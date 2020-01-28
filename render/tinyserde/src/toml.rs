@@ -74,7 +74,7 @@ impl TomlParser {
             _=>Err(self.err_token(tok))
         }
     }
-    
+
     pub fn parse_key_value(&mut self, local_scope:&String, key:String, i: &mut Chars, out:&mut HashMap<String, Toml>)->Result<(), TomlErr>{
         let tok = self.next_tok(i)?;
         if tok != TomlTok::Equals{
@@ -91,7 +91,7 @@ impl TomlParser {
         out.insert(key, val);
         Ok(())
     }
-    
+
     pub fn parse(data:&str)->Result<HashMap<String, Toml>, TomlErr>{
         let i = &mut data.chars();
         let mut t = TomlParser::default();
@@ -101,7 +101,7 @@ impl TomlParser {
         loop{
             let tok = t.next_tok(i)?;
             match tok{
-                TomlTok::Eof=>{ // at eof. 
+                TomlTok::Eof=>{ // at eof.
                     return Ok(out);
                 },
                 TomlTok::BlockOpen=>{ // its a scope
@@ -131,7 +131,7 @@ impl TomlParser {
             }
         }
     }
-    
+
     pub fn next(&mut self, i: &mut Chars) {
         if let Some(c) = i.next() {
             self.cur = c;
@@ -147,15 +147,15 @@ impl TomlParser {
             self.cur = '\0';
         }
     }
-    
+
     pub fn err_token(&self, tok:TomlTok) -> TomlErr {
         TomlErr{msg:format!("Unexpected token {:?} ", tok), line:self.line, col:self.col}
     }
-    
+
     pub fn err_parse(&self, what:&str) -> TomlErr {
         TomlErr{msg:format!("Cannot parse toml {} ", what), line:self.line, col:self.col}
     }
-    
+
     pub fn next_tok(&mut self, i: &mut Chars) -> Result<TomlTok, TomlErr> {
         while self.cur == '\n' || self.cur == '\r' || self.cur == '\t' || self.cur == ' ' {
             self.next(i);

@@ -32,18 +32,18 @@ pub struct HttpServer {
 
 impl HttpServer {
     pub fn start_http_server(config: &HttpServerConfig, workspaces_arc: Arc<Mutex<HashMap<String, String>>>) -> Option<HttpServer> {
-        
+
         let listen_address = match config {
             HttpServerConfig::Offline => return None,
             HttpServerConfig::Localhost(port) => SocketAddr::from(([127, 0, 0, 1], *port)),
             HttpServerConfig::Network(port) => SocketAddr::from(([0, 0, 0, 0], *port)),
             HttpServerConfig::InterfaceV4(port, ip) => SocketAddr::from((*ip, *port)),
         };
-        
+
         let listener = if let Ok(listener) = TcpListener::bind(listen_address.clone()) {listener} else {println!("Cannot bind http server port"); return None};
         let workspaces = Arc::clone(&workspaces_arc);
         let shared = Arc::new(Mutex::new(HttpServerShared::default()));
-        
+
         let listen_thread = {
             let shared = Arc::clone(&shared);
             std::thread::spawn(move || {
@@ -59,14 +59,14 @@ impl HttpServer {
                     let workspaces = Arc::clone(&workspaces);
                     let shared = Arc::clone(&shared);
                     let _read_thread = std::thread::spawn(move || {
-                        
+
                         let mut line = String::new();
                         reader.read_line(&mut line).expect("http read line fail");
                         if !line.starts_with("GET /") || line.len() < 10 {
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                             return
                         }
-                        
+
                         let line = &line[5..];
                         let space = line.find(' ').expect("http space fail");
                         let mut url = line[0..space].to_string();
@@ -128,7 +128,7 @@ impl HttpServer {
                             else {None}
                         }
                         else {None};
-                        
+
                         if file_path.is_none() {
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                             return
@@ -146,13 +146,13 @@ impl HttpServer {
                                 shared.files_read.push(url.to_string());
                             }
                         };
-                        
+
                         if let Ok(data) = std::fs::read(&file_path) {
                             let mime_type = if url.ends_with(".html") {"text/html"}
                             else if url.ends_with(".wasm") {"application/wasm"}
                             else if url.ends_with(".js") {"text/javascript"}
                             else {"application/octet-stream"};
-                            
+
                             // write the header
                             let header = format!(
                                 "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-encoding: identity\r\nTransfer-encoding: identity\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -177,7 +177,7 @@ impl HttpServer {
             shared: shared,
         })
     }
-    
+
     pub fn send_json_message(&mut self, json_msg: &str) {
         if let Ok(shared) = self.shared.lock() {
             for (_, tx) in &shared.watch_pending {
@@ -190,7 +190,7 @@ impl HttpServer {
             }
         }
     }
-    
+
     pub fn send_file_change(&mut self, path: &str) {
         if let Ok(shared) = self.shared.lock() {
             if shared.files_read.iter().find( | v | **v == path).is_none() {
@@ -199,11 +199,11 @@ impl HttpServer {
         }
         self.send_json_message(&format!("{{\"type\":\"file_change\",\"path\":\"{}\"}}", path));
     }
-    
+
     pub fn send_build_start(&mut self) {
         //self.send_json_message(&format!("{{\"type\":\"build_start\"}}"));
     }
-    
+
     pub fn terminate(&mut self) {
         if let Ok(mut shared) = self.shared.lock() {
             shared.terminate = true;

@@ -16,8 +16,8 @@ impl Rect{
     }
     pub fn intersects(&self, r:Rect)->bool{
         !(
-            r.x > self.x + self.w || 
-            r.x + r.w < self.x || 
+            r.x > self.x + self.w ||
+            r.x + r.w < self.x ||
             r.y > self.y + self.h ||
             r.y + r.h < self.y
         )
@@ -168,7 +168,7 @@ impl Mat4{
             (left+right) * lr, (top+bottom) * bt,  0.5+(far+near)*nf, 1.0
         ]}
     }
-    
+
     pub fn transform_vec4(&self, v:Vec4)->Vec4{
         let m = &self.v;
         Vec4{
@@ -178,4 +178,4 @@ impl Mat4{
             w:m[3] * v.x + m[7] * v.y + m[11] * v.z + m[15] * v.w
         }
     }
-} 
+}

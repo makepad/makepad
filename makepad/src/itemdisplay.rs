@@ -52,7 +52,7 @@ impl ItemDisplay {
         };
         editor
     }
-    
+
     pub fn style_text_editor() -> StyleId {uid!()}
     pub fn text_color() -> ColorId {uid!()}
     pub fn text_style_title() -> TextStyleId {uid!()}
@@ -66,24 +66,24 @@ impl ItemDisplay {
         TextEditor::color_bg().set(cx, Theme::color_bg_odd().get(cx));
         cx.end_style();
     }
-    
+
     pub fn display_message(&mut self, cx: &mut Cx, loc_message: &LocMessage) {
         self.display = ItemDisplayType::Message {message: loc_message.clone()};
         self.update_display = true;
         self.view.redraw_view_parent_area(cx);
     }
-    
+
     pub fn display_plain_text(&mut self, cx: &mut Cx, val: &str) {
         self.display = ItemDisplayType::PlainText {text: val.to_string()};
         self.update_display = true;
         self.view.redraw_view_parent_area(cx);
     }
-    
+
     pub fn update_plain_text_buffer(text_buffer: &mut TextBuffer, text: &str) {
         text_buffer.load_from_utf8(text);
         PlainTokenizer::update_token_chunks(text_buffer, None);
     }
-    
+
     pub fn update_message_text_buffer(text_buffer: &mut TextBuffer, loc_message: &LocMessage) {
         let text = if let Some(rendered) = &loc_message.rendered {
             if let Some(explanation) = &loc_message.explanation {
@@ -96,11 +96,11 @@ impl ItemDisplay {
         else {
             loc_message.body.clone()
         };
-        
+
         text_buffer.load_from_utf8(&text);
-        
+
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
-            
+
             let mut state = TokenizerState::new(&text_buffer.lines);
             let mut tokenizer = RustTokenizer::new();
             let mut pair_stack = Vec::new();
@@ -120,7 +120,7 @@ impl ItemDisplay {
                 if token_type == TokenType::Operator && val == "`" {
                     backtick_toggle = !backtick_toggle;
                 }
-                
+
                 let inside_backtick = !backtick_toggle || token_type == TokenType::Operator && val == "`";
                 if line_count == 2 {
                     first_block = true;
@@ -128,7 +128,7 @@ impl ItemDisplay {
                 if first_block && token_count == 0 && token_type == TokenType::Number {
                     first_block_code_line = true;
                 }
-                
+
                 // Gray out everything thats not in backticks or code
                 if (line_count == 0 && inside_backtick || line_count == 1 || first_block && token_count <= 2 && (val == "|" || token_type == TokenType::Number) || first_block && !first_block_code_line && inside_backtick || !first_block && inside_backtick)
                     && token_type != TokenType::Whitespace
@@ -136,16 +136,16 @@ impl ItemDisplay {
                     && token_type != TokenType::Eof {
                     token_type = TokenType::Defocus;
                 }
-                
+
                 // color the ^^
                 if first_block && !first_block_code_line && val == "^" {
                     token_type = message_type;
                 }
-                
+
                 if first_block && token_count == 1 && val != "|" && token_type != TokenType::Whitespace {
                     first_block = false;
                 }
-                
+
                 if line_count == 0 && token_count == 0 {
                     if val == "warning" {
                         token_type = TokenType::Warning
@@ -156,9 +156,9 @@ impl ItemDisplay {
                     }
                 }
                 //println!("{:?} {}", token_type, val);
-                
+
                 TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type);
-                
+
                 token_count += 1;
                 if token_type == TokenType::Newline {
                     line_count += 1;
@@ -171,7 +171,7 @@ impl ItemDisplay {
             }
         }
     }
-    
+
     pub fn handle_item_display(&mut self, cx: &mut Cx, event: &mut Event)->TextEditorEvent{
         match &self.display {
             ItemDisplayType::Empty=>{
@@ -185,7 +185,7 @@ impl ItemDisplay {
             },
         }
     }
-    
+
     pub fn draw_item_display(&mut self, cx: &mut Cx) {
         if self.update_display {
             match &self.display {
@@ -200,14 +200,14 @@ impl ItemDisplay {
             }
             self.update_display = false;
         }
-        match &self.display { 
+        match &self.display {
             ItemDisplayType::Empty=>{
             }
             ItemDisplayType::PlainText {..} | ItemDisplayType::Message {..} => {
                 let text_buffer = &mut self.text_buffer;
                 cx.begin_style(Self::style_text_editor());
                 if self.text_disp.begin_text_editor(cx, text_buffer).is_err() {return cx.end_style();}
-                
+
                 for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
                     self.text_disp.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.markers);
                 }

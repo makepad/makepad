@@ -9,5 +9,5 @@ edition = "2018"
 #ron = "*"
 time = "*"
 
-[dependencies.makepad-tinyserde] 
+[dependencies.makepad-tinyserde]
 path="../../render/tinyserde"

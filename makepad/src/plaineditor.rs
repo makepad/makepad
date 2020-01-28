@@ -17,20 +17,20 @@ impl PlainEditor {
         };
         editor
     }
-    
+
     pub fn handle_plain_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
         let ce = self.text_editor.handle_text_editor(cx, event, text_buffer);
         ce
     }
-    
+
     pub fn draw_plain_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer, search_index: Option<&mut SearchIndex>) {
         PlainTokenizer::update_token_chunks(text_buffer, search_index);
         if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
-        
+
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
             self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.markers);
         }
-        
+
         self.text_editor.end_text_editor(cx, text_buffer);
     }
 }
@@ -42,7 +42,7 @@ impl PlainTokenizer {
     pub fn new() -> PlainTokenizer {
         PlainTokenizer {}
     }
-    
+
     pub fn update_token_chunks(text_buffer: &mut TextBuffer, mut _search_index: Option<&mut SearchIndex>) {
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
             let mut state = TokenizerState::new(&text_buffer.lines);
@@ -58,7 +58,7 @@ impl PlainTokenizer {
             }
         }
     }
-    
+
     pub fn next_token<'a>(&mut self, state: &mut TokenizerState<'a>, chunk: &mut Vec<char>, _token_chunks: &Vec<TokenChunk>) -> TokenType {
         let start = chunk.len();
         loop {
@@ -75,7 +75,7 @@ impl PlainTokenizer {
                 if (chunk.len() - start)>0 {
                     return TokenType::Identifier
                 }
-                
+
                 chunk.push(state.next);
                 state.advance();
                 return TokenType::Newline

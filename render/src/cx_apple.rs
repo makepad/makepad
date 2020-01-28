@@ -122,17 +122,17 @@ pub fn load_webkit_cursor(cursor_name_str: &str) -> id {
         let cursor_plist = str_to_nsstring("info.plist");
         let key_x = str_to_nsstring("hotx");
         let key_y = str_to_nsstring("hoty");
-        
+
         let cursor_path: id = msg_send![cursor_root, stringByAppendingPathComponent: cursor_name];
         let pdf_path: id = msg_send![cursor_path, stringByAppendingPathComponent: cursor_pdf];
         let info_path: id = msg_send![cursor_path, stringByAppendingPathComponent: cursor_plist];
-        
+
         let ns_image: id = msg_send![class!(NSImage), alloc];
         let () = msg_send![ns_image, initByReferencingFile: pdf_path];
         let info: id = msg_send![class!(NSDictionary), dictionaryWithContentsOfFile: info_path];
         //let image = NSImage::alloc(nil).initByReferencingFile_(pdf_path);
         // let info = NSDictionary::dictionaryWithContentsOfFile_(nil, info_path);
-        
+
         let x: id = msg_send![info, valueForKey: key_x]; //info.valueForKey_(key_x);
         let y: id = msg_send![info, valueForKey: key_y]; //info.valueForKey_(key_y);
         let point = NSPoint {
@@ -287,13 +287,13 @@ pub enum NSWindowStyleMask{
     NSClosableWindowMask = 1 << 1,
     NSMiniaturizableWindowMask = 1 << 2,
     NSResizableWindowMask = 1 << 3,
-    
+
     NSTexturedBackgroundWindowMask = 1 << 8,
-    
+
     NSUnifiedTitleAndToolbarWindowMask = 1 << 12,
-    
+
     NSFullScreenWindowMask = 1 << 14,
-    
+
     NSFullSizeContentViewWindowMask = 1 << 15,
 }
 
@@ -350,12 +350,12 @@ pub trait NSMutableAttributedString: Sized {
     unsafe fn alloc(_: Self) -> id {
         msg_send![class!(NSMutableAttributedString), alloc]
     }
-    
+
     unsafe fn init(self) -> id;
     // *mut NSMutableAttributedString
     unsafe fn init_with_string(self, string: id) -> id;
     unsafe fn init_with_attributed_string(self, string: id) -> id;
-    
+
     unsafe fn string(self) -> id;
     // *mut NSString
     unsafe fn mutable_string(self) -> id;
@@ -367,23 +367,23 @@ impl NSMutableAttributedString for id {
     unsafe fn init(self) -> id {
         msg_send![self, init]
     }
-    
+
     unsafe fn init_with_string(self, string: id) -> id {
         msg_send![self, initWithString: string]
     }
-    
+
     unsafe fn init_with_attributed_string(self, string: id) -> id {
         msg_send![self, initWithAttributedString: string]
     }
-    
+
     unsafe fn string(self) -> id {
         msg_send![self, string]
     }
-    
+
     unsafe fn mutable_string(self) -> id {
         msg_send![self, mutableString]
     }
-    
+
     unsafe fn length(self) -> u64 {
         msg_send![self, length]
     }

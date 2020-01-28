@@ -20,7 +20,7 @@ impl ScrollView{
             }),
         }
     }
-    
+
     pub fn proto_no_scroll(cx: &mut Cx) -> Self {
         Self {
             view: View::proto(cx),
@@ -28,19 +28,19 @@ impl ScrollView{
             scroll_v: None
         }
     }
-    
+
     pub fn begin_view(&mut self, cx: &mut Cx, layout: Layout) -> ViewRedraw {
         self.view.begin_view(cx, layout)
     }
-    
+
     pub fn view_will_redraw(&mut self, cx: &mut Cx)->bool{
         self.view.view_will_redraw(cx)
     }
-    
+
     pub fn handle_scroll_bars(&mut self, cx: &mut Cx, event: &mut Event) -> bool {
         let mut ret_h = ScrollBarEvent::None;
         let mut ret_v = ScrollBarEvent::None;
-        
+
         if let Some(scroll_h) = &mut self.scroll_h {
             ret_h = scroll_h.handle_scroll_bar(cx, event);
         }
@@ -63,7 +63,7 @@ impl ScrollView{
         };
         ret_h != ScrollBarEvent::None || ret_v != ScrollBarEvent::None
     }
-    
+
     pub fn get_scroll_pos(&self, cx: &Cx) -> Vec2 {
         if let Some(view_id) = self.view.view_id {
             let cxview = &cx.views[view_id];
@@ -73,7 +73,7 @@ impl ScrollView{
             Vec2::default()
         }
     }
-    
+
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, pos: Vec2) -> bool {
         let view_id = self.view.view_id.unwrap();
         //let view_area = Area::DrawList(DrawListArea{draw_list_id:draw_list_id, redraw_id:cx.redraw_id});
@@ -94,7 +94,7 @@ impl ScrollView{
         }
         changed
     }
-    
+
     pub fn set_scroll_view_total(&mut self, cx: &mut Cx, view_total: Vec2) {
         if let Some(scroll_h) = &mut self.scroll_h {
             scroll_h.set_scroll_view_total(cx, view_total.x)
@@ -103,7 +103,7 @@ impl ScrollView{
             scroll_v.set_scroll_view_total(cx, view_total.y)
         }
     }
-    
+
     pub fn get_scroll_view_total(&mut self) -> Vec2 {
         Vec2 {
             x: if let Some(scroll_h) = &mut self.scroll_h {
@@ -114,7 +114,7 @@ impl ScrollView{
             }else {0.}
         }
     }
-    
+
     pub fn scroll_into_view(&mut self, cx: &mut Cx, rect: Rect) {
         if let Some(scroll_h) = &mut self.scroll_h {
             scroll_h.scroll_into_view(cx, rect.x, rect.w, true);
@@ -123,7 +123,7 @@ impl ScrollView{
             scroll_v.scroll_into_view(cx, rect.y, rect.h, true);
         }
     }
-    
+
     pub fn scroll_into_view_no_smooth(&mut self, cx: &mut Cx, rect: Rect) {
         if let Some(scroll_h) = &mut self.scroll_h {
             scroll_h.scroll_into_view(cx, rect.x, rect.w, false);
@@ -132,9 +132,9 @@ impl ScrollView{
             scroll_v.scroll_into_view(cx, rect.y, rect.h, false);
         }
     }
-    
+
     pub fn scroll_into_view_abs(&mut self, cx: &mut Cx, rect: Rect) {
-        let self_rect = self.get_rect(cx); 
+        let self_rect = self.get_rect(cx);
         if let Some(scroll_h) = &mut self.scroll_h {
             scroll_h.scroll_into_view(cx, rect.x - self_rect.x, rect.w, true);
         }
@@ -142,7 +142,7 @@ impl ScrollView{
             scroll_v.scroll_into_view(cx, rect.y  - self_rect.y, rect.h, true);
         }
     }
-    
+
     pub fn set_scroll_target(&mut self, cx: &mut Cx, pos: Vec2) {
         if let Some(scroll_h) = &mut self.scroll_h {
             scroll_h.set_scroll_target(cx, pos.x);
@@ -151,12 +151,12 @@ impl ScrollView{
             scroll_v.set_scroll_target(cx, pos.y);
         }
     }
-    
+
     pub fn end_view(&mut self, cx: &mut Cx) -> Area {
 
         let view_id = self.view.view_id.unwrap();
         let view_area = Area::View(ViewArea {view_id: view_id, redraw_id: cx.redraw_id});
-        
+
         // lets ask the turtle our actual bounds
         let view_total = cx.get_turtle_bounds();
         let mut rect_now = cx.get_turtle_rect();
@@ -166,7 +166,7 @@ impl ScrollView{
         if rect_now.w.is_nan() {
             rect_now.w = view_total.x;
         }
-        
+
         if let Some(scroll_h) = &mut self.scroll_h {
             let scroll_pos = scroll_h.draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
             cx.set_view_scroll_x(view_id, scroll_pos);
@@ -176,24 +176,24 @@ impl ScrollView{
             let scroll_pos = scroll_v.draw_scroll_bar(cx, Axis::Vertical, view_area, rect_now, view_total);
             cx.set_view_scroll_y(view_id, scroll_pos);
         }
-        
+
         let rect = cx.end_turtle(view_area);
         let cxview = &mut cx.views[view_id];
         cxview.rect = rect;
         cx.view_stack.pop();
-        
+
         return view_area
     }
-    
+
     pub fn get_rect(&mut self, cx: &Cx) -> Rect {
         self.view.get_rect(cx)
     }
-    
-    
+
+
     pub fn redraw_view_area(&self, cx: &mut Cx) {
         self.view.redraw_view_area(cx)
     }
-    
+
     pub fn get_view_area(&self, cx: &Cx) -> Area {
         self.view.get_view_area(cx)
     }

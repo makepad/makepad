@@ -22,7 +22,7 @@ pub struct AppSettings {
 }
 
 impl Default for AppSettings {
-    
+
     fn default() -> Self {
         Self {
             exec_when_done: false,
@@ -131,16 +131,16 @@ impl AppStorage {
             app_settings_file_read: FileRead::default()
         }
     }
-    
+
     pub fn status_new_message() -> StatusId {uid!()}
     pub fn status_settings_changed() -> StatusId {uid!()}
-    
+
     pub fn init(&mut self, cx: &mut Cx) {
         if cx.platform_type.is_desktop() {
-            
+
             self.app_state_file_read = cx.file_read("makepad_state.ron");
             self.app_settings_file_read = cx.file_read("makepad_settings.ron");
-            
+
             // lets start the router
             let mut hub_router = HubRouter::start_hub_router(HubLog::None);
             // lets start the hub UI connected directly
@@ -150,7 +150,7 @@ impl AppStorage {
                     Cx::post_signal(signal, Self::status_new_message());
                 }
             });
-            
+
             let send = HubBuilder::run_builder_direct("main", &mut hub_router, | ws, htc | {builder::builder(ws, htc)});
             self.builder_route_send = Some(send);
             self.hub_router = Some(hub_router);
@@ -160,7 +160,7 @@ impl AppStorage {
             self.file_tree_file_read = cx.file_read("index.ron");
         }
     }
-    
+
     pub fn load_settings(&mut self, cx: &mut Cx, utf8_data: &str) {
         match DeRon::deserialize_ron(utf8_data) {
             Ok(settings) => {
@@ -168,7 +168,7 @@ impl AppStorage {
                 self.settings = settings;
                 self.settings.style_options.scale = self.settings.style_options.scale.min(3.0).max(0.3);
                 cx.send_signal(self.settings_changed, Self::status_settings_changed());
-                
+
                 // so now, here we restart our hub_server if need be.
                 if cx.platform_type.is_desktop() {
                     if self.settings_old.hub_server != self.settings.hub_server {
@@ -181,7 +181,7 @@ impl AppStorage {
             }
         }
     }
-    
+
     pub fn save_settings(&mut self, cx: &mut Cx) {
         let utf8_data = self.settings.serialize_ron();
         let path = "makepad_settings.ron";
@@ -192,19 +192,19 @@ impl AppStorage {
         }
         cx.file_write(path, utf8_data.as_bytes());
     }
-    
+
     pub fn restart_hub_server(&mut self) {
         if let Some(hub_server) = &mut self.hub_server {
             hub_server.terminate();
         }
-        
+
         if let Some(hub_router) = &mut self.hub_router {
             let digest = Self::read_or_generate_key_ron();
             // start the server
             self.hub_server = HubServer::start_hub_server(digest, &self.settings.hub_server, hub_router);
         }
     }
-    
+
     pub fn read_or_generate_key_ron() -> Digest {
         // read or generate key.ron
         if let Ok(utf8_data) = std::fs::read_to_string("key.ron") {
@@ -219,12 +219,12 @@ impl AppStorage {
         }
         digest
     }
-    
+
     pub fn save_state(&mut self, cx: &mut Cx, state: &AppState) {
         let ron = state.serialize_ron();
         cx.file_write("makepad_state.ron", ron.as_bytes());
     }
-    
+
     pub fn remap_sync_path(&self, path: &str) -> String {
         let mut path = path.to_string();
         for (key, sync_to) in &self.settings.sync {
@@ -237,10 +237,10 @@ impl AppStorage {
         }
         path
     }
-    
-    
+
+
     pub fn text_buffer_from_path(&mut self, cx: &mut Cx, path: &str) -> &mut TextBuffer {
-        
+
         // if online, fallback to readfile
         if !cx.platform_type.is_desktop() || path.find('/').is_none() {
             if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
@@ -282,7 +282,7 @@ impl AppStorage {
                     }
                 };
                 hub_ui.route_send.send(msg.clone());
-                
+
                 let tb_id = TextBufferId(self.text_buffers.len() as u16);
                 self.text_buffer_path_to_id.insert(path.to_string(), tb_id);
                 self.text_buffer_id_to_path.insert(tb_id, path.to_string());
@@ -296,13 +296,13 @@ impl AppStorage {
                         text_buffer_id: tb_id,
                         ..TextBuffer::default()
                     }
-                    
+
                 });
                 &mut self.text_buffers[tb_id.0 as usize].text_buffer
             }
         }
     }
-    
+
     pub fn text_buffer_file_write(&mut self, cx: &mut Cx, path: &str) {
         if cx.platform_type.is_desktop() {
             if path.find('/').is_some() {
@@ -314,7 +314,7 @@ impl AppStorage {
                         if let Some(builder_pos) = path.find('/') {
                             let (builder, rest) = path.split_at(builder_pos);
                             let (_, rest) = rest.split_at(1);
-                            
+
                             hub_ui.route_send.send(ToHubMsg {
                                 to: HubMsgTo::Builder(builder.to_string()),
                                 msg: HubMsg::FileWriteRequest {
@@ -354,7 +354,7 @@ impl AppStorage {
             }
         }
     }
-    
+
     pub fn reload_builders(&mut self) {
         let hub_ui = self.hub_ui.as_mut().unwrap();
         let uid = hub_ui.route_send.alloc_uid();
@@ -364,7 +364,7 @@ impl AppStorage {
         });
         self.builders_request_uid = uid;
     }
-    
+
     pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: &FromHubMsg, windows: &mut Vec<AppWindow>, state: &AppState, build_manager: &mut BuildManager) {
         let hub_ui = self.hub_ui.as_mut().unwrap();
         // only in ConnectUI of ourselves do we list the workspaces

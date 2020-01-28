@@ -12,7 +12,7 @@ pub fn where_clause_with_bound(generics: &Generics, bound: TokenStream) -> Where
         let param = &param.ident;
         parse_quote!(#param: #bound)
     });
-    
+
     let mut generics = generics.clone();
     generics
         .make_where_clause()

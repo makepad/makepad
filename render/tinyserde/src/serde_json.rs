@@ -12,7 +12,7 @@ impl SerJsonState {
         //    self.out.push_str("    ");
         //}
     }
-    
+
     pub fn field(&mut self, d: usize, field: &str) {
         self.indent(d);
         self.out.push('"');
@@ -20,30 +20,30 @@ impl SerJsonState {
         self.out.push('"');
         self.out.push(':');
     }
-    
+
     pub fn label(&mut self, label:&str){
         self.out.push('"');
         self.out.push_str(label);
         self.out.push('"');
     }
-    
+
     pub fn conl(&mut self) {
         self.out.push(',')
     }
-    
+
     pub fn st_pre(&mut self) {
         self.out.push('{');
     }
-    
+
     pub fn st_post(&mut self, d: usize) {
         self.indent(d);
         self.out.push('}');
     }
-    
+
 }
 
 pub trait SerJson {
-    
+
     fn serialize_json(&self) -> String {
         let mut s = SerJsonState {
             out: String::new()
@@ -51,12 +51,12 @@ pub trait SerJson {
         self.ser_json(0, &mut s);
         s.out
     }
-    
+
     fn ser_json(&self, d: usize, s: &mut SerJsonState);
 }
 
 pub trait DeJson: Sized {
-    
+
     fn deserialize_json(input: &str) -> Result<Self,
     DeJsonErr> {
         let mut state = DeJsonState::default();
@@ -65,7 +65,7 @@ pub trait DeJson: Sized {
         state.next_tok(&mut chars) ?;
         DeJson::de_json(&mut state, &mut chars)
     }
-    
+
     fn de_json(s: &mut DeJsonState, i: &mut Chars) -> Result<Self,
     DeJsonErr>;
 }
@@ -133,11 +133,11 @@ impl DeJsonState {
             self.cur = '\0';
         }
     }
-    
+
     pub fn err_exp(&self, name: &str) -> DeJsonErr {
         DeJsonErr{msg:format!("Unexpected key {}", name), line:self.line, col:self.col}
     }
-    
+
     pub fn err_nf(&self, name: &str) -> DeJsonErr {
         DeJsonErr{msg:format!("Key not found {}", name), line:self.line, col:self.col}
     }
@@ -161,7 +161,7 @@ impl DeJsonState {
     pub fn err_parse(&self, what:&str) -> DeJsonErr {
         DeJsonErr{msg:format!("Cannot parse {} ", what), line:self.line, col:self.col}
     }
-    
+
     pub fn eat_comma_block(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
         match self.tok {
             DeJsonTok::Comma => {
@@ -176,7 +176,7 @@ impl DeJsonState {
             }
         }
     }
-    
+
     pub fn eat_comma_curly(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
         match self.tok {
             DeJsonTok::Comma => {
@@ -191,7 +191,7 @@ impl DeJsonState {
             }
         }
     }
-    
+
     pub fn colon(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
         match self.tok {
             DeJsonTok::Colon => {
@@ -203,8 +203,8 @@ impl DeJsonState {
             }
         }
     }
-    
-    
+
+
     pub fn string(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
         match &mut self.tok {
             DeJsonTok::Str => {
@@ -216,13 +216,13 @@ impl DeJsonState {
             }
         }
     }
-    
+
     pub fn next_colon(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
         self.next_tok(i) ?;
         self.colon(i) ?;
         Ok(())
     }
-    
+
     pub fn next_str(&mut self) -> Option<()> {
         if let DeJsonTok::Str = &mut self.tok {
             //let mut s = String::new();
@@ -233,7 +233,7 @@ impl DeJsonState {
             None
         }
     }
-    
+
     pub fn block_open(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
         if self.tok == DeJsonTok::BlockOpen {
             self.next_tok(i) ?;
@@ -241,8 +241,8 @@ impl DeJsonState {
         }
         Err(self.err_token("["))
     }
-    
-    
+
+
     pub fn block_close(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
         if self.tok == DeJsonTok::BlockClose {
             self.next_tok(i) ?;
@@ -250,7 +250,7 @@ impl DeJsonState {
         }
         Err(self.err_token("]"))
     }
-    
+
     pub fn curly_open(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
         if self.tok == DeJsonTok::CurlyOpen {
             self.next_tok(i) ?;
@@ -258,8 +258,8 @@ impl DeJsonState {
         }
         Err(self.err_token("{"))
     }
-    
-    
+
+
     pub fn curly_close(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
         if self.tok == DeJsonTok::CurlyClose {
             self.next_tok(i) ?;
@@ -267,7 +267,7 @@ impl DeJsonState {
         }
         Err(self.err_token("}"))
     }
-    
+
     pub fn u64_range(&mut self, max: u64) -> Result<u64, DeJsonErr> {
         if let DeJsonTok::U64(value) = self.tok {
             if value > max {
@@ -277,7 +277,7 @@ impl DeJsonState {
         }
         Err(self.err_token("unsigned integer"))
     }
-    
+
     pub fn i64_range(&mut self, min: i64, max: i64) -> Result<i64, DeJsonErr> {
         if let DeJsonTok::I64(value) = self.tok {
             if value< min {
@@ -293,7 +293,7 @@ impl DeJsonState {
         }
         Err(self.err_token("signed integer"))
     }
-    
+
     pub fn as_f64(&mut self) -> Result<f64, DeJsonErr> {
         if let DeJsonTok::I64(value) = self.tok {
             return Ok(value as f64)
@@ -306,14 +306,14 @@ impl DeJsonState {
         }
         Err(self.err_token("floating point"))
     }
-    
+
     pub fn as_bool(&mut self) -> Result<bool, DeJsonErr> {
         if let DeJsonTok::Bool(value) = self.tok {
             return Ok(value)
         }
         Err(self.err_token("boolean"))
     }
-    
+
     pub fn as_string(&mut self) -> Result<String, DeJsonErr> {
         if let DeJsonTok::Str = &mut self.tok {
             let mut val = String::new();
@@ -322,7 +322,7 @@ impl DeJsonState {
         }
         Err(self.err_token("string"))
     }
-    
+
     pub fn next_tok(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
         while self.cur == '\n' || self.cur == '\r' || self.cur == '\t' || self.cur == ' ' {
             self.next(i);
@@ -477,7 +477,7 @@ macro_rules!impl_ser_de_json_unsigned {
                 s.out.push_str(&self.to_string());
             }
         }
-        
+
         impl DeJson for $ ty {
             fn de_json(s: &mut DeJsonState, i: &mut Chars) -> Result< $ ty,
             DeJsonErr> {
@@ -496,7 +496,7 @@ macro_rules!impl_ser_de_json_signed {
                 s.out.push_str(&self.to_string());
             }
         }
-        
+
         impl DeJson for $ ty {
             fn de_json(s: &mut DeJsonState, i: &mut Chars) -> Result< $ ty,
             DeJsonErr> {
@@ -516,7 +516,7 @@ macro_rules!impl_ser_de_json_float {
                 s.out.push_str(&self.to_string());
             }
         }
-        
+
         impl DeJson for $ ty {
             fn de_json(s: &mut DeJsonState, i: &mut Chars) -> Result< $ ty,
             DeJsonErr> {
@@ -629,7 +629,7 @@ impl<T> DeJson for Vec<T> where T: DeJson {
     fn de_json(s: &mut DeJsonState, i: &mut Chars) -> Result<Vec<T>, DeJsonErr> {
         let mut out = Vec::new();
         s.block_open(i) ?;
-        
+
         while s.tok != DeJsonTok::BlockClose {
             out.push(DeJson::de_json(s, i) ?);
             s.eat_comma_block(i) ?;

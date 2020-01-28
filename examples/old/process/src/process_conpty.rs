@@ -10,8 +10,8 @@ impl Process {
     pub fn start() -> Process {
 	Process{}
     }
-    
+
     pub fn write(&mut self, _values: &str) {
-        
+
     }
 }

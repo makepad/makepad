@@ -27,24 +27,24 @@ pub struct HubServer {
 
 impl HubServer {
     pub fn start_hub_server(digest: Digest, config: &HubServerConfig, hub_router: &HubRouter) -> Option<HubServer> {
-        
+
         let listen_address = match config {
             HubServerConfig::Offline => return None,
             HubServerConfig::Localhost(port) => SocketAddr::from(([127, 0, 0, 1], *port)),
             HubServerConfig::Network(port) => SocketAddr::from(([0, 0, 0, 0], *port)),
             HubServerConfig::InterfaceV4(port, ip) => SocketAddr::from((*ip, *port)),
         };
-        
+
         let listener = if let Ok(listener) = TcpListener::bind(listen_address) {listener}else {println!("start_hub_server bind server address"); return None};
         let listen_address = listener.local_addr().expect("Cannot get local address");
-        
+
         let tx_pump = hub_router.tx_pump.clone();
         let routes = Arc::clone(&hub_router.routes); //Arc::new(Mutex::new(Vec::<HubServerConnection>::new()));
         let shared = Arc::new(Mutex::new(HubServerShared {
             connections: Vec::new(),
             terminate: false
         }));
-        
+
         let listen_thread = {
             //let hub_log = hub_log.clone();
             let routes = Arc::clone(&routes);
@@ -54,7 +54,7 @@ impl HubServer {
                 for tcp_stream in listener.incoming() {
                     let tcp_stream = tcp_stream.expect("Incoming stream failure");
                     let peer_addr = HubAddr::from_socket_addr(tcp_stream.peer_addr().expect("No peer address"));
-                    
+
                     if let Ok(mut shared) = shared.lock() {
                         if shared.terminate {
                             for (_, tcp_stream) in &mut shared.connections {
@@ -66,7 +66,7 @@ impl HubServer {
                         let tcp_stream = tcp_stream.try_clone().expect("Cannot clone tcp stream");
                         shared.connections.push((peer_addr, tcp_stream));
                     }
-                    
+
                     let (tx_write, rx_write) = mpsc::channel::<FromHubMsg>();
                     let tx_write_copy = tx_write.clone();
                     // clone our transmit-to-pump
@@ -116,9 +116,9 @@ impl HubServer {
                                     },
                                     _ => ()
                                 }
-                                let mut msg_buf = Vec::new(); 
+                                let mut msg_buf = Vec::new();
                                 htc_msg.ser_bin(&mut msg_buf);
-                                
+
                                 if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, digest.clone()) {
                                     // disconnect the socket and send shutdown
                                     let _ = tcp_stream.shutdown(Shutdown::Both);
@@ -136,7 +136,7 @@ impl HubServer {
                             }
                         })
                     };
-                    
+
                     if let Ok(mut routes) = routes.lock() {
                         routes.push(HubRoute {
                             route_type: HubRouteType::Unknown,
@@ -148,17 +148,17 @@ impl HubServer {
                 }
             })
         };
-        
+
         let hub_server = HubServer {
             shared: shared,
             listen_address: Some(listen_address),
             listen_thread: Some(listen_thread),
         };
-        
-        
+
+
         return Some(hub_server);
     }
-    
+
     pub fn terminate(&mut self) {
         if let Ok(mut shared) = self.shared.lock() {
             shared.terminate = true;

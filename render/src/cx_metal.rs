@@ -11,7 +11,7 @@ use crate::cx_cocoa::*;
 use crate::cx::*;
 
 impl Cx {
-    
+
     pub fn render_view(
         &mut self,
         pass_id: usize,
@@ -30,7 +30,7 @@ impl Cx {
         self.views[view_id].parent_scroll = scroll;
         let local_scroll = self.views[view_id].get_local_scroll();
         let clip = self.views[view_id].intersect_clip(clip);
-        
+
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
@@ -51,24 +51,24 @@ impl Cx {
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
                 let shp = sh.platform.as_ref().unwrap();
-                
+
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
                     self.platform.bytes_written += draw_call.instance.len() * 4;
                     draw_call.platform.inst_vbuf.update_with_f32_data(metal_cx, &draw_call.instance);
                 }
-                
+
                 // update the zbias uniform if we have it.
                 draw_call.set_zbias(*zbias);
                 draw_call.set_local_scroll(scroll, local_scroll);
                 draw_call.set_clip(clip);
                 *zbias += zbias_step;
-                
+
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
                 }
-                
+
                 // lets verify our instance_offset is not disaligned
                 let instances = (draw_call.instance.len() / sh.mapping.instance_slots) as u64;
                 if instances == 0 {
@@ -76,7 +76,7 @@ impl Cx {
                 }
                 let pipeline_state = shp.pipeline_state;
                 unsafe {let () = msg_send![encoder, setRenderPipelineState: pipeline_state];}
-                
+
                 if let Some(buf) = shp.geom_vbuf.multi_buffer_read().buffer {
                     unsafe {msg_send![
                         encoder,
@@ -86,7 +86,7 @@ impl Cx {
                     ]}
                 }
                 else {println!("Drawing error: geom_vbuf None")}
-                
+
                 if let Some(buf) = draw_call.platform.inst_vbuf.multi_buffer_read().buffer {
                     unsafe {msg_send![
                         encoder,
@@ -96,11 +96,11 @@ impl Cx {
                     ]}
                 }
                 else {println!("Drawing error: inst_vbuf None")}
-                
+
                 let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
                 let view_uniforms = cxview.view_uniforms.as_slice();
                 let draw_uniforms = draw_call.draw_uniforms.as_slice();
-                
+
                 unsafe {
                     let () = msg_send![encoder, setVertexBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: 2u64];
                     let () = msg_send![encoder, setVertexBytes: view_uniforms.as_ptr() as *const std::ffi::c_void length: (view_uniforms.len() * 4) as u64 atIndex: 3u64];
@@ -140,7 +140,7 @@ impl Cx {
                 }
                 self.platform.draw_calls_done += 1;
                 if let Some(buf) = shp.geom_ibuf.multi_buffer_read().buffer {
-                    
+
                     let () = unsafe {msg_send![
                         encoder,
                         drawIndexedPrimitives: MTLPrimitiveType::Triangle
@@ -155,10 +155,10 @@ impl Cx {
             }
         }
     }
-    
+
     pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: id, pass_id: usize, inherit_dpi_factor: f32, first_texture: Option<id>, metal_cx: &MetalCx) {
         let pass_size = self.passes[pass_id].pass_size;
-        
+
         self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
         self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         self.passes[pass_id].paint_dirty = false;
@@ -169,12 +169,12 @@ impl Cx {
             inherit_dpi_factor
         };
         self.passes[pass_id].set_dpi_factor(dpi_factor);
-        
+
         for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
             let color_attachments: id = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
             let color_attachment: id = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: 0]};
             // let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
-            
+
             let is_initial;
             if index == 0 && first_texture.is_some() {
                 let () = unsafe {msg_send![
@@ -186,7 +186,7 @@ impl Cx {
             else {
                 let cxtexture = &mut self.textures[color_texture.texture_id];
                 is_initial = metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, false);
-                
+
                 if let Some(mtl_texture) = cxtexture.platform.mtl_texture {
                     let () = unsafe {msg_send![
                         color_attachment,
@@ -196,10 +196,10 @@ impl Cx {
                 else {
                     println!("draw_pass_to_texture invalid render target");
                 }
-                
+
             }
             unsafe {msg_send![color_attachment, setStoreAction: MTLStoreAction::Store]}
-            
+
             match color_texture.clear_color {
                 ClearColor::InitWith(color) => {
                     if is_initial {
@@ -234,9 +234,9 @@ impl Cx {
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
             let cxtexture = &mut self.textures[depth_texture_id];
             let is_initial = metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, true);
-            
+
             let depth_attachment: id = unsafe {msg_send![render_pass_descriptor, depthAttachment]};
-            
+
             if let Some(mtl_texture) = cxtexture.platform.mtl_texture {
                 unsafe {msg_send![depth_attachment, setTexture: mtl_texture]}
             }
@@ -244,7 +244,7 @@ impl Cx {
                 println!("draw_pass_to_texture invalid render target");
             }
             let () = unsafe {msg_send![depth_attachment, setStoreAction: MTLStoreAction::Store]};
-            
+
             match self.passes[pass_id].clear_depth {
                 ClearDepth::InitWith(depth) => {
                     if is_initial {
@@ -262,7 +262,7 @@ impl Cx {
             }
             // create depth state
             if self.passes[pass_id].platform.mtl_depth_state.is_none() {
-                
+
                 let desc: id = unsafe {msg_send![class!(MTLDepthStencilDescriptor), new]};
                 let () = unsafe {msg_send![desc, setDepthCompareFunction: MTLCompareFunction::LessEqual]};
                 let () = unsafe {msg_send![desc, setDepthWriteEnabled: true]};
@@ -271,7 +271,7 @@ impl Cx {
             }
         }
     }
-    
+
     pub fn draw_pass_to_layer(
         &mut self,
         pass_id: usize,
@@ -282,9 +282,9 @@ impl Cx {
         self.platform.bytes_written = 0;
         self.platform.draw_calls_done = 0;
         let view_id = self.passes[pass_id].main_view_id.unwrap();
-        
+
         let pool: id = unsafe {msg_send![class!(NSAutoreleasePool), new]};
-        
+
         //let command_buffer = command_queue.new_command_buffer();
         let drawable: id = unsafe {msg_send![layer, nextDrawable]};
         if drawable != nil {
@@ -293,18 +293,18 @@ impl Cx {
             let texture: id = unsafe {msg_send![drawable, texture]};
 
             self.setup_render_pass_descriptor(render_pass_descriptor, pass_id, dpi_factor, Some(texture), metal_cx);
-            
+
             let command_buffer: id = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
             let encoder: id = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
-            
+
             unsafe {msg_send![encoder, textureBarrier]}
-            
+
             if let Some(depth_state) = self.passes[pass_id].platform.mtl_depth_state {
                 let () = unsafe {msg_send![encoder, setDepthStencilState: depth_state]};
             }
             let mut zbias = 0.0;
             let zbias_step = self.passes[pass_id].zbias_step;
-            
+
             self.render_view(
                 pass_id,
                 view_id,
@@ -315,7 +315,7 @@ impl Cx {
                 encoder,
                 &metal_cx,
             );
-            
+
             let () = unsafe {msg_send![encoder, endEncoding]};
             let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
             let () = unsafe {msg_send![command_buffer, commit]};
@@ -323,7 +323,7 @@ impl Cx {
         }
         let () = unsafe {msg_send![pool, release]};
     }
-    
+
     pub fn draw_pass_to_texture(
         &mut self,
         pass_id: usize,
@@ -331,19 +331,19 @@ impl Cx {
         metal_cx: &MetalCx,
     ) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
-        
+
         let pool: id = unsafe {msg_send![class!(NSAutoreleasePool), new]};
         let render_pass_descriptor: id = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
 
         self.setup_render_pass_descriptor(render_pass_descriptor, pass_id, dpi_factor, None, metal_cx);
-        
+
         let command_buffer: id = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
         let encoder: id = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
-        
+
         if let Some(depth_state) = self.passes[pass_id].platform.mtl_depth_state {
             let () = unsafe {msg_send![encoder, setDepthStencilState: depth_state]};
         }
-        
+
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         self.render_view(
@@ -370,7 +370,7 @@ pub struct MetalCx {
 }
 
 impl MetalCx {
-    
+
     pub fn new() -> MetalCx {
         let devices = get_all_metal_devices();
         for device in devices {
@@ -389,17 +389,17 @@ impl MetalCx {
             device: device
         }
     }
-    
+
     pub fn update_platform_render_target(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2, is_depth: bool) -> bool {
-        
+
         let width = if let Some(width) = cxtexture.desc.width {width as u64} else {(size.x * dpi_factor) as u64};
         let height = if let Some(height) = cxtexture.desc.height {height as u64} else {(size.y * dpi_factor) as u64};
-        
+
         if cxtexture.platform.width == width && cxtexture.platform.height == height && cxtexture.platform.alloc_desc == cxtexture.desc {
             return false
         }
         cxtexture.platform.mtl_texture = None;
-        
+
         let mdesc: id = unsafe {msg_send![class!(MTLTextureDescriptor), new]};
         if !is_depth {
             match cxtexture.desc.format {
@@ -436,7 +436,7 @@ impl MetalCx {
         let () = unsafe {msg_send![mdesc, setWidth: width as u64]};
         let () = unsafe {msg_send![mdesc, setHeight: height as u64]};
         let () = unsafe {msg_send![mdesc, setDepth: 1u64]};
-        
+
         let tex: id = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
 
         cxtexture.platform.width = width;
@@ -445,21 +445,21 @@ impl MetalCx {
         cxtexture.platform.mtl_texture = Some(tex);
         return true
     }
-    
+
     pub fn update_platform_texture_image2d(&self, cxtexture: &mut CxTexture) {
-        
+
         if cxtexture.desc.width.is_none() || cxtexture.desc.height.is_none() {
             println!("update_platform_texture_image2d without width/height");
             return;
         }
-        
+
         let width = cxtexture.desc.width.unwrap();
         let height = cxtexture.desc.height.unwrap();
-        
+
         // allocate new texture if descriptor change
         if cxtexture.platform.alloc_desc != cxtexture.desc {
             cxtexture.platform.mtl_texture = None;
-            
+
             let mdesc: id = unsafe {msg_send![class!(MTLTextureDescriptor), new]};
             unsafe {
                 let () = msg_send![mdesc, setTextureType: MTLTextureType::D2];
@@ -468,15 +468,15 @@ impl MetalCx {
                 let () = msg_send![mdesc, setWidth: width as u64];
                 let () = msg_send![mdesc, setHeight: height as u64];
             }
-            
+
             match cxtexture.desc.format {
                 TextureFormat::Default | TextureFormat::ImageBGRA => {
                     let () = unsafe {msg_send![mdesc, setPixelFormat: MTLPixelFormat::BGRA8Unorm]};
-                    
+
                     let tex: id = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
 
                     cxtexture.platform.mtl_texture = Some(tex);
-                    
+
                     if cxtexture.image_u32.len() != width * height {
                         println!("update_platform_texture_image2d with wrong buffer_u32 size!");
                         cxtexture.platform.mtl_texture = None;
@@ -505,7 +505,7 @@ impl MetalCx {
             cxtexture.platform.width = width as u64;
             cxtexture.platform.height = height as u64;
         }
-        
+
         cxtexture.update_image = false;
     }
 }
@@ -522,13 +522,13 @@ pub struct MetalWindow {
 
 impl MetalWindow {
     pub fn new(window_id: usize, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> MetalWindow {
-        
+
         let ca_layer: id = unsafe {msg_send![class!(CAMetalLayer), new]};
-        
+
         let mut cocoa_window = CocoaWindow::new(cocoa_app, window_id);
-        
+
         cocoa_window.init(title, inner_size, position);
-        
+
         unsafe {
             let () = msg_send![ca_layer, setDevice: metal_cx.device];
             let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
@@ -540,14 +540,14 @@ impl MetalWindow {
             let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
             let () = msg_send![ca_layer, setDelegate: cocoa_window.view];
             let () = msg_send![ca_layer, setBackgroundColor: CGColorCreateGenericRGB(0.0, 0.0, 0.0, 1.0)];
-            
+
             let view = cocoa_window.view;
             let () = msg_send![view, setWantsBestResolutionOpenGLSurface: YES];
             let () = msg_send![view, setWantsLayer: YES];
             let () = msg_send![view, setLayerContentsPlacement: 11];
             let () = msg_send![view, setLayer: ca_layer];
         }
-        
+
         MetalWindow {
             first_draw: true,
             window_id,
@@ -557,15 +557,15 @@ impl MetalWindow {
             cocoa_window
         }
     }
-    
+
     pub fn set_vsync_enable(&mut self, enable: bool) {
         let () = unsafe {msg_send![self.ca_layer, setDisplaySyncEnabled: enable]};
     }
-    
+
     pub fn set_buffer_count(&mut self, _count: u64) {
         let () = unsafe {msg_send![self.ca_layer, setMaximumDrawableCount: 3]};
     }
-    
+
     pub fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
         let cal_size = Vec2 {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
@@ -584,7 +584,7 @@ impl MetalWindow {
             false
         }
     }
-    
+
 }
 
 #[derive(Clone, Default)]
@@ -642,7 +642,7 @@ impl MetalBuffer {
             _ => &self.multi5,
         }
     }
-    
+
     pub fn multi_buffer_write(&mut self) -> &mut MultiMetalBuffer {
         self.last_written = (self.last_written + 1) % 5;
         match self.last_written {
@@ -653,7 +653,7 @@ impl MetalBuffer {
             _ => &mut self.multi5,
         }
     }
-    
+
     pub fn update_with_f32_data(&mut self, metal_cx: &MetalCx, data: &Vec<f32>) {
         let elem = self.multi_buffer_write();
         if elem.size < data.len() {
@@ -668,7 +668,7 @@ impl MetalBuffer {
             if buffer == nil {elem.buffer = None} else {elem.buffer = Some(buffer)}
             elem.size = data.len()
         }
-        
+
         if let Some(buffer) = elem.buffer {
             unsafe {
                 let p: *mut std::ffi::c_void = msg_send![buffer, contents];
@@ -684,7 +684,7 @@ impl MetalBuffer {
         }
         elem.used = data.len()
     }
-    
+
     pub fn update_with_u32_data(&mut self, metal_cx: &MetalCx, data: &Vec<u32>) {
         let elem = self.multi_buffer_write();
         if elem.size < data.len() {

@@ -34,7 +34,7 @@ impl FileEditor {
             FileEditor::Plain(re) => re.handle_plain_editor(cx, event, text_buffer),
         }
     }
-    
+
     pub fn set_last_cursor(&mut self, cx: &mut Cx, cursor:(usize, usize), at_top:bool) {
         match self {
             FileEditor::Rust(re) => re.text_editor.set_last_cursor(cx, cursor, at_top),
@@ -42,7 +42,7 @@ impl FileEditor {
             FileEditor::Plain(re) => re.text_editor.set_last_cursor(cx, cursor, at_top),
         }
     }
-    
+
     pub fn set_key_focus(&mut self, cx: &mut Cx) {
         match self {
             FileEditor::Rust(re) => re.text_editor.set_key_focus(cx),
@@ -50,7 +50,7 @@ impl FileEditor {
             FileEditor::Plain(re) => re.text_editor.set_key_focus(cx),
         }
     }
-    
+
     pub fn has_key_focus(&mut self, cx: &mut Cx)->bool {
         match self {
             FileEditor::Rust(re) => re.text_editor.has_key_focus(cx),
@@ -58,7 +58,7 @@ impl FileEditor {
             FileEditor::Plain(re) => re.text_editor.has_key_focus(cx),
         }
     }
-    
+
     pub fn get_scroll_pos(&mut self, cx: &mut Cx) -> Vec2 {
         match self {
             FileEditor::Rust(re) => re.text_editor.view.get_scroll_pos(cx),
@@ -66,7 +66,7 @@ impl FileEditor {
             FileEditor::Plain(re) => re.text_editor.view.get_scroll_pos(cx),
         }
     }
-    
+
     pub fn set_scroll_pos_on_load(&mut self, pos: Vec2) {
         match self {
             FileEditor::Rust(re) => re.text_editor._scroll_pos_on_load = Some(pos),
@@ -74,7 +74,7 @@ impl FileEditor {
             FileEditor::Plain(re) => re.text_editor._scroll_pos_on_load = Some(pos),
         }
     }
-    
+
     pub fn draw_file_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer, search_index: &mut SearchIndex) {
         match self {
             FileEditor::Rust(re) => re.draw_rust_editor(cx, text_buffer, Some(search_index)),
@@ -82,7 +82,7 @@ impl FileEditor {
             FileEditor::Plain(re) => re.draw_plain_editor(cx, text_buffer, Some(search_index)),
         }
     }
-    
+
     pub fn update_token_chunks(path: &str, text_buffer: &mut TextBuffer, search_index: &mut SearchIndex) {
         // check which file extension we have to spawn a new editor
         if path.ends_with(".rs") || path.ends_with(".toml") || path.ends_with(".ron") {
@@ -108,9 +108,9 @@ impl FileEditors {
             FileEditor::Plain(_) => !(path.ends_with(".rs") || path.ends_with(".toml") || path.ends_with(".ron") || path.ends_with(".js") || path.ends_with(".html"))
         }
     }
-    
+
     pub fn get_file_editor_for_path(&mut self, path: &str, editor_id:u64) -> (&mut FileEditor, bool) {
-        
+
         // check which file extension we have to spawn a new editor
         let is_new = !self.editors.contains_key(&editor_id);
         if is_new {
@@ -133,7 +133,7 @@ impl FileEditors {
         }
         (self.editors.get_mut(&editor_id).unwrap(), is_new)
     }
-    
+
     pub fn highest_file_editor_id(&self) -> u64 {
         let mut max_id = 0;
         for (id, _) in &self.editors {

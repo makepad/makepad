@@ -2,9 +2,9 @@
 
 members = [
     "makepad",
-    "makepad/wasm", 
+    "makepad/wasm",
     "examples/audio_example",
-    "examples/bare_example", 
+    "examples/bare_example",
     "examples/bare_example/wasm",
     "examples/widget_example",
     "examples/cmdline_example",
@@ -16,4 +16,4 @@ members = [
 
 [profile.release]
 #lto=true
- 
+

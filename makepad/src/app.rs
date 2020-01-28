@@ -20,7 +20,7 @@ pub struct App {
 }
 
 impl App {
-    
+
     pub fn command_about_makepad() -> CommandId {uid!()}
     pub fn command_preferences() -> CommandId {uid!()}
     pub fn command_new_file() -> CommandId {uid!()}
@@ -40,13 +40,13 @@ impl App {
     pub fn command_start_program() -> CommandId {uid!()}
     pub fn command_stop_program() -> CommandId {uid!()}
     pub fn command_bring_all_to_front() -> CommandId {uid!()}
-    
+
     pub fn proto(cx: &mut Cx) -> Self {
         let default_opt = StyleOptions {scale: 1.0, dark: true};
         set_widget_style(cx, &default_opt);
         set_makepad_style(cx, &default_opt);
         let ms = cx.new_signal();
-        
+
         // set up the keyboard map
         Self::command_preferences().set_key(cx, KeyCode::Comma);
         Self::command_new_file().set_key(cx, KeyCode::KeyN);
@@ -54,9 +54,9 @@ impl App {
         Self::command_save_as().set_key_shift(cx, KeyCode::KeyS);
         Self::command_close_editor().set_key(cx, KeyCode::KeyW);
         Self::command_close_window().set_key_shift(cx, KeyCode::KeyW);
-        
+
         cx.command_default_keymap();
-        
+
         Self {
             menu: Menu::main(vec![
                 Menu::sub("Makepad", vec![
@@ -167,7 +167,7 @@ impl App {
                                 current: 0,
                                 previous: 0,
                                 tabs: vec![
-                                    
+
                                     DockTab {
                                         closeable: false,
                                         title: "Log".to_string(),
@@ -201,18 +201,18 @@ impl App {
             storage: AppStorage::proto(cx)
         }
     }
-    
+
     pub fn default_layout(&mut self, cx: &mut Cx) {
         self.state.windows = vec![self.app_window_state_template.clone()];
         self.windows = vec![self.app_window_template.clone()];
         cx.redraw_child_area(Area::All);
     }
-    
+
     pub fn reload_style(&mut self, cx: &mut Cx) {
         set_widget_style(cx, &self.storage.settings.style_options);
         set_makepad_style(cx, &self.storage.settings.style_options);
     }
-    
+
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
@@ -307,7 +307,7 @@ impl App {
                             // create our windows with the serialized positions/size
                             for window_state in &self.state.windows {
                                 let mut size = window_state.window_inner_size;
-                                
+
                                 if size.x <= 10. {
                                     size.x = 800.;
                                 }
@@ -332,7 +332,7 @@ impl App {
                                 })
                             }
                             cx.redraw_child_area(Area::All);
-                            
+
                         }
                     }
                     else { // load default window
@@ -365,7 +365,7 @@ impl App {
                     }
                 }
             },
-            
+
             _ => ()
         }
         for (window_index, window) in self.windows.iter_mut().enumerate() {
@@ -373,10 +373,10 @@ impl App {
             // break;
         }
     }
-    
-    
+
+
     pub fn draw_app(&mut self, cx: &mut Cx) {
-        
+
         //return;
         for (window_index, window) in self.windows.iter_mut().enumerate() {
             window.draw_app_window(cx, &self.menu, window_index, &mut self.state, &mut self.storage, &mut self.build_manager);

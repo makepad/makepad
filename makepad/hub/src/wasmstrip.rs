@@ -1,4 +1,4 @@
- 
+
 use std::{mem};
 
 #[derive(Clone, Debug)]
@@ -33,7 +33,7 @@ impl<'a> Reader<'a> {
         self.offset += bytes.len();
         Ok(())
     }
-    
+
     fn read_u8(&mut self) -> Result<u8,WasmParseError> {
         let mut bytes = [0; mem::size_of::<u8>()];
         self.read(&mut bytes)?;
@@ -45,13 +45,13 @@ impl<'a> Reader<'a> {
         self.read(&mut bytes)?;
         Ok(u32::from_le_bytes(bytes))
     }
-    
+
     fn read_var_u32(&mut self) -> Result<u32,WasmParseError>{
         let byte = self.read_u8()? as  u32;
         if byte&0x80 == 0{
             return Ok(byte)
         }
-        
+
         let mut result = byte & 0x7F;
         let mut shift = 7;
         loop {
@@ -119,7 +119,7 @@ fn read_wasm_sections(buf:&[u8])->Result<Vec<WasmSection>,WasmParseError>{
                 });
                 reader.skip(payload_len)?;
             }
-        } 
+        }
         else{
             break;
         }
@@ -136,7 +136,7 @@ pub fn wasm_strip_debug(buf: &[u8])->Result<Vec<u8>,WasmParseError>{
         if section.type_id != 0{// !section.name.starts_with(".debug"){
             strip.extend_from_slice(&buf[section.start..section.end]);
         }
-        
+
     }
     Ok(strip)
 }

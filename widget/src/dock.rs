@@ -13,7 +13,7 @@ where TItem: Clone
     // pub dock_items: Option<DockItem<TItem>>,
     pub splitters: Elements<usize, Splitter, Splitter>,
     pub tab_controls: Elements<usize, TabControl, TabControl>,
-    
+
     pub drop_size: Vec2,
     pub drop_quad: Quad,
     pub drop_quad_view: View,
@@ -100,7 +100,7 @@ where TItem: Clone
 impl<'a, TItem> DockWalker<'a, TItem>
 where TItem: Clone
 {
-    
+
     pub fn walk_dock_item(&mut self) -> Option<(usize, &mut DockItem<TItem>)> {
         // lets get the current item on the stack
         let push_or_pop = if let Some(stack_top) = self.stack.last_mut() {
@@ -160,7 +160,7 @@ where TItem: Clone
         }
         return None;
     }
-    
+
     pub fn walk_handle_dock(&mut self, cx: &mut Cx, event: &mut Event) -> Option<&mut TItem> {
         // lets get the current item on the stack
         let push_or_pop = if let Some(stack_top) = self.stack.last_mut() {
@@ -210,10 +210,10 @@ where TItem: Clone
                                     *self._drag_move = None;
                                     *self._drag_end = Some(DockDragEnd::OldTab {
                                         fe: fe,
-                                        
+
                                         ident: DockTabIdent {
                                             tab_control_id: stack_top.uid,
-                                            
+
                                             tab_id: tab_id
                                         }
                                     });
@@ -233,7 +233,7 @@ where TItem: Clone
                                 _ => ()
                             }
                         }
-                        
+
                         if defocus {
                             // defocus all other tabcontrols
                             for (id, tab_control) in self.tab_controls.enumerate() {
@@ -293,7 +293,7 @@ where TItem: Clone
         return None;
     }
 
-    pub fn walk_draw_dock<F>(&mut self, cx: &mut Cx, mut tab_handler:F) -> Option<&'a mut TItem> 
+    pub fn walk_draw_dock<F>(&mut self, cx: &mut Cx, mut tab_handler:F) -> Option<&'a mut TItem>
     where F: FnMut(&mut Cx, &mut TabControl, &DockTab<TItem>, bool) {
         // lets get the current item on the stack
         let push_or_pop = if let Some(stack_top) = self.stack.last_mut() {
@@ -314,14 +314,14 @@ where TItem: Clone
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
                         let tab_control = self.tab_controls.get_draw(cx, stack_top.uid, | _cx, tmpl | tmpl.clone());
-                        
+
                         if let Ok(_) = tab_control.begin_tabs(cx) {
                             for (id, tab) in tabs.iter().enumerate() {
                                 tab_handler(cx, tab_control, tab, *current == id)
                             }
                             tab_control.end_tabs(cx);
                         }
-                        
+
                         if let Ok(_) = tab_control.begin_tab_page(cx) {
                             if *current < tabs.len() {
                                 return Some(unsafe {mem::transmute(&mut tabs[*current].item)});
@@ -349,7 +349,7 @@ where TItem: Clone
                     }
                     else if stack_top.counter == 1 {
                         stack_top.counter += 1;
-                        
+
                         let split = self.splitters.get_draw(cx, stack_top.uid, | _cx, tmpl | tmpl.clone());
                         split.mid_splitter(cx);
                         Some(DockWalkStack {counter: 0, uid: 0, item: unsafe {mem::transmute(last.as_mut())}})
@@ -409,7 +409,7 @@ where TItem: Clone
             _tweening_quad: None
         }
     }
-    
+
     fn recur_remove_tab(dock_walk: &mut DockItem<TItem>, control_id: usize, tab_id: usize, counter: &mut usize, clone: bool, select_previous:bool) -> Option<DockTab<TItem>>
     where TItem: Clone
     {
@@ -430,7 +430,7 @@ where TItem: Clone
                         if select_previous && *previous != *current && *previous < tabs.len() - 1{
                             *current = *previous;
                         }
-                        else 
+                        else
                         if *current >= 1 && *current == tabs.len() - 1 {
                             *current -= 1;
                         }
@@ -452,7 +452,7 @@ where TItem: Clone
         }
         None
     }
-    
+
     fn recur_collapse_empty(dock_walk: &mut DockItem<TItem>) -> bool
     where TItem: Clone
     {
@@ -477,7 +477,7 @@ where TItem: Clone
         }
         false
     }
-    
+
     fn recur_split_dock(dock_walk: &mut DockItem<TItem>, items: &Vec<DockTab<TItem>>, control_id: usize, kind: &DockDropKind, counter: &mut usize)->Option<DockTabIdent>
     where TItem: Clone
     {
@@ -560,7 +560,7 @@ where TItem: Clone
         }
         None
     }
-    
+
     fn get_drop_kind(pos: Vec2, drop_size: Vec2, tvr: Rect, cdr: Rect, tab_rects: Vec<Rect>) -> (DockDropKind, Rect) {
         // this is how the drop areas look
         //    |            Tab                |
@@ -575,7 +575,7 @@ where TItem: Clone
         //    |      |----------------|       |
         //    |      |    Bottom      |       |
         //    ---------------------------------
-        
+
         if tvr.contains(pos.x, pos.y) {
             for (id, tr) in tab_rects.iter().enumerate() {
                 if tr.contains(pos.x, pos.y) {
@@ -618,22 +618,22 @@ where TItem: Clone
         }
         (DockDropKind::Center, cdr.clone())
     }
-    
+
     pub fn dock_drag_out(&mut self, cx: &mut Cx) {
         self._drag_move = None;
         self.drop_quad_view.redraw_view_area(cx);
     }
-    
+
     pub fn dock_drag_move(&mut self, cx: &mut Cx, fe: FingerMoveEvent) {
         self._drag_move = Some(fe);
         self.drop_quad_view.redraw_view_area(cx);
     }
-    
+
     pub fn dock_drag_cancel(&mut self, cx: &mut Cx) {
         self._drag_move = None;
         self.drop_quad_view.redraw_view_area(cx);
     }
-    
+
     pub fn dock_drag_end(&mut self, _cx: &mut Cx, fe: FingerUpEvent, new_items: Vec<DockTab<TItem>>) {
         self._drag_move = None;
         self._drag_end = Some(DockDragEnd::NewItems {
@@ -641,7 +641,7 @@ where TItem: Clone
             items: new_items
         });
     }
-    
+
     pub fn handle_dock(&mut self, cx: &mut Cx, _event: &mut Event, dock_items: &mut DockItem<TItem>) -> DockEvent {
         if let Some(close_tab) = &self._close_tab {
             Self::recur_remove_tab(dock_items, close_tab.tab_control_id, close_tab.tab_id, &mut 0, false, false);
@@ -655,14 +655,14 @@ where TItem: Clone
             let mut tab_clone_ident = None;
             let fe = match &drag_end {DockDragEnd::OldTab {fe, ..} => fe, DockDragEnd::NewItems {fe, ..} => fe};
             for (target_id, tab_control) in self.tab_controls.enumerate() {
-                
+
                 let cdr = tab_control.get_content_drop_rect(cx);
                 let tvr = tab_control.get_tabs_view_rect(cx);
                 if tvr.contains(fe.abs.x, fe.abs.y) || cdr.contains(fe.abs.x, fe.abs.y) { // we might got dropped elsewhere
                     // ok now, we ask the tab_controls rect
                     let tab_rects = tab_control.get_tab_rects(cx);
                     let (kind, _rect) = Self::get_drop_kind(fe.abs, self.drop_size, tvr, cdr, tab_rects);
-                    
+
                     // alright our drag_end is an enum
                     // its either a previous tabs index
                     // or its a new Item
@@ -714,7 +714,7 @@ where TItem: Clone
         // ok we need to pull out the TItem from our dockpanel
         DockEvent::None
     }
-    
+
     pub fn draw_dock(&mut self, cx: &mut Cx) {
         // lets draw our hover layer if need be
         if let Some(fe) = &self._drag_move {
@@ -723,18 +723,18 @@ where TItem: Clone
             }
             let mut found_drop_zone = false;
             for (id, tab_control) in self.tab_controls.enumerate() {
-                
+
                 let cdr = tab_control.get_content_drop_rect(cx);
                 let tvr = tab_control.get_tabs_view_rect(cx);
                 if tvr.contains(fe.abs.x, fe.abs.y) || cdr.contains(fe.abs.x, fe.abs.y) {
                     let tab_rects = tab_control.get_tab_rects(cx);
                     let (_kind, rect) = Self::get_drop_kind(fe.abs, self.drop_size, tvr, cdr, tab_rects);
-                    
+
                     if !self._tweening_quad.is_none() && self._tweening_quad.unwrap().0 != *id {
                         // restarts the animation by removing drop_quad
                         self._tweening_quad = None;
                     }
-                    
+
                     // yay, i can finally do these kinds of animations!
                     let (dr, alpha) = if self._tweening_quad.is_none() {
                         self._tweening_quad = Some((*id, rect, 0.));
@@ -776,7 +776,7 @@ where TItem: Clone
             self.drop_quad_view.end_view(cx);
         }
     }
-    
+
     pub fn walker<'a>(&'a mut self, dock_items: &'a mut DockItem<TItem>) -> DockWalker<'a,
         TItem> {
         let mut stack = Vec::new();

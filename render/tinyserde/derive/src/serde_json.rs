@@ -23,7 +23,7 @@ pub fn derive_ser_json_struct(input: &DeriveInput, fields: &FieldsNamed) -> Toke
     let ident = &input.ident;
 
     let mut outputs = Vec::new();
-    
+
     let last = fields.named.len() -1;
     for (index, field) in fields.named.iter().enumerate() {
         let fieldname = field.ident.clone().unwrap();
@@ -75,30 +75,30 @@ pub fn derive_de_json_named(ident:TokenStream, fields: &FieldsNamed) -> TokenStr
     let mut field_strings = Vec::new();
     let mut unwraps = Vec::new();
     for field in &fields.named {
-         
+
         let fieldname = field.ident.clone().unwrap();
         let localvar = format_ident!("_{}", fieldname);
         let fieldstring = LitStr::new(&fieldname.to_string(), ident.span());
-        
+
         if type_is_option(&field.ty) {
             unwraps.push(quote! {if let Some(t) = #localvar {t}else {None}})
         }
         else {
             unwraps.push(quote! {if let Some(t) = #localvar {t}else {return Err(s.err_nf(#fieldstring))}})
         }
-        
+
         field_names.push(fieldname);
         local_vars.push(localvar);
         field_strings.push(fieldstring);
     }
-    
+
     quote!{
         #(
             let mut #local_vars = None;
         ) *
         s.curly_open(i) ?;
         while let Some(_) = s.next_str() {
-            
+
             match s.strbuf.as_ref() {
                 #(
                     #field_strings => {s.next_colon(i) ?;#local_vars = Some(DeJson::de_json(s, i) ?)},
@@ -120,7 +120,7 @@ pub fn derive_de_json_struct(input: &DeriveInput, fields: &FieldsNamed) -> Token
     let bounded_where_clause = where_clause_with_bound(&input.generics, bound);
     let ident = &input.ident;
     let body = derive_de_json_named(quote!{#ident}, fields);
-    
+
     quote!{
         impl #impl_generics DeJson for #ident #ty_generics #bounded_where_clause {
             fn de_json(s: &mut makepad_tinyserde::DeJsonState, i: &mut std::str::Chars) -> std::result::Result<Self,
@@ -129,17 +129,17 @@ pub fn derive_de_json_struct(input: &DeriveInput, fields: &FieldsNamed) -> Token
             }
         }
     }
-} 
+}
 
 pub fn derive_ser_json_enum(input: &DeriveInput, enumeration: &DataEnum) -> TokenStream {
     let (impl_generics, ty_generics, _) = input.generics.split_for_impl();
     let bound = parse_quote!(SerJson);
     let bounded_where_clause = where_clause_with_bound(&input.generics, bound);
-    
+
     let ident = &input.ident;
-    
+
     let mut match_item = Vec::new();
-    
+
     for variant in &enumeration.variants {
         let ident = &variant.ident;
         let lit = LitStr::new(&ident.to_string(), ident.span());
@@ -217,7 +217,7 @@ pub fn derive_ser_json_enum(input: &DeriveInput, enumeration: &DataEnum) -> Toke
             },
         }
     }
-    
+
     quote! {
         impl #impl_generics SerJson for #ident #ty_generics #bounded_where_clause {
             fn ser_json(&self, d: usize, s: &mut makepad_tinyserde::SerJsonState) {
@@ -229,20 +229,20 @@ pub fn derive_ser_json_enum(input: &DeriveInput, enumeration: &DataEnum) -> Toke
                 }
                 s.out.push('}');
             }
-        } 
+        }
     }
 }
 
 
 pub fn derive_de_json_enum(input: &DeriveInput, enumeration: &DataEnum) -> TokenStream {
-    
+
     let (impl_generics, ty_generics, _) = input.generics.split_for_impl();
     let ident = &input.ident;
     let bound = parse_quote!(DeJson);
     let bounded_where_clause = where_clause_with_bound(&input.generics, bound);
-    
+
     let mut match_item = Vec::new();
-    
+
     for variant in &enumeration.variants {
         let ident = &variant.ident;
         let lit = LitStr::new(&ident.to_string(), ident.span());
@@ -269,7 +269,7 @@ pub fn derive_de_json_enum(input: &DeriveInput, enumeration: &DataEnum) -> Token
             },
         }
     }
-    
+
     quote! {
         impl #impl_generics DeJson for #ident #ty_generics #bounded_where_clause {
             fn de_json(s: &mut DeJsonState, i: &mut std::str::Chars) -> std::result::Result<Self,DeJsonErr> {
