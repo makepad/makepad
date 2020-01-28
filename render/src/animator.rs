@@ -8,7 +8,7 @@ pub struct AnimArea {
     pub total_time: f64
 }
 
-#[derive(Clone)]
+#[derive(Clone)] 
 pub struct Anim {
     pub mode: Play,
     pub tracks: Vec<Track>
@@ -16,8 +16,8 @@ pub struct Anim {
 
 #[derive(Clone)]
 pub enum AnimLastValue {
-    Float(f32),
-    Vec2(Vec2),
+    Float(f32), 
+    Vec2(Vec2), 
     Vec3(Vec3),
     Vec4(Vec4),
     Color(Color),
@@ -120,13 +120,14 @@ impl Animator {
     }
     
     pub fn play_anim(&mut self, cx: &mut Cx, anim: Anim) {
+        self.theme_update_id = cx.theme_update_id;
         // if our area is invalid, we should just set our default value
         if let Some(current) = &self.current {
             if current.mode.term() { // can't override a term anim
                 return
             }
         }
-        
+
         if !self.area.is_valid(cx) {
             self.set_anim_as_last_values(&anim);
             self.current = Some(anim);

@@ -227,10 +227,10 @@ impl ScrollBar {
         return false
     }
     
-    pub fn scroll_into_view(&mut self, cx: &mut Cx, pos: f32, size: f32) {
+    pub fn scroll_into_view(&mut self, cx: &mut Cx, pos: f32, size: f32, smooth:bool) {
         if pos < self._scroll_pos { // scroll up
             let scroll_to = pos;
-            if self.smoothing.is_none() {
+            if !smooth || self.smoothing.is_none() {
                 self.set_scroll_pos(cx, scroll_to);
             }
             else {
@@ -242,7 +242,7 @@ impl ScrollBar {
             if pos + size > self._view_total { // resize _view_total if need be
                 self._view_total = pos + size;
             }
-            if self.smoothing.is_none() {
+            if !smooth || self.smoothing.is_none() {
                 self.set_scroll_pos(cx, scroll_to);
             }
             else {

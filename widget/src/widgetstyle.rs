@@ -1,4 +1,5 @@
 use makepad_render::*;
+use makepad_tinyserde::*;
 use crate::normalbutton::*;
 use crate::tab::*;
 use crate::desktopwindow::*;
@@ -12,9 +13,7 @@ use crate::desktopbutton::*;
 use crate::splitter::*;
 use crate::tabcontrol::*;
 
-use serde::{Serialize, Deserialize};
-
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Copy, Clone, SerRon, DeRon, PartialEq)]
 pub struct StyleOptions {
     pub scale: f32,
     pub dark: bool
@@ -107,9 +106,12 @@ pub fn set_widget_style(cx: &mut Cx, opt: &StyleOptions) {
         TextEditor::color_paren_pair_match().set(cx, color256(255, 255, 255));
         TextEditor::color_paren_pair_fail().set(cx, color256(255, 0, 0));
         
-        TextEditor::color_marker_error().set(cx, color256(200, 0, 0));
-        TextEditor::color_marker_warning().set(cx, color256(0, 200, 0));
-        TextEditor::color_marker_log().set(cx, color256(200, 200, 200));
+        TextEditor::color_message_marker_error().set(cx, color256(200, 0, 0));
+        TextEditor::color_message_marker_warning().set(cx, color256(0, 200, 0));
+        TextEditor::color_message_marker_log().set(cx, color256(200, 200, 200));
+
+        TextEditor::color_search_marker().set(cx, color256(128, 64, 0));
+
         TextEditor::color_line_number_normal().set(cx, color256(136, 136, 136));
         TextEditor::color_line_number_highlight().set(cx, color256(212, 212, 212));
         

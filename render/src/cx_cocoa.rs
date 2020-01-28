@@ -6,9 +6,14 @@ use crate::cx_apple::*;
 use std::os::raw::c_void;
 use std::sync::{Mutex};
 //use core_graphics::display::CGDisplay;
-use time::precise_time_ns;
+//use time::precise_time_ns;
 
 static mut GLOBAL_COCOA_APP: *mut CocoaApp = 0 as *mut _;
+
+
+extern{
+    pub fn mach_absolute_time()->u64;
+}
 
 use crate::cx::*; 
  
@@ -100,7 +105,7 @@ impl CocoaApp {
                 init_app_after_first_window: false,
                 const_empty_string: str_to_nsstring(""),
                 pasteboard: msg_send![class!(NSPasteboard), generalPasteboard],
-                time_start: precise_time_ns(),
+                time_start: mach_absolute_time(),
                 timer_delegate_instance: timer_delegate_instance,
                 timer_delegate_class: timer_delegate_class,
                 post_delegate_class: define_cocoa_post_delegate(),
@@ -243,7 +248,7 @@ impl CocoaApp {
     }
     
     pub fn time_now(&self) -> f64 {
-        let time_now = precise_time_ns();
+        let time_now = unsafe{mach_absolute_time()};
         (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
     
@@ -475,7 +480,7 @@ impl CocoaApp {
                 };
                 let ns_event: id = msg_send![
                     ns_app,
-                    nextEventMatchingMask: NSEventMask::NSAnyEventMask.bits() | NSEventMask::NSEventMaskPressure.bits()
+                    nextEventMatchingMask: NSEventMask::NSAnyEventMask as u64 | NSEventMask::NSEventMaskPressure as u64
                     untilDate: ns_until
                     inMode: NSDefaultRunLoopMode
                     dequeue: YES
@@ -632,10 +637,11 @@ impl CocoaApp {
     }
     
     pub fn send_signal_event(&mut self, signal: Signal, status: StatusId) {
+        let mut signals = HashMap::new();
+        signals.insert(signal, vec![status]);
         self.do_callback(&mut vec![
             Event::Signal(SignalEvent {
-                signal: signal,
-                status: status
+                signals: signals,
             })
         ]);
         self.do_callback(&mut vec![Event::Paint]);
@@ -707,16 +713,16 @@ impl CocoaWindow {
             };
             let ns_size = NSSize {width: size.x as f64, height: size.y as f64};
             let window_frame = NSRect {origin: left_top, size: ns_size};
-            let window_masks = NSWindowStyleMask::NSClosableWindowMask
-                | NSWindowStyleMask::NSMiniaturizableWindowMask
-                | NSWindowStyleMask::NSResizableWindowMask
-                | NSWindowStyleMask::NSTitledWindowMask
-                | NSWindowStyleMask::NSFullSizeContentViewWindowMask;
+            let window_masks = NSWindowStyleMask::NSClosableWindowMask as u64
+                | NSWindowStyleMask::NSMiniaturizableWindowMask as u64
+                | NSWindowStyleMask::NSResizableWindowMask as u64
+                | NSWindowStyleMask::NSTitledWindowMask as u64
+                | NSWindowStyleMask::NSFullSizeContentViewWindowMask as u64;
             
             let () = msg_send![
                 self.window,
                 initWithContentRect: window_frame
-                styleMask: window_masks.bits()
+                styleMask: window_masks as u64
                 backing: NSBackingStoreType::NSBackingStoreBuffered as u64
                 defer: NO
             ];
@@ -817,7 +823,7 @@ impl CocoaWindow {
     }
     
     pub fn time_now(&self) -> f64 {
-        let time_now = precise_time_ns();
+        let time_now = unsafe{mach_absolute_time()};
         (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
     
@@ -1047,12 +1053,12 @@ fn get_event_char(event: id) -> char {
 }
 
 fn get_event_key_modifier(event: id) -> KeyModifiers {
-    let flags: NSEventModifierFlags = unsafe {msg_send![event, modifierFlags]};
+    let flags:u64 = unsafe {msg_send![event, modifierFlags]};
     KeyModifiers {
-        shift: flags.contains(NSEventModifierFlags::NSShiftKeyMask),
-        control: flags.contains(NSEventModifierFlags::NSControlKeyMask),
-        alt: flags.contains(NSEventModifierFlags::NSAlternateKeyMask),
-        logo: flags.contains(NSEventModifierFlags::NSCommandKeyMask),
+        shift: flags & NSEventModifierFlags::NSShiftKeyMask as u64 != 0,
+        control: flags & NSEventModifierFlags::NSControlKeyMask as u64 != 0,
+        alt: flags & NSEventModifierFlags::NSAlternateKeyMask as u64 != 0,
+        logo: flags & NSEventModifierFlags::NSCommandKeyMask as u64!= 0,
     }
 }
 

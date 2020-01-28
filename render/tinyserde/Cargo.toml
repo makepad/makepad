@@ -1,0 +1,11 @@
+[package]
+name = "makepad-tinyserde"
+version = "0.1.0"
+authors = ["makepad <info@makepad.nl>"]
+license = "MIT OR Apache-2.0"
+description = "tinyserde."
+readme = "README.md"
+edition = "2018"
+
+[dependencies]
+makepad-tinyserde-derive = {path = "derive"}
