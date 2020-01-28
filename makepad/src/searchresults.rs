@@ -234,6 +234,7 @@ impl SearchResults {
         if s.len() > 0 {
             // lets search
             self.results = search_index.search(&s, self.first_tbid, cx,  storage);
+            println!("Result set size: {}", self.results.len());
             self.do_select_first = true;
         }
         else {

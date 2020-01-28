@@ -27,7 +27,9 @@ pub struct TextBuffer {
     pub is_crlf: bool,
     pub markers: TextBufferMarkers,
     pub flat_text: Vec<char>,
+    pub last_flat_text: Vec<char>,
     pub token_chunks: Vec<TokenChunk>,
+    pub last_token_chunks: Vec<TokenChunk>,
     pub token_chunks_id: u32,
     pub keyboard: TextBufferKeyboard,
 }
@@ -38,6 +40,11 @@ impl TextBuffer {
     pub fn status_search_update() -> StatusId {uid!()}
     pub fn status_data_update() -> StatusId {uid!()}
     pub fn status_keyboard_update() -> StatusId {uid!()}
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
+pub struct LiveMacro{
+    pub token:usize,
 }
 
 #[derive(Clone, Default)]
@@ -159,7 +166,9 @@ impl TextBuffer {
     pub fn needs_token_chunks(&mut self) -> bool {
         if self.token_chunks_id != self.mutation_id && self.is_loaded {
             self.token_chunks_id = self.mutation_id;
+            std::mem::swap(&mut self.token_chunks, &mut self.last_token_chunks);
             self.token_chunks.truncate(0);
+            std::mem::swap(&mut self.flat_text, &mut self.last_flat_text);
             self.flat_text.truncate(0);
             return true
         }
@@ -728,6 +737,7 @@ pub struct TokenizerState<'a> {
     pub cur: char,
     pub next: char,
     pub lines: &'a Vec<Vec<char>>,
+    pub line_start: usize,
     pub line_counter: usize,
     pub offset: usize,
     iter: std::slice::Iter<'a, char>
@@ -737,6 +747,7 @@ impl<'a> TokenizerState<'a> {
     pub fn new(lines: &'a Vec<Vec<char>>) -> Self {
         let mut ret = Self {
             lines: lines,
+            line_start: 0,
             line_counter: 0,
             offset: 0,
             prev: '\0',
@@ -761,6 +772,7 @@ impl<'a> TokenizerState<'a> {
     pub fn next_line(&mut self) {
         if self.line_counter < self.lines.len() - 1 {
             self.line_counter += 1;
+            self.line_start = self.offset;
             self.offset += 1;
             self.iter = self.lines[self.line_counter].iter();
             self.next = '\n'
