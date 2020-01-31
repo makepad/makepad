@@ -147,7 +147,7 @@ impl SearchIndex {
             }
         }
 
-        out
+        out 
     }
 }
 
