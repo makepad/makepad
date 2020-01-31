@@ -27,9 +27,10 @@ pub struct TextBuffer {
     pub is_crlf: bool,
     pub markers: TextBufferMarkers,
     pub flat_text: Vec<char>,
-    pub last_flat_text: Vec<char>,
     pub token_chunks: Vec<TokenChunk>,
-    pub last_token_chunks: Vec<TokenChunk>,
+    pub was_invalid_pair: bool,
+    pub old_flat_text: Vec<char>,
+    pub old_token_chunks: Vec<TokenChunk>,
     pub token_chunks_id: u32,
     pub keyboard: TextBufferKeyboard,
 }
@@ -166,9 +167,12 @@ impl TextBuffer {
     pub fn needs_token_chunks(&mut self) -> bool {
         if self.token_chunks_id != self.mutation_id && self.is_loaded {
             self.token_chunks_id = self.mutation_id;
-            std::mem::swap(&mut self.token_chunks, &mut self.last_token_chunks);
+            if !self.was_invalid_pair{
+                std::mem::swap(&mut self.token_chunks, &mut self.old_token_chunks);
+                std::mem::swap(&mut self.flat_text, &mut self.old_flat_text);
+            }
+            self.was_invalid_pair = false;
             self.token_chunks.truncate(0);
-            std::mem::swap(&mut self.flat_text, &mut self.last_flat_text);
             self.flat_text.truncate(0);
             return true
         }
@@ -843,6 +847,7 @@ pub enum TokenType {
     Looping,
     Identifier,
     Call,
+    Macro,
     TypeName,
     ThemeName,
     BuiltinType,
@@ -915,7 +920,8 @@ impl TokenChunk {
         return TokenType::Unexpected
     }
     
-    pub fn push_with_pairing(token_chunks: &mut Vec<TokenChunk>, pair_stack: &mut Vec<usize>, next: char, offset: usize, offset2: usize, token_type: TokenType) {
+    pub fn push_with_pairing(token_chunks: &mut Vec<TokenChunk>, pair_stack: &mut Vec<usize>, next: char, offset: usize, offset2: usize, token_type: TokenType)->bool {
+        let mut invalid_pair = false;
         let pair_token = if token_type == TokenType::ParenOpen {
             pair_stack.push(token_chunks.len());
             token_chunks.len()
@@ -927,6 +933,7 @@ impl TokenChunk {
                 other
             }
             else {
+                invalid_pair = true;
                 token_chunks.len()
             }
         }
@@ -939,7 +946,8 @@ impl TokenChunk {
             len: offset2 - offset,
             next: next,
             token_type: token_type.clone()
-        })
+        });
+        invalid_pair
     }
     
 }

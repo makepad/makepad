@@ -899,7 +899,7 @@ impl JSTokenizer {
                 },
                 // these are followeable by non unary operators
                 TokenType::Identifier | TokenType::BuiltinType | TokenType::TypeName | TokenType::ThemeName |
-                TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number |
+                TokenType::Macro | TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number |
                 TokenType::Bool | TokenType::Unexpected | TokenType::Error | TokenType::Warning | TokenType::Defocus => {
                     is_unary_operator = false;
                     
