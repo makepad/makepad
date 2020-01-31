@@ -1510,7 +1510,7 @@ impl TextEditor {
                 TokenType::TypeDef => {
                     self._last_indent_color = self.colors.indent_line_typedef;
                 },
-                TokenType::Fn | TokenType::Call => {
+                TokenType::Fn | TokenType::Call | TokenType::Macro=> {
                     self._last_indent_color = self.colors.indent_line_fn;
                 }
                 _ => ()
@@ -1577,7 +1577,7 @@ impl TextEditor {
                     }*/
                     self.colors.identifier
                 }
-                TokenType::Call => {/*
+                TokenType::Macro | TokenType::Call => {/*
                     if chunk == &self._highlight_token[0..] {
                         self.draw_token_highlight_quad(cx, geom);
                     }*/

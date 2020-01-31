@@ -60,15 +60,46 @@ impl RustTokenizer {
             loop {
                 let offset = text_buffer.flat_text.len();
                 let token_type = tokenizer.next_token(&mut state, &mut text_buffer.flat_text, &text_buffer.token_chunks);
-                TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type);
+                if TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type){
+                    text_buffer.was_invalid_pair = true;
+                }
                 if token_type == TokenType::Eof {
                     break
                 }
                 if let Some(search_index) = search_index.as_mut(){
                     search_index.new_rust_token(&text_buffer);
                 }
-                // do running tree-based diff with previous tokens.
             }
+            if pair_stack.len() > 0{
+                text_buffer.was_invalid_pair = true;
+            }
+            /*
+            // ok now lets write a diff with the previous one
+            let mut new_index = 0;
+            let mut old_index = 0;
+            // what are the possible results. 
+            // first lets loop over the body skipping the macros
+            loop{
+                let new_tok = &text_buffer.token_chunks[new_index];
+                let old_tok = &text_buffer.old_token_chunks[old_index];
+                if new_tok.token_type != old_tok.token_type{ // file dirty
+                    
+                }
+                if let TokenType::Macro = new_tok.token_type{ 
+                    // check if we are one of our live macros
+                    // then 
+                }
+                if new_index < text_buffer.token_chunks.len(){
+                    new_index += 1;
+                }
+                else{
+                    break
+                }
+                // just hold at the end
+                if old_index < text_buffer.old_token_chunks.len() - 1{
+                    old_index += 1;
+                }
+            }*/
         }
     }
       
@@ -411,8 +442,11 @@ impl RustTokenizer {
                 '_' => {
                     chunk.push(state.cur);
                     Self::parse_rust_ident_tail(state, chunk);
-                    if state.next == '(' {
+                    if state.next == '('{
                         return TokenType::Call;
+                    }
+                    if state.next == '!'{
+                        return TokenType::Macro;
                     }
                     return TokenType::Identifier;
                 },
@@ -424,6 +458,9 @@ impl RustTokenizer {
                     if is_ident {
                         if state.next == '(' {
                             return TokenType::Call;
+                        }
+                        if state.next == '!'{
+                            return TokenType::Macro;
                         }
                         return TokenType::Identifier;
                     }
@@ -1114,7 +1151,7 @@ impl RustTokenizer {
                     out.extend(tp.cur_chunk());
                 },
                 // these are followeable by non unary operators
-                TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number |
+                TokenType::Macro | TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number |
                 TokenType::Bool | TokenType::Unexpected | TokenType::Error | TokenType::Warning | TokenType::Defocus=> {
                     is_unary_operator = false;
                     paren_stack.last_mut().unwrap().angle_counter = 0;
