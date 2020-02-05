@@ -14,7 +14,7 @@ main_app!(App);
 impl App {
     pub fn bg() -> ShaderId {uid!()}
     pub fn counter() -> InstanceFloat {uid!()}
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         
         Self::bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             let counter: Self::counter();
@@ -27,11 +27,11 @@ impl App {
         })));
         
         Self {
-            window: Window::proto(cx),
+            window: Window::new(cx),
             pass: Pass::default(),
             color_texture: Texture::default(),
-            quad: Quad::proto(cx),
-            main_view: View::proto(cx),
+            quad: Quad::new(cx),
+            main_view: View::new(cx),
             count: 0.
         }
     }

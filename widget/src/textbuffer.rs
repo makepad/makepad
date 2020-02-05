@@ -2,11 +2,6 @@ use makepad_render::*;
 
 use crate::textcursor::*;
 
-#[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
-pub struct TextBufferId(pub u16);
-impl TextBufferId{
-    pub fn as_index(&self )->usize{return self.0 as usize}
-}
 #[derive(Clone, Default)]
 pub struct TextBuffer {
     // Vec<Vec<char>> was chosen because, for all practical use (code) most lines are short
@@ -14,7 +9,6 @@ pub struct TextBuffer {
     // Also inserting lines is pretty cheap even approaching 100k lines.
     // If you want to load a 100 meg single line file or something with >100k lines
     // other options are better. But these are not usecases for this editor.
-    pub text_buffer_id: TextBufferId,
     pub lines: Vec<Vec<char>>,
     pub undo_stack: Vec<TextUndo>,
     pub redo_stack: Vec<TextUndo>,
@@ -27,12 +21,13 @@ pub struct TextBuffer {
     pub is_crlf: bool,
     pub markers: TextBufferMarkers,
     pub flat_text: Vec<char>,
-    pub last_flat_text: Vec<char>,
     pub token_chunks: Vec<TokenChunk>,
-    pub last_token_chunks: Vec<TokenChunk>,
+    pub was_invalid_pair: bool,
+    pub old_flat_text: Vec<char>,
+    pub old_token_chunks: Vec<TokenChunk>,
     pub token_chunks_id: u32,
     pub keyboard: TextBufferKeyboard,
-}
+} 
 
 impl TextBuffer {
     pub fn status_loaded() -> StatusId {uid!()}
@@ -166,9 +161,12 @@ impl TextBuffer {
     pub fn needs_token_chunks(&mut self) -> bool {
         if self.token_chunks_id != self.mutation_id && self.is_loaded {
             self.token_chunks_id = self.mutation_id;
-            std::mem::swap(&mut self.token_chunks, &mut self.last_token_chunks);
+            if !self.was_invalid_pair{
+                std::mem::swap(&mut self.token_chunks, &mut self.old_token_chunks);
+                std::mem::swap(&mut self.flat_text, &mut self.old_flat_text);
+            }
+            self.was_invalid_pair = false;
             self.token_chunks.truncate(0);
-            std::mem::swap(&mut self.flat_text, &mut self.last_flat_text);
             self.flat_text.truncate(0);
             return true
         }
@@ -843,6 +841,7 @@ pub enum TokenType {
     Looping,
     Identifier,
     Call,
+    Macro,
     TypeName,
     ThemeName,
     BuiltinType,
@@ -915,7 +914,8 @@ impl TokenChunk {
         return TokenType::Unexpected
     }
     
-    pub fn push_with_pairing(token_chunks: &mut Vec<TokenChunk>, pair_stack: &mut Vec<usize>, next: char, offset: usize, offset2: usize, token_type: TokenType) {
+    pub fn push_with_pairing(token_chunks: &mut Vec<TokenChunk>, pair_stack: &mut Vec<usize>, next: char, offset: usize, offset2: usize, token_type: TokenType)->bool {
+        let mut invalid_pair = false;
         let pair_token = if token_type == TokenType::ParenOpen {
             pair_stack.push(token_chunks.len());
             token_chunks.len()
@@ -927,6 +927,7 @@ impl TokenChunk {
                 other
             }
             else {
+                invalid_pair = true;
                 token_chunks.len()
             }
         }
@@ -939,7 +940,8 @@ impl TokenChunk {
             len: offset2 - offset,
             next: next,
             token_type: token_type.clone()
-        })
+        });
+        invalid_pair
     }
     
 }
