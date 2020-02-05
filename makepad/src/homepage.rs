@@ -24,21 +24,21 @@ pub enum EmailState {
 }
 
 impl HomePage {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
-            view: ScrollView::proto(cx),
-            text: Text::proto(cx),
-            shadow: ScrollShadow::proto(cx),
-            send_mail_button: NormalButton::proto(cx),
+            view: ScrollView::new(cx),
+            text: Text::new(cx),
+            shadow: ScrollShadow::new(cx),
+            send_mail_button: NormalButton::new(cx),
             email_signal: cx.new_signal(),
-            email_input: TextInput::proto(cx, TextInputOptions {
+            email_input: TextInput::new(cx, TextInputOptions {
                 multiline: false,
                 read_only: false,
                 empty_message: "Enter email".to_string()
             }),
             email_state: EmailState::Empty,
             example_texts: ElementsCounted::new(
-                TextInput::proto(cx, TextInputOptions {
+                TextInput::new(cx, TextInputOptions {
                     multiline: true,
                     read_only: true,
                     empty_message: "".to_string()

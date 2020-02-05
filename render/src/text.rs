@@ -43,18 +43,14 @@ pub struct Text {
     pub z: f32,
     pub wrapping: Wrapping,
     pub font_scale: f32,
-    pub do_h_scroll: bool,
-    pub do_v_scroll: bool,
 }
 
 
 impl Text {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
             text_style: TextStyle::default(),
             shader: cx.add_shader(Self::def_text_shader(), "TextAtlas"),
-            do_h_scroll: true,
-            do_v_scroll: true,
             z: 0.0,
             wrapping: Wrapping::Word,
             color: color("white"),

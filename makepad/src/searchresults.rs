@@ -11,7 +11,7 @@ pub struct SearchResults {
     pub list: ListLogic,
     pub search_input: TextInput,
     pub do_select_first: bool,
-    pub first_tbid: TextBufferId,
+    pub first_tbid: AppTextBufferId,
     pub results: Vec<SearchResult>
 }
 
@@ -27,22 +27,22 @@ pub struct SearchResultDraw {
 }
 
 impl SearchResultDraw {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
             text_editor: TextEditor {
                 mark_unmatched_parens: false, 
                 draw_line_numbers:false,
-                ..TextEditor::proto(cx)
+                ..TextEditor::new(cx)
             },
-            item_bg: Quad {z: 0.0001, ..Quad::proto(cx)},
+            item_bg: Quad {z: 0.0001, ..Quad::new(cx)},
             text: Text {
                 wrapping: Wrapping::Word,
-                ..Text::proto(cx)
+                ..Text::new(cx)
             },
-            code_icon: CodeIcon::proto(cx),
+            code_icon: CodeIcon::new(cx),
             path_color: Theme::color_text_defocus(),
             message_color: Theme::color_text_focus(),
-            shadow: ScrollShadow {z: 0.01, ..ScrollShadow::proto(cx)},
+            shadow: ScrollShadow {z: 0.01, ..ScrollShadow::new(cx)},
         }
     }
     
@@ -179,28 +179,28 @@ impl SearchResultDraw {
 #[derive(Clone)]
 pub enum SearchResultEvent {
     DisplayFile {
-        text_buffer_id:TextBufferId,
+        text_buffer_id:AppTextBufferId,
         cursor:(usize, usize)
     },
     OpenFile{
-        text_buffer_id:TextBufferId,
+        text_buffer_id:AppTextBufferId,
         cursor:(usize, usize)
     },
     None,
 }
 
 impl SearchResults { 
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
-            first_tbid:TextBufferId(0),
-            search_input: TextInput::proto(cx, TextInputOptions{multiline:false,read_only:false, empty_message:"search".to_string()}),
-            result_draw: SearchResultDraw::proto(cx),
+            first_tbid:AppTextBufferId(0),
+            search_input: TextInput::new(cx, TextInputOptions{multiline:false,read_only:false, empty_message:"search".to_string()}),
+            result_draw: SearchResultDraw::new(cx),
             list: ListLogic {
                 multi_select: false,
                 ..ListLogic::default()
             },
             do_select_first: false,
-            view: ScrollView::proto(cx),
+            view: ScrollView::new(cx),
             results: Vec::new(),
         }
     }
@@ -220,7 +220,7 @@ impl SearchResults {
         SearchResultDraw::style(cx, opt);
     }
     
-    pub fn set_search_input_value(&mut self, cx: &mut Cx,  value: &str, first_tbid:TextBufferId, focus:bool) {
+    pub fn set_search_input_value(&mut self, cx: &mut Cx,  value: &str, first_tbid:AppTextBufferId, focus:bool) {
         self.search_input.set_value(cx, value);
         self.first_tbid = first_tbid;
         if focus{
@@ -229,7 +229,7 @@ impl SearchResults {
         self.search_input.select_all(cx);
     }
     
-    pub fn do_search(&mut self, cx: &mut Cx, search_index: &mut SearchIndex, storage: &mut AppStorage)->Option<(TextBufferId,(usize,usize))> {
+    pub fn do_search(&mut self, cx: &mut Cx, search_index: &mut SearchIndex, storage: &mut AppStorage)->Option<(AppTextBufferId,(usize,usize))> {
         let s = self.search_input.get_value();
         if s.len() > 0 {
             // lets search

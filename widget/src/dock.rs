@@ -390,17 +390,17 @@ enum DockDropKind {
 impl<TItem> Dock<TItem>
 where TItem: Clone
 {
-    pub fn proto(cx: &mut Cx) -> Dock<TItem> {
+    pub fn new(cx: &mut Cx) -> Dock<TItem> {
         Dock {
             // dock_items:None,
             drop_size: Vec2 {x: 100., y: 70.},
             //drop_quad_color: Color_drop_quad::id(),
             drop_quad: Quad {
                 z: 10.,
-                ..Quad::proto(cx)
+                ..Quad::new(cx)
             },
-            splitters: Elements::new(Splitter::proto(cx)),
-            tab_controls: Elements::new(TabControl::proto(cx)),
+            splitters: Elements::new(Splitter::new(cx)),
+            tab_controls: Elements::new(TabControl::new(cx)),
             drop_quad_view: View::proto_overlay(cx),
             _close_tab: None,
             _drag_move: None,

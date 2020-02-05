@@ -34,33 +34,33 @@ pub enum TabControlEvent {
 }
 
 impl TabControl {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
             tabs_view: ScrollView {
                 scroll_h: Some(ScrollBar {
                     bar_size: 8.0,
                     smoothing: Some(0.15),
                     use_vertical_finger_scroll: true,
-                    ..ScrollBar::proto(cx)
+                    ..ScrollBar::new(cx)
                 }),
-                ..ScrollView::proto(cx)
+                ..ScrollView::new(cx)
             },
-            page_view: View::proto(cx),
-            tabs: Elements::new(Tab::proto(cx)),
+            page_view: View::new(cx),
+            tabs: Elements::new(Tab::new(cx)),
             drag_tab: Tab {
                 z: 10.,
-                ..Tab::proto(cx)
+                ..Tab::new(cx)
             },
             drag_tab_view: View {
                 is_overlay: true,
-                ..View::proto(cx)
+                ..View::new(cx)
             },
             hover: Quad {
                 color: color("purple"),
-                ..Quad::proto(cx)
+                ..Quad::new(cx)
             },
             //tab_fill_color: Color_bg_normal::id(),
-            tab_fill: Quad::proto(cx),
+            tab_fill: Quad::new(cx),
             animator: Animator::default(),
             _dragging_tab: None,
             _tab_now_selected:None,

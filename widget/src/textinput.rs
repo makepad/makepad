@@ -18,7 +18,7 @@ pub struct TextInputOptions {
 
 impl TextInput {
     
-    pub fn proto(cx: &mut Cx, opt: TextInputOptions) -> Self {
+    pub fn new(cx: &mut Cx, opt: TextInputOptions) -> Self {
         Self {
             text_editor: TextEditor {
                 read_only: opt.read_only,
@@ -28,7 +28,7 @@ impl TextInput {
                 highlight_area_on: false,
                 mark_unmatched_parens: false,
                 folding_depth: 3,
-                ..TextEditor::proto(cx)
+                ..TextEditor::new(cx)
             },
             empty_message: opt.empty_message,
             text_buffer: TextBuffer::from_utf8(""),
