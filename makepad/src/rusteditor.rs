@@ -1,6 +1,7 @@
 use makepad_render::*;
 use makepad_widget::*;
 use crate::searchindex::*;
+use crate::appstorage::*;
 
 #[derive(Clone)]
 pub struct RustEditor {
@@ -8,23 +9,23 @@ pub struct RustEditor {
 }
 
 impl RustEditor {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         let editor = Self {
-            text_editor: TextEditor::proto(cx),
+            text_editor: TextEditor::new(cx),
         };
         //tab.animator.default = tab.anim_default(cx);
         editor
     }
-      
-    pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer, search_index: Option<&mut SearchIndex>) -> TextEditorEvent {
-        let ce = self.text_editor.handle_text_editor(cx, event, text_buffer);
+    
+    pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, search_index: Option<&mut SearchIndex>) -> TextEditorEvent {
+        let ce = self.text_editor.handle_text_editor(cx, event, &mut atb.text_buffer);
         match ce {
             TextEditorEvent::Change => {
-                RustTokenizer::update_token_chunks(text_buffer, search_index);
+                RustTokenizer::update_token_chunks(atb, search_index);
             },
             TextEditorEvent::AutoFormat => {
-                let formatted = RustTokenizer::auto_format(text_buffer, false).out_lines;
-                self.text_editor.cursors.replace_lines_formatted(formatted, text_buffer);
+                let formatted = RustTokenizer::auto_format(&mut atb.text_buffer, false).out_lines;
+                self.text_editor.cursors.replace_lines_formatted(formatted, &mut atb.text_buffer);
                 self.text_editor.view.redraw_view_area(cx);
             },
             _ => ()
@@ -32,16 +33,16 @@ impl RustEditor {
         ce
     }
     
-    pub fn draw_rust_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer, search_index: Option<&mut SearchIndex>) {
-        RustTokenizer::update_token_chunks(text_buffer, search_index);
+    pub fn draw_rust_editor(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, search_index: Option<&mut SearchIndex>) {
+        RustTokenizer::update_token_chunks(atb, search_index);
         
-        if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
+        if self.text_editor.begin_text_editor(cx, &mut atb.text_buffer).is_err() {return}
         
-        for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
-            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.markers);
+        for (index, token_chunk) in atb.text_buffer.token_chunks.iter_mut().enumerate() {
+            self.text_editor.draw_chunk(cx, index, &atb.text_buffer.flat_text, token_chunk, &atb.text_buffer.markers);
         }
         
-        self.text_editor.end_text_editor(cx, text_buffer);
+        self.text_editor.end_text_editor(cx, &mut atb.text_buffer);
     }
 }
 
@@ -51,58 +52,66 @@ pub struct RustTokenizer {
     pub in_string: bool
 }
 
+
 impl RustTokenizer {
-    pub fn update_token_chunks(text_buffer: &mut TextBuffer, mut search_index: Option<&mut SearchIndex>){
-        if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
-            let mut state = TokenizerState::new(&text_buffer.lines);
+    pub fn update_token_chunks(atb: &mut AppTextBuffer, mut search_index: Option<&mut SearchIndex>) {
+        if atb.text_buffer.needs_token_chunks() && atb.text_buffer.lines.len() >0 {
+            let mut state = TokenizerState::new(&atb.text_buffer.lines);
             let mut tokenizer = RustTokenizer::new();
             let mut pair_stack = Vec::new();
             loop {
-                let offset = text_buffer.flat_text.len();
-                let token_type = tokenizer.next_token(&mut state, &mut text_buffer.flat_text, &text_buffer.token_chunks);
-                if TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type){
-                    text_buffer.was_invalid_pair = true;
+                let offset = atb.text_buffer.flat_text.len();
+                let token_type = tokenizer.next_token(&mut state, &mut atb.text_buffer.flat_text, &atb.text_buffer.token_chunks);
+                if TokenChunk::push_with_pairing(&mut atb.text_buffer.token_chunks, &mut pair_stack, state.next, offset, atb.text_buffer.flat_text.len(), token_type) {
+                    atb.text_buffer.was_invalid_pair = true;
                 }
                 if token_type == TokenType::Eof {
                     break
                 }
-                if let Some(search_index) = search_index.as_mut(){
-                    search_index.new_rust_token(&text_buffer);
+                if let Some(search_index) = search_index.as_mut() {
+                    search_index.new_rust_token(&atb);
                 }
             }
-            if pair_stack.len() > 0{
-                text_buffer.was_invalid_pair = true;
+            if pair_stack.len() > 0 {
+                atb.text_buffer.was_invalid_pair = true;
             }
-            /*
+            
             // ok now lets write a diff with the previous one
-            let mut new_index = 0;
-            let mut old_index = 0;
-            // what are the possible results. 
-            // first lets loop over the body skipping the macros
-            loop{
-                let new_tok = &text_buffer.token_chunks[new_index];
-                let old_tok = &text_buffer.old_token_chunks[old_index];
-                if new_tok.token_type != old_tok.token_type{ // file dirty
-                    
+            //let mut new_index = 0;
+            //let mut old_index = 0;
+            /*
+            loop {
+                let new_tok = &atb.text_buffer.token_chunks[new_index];
+                let old_tok = &atb.text_buffer.old_token_chunks[old_index];
+                if let TokenType::Macro = new_tok.token_type {
+                    fn tok_cmp(name: &str, tok: &[char]) -> bool {
+                        for (index, c) in name.chars().enumerate() {
+                            if tok[index] != c {
+                                return false
+                            }
+                        }
+                        return true
+                    }
+                    let tok = &atb.text_buffer.flat_text[new_tok.offset..new_tok.offset + new_tok.len];
+                    if tok_cmp("pick", tok) {
+                        // parse the next tokens as a pick
+                        
+                    }
                 }
-                if let TokenType::Macro = new_tok.token_type{ 
-                    // check if we are one of our live macros
-                    // then 
-                }
-                if new_index < text_buffer.token_chunks.len(){
+                if new_index < atb.text_buffer.token_chunks.len() {
                     new_index += 1;
                 }
-                else{
+                else {
                     break
                 }
                 // just hold at the end
-                if old_index < text_buffer.old_token_chunks.len() - 1{
+                if old_index < atb.text_buffer.old_token_chunks.len() - 1 {
                     old_index += 1;
                 }
             }*/
         }
     }
-      
+    
     pub fn new() -> RustTokenizer {
         RustTokenizer {
             comment_single: false,
@@ -114,9 +123,9 @@ impl RustTokenizer {
     pub fn next_token<'a>(&mut self, state: &mut TokenizerState<'a>, chunk: &mut Vec<char>, token_chunks: &Vec<TokenChunk>) -> TokenType {
         let start = chunk.len();
         //chunk.truncate(0);
-        if self.in_string{
-            if state.next == ' ' || state.next == '\t'{
-                while state.next == ' ' || state.next == '\t'{
+        if self.in_string {
+            if state.next == ' ' || state.next == '\t' {
+                while state.next == ' ' || state.next == '\t' {
                     chunk.push(state.next);
                     state.advance_with_cur();
                 }
@@ -135,7 +144,7 @@ impl RustTokenizer {
                     state.advance_with_cur();
                     return TokenType::Newline
                 }
-                else if state.next == '"' && state.cur != '\\'  {
+                else if state.next == '"' && state.cur != '\\' {
                     if (chunk.len() - start)>0 {
                         return TokenType::StringChunk
                     }
@@ -148,7 +157,7 @@ impl RustTokenizer {
                     chunk.push(state.next);
                     state.advance_with_cur();
                 }
-            } 
+            }
             
         }
         else if self.comment_depth >0 { // parse comments
@@ -220,7 +229,7 @@ impl RustTokenizer {
                 },
                 ' ' | '\t' => { // eat as many spaces as possible
                     chunk.push(state.cur);
-                    while state.next == ' ' || state.next == '\t'{
+                    while state.next == ' ' || state.next == '\t' {
                         chunk.push(state.next);
                         state.advance();
                     }
@@ -294,7 +303,7 @@ impl RustTokenizer {
                             return TokenType::String;
                         }
                     };
-                    if state.next == '\n'{
+                    if state.next == '\n' {
                         self.in_string = true;
                         return TokenType::StringMultiBegin;
                     }
@@ -442,10 +451,10 @@ impl RustTokenizer {
                 '_' => {
                     chunk.push(state.cur);
                     Self::parse_rust_ident_tail(state, chunk);
-                    if state.next == '('{
+                    if state.next == '(' {
                         return TokenType::Call;
                     }
-                    if state.next == '!'{
+                    if state.next == '!' {
                         return TokenType::Macro;
                     }
                     return TokenType::Identifier;
@@ -459,7 +468,7 @@ impl RustTokenizer {
                         if state.next == '(' {
                             return TokenType::Call;
                         }
-                        if state.next == '!'{
+                        if state.next == '!' {
                             return TokenType::Macro;
                         }
                         return TokenType::Identifier;
@@ -496,11 +505,11 @@ impl RustTokenizer {
         }
     }
     
-    fn parse_rust_ident_tail<'a>(state: &mut TokenizerState<'a>, chunk: &mut Vec<char>) -> (bool,bool) {
+    fn parse_rust_ident_tail<'a>(state: &mut TokenizerState<'a>, chunk: &mut Vec<char>) -> (bool, bool) {
         let mut ret = false;
         let mut has_underscores = false;
         while state.next_is_digit() || state.next_is_letter() || state.next == '_' || state.next == '$' {
-            if state.next == '_'{
+            if state.next == '_' {
                 has_underscores = true;
             }
             ret = true;
@@ -596,7 +605,7 @@ impl RustTokenizer {
                 if state.next == 'E' || state.next == 'e' {
                     chunk.push(state.next);
                     state.advance();
-                    if state.next == '+' || state.next == '-'{
+                    if state.next == '+' || state.next == '-' {
                         chunk.push(state.next);
                         state.advance();
                         while state.next_is_digit() || state.next == '_' {
@@ -651,10 +660,10 @@ impl RustTokenizer {
                     return TokenType::BuiltinType
                 }
             },
-            'd' =>{
+            'd' => {
                 if state.keyword(chunk, "yn") {
                     return TokenType::Keyword
-                } 
+                }
             },
             'e' => {
                 if state.keyword(chunk, "lse") {
@@ -772,7 +781,7 @@ impl RustTokenizer {
                         return TokenType::Keyword
                     }
                     if state.keyword(chunk, "r") {
-                        if state.keyword(chunk, "uct"){
+                        if state.keyword(chunk, "uct") {
                             return TokenType::TypeDef
                         }
                         return TokenType::BuiltinType
@@ -840,7 +849,7 @@ impl RustTokenizer {
     }
     
     // because rustfmt is such an insane shitpile to compile or use as a library, here is a stupid version.
-    pub fn auto_format(text_buffer: &mut TextBuffer, force_newlines:bool) -> FormatOutput {
+    pub fn auto_format(text_buffer: &mut TextBuffer, force_newlines: bool) -> FormatOutput {
         
         // extra spacey setting that rustfmt seems to do, but i don't like
         let extra_spacey = false;
@@ -875,7 +884,7 @@ impl RustTokenizer {
             
             match tp.cur_type() {
                 TokenType::Whitespace => {
-                    if in_singleline_comment || in_multline_comment{
+                    if in_singleline_comment || in_multline_comment {
                         out.extend(tp.cur_chunk());
                     }
                     else if !first_on_line && tp.next_type() != TokenType::Newline
@@ -889,11 +898,11 @@ impl RustTokenizer {
                 TokenType::Newline => {
                     in_singleline_comment = false;
                     //paren_stack.last_mut().unwrap().angle_counter = 0;
-                    if  in_singleline_comment || in_multline_comment || in_multiline_string{
+                    if in_singleline_comment || in_multline_comment || in_multiline_string {
                         out.new_line();
                         first_on_line = true;
                     }
-                    else{
+                    else {
                         if first_on_line {
                             out.indent(expected_indent);
                         }
@@ -1116,7 +1125,7 @@ impl RustTokenizer {
                     
                     is_unary_operator = true;
                 },
-                TokenType::Identifier | TokenType::BuiltinType | TokenType::TypeName | TokenType::ThemeName=> { // these dont reset the angle counter
+                TokenType::Identifier | TokenType::BuiltinType | TokenType::TypeName | TokenType::ThemeName => { // these dont reset the angle counter
                     is_unary_operator = false;
                     
                     first_after_open = false;
@@ -1152,7 +1161,7 @@ impl RustTokenizer {
                 },
                 // these are followeable by non unary operators
                 TokenType::Macro | TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number |
-                TokenType::Bool | TokenType::Unexpected | TokenType::Error | TokenType::Warning | TokenType::Defocus=> {
+                TokenType::Bool | TokenType::Unexpected | TokenType::Error | TokenType::Warning | TokenType::Defocus => {
                     is_unary_operator = false;
                     paren_stack.last_mut().unwrap().angle_counter = 0;
                     
