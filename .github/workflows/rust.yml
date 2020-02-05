@@ -6,6 +6,8 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
+    - name: Update package list
+      run: sudo apt-get update
     - name: Install dependencies
       run: sudo apt-get install libegl1-mesa-dev libxcursor-dev
     - name: Checkout repository

@@ -10,9 +10,9 @@ pub struct TabClose {
 }
 
 impl TabClose {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
-            bg: Quad::proto(cx),
+            bg: Quad::new(cx),
             animator: Animator::default(),
             _bg_area: Area::Empty,
         }

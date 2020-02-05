@@ -11,12 +11,12 @@ struct App {
 main_app!(App);
 
 impl App {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         set_widget_style(cx, &StyleOptions{scale:0.5,..StyleOptions::default()});
         Self {
-            desktop_window: DesktopWindow::proto(cx),
-            button: NormalButton::proto(cx),
-            buttons:ElementsCounted::new(NormalButton::proto(cx)),
+            desktop_window: DesktopWindow::new(cx),
+            button: NormalButton::new(cx),
+            buttons:ElementsCounted::new(NormalButton::new(cx)),
             menu:Menu::main(vec![
                 Menu::sub("Example", vec![
                     Menu::line(),

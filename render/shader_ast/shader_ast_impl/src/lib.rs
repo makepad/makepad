@@ -198,44 +198,6 @@ fn generate_let(local:Local)->TokenStream{
     else{
         return error(local.span(), "let pattern doesn't need type");
     }
-/*
-    if let Pat::Ident(pat) = &local.pat{
-        let name =  pat.ident.to_string();
-        let found_type;
-        //if let Some((_tok, ty)) = local.ty.clone(){
-            if let Pat::Path(typath) = &local.pat{
-                if typath.path.segments.len() != 1{
-                    return error(typath.span(), "type not simple");
-                }
-                let seg = &typath.path.segments[0];
-                found_type = seg.ident.to_string();
-            }
-            else{
-                return error(local.span(), "type missing or malformed");
-            }
-        //}
-        //else{
-        //    found_type = "".to_string();
-            //return error(local.span(), "let pattern misses type info");
-        //}
-        let init;
-        if let Some((_,local_init)) = local.init{
-            init = generate_expr(*local_init);
-        }
-        else{
-            return error(local.span(), "let pattern misses initializer");
-        }
-        return quote!{
-            ShLet{
-                name:#name.to_string(),
-                ty:#found_type.to_string(),
-                init:Box::new(#init)
-            }
-        }
-    }
-    else{
-        return error(local.span(), "let pattern not simple identifier")
-    }*/
 }
 
 // generate a { } block AST 
