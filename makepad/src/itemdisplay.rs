@@ -27,10 +27,10 @@ pub struct ItemDisplay {
 }
 
 impl ItemDisplay {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         let editor = Self {
-            text: Text::proto(cx),
-            view: View::proto(cx),
+            text: Text::new(cx),
+            view: View::new(cx),
             update_display: false,
             text_disp: TextEditor {
                 read_only: true,
@@ -38,16 +38,16 @@ impl ItemDisplay {
                 draw_cursor_row: false,
                 mark_unmatched_parens: false,
                 folding_depth: 3,
-                ..TextEditor::proto(cx)
+                ..TextEditor::new(cx)
             },
             text_buffer: TextBuffer {
                 ..TextBuffer::default()
             },
             last_text_buffer_id: 0,
-            prev_button: NormalButton::proto(cx),
-            next_button: NormalButton::proto(cx),
-            open_button: NormalButton::proto(cx),
-            item_title: Text::proto(cx),
+            prev_button: NormalButton::new(cx), 
+            next_button: NormalButton::new(cx),
+            open_button: NormalButton::new(cx),
+            item_title: Text::new(cx),
             display: ItemDisplayType::Empty,
         };
         editor
