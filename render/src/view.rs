@@ -18,7 +18,7 @@ pub struct View { // draw info per UI element
 }
 
 impl View {
-    pub fn proto_overlay(_cx: &mut Cx) -> Self {
+    pub fn new_overlay(_cx: &mut Cx) -> Self {
         Self {
             is_clipped: true,
             is_overlay: true,

@@ -8,7 +8,7 @@ pub struct Quad {
 }
 
 impl Quad {
-    pub fn proto_with_shader(cx: &mut Cx, shader: ShaderGen, name: &str) -> Self {
+    pub fn new_with_shader(cx: &mut Cx, shader: ShaderGen, name: &str) -> Self {
         Self {
             shader: cx.add_shader(shader, name),
             ..Self::new(cx)

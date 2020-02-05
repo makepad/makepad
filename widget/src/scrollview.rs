@@ -21,7 +21,7 @@ impl ScrollView{
         }
     }
     
-    pub fn proto_no_scroll(cx: &mut Cx) -> Self {
+    pub fn new_no_scroll(cx: &mut Cx) -> Self {
         Self {
             view: View::new(cx),
             scroll_h: None,

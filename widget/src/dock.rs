@@ -401,7 +401,7 @@ where TItem: Clone
             },
             splitters: Elements::new(Splitter::new(cx)),
             tab_controls: Elements::new(TabControl::new(cx)),
-            drop_quad_view: View::proto_overlay(cx),
+            drop_quad_view: View::new_overlay(cx),
             _close_tab: None,
             _drag_move: None,
             _drag_end: None,
