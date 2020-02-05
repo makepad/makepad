@@ -9,7 +9,7 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn proto(_cx: &mut Cx) -> Self {
+    pub fn new(_cx: &mut Cx) -> Self {
         Self {
             window_id: None,
             create_inner_size: None,

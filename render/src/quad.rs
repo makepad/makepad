@@ -11,11 +11,11 @@ impl Quad {
     pub fn proto_with_shader(cx: &mut Cx, shader: ShaderGen, name: &str) -> Self {
         Self {
             shader: cx.add_shader(shader, name),
-            ..Self::proto(cx)
+            ..Self::new(cx)
         }
     }
     
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
             shader: cx.add_shader(Self::def_quad_shader(), "Quad"),
             z: 0.0,
@@ -81,8 +81,6 @@ impl Quad {
     }
 
     pub fn end_quad(&mut self, cx: &mut Cx, inst: &InstanceArea) -> Area {
-        // at this point, we should fill in any missing slots.
-        
         let area = inst.clone().into();
         let rect = cx.end_turtle(area);
         area.set_rect(cx, &rect);
@@ -95,7 +93,6 @@ impl Quad {
     }
 
     pub fn end_quad_fill(&mut self, cx: &mut Cx, inst: &InstanceArea) -> Area {
-        // at this point, we should fill in any missing slots.
         let area:Area = inst.clone().into();
         let pos = cx.get_turtle_origin();
         area.set_rect(cx, &Rect {x: pos.x, y: pos.y, w: cx.get_width_total(), h: cx.get_height_total()});

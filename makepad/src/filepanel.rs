@@ -22,10 +22,10 @@ pub enum FilePanelEvent {
 }
 */
 impl FilePanel {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
-            file_tree: FileTree::proto(cx),
-            new_file_btn: NormalButton::proto(cx),
+            file_tree: FileTree::new(cx), 
+            new_file_btn: NormalButton::new(cx),
         }
     }
     

@@ -41,30 +41,30 @@ pub enum DesktopWindowEvent {
 }
 
 impl DesktopWindow {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
-            window: Window::proto(cx),
+            window: Window::new(cx),
             pass: Pass::default(),
             color_texture: Texture::default(),
             depth_texture: Texture::default(),
-            main_view: View::proto(cx),
-            caption_view: View::proto(cx),
-            inner_view: View::proto(cx),
+            main_view: View::new(cx),
+            caption_view: View::new(cx),
+            inner_view: View::new(cx),
             
-            min_btn: DesktopButton::proto(cx),
-            max_btn: DesktopButton::proto(cx),
-            close_btn: DesktopButton::proto(cx),
-            vr_btn: DesktopButton::proto(cx),
+            min_btn: DesktopButton::new(cx),
+            max_btn: DesktopButton::new(cx),
+            close_btn: DesktopButton::new(cx),
+            vr_btn: DesktopButton::new(cx),
             
-            window_menu: WindowMenu::proto(cx),
+            window_menu: WindowMenu::new(cx),
             default_menu: Menu::main(vec![
                 Menu::sub("App", vec![
                     Menu::item("Quit App",  Cx::command_quit()),
                 ]),
             ]),
-            caption_text: Text::proto(cx),
+            caption_text: Text::new(cx),
             //caption_bg_color: Color_bg_selected_over::id(cx),
-            caption_bg: Quad::proto(cx),
+            caption_bg: Quad::new(cx),
             caption_size: Vec2::default(),
             caption: "Makepad".to_string(),
             inner_over_chrome: false,
