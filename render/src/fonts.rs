@@ -317,7 +317,7 @@ pub struct CxAfterDraw {
 }
 
 impl CxAfterDraw {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         cx.fonts_atlas.texture_size = Vec2 {x: 2048.0, y: 2048.0};
         let mut atlas_texture = Texture::default();
         atlas_texture.set_desc(cx, None);
@@ -328,7 +328,7 @@ impl CxAfterDraw {
             atlas_pass: Pass::default(),
             atlas_view: View {
                 always_redraw: true,
-                ..View::proto(cx)
+                ..View::new(cx)
             },
             atlas_texture: atlas_texture
         }

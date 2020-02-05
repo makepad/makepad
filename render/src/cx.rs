@@ -882,8 +882,8 @@ macro_rules!main_app {
         //TODO do this with a macro to generate both entrypoints for App and Cx
         pub fn main() {
             let mut cx = Cx::default();
-            let mut app = $ app::proto(&mut cx);
-            let mut cxafterdraw = CxAfterDraw::proto(&mut cx);
+            let mut app = $ app::new(&mut cx);
+            let mut cxafterdraw = CxAfterDraw::new(&mut cx);
             cx.event_loop( | cx, mut event | {
                 if let Event::Draw = event {
                     app.draw_app(cx);
@@ -897,8 +897,8 @@ macro_rules!main_app {
         #[export_name = "create_wasm_app"]
         pub extern "C" fn create_wasm_app() -> u32 {
             let mut cx = Box::new(Cx::default());
-            let app = Box::new( $ app::proto(&mut cx));
-            let cxafterdraw = Box::new(CxAfterDraw::proto(&mut cx));
+            let app = Box::new( $ app::new(&mut cx));
+            let cxafterdraw = Box::new(CxAfterDraw::new(&mut cx));
             Box::into_raw(Box::new((Box::into_raw(app), Box::into_raw(cx), Box::into_raw(cxafterdraw)))) as u32
         }
         
