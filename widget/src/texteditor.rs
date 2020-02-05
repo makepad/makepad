@@ -157,47 +157,47 @@ pub struct CodeEditorColors {
 
 impl TextEditor {
     
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
             read_only: false,
             multiline: true,
             cursors: TextCursorSet::new(),
             indent_lines: Quad {
                 z: 0.001,
-                ..Quad::proto(cx)
+                ..Quad::new(cx)
             },
-            view: ScrollView::proto(cx),
-            bg: Quad ::proto(cx),
+            view: ScrollView::new(cx),
+            bg: Quad ::new(cx),
             shadow: ScrollShadow {
                 z: 10.,
-                ..ScrollShadow::proto(cx)
+                ..ScrollShadow::new(cx)
             },
             gutter_bg: Quad {
                 z: 9.0,
-                ..Quad::proto(cx)
+                ..Quad::new(cx)
             },
             colors: CodeEditorColors::default(),
             selection: Quad {
                 z: 0.,
-                ..Quad::proto(cx)
+                ..Quad::new(cx)
             },
-            token_highlight: Quad::proto(cx),
-            cursor: Quad::proto(cx),
-            cursor_row: Quad::proto(cx),
-            paren_pair: Quad::proto(cx),
-            message_marker: Quad::proto(cx),
-            search_marker: Quad::proto(cx),
+            token_highlight: Quad::new(cx),
+            cursor: Quad::new(cx),
+            cursor_row: Quad::new(cx),
+            paren_pair: Quad::new(cx),
+            message_marker: Quad::new(cx),
+            search_marker: Quad::new(cx),
             //code_icon: CodeIcon::proto(cx),
             //view_layout: Layout::default(),
             text: Text {
                 z: 2.00,
                 wrapping: Wrapping::Line,
-                ..Text::proto(cx)
+                ..Text::new(cx)
             },
             line_number_text: Text {
                 z: 9.,
                 wrapping: Wrapping::Line,
-                ..Text::proto(cx)
+                ..Text::new(cx)
             },
             //base_font_size: 8.0,
             open_font_scale: 1.0,

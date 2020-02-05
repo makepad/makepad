@@ -10,20 +10,20 @@ pub struct ScrollView{
 
 impl ScrollView{
 
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
-            view: View::proto(cx),
-            scroll_h: Some(ScrollBar::proto(cx)),
+            view: View::new(cx),
+            scroll_h: Some(ScrollBar::new(cx)),
             scroll_v: Some(ScrollBar {
                 smoothing: Some(0.15),
-                ..ScrollBar::proto(cx)
+                ..ScrollBar::new(cx)
             }),
         }
     }
     
     pub fn proto_no_scroll(cx: &mut Cx) -> Self {
         Self {
-            view: View::proto(cx),
+            view: View::new(cx),
             scroll_h: None,
             scroll_v: None
         }
