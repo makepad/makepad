@@ -41,7 +41,7 @@ impl App {
     pub fn command_stop_program() -> CommandId {uid!()}
     pub fn command_bring_all_to_front() -> CommandId {uid!()}
     
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         let default_opt = StyleOptions {scale: 1.0, dark: true};
         set_widget_style(cx, &default_opt);
         set_makepad_style(cx, &default_opt);
@@ -119,7 +119,7 @@ impl App {
                 ])
             ]),
             menu_signal: ms,
-            app_window_template: AppWindow::proto(cx),
+            app_window_template: AppWindow::new(cx),
             app_window_state_template: AppWindowState {
                 open_folders: Vec::new(),
                 window_inner_size: Vec2::default(),
@@ -198,7 +198,7 @@ impl App {
             windows: vec![],
             build_manager: BuildManager::new(cx),
             state: AppState::default(),
-            storage: AppStorage::proto(cx)
+            storage: AppStorage::new(cx)
         }
     }
     
@@ -326,7 +326,7 @@ impl App {
                                     desktop_window: DesktopWindow {window: Window {
                                         create_inner_size: Some(size),
                                         create_position: create_pos,
-                                        ..Window::proto(cx)
+                                        ..Window::new(cx)
                                     }, ..self.app_window_template.desktop_window.clone()},
                                     ..self.app_window_template.clone()
                                 })
