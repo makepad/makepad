@@ -2,11 +2,6 @@ use makepad_render::*;
 
 use crate::textcursor::*;
 
-#[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
-pub struct TextBufferId(pub u16);
-impl TextBufferId{
-    pub fn as_index(&self )->usize{return self.0 as usize}
-}
 #[derive(Clone, Default)]
 pub struct TextBuffer {
     // Vec<Vec<char>> was chosen because, for all practical use (code) most lines are short
@@ -14,7 +9,6 @@ pub struct TextBuffer {
     // Also inserting lines is pretty cheap even approaching 100k lines.
     // If you want to load a 100 meg single line file or something with >100k lines
     // other options are better. But these are not usecases for this editor.
-    pub text_buffer_id: TextBufferId,
     pub lines: Vec<Vec<char>>,
     pub undo_stack: Vec<TextUndo>,
     pub redo_stack: Vec<TextUndo>,
@@ -33,7 +27,7 @@ pub struct TextBuffer {
     pub old_token_chunks: Vec<TokenChunk>,
     pub token_chunks_id: u32,
     pub keyboard: TextBufferKeyboard,
-}
+} 
 
 impl TextBuffer {
     pub fn status_loaded() -> StatusId {uid!()}

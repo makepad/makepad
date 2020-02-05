@@ -34,7 +34,7 @@ pub enum ScrollBarEvent {
 }
 
 impl ScrollBar {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
             bar_size: 12.0,
             min_handle_size: 30.0,
@@ -44,7 +44,7 @@ impl ScrollBar {
             animator: Animator::default(),
             bg: Quad {
                 z: 10.,
-                ..Quad::proto(cx)
+                ..Quad::new(cx)
             },
             use_vertical_finger_scroll: false,
             _visible: false,

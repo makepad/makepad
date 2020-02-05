@@ -113,9 +113,9 @@ impl BuildManager {
                 
                 self.log_items.push(item.clone());
                 if let Some(loc_message) = item.get_loc_message() {
-                    let text_buffer = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
-                    let markers = &mut text_buffer.markers;
-                    markers.mutation_id = text_buffer.mutation_id.max(1);
+                    let atb = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
+                    let markers = &mut atb.text_buffer.markers;
+                    markers.mutation_id = atb.text_buffer.mutation_id.max(1);
                     if markers.message_cursors.len() > 100000{ // crash saftey
                         return
                     }
@@ -160,12 +160,12 @@ impl BuildManager {
                             }
                         };
                         if let Some(pos) = inserted {
-                            text_buffer.markers.message_bodies.insert(pos, msg);
+                            atb.text_buffer.markers.message_bodies.insert(pos, msg);
                         }
                         else {
-                            text_buffer.markers.message_bodies.push(msg);
+                            atb.text_buffer.markers.message_bodies.push(msg);
                         }
-                        cx.send_signal(text_buffer.signal, TextBuffer::status_message_update());
+                        cx.send_signal(atb.text_buffer.signal, TextBuffer::status_message_update());
                     }
                 }
                 cx.send_signal(self.signal, BuildManager::status_new_log_item());

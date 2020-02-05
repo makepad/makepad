@@ -23,17 +23,17 @@ pub struct LogItemDraw {
 }
 
 impl LogItemDraw {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
-            item_bg: Quad::proto(cx),
+            item_bg: Quad::new(cx),
             text: Text {
                 wrapping: Wrapping::Word,
-                ..Text::proto(cx)
+                ..Text::new(cx)
             },
-            code_icon: CodeIcon::proto(cx),
+            code_icon: CodeIcon::new(cx),
             path_color: Theme::color_text_defocus(),
             message_color: Theme::color_text_focus(),
-            shadow: ScrollShadow{z:0.01,..ScrollShadow::proto(cx)}
+            shadow: ScrollShadow{z:0.01,..ScrollShadow::new(cx)}
         }
     }
     
@@ -203,14 +203,14 @@ pub enum LogListEvent {
 }
 
 impl LogList {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
-            item_draw: LogItemDraw::proto(cx),
+            item_draw: LogItemDraw::new(cx),
             list: ListLogic {
                 multi_select: true,
                 ..ListLogic::default()
             },
-            view: ScrollView::proto(cx),
+            view: ScrollView::new(cx),
         }
     }
 
@@ -314,7 +314,7 @@ impl LogList {
                         }
                     }
                     
-                    let text_buffer = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
+                    let text_buffer = &storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path)).text_buffer;
                     // check if we have a range:
                     let offset = if let Some((head, tail)) = loc_message.range {
                         if select_at_end {

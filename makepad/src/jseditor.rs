@@ -1,6 +1,7 @@
 use makepad_render::*;
 use makepad_widget::*;
 use crate::searchindex::*;
+use crate::appstorage::*;
 
 #[derive(Clone)]
 pub struct JSEditor {
@@ -8,21 +9,21 @@ pub struct JSEditor {
 }
 
 impl JSEditor {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
             text_editor: TextEditor {
                 folding_depth: 3,
-                ..TextEditor::proto(cx)
+                ..TextEditor::new(cx)
             }
         }
     }
     
-    pub fn handle_js_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
-        let ce = self.text_editor.handle_text_editor(cx, event, text_buffer);
+    pub fn handle_js_editor(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer) -> TextEditorEvent {
+        let ce = self.text_editor.handle_text_editor(cx, event, &mut atb.text_buffer);
         match ce {
             TextEditorEvent::AutoFormat => {
-                let formatted = JSTokenizer::auto_format(text_buffer).out_lines;
-                self.text_editor.cursors.replace_lines_formatted(formatted, text_buffer);
+                let formatted = JSTokenizer::auto_format(&mut atb.text_buffer).out_lines;
+                self.text_editor.cursors.replace_lines_formatted(formatted, &mut atb.text_buffer);
                 self.text_editor.view.redraw_view_area(cx);
             },
             _ => ()
@@ -30,17 +31,17 @@ impl JSEditor {
         ce
     }
     
-    pub fn draw_js_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer, search_index: Option<&mut SearchIndex>) {
+    pub fn draw_js_editor(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, search_index: Option<&mut SearchIndex>) {
         
-        JSTokenizer::update_token_chunks(text_buffer, search_index);
+        JSTokenizer::update_token_chunks(atb, search_index);
         
-        if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
+        if self.text_editor.begin_text_editor(cx, &mut atb.text_buffer).is_err() {return}
         
-        for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
-            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.markers);
+        for (index, token_chunk) in atb.text_buffer.token_chunks.iter_mut().enumerate() {
+            self.text_editor.draw_chunk(cx, index, &atb.text_buffer.flat_text, token_chunk, &atb.text_buffer.markers);
         }
         
-        self.text_editor.end_text_editor(cx, text_buffer);
+        self.text_editor.end_text_editor(cx, &mut atb.text_buffer);
     }
 }
 
@@ -57,8 +58,9 @@ impl JSTokenizer {
         }
     }
     
-    pub fn update_token_chunks(text_buffer: &mut TextBuffer, mut _search_index: Option<&mut SearchIndex>){
-            if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
+    pub fn update_token_chunks(atb: &mut AppTextBuffer, mut _search_index: Option<&mut SearchIndex>) {
+        let text_buffer = &mut atb.text_buffer;
+        if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
             let mut state = TokenizerState::new(&text_buffer.lines);
             let mut tokenizer = JSTokenizer::new();
             let mut pair_stack = Vec::new();
@@ -681,7 +683,7 @@ impl JSTokenizer {
                 TokenType::Newline => {
                     in_singleline_comment = false;
                     //paren_stack.last_mut().unwrap().angle_counter = 0;
-                    if first_on_line && !in_singleline_comment && !in_multline_comment && !in_multline_string{
+                    if first_on_line && !in_singleline_comment && !in_multline_comment && !in_multline_string {
                         out.indent(expected_indent);
                     }
                     else {
@@ -886,7 +888,7 @@ impl JSTokenizer {
                     is_unary_operator = true;
                 },
                 // these are followed by unary operators (some)
-                TokenType::TypeDef |TokenType::Impl | TokenType::Fn | TokenType::Hash | TokenType::Splat | TokenType::Namespace |
+                TokenType::TypeDef | TokenType::Impl | TokenType::Fn | TokenType::Hash | TokenType::Splat | TokenType::Namespace |
                 TokenType::Keyword | TokenType::Flow | TokenType::Looping => {
                     is_unary_operator = true;
                     
