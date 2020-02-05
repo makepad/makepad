@@ -8,9 +8,9 @@ pub struct ScrollShadow {
 }
 
 impl ScrollShadow {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
-            bg: Quad ::proto(cx),
+            bg: Quad ::new(cx),
             z: 10.,
         }
     }

@@ -31,10 +31,10 @@ impl DesktopButtonType {
 }
 
 impl DesktopButton {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
             button: ButtonLogic::default(),
-            bg: Quad::proto(cx),
+            bg: Quad::new(cx),
             animator: Animator::default(),
             _bg_area: Area::Empty,
         }

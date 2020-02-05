@@ -56,26 +56,26 @@ pub struct AppState {
 }
 
 impl AppWindow {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
             desktop_window: DesktopWindow {
                 caption: "Makepad".to_string(),
-                window: Window::proto(cx),
-                ..DesktopWindow::proto(cx)
+                window: Window::new(cx),
+                ..DesktopWindow::new(cx)
             },
             file_editors: FileEditors {
-                rust_editor: RustEditor::proto(cx),
-                js_editor: JSEditor::proto(cx),
-                plain_editor: PlainEditor::proto(cx),
+                rust_editor: RustEditor::new(cx),
+                js_editor: JSEditor::new(cx),
+                plain_editor: PlainEditor::new(cx),
                 editors: HashMap::new(),
             },
-            home_page: HomePage::proto(cx),
-            keyboard: Keyboard::proto(cx),
-            item_display: ItemDisplay::proto(cx),
-            log_list: LogList::proto(cx),
-            search_results: SearchResults::proto(cx),
-            file_panel: FilePanel::proto(cx),
-            dock: Dock ::proto(cx),
+            home_page: HomePage::new(cx),
+            keyboard: Keyboard::new(cx),
+            item_display: ItemDisplay::new(cx),
+            log_list: LogList::new(cx),
+            search_results: SearchResults::new(cx),
+            file_panel: FilePanel::new(cx),
+            dock: Dock ::new(cx),
         }
     }
     
@@ -187,20 +187,20 @@ impl AppWindow {
                 Panel::FileEditor {path, scroll_pos, editor_id} => {
                     if let Some(file_editor) = &mut self.file_editors.editors.get_mut(editor_id) {
                         
-                        let text_buffer = storage.text_buffer_from_path(cx, path);
+                        let atb = storage.text_buffer_from_path(cx, path);
                         
-                        match file_editor.handle_file_editor(cx, event, text_buffer, Some(&mut build_manager.search_index)) {
+                        match file_editor.handle_file_editor(cx, event, atb, Some(&mut build_manager.search_index)) {
                             TextEditorEvent::Search(search) => {
-                                do_search = Some((Some(search), text_buffer.text_buffer_id, true, false));
+                                do_search = Some((Some(search), atb.text_buffer_id, true, false));
                             }
                             TextEditorEvent::Decl(search) => {
-                                do_search = Some((Some(search), text_buffer.text_buffer_id, false, false));
+                                do_search = Some((Some(search), atb.text_buffer_id, false, false));
                             }
                             TextEditorEvent::Escape => {
-                                do_search = Some((Some("".to_string()), text_buffer.text_buffer_id, false, true));
+                                do_search = Some((Some("".to_string()), atb.text_buffer_id, false, true));
                             }
                             TextEditorEvent::Change => {
-                                do_search = Some((None, TextBufferId(0), false, false));
+                                do_search = Some((None, AppTextBufferId(0), false, false));
                             }
                             TextEditorEvent::LagChange => {
                                 storage.text_buffer_file_write(cx, path);

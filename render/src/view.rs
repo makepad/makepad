@@ -27,7 +27,7 @@ impl View {
         }
     }
     
-    pub fn proto(_cx: &mut Cx) -> Self {
+    pub fn new(_cx: &mut Cx) -> Self {
         Self {
             is_clipped: true,
             is_overlay: false,
