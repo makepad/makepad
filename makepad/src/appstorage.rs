@@ -95,21 +95,33 @@ pub struct AppStorage {
     pub file_tree_file_read: FileRead,
     pub app_state_file_read: FileRead,
     pub app_settings_file_read: FileRead,
-    pub text_buffer_path_to_id: HashMap<String, TextBufferId>,
-    pub text_buffer_id_to_path: HashMap<TextBufferId, String>,
+    pub text_buffer_path_to_id: HashMap<String, AppTextBufferId>,
+    pub text_buffer_id_to_path: HashMap<AppTextBufferId, String>,
     pub text_buffers: Vec<AppTextBuffer>,
+}
+
+pub enum LiveMacro {
+    Pick {token: usize, color: Color},
+    Shader {token: usize,}
 }
 
 pub struct AppTextBuffer {
     pub file_read: FileRead,
     pub read_msg: Option<ToHubMsg>,
     pub full_path: String,
-    //pub write_msg: Option<ToHubMsg>,
     pub text_buffer: TextBuffer,
+    pub text_buffer_id: AppTextBufferId,
+    pub live_macros: Vec<LiveMacro>
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
+pub struct AppTextBufferId(pub u16);
+impl AppTextBufferId{
+    pub fn as_index(&self )->usize{return self.0 as usize}
 }
 
 impl AppStorage {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         AppStorage {
             init_builders_counter: 2,
             builders_request_uid: HubUid::zero(),
@@ -239,35 +251,36 @@ impl AppStorage {
     }
     
     
-    pub fn text_buffer_from_path(&mut self, cx: &mut Cx, path: &str) -> &mut TextBuffer {
+    pub fn text_buffer_from_path(&mut self, cx: &mut Cx, path: &str) -> &mut AppTextBuffer {
         
         // if online, fallback to readfile
         if !cx.platform_type.is_desktop() || path.find('/').is_none() {
             if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
-                &mut self.text_buffers[tb_id.0 as usize].text_buffer
+                &mut self.text_buffers[tb_id.0 as usize]
             }
             else {
-                let tb_id = TextBufferId(self.text_buffers.len() as u16);
+                let tb_id = AppTextBufferId(self.text_buffers.len() as u16);
                 self.text_buffer_path_to_id.insert(path.to_string(), tb_id);
                 self.text_buffer_id_to_path.insert(tb_id, path.to_string());
                 self.text_buffers.push(AppTextBuffer {
                     file_read: cx.file_read(path),
                     read_msg: None,
                     full_path: path.to_string(),
+                    text_buffer_id: tb_id,
+                    live_macros: Vec::new(),
                     // write_msg: None,
                     text_buffer: TextBuffer {
-                        text_buffer_id: tb_id,
                         signal: cx.new_signal(),
                         ..TextBuffer::default()
                     }
                 });
-                &mut self.text_buffers[tb_id.0 as usize].text_buffer
+                &mut self.text_buffers[tb_id.0 as usize]
             }
         }
         else {
             let hub_ui = self.hub_ui.as_mut().unwrap();
             if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
-                &mut self.text_buffers[tb_id.0 as usize].text_buffer
+                &mut self.text_buffers[tb_id.0 as usize]
             }
             else {
                 let builder_pos = path.find('/').unwrap();
@@ -283,22 +296,23 @@ impl AppStorage {
                 };
                 hub_ui.route_send.send(msg.clone());
                 
-                let tb_id = TextBufferId(self.text_buffers.len() as u16);
+                let tb_id = AppTextBufferId(self.text_buffers.len() as u16);
                 self.text_buffer_path_to_id.insert(path.to_string(), tb_id);
                 self.text_buffer_id_to_path.insert(tb_id, path.to_string());
                 self.text_buffers.push(AppTextBuffer {
                     file_read: FileRead::default(),
                     read_msg: Some(msg),
                     full_path: path.to_string(),
+                    text_buffer_id: tb_id,
+                    live_macros: Vec::new(),
                     // write_msg: None,
                     text_buffer: TextBuffer {
                         signal: cx.new_signal(),
-                        text_buffer_id: tb_id,
                         ..TextBuffer::default()
                     }
                     
                 });
-                &mut self.text_buffers[tb_id.0 as usize].text_buffer
+                &mut self.text_buffers[tb_id.0 as usize]
             }
         }
     }
@@ -464,7 +478,7 @@ impl AppStorage {
                                     if let Ok(utf8_data) = std::str::from_utf8(data) {
                                         atb.text_buffer.load_from_utf8(&utf8_data);
                                         atb.text_buffer.send_textbuffer_loaded_signal(cx);
-                                        FileEditor::update_token_chunks(&path, &mut atb.text_buffer, &mut build_manager.search_index);
+                                        FileEditor::update_token_chunks(&path, atb, &mut build_manager.search_index);
                                     }
                                 }
                                 else {

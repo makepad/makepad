@@ -34,14 +34,14 @@ pub enum TabEvent {
 }
 
 impl Tab {
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         let mut tab = Self {
             label: "Tab".to_string(),
             is_closeable: true,
             z: 0.,
-            bg: Quad ::proto(cx),
-            tab_close: TabClose::proto(cx),
-            text: Text::proto(cx),
+            bg: Quad ::new(cx),
+            tab_close: TabClose::new(cx),
+            text: Text::new(cx),
             animator: Animator::default(),
             abs_origin: None,
             _is_selected: false,
