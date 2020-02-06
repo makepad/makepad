@@ -7,5 +7,5 @@ description = "Makepad shader AST"
 license = "MIT"
 
 [dependencies]
-makepad-shader-ast-impl = { path = "./shader_ast_impl", version = "0.1" }
+makepad-shader-ast-impl = { path = "./shader_ast_impl", version = "0.2" }
 proc-macro-hack = "0.5"
