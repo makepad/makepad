@@ -13,7 +13,7 @@ ipc=[]
 makepad-font = { path = "./vector/font", version = "0.1" }
 makepad-geometry = { path = "./vector/geometry", version = "0.1" }
 makepad-internal-iter = { path = "./vector/internal_iter", version = "0.1" }
-makepad-shader-ast = { path="./shader_ast", version = "0.1" }
+makepad-shader-ast = { path="./shader_ast", version = "0.2" }
 makepad-tinyserde = {path = "./tinyserde", version = "0.1"}
 makepad-trapezoidator = { path = "./vector/trapezoidator", version = "0.1" }
 makepad-ttf-parser = { path = "./vector/ttf_parser", version = "0.1" }
