@@ -1,11 +1,11 @@
 [package]
 name = "makepad-shader-ast"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad shader AST"
 license = "MIT"
 
 [dependencies]
-makepad-shader-ast-impl = { path = "./shader_ast_impl", version = "0.1" }
+makepad-shader-ast-impl = { path = "./shader_ast_impl", version = "0.2" }
 proc-macro-hack = "0.5"
