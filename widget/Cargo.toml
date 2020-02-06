@@ -15,4 +15,4 @@ path = "../render/tinyserde"
 
 [dependencies.makepad-render]
 path = "../render"
-version = "0.1"
+version = "0.2"
