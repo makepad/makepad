@@ -3,7 +3,7 @@
 use std::hash::{Hash, Hasher};
 use crate::shader::*;
 
-#[derive(Default, Clone, PartialEq)]
+#[derive(Default, Clone, PartialEq, Debug)]
 pub struct ShaderGen {
     pub log: i32,
     pub name: String,
@@ -129,7 +129,7 @@ impl ShaderGen {
 
 
 // The AST block
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShAst {
     pub types: Vec<ShType>,
     pub vars: Vec<ShVar>,
@@ -137,7 +137,7 @@ pub struct ShAst {
     pub fns: Vec<ShFn>
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShFnArg {
     pub name: String,
     pub ty: String
@@ -161,7 +161,7 @@ impl ShFnArg {
     }
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShFn {
     pub name: String,
     pub args: Vec<ShFnArg>,
@@ -180,7 +180,7 @@ pub fn sh_fn(name:&str, args:&[ShFnArg], ret:&str, block:Option<ShBlock>)->ShFn{
     
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub enum UniformType {
     Color(UniformColor),
     Vec4(UniformVec4),
@@ -201,7 +201,7 @@ impl UniformType{
     }
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub enum InstanceType {
     Color(InstanceColor),
     Vec4(InstanceVec4),
@@ -222,7 +222,7 @@ impl InstanceType{
     }
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub enum ShVarStore {
     Uniform(UniformType),
     UniformColor(ColorId),
@@ -236,7 +236,7 @@ pub enum ShVarStore {
     Varying,
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShVar {
     pub name: String,
     pub ty: String,
@@ -253,14 +253,14 @@ pub fn sh_var(name:&str, ty:&str, store:ShVarStore)->ShVar{
     }
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShConst {
     pub name: String,
     pub ty: String,
     pub value: ShExpr
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShTypeField {
     pub name: String,
     pub ty: String,
@@ -275,7 +275,7 @@ impl ShTypeField {
     }
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShType {
     pub name: String,
     pub slots: usize,
@@ -285,7 +285,7 @@ pub struct ShType {
 
 // AST tree nodes
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub enum ShExpr {
     ShId(ShId),
     ShLit(ShLit),
@@ -306,7 +306,7 @@ pub enum ShExpr {
     ShContinue(ShContinue)
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub enum ShOp {
     Add,
     Sub,
@@ -373,7 +373,7 @@ impl ShOp {
     }
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShId {
     pub name: String
 }
@@ -383,7 +383,7 @@ pub fn sh_id(name:&str)->ShExpr{
     ShExpr::ShId(ShId{name:name.to_string()})
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ShLit {
     Int(i64),
     Float(f64),
@@ -447,7 +447,7 @@ impl PartialEq for ShLit {
     }
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShField {
     pub base: Box<ShExpr>,
     pub member: String
@@ -462,7 +462,7 @@ pub fn sh_fd(base:ShExpr, member:&str)->ShExpr{
 }
 
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShIndex {
     pub base: Box<ShExpr>,
     pub index: Box<ShExpr>
@@ -478,7 +478,7 @@ pub fn sh_idx(base:ShExpr, index:ShExpr)->ShExpr{
 
 
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShAssign {
     pub left: Box<ShExpr>,
     pub right: Box<ShExpr>
@@ -492,7 +492,7 @@ pub fn sh_asn(left:ShExpr, right:ShExpr)->ShExpr{
     })
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShAssignOp {
     pub left: Box<ShExpr>,
     pub right: Box<ShExpr>,
@@ -509,7 +509,7 @@ pub fn sh_asn_op(left:ShExpr, right:ShExpr, op:ShOp)->ShExpr{
 }
 
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShBinary {
     pub left: Box<ShExpr>,
     pub right: Box<ShExpr>,
@@ -525,7 +525,7 @@ pub fn sh_bin(left:ShExpr, right:ShExpr, op:ShOp)->ShExpr{
     })
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub enum ShUnaryOp {
     Not,
     Neg
@@ -540,7 +540,7 @@ impl ShUnaryOp {
     }
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShUnary {
     pub expr: Box<ShExpr>,
     pub op: ShUnaryOp
@@ -555,7 +555,7 @@ pub fn sh_unary(expr:ShExpr, op:ShUnaryOp)->ShExpr{
 }
 
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShParen {
     pub expr: Box<ShExpr>,
 }
@@ -565,7 +565,7 @@ pub fn sh_par(expr:ShExpr)->ShExpr{
     ShExpr::ShParen(ShParen{expr:Box::new(expr)})
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub enum ShStmt {
     ShLet(ShLet),
     ShExpr(ShExpr),
@@ -582,7 +582,7 @@ pub fn sh_exps(expr:ShExpr)->ShStmt{
     ShStmt::ShExpr(expr)
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShBlock {
     pub stmts: Vec<ShStmt>
 }
@@ -592,7 +592,7 @@ pub fn sh_block(stmts:&[ShStmt])->ShBlock{
     ShBlock{stmts:stmts.to_vec()}
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShCall {
     pub call: String,
     pub args: Vec<ShExpr>
@@ -606,7 +606,7 @@ pub fn sh_call(call:&str, args:&[ShExpr])->ShExpr{
     })
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShIf {
     pub cond: Box<ShExpr>,
     pub then_branch: ShBlock,
@@ -631,7 +631,7 @@ pub fn sh_if_else(cond:ShExpr, then_branch:ShBlock, else_branch:ShExpr)->ShExpr{
     })
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShWhile {
     pub cond: Box<ShExpr>,
     pub body: ShBlock,
@@ -646,7 +646,7 @@ pub fn sh_while(cond:ShExpr, body:ShBlock)->ShExpr{
 }
 
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShForLoop {
     pub iter: String,
     pub from: Box<ShExpr>,
@@ -664,7 +664,7 @@ pub fn sh_for(iter:&str, from_ts:ShExpr, to_ts:ShExpr, body:ShBlock)->ShExpr{
     })
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShReturn {
     pub expr: Option<Box<ShExpr>>
 }
@@ -684,15 +684,15 @@ pub fn sh_retn()->ShExpr{
 }
 
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShBreak {
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShContinue {
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct ShLet {
     pub name: String,
     pub ty: String,
@@ -709,13 +709,13 @@ pub fn sh_let(name:&str, ty:&str, init:ShExpr)->ShStmt{
     })
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Sl {
     pub sl: String,
     pub ty: String
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SlErr {
     pub msg: String
 }
@@ -725,7 +725,7 @@ pub struct SlDecl {
     pub ty: String
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum SlTarget {
     Pixel,
     Vertex,

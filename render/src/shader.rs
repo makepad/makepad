@@ -7,34 +7,34 @@ pub use crate::math::*;
 pub use crate::colors::*;
 use std::any::TypeId;
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct InstanceColor(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct InstanceVec4(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct InstanceVec3(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct InstanceVec2(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct InstanceFloat(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct UniformColor(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct UniformVec4(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct UniformVec3(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct UniformVec2(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct UniformFloat(pub TypeId);
 
 pub struct UniqueId(pub TypeId);
@@ -147,12 +147,12 @@ impl Into<UniformFloat> for UniqueId{
     fn into(self) -> UniformFloat{UniformFloat(self.0)}
 }
 
-#[derive(Default, Copy, Clone, PartialEq)]
+#[derive(Default, Copy, Clone, PartialEq, Debug)]
 pub struct Shader {
     pub shader_id: Option<(usize, usize)>,
 } 
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct RectInstanceProps {
     pub x: Option<usize>,
     pub y: Option<usize>,
@@ -186,7 +186,7 @@ impl RectInstanceProps {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct InstanceProp {
     pub name: String,
     pub ident: InstanceType,
@@ -194,13 +194,13 @@ pub struct InstanceProp {
     pub slots: usize
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct InstanceProps {
     pub props: Vec<InstanceProp>,
     pub total_slots: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct UniformProp {
     pub name: String,
     pub ident: UniformType,
@@ -208,20 +208,20 @@ pub struct UniformProp {
     pub slots: usize
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct UniformProps {
     pub props: Vec<UniformProp>,
     pub total_slots: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NamedProp {
     pub name: String,
     pub offset: usize,
     pub slots: usize
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct NamedProps {
     pub props: Vec<NamedProp>,
     pub total_slots: usize,
@@ -319,7 +319,7 @@ impl UniformProps{
     }
 } 
  
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct CxShaderMapping {
     pub instance_slots: usize,
     pub geometry_slots: usize,
@@ -341,6 +341,12 @@ pub struct CxShader {
     pub shader_gen: ShaderGen,
     pub platform: Option<CxPlatformShader>,
     pub mapping: CxShaderMapping
+}
+
+impl std::fmt::Debug for CxShader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        write!(f, "CxShader: {}", self.name)
+    }
 }
 
 impl CxShader {
