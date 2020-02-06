@@ -1,6 +1,6 @@
 [package]
 name = "makepad-render"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad renderer"
@@ -13,14 +13,14 @@ ipc=[]
 makepad-font = { path = "./vector/font", version = "0.1" }
 makepad-geometry = { path = "./vector/geometry", version = "0.1" }
 makepad-internal-iter = { path = "./vector/internal_iter", version = "0.1" }
-makepad-shader-ast = { path="./shader_ast", version = "0.1" }
+makepad-shader-ast = { path="./shader_ast", version = "0.2" }
 makepad-tinyserde = {path = "./tinyserde", version = "0.1"}
 makepad-trapezoidator = { path = "./vector/trapezoidator", version = "0.1" }
 makepad-ttf-parser = { path = "./vector/ttf_parser", version = "0.1" }
 makepad-path = { path = "./vector/path", version = "0.1" }
  
 [target.x86_64-apple-darwin.dependencies]
-makepad-objc-sys = {path = "./bind/objc-sys"}
+makepad-objc-sys = { path = "./bind/objc-sys", version = "0.2" }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 makepad-glx-sys = { path = "./bind/glx-sys", version = "0.1" }
