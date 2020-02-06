@@ -2,7 +2,7 @@
 //! rectangle to it.
 //! ```
 //! use makepad_render::*;
-
+//!
 //! struct App {
 //!    window: Window,
 //!    pass: Pass,
