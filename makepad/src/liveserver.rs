@@ -10,7 +10,7 @@ pub enum LiveServerConfig {
 }
 
 enum LiveMsg{
-    
+
 }
 
 struct LiveServer {
@@ -21,7 +21,7 @@ struct LiveServer {
             LiveServerConfig::Network(port) => SocketAddr::from(([0, 0, 0, 0], *port)),
             LiveServerConfig::InterfaceV4(port, ip) => SocketAddr::from((*ip, *port)),
         };
-        
+
         let listener = if let Ok(listener) = TcpListener::bind(listen_address) {
             listener
         }
@@ -30,16 +30,16 @@ struct LiveServer {
             return None
         };
         let listen_address = listener.local_addr().expect("Cannot get local address");
-        
+
         let listen_thread = {
             //let hub_log = hub_log.clone();
             std::thread::spawn(move || {
                 for tcp_stream in listener.incoming() {
                     let tcp_stream = tcp_stream.expect("Incoming stream failure");
                     let peer_addr = tcp_stream.peer_addr().expect("No peer address");
-                    
-                    
-                    
+
+
+
                 }
             })
         };

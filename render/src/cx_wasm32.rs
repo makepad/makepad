@@ -4,11 +4,11 @@ use std::alloc;
 use crate::cx::*;
 
 impl Cx {
-    
+
     pub fn get_default_window_size(&self) -> Vec2 {
         return self.platform.window_geom.inner_size;
     }
-    
+
     // incoming to_wasm. There is absolutely no other entrypoint
     // to general rust codeflow than this function. Only the allocators and init
     pub fn process_to_wasm<F>(&mut self, msg: u32, mut event_handler: F) -> u32
@@ -22,7 +22,7 @@ impl Cx {
             }
             self.platform_type = PlatformType::WASM;
         }
-        
+
         //let root_view = unsafe {&mut *(self.platform.root_view_ptr as *mut View<NoScrollBar>)};
         let mut to_wasm = ToWasm::from(msg);
         self.platform.from_wasm = FromWasm::new();
@@ -34,7 +34,7 @@ impl Cx {
                     break;
                 },
                 1 => { // fetch_deps
-                    
+
                     // send the UI our deps, overlap with shadercompiler
                     let mut load_deps = Vec::<String>::new();
                     for cxfont in &self.fonts {
@@ -42,12 +42,12 @@ impl Cx {
                     }
                     // other textures, things
                     self.platform.from_wasm.load_deps(load_deps);
-                    
+
                     self.webgl_compile_all_shaders();
                 },
                 2 => { // deps_loaded
                     let len = to_wasm.mu32();
-                    
+
                     for _ in 0..len {
                         let dep_path = to_wasm.parse_string();
                         let vec_ptr = to_wasm.mu32() as *mut u8;
@@ -82,13 +82,13 @@ impl Cx {
                     };
                     self.default_dpi_factor = self.platform.window_geom.dpi_factor;
                     self.vr_can_present = to_wasm.mu32() > 0;
-                    
+
                     if self.windows.len() > 0 {
                         self.windows[0].window_geom = self.platform.window_geom.clone();
                     }
-                    
+
                     self.call_event_handler(&mut event_handler, &mut Event::Construct);
-                    
+
                     self.redraw_child_area(Area::All);
                 },
                 4 => { // resize
@@ -102,11 +102,11 @@ impl Cx {
                         vr_is_presenting: to_wasm.mu32() > 0
                     };
                     self.vr_can_present = to_wasm.mu32() > 0;
-                    
+
                     if self.windows.len()>0 {
                         self.windows[0].window_geom = self.platform.window_geom.clone();
                     }
-                    
+
                     // do our initial redraw and repaint
                     self.redraw_child_area(Area::All);
                 },
@@ -281,7 +281,7 @@ impl Cx {
                     let buf_ptr = to_wasm.mu32() as *mut u8;
                     let buf_len = to_wasm.mu32() as usize;
                     let vec_buf = unsafe {Vec::<u8>::from_raw_parts(buf_ptr, buf_len, buf_len)};
-                    
+
                     self.call_event_handler(&mut event_handler, &mut Event::FileRead(FileReadEvent {
                         read_id: read_id as u64,
                         data: Ok(vec_buf)
@@ -289,7 +289,7 @@ impl Cx {
                 },
                 16 => { // file error
                     let read_id = to_wasm.mu32();
-                    
+
                     self.call_event_handler(&mut event_handler, &mut Event::FileRead(FileReadEvent {
                         read_id: read_id as u64,
                         data: Err("Cannot load".to_string())
@@ -350,22 +350,22 @@ impl Cx {
                 }
             };
         };
-        
+
         self.call_signals(&mut event_handler);
-        
+
         if is_animation_frame && (self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0) {
             self.call_draw_event(&mut event_handler);
         }
-        
+
         self.call_signals(&mut event_handler);
-        
+
         for window in &mut self.windows {
-            
+
             window.window_state = match &window.window_state {
                 CxWindowState::Create {title, ..} => {
                     self.platform.from_wasm.set_document_title(&title);
                     window.window_geom = self.platform.window_geom.clone();
-                    
+
                     CxWindowState::Created
                 },
                 CxWindowState::Close => {
@@ -374,7 +374,7 @@ impl Cx {
                 CxWindowState::Created => CxWindowState::Created,
                 CxWindowState::Closed => CxWindowState::Closed
             };
-            
+
             window.window_command = match &window.window_command {
                 CxWindowCmd::VrStartPresenting => {
                     self.platform.from_wasm.vr_start_presenting();
@@ -387,7 +387,7 @@ impl Cx {
                 _ => CxWindowCmd::None,
             };
         }
-        
+
         // check if we need to send a cursor
         if !self.down_mouse_cursor.is_none() {
             self.platform.from_wasm.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
@@ -398,11 +398,11 @@ impl Cx {
         else {
             self.platform.from_wasm.set_mouse_cursor(MouseCursor::Default);
         }
-        
+
         let mut passes_todo = Vec::new();
         let mut windows_need_repaint = 0;
         self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
-        
+
         if is_animation_frame {
             if passes_todo.len() > 0 {
                 for pass_id in &passes_todo {
@@ -427,80 +427,80 @@ impl Cx {
         }
         // free the received message
         to_wasm.dealloc();
-        
+
         // request animation frame if still need to redraw, or repaint
         // we use request animation frame for that.
         if !(passes_todo.len() == 0 && self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0) {
             self.platform.from_wasm.request_animation_frame();
         }
-        
+
         // mark the end of the message
         self.platform.from_wasm.end();
-        
+
         //return wasm pointer to caller
         self.platform.from_wasm.wasm_ptr()
     }
-    
+
     // empty stub
     pub fn event_loop<F>(&mut self, mut _event_handler: F)
     where F: FnMut(&mut Cx, Event),
     {
     }
-    
+
     pub fn write_log(&mut self, data: &str) {
         self.platform.from_wasm.log(data);
         //let _=io::stdout().write(data.as_bytes());
         //let _=io::stdout().flush();
     }
-    
+
     pub fn post_signal(_signal: Signal, _value: StatusId) {
         // todo
     }
-    
+
     pub fn file_read(&mut self, path: &str) -> FileRead {
         let id = self.platform.file_read_id;
         self.platform.from_wasm.read_file(id as u32, path);
         self.platform.file_read_id += 1;
         FileRead {read_id: id, path: path.to_string()}
     }
-    
+
     pub fn file_write(&mut self, _path: &str, _data: &[u8]) -> u64 {
         return 0
     }
-    
+
     pub fn set_window_outer_size(&mut self, _size: Vec2) {
     }
-    
+
     pub fn set_window_position(&mut self, _pos: Vec2) {
     }
-    
+
     pub fn show_text_ime(&mut self, x: f32, y: f32) {
         self.platform.from_wasm.show_text_ime(x, y);
     }
-    
+
     pub fn hide_text_ime(&mut self) {
         self.platform.from_wasm.hide_text_ime();
     }
-    
+
     pub fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
         self.timer_id += 1;
         self.platform.from_wasm.start_timer(self.timer_id, interval, repeats);
         Timer {timer_id: self.timer_id}
     }
-    
+
     pub fn stop_timer(&mut self, timer: &mut Timer) {
         if timer.timer_id != 0 {
             self.platform.from_wasm.stop_timer(timer.timer_id);
             timer.timer_id = 0;
         }
     }
-    
+
     pub fn http_send(&mut self, verb: &str, path: &str, proto:&str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         self.platform.from_wasm.http_send(verb, path, proto, domain, port, content_type, body, signal);
     }
-    
+
     pub fn update_menu(&mut self, _menu: &Menu) {
-        
+
     }
 }
 
@@ -532,10 +532,10 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
         189 => KeyCode::Minus,
         61 => KeyCode::Equals,
         187 => KeyCode::Equals,
-        
+
         8 => KeyCode::Backspace,
         9 => KeyCode::Tab,
-        
+
         81 => KeyCode::KeyQ,
         87 => KeyCode::KeyW,
         69 => KeyCode::KeyE,
@@ -549,7 +549,7 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
         219 => KeyCode::LBracket,
         221 => KeyCode::RBracket,
         13 => KeyCode::Return,
-        
+
         65 => KeyCode::KeyA,
         83 => KeyCode::KeyS,
         68 => KeyCode::KeyD,
@@ -559,12 +559,12 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
         74 => KeyCode::KeyJ,
         75 => KeyCode::KeyK,
         76 => KeyCode::KeyL,
-        
+
         59 => KeyCode::Semicolon,
         186 => KeyCode::Semicolon,
         222 => KeyCode::Quote,
         220 => KeyCode::Backslash,
-        
+
         90 => KeyCode::KeyZ,
         88 => KeyCode::KeyX,
         67 => KeyCode::KeyC,
@@ -575,18 +575,18 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
         188 => KeyCode::Comma,
         190 => KeyCode::Period,
         191 => KeyCode::Slash,
-        
+
         17 => KeyCode::Control,
         18 => KeyCode::Alt,
         16 => KeyCode::Shift,
         224 => KeyCode::Logo,
         91 => KeyCode::Logo,
-        
+
         //RightControl,
         //RightShift,
         //RightAlt,
         93 => KeyCode::Logo,
-        
+
         32 => KeyCode::Space,
         20 => KeyCode::Capslock,
         112 => KeyCode::F1,
@@ -601,19 +601,19 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
         121 => KeyCode::F10,
         122 => KeyCode::F11,
         123 => KeyCode::F12,
-        
+
         44 => KeyCode::PrintScreen,
         124 => KeyCode::PrintScreen,
         //Scrolllock,
         //Pause,
-        
+
         45 => KeyCode::Insert,
         46 => KeyCode::Delete,
         36 => KeyCode::Home,
         35 => KeyCode::End,
         33 => KeyCode::PageUp,
         34 => KeyCode::PageDown,
-        
+
         96 => KeyCode::Numpad0,
         97 => KeyCode::Numpad1,
         98 => KeyCode::Numpad2,
@@ -624,7 +624,7 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
         103 => KeyCode::Numpad7,
         104 => KeyCode::Numpad8,
         105 => KeyCode::Numpad9,
-        
+
         //NumpadEquals,
         109 => KeyCode::NumpadSubtract,
         107 => KeyCode::NumpadAdd,
@@ -633,7 +633,7 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
         111 => KeyCode::NumpadDivide,
         12 => KeyCode::Numlock,
         //NumpadEnter,
-        
+
         38 => KeyCode::ArrowUp,
         40 => KeyCode::ArrowDown,
         37 => KeyCode::ArrowLeft,
@@ -739,7 +739,7 @@ impl FromWasm {
     pub fn new() -> FromWasm {
         unsafe {
             let start_bytes = 4096;
-            
+
             let buf = alloc::alloc(alloc::Layout::from_size_align(start_bytes as usize, mem::align_of::<u32>()).unwrap()) as *mut u32;
             (buf as *mut u64).write(start_bytes as u64);
             FromWasm {
@@ -752,7 +752,7 @@ impl FromWasm {
             }
         }
     }
-    
+
     // fit enough size for RPC structure with exponential alloc strategy
     // returns position to write to
     fn fit(&mut self, slots: usize) {
@@ -783,27 +783,27 @@ impl FromWasm {
             self.used += slots as isize;
         }
     }
-    
+
     fn check(&mut self) {
         if self.offset != self.used {
             panic!("Unequal allocation and writes")
         }
     }
-    
+
     fn mu32(&mut self, v: u32) {
         unsafe {
             self.mu32.offset(self.offset).write(v);
             self.offset += 1;
         }
     }
-    
+
     fn mf32(&mut self, v: f32) {
         unsafe {
             self.mf32.offset(self.offset).write(v);
             self.offset += 1;
         }
     }
-    
+
     fn add_f64(&mut self, v: f64) {
         unsafe {
             if self.offset & 1 != 0 {
@@ -815,17 +815,17 @@ impl FromWasm {
             self.offset += 2;
         }
     }
-    
+
     // end the block and return ownership of the pointer
     pub fn end(&mut self) {
         self.fit(1);
         self.mu32(0);
     }
-    
+
     pub fn wasm_ptr(&self) -> u32 {
         self.mu32 as u32
     }
-    
+
     fn add_shvarvec(&mut self, shvars: &Vec<ShVar>) {
         self.fit(1);
         self.mu32(shvars.len() as u32);
@@ -834,14 +834,14 @@ impl FromWasm {
             self.add_string(&shvar.name);
         }
     }
-    
+
     // log a string
     pub fn log(&mut self, msg: &str) {
         self.fit(1);
         self.mu32(1);
         self.add_string(msg);
     }
-    
+
     pub fn compile_webgl_shader(&mut self, shader_id: usize, vertex: &str, fragment: &str, mapping: &CxShaderMapping) {
         self.fit(2);
         self.mu32(2);
@@ -857,7 +857,7 @@ impl FromWasm {
         self.add_shvarvec(&mapping.uniforms);
         self.add_shvarvec(&mapping.texture_slots);
     }
-    
+
     pub fn alloc_array_buffer(&mut self, buffer_id: usize, len: usize, data: *const f32) {
         self.fit(4);
         self.mu32(3);
@@ -865,7 +865,7 @@ impl FromWasm {
         self.mu32(len as u32);
         self.mu32(data as u32);
     }
-    
+
     pub fn alloc_index_buffer(&mut self, buffer_id: usize, len: usize, data: *const u32) {
         self.fit(4);
         self.mu32(4);
@@ -873,7 +873,7 @@ impl FromWasm {
         self.mu32(len as u32);
         self.mu32(data as u32);
     }
-    
+
     pub fn alloc_vao(&mut self, shader_id: usize, vao_id: usize, geom_ib_id: usize, geom_vb_id: usize, inst_vb_id: usize) {
         self.fit(6);
         self.mu32(5);
@@ -883,7 +883,7 @@ impl FromWasm {
         self.mu32(geom_vb_id as u32);
         self.mu32(inst_vb_id as u32);
     }
-    
+
     pub fn draw_call(
         &mut self,
         shader_id: usize,
@@ -904,7 +904,7 @@ impl FromWasm {
         self.mu32(uniforms.as_ptr() as u32);
         self.mu32(textures.as_ptr() as u32);
     }
-    
+
     pub fn clear(&mut self, r: f32, g: f32, b: f32, a: f32) {
         self.fit(5);
         self.mu32(7);
@@ -913,7 +913,7 @@ impl FromWasm {
         self.mf32(b);
         self.mf32(a);
     }
-    
+
     pub fn load_deps(&mut self, deps: Vec<String>) {
         self.fit(1);
         self.mu32(8);
@@ -923,7 +923,7 @@ impl FromWasm {
             self.add_string(&dep);
         }
     }
-    
+
     pub fn update_texture_image2d(&mut self, texture_id: usize, texture: &mut CxTexture) {
         //usize, width: usize, height: usize, data: &Vec<u32>
         self.fit(5);
@@ -933,18 +933,18 @@ impl FromWasm {
         self.mu32(texture.desc.height.unwrap() as u32);
         self.mu32(texture.image_u32.as_ptr() as u32)
     }
-    
+
     pub fn request_animation_frame(&mut self) {
         self.fit(1);
         self.mu32(10);
     }
-    
+
     pub fn set_document_title(&mut self, title: &str) {
         self.fit(1);
         self.mu32(11);
         self.add_string(title);
     }
-    
+
     pub fn set_mouse_cursor(&mut self, mouse_cursor: MouseCursor) {
         self.fit(2);
         self.mu32(12);
@@ -967,43 +967,43 @@ impl FromWasm {
             MouseCursor::SwResize => 15,
             MouseCursor::WResize => 16,
             MouseCursor::NwResize => 17,
-            
+
             MouseCursor::NsResize => 18,
             MouseCursor::NeswResize => 19,
             MouseCursor::EwResize => 20,
             MouseCursor::NwseResize => 21,
             MouseCursor::ColResize => 22,
             MouseCursor::RowResize => 23,
-            
+
         };
         self.mu32(cursor_id);
     }
-    
+
     pub fn read_file(&mut self, id: u32, path: &str) {
         self.fit(2);
         self.mu32(13);
         self.mu32(id);
         self.add_string(path);
     }
-    
+
     pub fn show_text_ime(&mut self, x: f32, y: f32) {
         self.fit(3);
         self.mu32(14);
         self.mf32(x);
         self.mf32(y);
     }
-    
+
     pub fn hide_text_ime(&mut self) {
         self.fit(1);
         self.mu32(15);
     }
-    
+
     pub fn text_copy_response(&mut self, response: &str) {
         self.fit(1);
         self.mu32(16);
         self.add_string(response);
     }
-    
+
     pub fn start_timer(&mut self, id: u64, interval: f64, repeats: bool) {
         self.fit(2);
         self.mu32(17);
@@ -1011,33 +1011,33 @@ impl FromWasm {
         self.add_f64(id as f64);
         self.add_f64(interval);
     }
-    
+
     pub fn stop_timer(&mut self, id: u64) {
         self.fit(1);
         self.mu32(18);
         self.add_f64(id as f64);
     }
-    
+
     pub fn vr_start_presenting(&mut self) {
         self.fit(1);
         self.mu32(19);
     }
-    
+
     pub fn vr_stop_presenting(&mut self) {
         self.fit(1);
         self.mu32(20);
     }
-    
+
     pub fn mark_vr_draw_eye(&mut self) {
         self.fit(1);
         self.mu32(21);
     }
-    
+
     pub fn loop_vr_draw_eye(&mut self) {
         self.fit(1);
         self.mu32(22);
     }
-    
+
     pub fn begin_render_targets(&mut self, pass_id: usize, width: usize, height: usize) {
         self.fit(4);
         self.mu32(23);
@@ -1045,7 +1045,7 @@ impl FromWasm {
         self.mu32(width as u32);
         self.mu32(height as u32);
     }
-    
+
     pub fn add_color_target(&mut self, texture_id: usize, init_only: bool, color: Color) {
         self.fit(7);
         self.mu32(24);
@@ -1056,7 +1056,7 @@ impl FromWasm {
         self.mf32(color.b);
         self.mf32(color.a);
     }
-    
+
     pub fn set_depth_target(&mut self, texture_id: usize, init_only: bool, depth: f32) {
         self.fit(4);
         self.mu32(25);
@@ -1064,17 +1064,17 @@ impl FromWasm {
         self.mu32(if init_only {1} else {0});
         self.mf32(depth);
     }
-    
+
     pub fn end_render_targets(&mut self) {
         self.fit(1);
         self.mu32(26);
     }
-    
+
     pub fn set_default_depth_and_blend_mode(&mut self) {
         self.fit(1);
         self.mu32(27);
     }
-    
+
     pub fn begin_main_canvas(&mut self, color: Color, depth: f32) {
         self.fit(6);
         self.mu32(28);
@@ -1084,8 +1084,8 @@ impl FromWasm {
         self.mf32(color.a);
         self.mf32(depth);
     }
-    
-    
+
+
     fn add_string(&mut self, msg: &str) {
         let len = msg.chars().count();
         self.fit(len + 1);
@@ -1095,7 +1095,7 @@ impl FromWasm {
         }
         self.check();
     }
-    
+
     fn add_u8slice(&mut self, msg: &[u8]) {
         let u8_len = msg.len();
         let len = u8_len>>2;
@@ -1114,10 +1114,10 @@ impl FromWasm {
         }
         self.check();
     }
-    
+
     fn http_send(&mut self, verb: &str, path: &str, proto:&str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         self.fit(3);
-        self.mu32(29); 
+        self.mu32(29);
         self.mu32(port as u32);
         self.mu32(signal.signal_id as u32);
         self.add_string(verb);
@@ -1127,8 +1127,8 @@ impl FromWasm {
         self.add_string(content_type);
         self.add_u8slice(body);
     }
-    
-    
+
+
 }
 
 #[derive(Clone)]
@@ -1141,7 +1141,7 @@ struct ToWasm {
 }
 
 impl ToWasm {
-    
+
     pub fn dealloc(&mut self) {
         unsafe {
             alloc::dealloc(self.mu32 as *mut u8, alloc::Layout::from_size_align((self.slots * mem::size_of::<u64>()) as usize, mem::align_of::<u32>()).unwrap());
@@ -1150,7 +1150,7 @@ impl ToWasm {
             self.mf64 = 0 as *mut f64;
         }
     }
-    
+
     pub fn from(buf: u32) -> ToWasm {
         unsafe {
             let bytes = (buf as *mut u64).read() as usize;
@@ -1163,7 +1163,7 @@ impl ToWasm {
             }
         }
     }
-    
+
     fn mu32(&mut self) -> u32 {
         unsafe {
             let ret = self.mu32.offset(self.offset).read();
@@ -1171,7 +1171,7 @@ impl ToWasm {
             ret
         }
     }
-    
+
     fn mf32(&mut self) -> f32 {
         unsafe {
             let ret = self.mf32.offset(self.offset).read();
@@ -1179,7 +1179,7 @@ impl ToWasm {
             ret
         }
     }
-    
+
     fn mf64(&mut self) -> f64 {
         unsafe {
             if self.offset & 1 != 0 {
@@ -1190,7 +1190,7 @@ impl ToWasm {
             ret
         }
     }
-    
+
     fn parse_string(&mut self) -> String {
         let len = self.mu32();
         let mut out = String::new();

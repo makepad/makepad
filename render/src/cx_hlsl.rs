@@ -24,7 +24,7 @@ impl Cx {
             }
         };
     }
-    
+
     pub fn hlsl_type(ty: &str) -> String {
         match ty.as_ref() {
             "float" => "float".to_string(),
@@ -38,7 +38,7 @@ impl Cx {
             ty => ty.to_string()
         }
     }
-    
+
     pub fn hlsl_assemble_struct(lead: &str, name: &str, vars: &Vec<ShVar>, semantic: &str, field: &str, post: &str) -> String {
         let mut out = String::new();
         out.push_str(lead);
@@ -65,7 +65,7 @@ impl Cx {
         out.push_str("};\n\n");
         out
     }
-    
+
     pub fn hlsl_init_struct(vars: &Vec<ShVar>, field: &str) -> String {
         let mut out = String::new();
         out.push_str("{\n");
@@ -83,7 +83,7 @@ impl Cx {
         out.push_str("}");
         out
     }
-    
+
     pub fn hlsl_assemble_texture_slots(textures: &Vec<ShVar>) -> String {
         let mut out = String::new();
         for (i, tex) in textures.iter().enumerate() {
@@ -93,13 +93,13 @@ impl Cx {
         };
         out
     }
-    
+
     pub fn hlsl_assemble_shader(sg: &ShaderGen) -> Result<(String, CxShaderMapping), SlErr> {
-        
+
         let mut hlsl_out = String::new();
-        
+
         hlsl_out.push_str("SamplerState DefaultTextureSampler{Filter = MIN_MAG_MIP_LINEAR;AddressU = Wrap;AddressV=Wrap;};\n");
-        
+
         // float constructor mappings
         hlsl_out.push_str("float2 float2_1(float x){return float2(x,x);};\n");
         hlsl_out.push_str("float3 float3_1(float x){return float3(x,x,x);};\n");
@@ -112,7 +112,7 @@ impl Cx {
         hlsl_out.push_str("float4 float4_121(float x, float2 yz, float w){return float4(x, yz.x, yz.y, w);};\n");
         hlsl_out.push_str("float4 float4_211(float2 xy, float z, float w){return float4(xy.x, xy.y, z, w);};\n");
         hlsl_out.push_str("float4 float4_22(float2 xy, float2 zw){return float4(xy.x, xy.y, zw.x, zw.y);};\n");
-        
+
         // ok now define samplers from our sh.
         let texture_slots = sg.flat_vars(|v| if let ShVarStore::Texture = *v{true} else {false});
         let geometries = sg.flat_vars(|v| if let ShVarStore::Geometry = *v{true} else {false});
@@ -123,13 +123,13 @@ impl Cx {
         let view_uniforms = sg.flat_vars(|v| if let ShVarStore::ViewUniform = *v{true} else {false});
         let draw_uniforms = sg.flat_vars(|v| if let ShVarStore::DrawUniform = *v{true} else {false});
         let uniforms = sg.flat_vars(|v| if let ShVarStore::Uniform(_) = *v{true} else {false});
-        
+
         // lets count the slots
         let geometry_slots = sg.compute_slot_total(&geometries);
         let instance_slots = sg.compute_slot_total(&instances);
         //let varying_slots = sh.compute_slot_total(&varyings);
         hlsl_out.push_str(&Self::hlsl_assemble_texture_slots(&texture_slots));
-        
+
         hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Geom", &geometries, "GEOM_", "", ""));
         hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Inst", &instances, "INST_", "", ""));
         hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Ps", &pass_uniforms, "", "", ": register(b0)"));
@@ -137,11 +137,11 @@ impl Cx {
         hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Dr", &draw_uniforms, "", "", ": register(b2)"));
         hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni", &uniforms, "", "", ": register(b3)"));
         hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Loc", &locals, "", "", ""));
-        
+
         // we need to figure out which texture slots exist
         // we need to figure out which texture slots exist
         // mtl_out.push_str(&Self::assemble_constants(&texture_slots));
-        
+
         let mut const_cx = SlCx {
             depth: 0,
             target: SlTarget::Constant,
@@ -164,7 +164,7 @@ impl Cx {
             hlsl_out.push_str(&const_init.sl);
             hlsl_out.push_str(")\n");
         }
-        
+
         let mut vtx_cx = SlCx {
             depth: 0,
             target: SlTarget::Vertex,
@@ -177,7 +177,7 @@ impl Cx {
             fn_done: Vec::new(),
             auto_vary: Vec::new()
         };
-        
+
         let vtx_fns = assemble_fn_and_deps(sg, &mut vtx_cx) ?;
         let mut pix_cx = SlCx {
             depth: 0,
@@ -191,20 +191,20 @@ impl Cx {
             fn_done: vtx_cx.fn_done,
             auto_vary: Vec::new()
         };
-        
+
         let pix_fns = assemble_fn_and_deps(sg, &mut pix_cx) ?;
-        
+
         // lets add the auto_vary ones to the varyings struct
         for auto in &pix_cx.auto_vary {
             varyings.push(auto.clone());
         }
         hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Vary", &varyings, "VARY_", "  float4 hlsl_position : SV_POSITION;\n", ""));
-        
+
         hlsl_out.push_str("//Vertex shader\n");
         hlsl_out.push_str(&vtx_fns);
         hlsl_out.push_str("//Pixel shader\n");
         hlsl_out.push_str(&pix_fns);
-        
+
         // lets define the vertex shader
         hlsl_out.push_str("_Vary _vertex_shader(_Geom _geom, _Inst _inst, uint inst_id: SV_InstanceID){\n");
         hlsl_out.push_str("  _Loc _loc = ");
@@ -216,7 +216,7 @@ impl Cx {
         hlsl_out.push_str("  _vary.hlsl_position = _vertex(");
         hlsl_out.push_str(&vtx_cx.defargs_call);
         hlsl_out.push_str(");\n\n");
-        
+
         for auto in pix_cx.auto_vary {
             if let ShVarStore::Geometry = auto.store {
                 hlsl_out.push_str("       _vary.");
@@ -233,7 +233,7 @@ impl Cx {
                 hlsl_out.push_str(";\n");
             }
         }
-        
+
         hlsl_out.push_str("       return _vary;\n");
         hlsl_out.push_str("};\n");
         // then the fragment shader
@@ -244,7 +244,7 @@ impl Cx {
         hlsl_out.push_str("  return _pixel(");
         hlsl_out.push_str(&pix_cx.defargs_call);
         hlsl_out.push_str(");\n};\n");
-        
+
         if sg.log != 0 {
             println!("---- HLSL shader -----");
             let lines = hlsl_out.split('\n');
@@ -252,7 +252,7 @@ impl Cx {
                 println!("{} {}", index + 1, line);
             }
         }
-        
+
         let uniform_props = UniformProps::construct(sg, &uniforms);
         Ok((hlsl_out, CxShaderMapping {
             rect_instance_props: RectInstanceProps::construct(sg, &instances),
@@ -269,7 +269,7 @@ impl Cx {
             texture_slots: texture_slots,
         }))
     }
-    
+
     fn slots_to_dxgi_format(slots: usize) -> u32 {
         match slots {
             1 => dxgiformat::DXGI_FORMAT_R32_FLOAT,
@@ -279,21 +279,21 @@ impl Cx {
             _ => panic!("slots_to_dxgi_format unsupported slotcount {}", slots)
         }
     }
-    
+
     pub fn hlsl_compile_shader(sh: &mut CxShader, d3d11_cx: &D3d11Cx) -> Result<(), SlErr> {
         let (hlsl, mapping) = Self::hlsl_assemble_shader(&sh.shader_gen) ?;
-        
+
         let vs_blob = d3d11_cx.compile_shader("vs", "_vertex_shader".as_bytes(), hlsl.as_bytes()) ?;
         let ps_blob = d3d11_cx.compile_shader("ps", "_pixel_shader".as_bytes(), hlsl.as_bytes()) ?;
-        
+
         let vs = d3d11_cx.create_vertex_shader(&vs_blob) ?;
         let ps = d3d11_cx.create_pixel_shader(&ps_blob) ?;
-        
+
         let mut layout_desc = Vec::new();
         let geom_named = NamedProps::construct(&sh.shader_gen, &mapping.geometries);
         let inst_named = NamedProps::construct(&sh.shader_gen, &mapping.instances);
         let mut strings = Vec::new();
-        
+
         for (index, geom) in geom_named.props.iter().enumerate() {
             strings.push(ffi::CString::new(format!("GEOM_{}", std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
             layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
@@ -306,7 +306,7 @@ impl Cx {
                 InstanceDataStepRate: 0
             })
         }
-        
+
         for (index, inst) in inst_named.props.iter().enumerate() {
             strings.push(ffi::CString::new(format!("INST_{}", std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
             layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
@@ -319,9 +319,9 @@ impl Cx {
                 InstanceDataStepRate: 1
             })
         }
-        
+
         let input_layout = d3d11_cx.create_input_layout(&vs_blob, &layout_desc) ?;
-        
+
         sh.mapping = mapping;
         sh.platform = Some(CxPlatformShader {
             geom_ibuf: {
@@ -340,7 +340,7 @@ impl Cx {
             pixel_shader_blob: ps_blob,
             input_layout: input_layout,
         });
-        
+
         Ok(())
     }
 }
@@ -379,15 +379,15 @@ impl<'a> SlCx<'a> {
             _ => return MapCallResult::None
         }
     }
-    
+
     pub fn mat_mul(&self, left: &str, right: &str) -> String {
         format!("mul({},{})", left, right)
     }
-    
+
     pub fn map_type(&self, ty: &str) -> String {
         Cx::hlsl_type(ty)
     }
-    
+
     pub fn map_constructor(&self, name: &str, args: &Vec<Sl>) -> String {
         let mut out = String::new();
         match args.len() {
@@ -459,7 +459,7 @@ impl<'a> SlCx<'a> {
         out.push_str(")");
         return out;
     }
-    
+
     pub fn map_var(&mut self, var: &ShVar) -> String {
         //let mty = Cx::hlsl_type(&var.ty);
         match var.store {
@@ -487,7 +487,7 @@ impl<'a> SlCx<'a> {
                     return format!("_vary.{}", var.name);
                 }
                 else {
-                    
+
                     return format!("_geom.{}", var.name);
                 }
             },

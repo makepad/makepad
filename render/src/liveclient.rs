@@ -15,7 +15,7 @@ struct LiveError{
 type LiveResult<T> = Result<T, LiveError>;
 
 impl LiveClient{
-    
+
     pub fn connect_to_live_server(server_address: Option<SocketAddr>) -> Option<LiveClient> {
         // first try local address
         let addr = if let Some(addr) = server_address{

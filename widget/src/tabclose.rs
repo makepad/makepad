@@ -17,7 +17,7 @@ impl TabClose {
             _bg_area: Area::Empty,
         }
     }
-    
+
     pub fn walk() -> WalkId {uid!()}
     pub fn instance_hover() -> InstanceFloat {uid!()}
     pub fn instance_down() -> InstanceFloat {uid!()}
@@ -32,13 +32,13 @@ impl TabClose {
             height: Height::Fix(10. * opt.scale),
             margin: Margin {l: -4., t: 0., r: 4., b: 0.}
         });
-        
+
         Self::anim_default().set(cx,Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_text_deselected_focus().get(cx))]),
             Track::float(Self::instance_hover(), Ease::Lin, vec![(1.0, 0.)]),
             Track::float(Self::instance_down(), Ease::Lin, vec![(1.0, 0.)]),
         ]));
-        
+
         Self::anim_over().set(cx,Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (0.0, Theme::color_text_selected_focus().get(cx)),
@@ -47,7 +47,7 @@ impl TabClose {
             Track::float(Self::instance_hover(), Ease::Lin, vec![(1.0, 1.0)]),
             Track::float(Self::instance_down(), Ease::Lin, vec![(1.0, 0.)]),
         ]));
-        
+
         Self::anim_down().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (0.0, Theme::color_text_selected_focus().get(cx)),
@@ -56,7 +56,7 @@ impl TabClose {
             Track::float(Self::instance_hover(), Ease::Lin, vec![(1.0, 1.0)]),
             Track::float(Self::instance_down(), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
         ]));
-        
+
         Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             let hover: Self::instance_hover();
             let down: Self::instance_down();
@@ -75,8 +75,8 @@ impl TabClose {
             }
         })));
     }
-    
-    
+
+
     pub fn handle_tab_close(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
         match event.hits(cx, self._bg_area, HitOpt {
             margin: Some(Margin {l: 5., t: 5., r: 5., b: 5.}),
@@ -114,7 +114,7 @@ impl TabClose {
         };
         ButtonEvent::None
     }
-    
+
     pub fn draw_tab_close(&mut self, cx: &mut Cx) {
         self.animator.init(cx, | cx | Self::anim_default().get(cx));
         self.bg.shader = Self::shader_bg().get(cx);

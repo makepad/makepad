@@ -3,36 +3,36 @@ use crate::cx_cocoa::*;
 use crate::cx::*;
 
 impl Cx {
-    
+
     pub fn event_loop<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event),
     {
         self.platform_type = PlatformType::OSX;
-        
+
         let mut cocoa_app = CocoaApp::new();
-        
+
         cocoa_app.init();
-        
+
         let mut metal_cx = MetalCx::new();
-        
+
         let mut metal_windows: Vec<MetalWindow> = Vec::new();
 
         self.mtl_compile_all_shaders(&metal_cx);
 
         self.load_theme_fonts();
-        
+
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
-        
+
         self.redraw_child_area(Area::All);
-        
+
         let mut passes_todo = Vec::new();
-        
+
         cocoa_app.event_loop( | cocoa_app, events | {
             //let mut paint_dirty = false;
             for mut event in events {
-                
+
                 self.process_desktop_pre_event(&mut event, &mut event_handler);
-                
+
                 match &event {
                     Event::WindowGeomChange(re) => { // do this here because mac
                         for metal_window in &mut metal_windows {
@@ -51,12 +51,12 @@ impl Cx {
                         // ok lets not redraw all, just this window
                         self.call_event_handler(&mut event_handler, &mut event);
                     },
-                    Event::WindowClosed(wc) => { 
+                    Event::WindowClosed(wc) => {
                         // lets remove the window from the set
                         self.windows[wc.window_id].window_state = CxWindowState::Closed;
                         self.windows_free.push(wc.window_id);
                         // remove the d3d11/win32 window
-                        
+
                         for index in 0..metal_windows.len() {
                             if metal_windows[index].window_id == wc.window_id {
                                 metal_windows.remove(index);
@@ -71,12 +71,12 @@ impl Cx {
                         self.call_event_handler(&mut event_handler, &mut event);
                     },
                     Event::Paint => {
-                        
+
                         let vsync = self.process_desktop_paint_callbacks(cocoa_app.time_now(), &mut event_handler);
-                        
+
                         // construct or destruct windows
                         for (index, window) in self.windows.iter_mut().enumerate() {
-                            
+
                             window.window_state = match &window.window_state {
                                 CxWindowState::Create {inner_size, position, title} => {
                                     // lets create a platformwindow
@@ -98,7 +98,7 @@ impl Cx {
                                 CxWindowState::Created => CxWindowState::Created,
                                 CxWindowState::Closed => CxWindowState::Closed
                             };
-                            
+
                             window.window_command = match &window.window_command {
                                 CxWindowCmd::Restore => {
                                     for metal_window in &mut metal_windows {if metal_window.window_id == index {
@@ -120,14 +120,14 @@ impl Cx {
                                 },
                                 _ => CxWindowCmd::None,
                             };
-                            
+
                             if let Some(topmost) = window.window_topmost {
                                 for metal_window in &mut metal_windows {if metal_window.window_id == index {
                                     metal_window.cocoa_window.set_topmost(topmost);
                                 }}
                             }
                         }
-                        
+
                         // set a cursor
                         if !self.down_mouse_cursor.is_none() {
                             cocoa_app.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
@@ -138,35 +138,35 @@ impl Cx {
                         else {
                             cocoa_app.set_mouse_cursor(MouseCursor::Default)
                         }
-                        
+
                         if let Some(set_ime_position) = self.platform.set_ime_position {
                             self.platform.set_ime_position = None;
                             for metal_window in &mut metal_windows {
                                 metal_window.cocoa_window.set_ime_spot(set_ime_position);
                             }
                         }
-                        
+
                         while self.platform.start_timer.len() > 0 {
                             let (timer_id, interval, repeats) = self.platform.start_timer.pop().unwrap();
                             cocoa_app.start_timer(timer_id, interval, repeats);
                         }
-                        
+
                         while self.platform.stop_timer.len() > 0 {
                             let timer_id = self.platform.stop_timer.pop().unwrap();
                             cocoa_app.stop_timer(timer_id);
                         }
-                        
+
                         if self.platform.set_menu{
                             self.platform.set_menu = false;
                             if let Some(menu) = &self.platform.last_menu{
                                 cocoa_app.update_app_menu(menu, &self.command_settings)
                             }
                         }
-                        
+
                         // build a list of renderpasses to repaint
                         let mut windows_need_repaint = 0;
                         self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
-                        
+
                         if passes_todo.len() > 0 {
                             for pass_id in &passes_todo {
                                 match self.passes[*pass_id].dep_of.clone() {
@@ -179,11 +179,11 @@ impl Cx {
                                             metal_window.set_buffer_count(
                                                 if metal_window.window_geom.is_fullscreen {3}else {2}
                                             );
-                                            
+
                                             let dpi_factor = metal_window.window_geom.dpi_factor;
-                                            
+
                                             metal_window.resize_core_animation_layer(&metal_cx);
-                                            
+
                                             self.draw_pass_to_layer(
                                                 *pass_id,
                                                 dpi_factor,
@@ -240,41 +240,41 @@ impl Cx {
             }
         })
     }
-    
+
     pub fn show_text_ime(&mut self, x: f32, y: f32) {
         self.platform.set_ime_position = Some(Vec2 {x: x, y: y});
     }
-    
+
     pub fn hide_text_ime(&mut self) {
     }
-    
+
     pub fn set_window_outer_size(&mut self, size: Vec2) {
         self.platform.set_window_outer_size = Some(size);
     }
-    
+
     pub fn set_window_position(&mut self, pos: Vec2) {
         self.platform.set_window_position = Some(pos);
     }
-    
+
     pub fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
         self.timer_id += 1;
         self.platform.start_timer.push((self.timer_id, interval, repeats));
         Timer {timer_id: self.timer_id}
     }
-    
+
     pub fn stop_timer(&mut self, timer: &mut Timer) {
         if timer.timer_id != 0 {
             self.platform.stop_timer.push(timer.timer_id);
             timer.timer_id = 0;
         }
     }
-    
+
     pub fn post_signal(signal: Signal, status: StatusId) {
         if signal.signal_id != 0{
             CocoaApp::post_signal(signal.signal_id, status);
         }
     }
-    
+
     pub fn update_menu(&mut self, menu:&Menu){
         // lets walk the menu and do the cocoa equivalents
         let platform = &mut self.platform;

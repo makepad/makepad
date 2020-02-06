@@ -6,7 +6,7 @@ pub enum GLShaderType {
 }
 
 impl Cx {
-    
+
     pub fn gl_assemble_uniforms(unis: &Vec<ShVar>) -> String {
         let mut out = String::new();
         for uni in unis {
@@ -18,7 +18,7 @@ impl Cx {
         };
         out
     }
-    
+
     pub fn ceil_div4(base: usize) -> usize {
         let r = base >> 2;
         if base & 3 != 0 {
@@ -26,7 +26,7 @@ impl Cx {
         }
         r
     }
-    
+
     pub fn gl_assemble_texture_slots(unis: &Vec<ShVar>) -> String {
         let mut out = String::new();
         for uni in unis {
@@ -41,7 +41,7 @@ impl Cx {
         };
         out
     }
-    
+
     pub fn gl_assemble_vartype(i: usize, total: usize, left: usize) -> String {
         if i == total - 1 {
             match left {
@@ -55,8 +55,8 @@ impl Cx {
             "vec4".to_string()
         }
     }
-    
-    
+
+
     pub fn gl_assemble_varblock(thing: &str, base: &str, slots: usize) -> String {
         // ok lets do a ceil
         let mut out = String::new();
@@ -72,7 +72,7 @@ impl Cx {
         }
         out
     }
-    
+
     pub fn gl_assemble_vardef(var: &ShVar) -> String {
         // ok lets do a ceil
         let mut out = String::new();
@@ -82,7 +82,7 @@ impl Cx {
         out.push_str(";\n");
         out
     }
-    
+
     pub fn gl_assemble_unpack(base: &str, slot: usize, total_slots: usize, sv: &ShVar) -> String {
         let mut out = String::new();
         // ok we have the slot we start at
@@ -90,7 +90,7 @@ impl Cx {
         out.push_str(&sv.name);
         out.push_str("=");
         let id = (slot)>>2;
-        
+
         // just splat directly
         if sv.ty == "vec2" {
             match slot & 3 {
@@ -144,7 +144,7 @@ impl Cx {
             out.push_str(&sv.ty);
             out.push_str("(");
         }
-        
+
         // splat via loose props
         let svslots = match sv.ty.as_ref() {
             "float" => 1,
@@ -152,16 +152,16 @@ impl Cx {
             "vec3" => 3,
             _ => 4
         };
-        
+
         for i in 0..svslots {
             if i != 0 {
                 out.push_str(", ");
             }
             out.push_str(base);
-            
+
             let id = (slot + i)>>2;
             let ext = (slot + i) & 3;
-            
+
             out.push_str(&id.to_string());
             out.push_str(
                 match ext {
@@ -185,7 +185,7 @@ impl Cx {
         out.push_str(";\n");
         out
     }
-    
+
     pub fn gl_assemble_pack_chunk(base: &str, id: usize, chunk: &str, sv: &ShVar) -> String {
         let mut out = String::new();
         out.push_str("    ");
@@ -196,12 +196,12 @@ impl Cx {
         out.push_str(";\n");
         out
     }
-    
+
     pub fn gl_assemble_pack(base: &str, slot: usize, total_slots: usize, sv: &ShVar) -> String {
         // now we go the other way. we take slot and assign ShaderVar into it
         let mut out = String::new();
         let id = (slot)>>2;
-        
+
         // just splat directly
         if sv.ty == "vec2" {
             match slot & 3 {
@@ -223,14 +223,14 @@ impl Cx {
                 return Self::gl_assemble_pack_chunk(base, id, ".xyzw =", &sv);
             }
         }
-        
+
         let svslots = match sv.ty.as_ref() {
             "float" => 1,
             "vec2" => 2,
             "vec3" => 3,
             _ => 4
         };
-        
+
         for i in 0..svslots {
             out.push_str("    ");
             out.push_str(base);
@@ -273,9 +273,9 @@ impl Cx {
         }
         out
     }
-    
+
     pub fn gl_assemble_shader(sg: &ShaderGen, shtype: GLShaderType) -> Result<(String, String, CxShaderMapping), SlErr> {
-        
+
         let mut vtx_out = String::new();
         let mut pix_out = String::new();
         match shtype {
@@ -310,7 +310,7 @@ impl Cx {
         let view_uniforms = sg.flat_vars(|v| if let ShVarStore::ViewUniform = *v{true} else {false});
         let draw_uniforms = sg.flat_vars(|v| if let ShVarStore::DrawUniform = *v{true} else {false});
         let uniforms = sg.flat_vars(|v| if let ShVarStore::Uniform(_) = *v{true} else {false});
-        
+
         let mut const_cx = SlCx {
             depth: 0,
             target: SlTarget::Constant,
@@ -339,7 +339,7 @@ impl Cx {
             consts_out.push_str(&const_init.sl);
             consts_out.push_str(";\n");
         }
-        
+
         let mut vtx_cx = SlCx {
             depth: 0,
             target: SlTarget::Vertex,
@@ -353,7 +353,7 @@ impl Cx {
             auto_vary: Vec::new()
         };
         let vtx_fns = assemble_fn_and_deps(sg, &mut vtx_cx) ?;
-        
+
         let mut pix_cx = SlCx {
             depth: 0,
             target: SlTarget::Pixel,
@@ -367,11 +367,11 @@ impl Cx {
             auto_vary: Vec::new()
         };
         let pix_fns = assemble_fn_and_deps(sg, &mut pix_cx) ?;
-        
+
         for auto in &pix_cx.auto_vary {
             varyings.push(auto.clone());
         }
-        
+
         // lets count the slots
         let geometry_slots = sg.compute_slot_total(&geometries);
         let instance_slots = sg.compute_slot_total(&instances);
@@ -391,16 +391,16 @@ impl Cx {
         shared.push_str(&Self::gl_assemble_texture_slots(&texture_slots));
         shared.push_str("// Varyings\n");
         shared.push_str(&Self::gl_assemble_varblock("varying", "varying", varying_slots));
-        
+
         for local in &locals {shared.push_str(&Self::gl_assemble_vardef(&local));}
-        
+
         pix_out.push_str(&shared);
-        
+
         vtx_out.push_str(&shared);
-        
+
         let mut vtx_main = "void main(){\n".to_string();
         let mut pix_main = "void main(){\n".to_string();
-        
+
         vtx_out.push_str("// Geometry attributes\n");
         vtx_out.push_str(&Self::gl_assemble_varblock("attribute", "geomattr", geometry_slots));
         let mut slot_id = 0;
@@ -409,7 +409,7 @@ impl Cx {
             vtx_main.push_str(&Self::gl_assemble_unpack("geomattr", slot_id, geometry_slots, &geometry));
             slot_id += sg.get_type_slots(&geometry.ty);
         }
-        
+
         vtx_out.push_str("// Instance attributes\n");
         vtx_out.push_str(&Self::gl_assemble_varblock("attribute", "instattr", instance_slots));
         let mut slot_id = 0;
@@ -418,13 +418,13 @@ impl Cx {
             vtx_main.push_str(&Self::gl_assemble_unpack("instattr", slot_id, instance_slots, &instance));
             slot_id += sg.get_type_slots(&instance.ty);
         }
-        
-        
+
+
         vtx_main.push_str("\n    gl_Position = vertex();\n");
         vtx_main.push_str("\n    // Varying packing\n");
-        
+
         pix_main.push_str("\n    // Varying unpacking\n");
-        
+
         // alright lets pack/unpack varyings
         let mut slot_id = 0;
         for vary in &varyings {
@@ -440,28 +440,28 @@ impl Cx {
             pix_main.push_str(&Self::gl_assemble_unpack("varying", slot_id, varying_slots, &vary));
             slot_id += sg.get_type_slots(&vary.ty);
         }
-        
+
         pix_main.push_str("\n    gl_FragColor = pixel();\n");
         vtx_main.push_str("\n}\n\0");
         pix_main.push_str("\n}\n\0");
-        
+
         vtx_out.push_str("//Vertex shader\n");
         vtx_out.push_str(&vtx_fns);
         pix_out.push_str("//Pixel shader\n");
         pix_out.push_str(&pix_fns);
-        
+
         vtx_out.push_str("//Main function\n");
         vtx_out.push_str(&vtx_main);
-        
+
         pix_out.push_str("//Main function\n");
         pix_out.push_str(&pix_main);
-        
+
         if sg.log != 0 {
             //println!("---------- Pixelshader:  ---------\n{}", pix_out);
             //println!("---------- Vertexshader:  ---------\n{}", vtx_out);
         }
         // we can also flatten our uniform variable set
-        
+
         // lets composite our ShAst structure into a set of methods
         let uniform_props = UniformProps::construct(sg, &uniforms);
         Ok((vtx_out, pix_out, CxShaderMapping {
@@ -513,18 +513,18 @@ impl<'a> SlCx<'a> {
             _ => return MapCallResult::None
         }
     }
-    
+
     pub fn mat_mul(&self, left: &str, right: &str) -> String {
         format!("{}*{}", left, right)
     }
-    
+
     pub fn map_type(&self, ty: &str) -> String {
         match ty {
             "texture2d" => return "sampler2D".to_string(),
             _ => return ty.to_string()
         }
     }
-    
+
     pub fn map_constructor(&self, name: &str, args: &Vec<Sl>)->String{
         let mut out = String::new();
         out.push_str(&self.map_type(name));
@@ -538,7 +538,7 @@ impl<'a> SlCx<'a> {
         out.push_str(")");
         return out;
     }
-    
+
     pub fn map_var(&mut self, var: &ShVar) -> String {
         match var.store {
             ShVarStore::Instance(_) => {
@@ -559,5 +559,5 @@ impl<'a> SlCx<'a> {
         }
         var.name.clone()
     }
-    
+
 }

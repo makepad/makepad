@@ -11,7 +11,7 @@ pub struct Process {
 }
 
 impl Process {
-    
+
     pub fn start(cmd: &str, args: &[&str], current_dir: &str, env: &[(&str, &str)]) -> Result<Process, std::io::Error> {
         fn create_process(cmd: &str, args: &[&str], current_dir: &str, env: &[(&str, &str)]) -> Result<Child, std::io::Error> {
             let mut cbuild = if cmd.find("/").is_some() {
@@ -30,14 +30,14 @@ impl Process {
             }
             cbuild.spawn()
         }
-        
+
         let mut child = create_process(cmd, args, current_dir, env) ?;
-        
+
         let (tx_line, rx_line) = mpsc::channel();
         let tx_err = tx_line.clone();
         let mut stdout = child.stdout.take().expect("stdout cannot be taken!");
         let mut stderr = child.stderr.take().expect("stderr cannot be taken!");
-        
+
         let _stdout_thread = {
             std::thread::spawn(move || {
                 let mut storage = Vec::new();
@@ -65,7 +65,7 @@ impl Process {
                 }
             })
         };
-        
+
         let _stderr_thread = {
             std::thread::spawn(move || {
                 let mut storage = Vec::new();
@@ -92,20 +92,20 @@ impl Process {
                 }
             })
         };
-        
+
         Ok(Process {
             child: Some(child),
             rx_line: Some(rx_line),
         })
     }
-    
+
     pub fn wait(&mut self) {
         if let Some(child) = &mut self.child {
             let _ = child.wait();
             self.child = None;
         }
     }
-    
+
     pub fn kill(&mut self) {
         if let Some(child) = &mut self.child {
             let _ = child.kill();

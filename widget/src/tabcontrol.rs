@@ -16,7 +16,7 @@ pub struct TabControl {
     //pub tab_fill_color: ColorId,
     pub tab_fill: Quad,
     pub animator: Animator,
-    
+
     pub _dragging_tab: Option<(FingerMoveEvent, usize)>,
     pub _tab_id_alloc: usize,
     pub _tab_now_selected: Option<usize>,
@@ -69,14 +69,14 @@ impl TabControl {
             _tab_id_alloc: 0
         }
     }
-    
+
     pub fn handle_tab_control(&mut self, cx: &mut Cx, event: &mut Event) -> TabControlEvent {
         let mut tab_control_event = TabControlEvent::None;
-        
+
         self.tabs_view.handle_scroll_bars(cx, event);
-        
+
         for (id, tab) in self.tabs.enumerate() {
-            
+
             match tab.handle_tab(cx, event) {
                 TabEvent::Select => {
                     self.page_view.redraw_view_area(cx);
@@ -88,13 +88,13 @@ impl TabControl {
                     // flag our view as dirty, to trigger
                     self.tabs_view.redraw_view_area(cx);
                     self.drag_tab_view.redraw_view_area(cx);
-                    
+
                     tab_control_event = TabControlEvent::TabDragMove {fe: fe, tab_id: *id};
                 },
                 TabEvent::DragEnd(fe) => {
                     self._dragging_tab = None;
                     self.drag_tab_view.redraw_view_area(cx);
-                    
+
                     tab_control_event = TabControlEvent::TabDragEnd {fe, tab_id: *id};
                 },
                 TabEvent::Closing => { // this tab is closing. select the visible one
@@ -139,7 +139,7 @@ impl TabControl {
         };
         tab_control_event
     }
-    
+
     pub fn tab_control_style()->StyleId{uid!()}
 
     pub fn style(cx:&mut Cx, opt:&StyleOptions){
@@ -147,7 +147,7 @@ impl TabControl {
         ScrollBar::bar_size().set(cx, 8. * opt.scale.powf(0.5));
         cx.end_style();
     }
-    
+
     pub fn get_tab_rects(&mut self, cx: &Cx) -> Vec<Rect> {
         let mut rects = Vec::new();
         for tab in self.tabs.iter() {
@@ -155,18 +155,18 @@ impl TabControl {
         }
         return rects
     }
-    
+
     pub fn set_tab_control_focus(&mut self, cx: &mut Cx, focus: bool) {
         self._focussed = focus;
         for tab in self.tabs.iter() {
             tab.set_tab_focus(cx, focus);
         }
     }
-    
+
     pub fn get_tabs_view_rect(&mut self, cx: &Cx) -> Rect {
         self.tabs_view.get_rect(cx)
     }
-    
+
     pub fn get_content_drop_rect(&mut self, cx: &Cx) -> Rect {
         let pr = self.page_view.get_rect(cx);
         // we now need to change the y and the new height
@@ -177,7 +177,7 @@ impl TabControl {
             h: pr.h
         }
     }
-    
+
     // data free APIs for the win!
     pub fn begin_tabs(&mut self, cx: &mut Cx) -> ViewRedraw {
         //cx.begin_turtle(&Layout{
@@ -214,7 +214,7 @@ impl TabControl {
         let tab = self.get_draw_tab(cx, label, selected, closeable);
         tab.draw_tab(cx);
     }
-    
+
     pub fn end_tabs(&mut self, cx: &mut Cx) {
         self.tab_fill.color = Theme::color_bg_normal().get(cx);
         self.tab_fill.draw_quad(cx, Walk::wh(Width::Fill, Height::Fill));
@@ -224,13 +224,13 @@ impl TabControl {
                 abs_origin: Some(Vec2::default()),
                 ..Default::default()
             }) {
-                
+
                 self.drag_tab.abs_origin = Some(Vec2 {x: fe.abs.x - fe.rel_start.x, y: fe.abs.y - fe.rel_start.y});
                 let origin_tab = self.tabs.get_draw(cx, *id, | _cx, tmpl | tmpl.clone());
                 self.drag_tab.label = origin_tab.label.clone();
                 self.drag_tab.is_closeable = origin_tab.is_closeable;
                 self.drag_tab.draw_tab(cx);
-                
+
                 self.drag_tab_view.end_view(cx);
             }
         }
@@ -248,12 +248,12 @@ impl TabControl {
             self._tab_last_selected = self._tab_now_selected;
         }
     }
-    
+
     pub fn begin_tab_page(&mut self, cx: &mut Cx) -> ViewRedraw {
         cx.turtle_new_line();
         self.page_view.begin_view(cx, Layout::default())
     }
-    
+
     pub fn end_tab_page(&mut self, cx: &mut Cx) {
         self.page_view.end_view(cx);
         //cx.end_turtle(Area::Empty);

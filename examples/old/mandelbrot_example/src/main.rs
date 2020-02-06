@@ -41,7 +41,7 @@ Future - live editing of programs, sliders, colorpickers
 
 Web - marketing tool not real target for makepad itself but possible for user programs.
 
-Shaders as first class citizen 
+Shaders as first class citizen
 
 UI system design
 */
@@ -99,26 +99,26 @@ struct App {
     window_template: DesktopWindow,
     windows: Vec<DesktopWindow>,
     frame: f32,
-    
+
     capture: Capture,
     gamepad: Gamepad,
-    
+
     mandel: Mandelbrot,
     loc_history: Vec<MandelbrotLoc>,
     mandel_blit: Blit,
-    
+
     state: AppState,
-    
+
     presets: Vec<AppState>,
     current_preset: usize,
     preset_file_read: FileRead,
-    
+
     blit: Blit,
     cam_blit: Blit,
     cam_pass: Pass,
     cam_view: View<ScrollBar>, // we have a root view otherwise is_overlay subviews can't attach topmost
     cam_buffer: Texture,
-    
+
 }
 
 main_app!(App, "Example");
@@ -142,7 +142,7 @@ impl Style for App{
             current_preset:0,
             capture: Capture::default(),
             gamepad: Gamepad::default(),
-            
+
             mandel: Mandelbrot::style(cx),
             loc_history: Vec::new(),
             mandel_blit: Blit {
@@ -169,7 +169,7 @@ impl App {
         Blit::def_blit_shader().compose(shader_ast!({
             let texcam: texture2d<Texture>;
             let time: float<Uniform>;
-            
+
             let scale_delta: float<Uniform>;
             let offset_delta: vec2<Uniform>;
             let rotate_sin: float<Uniform>;
@@ -179,7 +179,7 @@ impl App {
             let palette_scale: float<Uniform>;
             let outer_scale: float<Uniform>;
             let blend_mode: float<Uniform>;
-            
+
             fn kaleido(uv: vec2, angle: float, base: float, spin: float) -> vec2 {
                 let a = atan(uv.y, uv.x);
                 if a<0. {a = PI + a}
@@ -187,29 +187,29 @@ impl App {
                 a = abs(fmod (a + spin, angle * 2.0) - angle);
                 return vec2(abs(sin(a + base)) * d, abs(cos(a + base)) * d);
             }
-            
+
             fn pixel() -> vec4 {
                 let geom_cen = (geom.xy - vec2(0.5, 0.5)) * vec2(5.33, 3.0);
-                
+
                 if scale_delta > 100. {
                     return vec4(0., 0., 0., 1.);
                 }
                 let geom_rot = vec2(geom_cen.x * rotate_cos - geom_cen.y * rotate_sin, geom_cen.y * rotate_cos + geom_cen.x * rotate_sin) / vec2(5.33, 3.0);
                 let comp_texpos1 = geom_rot * scale_delta + vec2(0.5, 0.5) + offset_delta;
-                
+
                 let fr1 = sample2d(texturez, comp_texpos1).rg; //kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time)).rg;
-                
+
                 let cam = sample2d(texcam, geom.xy).xyz;
                 //let fr2 = sample2d(texturez, comp_texpos2).rg;
                 //let comp_texpos2 = (vec2(1.0 - geom.x, geom.y) - vec2(0.5, 0.5)) * scale_delta + vec2(0.5, 0.5) + offset_delta;
                 //kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time));
                 let center_blend = 0.0;
-                
+
                 let dx = sin(2. * atan(dfdx(fr1.y), dfdy(fr1.y)) + time * 10.) * 0.5 + 0.5;
                 let df = dfdx(fr1.x)+dfdy(fr1.x);
                 let index = abs(color_offset + fr1.x * 8.0 - outer_scale * 0.05 * log(fr1.y)) * palette_scale;
                 let fract = vec3(0., 0., 0.);
-                
+
                 if fr1.x > 1.0 {
                     center_blend = 1.0;
                     fract.xyz = vec3(0., 0., 0,);
@@ -222,7 +222,7 @@ impl App {
                 else if palette == 5.0 {fract = df_iq_pal5(index)}
                 else if palette == 6.0 {fract = df_iq_pal6(index)}
                 else if palette == 7.0 {fract = df_iq_pal7(index)}
-                
+
                 if blend_mode == 0.0 {return vec4(fract.xyz, 1.0)}
                 else if blend_mode == 1.0 {return vec4(cam.xyz, 1.0);}
                 else if blend_mode == 2.0 {return vec4(mix(fract.xyz, cam.xyz, center_blend), 1.0);}
@@ -239,41 +239,41 @@ impl App {
             }
         }))
     }
-    
+
     fn def_cam_blit_shader() -> ShaderGen {
         Blit::def_blit_shader().compose(shader_ast!({
             let alpha_offset: float<Uniform>;
-            
+
             fn sample_camera_depth(dpix: vec2) -> vec4 {
                 let cam1 = sample2d(texturez, geom.xy + dpix * vec2(0., 0.));
                 let cam2 = sample2d(texturez, geom.xy + dpix * vec2(1., 0.));
                 let cam3 = sample2d(texturez, geom.xy + dpix * vec2(0., 1.));
                 let cam4 = sample2d(texturez, geom.xy + dpix * vec2(1., 1.));
-                
+
                 let cam5 = sample2d(texturez, geom.xy + dpix * vec2(2., 0.));
                 let cam6 = sample2d(texturez, geom.xy + dpix * vec2(3., 0.));
                 let cam7 = sample2d(texturez, geom.xy + dpix * vec2(2., 1.));
                 let cam8 = sample2d(texturez, geom.xy + dpix * vec2(3., 1.));
-                
+
                 let cam9 = sample2d(texturez, geom.xy + dpix * vec2(0., 2.));
                 let cam10 = sample2d(texturez, geom.xy + dpix * vec2(1., 3.));
                 let cam11 = sample2d(texturez, geom.xy + dpix * vec2(0., 2.));
                 let cam12 = sample2d(texturez, geom.xy + dpix * vec2(1., 3.));
-                
+
                 let cam13 = sample2d(texturez, geom.xy + dpix * vec2(2., 2.));
                 let cam14 = sample2d(texturez, geom.xy + dpix * vec2(3., 2.));
                 let cam15 = sample2d(texturez, geom.xy + dpix * vec2(2., 3.));
                 let cam16 = sample2d(texturez, geom.xy + dpix * vec2(3., 3.));
-                
+
                 let cama = cam1.y + cam2.y + cam3.y + cam4.y;
                 let camb = cam5.y + cam6.y + cam7.y + cam8.y;
                 let camc = cam9.y + cam10.y + cam11.y + cam12.y;
                 let camd = cam13.y + cam14.y + cam15.y + cam16.y;
-                
+
                 let delta = smoothstep(0.35, 0.5, abs(cama - camb) + abs(cama - camc) + abs(cama - camd) + abs(camb - camd) + abs(camc - camd));
                 return vec4(cam1.xyz, delta);
             }
-            
+
             fn pixel() -> vec4 {
                 //return color("pink");
                 let cam = sample_camera_depth(vec2(1.0 / 3840.0, 1.0 / 2160.0));
@@ -282,10 +282,10 @@ impl App {
             }
         }))
     }
-    
-    
+
+
     fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
-        
+
         match event {
             Event::Construct => {
                 self.capture.init(cx, 0, CaptureFormat::NV12, 3840, 2160, 30.0);
@@ -316,7 +316,7 @@ impl App {
                     }
                 },
                 KeyCode::F3 => {
-                    while self.windows.len() <= 2 {self.windows.push(self.window_template.clone());} 
+                    while self.windows.len() <= 2 {self.windows.push(self.window_template.clone());}
                     if self.windows[2].window.is_fullscreen(cx) {self.windows[2].window.restore_window(cx);}
                     else {
                         self.windows[2].window.set_position(cx, Vec2 {x: 1920. * 2. + 100., y: 0.});
@@ -334,18 +334,18 @@ impl App {
             }
             _ => ()
         }
-        
+
         for i in 0..self.windows.len() {
             self.windows[i].handle_desktop_window(cx, event);
         }
-        
+
         if let CaptureEvent::NewFrame = self.capture.handle_signal(cx, event) {
         }
-        
+
         if self.mandel.handle_signal(cx, event) {
         }
     }
-    
+
     fn map_input(val:f32, dead_zone:f32, exp:f32)->f32{
          if val > dead_zone {
            return ((val- dead_zone) / (1.-dead_zone)).powf(exp); //self.gamepad.right_trigger;
@@ -355,25 +355,25 @@ impl App {
         }
         0.0
     }
-    
+
     fn do_gamepad_interaction(&mut self, cx: &mut Cx) {
         self.gamepad.poll();
-        
+
         // preset mgmt
         let mut preset_handled = false;
         if self.gamepad.buttons & GamepadButtonBack>0 || self.gamepad.buttons & GamepadButtonStart>0 {
             preset_handled = true;
-            
-            // add 
-            if self.gamepad.buttons & GamepadButtonBack>0 && self.gamepad.buttons & GamepadButtonStart>0 && 
+
+            // add
+            if self.gamepad.buttons & GamepadButtonBack>0 && self.gamepad.buttons & GamepadButtonStart>0 &&
                 self.gamepad.buttons_down_edge & GamepadButtonA > 0{
-                self.current_preset = self.presets.len(); 
+                self.current_preset = self.presets.len();
                 self.presets.push(self.state.clone());
                 let json = serde_json::to_string(&self.presets).unwrap();
                 cx.file_write("mandelbrot_presets.json", json.as_bytes());
             }
             // remove
-            else if self.gamepad.buttons & GamepadButtonBack>0 && self.gamepad.buttons & GamepadButtonStart>0 && 
+            else if self.gamepad.buttons & GamepadButtonBack>0 && self.gamepad.buttons & GamepadButtonStart>0 &&
                 self.gamepad.buttons_down_edge & GamepadButtonB > 0{
                 self.presets.remove(self.current_preset);
                 if self.current_preset>0{
@@ -405,10 +405,10 @@ impl App {
                 self.state = self.presets[self.current_preset].clone();
             }
         }
-        
+
         // update the mandelbrot location
         let state = &mut self.state;
-        
+
         let last_lock_mode = state.lock_mode;
         if !preset_handled {
             if self.gamepad.buttons_down_edge & GamepadButtonRightShoulder > 0 {
@@ -445,14 +445,14 @@ impl App {
         //state.color_offset -= 0.02 * self.gamepad.left_trigger;
         let dx = 0.1 * Self::map_input(self.gamepad.right_thumb.x, 0., 2.0) as f64 * state.loc.zoom;
         let dy = -0.1 * Self::map_input(self.gamepad.right_thumb.y, 0., 2.0) as f64 * state.loc.zoom;
-        
+
         let dx_rot = dx * state.loc.rotate.cos() - dy * state.loc.rotate.sin();
         let dy_rot = dy * state.loc.rotate.cos() + dx * state.loc.rotate.sin();
-        
+
         state.loc.center_x += dx_rot;
         state.loc.center_y += dy_rot;
         state.loc.zoom = state.loc.zoom * (1.0 - zoom as f64);
-        
+
         if state.loc.zoom < 0.00000000000002 {
             state.loc.zoom = 0.00000000000002;
             if state.lock_mode && state.lock_zoom != 0.0 {
@@ -462,7 +462,7 @@ impl App {
         else if state.loc.zoom > 1.0 {
             state.loc.zoom = 1.0;
         }
-        
+
         let mut pred_loc = state.loc.clone();
         for _ in 0..10 {
             pred_loc.center_x += dx_rot;
@@ -471,27 +471,27 @@ impl App {
                 pred_loc.zoom = pred_loc.zoom * (1.0 - zoom as f64);
            };
         }
-        
+
         // we only send a new loc when we move more than 10% or zoom more than 25%
         if self.loc_history.len()>0{
             let last_loc = &self.loc_history[self.loc_history.len()-1];
-            if 
-            (last_loc.rotate-pred_loc.rotate).abs()>0.05 
+            if
+            (last_loc.rotate-pred_loc.rotate).abs()>0.05
             || (last_loc.center_x != pred_loc.center_x || last_loc.center_y != pred_loc.center_y) &&  dx == 0.0 && dy ==0.0
-            || (last_loc.center_x-pred_loc.center_x).abs()>0.1*pred_loc.zoom 
+            || (last_loc.center_x-pred_loc.center_x).abs()>0.1*pred_loc.zoom
             || (last_loc.center_y-pred_loc.center_y).abs()>0.1*pred_loc.zoom
             || last_loc.zoom > pred_loc.zoom && last_loc.zoom > pred_loc.zoom*1.1
             || last_loc.zoom < pred_loc.zoom && last_loc.zoom < pred_loc.zoom*0.9{
                 self.mandel.send_new_loc(self.loc_history.len(), pred_loc.clone(), zoom.abs()>0.01);
                 self.loc_history.push(pred_loc.clone());
             }
-            
+
         }
         else{
             self.mandel.send_new_loc(self.loc_history.len(), pred_loc.clone(), true);
             self.loc_history.push(pred_loc.clone());
         }
-        
+
         if !preset_handled {
             if self.gamepad.buttons_down_edge & GamepadButtonA > 0 {
                 if state.palette > 0.0 {state.palette -= 1.0;}
@@ -531,10 +531,10 @@ impl App {
             }
         }
     }
-    
-    
+
+
     fn draw_window(&mut self, window_id: usize, cx: &mut Cx) {
-        
+
         if let Err(_) = self.windows[window_id].begin_desktop_window(cx) {
             return
         }
@@ -550,8 +550,8 @@ impl App {
             self.cam_view.end_view(cx);
             self.cam_pass.end_pass(cx);
         }
-        
-        
+
+
         // draw our mandelbrot
         if window_id == 3 {
             self.blit.draw_blit_walk(cx, &self.cam_buffer, Bounds::Fill, Bounds::Fill, Margin::zero());
@@ -562,7 +562,7 @@ impl App {
                 inst.push_uniform_texture_2d(cx, &self.cam_buffer);
                 inst.push_uniform_float(cx, self.frame);
                 inst.push_uniform_float(cx, (state.loc.zoom / self.loc_history[index].zoom) as f32);
-                
+
                 let dx = self.loc_history[index].center_x - state.loc.center_x;
                 let dy = self.loc_history[index].center_y - state.loc.center_y;
                 let rev_rotate = -state.loc.rotate + (-self.loc_history[index].rotate + state.loc.rotate);
@@ -571,7 +571,7 @@ impl App {
                 let screen_dx = -(dx_rot / self.loc_history[index].zoom) / 5.33;
                 let screen_dy = -(dy_rot / self.loc_history[index].zoom) / 3.0;
                 inst.push_uniform_vec2f(cx, screen_dx as f32, screen_dy as f32);
-                
+
                 inst.push_uniform_float(cx, (-self.loc_history[index].rotate + state.loc.rotate).sin() as f32);
                 inst.push_uniform_float(cx, (-self.loc_history[index].rotate + state.loc.rotate).cos() as f32);
                 inst.push_uniform_float(cx, state.color_offset);
@@ -582,20 +582,20 @@ impl App {
                 cx.reset_turtle_walk();
             }
         }
-        
+
         self.frame += 0.001;
-        
+
         self.windows[window_id].inner_view.redraw_view_area(cx);
-        
+
         self.windows[window_id].end_desktop_window(cx);
     }
-    
+
     fn draw_app(&mut self, cx: &mut Cx) {
         self.do_gamepad_interaction(cx);
-        
+
         for i in 0..self.windows.len() {
             self.draw_window(i, cx);
         }
-        
+
     }
 }

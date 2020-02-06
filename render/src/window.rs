@@ -17,7 +17,7 @@ impl Window {
             create_title: "Makepad".to_string()
         }
     }
-    
+
     pub fn begin_window(&mut self, cx: &mut Cx) {
         // if we are not at ground level for viewports,
         if self.window_id.is_none() {
@@ -48,34 +48,34 @@ impl Window {
         let window_id = self.window_id.unwrap();
         cx.windows[window_id].main_pass_id = None;
         cx.window_stack.push(window_id);
-        
+
     }
-    
+
     pub fn get_inner_size(&mut self, cx: &mut Cx) -> Vec2 {
         if let Some(window_id) = self.window_id {
             return cx.windows[window_id].get_inner_size()
         }
         return Vec2::default();
     }
-    
+
     pub fn get_position(&mut self, cx: &mut Cx) -> Option<Vec2> {
         if let Some(window_id) = self.window_id {
             return cx.windows[window_id].get_position()
         }
         return None
     }
-    
-        
+
+
     pub fn set_position(&mut self, cx: &mut Cx, pos:Vec2) {
         if let Some(window_id) = self.window_id {
             return cx.windows[window_id].window_set_position = Some(pos);
         }
     }
-    
+
     pub fn handle_window(&mut self, _cx: &mut Cx, _event: &mut Event) -> bool {
         false
     }
-    
+
     pub fn redraw_window_area(&mut self, cx: &mut Cx) {
         if let Some(window_id) = self.window_id {
             if let Some(pass_id) = cx.windows[window_id].main_pass_id {
@@ -83,24 +83,24 @@ impl Window {
             }
         }
     }
-    
+
     pub fn end_window(&mut self, cx: &mut Cx) -> Area {
         cx.window_stack.pop();
         Area::Empty
     }
-    
+
     pub fn minimize_window(&mut self, cx: &mut Cx) {
         if let Some(window_id) = self.window_id {
             cx.windows[window_id].window_command = CxWindowCmd::Minimize;
         }
     }
-    
+
     pub fn maximize_window(&mut self, cx: &mut Cx) {
         if let Some(window_id) = self.window_id {
             cx.windows[window_id].window_command = CxWindowCmd::Maximize;
         }
     }
-    
+
     pub fn is_fullscreen(&mut self, cx: &mut Cx) -> bool {
         if let Some(window_id) = self.window_id {
             cx.windows[window_id].window_geom.is_fullscreen
@@ -109,7 +109,7 @@ impl Window {
             false
         }
     }
-    
+
     pub fn vr_is_presenting(&mut self, cx: &mut Cx) -> bool {
         if let Some(window_id) = self.window_id {
             cx.windows[window_id].window_geom.vr_is_presenting
@@ -118,19 +118,19 @@ impl Window {
             false
         }
     }
-    
+
     pub fn vr_start_presenting(&mut self, cx: &mut Cx){
         if let Some(window_id) = self.window_id {
             cx.windows[window_id].window_command = CxWindowCmd::VrStartPresenting;
         }
     }
-    
+
     pub fn vr_stop_presenting(&mut self, cx: &mut Cx){
         if let Some(window_id) = self.window_id {
             cx.windows[window_id].window_command = CxWindowCmd::VrStopPresenting;
         }
     }
-    
+
     pub fn is_topmost(&mut self, cx: &mut Cx) -> bool {
         if let Some(window_id) = self.window_id {
             cx.windows[window_id].window_geom.is_topmost
@@ -139,19 +139,19 @@ impl Window {
             false
         }
     }
-    
+
     pub fn set_topmost(&mut self, cx: &mut Cx, topmost: bool) {
         if let Some(window_id) = self.window_id {
             cx.windows[window_id].window_topmost = Some(topmost);
         }
     }
-    
+
     pub fn restore_window(&mut self, cx: &mut Cx) {
         if let Some(window_id) = self.window_id {
             cx.windows[window_id].window_command = CxWindowCmd::Restore;
         }
     }
-    
+
     pub fn close_window(&mut self, cx: &mut Cx) {
         if let Some(window_id) = self.window_id {
             cx.windows[window_id].window_state = CxWindowState::Close;
@@ -214,7 +214,7 @@ impl CxWindow {
             _ => Vec2::default()
         }
     }
-    
+
     pub fn get_position(&mut self) -> Option<Vec2> {
         match &self.window_state {
             CxWindowState::Create {position, ..} => *position,
@@ -222,7 +222,7 @@ impl CxWindow {
             _ => None
         }
     }
-    
+
     pub fn get_dpi_factor(&mut self) -> Option<f32> {
         match &self.window_state {
             CxWindowState::Created => Some(self.window_geom.dpi_factor),

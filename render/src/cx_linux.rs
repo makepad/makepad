@@ -1,36 +1,36 @@
 use crate::cx_xlib::*;
 use crate::cx::*;
- 
+
 impl Cx{
     pub fn event_loop<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event),
     {
         self.platform_type = PlatformType::Linux;
-        
+
         let mut xlib_app = XlibApp::new();
-        
+
         xlib_app.init();
-        
+
         let opengl_cx = OpenglCx::new(xlib_app.display);
-        
+
         let mut opengl_windows: Vec<OpenglWindow> = Vec::new();
-        
+
         self.opengl_compile_all_shaders(&opengl_cx);
-        
+
         self.load_theme_fonts();
-        
+
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
-        
-        self.redraw_child_area(Area::All); 
-        
+
+        self.redraw_child_area(Area::All);
+
         let mut passes_todo = Vec::new();
-        
+
         xlib_app.event_loop( | xlib_app, events | {
             let mut paint_dirty = false;
             for mut event in events {
-                
+
                 self.process_desktop_pre_event(&mut event, &mut event_handler);
-                
+
                 match &event {
                     Event::WindowSetHoverCursor(mc) => {
                         self.set_hover_mouse_cursor(mc.clone());
@@ -55,7 +55,7 @@ impl Cx{
                         self.windows[wc.window_id].window_state = CxWindowState::Closed;
                         self.windows_free.push(wc.window_id);
                         // remove the d3d11/win32 window
-                        
+
                         for index in 0..opengl_windows.len() {
                             if opengl_windows[index].window_id == wc.window_id {
                                 opengl_windows.remove(index);
@@ -71,10 +71,10 @@ impl Cx{
                     },
                     Event::Paint => {
                         let _vsync = self.process_desktop_paint_callbacks(xlib_app.time_now(), &mut event_handler);
-                        
+
                         // construct or destruct windows
                         for (index, window) in self.windows.iter_mut().enumerate() {
-                            
+
                             window.window_state = match &window.window_state {
                                 CxWindowState::Create {inner_size, position, title} => {
                                     // lets create a platformwindow
@@ -84,7 +84,7 @@ impl Cx{
                                     for opengl_window in &mut opengl_windows {
                                         opengl_window.xlib_window.update_ptrs();
                                     }
-                                    
+
                                     CxWindowState::Created
                                 },
                                 CxWindowState::Close => {
@@ -97,7 +97,7 @@ impl Cx{
                                 CxWindowState::Created => CxWindowState::Created,
                                 CxWindowState::Closed => CxWindowState::Closed
                             };
-                            
+
                             window.window_command = match &window.window_command {
                                 CxWindowCmd::Restore => {
                                     for opengl_window in &mut opengl_windows {if opengl_window.window_id == index {
@@ -119,7 +119,7 @@ impl Cx{
                                 },
                                 _ => CxWindowCmd::None,
                             };
-                            
+
                             if let Some(topmost) = window.window_topmost {
                                 for opengl_window in &mut opengl_windows {if opengl_window.window_id == index {
                                     opengl_window.xlib_window.set_topmost(topmost);
@@ -136,28 +136,28 @@ impl Cx{
                         else {
                             xlib_app.set_mouse_cursor(MouseCursor::Default)
                         }
-                        
+
                         if let Some(set_ime_position) = self.platform.set_ime_position {
                             self.platform.set_ime_position = None;
                             for opengl_window in &mut opengl_windows {
                                 opengl_window.xlib_window.set_ime_spot(set_ime_position);
                             }
                         }
-                        
+
                         while self.platform.start_timer.len() > 0 {
                             let (timer_id, interval, repeats) = self.platform.start_timer.pop().unwrap();
                             xlib_app.start_timer(timer_id, interval, repeats);
                         }
-                        
+
                         while self.platform.stop_timer.len() > 0 {
                             let timer_id = self.platform.stop_timer.pop().unwrap();
                             xlib_app.stop_timer(timer_id);
                         }
-                        
+
                         // build a list of renderpasses to repaint
                         let mut windows_need_repaint = 0;
                         self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
-                        
+
                         if passes_todo.len() > 0 {
                             for pass_id in &passes_todo {
                                 match self.passes[*pass_id].dep_of.clone() {
@@ -170,13 +170,13 @@ impl Cx{
                                                 break;
                                             }
                                             let dpi_factor = opengl_window.window_geom.dpi_factor;
-                                            
+
                                             self.passes[*pass_id].set_dpi_factor(dpi_factor);
-                                            
+
                                             opengl_window.resize_framebuffer(&opengl_cx);
-                                            
+
                                             self.passes[*pass_id].paint_dirty = false;
-                                            
+
                                             if self.draw_pass_to_window(
                                                 *pass_id,
                                                 dpi_factor,
@@ -237,36 +237,36 @@ impl Cx{
             }
         })
     }
-    
-    
+
+
     pub fn show_text_ime(&mut self, x: f32, y: f32) {
         self.platform.set_ime_position = Some(Vec2 {x: x, y: y});
     }
-    
+
     pub fn hide_text_ime(&mut self) {
     }
-    
+
     pub fn set_window_outer_size(&mut self, size: Vec2) {
         self.platform.set_window_outer_size = Some(size);
     }
-    
+
     pub fn set_window_position(&mut self, pos: Vec2) {
         self.platform.set_window_position = Some(pos);
     }
-    
+
     pub fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
         self.timer_id += 1;
         self.platform.start_timer.push((self.timer_id, interval, repeats));
         Timer {timer_id: self.timer_id}
     }
-    
+
     pub fn stop_timer(&mut self, timer: &mut Timer) {
         if timer.timer_id != 0 {
             self.platform.stop_timer.push(timer.timer_id);
             timer.timer_id = 0;
         }
     }
-    
+
     pub fn post_signal(signal: Signal, status: StatusId) {
         XlibApp::post_signal(signal, status);
     }

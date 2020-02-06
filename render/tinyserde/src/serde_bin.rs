@@ -7,7 +7,7 @@ pub trait SerBin {
         self.ser_bin(&mut s);
         s
     }
-    
+
     fn ser_bin(&self, s: &mut Vec<u8>);
 }
 
@@ -40,13 +40,13 @@ macro_rules! impl_ser_de_bin_for {
                 s.extend_from_slice(du8);
             }
         }
-        
+
         impl DeBin for $ty {
             fn de_bin(o:&mut usize, d:&[u8]) -> Result<$ty, DeBinErr> {
                 let l = std::mem::size_of::<$ty>();
                 if *o + l > d.len(){
                     return Err(DeBinErr{o:*o, l:l, s:d.len()})
-                } 
+                }
                 let mut m = [0 as $ty];
                 unsafe {std::ptr::copy_nonoverlapping(d.as_ptr().offset(*o as isize) as *const $ty, m.as_mut_ptr() as *mut $ty, 1)}
                 *o += l;
@@ -78,7 +78,7 @@ impl DeBin for usize {
         let l = std::mem::size_of::<u64>();
         if *o + l > d.len(){
             return Err(DeBinErr{o:*o, l:l, s:d.len()})
-        } 
+        }
         let mut m = [0 as u64];
         unsafe {std::ptr::copy_nonoverlapping(d.as_ptr().offset(*o as isize) as *const u64, m.as_mut_ptr() as *mut u64, 1)}
         *o += l;
@@ -90,7 +90,7 @@ impl DeBin for u8 {
     fn de_bin(o:&mut usize, d:&[u8]) -> Result<u8,DeBinErr> {
         if *o + 1 > d.len(){
             return Err(DeBinErr{o:*o, l:1, s:d.len()})
-        } 
+        }
         let m = d[*o];
         *o += 1;
         Ok(m)
@@ -113,7 +113,7 @@ impl DeBin for bool {
     fn de_bin(o:&mut usize, d:&[u8]) -> Result<bool, DeBinErr> {
         if *o + 1 > d.len(){
             return Err(DeBinErr{o:*o, l:1, s:d.len()})
-        } 
+        }
         let m = d[*o];
         *o += 1;
         if m == 0{Ok(false)} else {Ok(true)}
@@ -133,7 +133,7 @@ impl DeBin for String {
         let len:usize = DeBin::de_bin(o,d)?;
         if *o + len > d.len(){
             return Err(DeBinErr{o:*o, l:1, s:d.len()})
-        } 
+        }
         let r = std::str::from_utf8(&d[*o..(*o+len)]).unwrap().to_string();
         *o += len;
         Ok(r)
@@ -177,7 +177,7 @@ impl<T> DeBin for Option<T> where T:DeBin{
     fn de_bin(o:&mut usize, d:&[u8])->Result<Option<T>, DeBinErr> {
         if *o + 1 > d.len(){
             return Err(DeBinErr{o:*o, l:1, s:d.len()})
-        } 
+        }
         let m = d[*o];
         *o += 1;
         if m == 1{
@@ -241,7 +241,7 @@ impl<A,B,C> SerBin for (A,B,C) where A: SerBin, B:SerBin, C:SerBin {
         self.0.ser_bin(s);
         self.1.ser_bin(s);
         self.2.ser_bin(s);
-    } 
+    }
 }
 
 impl<A,B,C> DeBin for (A,B,C) where A:DeBin, B:DeBin, C:DeBin{

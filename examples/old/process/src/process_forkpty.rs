@@ -10,7 +10,7 @@ pub struct Process {
 impl Process {
     // starts a process with a read/write pipe
     // since rusts Process is broken.
-    
+
     pub fn write(&mut self, _values: &str) {
     }
 
@@ -102,18 +102,18 @@ impl Process {
             ws_xpixel: 0,
             ws_ypixel: 0
         };
-        
+
         let mut termp = Self::get_platform_termios();
-        
+
         unsafe{
             let mut master = mem::uninitialized();
             let pid = libc::forkpty(&mut master, ptr::null_mut(), &mut termp, &mut winp);
             if pid != 0{ // we are the master process
                 // lets start a thread to read from / write to the master fd
-                
+
             }
             else{ // child process. exec a shell or something
-                
+
             }
             println!("WE GOT A PID {}", pid);
         }

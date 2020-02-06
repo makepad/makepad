@@ -11,4 +11,4 @@ pub use crate::process_conpty::*;
 #[cfg(target_arch = "wasm32")]
 mod process_dummy;
 #[cfg(target_arch = "wasm32")]
-pub use crate::process_dummy::*; 
+pub use crate::process_dummy::*;

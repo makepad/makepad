@@ -1,6 +1,6 @@
 use std::io::Write;
 
-fn main(){ 
+fn main(){
     let data = std::fs::read("target/wasm32-unknown-unknown/release/makepad_wasm.wasm").expect("can't read");
     let mut result = Vec::new();
     {

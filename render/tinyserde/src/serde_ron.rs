@@ -12,30 +12,30 @@ impl SerRonState {
             self.out.push_str("    ");
         }
     }
-    
+
     pub fn field(&mut self, d: usize, field: &str) {
         self.indent(d);
         self.out.push_str(field);
         self.out.push(':');
     }
-    
+
     pub fn conl(&mut self) {
         self.out.push_str(",\n")
     }
-    
+
     pub fn st_pre(&mut self) {
         self.out.push_str("(\n");
     }
-    
+
     pub fn st_post(&mut self, d: usize) {
         self.indent(d);
         self.out.push(')');
     }
-    
+
 }
 
 pub trait SerRon {
-    
+
     fn serialize_ron(&self) -> String {
         let mut s = SerRonState {
             out: String::new()
@@ -43,12 +43,12 @@ pub trait SerRon {
         self.ser_ron(0, &mut s);
         s.out
     }
-    
+
     fn ser_ron(&self, d: usize, s: &mut SerRonState);
 }
 
 pub trait DeRon: Sized {
-    
+
     fn deserialize_ron(input: &str) -> Result<Self,
     DeRonErr> {
         let mut state = DeRonState::default();
@@ -57,7 +57,7 @@ pub trait DeRon: Sized {
         state.next_tok(&mut chars) ?;
         DeRon::de_ron(&mut state, &mut chars)
     }
-    
+
     fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Self,
     DeRonErr>;
 }
@@ -126,35 +126,35 @@ impl DeRonState {
             self.cur = '\0';
         }
     }
-    
+
     pub fn err_exp(&self, name: &str) -> DeRonErr {
         DeRonErr {msg: format!("Unexpected key {}", name), line: self.line, col: self.col}
     }
-    
+
     pub fn err_nf(&self, name: &str) -> DeRonErr {
         DeRonErr {msg: format!("Key not found {}", name), line: self.line, col: self.col}
     }
-    
+
     pub fn err_enum(&self, name: &str) -> DeRonErr {
         DeRonErr {msg: format!("Enum not defined {}", name), line: self.line, col: self.col}
     }
-    
+
     pub fn err_token(&self, what: &str) -> DeRonErr {
         DeRonErr {msg: format!("Unexpected token {:?} expected {} ", self.tok, what), line: self.line, col: self.col}
     }
-    
+
     pub fn err_range(&self, what: &str) -> DeRonErr {
         DeRonErr {msg: format!("Value out of range {} ", what), line: self.line, col: self.col}
     }
-    
+
     pub fn err_type(&self, what: &str) -> DeRonErr {
         DeRonErr {msg: format!("Token wrong type {} ", what), line: self.line, col: self.col}
     }
-    
+
     pub fn err_parse(&self, what: &str) -> DeRonErr {
         DeRonErr {msg: format!("Cannot parse {} ", what), line: self.line, col: self.col}
     }
-    
+
     pub fn eat_comma_paren(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         match self.tok {
             DeRonTok::Comma => {
@@ -169,7 +169,7 @@ impl DeRonState {
             }
         }
     }
-    
+
     pub fn eat_comma_block(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         match self.tok {
             DeRonTok::Comma => {
@@ -184,7 +184,7 @@ impl DeRonState {
             }
         }
     }
-    
+
     pub fn eat_comma_curly(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         match self.tok {
             DeRonTok::Comma => {
@@ -199,7 +199,7 @@ impl DeRonState {
             }
         }
     }
-    
+
     pub fn colon(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         match self.tok {
             DeRonTok::Colon => {
@@ -211,7 +211,7 @@ impl DeRonState {
             }
         }
     }
-    
+
     pub fn ident(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         match &mut self.tok {
             DeRonTok::Ident => {
@@ -223,13 +223,13 @@ impl DeRonState {
             }
         }
     }
-    
+
     pub fn next_colon(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         self.next_tok(i) ?;
         self.colon(i) ?;
         Ok(())
     }
-    
+
     pub fn next_ident(&mut self) -> Option<()> {
         if let DeRonTok::Ident = &mut self.tok {
             Some(())
@@ -238,7 +238,7 @@ impl DeRonState {
             None
         }
     }
-    
+
     pub fn paren_open(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         if self.tok == DeRonTok::ParenOpen {
             self.next_tok(i) ?;
@@ -246,8 +246,8 @@ impl DeRonState {
         }
         Err(self.err_token("("))
     }
-    
-    
+
+
     pub fn paren_close(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         if self.tok == DeRonTok::ParenClose {
             self.next_tok(i) ?;
@@ -255,7 +255,7 @@ impl DeRonState {
         }
         Err(self.err_token(")"))
     }
-    
+
     pub fn block_open(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         if self.tok == DeRonTok::BlockOpen {
             self.next_tok(i) ?;
@@ -263,8 +263,8 @@ impl DeRonState {
         }
         Err(self.err_token("["))
     }
-    
-    
+
+
     pub fn block_close(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         if self.tok == DeRonTok::BlockClose {
             self.next_tok(i) ?;
@@ -272,7 +272,7 @@ impl DeRonState {
         }
         Err(self.err_token("]"))
     }
-    
+
     pub fn curly_open(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         if self.tok == DeRonTok::CurlyOpen {
             self.next_tok(i) ?;
@@ -280,8 +280,8 @@ impl DeRonState {
         }
         Err(self.err_token("{"))
     }
-    
-    
+
+
     pub fn curly_close(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         if self.tok == DeRonTok::CurlyClose {
             self.next_tok(i) ?;
@@ -289,8 +289,8 @@ impl DeRonState {
         }
         Err(self.err_token("}"))
     }
-    
-    
+
+
     pub fn u64_range(&mut self, max: u64) -> Result<u64, DeRonErr> {
         if let DeRonTok::U64(value) = self.tok {
             if value > max {
@@ -300,7 +300,7 @@ impl DeRonState {
         }
         Err(self.err_token("unsigned integer"))
     }
-    
+
     pub fn i64_range(&mut self, min: i64, max: i64) -> Result<i64, DeRonErr> {
         if let DeRonTok::I64(value) = self.tok {
             if value< min {
@@ -316,7 +316,7 @@ impl DeRonState {
         }
         Err(self.err_token("signed integer"))
     }
-    
+
     pub fn as_f64(&mut self) -> Result<f64, DeRonErr> {
         if let DeRonTok::I64(value) = self.tok {
             return Ok(value as f64)
@@ -329,7 +329,7 @@ impl DeRonState {
         }
         Err(self.err_token("floating point"))
     }
-    
+
     pub fn as_bool(&mut self) -> Result<bool, DeRonErr> {
         if let DeRonTok::Bool(value) = self.tok {
             return Ok(value)
@@ -339,7 +339,7 @@ impl DeRonState {
         }
         Err(self.err_token("boolean"))
     }
-    
+
     pub fn as_string(&mut self) -> Result<String, DeRonErr> {
         if let DeRonTok::Str = &mut self.tok {
             let mut val = String::new();
@@ -348,7 +348,7 @@ impl DeRonState {
         }
         Err(self.err_token("string"))
     }
-    
+
     pub fn next_tok(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         loop {
             while self.cur == '\n' || self.cur == '\r' || self.cur == '\t' || self.cur == ' ' {
@@ -550,7 +550,7 @@ macro_rules!impl_ser_de_ron_unsigned {
                 s.out.push_str(&self.to_string());
             }
         }
-        
+
         impl DeRon for $ ty {
             fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result< $ ty,
             DeRonErr> {
@@ -570,7 +570,7 @@ macro_rules!impl_ser_de_ron_signed {
                 s.out.push_str(&self.to_string());
             }
         }
-        
+
         impl DeRon for $ ty {
             fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result< $ ty,
             DeRonErr> {
@@ -590,7 +590,7 @@ macro_rules!impl_ser_de_ron_float {
                 s.out.push_str(&self.to_string());
             }
         }
-        
+
         impl DeRon for $ ty {
             fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result< $ ty,
             DeRonErr> {
@@ -701,7 +701,7 @@ impl<T> DeRon for Vec<T> where T: DeRon {
     fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Vec<T>, DeRonErr> {
         let mut out = Vec::new();
         s.block_open(i) ?;
-        
+
         while s.tok != DeRonTok::BlockClose {
             out.push(DeRon::de_ron(s, i) ?);
             s.eat_comma_block(i) ?;

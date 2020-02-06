@@ -265,7 +265,7 @@ pub struct HitOpt {
 }
 
 impl Event {
-    
+
     pub fn hits(&mut self, cx: &mut Cx, area: Area, opt: HitOpt) -> Event {
         match self {
             Event::KeyFocus(kf) => {
@@ -332,7 +332,7 @@ impl Event {
             },
             Event::FingerHover(fe) => {
                 let rect = area.get_rect(&cx);
-                
+
                 if cx._finger_over_last_area == area {
                     let mut any_down = false;
                     for fin_area in &cx.captured_fingers {
@@ -463,11 +463,11 @@ impl Signal {
             signal_id: 0
         }
     }
-    
+
     pub fn is_empty(&self) -> bool {
         self.signal_id == 0
     }
-    
+
     pub fn send(&self, cx:&mut Cx, status:StatusId){
         cx.send_signal(*self, status);
     }
@@ -503,7 +503,7 @@ impl FileRead {
     pub fn is_pending(&self) -> bool {
         self.read_id != 0
     }
-    
+
     pub fn resolve_utf8<'a>(&mut self, fr: &'a FileReadEvent) -> Option<Result<&'a str,String>> {
         if fr.read_id == self.read_id {
             self.read_id = 0;
@@ -534,11 +534,11 @@ impl Timer {
             timer_id: 0,
         }
     }
-    
+
     pub fn is_empty(&self) -> bool {
         self.timer_id == 0
     }
-    
+
     pub fn is_timer(&mut self, te: &TimerEvent) -> bool {
         te.timer_id == self.timer_id
     }
@@ -559,7 +559,7 @@ impl Event {
             _ => ()
         }
     }
-    
+
     pub fn handled(&self) -> bool {
         match self {
             Event::FingerHover(fe) => {
@@ -571,19 +571,19 @@ impl Event {
             Event::FingerDown(fe) => {
                 fe.handled
             },
-            
+
             _ => false
         }
     }
-    
-    
+
+
 }
 
 // lowest common denominator keymap between desktop and web
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum KeyCode {
     Escape,
-    
+
     Backtick,
     Key0,
     Key1,
@@ -597,10 +597,10 @@ pub enum KeyCode {
     Key9,
     Minus,
     Equals,
-    
+
     Backspace,
     Tab,
-    
+
     KeyQ,
     KeyW,
     KeyE,
@@ -614,7 +614,7 @@ pub enum KeyCode {
     LBracket,
     RBracket,
     Return,
-    
+
     KeyA,
     KeyS,
     KeyD,
@@ -627,7 +627,7 @@ pub enum KeyCode {
     Semicolon,
     Quote,
     Backslash,
-    
+
     KeyZ,
     KeyX,
     KeyC,
@@ -638,17 +638,17 @@ pub enum KeyCode {
     Comma,
     Period,
     Slash,
-    
+
     Control,
     Alt,
     Shift,
     Logo,
-    
+
     //RightControl,
     //RightShift,
     //RightAlt,
     //RightLogo,
-    
+
     Space,
     Capslock,
     F1,
@@ -663,18 +663,18 @@ pub enum KeyCode {
     F10,
     F11,
     F12,
-    
+
     PrintScreen,
     Scrolllock,
     Pause,
-    
+
     Insert,
     Delete,
     Home,
     End,
     PageUp,
     PageDown,
-    
+
     Numpad0,
     Numpad1,
     Numpad2,
@@ -685,7 +685,7 @@ pub enum KeyCode {
     Numpad7,
     Numpad8,
     Numpad9,
-    
+
     NumpadEquals,
     NumpadSubtract,
     NumpadAdd,
@@ -694,12 +694,12 @@ pub enum KeyCode {
     NumpadDivide,
     Numlock,
     NumpadEnter,
-    
+
     ArrowUp,
     ArrowDown,
     ArrowLeft,
     ArrowRight,
-    
+
     Unknown
 }
 

@@ -18,11 +18,11 @@ pub enum ButtonEvent {
     None,
     Clicked,
     Down,
-    Up 
+    Up
 }
 
 impl ButtonLogic {
-    
+
     pub fn handle_button_logic<F>(&mut self, cx: &mut Cx, event: &mut Event, area:Area, mut cb:F) -> ButtonEvent
     where F: FnMut(&mut Cx, ButtonLogicEvent, Area)
     {

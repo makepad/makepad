@@ -14,21 +14,21 @@ use deflate::write::ZlibEncoder;
 fn main() {
     // read the entire file tree, and brotli it.
     let mut filecache = HashMap::new();
-    
+
     fn compress_tree_recursive(base_path: &str, calc_path: &str, ext_inc: &[&str], file_ex: &[&str], dir_ex: &[&str], filecache: &mut HashMap<String, Vec<u8>>) {
         if let Ok(read_dir) = fs::read_dir(calc_path) {
             for entry in read_dir {
                 if entry.is_err() {continue};
                 let entry = entry.unwrap();
-                
+
                 let ty = entry.file_type();
                 if ty.is_err() {continue};
                 let ty = ty.unwrap();
-                
+
                 let name = entry.file_name().into_string();
                 if name.is_err() {continue};
                 let name = name.unwrap();
-                
+
                 if ty.is_dir() {
                     if dir_ex.iter().find( | dir | **dir == name).is_some() {
                         continue
@@ -44,7 +44,7 @@ fn main() {
                         let read_path = format!("{}/{}", calc_path, name);
                         let data = fs::read(read_path).expect("Can't read file");
                         // lets brotli it
-                        
+
                         /*
                         let mut result = Vec::new();
                         {
@@ -56,7 +56,7 @@ fn main() {
                         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::Default);
                         encoder.write_all(&data).expect("Write error!");
                         let result = encoder.finish().expect("Failed to finish compression!");
-                        
+
                         println!("Compressed {} {}->{}", key_path, data.len(), result.len());
                         filecache.insert(key_path, result);
                     }
@@ -64,7 +64,7 @@ fn main() {
             }
         }
     }
-    
+
     compress_tree_recursive(
         "",
         "./",
@@ -72,8 +72,8 @@ fn main() {
         &["bindings.rs"],
         &["deps", "build", "edit_repo"],
         &mut filecache
-    ); 
-    
+    );
+
     let http_server = HttpServer::start_http_server(
         SocketAddr::from(([0, 0, 0, 0], 80)),
         Arc::new(filecache),
@@ -85,16 +85,16 @@ pub struct HttpServer {
     pub listen_thread: Option<std::thread::JoinHandle<()>>,
     pub listen_address: Option<SocketAddr>,
 }
- 
+
 impl HttpServer {
     pub fn start_http_server(listen_address: SocketAddr, filecache: Arc<HashMap<String, Vec<u8>>>) -> Option<HttpServer> {
-        
+
         let listener = if let Ok(listener) = TcpListener::bind(listen_address.clone()) {listener} else {println!("Cannot bind http server port"); return None};
-        
+
         let listen_thread = {
             std::thread::spawn(move || {
                 for tcp_stream in listener.incoming() {
-                    
+
                     let mut tcp_stream = if let Ok(tcp_stream) = tcp_stream {
                         tcp_stream
                     }
@@ -105,10 +105,10 @@ impl HttpServer {
                     let filecache = filecache.clone();
                     let _read_thread = std::thread::spawn(move || {
                         let mut reader = BufReader::new(tcp_stream.try_clone().expect("Cannot clone tcp stream"));
-                        
+
                         let mut line = String::new();
                         reader.read_line(&mut line).expect("http read line fail");
-                        
+
                         if line.starts_with("POST /subscribe"){ // writing email address
                             let mut content_size:u32 = 0;
                             while let Ok(_) = reader.read_line(&mut line){
@@ -143,41 +143,41 @@ impl HttpServer {
                                     .append(true)
                                     .open("subscribe.db")
                                     .unwrap();
-                                    
+
                                 data.push('\n' as u8);
                                 if let Err(_) = file.write(&data){
                                     println!("Couldn't append email to file");
                                 }
                             }
-                            // lets append this to our file 
+                            // lets append this to our file
                             write_bytes_to_tcp_stream_no_error(&mut tcp_stream, "HTTP/1.1 200 OK\r\n\r\n".as_bytes());
                             let _ = tcp_stream.shutdown(Shutdown::Both);
-                            return 
+                            return
                         }
 
                         if !line.starts_with("GET /") || line.len() < 10 {
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                             return
                         }
-                        
+
                         let line = &line[4..];
-                        
+
                         let space = line.find(' ').expect("http space fail");
                         let space = if let Some(q) = line.find('?'){
                             space.min(q)
                         }else{space};
-                        
+
                         let mut url = line[0..space].to_string();
                         if url.ends_with("/") {
                             url.push_str("index.html");
                         }
 
-                        if let Some(data) = filecache.get(&url){  
+                        if let Some(data) = filecache.get(&url){
                             let mime_type = if url.ends_with(".html") {"text/html"}
                                 else if url.ends_with(".wasm") {"application/wasm"}
                                 else if url.ends_with(".js") {"text/javascript"}
                                 else {"application/octet-stream"};
-                            
+
                             // write the header
                             let header = format!(
                                 "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-encoding: deflate\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

@@ -1,4 +1,4 @@
-use crate::cx::*; 
+use crate::cx::*;
 
 #[derive(Clone, Default, Debug, PartialEq, Copy)]
 pub struct InstanceArea{
@@ -12,7 +12,7 @@ pub struct InstanceArea{
 #[derive(Clone, Default, Debug, PartialEq, Copy)]
 pub struct ViewArea{
     pub view_id:usize,
-    pub redraw_id:u64 
+    pub redraw_id:u64
 }
 
 #[derive(Clone, Debug, PartialEq, Copy)]
@@ -26,13 +26,13 @@ pub enum Area{
 impl Default for Area{
     fn default()->Area{
         Area::Empty
-    } 
-}  
+    }
+}
 
 pub struct InstanceReadRef<'a>{
     pub offset:usize,
     pub slots:usize,
-    pub count:usize, 
+    pub count:usize,
     pub buffer:&'a Vec<f32>
 }
 
@@ -73,7 +73,7 @@ impl Area{
             _=>false,
         }
     }
-    
+
     pub fn get_local_scroll_pos(&self, cx:&Cx)->Vec2{
         return match self{
             Area::Instance(inst)=>{
@@ -206,7 +206,7 @@ impl Area{
                 }
                 let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
                 let sh = &cx.shaders[draw_call.shader_id];        // ok now we have to patch x/y/w/h into it
-                
+
                 if let Some(ix) = sh.mapping.rect_instance_props.x{
                     draw_call.instance[inst.instance_offset + ix] = rect.x;
                 }
@@ -282,8 +282,8 @@ impl Area{
                 let sh = &cx.shaders[draw_call.shader_id];
                 return Some(
                     InstanceReadRef{
-                        offset:inst.instance_offset, 
-                        count:inst.instance_count, 
+                        offset:inst.instance_offset,
+                        count:inst.instance_count,
                         slots:sh.mapping.instance_slots,
                         buffer:&draw_call.instance
                     }
@@ -308,8 +308,8 @@ impl Area{
                 draw_call.instance_dirty = true;
                 return Some(
                     InstanceWriteRef{
-                        offset:inst.instance_offset, 
-                        count:inst.instance_count, 
+                        offset:inst.instance_offset,
+                        count:inst.instance_count,
                         slots:sh.mapping.instance_slots,
                         buffer:&mut draw_call.instance
                     }
@@ -488,7 +488,7 @@ impl Area{
             println!("uniform_vec2f called on invalid area pointer, use mark/sweep correctly!");
             return
         }
-        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
         draw_call.uniforms.push(x);
         draw_call.uniforms.push(y);
     }
@@ -499,7 +499,7 @@ impl Area{
             println!("uniform_vec3f called on invalid area pointer, use mark/sweep correctly!");
             return
         }
-        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
         draw_call.uniforms.push(x);
         draw_call.uniforms.push(y);
         draw_call.uniforms.push(z);
@@ -511,7 +511,7 @@ impl Area{
             println!("uniform_vec4f called on invalid area pointer, use mark/sweep correctly!");
             return
         }
-        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
         draw_call.uniforms.push(x);
         draw_call.uniforms.push(y);
         draw_call.uniforms.push(z);
@@ -524,7 +524,7 @@ impl Area{
             println!("uniform_mat4 called on invalid area pointer, use mark/sweep correctly!");
             return
         }
-        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
         for i in 0..16{
             draw_call.uniforms.push(v.v[i]);
         }
@@ -538,7 +538,7 @@ impl Into<Area> for InstanceArea{
 }
 
 impl InstanceArea{
-    
+
     pub fn push_slice(&self, cx:&mut Cx, data:&[f32]){
         let cxview = &mut cx.views[self.view_id];
         if cxview.redraw_id != self.redraw_id {
@@ -669,7 +669,7 @@ impl InstanceArea{
             println!("uniform_texture_2d called on invalid area pointer, use mark/sweep correctly!");
             return
         }
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
+        let draw_call = &mut cxview.draw_calls[self.draw_call_id];
          if let Some(texture_id) = texture.texture_id{
             draw_call.textures_2d.push(texture_id as u32);
         }
@@ -684,7 +684,7 @@ impl InstanceArea{
             println!("uniform_texture_2d called on invalid area pointer, use mark/sweep correctly!");
             return
         }
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
+        let draw_call = &mut cxview.draw_calls[self.draw_call_id];
         draw_call.textures_2d.push(texture_id as u32);
     }
 
@@ -694,7 +694,7 @@ impl InstanceArea{
             println!("uniform_float called on invalid area pointer, use mark/sweep correctly!");
             return
         }
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
+        let draw_call = &mut cxview.draw_calls[self.draw_call_id];
         draw_call.uniforms.push(v);
     }
 
@@ -704,7 +704,7 @@ impl InstanceArea{
             println!("uniform_vec2f called on invalid area pointer, use mark/sweep correctly!");
             return
         }
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
+        let draw_call = &mut cxview.draw_calls[self.draw_call_id];
         let left = draw_call.uniforms.len()&3;
         if left > 2{ // align buffer
             for _ in 0..(4-left){
@@ -721,7 +721,7 @@ impl InstanceArea{
             println!("uniform_vec2f called on invalid area pointer, use mark/sweep correctly!");
             return
         }
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
+        let draw_call = &mut cxview.draw_calls[self.draw_call_id];
         let left = draw_call.uniforms.len()&3;
         if left > 2{ // align buffer
             for _ in 0..(4-left){
@@ -738,7 +738,7 @@ impl InstanceArea{
             println!("uniform_vec3f called on invalid area pointer, use mark/sweep correctly!");
             return
         }
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
+        let draw_call = &mut cxview.draw_calls[self.draw_call_id];
         let left = draw_call.uniforms.len()&3;
         if left > 1{ // align buffer
             for _ in 0..(4-left){
@@ -756,7 +756,7 @@ impl InstanceArea{
             println!("uniform_vec4f called on invalid area pointer, use mark/sweep correctly!");
             return
         }
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
+        let draw_call = &mut cxview.draw_calls[self.draw_call_id];
         let left = draw_call.uniforms.len()&3;
         if left > 0{ // align buffer
             for _ in 0..(4-left){
@@ -775,7 +775,7 @@ impl InstanceArea{
             println!("uniform_mat4 called on invalid area pointer, use mark/sweep correctly!");
             return
         }
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
+        let draw_call = &mut cxview.draw_calls[self.draw_call_id];
         for i in 0..16{
             draw_call.uniforms.push(v.v[i]);
         }

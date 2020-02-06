@@ -16,7 +16,7 @@ impl RustEditor {
         //tab.animator.default = tab.anim_default(cx);
         editor
     }
-    
+
     pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, search_index: Option<&mut SearchIndex>) -> TextEditorEvent {
         let ce = self.text_editor.handle_text_editor(cx, event, &mut atb.text_buffer);
         match ce {
@@ -32,16 +32,16 @@ impl RustEditor {
         }
         ce
     }
-    
+
     pub fn draw_rust_editor(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, search_index: Option<&mut SearchIndex>) {
         RustTokenizer::update_token_chunks(atb, search_index);
-        
+
         if self.text_editor.begin_text_editor(cx, &mut atb.text_buffer).is_err() {return}
-        
+
         for (index, token_chunk) in atb.text_buffer.token_chunks.iter_mut().enumerate() {
             self.text_editor.draw_chunk(cx, index, &atb.text_buffer.flat_text, token_chunk, &atb.text_buffer.markers);
         }
-        
+
         self.text_editor.end_text_editor(cx, &mut atb.text_buffer);
     }
 }
@@ -75,7 +75,7 @@ impl RustTokenizer {
             if pair_stack.len() > 0 {
                 atb.text_buffer.was_invalid_pair = true;
             }
-            
+
             // ok now lets write a diff with the previous one
             //let mut new_index = 0;
             //let mut old_index = 0;
@@ -95,7 +95,7 @@ impl RustTokenizer {
                     let tok = &atb.text_buffer.flat_text[new_tok.offset..new_tok.offset + new_tok.len];
                     if tok_cmp("pick", tok) {
                         // parse the next tokens as a pick
-                        
+
                     }
                 }
                 if new_index < atb.text_buffer.token_chunks.len() {
@@ -111,7 +111,7 @@ impl RustTokenizer {
             }*/
         }
     }
-    
+
     pub fn new() -> RustTokenizer {
         RustTokenizer {
             comment_single: false,
@@ -119,7 +119,7 @@ impl RustTokenizer {
             in_string: false
         }
     }
-    
+
     pub fn next_token<'a>(&mut self, state: &mut TokenizerState<'a>, chunk: &mut Vec<char>, token_chunks: &Vec<TokenChunk>) -> TokenType {
         let start = chunk.len();
         //chunk.truncate(0);
@@ -158,7 +158,7 @@ impl RustTokenizer {
                     state.advance_with_cur();
                 }
             }
-            
+
         }
         else if self.comment_depth >0 { // parse comments
             loop {
@@ -195,7 +195,7 @@ impl RustTokenizer {
                     if (chunk.len() - start)>0 {
                         return TokenType::CommentChunk
                     }
-                    
+
                     chunk.push(state.next);
                     state.advance();
                     return TokenType::Newline
@@ -260,7 +260,7 @@ impl RustTokenizer {
                 },
                 '\'' => { // parse char literal or lifetime annotation
                     chunk.push(state.cur);
-                    
+
                     if Self::parse_rust_escape_char(state, chunk) { // escape char or unicode
                         if state.next == '\'' { // parsed to closing '
                             chunk.push(state.next);
@@ -367,7 +367,7 @@ impl RustTokenizer {
                         chunk.push(state.next);
                         state.advance();
                     }
-                    
+
                     return TokenType::Operator;
                 },
                 '.' => {
@@ -461,7 +461,7 @@ impl RustTokenizer {
                 },
                 'a'..='z' => { // try to parse keywords or identifiers
                     chunk.push(state.cur);
-                    
+
                     let keyword_type = Self::parse_rust_lc_keyword(state, chunk, token_chunks);
                     let (is_ident, _) = Self::parse_rust_ident_tail(state, chunk);
                     if is_ident {
@@ -504,7 +504,7 @@ impl RustTokenizer {
             }
         }
     }
-    
+
     fn parse_rust_ident_tail<'a>(state: &mut TokenizerState<'a>, chunk: &mut Vec<char>) -> (bool, bool) {
         let mut ret = false;
         let mut has_underscores = false;
@@ -518,8 +518,8 @@ impl RustTokenizer {
         }
         (ret, has_underscores)
     }
-    
-    
+
+
     fn parse_rust_escape_char<'a>(state: &mut TokenizerState<'a>, chunk: &mut Vec<char>) -> bool {
         if state.next == '\\' {
             chunk.push(state.next);
@@ -628,7 +628,7 @@ impl RustTokenizer {
             }
         }
     }
-    
+
     fn parse_rust_lc_keyword<'a>(state: &mut TokenizerState<'a>, chunk: &mut Vec<char>, token_chunks: &Vec<TokenChunk>) -> TokenType {
         match state.cur {
             'a' => {
@@ -692,11 +692,11 @@ impl RustTokenizer {
                         return TokenType::Looping;
                         //self.code_editor.set_indent_color(self.code_editor.colors.indent_line_looping);
                     }
-                    
+
                     return TokenType::Keyword;
                     // self.code_editor.set_indent_color(self.code_editor.colors.indent_line_def);
                 }
-                
+
                 if state.keyword(chunk, "32") {
                     return TokenType::BuiltinType
                 }
@@ -802,7 +802,7 @@ impl RustTokenizer {
                 }
             },
             'u' => { // use
-                
+
                 if state.keyword(chunk, "nsafe") {
                     return TokenType::Keyword
                 }
@@ -837,7 +837,7 @@ impl RustTokenizer {
                     }
                 }
             },
-            
+
             _ => {}
         }
         if state.next == '(' {
@@ -847,32 +847,32 @@ impl RustTokenizer {
             return TokenType::Identifier;
         }
     }
-    
+
     // because rustfmt is such an insane shitpile to compile or use as a library, here is a stupid version.
     pub fn auto_format(text_buffer: &mut TextBuffer, force_newlines: bool) -> FormatOutput {
-        
+
         // extra spacey setting that rustfmt seems to do, but i don't like
         let extra_spacey = false;
         let pre_spacey = true;
-        
+
         let mut out = FormatOutput::new();
         let mut tp = TokenParser::new(&text_buffer.flat_text, &text_buffer.token_chunks);
-        
+
         struct ParenStack {
             expecting_newlines: bool,
             expected_indent: usize,
             angle_counter: usize
         }
-        
+
         let mut paren_stack: Vec<ParenStack> = Vec::new();
-        
+
         paren_stack.push(ParenStack {
             expecting_newlines: true,
             expected_indent: 0,
             angle_counter: 0
         });
         out.new_line();
-        
+
         let mut first_on_line = true;
         let mut first_after_open = false;
         let mut expected_indent = 0;
@@ -881,7 +881,7 @@ impl RustTokenizer {
         let mut in_singleline_comment = false;
         let mut in_multiline_string = false;
         while tp.advance() {
-            
+
             match tp.cur_type() {
                 TokenType::Whitespace => {
                     if in_singleline_comment || in_multline_comment {
@@ -925,7 +925,7 @@ impl RustTokenizer {
                     if first_on_line {
                         out.indent(expected_indent);
                     }
-                    
+
                     paren_stack.push(ParenStack {
                         expecting_newlines: force_newlines,
                         expected_indent: expected_indent,
@@ -933,7 +933,7 @@ impl RustTokenizer {
                     });
                     first_after_open = true;
                     is_unary_operator = true;
-                    
+
                     let is_curly = tp.cur_char() == '{';
                     if tp.cur_char() == '(' && (
                         tp.prev_type() == TokenType::Flow || tp.prev_type() == TokenType::Looping || tp.prev_type() == TokenType::Keyword
@@ -949,30 +949,30 @@ impl RustTokenizer {
                     else if !pre_spacey {
                         out.strip_space();
                     }
-                    
+
                     out.extend(tp.cur_chunk());
-                    
+
                     if extra_spacey && is_curly && tp.next_type() != TokenType::Newline {
                         out.add_space();
                     }
                     first_on_line = false;
                 },
                 TokenType::ParenClose => {
-                    
+
                     out.strip_space();
-                    
+
                     let expecting_newlines = paren_stack.last().unwrap().expecting_newlines;
-                    
+
                     if extra_spacey && tp.cur_char() == '}' && !expecting_newlines {
                         out.add_space();
                     }
-                    
+
                     first_after_open = false;
                     if !first_on_line && expecting_newlines { // we are expecting newlines!
                         out.new_line();
                         first_on_line = true;
                     }
-                    
+
                     expected_indent = if paren_stack.len()>1 {
                         paren_stack.pop().unwrap().expected_indent
                     }
@@ -1086,9 +1086,9 @@ impl RustTokenizer {
                     is_unary_operator = true;
                 },
                 TokenType::Operator => {
-                    
+
                     // detect ++ and -- and execute insert or delete macros
-                    
+
                     let mut is_closing_angle = false;
                     if tp.cur_char() == '<' {
                         paren_stack.last_mut().unwrap().angle_counter += 1;
@@ -1104,13 +1104,13 @@ impl RustTokenizer {
                     else {
                         paren_stack.last_mut().unwrap().angle_counter = 0
                     }
-                    
+
                     if first_on_line {
                         first_on_line = false;
                         let extra_indent = if is_closing_angle || is_unary_operator {0}else {4};
                         out.indent(expected_indent + extra_indent);
                     }
-                    
+
                     if (is_unary_operator && (tp.cur_char() == '-' || tp.cur_char() == '*' || tp.cur_char() == '&'))
                         || tp.cur_char() == '!' || tp.cur_char() == '.' || tp.cur_char() == '<' || tp.cur_char() == '>' {
                         out.extend(tp.cur_chunk());
@@ -1122,12 +1122,12 @@ impl RustTokenizer {
                             out.add_space();
                         }
                     }
-                    
+
                     is_unary_operator = true;
                 },
                 TokenType::Identifier | TokenType::BuiltinType | TokenType::TypeName | TokenType::ThemeName => { // these dont reset the angle counter
                     is_unary_operator = false;
-                    
+
                     first_after_open = false;
                     if first_on_line {
                         first_on_line = false;
@@ -1138,7 +1138,7 @@ impl RustTokenizer {
                 },
                 TokenType::Namespace => {
                     is_unary_operator = true;
-                    
+
                     first_after_open = false;
                     if first_on_line {
                         first_on_line = false;
@@ -1151,7 +1151,7 @@ impl RustTokenizer {
                 TokenType::Keyword | TokenType::Flow | TokenType::Looping => {
                     is_unary_operator = true;
                     paren_stack.last_mut().unwrap().angle_counter = 0;
-                    
+
                     first_after_open = false;
                     if first_on_line {
                         first_on_line = false;
@@ -1164,14 +1164,14 @@ impl RustTokenizer {
                 TokenType::Bool | TokenType::Unexpected | TokenType::Error | TokenType::Warning | TokenType::Defocus => {
                     is_unary_operator = false;
                     paren_stack.last_mut().unwrap().angle_counter = 0;
-                    
+
                     first_after_open = false;
                     if first_on_line {
                         first_on_line = false;
                         out.indent(expected_indent);
                     }
                     out.extend(tp.cur_chunk());
-                    
+
                 },
             }
         };

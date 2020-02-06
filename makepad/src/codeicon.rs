@@ -35,9 +35,9 @@ impl CodeIcon {
             }
         }
     }
-    
+
     pub fn walk()->WalkId{uid!()}
-    
+
     pub fn style(cx:&mut Cx, opt:&StyleOptions){
         Self::walk().set(cx, Walk{
             width: Width::Fix(14.0*opt.scale),
@@ -45,13 +45,13 @@ impl CodeIcon {
             margin: Margin {l: 0., t: 0.5, r: 4., b: 0.},
         })
     }
-    
+
     pub fn instance_icon_id()->InstanceFloat{uid!()}
-    
+
     pub fn def_code_icon_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             let icon_id: Self::instance_icon_id();
-            
+
             fn pixel() -> vec4 {
                 let col = color;
                 if abs(icon_id - 5.) < 0.1 { //Wait
@@ -134,12 +134,12 @@ impl CodeIcon {
         inst.push_float(cx, icon_type.shader_float());
         inst
     }*/
-    
+
     pub fn draw_icon(&mut self, cx: &mut Cx, icon_type: CodeIconType) -> InstanceArea {
-        
+
         let inst = self.quad.draw_quad(cx, Self::walk().get(cx));
         inst.push_float(cx, icon_type.shader_float());
         inst
     }
-    
+
 }

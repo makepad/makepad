@@ -14,11 +14,11 @@ impl Cx{
             self.style_stack.push(index);
         }
     }
-    
+
     pub fn end_style(&mut self){
         self.style_stack.pop().expect("end_style pop failed");
     }
-    
+
     pub fn get_mut_style_top(&mut self)->&mut CxStyle{
         if let Some(last) = self.style_stack.last(){
             &mut self.styles[*last]
@@ -33,14 +33,14 @@ impl Cx{
 // floats
 
 
-#[derive(PartialEq, Copy, Clone, Hash, Eq)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
 pub struct FloatId(pub TypeId);
 
 impl FloatId {
     pub fn set(&self, cx: &mut Cx, value: f32) {
         cx.get_mut_style_top().floats.insert(*self, value);
     }
-    
+
     pub fn get(&self, cx: &Cx) -> f32 {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].floats.get(self){
@@ -60,14 +60,14 @@ impl Into<FloatId> for UniqueId {
 // Colors
 
 
-#[derive(PartialEq, Copy, Clone, Hash, Eq)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
 pub struct ColorId(pub TypeId);
 
 impl ColorId {
     pub fn set(&self, cx: &mut Cx, value: Color) {
         cx.get_mut_style_top().colors.insert(*self, value);
     }
-    
+
     pub fn get(&self, cx: &Cx) -> Color {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].colors.get(self){
@@ -87,14 +87,14 @@ impl Into<ColorId> for UniqueId {
 
 
 
-#[derive(PartialEq, Copy, Clone, Hash, Eq)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
 pub struct TextStyleId(pub TypeId);
 
 impl TextStyleId {
     pub fn set(&self, cx: &mut Cx, value: TextStyle) {
         cx.get_mut_style_top().text_styles.insert(*self, value);
     }
-    
+
     pub fn get(&self, cx: &Cx) -> TextStyle {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].text_styles.get(self){
@@ -112,14 +112,14 @@ impl Into<TextStyleId> for UniqueId {
 
 // Layout
 
-#[derive(PartialEq, Copy, Clone, Hash, Eq)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
 pub struct LayoutId(pub TypeId);
 
 impl LayoutId {
     pub fn set(&self, cx: &mut Cx, value: Layout) {
         cx.get_mut_style_top().layouts.insert(*self, value);
     }
-    
+
     pub fn get(&self, cx: &Cx) -> Layout {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].layouts.get(self){
@@ -138,14 +138,14 @@ impl Into<LayoutId> for UniqueId {
 // Walks
 
 
-#[derive(PartialEq, Copy, Clone, Hash, Eq)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
 pub struct WalkId(pub TypeId);
 
 impl WalkId {
     pub fn set(&self, cx: &mut Cx, value: Walk) {
         cx.get_mut_style_top().walks.insert(*self, value);
     }
-    
+
     pub fn get(&self, cx: &Cx) -> Walk {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].walks.get(self){
@@ -166,14 +166,14 @@ impl Into<WalkId> for UniqueId {
 // Animations
 
 
-#[derive(PartialEq, Copy, Clone, Hash, Eq)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
 pub struct AnimId(pub TypeId);
 
 impl AnimId {
     pub fn set(&self, cx: &mut Cx, value: Anim) {
         cx.get_mut_style_top().anims.insert(*self, value);
     }
-    
+
     pub fn get(&self, cx: &Cx) -> Anim {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].anims.get(self){
@@ -191,7 +191,7 @@ impl Into<AnimId> for UniqueId {
 
 // Shaders
 
-#[derive(PartialEq, Copy, Clone, Hash, Eq)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
 pub struct ShaderId(pub TypeId);
 
 impl ShaderId {
@@ -199,7 +199,7 @@ impl ShaderId {
         let shader = cx.add_shader(sg, &format!("{:?}", self.0));
         cx.get_mut_style_top().shaders.insert(*self, shader);
     }
-    
+
     pub fn get(&self, cx: &Cx) -> Shader {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].shaders.get(self){
@@ -219,7 +219,7 @@ impl Into<ShaderId> for UniqueId {
 // Classes
 
 
-#[derive(PartialEq, Copy, Clone, Hash, Eq)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
 pub struct StyleId(pub TypeId);
 
 impl Into<StyleId> for UniqueId {

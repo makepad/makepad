@@ -24,7 +24,7 @@ pub struct TextEditor {
     pub text: Text,
     pub line_number_text: Text,
     pub cursors: TextCursorSet,
-    
+
     //pub base_font_size: f32,
     pub open_font_scale: f32,
     pub folded_font_scale: f32,
@@ -36,18 +36,18 @@ pub struct TextEditor {
     pub cursor_blink_speed: f64,
     pub _undo_id: u64,
     pub highlight_area_on: bool,
-    
+
     pub mark_unmatched_parens: bool,
     pub draw_cursor_row: bool,
     pub search_markers_bypass: Vec<TextCursor>,
     pub folding_depth: usize,
     pub colors: CodeEditorColors,
-    
+
     pub read_only: bool,
     pub multiline: bool,
-    
+
     pub line_number_offset: usize,
-    
+
     //pub _bg_area: Area,
     pub _scroll_pos_on_load: Option<Vec2>,
     pub _set_key_focus_on_load: bool,
@@ -66,27 +66,27 @@ pub struct TextEditor {
     pub _indent_line_inst: Option<InstanceArea>,
     pub _bg_inst: Option<InstanceArea>,
     pub _last_indent_color: Color,
-    
+
     pub _line_geometry: Vec<LineGeom>,
     pub _anim_select: Vec<AnimSelect>,
     pub _visible_lines: usize,
-    
+
     pub _select_scroll: Option<SelectScroll>,
     pub _grid_select_corner: Option<TextPos>,
     pub _is_row_select: bool,
     //pub _line_chunk: Vec<(f32, char)>,
-    
+
     //pub _highlight_selection: Vec<char>,
     //pub _highlight_token: Vec<char>,
     pub _last_cursor_pos: TextPos,
-    
+
     pub _anim_font_scale: f32,
     pub _line_largest_font: f32,
     pub _anim_folding: AnimFolding,
-    
+
     pub _monospace_size: Vec2,
     pub _monospace_base: Vec2,
-    
+
     pub _tokens_on_line: usize,
     pub _line_was_folded: bool,
     //pub _line_was_visible: bool,
@@ -94,15 +94,15 @@ pub struct TextEditor {
     pub _draw_cursors: DrawCursors,
     pub _draw_search: DrawCursors,
     pub _draw_messages: DrawCursors,
-    
+
     pub _cursor_blink_timer: Timer,
     pub _cursor_blink_flipflop: f32,
     pub _cursor_area: Area,
     pub _highlight_visibility: f32,
-    
+
     pub _last_tabs: usize,
     pub _newline_tabs: usize,
-    
+
     pub _last_lag_mutation_id: u32
 }
 
@@ -156,7 +156,7 @@ pub struct CodeEditorColors {
 }
 
 impl TextEditor {
-    
+
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             read_only: false,
@@ -224,10 +224,10 @@ impl TextEditor {
             _scroll_pos: Vec2::default(),
             _visible_lines: 0,
             _undo_id: 0,
-            
-            
+
+
             _line_geometry: Vec::new(),
-            
+
             _anim_select: Vec::new(),
             _grid_select_corner: None,
             _is_row_select: false,
@@ -240,7 +240,7 @@ impl TextEditor {
             _text_area: Area::Empty,
             _line_number_inst: None,
             _line_number_chunk: Vec::new(),
-            
+
             _anim_font_scale: 1.0,
             _line_largest_font: 0.,
             _final_fill_height: 0.,
@@ -254,18 +254,18 @@ impl TextEditor {
             _draw_cursors: DrawCursors::new(),
             _draw_search: DrawCursors::new(),
             _draw_messages: DrawCursors::new(),
-            
+
             _paren_stack: Vec::new(),
             _indent_stack: Vec::new(),
             _indent_id_alloc: 0.0,
             _indent_line_inst: None,
-            
+
             //_line_chunk: Vec::new(),
             //_highlight_selection: Vec::new(),
             //_highlight_token: Vec::new(),
             _last_cursor_pos: TextPos::zero(),
             _last_indent_color: Color::default(),
-            
+
             _cursor_blink_timer: Timer::empty(),
             _cursor_blink_flipflop: 0.,
             _cursor_area: Area::Empty,
@@ -274,23 +274,23 @@ impl TextEditor {
             _newline_tabs: 0,
         }
     }
-    
+
     pub fn gutter_width() -> FloatId {uid!()}
     pub fn padding_top() -> FloatId {uid!()}
     pub fn shadow_size() -> FloatId {uid!()}
-    
+
     pub fn layout_bg() -> LayoutId {uid!()}
     pub fn text_style_editor_text() -> TextStyleId {uid!()}
-    
+
     pub fn color_bg() -> ColorId {uid!()}
     pub fn color_gutter_bg() -> ColorId {uid!()}
-    
+
     pub fn color_selection() -> ColorId {uid!()}
     pub fn color_selection_defocus() -> ColorId {uid!()}
     pub fn color_highlight() -> ColorId {uid!()}
     pub fn color_cursor() -> ColorId {uid!()}
     pub fn color_cursor_row() -> ColorId {uid!()}
-    
+
     pub fn color_indent_line_unknown() -> ColorId {uid!()}
     pub fn color_indent_line_fn() -> ColorId {uid!()}
     pub fn color_indent_line_typedef() -> ColorId {uid!()}
@@ -304,7 +304,7 @@ impl TextEditor {
     pub fn color_search_marker() -> ColorId {uid!()}
     pub fn color_line_number_normal() -> ColorId {uid!()}
     pub fn color_line_number_highlight() -> ColorId {uid!()}
-    
+
     pub fn color_whitespace() -> ColorId {uid!()}
     pub fn color_keyword() -> ColorId {uid!()}
     pub fn color_flow() -> ColorId {uid!()}
@@ -325,7 +325,7 @@ impl TextEditor {
     pub fn color_warning() -> ColorId {uid!()}
     pub fn color_error() -> ColorId {uid!()}
     pub fn color_defocus() -> ColorId {uid!()}
-    
+
     pub fn shader_bg() -> ShaderId {uid!()}
     pub fn shader_indent_lines() -> ShaderId {uid!()}
     pub fn shader_cursor() -> ShaderId {uid!()}
@@ -335,7 +335,7 @@ impl TextEditor {
     //pub fn shader_token_highlight() -> ShaderId {uid!()}
     pub fn shader_search_marker() -> ShaderId {uid!()}
     pub fn shader_message_marker() -> ShaderId {uid!()}
-    
+
     pub fn instance_indent_id() -> InstanceFloat {uid!()}
     pub fn uniform_indent_sel() -> UniformFloat {uid!()}
     pub fn uniform_cursor_blink() -> UniformFloat {uid!()}
@@ -345,14 +345,14 @@ impl TextEditor {
     pub fn instance_select_next_w() -> InstanceFloat {uid!()}
     pub fn uniform_highlight_visible() -> UniformFloat {uid!()}
     pub fn instance_shadow_dir() -> InstanceFloat {uid!()}
-    
+
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         Self::layout_bg().set(cx, Layout::default());
         Self::shadow_size().set(cx, 6.0);
         Self::gutter_width().set(cx, 45.0);
         Self::padding_top().set(cx, 27.);
         Self::text_style_editor_text().set(cx, Theme::text_style_fixed().get(cx));
-        
+
         Self::shader_indent_lines().set(cx, Quad::def_quad_shader().compose(shader_ast !({
             let indent_id: Self::instance_indent_id();
             // uniforms
@@ -373,7 +373,7 @@ impl TextEditor {
                 return df_stroke(col, thickness);
             }
         })));
-        
+
         Self::shader_cursor().set(cx, Quad::def_quad_shader().compose(shader_ast !({
             let blink: Self::uniform_cursor_blink();
             fn pixel() -> vec4 {
@@ -385,7 +385,7 @@ impl TextEditor {
                 }
             }
         })));
-        
+
         Self::shader_selection().set(cx, Quad::def_quad_shader().compose(shader_ast !({
             let prev_x: Self::instance_select_prev_x();
             let prev_w: Self::instance_select_prev_w();
@@ -393,7 +393,7 @@ impl TextEditor {
             let next_w: Self::instance_select_next_w();
             const gloopiness: float = 8.;
             const border_radius: float = 2.;
-            
+
             fn vertex() -> vec4 { // custom vertex shader because we widen the draweable area a bit for the gloopiness
                 let shift: vec2 = -draw_scroll.xy;
                 let clipped: vec2 = clamp(
@@ -404,7 +404,7 @@ impl TextEditor {
                 pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
                 return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + draw_zbias, 1.)));
             }
-            
+
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 df_box(0., 0., w, h, border_radius);
@@ -420,7 +420,7 @@ impl TextEditor {
                 return df_fill(color);
             }
         })));
-        
+
         Self::shader_paren_pair().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
@@ -434,7 +434,7 @@ impl TextEditor {
                 //return df_fill(color);
             }
         })));
-        
+
         Self::shader_cursor_row().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
@@ -468,7 +468,7 @@ impl TextEditor {
                 return df_fill(color);
             }
         })));*/
-        
+
         Self::shader_search_marker().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
                 let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
@@ -483,7 +483,7 @@ impl TextEditor {
                 return df_fill(color);*/
             }
         })));
-        
+
         Self::shader_message_marker().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
                 let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
@@ -494,14 +494,14 @@ impl TextEditor {
                 return df_stroke(color, 0.8);
             }
         })));
-        
+
         Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
                 return vec4(color.rgb * color.a, color.a);
             }
         })));
     }
-    
+
     pub fn apply_style(&mut self, cx: &mut Cx) {
         // copy over colors
         self.colors.indent_line_unknown = Self::color_indent_line_unknown().get(cx);
@@ -539,10 +539,10 @@ impl TextEditor {
         self.colors.defocus = Self::color_defocus().get(cx);
         self.bg.color = Self::color_bg().get(cx);
         self.gutter_bg.color = Self::color_gutter_bg().get(cx);
-        
+
         self.line_number_width = Self::gutter_width().get(cx);
         self.top_padding = Self::padding_top().get(cx);
-        
+
         self.selection.color = if self.has_key_focus(cx) {
             Self::color_selection().get(cx)
         }else {
@@ -553,7 +553,7 @@ impl TextEditor {
         self.cursor_row.color = Self::color_cursor_row().get(cx);
         self.text.text_style = Self::text_style_editor_text().get(cx);
         self.line_number_text.text_style = Self::text_style_editor_text().get(cx);
-        
+
         self.bg.shader = Self::shader_bg().get(cx);
         self.indent_lines.shader = Self::shader_indent_lines().get(cx);
         self.cursor.shader = Self::shader_cursor().get(cx);
@@ -569,20 +569,20 @@ impl TextEditor {
         self._highlight_visibility = 0.0;
         self._highlight_area.write_uniform_float(cx, Self::uniform_highlight_visible(), self._highlight_visibility);
     }*/
-    
+
     fn reset_cursor_blinker(&mut self, cx: &mut Cx) {
         cx.stop_timer(&mut self._cursor_blink_timer);
         self._cursor_blink_timer = cx.start_timer(self.cursor_blink_speed * 0.5, false);
         self._cursor_blink_flipflop = 0.;
         self._cursor_area.write_uniform_float(cx, Self::uniform_cursor_blink(), self._cursor_blink_flipflop);
     }
-    
+
     fn handle_finger_down(&mut self, cx: &mut Cx, fe: &FingerDownEvent, text_buffer: &mut TextBuffer) {
         cx.set_down_mouse_cursor(MouseCursor::Text);
         // give us the focus
         self.set_key_focus(cx);
         self._undo_id += 1;
-        
+
         let offset;
         //let scroll_pos = self._bg_area.get_scroll_pos(cx);
         if fe.rel.x < self.line_number_width - self.line_number_click_margin {
@@ -628,7 +628,7 @@ impl TextEditor {
             }
             // ok so we should scan a range
         }
-        
+
         if fe.modifiers.shift {
             if fe.modifiers.logo || fe.modifiers.control { // grid select
                 let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
@@ -650,13 +650,13 @@ impl TextEditor {
                 self.cursors.clear_and_set_last_cursor_head_and_tail(offset, offset, text_buffer);
             }
         }
-        
+
         self.view.redraw_view_area(cx);
         self._last_finger_move = Some(fe.abs);
         //self.update_highlight(cx, text_buffer);
         self.reset_cursor_blinker(cx);
     }
-    
+
     fn handle_finger_move(&mut self, cx: &mut Cx, fe: &FingerMoveEvent, text_buffer: &mut TextBuffer) {
         let cursor_moved = if let Some(grid_select_corner) = self._grid_select_corner {
             let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
@@ -683,7 +683,7 @@ impl TextEditor {
             self.reset_cursor_blinker(cx);
         }
     }
-    
+
     fn handle_finger_up(&mut self, cx: &mut Cx, _fe: &FingerUpEvent, _text_buffer: &mut TextBuffer) {
         self.cursors.clear_last_clamp_range();
         self._select_scroll = None;
@@ -693,7 +693,7 @@ impl TextEditor {
         //self.update_highlight(cx, text_buffer);
         self.reset_cursor_blinker(cx);
     }
-    
+
     fn handle_key_down(&mut self, cx: &mut Cx, ke: &KeyEvent, text_buffer: &mut TextBuffer) {
         let cursor_moved = match ke.key_code {
             KeyCode::KeyE =>{
@@ -712,7 +712,7 @@ impl TextEditor {
                             break;
                         }
                     }
-                    
+
                     moved
                 }
                 else{
@@ -920,12 +920,12 @@ impl TextEditor {
             self.reset_cursor_blinker(cx);
         }
     }
-    
+
     fn handle_text_input(&mut self, cx: &mut Cx, te: &TextInputEvent, text_buffer: &mut TextBuffer) {
         if te.replace_last {
             text_buffer.undo(false, &mut self.cursors);
         }
-        
+
         if !te.was_paste && te.input.len() == 1 {
             match te.input.chars().next().unwrap() {
                 '(' => {
@@ -968,11 +968,11 @@ impl TextEditor {
         self.scroll_last_cursor_visible(cx, text_buffer, 0.);
         self.view.redraw_view_area(cx);
         self.reset_cursor_blinker(cx);
-        
+
         cx.send_signal(text_buffer.signal, TextBuffer::status_data_update());
-        
+
     }
-    
+
     pub fn handle_text_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
         if self.view.handle_scroll_bars(cx, event) {
             if let Some(last_finger_move) = self._last_finger_move {
@@ -1005,7 +1005,7 @@ impl TextEditor {
                 if self.highlight_area_on {
                     self._highlight_area.write_uniform_float(cx, Self::uniform_highlight_visible(), self._highlight_visibility);
                 }
-                
+
                 // ok see if we changed.
                 if self._last_lag_mutation_id != text_buffer.mutation_id {
                     let was_filechange = self._last_lag_mutation_id != 0;
@@ -1096,7 +1096,7 @@ impl TextEditor {
                     if !repeat{
                         let search = self.cursors.get_ident_around_last_cursor_and_set(text_buffer);
                         // lets select the ident
-                        
+
                         return TextEditorEvent::Decl(search)
                     }*/
                 }*/
@@ -1108,7 +1108,7 @@ impl TextEditor {
                     let search = self.cursors.get_ident_around_last_cursor_and_set(text_buffer);
                     return TextEditorEvent::Decl(search)
                 }
-                
+
                 if ke.key_code == KeyCode::Return && (ke.modifiers.logo || ke.modifiers.control) {
                     return TextEditorEvent::AutoFormat
                 }
@@ -1145,11 +1145,11 @@ impl TextEditor {
             TextEditorEvent::None
         }
     }
-    
+
     pub fn has_key_focus(&self, cx: &Cx) -> bool {
         cx.has_key_focus(self._view_area)
     }
-    
+
     pub fn set_key_focus(&mut self, cx: &mut Cx) {
         if self._view_area == Area::Empty {
             self._set_key_focus_on_load = true;
@@ -1158,7 +1158,7 @@ impl TextEditor {
         cx.set_key_focus(self._view_area);
         self.reset_cursor_blinker(cx);
     }
-    
+
     pub fn new_draw_calls(&mut self, cx: &mut Cx, line_number_bg: bool) {
         // layering, this sets the draw call order
         self._highlight_area = cx.new_instance_draw_call(&self.token_highlight.shader, 0).into();
@@ -1168,13 +1168,13 @@ impl TextEditor {
         cx.new_instance_draw_call(&self.message_marker.shader, 0);
         cx.new_instance_draw_call(&self.search_marker.shader, 0);
         cx.new_instance_draw_call(&self.paren_pair.shader, 0);
-        
+
         // force next begin_text in another drawcall
         self._text_inst = Some(self.text.begin_text(cx));
         self._indent_line_inst = Some(cx.new_instance_draw_call(&self.indent_lines.shader, 0));
-        
+
         self._cursor_area = cx.new_instance_draw_call(&self.cursor.shader, 0).into();
-        
+
         if self.draw_line_numbers {
             if line_number_bg {
                 let inst = self.gutter_bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.line_number_width, h: cx.get_height_total()});
@@ -1185,7 +1185,7 @@ impl TextEditor {
             self._line_number_inst = Some(inst);
         }
     }
-    
+
     pub fn init_draw_state(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
         self._monospace_base = self.text.get_monospace_base(cx);
         self.set_font_scale(cx, self.open_font_scale);
@@ -1209,13 +1209,13 @@ impl TextEditor {
         // indent
         cx.move_turtle(self.line_number_width, self.top_padding);
     }
-    
+
     pub fn begin_text_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) -> Result<(), ()> {
         // adjust dilation based on DPI factor
         self.view.begin_view(cx, Self::layout_bg().get(cx)) ?;
-        
+
         self.apply_style(cx);
-        
+
         if !text_buffer.is_loaded {
             //et bg_inst = self.bg.begin_quad(cx, &Layout {
             //    align: Align::left_top(),
@@ -1238,13 +1238,13 @@ impl TextEditor {
                 self._set_key_focus_on_load = false;
                 self.set_key_focus(cx);
             }
-            
+
             let inst = self.bg.begin_quad_fill(cx);
             inst.set_do_scroll(cx, false, false); // don't scroll the bg
             self._bg_inst = Some(inst);
-            
+
             self.new_draw_calls(cx, true);
-            
+
             if let Some(select_scroll) = &mut self._select_scroll {
                 let scroll_pos = self.view.get_scroll_pos(cx);
                 if self.view.set_scroll_pos(cx, Vec2 {
@@ -1257,7 +1257,7 @@ impl TextEditor {
                     select_scroll.at_end = true;
                 }
             }
-            
+
             if text_buffer.markers.mutation_id != text_buffer.mutation_id {
                 self._draw_messages.term(&text_buffer.markers.message_cursors);
             }
@@ -1265,19 +1265,19 @@ impl TextEditor {
                 self._draw_messages.set_next(&text_buffer.markers.message_cursors);
             }
             self._last_cursor_pos = self.cursors.get_last_cursor_text_pos(text_buffer);
-            
-            
+
+
             // lets compute our scroll line position and keep it where it is
             self.do_folding_animation_step(cx);
-            
+
             self.init_draw_state(cx, text_buffer);
-            
+
             self._scroll_pos = self.view.get_scroll_pos(cx);
-            
+
             return Ok(())
         }
     }
-    
+
     fn do_folding_animation_step(&mut self, cx: &mut Cx) {
         // run the folding animation
         let anim_folding = &mut self._anim_folding;
@@ -1293,7 +1293,7 @@ impl TextEditor {
         }
         //let new_anim_font_size =
         self._anim_font_scale = anim_folding.state.get_font_size(self.open_font_scale, self.folded_font_scale);
-        
+
         if self._anim_folding.did_animate {
             let mut ypos = self.top_padding;
             let mut ypos_at_line = ypos;
@@ -1330,9 +1330,9 @@ impl TextEditor {
             self.reset_highlight_visible(cx);
         }
         self._highlight_token = new_token;
-        
+
     }*/
-    
+
     fn draw_new_line(&mut self, cx: &mut Cx) {
         // line geometry is used for scrolling look up of cursors
         let line_geom = LineGeom {
@@ -1341,7 +1341,7 @@ impl TextEditor {
             was_folded: self._line_was_folded,
             indent_id: if let Some((_, id)) = self._indent_stack.last() {*id}else {0.}
         };
-        
+
         // draw a linenumber if we are visible
         let origin = cx.get_turtle_origin();
         if self.draw_line_numbers && cx.turtle_line_is_visible(self._monospace_size.y, self._scroll_pos) {
@@ -1377,17 +1377,17 @@ impl TextEditor {
             let chunk_width = self._monospace_size.x * 5.0;
             self.line_number_text.add_text(cx, origin.x + (self.line_number_width - chunk_width - self.line_number_click_margin), origin.y + line_geom.walk.y, 0, self._line_number_inst.as_mut().unwrap(), chunk, | _, _, _, _ | {0.});
         }
-        
+
         cx.turtle_new_line_min_height(self._monospace_size.y);
-        
+
         cx.move_turtle(self.line_number_width, 0.);
-        
+
         self._tokens_on_line = 0;
         //self._line_was_visible = false;
-        
+
         self._draw_cursors.process_newline();
         self._draw_messages.process_newline();
-        
+
         // highlighting the selection
         /*let hl_len = self._highlight_selection.len();
         if hl_len != 0 {
@@ -1413,12 +1413,12 @@ impl TextEditor {
             }
             self._line_chunk.truncate(0);
         }*/
-        
+
         // search for all markings
         self._line_geometry.push(line_geom);
         self._line_largest_font = self.text.text_style.font_size;
     }
-    
+
     fn draw_indent_lines(&mut self, cx: &mut Cx, geom_y: f32, tabs: usize) {
         let y_pos = geom_y - cx.get_turtle_origin().y;
         let tab_variable_width = self._monospace_base.x * 4. * self.text.text_style.font_size * self._anim_font_scale;
@@ -1440,22 +1440,22 @@ impl TextEditor {
             inst.push_float(cx, indent_id);
         }
     }
-    
+
     pub fn draw_chunk(&mut self, cx: &mut Cx, token_chunks_index: usize, flat_text: &Vec<char>, token_chunk: &TokenChunk, markers: &TextBufferMarkers) {
         if token_chunk.len == 0 {
             return
         }
-        
+
         let token_type = token_chunk.token_type;
         let chunk = &flat_text[token_chunk.offset..(token_chunk.offset + token_chunk.len)]; //chunk;
         let offset = token_chunk.offset; // end_offset - chunk.len() - 1;
         let next_char = token_chunk.next;
-        
+
         // maintain paren stack
         if token_type == TokenType::ParenOpen {
             self.draw_paren_open(token_chunks_index, offset, next_char, chunk);
         }
-        
+
         // do indent depth walking
         if self._tokens_on_line == 0 {
             let font_scale = match token_type {
@@ -1573,7 +1573,7 @@ impl TextEditor {
                 TokenType::Identifier => {/*
                     if chunk == &self._highlight_token[0..] {
                         self.draw_token_highlight_quad(cx, geom);
-                        
+
                     }*/
                     self.colors.identifier
                 }
@@ -1598,11 +1598,11 @@ impl TextEditor {
                 TokenType::Regex => self.colors.string,
                 TokenType::String => self.colors.string,
                 TokenType::Number => self.colors.number,
-                
+
                 TokenType::StringMultiBegin => self.colors.string,
                 TokenType::StringChunk => self.colors.string,
                 TokenType::StringMultiEnd => self.colors.string,
-                
+
                 TokenType::CommentMultiBegin => self.colors.comment,
                 TokenType::CommentMultiEnd => self.colors.comment,
                 TokenType::CommentLine => self.colors.comment,
@@ -1639,19 +1639,19 @@ impl TextEditor {
                 TokenType::Eof => self.colors.unexpected,
                 TokenType::Unexpected => self.colors.unexpected
             };
-            
+
             if self._tokens_on_line == 0 {
                 self._visible_lines += 1;
                 //self._line_was_visible = true;
             }
-            
+
             let cursors = &self.cursors.set;
             //let messages_cursors = &text_buffer.message_cursors;
             let last_cursor = self.cursors.last_cursor;
             let draw_cursors = &mut self._draw_cursors;
             let draw_messages = &mut self._draw_messages;
             let draw_search = &mut self._draw_search;
-            
+
             let height = self._monospace_size.y;
             let search_cursors = if self.search_markers_bypass.len()>0 {&self.search_markers_bypass} else {&markers.search_cursors};
             // actually generate the GPU data for the text
@@ -1675,7 +1675,7 @@ impl TextEditor {
             }
         }
         self._tokens_on_line += 1;
-        
+
         // Do all the Paren matching highlighting drawing
         if token_chunk.token_type == TokenType::ParenClose {
             self.draw_paren_close(cx, token_chunks_index, offset, next_char, chunk);
@@ -1693,13 +1693,13 @@ impl TextEditor {
             inst.push_uniform_float(cx, self._highlight_visibility);
         }
     }*/
-    
+
     fn draw_paren_open(&mut self, token_chunks_index: usize, offset: usize, next_char: char, chunk: &[char]) {
         let marked = if let Some(pos) = self.cursors.get_last_cursor_singular() {
             pos == offset || pos == offset + 1 && next_char != '(' && next_char != '{' && next_char != '['
         }
         else {false};
-        
+
         self._paren_stack.push(ParenItem {
             pair_start: token_chunks_index, //self.token_chunks.len(),
             geom_open: None,
@@ -1708,7 +1708,7 @@ impl TextEditor {
             exp_paren: chunk[0]
         });
     }
-    
+
     fn draw_paren_close(&mut self, cx: &mut Cx, token_chunks_index: usize, offset: usize, next_char: char, chunk: &[char]) {
         //let token_chunks_len = self.token_chunks.len();
         if self._paren_stack.len() == 0 {
@@ -1760,7 +1760,7 @@ impl TextEditor {
             };
         }
     }
-    
+
     fn draw_paren_unmatched(&mut self, cx: &mut Cx) {
         if !self.mark_unmatched_parens {
             return
@@ -1775,21 +1775,21 @@ impl TextEditor {
             }
         }
     }
-    
+
     pub fn end_text_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
-        
+
         // lets insert an empty newline at the bottom so its nicer to scroll
         self.draw_new_line(cx);
         if !cx.is_height_computed() {
             cx.walk_turtle(Walk::wh(Width::Fix(0.0), Height::Fix(self._monospace_size.y)));
         }
-        
+
         self._text_area = self.text.end_text(cx, self._text_inst.as_ref().unwrap());
-        
+
         if self.draw_line_numbers {
             self.line_number_text.end_text(cx, self._line_number_inst.as_ref().unwrap());
         }
-        
+
         // unmatched highlighting
         self.draw_paren_unmatched(cx);
         self.draw_cursors(cx);
@@ -1797,7 +1797,7 @@ impl TextEditor {
         self.draw_selections(cx);
         self.draw_search_markers(cx);
         self.draw_message_markers(cx, text_buffer);
-        
+
         // inject a final page
         self._final_fill_height = cx.get_height_total() - self._monospace_size.y;
         if !cx.is_height_computed() {
@@ -1809,9 +1809,9 @@ impl TextEditor {
         self.set_indent_line_highlight_id(cx);
         self.draw_shadows(cx);
         self.bg.end_quad_fill(cx, &self._bg_inst.take().unwrap());
-        
+
         self.view.end_view(cx);
-        
+
         if let Some(((head, tail), at_top)) = self._set_last_cursor {
             self._set_last_cursor = None;
             self._scroll_pos_on_load = None;
@@ -1823,7 +1823,7 @@ impl TextEditor {
             else {
                 self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height * 0.8);
             }
-            
+
             self.view.redraw_view_area(cx);
         }
         else if let Some(scroll_pos_on_load) = self._scroll_pos_on_load {
@@ -1837,13 +1837,13 @@ impl TextEditor {
         self.view.redraw_view_area(cx);
     }
 
-    
+
     fn draw_cursors(&mut self, cx: &mut Cx) {
         if self.has_key_focus(cx) {
             let origin = cx.get_turtle_origin();
             for rc in &self._draw_cursors.cursors {
                 self.cursor.z = rc.z + 0.1;
-                
+
                 let inst = self.cursor.draw_quad_rel(cx, Rect {x: rc.x - origin.x, y: rc.y - origin.y, w: rc.w, h: rc.h});
                 if inst.need_uniforms_now(cx) {
                     inst.push_uniform_float(cx, self._cursor_blink_flipflop);
@@ -1852,7 +1852,7 @@ impl TextEditor {
             }
         }
     }
-    
+
     fn draw_shadows(&mut self, cx: &mut Cx) {
         let gutter_width = Self::gutter_width().get(cx);
         self.shadow.draw_shadow_left_at(cx, Rect {
@@ -1861,14 +1861,14 @@ impl TextEditor {
             w: 0.,
             h: cx.get_height_total()
         });
-        
+
         self.shadow.draw_shadow_top(cx);
     }
-    
+
     fn draw_message_markers(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
         let origin = cx.get_turtle_origin();
         let message_markers = &mut self._draw_messages.selections;
-        
+
         for i in 0..message_markers.len() {
             let mark = &message_markers[i];
             let body = &text_buffer.markers.message_bodies[mark.index];
@@ -1880,24 +1880,24 @@ impl TextEditor {
             self.message_marker.draw_quad_rel(cx, Rect {x: mark.rc.x - origin.x, y: mark.rc.y - origin.y, w: mark.rc.w, h: mark.rc.h});
         }
     }
-    
+
     pub fn draw_search_markers(&mut self, cx: &mut Cx) {
         let origin = cx.get_turtle_origin();
-        
+
         for mark in &self._draw_search.selections {
             self.search_marker.draw_quad_rel(cx, Rect {x: mark.rc.x - origin.x, y: mark.rc.y - origin.y, w: mark.rc.w, h: mark.rc.h});
         }
     }
-    
+
     pub fn draw_selections(&mut self, cx: &mut Cx) {
         let origin = cx.get_turtle_origin();
         let sel = &mut self._draw_cursors.selections;
         // draw selections
         for i in 0..sel.len() {
             let cur = &sel[i];
-            
+
             let mk_inst = self.selection.draw_quad_rel(cx, Rect {x: cur.rc.x - origin.x, y: cur.rc.y - origin.y, w: cur.rc.w, h: cur.rc.h});
-            
+
             // do we have a prev?
             if i > 0 && sel[i - 1].index == cur.index {
                 let p_rc = &sel[i - 1].rc;
@@ -1920,7 +1920,7 @@ impl TextEditor {
             }
         }
     }
-    
+
     fn place_ime_and_draw_cursor_row(&mut self, cx: &mut Cx) {
         // place the IME
         if let Some(last_cursor) = self._draw_cursors.last_cursor {
@@ -1945,7 +1945,7 @@ impl TextEditor {
             }
         }
     }
-    
+
     fn do_selection_scrolling(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
         // do select scrolling
         if let Some(select_scroll) = self._select_scroll.clone() {
@@ -1964,11 +1964,11 @@ impl TextEditor {
             self.view.redraw_view_area(cx);
         }
     }
-    
+
     fn _do_selection_animations(&mut self, cx: &mut Cx) {
         if !self._anim_folding.state.is_animating() {
             let sel = &mut self._draw_cursors.selections;
-            
+
             let mut anim_select_any = false;
             for i in 0..sel.len() {
                 let cur = &mut sel[i];
@@ -2004,7 +2004,7 @@ impl TextEditor {
                 };
                 let wtime = 1.0 - wtime as f32;
                 let htime = 1.0 - htime as f32;
-                
+
                 if invert {
                     cur.rc.w = cur.rc.w * wtime;
                     cur.rc.h = cur.rc.h * htime;
@@ -2021,7 +2021,7 @@ impl TextEditor {
             }
         }
     }
-    
+
     fn set_indent_line_highlight_id(&mut self, cx: &mut Cx) {
         // compute the line which our last cursor is on so we can set the highlight id
         if let Some(indent_inst) = self._indent_line_inst {
@@ -2032,7 +2032,7 @@ impl TextEditor {
             area.write_uniform_float(cx, Self::uniform_indent_sel(), indent_id);
         }
     }
-    
+
     // set it once per line otherwise the LineGeom stuff isn't really working out.
     fn set_font_scale(&mut self, _cx: &Cx, font_scale: f32) {
         self.text.font_scale = font_scale;
@@ -2043,19 +2043,19 @@ impl TextEditor {
         self._monospace_size.x = self._monospace_base.x * self.text.text_style.font_size * font_scale;
         self._monospace_size.y = self._monospace_base.y * self.text.text_style.font_size * font_scale;
     }
-    
+
     pub fn reset_cursors(&mut self) {
         self.cursors = TextCursorSet::new();
     }
-    
+
     fn scroll_last_cursor_visible(&mut self, cx: &mut Cx, text_buffer: &TextBuffer, height_pad: f32) {
         // so we have to compute (approximately) the rect of our cursor
         if self.cursors.last_cursor >= self.cursors.set.len() {
             panic !("LAST CURSOR INVALID");
         }
-        
+
         let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
-        
+
         // alright now lets query the line geometry
         let row = pos.row.min(self._line_geometry.len() - 1);
         if row < self._line_geometry.len() {
@@ -2068,20 +2068,20 @@ impl TextEditor {
                 w: mono_size.x * 4. + self.line_number_width,
                 h: mono_size.y * 4. + height_pad
             };
-            
+
             // scroll this cursor into view
             self.view.scroll_into_view(cx, rect);
         }
     }
-    
+
     fn scroll_last_cursor_top(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
         // so we have to compute (approximately) the rect of our cursor
         if self.cursors.last_cursor >= self.cursors.set.len() {
             panic !("LAST CURSOR INVALID");
         }
-        
+
         let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
-        
+
         // alright now lets query the line geometry
         let row = pos.row.min(self._line_geometry.len() - 1);
         if row < self._line_geometry.len() {
@@ -2094,12 +2094,12 @@ impl TextEditor {
                 w: mono_size.x * 4. + self.line_number_width,
                 h: self._final_fill_height + mono_size.y * 1.
             };
-            
+
             // scroll this cursor into view
             self.view.scroll_into_view_no_smooth(cx, rect);
         }
     }
-    
+
     fn compute_grid_text_pos_from_abs(&mut self, cx: &Cx, abs: Vec2) -> TextPos {
         //
         let rel = self.view.get_view_area(cx).abs_to_rel(cx, abs);
@@ -2116,7 +2116,7 @@ impl TextEditor {
         // otherwise the file is too short, lets use the last line
         TextPos {row: self._line_geometry.len() - 1, col: (rel.x.max(0.) / mono_size.x) as usize}
     }
-    
+
     fn compute_offset_from_ypos(&mut self, cx: &Cx, ypos_abs: f32, text_buffer: &TextBuffer, end: bool) -> usize {
         let rel = self.view.get_view_area(cx).abs_to_rel(cx, Vec2 {x: 0.0, y: ypos_abs});
         let mut mono_size;
@@ -2131,7 +2131,7 @@ impl TextEditor {
         }
         return text_buffer.text_pos_to_offset(TextPos {row: self._line_geometry.len() - 1, col: end_col})
     }
-    
+
     fn start_code_folding(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
         // start code folding anim
         let speed = 0.98;
@@ -2143,7 +2143,7 @@ impl TextEditor {
         //println!("FOLDING {}",self._anim_folding.focussed_line);
         self.view.redraw_view_area(cx);
     }
-    
+
     fn start_code_unfolding(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
         let speed = 0.96;
         self._anim_folding.state.do_opening(speed, 0.97);
@@ -2152,7 +2152,7 @@ impl TextEditor {
         self.view.redraw_view_area(cx);
         // return to normal size
     }
-    
+
     fn check_select_scroll_dynamics(&mut self, fe: &FingerMoveEvent) -> bool {
         let pow_scale = 0.1;
         let pow_fac = 3.;
@@ -2197,7 +2197,7 @@ impl TextEditor {
         }
         last_scroll_none
     }
-    
+
     fn compute_next_unfolded_line_up(&self, text_buffer: &TextBuffer) -> usize {
         let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
         let mut delta = 1;
@@ -2213,7 +2213,7 @@ impl TextEditor {
         };
         delta
     }
-    
+
     fn compute_next_unfolded_line_down(&self, text_buffer: &TextBuffer) -> usize {
         let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
         let mut delta = 1;
@@ -2227,12 +2227,12 @@ impl TextEditor {
         }
         delta
     }
-    
-    
+
+
     fn compute_focussed_line_for_folding(&self, cx: &Cx, text_buffer: &TextBuffer) -> usize {
         let scroll = self.view.get_scroll_pos(cx);
         let rect = self.view.get_view_area(cx).get_rect(cx);
-        
+
         // first try if our last cursor is in view
         let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
         if pos.row < self._line_geometry.len() {
@@ -2243,7 +2243,7 @@ impl TextEditor {
                 return pos.row
             }
         }
-        
+
         // scan for the centerline otherwise
         let scroll = self.view.get_scroll_pos(cx);
         let center_y = rect.h * 0.5 + scroll.y;
@@ -2253,7 +2253,7 @@ impl TextEditor {
                 return line
             }
         }
-        
+
         // if we cant find the centerline, use the view top
         for (line, geom) in self._line_geometry.iter().enumerate() {
             if geom.walk.y > scroll.y {
@@ -2261,12 +2261,12 @@ impl TextEditor {
                 return line
             }
         }
-        
+
         // cant find anything
         return 0
     }
-    
-    
+
+
 }
 
 #[derive(Clone)]
@@ -2324,7 +2324,7 @@ impl AnimFoldingState {
             _ => true
         }
     }
-    
+
     fn is_folded(&self) -> bool {
         match self {
             AnimFoldingState::Folded => true,
@@ -2332,7 +2332,7 @@ impl AnimFoldingState {
             _ => false
         }
     }
-    
+
     fn get_font_size(&self, open_size: f32, folded_size: f32) -> f32 {
         match self {
             AnimFoldingState::Open => open_size,
@@ -2341,7 +2341,7 @@ impl AnimFoldingState {
             AnimFoldingState::Folding(f, _, _) => f * open_size + (1. - f) * folded_size,
         }
     }
-    
+
     fn do_folding(&mut self, speed: f32, speed2: f32) {
         *self = match self {
             AnimFoldingState::Open => AnimFoldingState::Folding(1.0, speed, speed2),
@@ -2350,7 +2350,7 @@ impl AnimFoldingState {
             AnimFoldingState::Folding(f, _, _) => AnimFoldingState::Folding(*f, speed, speed2),
         }
     }
-    
+
     fn do_opening(&mut self, speed: f32, speed2: f32) {
         *self = match self {
             AnimFoldingState::Open => AnimFoldingState::Open,
@@ -2359,7 +2359,7 @@ impl AnimFoldingState {
             AnimFoldingState::Folding(f, _, _) => AnimFoldingState::Opening(1.0 - *f, speed, speed2),
         }
     }
-    
+
     fn next_anim_step(&mut self) {
         *self = match self {
             AnimFoldingState::Open => AnimFoldingState::Open,

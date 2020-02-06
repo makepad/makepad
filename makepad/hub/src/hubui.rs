@@ -10,15 +10,15 @@ pub struct HubUI {
 }
 
 impl HubUI {
-    
+
     pub fn start_hub_ui_direct<F>(hub_router:&mut HubRouter,event_handler: F)->HubUI
     where F: Fn() + Clone + Send + 'static{
         // lets create a tx pair, and add a route
         let (tx_write, rx_write) = mpsc::channel::<FromHubMsg>();
-        
+
         let htc_msgs_arc = Arc::new(Mutex::new(Vec::new()));
         let route_send = hub_router.connect_direct(HubRouteType::UI, tx_write);
-        
+
         let thread = {
             let htc_msgs_arc = Arc::clone(&htc_msgs_arc);
             let route_send = route_send.clone();
@@ -29,7 +29,7 @@ impl HubUI {
                     to: HubMsgTo::All,
                     msg: HubMsg::ConnectUI
                 });
-                
+
                 // this is the main messageloop, on rx
                 while let Ok(htc) = rx_write.recv() {
                     let mut do_signal = false;
@@ -38,7 +38,7 @@ impl HubUI {
                             do_signal = true;
                         }
                         htc_msgs.push(htc);
-                    } 
+                    }
                     if do_signal{
                         event_handler();
                     }
@@ -54,7 +54,7 @@ impl HubUI {
         }
     }
 
-    
+
     pub fn get_messages(&mut self)->Option<Vec<FromHubMsg>>{
         if let Ok(mut htc_msgs) = self.htc_msgs_arc.lock() {
             let mut msgs = Vec::new();

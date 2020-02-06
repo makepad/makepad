@@ -55,7 +55,7 @@ pub enum CaptureEvent {
 }
 
 impl Capture {
-    
+
     fn mf_create_attributes(num_attrs: DWORD) -> Result<ComPtr<IMFAttributes>, HRESULT> {
         let mut attributes = ptr::null_mut();
         let hr = unsafe {MFCreateAttributes(
@@ -64,7 +64,7 @@ impl Capture {
         )};
         if winerror::SUCCEEDED(hr) {Ok(unsafe {ComPtr::from_raw(attributes as *mut _)})} else {Err(hr)}
     }
-    
+
     fn mf_create_source_reader(attributes: &ComPtr<IMFAttributes>, source: &ComPtr<IMFMediaSource>) -> Result<ComPtr<IMFSourceReader>, HRESULT> {
         let mut source_reader = ptr::null_mut();
         let hr = unsafe {MFCreateSourceReaderFromMediaSource(
@@ -74,7 +74,7 @@ impl Capture {
         )};
         if winerror::SUCCEEDED(hr) {Ok(unsafe {ComPtr::from_raw(source_reader as *mut _)})} else {Err(hr)}
     }
-    
+
     unsafe fn select_format(reader: &ComPtr<IMFSourceReader>, pref_format: &CaptureFormat, pref_width: usize, pref_height: usize, pref_fps: f64) -> Option<ComPtr<IMFMediaType>> {
         let mut counter = 0;
         loop {
@@ -85,12 +85,12 @@ impl Capture {
                 if native_type.GetGUID(&MF_MT_SUBTYPE, &mut guid) != S_OK {
                     continue;
                 }
-                
+
                 let mut frame_size: u64 = 0;
                 check("native_type.GetUINT64", native_type.GetUINT64(&MF_MT_FRAME_SIZE, &mut frame_size));
                 let height = frame_size & 0xffffffff;
                 let width = frame_size>>32;
-                
+
                 let mut frame_rate: u64 = 0;
                 check("native_type.GetDouble", native_type.GetUINT64(&MF_MT_FRAME_RATE, &mut frame_rate));
                 let fps = (frame_rate >> 32) as f64 / ((frame_rate & 0xffffffff)as f64);
@@ -111,7 +111,7 @@ impl Capture {
         }
         return None
     }
-    
+
     pub fn handle_signal(&mut self, _cx: &mut Cx, event: &mut Event) -> CaptureEvent {
         if let Some(platform) = &self.platform {
             if let Event::Signal(se) = event {
@@ -130,29 +130,29 @@ impl Capture {
         }
         return CaptureEvent::None
     }
-    
+
     pub fn init(&mut self, cx: &mut Cx, device_id: usize, pref_format: CaptureFormat, pref_width: usize, pref_height: usize, pref_fps: f64) -> bool {
-        
+
         check("cannot mf_startup", unsafe {
             MFStartup(0)
         });
-        
+
         let attributes = Self::mf_create_attributes(1).expect("cannot mf_create_attributes");
-        
+
         check("attributes.SetGUID", unsafe {
             attributes.SetGUID(
                 &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
                 &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID
             )
         });
-        
+
         unsafe {
             let mut devices_raw: *mut *mut IMFActivate = 0 as _;
             let mut count: u32 = 0;
             check("attributes.SetGUID", MFEnumDeviceSources(attributes.as_raw() as *mut _, &mut devices_raw, &mut count));
-            
+
             let devices = std::slice::from_raw_parts(devices_raw, count as usize);
-            
+
             let mut source_raw = ptr::null_mut();
             if device_id as u32 >= count {
                 println!("Capture device with id {} not found", device_id);
@@ -162,25 +162,25 @@ impl Capture {
                 &IMFMediaSource::uuidof(),
                 &mut source_raw
             ));
-            
+
             let source: ComPtr<IMFMediaSource> = ComPtr::from_raw(source_raw as *mut _);
-            
+
             let attributes = Self::mf_create_attributes(2).expect("cannot mf_create_attributes");
-            
+
             check("attributes.SetUINT32", attributes.SetUINT32(
                 &MF_READWRITE_DISABLE_CONVERTERS,
                 TRUE as u32
             ));
-            
+
             let source_reader = SourceReaderCallback::new(self);
             check("attributes.SetUnknown", attributes.SetUnknown(
                 &MF_SOURCE_READER_ASYNC_CALLBACK,
                 source_reader.as_raw() as *mut _
             ));
-            
+
             let reader = Self::mf_create_source_reader(&attributes, &source).expect("cannot mf_create_source_reader");
             // set reader async callback
-            
+
             if let Some(media_type) = Self::select_format(&reader, &pref_format, pref_width, pref_height, pref_fps) {
                 //println!("Selected format!");
                 check("SetCurrentMediaType", reader.SetCurrentMediaType(
@@ -196,14 +196,14 @@ impl Capture {
                     ptr::null_mut(),
                     ptr::null_mut()
                 ));
-                
+
                 self.texture.set_desc(cx, Some(TextureDesc {
                     format: TextureFormat::MappedBGRA,
                     width: Some(pref_width),
                     height: Some(pref_height),
                     multisample: None
                 }));
-                
+
                 self.platform = Some(CapturePlatform {
                     format: pref_format,
                     width: pref_width as usize,
@@ -248,11 +248,11 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
             println!("read sample returned failure!");
             return S_OK;
         }
-        
+
         let capture_platform = (*self.capture).platform.as_mut().unwrap();
         let width = capture_platform.width;
         let height = capture_platform.height;
-        
+
         if pSample != ptr::null() {
             let mut media_buffer_raw = ptr::null_mut();
             if (*pSample).GetBufferByIndex(0, &mut media_buffer_raw as *mut *mut _) == S_OK {
@@ -264,9 +264,9 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
                     let mut stride: LONG = 0;
                     let mut scanline0: *mut BYTE = ptr::null_mut();
                     if media_buffer2d.Lock2D(&mut scanline0, &mut stride) == S_OK {
-                        
+
                         if let Some(out_u32) = capture_platform.cxthread.lock_mapped_texture_u32(&capture_platform.texture, 0) {
-                            
+
                             match capture_platform.format {
                                 CaptureFormat::YUY2 => {
                                     // lets convert YUY2 to RGB
@@ -274,33 +274,33 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
                                     for y in 0..height {
                                         for x in (0..width).step_by(2 * 4) {
                                             let off = y * width + x;
-                                            
+
                                             let ay0 = (in_buf[off + 0] & 0xff) as i32;
                                             let au0 = (in_buf[off + 0] >> 8) as i32;
                                             let ay1 = (in_buf[off + 1] & 0xff) as i32;
                                             let av0 = (in_buf[off + 1] >> 8) as i32;
-                                            
+
                                             let by0 = (in_buf[off + 2] & 0xff) as i32;
                                             let bu0 = (in_buf[off + 2] >> 8) as i32;
                                             let by1 = (in_buf[off + 3] & 0xff) as i32;
                                             let bv0 = (in_buf[off + 3] >> 8) as i32;
-                                            
+
                                             let cy0 = (in_buf[off + 4] & 0xff) as i32;
                                             let cu0 = (in_buf[off + 4] >> 8) as i32;
                                             let cy1 = (in_buf[off + 5] & 0xff) as i32;
                                             let cv0 = (in_buf[off + 5] >> 8) as i32;
-                                            
+
                                             let dy0 = (in_buf[off + 6] & 0xff) as i32;
                                             let du0 = (in_buf[off + 6] >> 8) as i32;
                                             let dy1 = (in_buf[off + 7] & 0xff) as i32;
                                             let dv0 = (in_buf[off + 7] >> 8) as i32;
-                                            
+
                                             let abcd1 = convert_ycrcb_to_rgba_sse2(
                                                 _mm_set_epi32(ay0, by0, cy0, dy0),
                                                 _mm_set_epi32(av0, bv0, cv0, dv0),
                                                 _mm_set_epi32(au0, bu0, cu0, du0)
                                             );
-                                            
+
                                             let abcd2 = convert_ycrcb_to_rgba_sse2(
                                                 _mm_set_epi32(ay1, by1, cy1, dy1),
                                                 _mm_set_epi32(av0, bv0, cv0, dv0),
@@ -336,7 +336,7 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
                                                 _mm_set_epi32(v, v, v, v),
                                                 _mm_set_epi32(u, u, u, u)
                                             );
-                                            
+
                                             out_u32[off] = _mm_extract_epi32(abcd1, 3) as u32;
                                             out_u32[off + 1] = _mm_extract_epi32(abcd1, 2) as u32;
                                             out_u32[off + width] = _mm_extract_epi32(abcd1, 1) as u32;
@@ -352,7 +352,7 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
                 }
             }
         }
-        
+
         check("ReadSample", capture_platform.reader.ReadSample(
             MF_SOURCE_READER_FIRST_VIDEO_STREAM,
             0,
@@ -361,15 +361,15 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
             ptr::null_mut(),
             ptr::null_mut()
         ));
-        
+
         return S_OK
     }
-    
+
     unsafe fn on_flush(&self, _dwStreamIndex: DWORD,) -> HRESULT {
         println!("GOT FLUSH!");
         return S_OK
     }
-    
+
     unsafe fn on_event(&self, _dwStreamIndex: DWORD, _pEvent: *const IMFMediaEvent,) -> HRESULT {
         println!("GOT EVENT!");
         return S_OK
@@ -386,11 +386,11 @@ fn convert_ycrcb_to_rgba(y: u16, cr: u16, cb: u16) -> u32 {
         }
         return a as u32
     }
-    
+
     let c = y as i32 - 16;
     let d = cb as i32 - 128;
     let e = cr as i32 - 128;
-    
+
     return (clip((298 * c + 516 * d + 128) >> 8) << 16)
         | (clip((298 * c - 100 * d - 208 * e + 128) >> 8) << 8)
         | (clip((298 * c + 409 * e + 128) >> 8) << 0)
@@ -398,15 +398,15 @@ fn convert_ycrcb_to_rgba(y: u16, cr: u16, cb: u16) -> u32 {
 }*/
 
 unsafe fn convert_ycrcb_to_rgba_sse2(y: __m128i, cr: __m128i, cb: __m128i) -> __m128i {
-    
+
     unsafe fn clip(a: __m128i) -> __m128i {
         _mm_srl_epi32(_mm_max_epi32(_mm_min_epi32(a, _mm_set1_epi32(65535)), _mm_set1_epi32(0)), _mm_setr_epi32(8, 0, 0, 0))
     }
-    
+
     let c = _mm_add_epi32(y, _mm_set1_epi32(-16));
     let d = _mm_add_epi32(cb, _mm_set1_epi32(-128));
     let e = _mm_add_epi32(cr, _mm_set1_epi32(-128));
-    
+
     // red
     let m128 = _mm_set1_epi32(128);
     let mc = _mm_mullo_epi32(c, _mm_set1_epi32(298));
@@ -481,7 +481,7 @@ DEFINE_GUID! {MFVideoFormat_NV12, 0x3231564e, 0x0000, 0x0010, 0x80, 0x00, 0x00, 
 RIDL! {
     #[uuid(0x2cd2d921, 0xc447, 0x44a7, 0xa1, 0x3c, 0x4a, 0xda, 0xbf, 0xc2, 0x47, 0xe3)]
     interface IMFAttributes(IMFAttributesVtbl): IUnknown(IUnknownVtbl) {
-        
+
         fn GetItem(guidKey: REFGUID, pValue: *mut PROPVARIANT,) -> HRESULT,
         fn GetItemType(guidKey: REFGUID, pType: *mut MF_ATTRIBUTE_TYPE,) -> HRESULT,
         fn CompareItem(guidKey: REFGUID, Value: REFPROPVARIANT, pbResult: *mut BOOL,) -> HRESULT,

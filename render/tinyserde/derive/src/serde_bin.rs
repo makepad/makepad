@@ -21,7 +21,7 @@ pub fn derive_ser_bin_struct(input: &DeriveInput, fields: &FieldsNamed) -> Token
     let bounded_where_clause = where_clause_with_bound(&input.generics, bound);
     let ident = &input.ident;
     let fieldname = fields.named.iter().map( | f | f.ident.clone().unwrap()).collect::<Vec<_>>();
-    
+
     quote! {
         impl #impl_generics SerBin for #ident #ty_generics #bounded_where_clause {
             fn ser_bin(&self, s: &mut Vec<u8>) {
@@ -102,11 +102,11 @@ pub fn derive_ser_bin_enum(input: &DeriveInput, enumeration: &DataEnum) -> Token
     let (impl_generics, ty_generics, _) = input.generics.split_for_impl();
     let bound = parse_quote!(SerBin);
     let bounded_where_clause = where_clause_with_bound(&input.generics, bound);
-    
+
     let ident = &input.ident;
-    
+
     let mut match_item = Vec::new();
-    
+
     for (index, variant) in enumeration.variants.iter().enumerate() {
         let lit = LitInt::new(&format!("{}u16", index), ident.span());
         let ident = &variant.ident;
@@ -144,7 +144,7 @@ pub fn derive_ser_bin_enum(input: &DeriveInput, enumeration: &DataEnum) -> Token
             },
         }
     }
-    
+
     quote! {
         impl #impl_generics SerBin for #ident #ty_generics #bounded_where_clause {
             fn ser_bin(&self, s: &mut Vec<u8>) {
@@ -159,14 +159,14 @@ pub fn derive_ser_bin_enum(input: &DeriveInput, enumeration: &DataEnum) -> Token
 }
 
 pub fn derive_de_bin_enum(input: &DeriveInput, enumeration: &DataEnum) -> TokenStream {
-    
+
     let (impl_generics, ty_generics, _) = input.generics.split_for_impl();
     let ident = &input.ident;
     let bound = parse_quote!(DeBin);
     let bounded_where_clause = where_clause_with_bound(&input.generics, bound);
-    
+
     let mut match_item = Vec::new();
-    
+
     for (index, variant) in enumeration.variants.iter().enumerate() {
         let lit = LitInt::new(&format!("{}u16", index), ident.span());
         let ident = &variant.ident;
@@ -198,7 +198,7 @@ pub fn derive_de_bin_enum(input: &DeriveInput, enumeration: &DataEnum) -> TokenS
             },
         }
     }
-    
+
     quote! {
         impl #impl_generics DeBin for #ident #ty_generics #bounded_where_clause {
             fn de_bin(o:&mut usize, d:&[u8]) -> std::result::Result<Self, DeBinErr> {
