@@ -1,5 +1,47 @@
 //! This is an example of a minimal Makepad application. It creates a single window, and renders a
 //! rectangle to it.
+//! ```
+//! use makepad_render::*;
+
+//! struct App {
+//!    window: Window,
+//!    pass: Pass,
+//!    color_texture: Texture,
+//!    view: View,
+//!}
+//!
+//!main_app!(App);
+//!
+//!impl App {
+//!    pub fn shader() -> ShaderId {uid!()}
+//!
+//!    pub fn new(cx: &mut Cx) -> App {
+//!        App::shader().set(cx, Quad::def_quad_shader());
+//!        App {
+//!            window: Window::new(cx),
+//!            pass: Pass::default(),
+//!            color_texture: Texture::default(),
+//!            view: View::new(cx),
+//!        }
+//!    }
+//!    
+//!    fn handle_app(&mut self, _cx: &mut Cx, _event: &mut Event) {}
+//!    
+//!    fn draw_app(&mut self, cx: &mut Cx) {
+//!        self.window.begin_window(cx);
+//!        self.pass.begin_pass(cx);
+//!        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(32, 0, 0)));
+//!        if self.view.begin_view(cx, Layout::default()).is_ok() {
+//!            let mut quad = Quad::new(cx);
+//!            quad.shader = App::shader().get(cx);
+//!            quad.draw_quad_abs(cx, Rect{ x: 200.0, y: 150.0, w: 400.0, h: 300.0 });
+//!            self.view.end_view(cx);
+//!        }
+//!        self.pass.end_pass(cx);
+//!        self.window.end_window(cx);
+//!    }
+//!}
+//!```
 //!
 //! # The `App` struct
 //!
@@ -134,6 +176,7 @@ use makepad_render::*;
 struct App {
     window: Window,
     pass: Pass,
+    color_texture: Texture,
     view: View,
 }
 
@@ -147,6 +190,7 @@ impl App {
         App {
             window: Window::new(cx),
             pass: Pass::default(),
+            color_texture: Texture::default(),
             view: View::new(cx),
         }
     }
@@ -156,6 +200,7 @@ impl App {
     fn draw_app(&mut self, cx: &mut Cx) {
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
+        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(32, 0, 0)));
         if self.view.begin_view(cx, Layout::default()).is_ok() {
             let mut quad = Quad::new(cx);
             quad.shader = App::shader().get(cx);
