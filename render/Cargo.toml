@@ -20,7 +20,7 @@ makepad-ttf-parser = { path = "./vector/ttf_parser", version = "0.1" }
 makepad-path = { path = "./vector/path", version = "0.1" }
  
 [target.x86_64-apple-darwin.dependencies]
-makepad-objc-sys = {path = "./bind/objc-sys"}
+makepad-objc-sys = { path = "./bind/objc-sys", version = "0.2" }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 makepad-glx-sys = { path = "./bind/glx-sys", version = "0.1" }
