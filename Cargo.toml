@@ -6,6 +6,7 @@ members = [
     "examples/audio_example",
     "examples/bare_example", 
     "examples/bare_example/wasm",
+    "examples/hello_world",
     "examples/widget_example",
     "examples/cmdline_example",
     "examples/webgl_example_wasm",
