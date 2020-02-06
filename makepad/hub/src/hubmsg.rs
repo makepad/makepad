@@ -10,19 +10,19 @@ pub enum HubMsg {
     ConnectBuilder(String),
     ConnectClone(String),
     ConnectUI,
-    
+
     DisconnectBuilder(String),
     DisconnectClone(String),
     DisconnectUI,
     DisconnectUnknown,
-    
+
     ConnectionError(HubError),
-    
-    BuilderConfig { 
+
+    BuilderConfig {
         uid: HubUid,
         config: HubBuilderConfig
     },
-    
+
     // make client stuff
     Build {
         uid: HubUid,
@@ -30,102 +30,102 @@ pub enum HubMsg {
         package: String,
         config: String
     },
-    
+
     BuildFailure {
         uid: HubUid,
     },
-    
+
     BuildSuccess {
         uid: HubUid,
     },
-    
+
     BuildKill {
         uid: HubUid
     },
-    
+
     CargoBegin {
         uid: HubUid,
     },
-    
+
     LogItem {
         uid: HubUid,
         item: HubLogItem
     },
-    
+
     CargoArtifact {
         uid: HubUid,
         package_id: String,
         fresh: bool
     },
-    
+
     CargoEnd {
         uid: HubUid,
         build_result: BuildResult
     },
-    
+
     ListPackagesRequest {
         uid: HubUid
     },
-    
+
     ListPackagesResponse {
         uid: HubUid,
         packages: Vec<HubPackage>
     },
-    
+
     ProgramKill {
         uid: HubUid
     },
-    
+
     ProgramRun {
         uid: HubUid,
         path: String,
         args: Vec<String>
     },
-    
+
     ProgramBegin {
         uid: HubUid
     },
-    
+
     ProgramEnd {
         uid: HubUid
     },
-    
+
     BuilderFileTreeRequest {
         uid: HubUid,
         create_digest: bool
     },
-    
+
     BuilderFileTreeResponse {
         uid: HubUid,
         tree: BuilderFileTreeNode
     },
-    
+
     ListBuildersRequest {
         uid: HubUid,
     },
-    
+
     ListBuildersResponse {
         uid: HubUid,
         builders: Vec<String>
     },
-    
+
     FileReadRequest {
         uid: HubUid,
         path: String
     },
-    
+
     FileReadResponse {
         uid: HubUid,
         path: String,
         data: Option<Vec<u8>>
     },
-    
+
     FileWriteRequest {
         uid: HubUid,
         path: String,
         data: Vec<u8>
     },
-    
+
     FileWriteResponse {
         uid: HubUid,
         path: String,
@@ -299,7 +299,7 @@ impl HubAddr {
     //pub fn zero() -> HubAddr {
     //    HubAddr::V4 {octets: [0, 0, 0, 0], port: 0}
    // }
-    
+
     pub fn from_socket_addr(addr: SocketAddr) -> HubAddr {
         match addr {
             SocketAddr::V4(v4) => HubAddr::V4 {octets: v4.ip().octets(), port: v4.port()},

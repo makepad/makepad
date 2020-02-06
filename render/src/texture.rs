@@ -58,7 +58,7 @@ impl Texture {
             None
         }
     }
-    
+
     pub fn set_desc(&mut self, cx: &mut Cx, desc: Option<TextureDesc>) {
         if self.texture_id.is_none() {
             self.texture_id = Some(if cx.textures_free.len() > 0 {
@@ -73,7 +73,7 @@ impl Texture {
             cxtexture.desc = desc;
         }
     }
-    
+
 }
 
 #[derive(Default)]

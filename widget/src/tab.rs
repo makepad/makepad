@@ -56,29 +56,29 @@ impl Tab {
         tab.animator.set_anim_as_last_values(&tab.anim_default(cx));
         tab
     }
-    
+
     pub fn layout_bg() -> LayoutId {uid!()}
     pub fn text_style_title() -> TextStyleId {uid!()}
     pub fn instance_border_color() -> InstanceColor {uid!()}
     pub fn tab_closing() -> InstanceFloat {uid!()}
     pub fn shader_bg() -> ShaderId {uid!()}
-    
+
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
-        
+
         Self::layout_bg().set(cx, Layout {
             align: Align::left_center(),
             walk: Walk::wh(Width::Compute, Height::Fix(40. * opt.scale.powf(0.5))),
             padding: Padding {l: 16.0, t: 1.0, r: 16.0, b: 0.0},
             ..Default::default()
         });
-        
+
         Self::text_style_title().set(cx, Theme::text_style_normal().get(cx));
-        
+
         Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
-            
+
             let border_color: Self::instance_border_color();
             const border_width: float = 1.0;
-            
+
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 df_rect(-1., -1., w + 2., h + 2.);
@@ -91,7 +91,7 @@ impl Tab {
             }
         })));
     }
-    
+
     pub fn get_bg_color(&self, cx: &Cx) -> Color {
         if self._is_selected {
             Theme::color_bg_selected().get(cx)
@@ -100,7 +100,7 @@ impl Tab {
             Theme::color_bg_normal().get(cx)
         }
     }
-    
+
     pub fn get_text_color(&self, cx: &Cx) -> Color {
         if self._is_selected {
             if self._is_focussed {
@@ -119,7 +119,7 @@ impl Tab {
             }
         }
     }
-    
+
     pub fn anim_default(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.05}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
@@ -128,7 +128,7 @@ impl Tab {
             //Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
-    
+
     pub fn anim_over(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
@@ -137,7 +137,7 @@ impl Tab {
             //Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
-    
+
     pub fn anim_down(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
@@ -146,35 +146,35 @@ impl Tab {
             // Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
-    
+
     pub fn anim_close(&self, _cx: &Cx) -> Anim {
         Anim::new(Play::Single {duration: 0.1, cut: true, term: true, end: 1.0}, vec![
             Track::float(Self::tab_closing(), Ease::OutExp, vec![(0.0, 1.0), (1.0, 0.0)]),
         ])
     }
-    
+
     pub fn set_tab_focus(&mut self, cx: &mut Cx, focus: bool) {
         if focus != self._is_focussed {
             self._is_focussed = focus;
             self.animator.play_anim(cx, self.anim_default(cx));
         }
     }
-    
+
     pub fn set_tab_selected(&mut self, cx: &mut Cx, selected: bool) {
         if selected != self._is_selected {
             self._is_selected = selected;
             self.animator.play_anim(cx, self.anim_default(cx));
         }
     }
-    
+
     pub fn set_tab_state(&mut self, cx: &mut Cx, selected: bool, focus: bool) {
         self._is_selected = selected;
         self._is_focussed = focus;
         self.animator.set_anim_as_last_values(&self.anim_default(cx));
     }
-    
+
     pub fn handle_tab(&mut self, cx: &mut Cx, event: &mut Event) -> TabEvent {
-        
+
         if !self.animator.term_anim_playing() {
             match self.tab_close.handle_tab_close(cx, event) {
                 ButtonEvent::Down => {
@@ -185,7 +185,7 @@ impl Tab {
                 _ => ()
             }
         }
-        
+
         match event.hits(cx, self._bg_area, HitOpt::default()) {
             Event::Animate(ae) => {
                 // its playing the term anim, run a redraw
@@ -237,7 +237,7 @@ impl Tab {
             },
             Event::FingerUp(fe) => {
                 self._is_down = false;
-                
+
                 if fe.is_over {
                     if !fe.is_touch {
                         self.animator.play_anim(cx, self.anim_over(cx));
@@ -270,17 +270,17 @@ impl Tab {
         };
         TabEvent::None
     }
-    
+
     pub fn get_tab_rect(&mut self, cx: &Cx) -> Rect {
         self._bg_area.get_rect(cx)
     }
-    
+
     pub fn begin_tab(&mut self, cx: &mut Cx) -> Result<(), ()> {
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.shader = Self::shader_bg().get(cx);
         self.bg.z = self.z;
         self.bg.color = self.animator.last_color(cx, Quad::instance_color());
-        
+
         // check if we are closing
         if self.animator.term_anim_playing() {
             // so so BUT how would we draw this thing with its own clipping
@@ -316,21 +316,21 @@ impl Tab {
             self._text_area = self.text.draw_text(cx, &self.label);
             cx.turtle_align_y();
             self._bg_inst = Some(bg_inst);
-            
+
             return Ok(())
         }
     }
-    
+
     pub fn end_tab(&mut self, cx: &mut Cx) {
         if let Some(bg_inst) = self._bg_inst.take() {
             self._bg_area = self.bg.end_quad(cx, &bg_inst);
             self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
         }
     }
-    
+
     pub fn draw_tab(&mut self, cx: &mut Cx) {
         if self.begin_tab(cx).is_err() {return};
         self.end_tab(cx);
     }
-    
+
 }

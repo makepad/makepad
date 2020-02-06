@@ -18,7 +18,7 @@ thread_local! {
 static mut GLOBAL_MY_CX: *mut RwLock<MyCx> = 0 as *mut _;
 
 impl MyCx{
-    
+
     fn get<'a>()->std::sync::RwLockWriteGuard<'a, MyCx>{
         /*FOO.with(|foo| {
             if *foo.borrow() == true{
@@ -32,7 +32,7 @@ impl MyCx{
         }
         my_cx
     }
-    
+
     fn test(&mut self, t:i32){
         self.x |= t;
     }
@@ -42,19 +42,19 @@ impl MyCx{
 
 fn main() {
     let start = precise_time_ns();
-    
+
     let mut x = RwLock::new(MyCx{id:std::thread::current().id(), x:0});
     unsafe{GLOBAL_MY_CX = &mut x};
-    
+
     let start = precise_time_ns();
     for i in 0..10000{
         let mut my_cx = MyCx::get();
         my_cx.test(i);
-    } 
+    }
     let end = precise_time_ns();
     let my_cx = MyCx::get();
     println!("HELLO1 {} {}", (end-start) as f64/1_000_000.0, my_cx.x);
-    
+
     let mut y = MyCx{id:std::thread::current().id(), x:0};
     let start = precise_time_ns();
     for i in 0..1000000{

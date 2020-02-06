@@ -28,7 +28,7 @@ pub struct Gamepad {
     pub player: usize,
     pub packet_number: u64,
     pub buttons: u32,
-    pub last_buttons: u32, 
+    pub last_buttons: u32,
     pub buttons_up_edge: u32,
     pub buttons_down_edge: u32,
     pub left_trigger: f32,
@@ -42,21 +42,21 @@ pub struct GamepadPlatform {
 }
 
 impl Gamepad {
-    
+
     pub fn init(&mut self, player: usize, thumb_deadzone:f32) -> bool {
         self.thumb_deadzone = thumb_deadzone;
         self.player = player;
         self.lazy_init();
         return true;
     }
-    
+
     fn lazy_init(&mut self){
-        if!self.initialized{ 
+        if!self.initialized{
             unsafe{xinput::XInputEnable(TRUE)};
             self.initialized = true;
         }
     }
-    
+
     pub fn poll(&mut self) {
         unsafe{
             self.lazy_init();

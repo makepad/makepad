@@ -34,7 +34,7 @@ impl MenuItemDraw {
             //bg_selected_color: Color_bg_selected_over::id(cx),
         }
     }
-    
+
     pub fn get_default_anim(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
@@ -42,7 +42,7 @@ impl MenuItemDraw {
             ])
         ])
     }
-    
+
     pub fn get_default_anim_cut(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
@@ -50,7 +50,7 @@ impl MenuItemDraw {
             ])
         ])
     }
-    
+
     pub fn get_over_anim(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.02}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
@@ -58,19 +58,19 @@ impl MenuItemDraw {
             ])
         ])
     }
-    
+
     pub fn text_style_menu_label() ->TextStyleId{uid!()}
-    
-    pub fn style(cx:&mut Cx, _opt:&StyleOptions){ 
+
+    pub fn style(cx:&mut Cx, _opt:&StyleOptions){
         Self::text_style_menu_label().set(cx, Theme::text_style_normal().get(cx));
-    }   
-    
+    }
+
     /*
     pub fn draw_log_path(&mut self, cx: &mut Cx, path: &str, row: usize) {
         self.text.color = self.path_color;
         self.text.draw_text(cx, &format!("{}:{} - ", path, row));
     }
-    
+
     pub fn draw_log_body(&mut self, cx: &mut Cx, body: &str) {
         self.text.color = self.message_color;
         if body.len()>500 {
@@ -80,17 +80,17 @@ impl MenuItemDraw {
             self.text.draw_text(cx, &body);
         }
     }
-    
+
     pub fn draw_log_item(&mut self, cx: &mut Cx, list_item: &mut ListItem, log_item: &HubLogItem) {
         self.item_bg.color = list_item.animator.last_color(cx.id("bg.color"));
         let bg_inst = self.item_bg.begin_quad(cx, &self.get_line_layout());
-        
+
         match log_item {
             HubLogItem::LocPanic(loc_msg) => {
                 self.code_icon.draw_icon_walk(cx, CodeIconType::Panic);
                 self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
                 self.draw_log_body(cx, &loc_msg.body);
-                
+
             },
             HubLogItem::LocError(loc_msg) => {
                 self.code_icon.draw_icon_walk(cx, CodeIconType::Error);
@@ -118,7 +118,7 @@ impl MenuItemDraw {
                 self.draw_log_body(cx, &msg);
             }
         }
-        
+
         let bg_area = self.item_bg.end_quad(cx, &bg_inst);
         list_item.animator.update_area_refs(cx, bg_area);
     }*/
@@ -138,11 +138,11 @@ impl WindowMenu {
             view: View::new(cx),
         }
     }
-    
+
     pub fn handle_window_menu(&mut self, _cx: &mut Cx, _event: &mut Event, _menu: &Menu) -> WindowMenuEvent {
         WindowMenuEvent::None
     }
-    
+
     pub fn draw_window_menu(&mut self, _cx: &mut Cx, _menu: &Menu) {
     }
 }

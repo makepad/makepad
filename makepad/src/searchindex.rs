@@ -12,13 +12,13 @@ pub struct SearchIndex {
 //
 
 impl SearchIndex {
-    
+
     pub fn new() -> Self {
         Self {
             identifiers: TextIndex::new()
         }
     }
-    
+
     pub fn new_rust_token(&mut self, atb: &AppTextBuffer) {
         // pass it to the textindex
         if atb.text_buffer.token_chunks.len() <= 1 {
@@ -33,7 +33,7 @@ impl SearchIndex {
                 // how do we maintain an incremental datastructure?
                 // that we can copy on build, but also diff for changes?
                 // how do we detect a change thats NOT a live change?
-                
+
             },
             TokenType::Identifier | TokenType::Call | TokenType::TypeName => {
                 let prev_tt = {
@@ -63,7 +63,7 @@ impl SearchIndex {
                 let len = atb.text_buffer.token_chunks[chunk_id].len;
                 let chars = &atb.text_buffer.flat_text[offset..(offset + len)];
                 let mut_id = (atb.text_buffer.mutation_id & 0xffff) as u16;
-                
+
                 let prio = match atb.text_buffer.token_chunks[chunk_id].token_type {
                     TokenType::Identifier => {
                         match prev_tt {
@@ -108,7 +108,7 @@ impl SearchIndex {
             _ => ()
         }
     }
-     
+
     pub fn clear_markers(&mut self, cx: &mut Cx, storage: &mut AppStorage) {
         for atb in &mut storage.text_buffers {
             if atb.text_buffer.markers.search_cursors.len()>0 {
@@ -117,14 +117,14 @@ impl SearchIndex {
             atb.text_buffer.markers.search_cursors.truncate(0);
         }
     }
-    
+
     pub fn search(&mut self, what: &str, first_tbid:AppTextBufferId, cx: &mut Cx, storage: &mut AppStorage) -> Vec<SearchResult> {
         let mut out = Vec::new();
-        
+
         self.clear_markers(cx, storage);
-        
+
         self.identifiers.search(what, first_tbid, storage, &mut out);
-        
+
         // sort it
         out.sort_by( | a, b | {
             let prio = a.prio.cmp(&b.prio);
@@ -136,8 +136,8 @@ impl SearchIndex {
                 return tb
             }
             return prio
-        }); 
-        
+        });
+
         for atb in &mut storage.text_buffers {
             atb.text_buffer.markers.search_cursors.sort_by( | a, b | {
                 a.tail.cmp(&b.tail)
@@ -147,7 +147,7 @@ impl SearchIndex {
             }
         }
 
-        out 
+        out
     }
 }
 
@@ -179,13 +179,13 @@ pub struct TextIndex {
 }
 
 impl TextIndex {
-    
+
     pub fn new() -> TextIndex {
         TextIndex {
             nodes: vec![TextIndexNode::default()]
         }
     }
-    
+
     pub fn write(&mut self, what: &[char], text_buffer_id: AppTextBufferId, mut_id: u16, prio: u16, token: u32) {
         let mut o = 0;
         let mut id = 0;
@@ -243,10 +243,10 @@ impl TextIndex {
                 new_id
             };
         }
-        
+
         self.nodes[id].end.insert((text_buffer_id, token), TextIndexEntry {mut_id, prio});
     }
-    
+
     pub fn _write_str(&mut self, what: &str, text_buffer_id: AppTextBufferId, mut_id: u16, prio: u16, token: u32) {
         let mut whatv = Vec::new();
         for c in what.chars() {
@@ -254,10 +254,10 @@ impl TextIndex {
         }
         self.write(&whatv, text_buffer_id, mut_id, prio, token);
     }
-    
+
     pub fn search(&mut self, what: &str, first_tbid:AppTextBufferId, storage: &mut AppStorage, out: &mut Vec<SearchResult>) {
         // ok so if i type a beginning of a word, i'd want all the endpoints
-        
+
         let mut node_id = 0;
         let mut stem_eat = 0;
         let mut exact_only = true;
@@ -266,7 +266,7 @@ impl TextIndex {
                 exact_only = false;
                 continue;
             }
-            
+
             // first eat whats in the stem
             if stem_eat < self.nodes[node_id].used {
                 if c != self.nodes[node_id].stem[stem_eat] {
@@ -288,11 +288,11 @@ impl TextIndex {
         if exact_only && stem_eat < self.nodes[node_id].used {
             return
         }
-        
+
         let mut nexts = Vec::new();
         let mut cleanup = Vec::new();
 
-        loop { 
+        loop {
             for (_key, next) in &self.nodes[node_id].map {
                 nexts.push(*next);
             }
@@ -311,7 +311,7 @@ impl TextIndex {
                                 1
                             }
                         }else{entry.prio}
-                        
+
                     });
                     // lets output a result cursor int he textbuffer
                     let tok = &tb.token_chunks[*token as usize];
@@ -337,7 +337,7 @@ impl TextIndex {
             node_id = nexts.pop().unwrap();
         }
     }
-    
+
     pub fn _dump_tree(&self, key: char, id: usize, depth: usize) {
         let mut indent = String::new();
         for _ in 0..depth {indent.push_str(" - ");};

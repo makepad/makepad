@@ -1,4 +1,4 @@
- 
+
 use makepad_hub::*;
 
 pub fn builder(ws: &mut HubBuilder, htc: FromHubMsg) -> Result<(), HubWsError> {
@@ -24,15 +24,15 @@ pub fn builder(ws: &mut HubBuilder, htc: FromHubMsg) -> Result<(), HubWsError> {
                 "check" => args.extend_from_slice(&["check", "-p", &package]),
                 _ => return ws.cannot_find_build(uid, &package, &config)
             }
-            
+
             if config == "small" {
                 env.push(("RUSTFLAGS", "-C opt-level=z -C panic=abort -C codegen-units=1"))
             }
-            
+
             if package.ends_with("wasm") {
                 args.push("--target=wasm32-unknown-unknown");
             }
-            
+
             if let BuildResult::Wasm {path} = ws.cargo(uid, &workspace, &args, &env) ? {
                 if config == "small" { // strip the build
                     ws.wasm_strip_debug(uid, &path) ?;

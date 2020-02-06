@@ -80,7 +80,7 @@ impl HubRouteSend{
             id: 0
         }
     }
-    
+
      pub fn update_networked_in_place(&self, set_addr:Option<HubAddr>, tx_write:Option<mpsc::Sender<ToHubMsg>>){
         match self{
             HubRouteSend::Networked{own_addr_arc,tx_write_arc,..}=>{
@@ -96,8 +96,8 @@ impl HubRouteSend{
             }
         }
     }
-    
-    
+
+
     pub fn send(&self, msg:ToHubMsg){
         match self{
             HubRouteSend::Networked{tx_write_arc,..}=>{
@@ -139,7 +139,7 @@ impl HubRouter{
     pub fn connect_direct(&mut self, route_type: HubRouteType, tx_write: mpsc::Sender<FromHubMsg>)->HubRouteSend{
         let tx_pump = self.tx_pump.clone();
         let own_addr = self.alloc_local_addr();
-        
+
         if let Ok(mut routes) = self.routes.lock() {
             routes.push(HubRoute {
                 route_type: route_type,
@@ -148,14 +148,14 @@ impl HubRouter{
                 tx_write: tx_write
             })
         };
-        
+
         HubRouteSend::Direct{
             uid_alloc: Arc::new(Mutex::new(0)),
             tx_pump: tx_pump,
             own_addr: own_addr
         }
     }
-        
+
     pub fn start_hub_router(hub_log:HubLog)->HubRouter{
          let (tx_pump, rx_pump) = mpsc::channel::<(HubAddr, ToHubMsg)>();
          let routes = Arc::new(Mutex::new(Vec::<HubRoute>::new()));
@@ -173,7 +173,7 @@ impl HubRouter{
                     // we got a message.. now lets route it elsewhere
                     if let Ok(mut routes) = routes.lock() {
                         hub_log.msg("HubServer sending", &htc_msg);
-                        
+
                         if let Some(cid) = routes.iter().position( | c | c.peer_addr == htc_msg.from) {
                             if routes[cid].route_type == HubRouteType::Unknown {
                                 match &htc_msg.msg {
@@ -214,7 +214,7 @@ impl HubRouter{
                                 }
                             }
                         }
-                        
+
                         match to {
                             HubMsgTo::All => { // send it to all
                                 for route in routes.iter() {
@@ -302,7 +302,7 @@ impl HubRouter{
                 }
             })
         };
-        
+
         return HubRouter {
             tx_pump: tx_pump,
             router_thread: Some(router_thread),

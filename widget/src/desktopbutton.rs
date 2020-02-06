@@ -48,30 +48,30 @@ impl DesktopButton {
     pub fn anim_over() -> AnimId {uid!()}
     pub fn anim_down() -> AnimId {uid!()}
     pub fn shader_bg() -> ShaderId {uid!()}
-    
+
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
-        
+
         Self::anim_default().set(cx,Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::float(Self::instance_hover(), Ease::Lin, vec![(1.0, 0.)]),
             Track::float(Self::instance_down(), Ease::Lin, vec![(1.0, 0.)]),
         ]));
-        
+
         Self::anim_over().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::float(Self::instance_down(), Ease::Lin, vec![(1.0, 0.)]),
             Track::float(Self::instance_hover(), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
         ]));
-        
+
         Self::anim_down().set(cx,Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::float(Self::instance_down(), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
             Track::float(Self::instance_hover(), Ease::Lin, vec![(1.0, 1.0)]),
         ]));
-        
+
         Self::shader_bg().set(cx,Quad::def_quad_shader().compose(shader_ast!({
-            
+
             let hover: Self::instance_hover();
             let down: Self::instance_down();
             let button_type: Self::instance_type();
-            
+
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h)); // );
                 df_aa *= 3.0;
@@ -102,7 +102,7 @@ impl DesktopButton {
                     df_rect(c.x - sz - 1., c.y - sz + 1., 2. * sz, 2. * sz);
                     df_fill_keep(clear);
                     df_stroke(color("white"), 0.5 + 0.5 * dpi_dilate);
-                    
+
                     return df_result;
                 }
                 // WindowsClose
@@ -129,7 +129,7 @@ impl DesktopButton {
                     df_circle(c.x, c.y + h-0.75,2.5);
                     df_subtract();
                     df_fill(color("#8"));
-                    
+
                     return df_result;
                 }
                 return color("red")/*
@@ -143,7 +143,7 @@ impl DesktopButton {
             }
         })));
     }
-    
+
     pub fn handle_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
         //let mut ret_event = ButtonEvent::None;
         let animator = &mut self.animator;
@@ -160,9 +160,9 @@ impl DesktopButton {
         //self.bg.color = self.animator.last_color(cx, Quad_color::id());
         self.animator.init(cx, |cx| Self::anim_default().get(cx));
         let (w,h) = match ty {
-            DesktopButtonType::WindowsMin 
-            | DesktopButtonType::WindowsMax 
-            | DesktopButtonType::WindowsMaxToggled 
+            DesktopButtonType::WindowsMin
+            | DesktopButtonType::WindowsMax
+            | DesktopButtonType::WindowsMaxToggled
             | DesktopButtonType::WindowsClose => (46.,29.),
             DesktopButtonType::VRMode => (50.,36.),
         };

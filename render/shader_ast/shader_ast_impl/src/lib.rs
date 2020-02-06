@@ -12,7 +12,7 @@
 // these are defined in shader.rs in the root project
 // which looks something like the following:
 // ShAst{
-//      vars:vec![ShVar{name:"x".to_string(), ty:"float".to_string()}]   
+//      vars:vec![ShVar{name:"x".to_string(), ty:"float".to_string()}]
 // }
 // The subset of Rust syntax we support is directly related to
 // a mapping of GLSL.
@@ -28,7 +28,7 @@ use proc_macro_hack::proc_macro_hack;
 use proc_macro2::TokenStream;
 use proc_macro2::Span;
 use syn::{
-    Expr, Type, Pat, Stmt, PathArguments, GenericArgument, 
+    Expr, Type, Pat, Stmt, PathArguments, GenericArgument,
     Item, Local, ItemFn, ItemConst, ItemStruct,
     Lit, Block, FnArg, BinOp, UnOp, Ident, ReturnType, Member
 };
@@ -144,7 +144,7 @@ fn generate_fn_def(item:ItemFn)->TokenStream{
         else{
             return error(ty.span(), "return type not simple");
         }
-    }   
+    }
     else{
         return_type = "void".to_string();
         //return error(item.span(), "function needs to specify return type")
@@ -174,7 +174,7 @@ fn generate_let(local:Local)->TokenStream{
         else{
             return error(local.span(), "Please only use simple identifiers such as x or var_iable");
         };
-        
+
         let ty = if let Type::Path(typath) = &*pat.ty{
             if typath.path.segments.len() != 1{
                 return error(typath.span(), "Only simple typenames such as float or vec4 are supported");
@@ -192,7 +192,7 @@ fn generate_let(local:Local)->TokenStream{
         else{
             return error(local.span(), "let pattern misses initializer");
         };
-        
+
         return quote!{sh_let(#name, #ty, #init)}
     }
     else{
@@ -200,7 +200,7 @@ fn generate_let(local:Local)->TokenStream{
     }
 }
 
-// generate a { } block AST 
+// generate a { } block AST
 fn generate_block(block:Block)->TokenStream{
     let mut stmts = Vec::new();
     for stmt in block.stmts{
@@ -225,7 +225,7 @@ fn generate_block(block:Block)->TokenStream{
     return quote!{sh_block(&[#(#stmts,)*])}
 }
 
-// return the string name of a BinOp enum 
+// return the string name of a BinOp enum
 fn get_binop(op:BinOp)->&'static str{
     match op{
         BinOp::Add(_)=>"Add",
@@ -273,7 +273,7 @@ fn generate_expr(expr:Expr)->TokenStream{
                 for arg in expr.args{
                     args.push(generate_expr(arg));
                 }
-                
+
                 //return quote!{ShExpr::ShCall(ShCall{call:#seg.to_string(), args:{let mut v=Vec::new();#(v.push(#args);)*v}})}
                 return quote!{sh_call(#seg, &[#(#args,)*])}
             }
@@ -413,7 +413,7 @@ fn generate_expr(expr:Expr)->TokenStream{
             return quote!{sh_par(#expr)}//ShExpr::ShParen(ShParen{expr:Box::new(#expr)})}
         }
         Expr::Block(expr)=>{ // process a block expression
-            let block = generate_block(expr.block); 
+            let block = generate_block(expr.block);
             return quote!{ShExpr::ShBlock(#block)}
         }
         Expr::Return(expr)=>{
@@ -509,12 +509,12 @@ fn generate_root(expr:Expr)->TokenStream{
             return error(expr.span(), "Expecting block")
         }
     };
-    quote!{ 
+    quote!{
         ShAst{
             types:Vec::new(),//{let mut v=Vec::new();#(v.push(#types);)*v},
             vars:{let mut v=Vec::new();#(v.push(#vars);)*v},
             consts:{let mut v=Vec::new();#(v.push(#consts);)*v},
-            fns:{let mut v=Vec::new();#(v.push(#fns);)*v} 
+            fns:{let mut v=Vec::new();#(v.push(#fns);)*v}
         }
     }
 
@@ -523,10 +523,10 @@ fn generate_root(expr:Expr)->TokenStream{
 // The actual macro
 #[proc_macro_hack]
 pub fn shader_ast(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    
+
     let parsed = syn::parse_macro_input!(input as syn::Expr);
 
     let ts = generate_root(parsed);
     proc_macro::TokenStream::from(ts)
 }
- 
+

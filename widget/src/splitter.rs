@@ -7,7 +7,7 @@ pub struct Splitter {
     pub axis: Axis,
     pub align: SplitterAlign,
     pub pos: f32,
-    
+
     pub min_size: f32,
     pub split_size: f32,
     pub bg: Quad,
@@ -43,7 +43,7 @@ impl Splitter {
             axis: Axis::Vertical,
             align: SplitterAlign::First,
             pos: 0.0,
-            
+
             _split_area: Area::Empty,
             _calc_pos: 0.0,
             _is_moving: false,
@@ -59,31 +59,31 @@ impl Splitter {
             animator: Animator::default(),
         }
     }
-    
+
     pub fn anim_default() -> AnimId {uid!()}
     pub fn anim_over() -> AnimId {uid!()}
     pub fn anim_down() -> AnimId {uid!()}
     pub fn shader_bg() -> ShaderId {uid!()}
-    
+
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
-        
+
         Self::anim_default().set(cx, Anim::new(Play::Cut {duration: 0.5}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter().get(cx))]),
         ]));
-        
+
         Self::anim_over().set(cx, Anim::new(Play::Cut {duration: 0.05}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter_over().get(cx))]),
         ]));
-        
+
         Self::anim_down().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (0.0, Theme::color_bg_splitter_peak().get(cx)),
                 (1.0, Theme::color_bg_splitter_drag().get(cx))
             ]),
         ]));
-        
+
         Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
-            
+
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 df_box(0., 0., w, h, 0.5);
@@ -91,7 +91,7 @@ impl Splitter {
             }
         })));
     }
-    
+
     pub fn handle_splitter(&mut self, cx: &mut Cx, event: &mut Event) -> SplitterEvent {
         match event.hits(cx, self._split_area, HitOpt {margin: self._hit_state_margin, ..Default::default()}) {
             Event::Animate(ae) => {
@@ -150,7 +150,7 @@ impl Splitter {
                     self.pos = self._calc_pos / self._drag_max_pos;
                 }
                 else if self._calc_pos < center - self.realign_dist {
-                    
+
                     self.align = SplitterAlign::First;
                     self.pos = self._calc_pos;
                 }
@@ -158,7 +158,7 @@ impl Splitter {
                     self.align = SplitterAlign::Last;
                     self.pos = self._drag_max_pos - self._calc_pos;
                 }
-                
+
                 return SplitterEvent::MovingEnd {
                     new_align: self.align.clone(),
                     new_pos: self.pos
@@ -209,7 +209,7 @@ impl Splitter {
         };
         SplitterEvent::None
     }
-    
+
     pub fn set_splitter_state(&mut self, align: SplitterAlign, pos: f32, axis: Axis) {
         self.axis = axis;
         self.align = align;
@@ -233,7 +233,7 @@ impl Splitter {
             }
         }
     }
-    
+
     pub fn begin_splitter(&mut self, cx: &mut Cx) {
         self.animator.init(cx, | cx | Self::anim_default().get(cx));
         let rect = cx.get_turtle_rect();
@@ -265,7 +265,7 @@ impl Splitter {
             }
         }
     }
-    
+
     pub fn mid_splitter(&mut self, cx: &mut Cx) {
         cx.end_turtle(Area::Empty);
         let rect = cx.get_turtle_rect();
@@ -297,12 +297,12 @@ impl Splitter {
         };
         cx.begin_turtle(Layout::default(), Area::Empty);
     }
-    
+
     pub fn end_splitter(&mut self, cx: &mut Cx) {
         cx.end_turtle(Area::Empty);
         // draw the splitter in the middle of the turtle
         let rect = cx.get_turtle_rect();
-        
+
         match self.axis {
             Axis::Horizontal => {
                 self._drag_max_pos = rect.h;
@@ -311,7 +311,7 @@ impl Splitter {
                 self._drag_max_pos = rect.w;
             }
         };
-        
+
         self.animator.set_area(cx, self._split_area);
     }
 }

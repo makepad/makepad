@@ -49,28 +49,28 @@ pub fn read_exact_bytes_from_tcp_stream(tcp_stream: &mut TcpStream, bytes: &mut 
 
 pub fn read_block_from_tcp_stream(tcp_stream: &mut TcpStream, mut check_digest: Digest) -> HubResult<Vec<u8>> {
     let mut dwd_read = DigestWithData::default();
-    
+
     let dwd_u8 = unsafe {std::mem::transmute::<&mut DigestWithData, &mut [u8; 26 * 8]>(&mut dwd_read)};
     read_exact_bytes_from_tcp_stream(tcp_stream, dwd_u8) ?;
-    
+
     let bytes_total = dwd_read.data as usize;
     if bytes_total > 250 * 1024 * 1024 {
         return Err(HubError::new("read_block_from_tcp_stream: bytes_total more than 250mb"))
     }
-    
+
     let mut msg_buf = Vec::new();
     msg_buf.resize(bytes_total, 0);
     read_exact_bytes_from_tcp_stream(tcp_stream, &mut msg_buf) ?;
-    
+
     check_digest.digest_buffer(&msg_buf);
-    
+
     if check_digest != dwd_read.digest {
         return Err(HubError::new("read_block_from_tcp_stream: block digest check failed"))
     }
-    
+
     //let mut dec = snap::Decoder::new();
     let decompressed = msg_buf;//dec.decompress_vec(&msg_buf).expect_msg("read_block_from_tcp_stream: cannot decompress_vec");
-    
+
     return Ok(decompressed);
 }
 
@@ -90,21 +90,21 @@ pub fn write_exact_bytes_to_tcp_stream(tcp_stream: &mut TcpStream, bytes: &[u8])
 
 pub fn write_block_to_tcp_stream(tcp_stream: &mut TcpStream, msg_buf: &[u8], digest: Digest) -> HubResult<()> {
     let bytes_total = msg_buf.len();
-    
+
     if bytes_total > 250 * 1024 * 1024 {
         return Err(HubError::new("read_block_from_tcp_stream: bytes_total more than 250mb"))
     }
-    
+
     //let mut enc = snap::Encoder::new();
     let compressed = msg_buf;//enc.compress_vec(msg_buf).expect_msg("read_block_from_tcp_stream: cannot compress msgbuf") ?;
-    
+
     let mut dwd_write = DigestWithData{
         digest:digest,
         data: compressed.len() as u64
     };
-    
+
     dwd_write.digest.digest_buffer(&compressed);
-    
+
     let dwd_u8 = unsafe {std::mem::transmute::<&DigestWithData, &[u8; 26 * 8]>(&dwd_write)};
     write_exact_bytes_to_tcp_stream(tcp_stream, dwd_u8) ?;
     write_exact_bytes_to_tcp_stream(tcp_stream, &compressed) ?;
@@ -130,7 +130,7 @@ pub struct DigestWithData{
 
 impl HubClient {
     pub fn connect_to_server(digest: Digest, server_address: SocketAddr, hub_log: HubLog) -> HubResult<HubClient> {
-        
+
         // first try local address
         let local_address = SocketAddr::from(([127, 0, 0, 1], server_address.port()));
         let server_hubaddr;
@@ -142,14 +142,14 @@ impl HubClient {
             server_hubaddr = HubAddr::from_socket_addr(server_address);
             TcpStream::connect(server_address).expect_msg("connect_to_hub: cannot connect") ?
         };
-        
+
         let own_addr = HubAddr::from_socket_addr(tcp_stream.local_addr().expect("Cannot get client local address"));
-        
+
         let (tx_read, rx_read) = mpsc::channel::<FromHubMsg>();
         let (tx_write, rx_write) = mpsc::channel::<ToHubMsg>();
         let tx_read_copy = tx_read.clone();
         let tx_write_copy = tx_write.clone();
-        
+
         let read_thread = {
             let mut tcp_stream = tcp_stream.try_clone().expect_msg("connect_to_hub: cannot clone socket") ?;
             let digest = digest.clone();
@@ -180,7 +180,7 @@ impl HubClient {
                 }
             })
         };
-        
+
         let write_thread = {
             let digest = digest.clone();
             let tx_read = tx_read_copy.clone();
@@ -209,7 +209,7 @@ impl HubClient {
                 }
             })
         };
-        
+
         Ok(HubClient {
             uid_alloc: 0,
             own_addr: own_addr,
@@ -221,13 +221,13 @@ impl HubClient {
             tx_write: tx_write
         })
     }
-    
-    
+
+
     pub fn join_threads(&mut self) {
         self.read_thread.take().expect("cant take read thread").join().expect("cant join read thread");
         self.write_thread.take().expect("cant take write thread").join().expect("cant join write thread");
     }
-    
+
     pub fn alloc_uid(&mut self) -> HubUid {
         self.uid_alloc += 1;
         return HubUid {
@@ -235,7 +235,7 @@ impl HubClient {
             id: self.uid_alloc
         }
     }
-    
+
     pub fn get_route_send(&self) -> HubRouteSend {
         HubRouteSend::Networked {
             uid_alloc: Arc::new(Mutex::new(0)),
@@ -243,7 +243,7 @@ impl HubClient {
             own_addr_arc: Arc::new(Mutex::new(Some(self.own_addr)))
         }
     }
-    
+
     pub fn get_route_send_in_place(&self, route_send: &HubRouteSend) {
         route_send.update_networked_in_place(Some(self.own_addr), Some(self.tx_write.clone()))
     }
@@ -260,7 +260,7 @@ impl Default for Digest {
 }
 
 impl Digest {
-    
+
     pub fn generate() -> Digest {
         let mut result = Digest::default();
         for i in 0..25 {
@@ -270,7 +270,7 @@ impl Digest {
         }
         result
     }
-    
+
     pub fn digest_cycle(&mut self){
         digest_cycle(self);
     }
@@ -281,7 +281,7 @@ impl Digest {
         }
         self.digest_cycle();
     }
-    
+
     pub fn digest_buffer(&mut self, msg_buf: &[u8]) {
         let digest_u8 = unsafe {std::mem::transmute::<&mut Digest, &mut [u8; 26 * 8]>(self)};
         let mut s = 0;
@@ -295,7 +295,7 @@ impl Digest {
         }
         self.digest_cycle();
     }
-    
+
 }
 
 // digest function to hash tcp data to enable error checking and multiple servers on one network, found various
@@ -389,14 +389,14 @@ macro_rules!unroll24 {
 pub fn digest_cycle(a:&mut Digest) {
     for i in 0..24 {
         let mut array = [0u64; 5];
-        
+
         // Theta
         unroll5!(x, {
             unroll5!(y, {
                 array[x] ^= a.buf[5 * y + x];
             });
         });
-        
+
         unroll5!(x, {
             unroll5!(y, {
                 let t1 = array[(x + 4) % 5];
@@ -404,7 +404,7 @@ pub fn digest_cycle(a:&mut Digest) {
                 a.buf[5 * y + x] ^= t1 ^ t2;
             });
         });
-        
+
         // Rho and pi
         let mut last = a.buf[1];
         unroll24!(x, {
@@ -412,22 +412,22 @@ pub fn digest_cycle(a:&mut Digest) {
             a.buf[PI[x]] = last.rotate_left(RHO[x]);
             last = array[0];
         });
-        
+
         // Chi
         unroll5!(y_step, {
             let y = 5 * y_step;
-            
+
             unroll5!(x, {
                 array[x] = a.buf[y + x];
             });
-            
+
             unroll5!(x, {
                 let t1 = !array[(x + 1) % 5];
                 let t2 = array[(x + 2) % 5];
                 a.buf[y + x] = array[x] ^ (t1 & t2);
             });
         });
-        
+
         // Iota
         a.buf[0] ^= RC[i];
     }
