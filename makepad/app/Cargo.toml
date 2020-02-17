@@ -1,0 +1,20 @@
+[package]
+name = "makepad-app"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad app"
+license = "MIT"
+
+[dependencies.makepad-tinyserde]
+path="../../render/tinyserde"
+
+[dependencies.makepad-widget]
+path="../../widget"
+
+[dependencies.makepad-render]
+path="../../render"
+
+[dependencies.makepad-hub]
+path="../hub"
+

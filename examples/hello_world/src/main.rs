@@ -3,21 +3,21 @@
 //! ```
 //! use makepad_render::*;
 
-//! struct App {
+//! struct HelloWorldApp {
 //!    window: Window,
 //!    pass: Pass,
 //!    color_texture: Texture,
 //!    view: View,
 //!}
 //!
-//!main_app!(App);
+//!main_app!(HelloWorldApp);
 //!
-//!impl App {
+//!impl HelloWorldApp {
 //!    pub fn shader() -> ShaderId {uid!()}
 //!
-//!    pub fn new(cx: &mut Cx) -> App {
-//!        App::shader().set(cx, Quad::def_quad_shader());
-//!        App {
+//!    pub fn new(cx: &mut Cx) -> Self {
+//!        Self::shader().set(cx, Quad::def_quad_shader());
+//!        Self {
 //!            window: Window::new(cx),
 //!            pass: Pass::default(),
 //!            color_texture: Texture::default(),
@@ -43,9 +43,9 @@
 //!}
 //!```
 //!
-//! # The `App` struct
+//! # The `HelloWorldApp` struct
 //!
-//! At the top level, a Makepad application consists of a single `App` struct. `App` contains all
+//! At the top level, a Makepad application consists of a single `App` struct. `HelloWorldApp` contains all
 //! the fields and methods that govern the application's behavior.
 //!
 //! ## Fields
@@ -173,24 +173,22 @@
 
 use makepad_render::*;
 
-struct App {
+struct HelloWorldApp {
     window: Window,
     pass: Pass,
-    color_texture: Texture,
     view: View,
 }
 
-main_app!(App);
+main_app!(HelloWorldApp);
 
-impl App {
+impl HelloWorldApp {
     pub fn shader() -> ShaderId {uid!()}
 
-    pub fn new(cx: &mut Cx) -> App {
-        App::shader().set(cx, Quad::def_quad_shader());
-        App {
+    pub fn new(cx: &mut Cx) -> Self {
+        Self::shader().set(cx, Quad::def_quad_shader());
+        Self {
             window: Window::new(cx),
             pass: Pass::default(),
-            color_texture: Texture::default(),
             view: View::new(cx),
         }
     }
@@ -200,10 +198,10 @@ impl App {
     fn draw_app(&mut self, cx: &mut Cx) {
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
-        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(32, 0, 0)));
+        self.pass.set_window_clear_color(cx, color("grey"));
         if self.view.begin_view(cx, Layout::default()).is_ok() {
             let mut quad = Quad::new(cx);
-            quad.shader = App::shader().get(cx);
+            quad.shader = Self::shader().get(cx);
             quad.draw_quad_abs(cx, Rect{ x: 200.0, y: 150.0, w: 400.0, h: 300.0 });
             self.view.end_view(cx);
         }

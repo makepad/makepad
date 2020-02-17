@@ -8,7 +8,7 @@ use crate::filetree::*;
 use crate::buildmanager::*;
 use crate::makepadstyle::*;
 
-pub struct App {
+pub struct MakepadApp {
     pub app_window_state_template: AppWindowState,
     pub app_window_template: AppWindow,
     pub menu: Menu,
@@ -19,7 +19,7 @@ pub struct App {
     pub windows: Vec<AppWindow>,
 }
 
-impl App {
+impl MakepadApp {
     
     pub fn command_about_makepad() -> CommandId {uid!()}
     pub fn command_preferences() -> CommandId {uid!()}

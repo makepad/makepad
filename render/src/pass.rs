@@ -76,6 +76,12 @@ impl Pass {
         cxpass.pass_size = pass_size;
     }
     
+    pub fn set_window_clear_color(&mut self, cx: &mut Cx, clear_color: Color) {
+        let pass_id = self.pass_id.expect("Please call set_window_clear_color after begin_pass");
+        let cxpass = &mut cx.passes[pass_id];
+        cxpass.clear_color = clear_color;
+    }
+    
     pub fn add_color_texture(&mut self, cx: &mut Cx, texture: &mut Texture, clear_color: ClearColor) {
         texture.set_desc(cx, None);
         let pass_id = self.pass_id.expect("Please call add_color_texture after begin_pass");
@@ -157,6 +163,7 @@ pub struct CxPass {
     pub depth_texture: Option<usize>,
     pub clear_depth: ClearDepth,
     pub depth_init: f64,
+    pub clear_color: Color,
     pub override_dpi_factor: Option<f32>,
     pub main_view_id: Option<usize>,
     pub dep_of: CxPassDepOf,
@@ -176,6 +183,7 @@ impl Default for CxPass {
             depth_texture: None,
             override_dpi_factor: None,
             clear_depth: ClearDepth::ClearWith(1.0),
+            clear_color: Color::default(),
             depth_init: 1.0,
             main_view_id: None,
             dep_of: CxPassDepOf::None,

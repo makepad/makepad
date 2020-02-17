@@ -8,3 +8,4 @@ edition = "2018"
 
 [dependencies.makepad-render]
 path="../../render"
+version="0.2"
