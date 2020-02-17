@@ -77,9 +77,9 @@ impl RustTokenizer {
             }
             
             // ok now lets write a diff with the previous one
-            //let mut new_index = 0;
-            //let mut old_index = 0;
-            /*
+            let mut new_index = 0;
+            let mut old_index = 0;
+            
             loop {
                 let new_tok = &atb.text_buffer.token_chunks[new_index];
                 let old_tok = &atb.text_buffer.old_token_chunks[old_index];
@@ -108,7 +108,7 @@ impl RustTokenizer {
                 if old_index < atb.text_buffer.old_token_chunks.len() - 1 {
                     old_index += 1;
                 }
-            }*/
+            }
         }
     }
     

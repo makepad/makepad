@@ -5,19 +5,9 @@ authors = ["arc"]
 edition = "2018"
 
 [lib]
-path = "../src/main.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
 
-[dependencies.makepad-tinyserde]
-path="../../render/tinyserde"
-
-[dependencies.makepad-widget]
-path="../../widget"
-
-[dependencies.makepad-render]
-path="../../render"
-
-[dependencies.makepad-hub]
-path="../hub"
+[dependencies.makepad-app]
+path="../app"
