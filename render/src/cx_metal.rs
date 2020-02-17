@@ -289,9 +289,9 @@ impl Cx {
         let drawable: id = unsafe {msg_send![layer, nextDrawable]};
         if drawable != nil {
             let render_pass_descriptor: id = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
-
+            
             let texture: id = unsafe {msg_send![drawable, texture]};
-
+            
             self.setup_render_pass_descriptor(render_pass_descriptor, pass_id, dpi_factor, Some(texture), metal_cx);
             
             let command_buffer: id = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
@@ -334,7 +334,7 @@ impl Cx {
         
         let pool: id = unsafe {msg_send![class!(NSAutoreleasePool), new]};
         let render_pass_descriptor: id = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
-
+        
         self.setup_render_pass_descriptor(render_pass_descriptor, pass_id, dpi_factor, None, metal_cx);
         
         let command_buffer: id = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
@@ -438,7 +438,7 @@ impl MetalCx {
         let () = unsafe {msg_send![mdesc, setDepth: 1u64]};
         
         let tex: id = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
-
+        
         cxtexture.platform.width = width;
         cxtexture.platform.height = height;
         cxtexture.platform.alloc_desc = cxtexture.desc.clone();
@@ -474,7 +474,7 @@ impl MetalCx {
                     let () = unsafe {msg_send![mdesc, setPixelFormat: MTLPixelFormat::BGRA8Unorm]};
                     
                     let tex: id = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
-
+                    
                     cxtexture.platform.mtl_texture = Some(tex);
                     
                     if cxtexture.image_u32.len() != width * height {

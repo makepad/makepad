@@ -32,7 +32,7 @@ impl Quad {
     
     pub fn def_quad_shader() -> ShaderGen {
         // lets add the draw shader lib
-        let mut sg = ShaderGen::new();
+        let mut sg = ShaderGen::new(); 
         sg.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
         sg.geometry_indices = vec![0, 1, 2, 2, 3, 0];
         

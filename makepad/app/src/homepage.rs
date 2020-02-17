@@ -178,7 +178,7 @@ impl HomePage {
             from you! Although Makepad is primarily a native application, its UI \
             is perfectly capable of running on the web. Try browsing the source code and pressing alt \
             in a large code file!. To compile code yourself, you have to install \
-            the native version. Right now makepad is set up compile a simple WASM example you run in a browser from a localhost url.\n");
+            the native version. Right now makepad is set up to compile a simple WASM example you run in a browser from a localhost url.\n");
         
         t.text_style = Self::text_style_heading().get(cx);
         t.draw_text(cx, "How to use\n");
