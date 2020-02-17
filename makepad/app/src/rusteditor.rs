@@ -52,7 +52,6 @@ pub struct RustTokenizer {
     pub in_string: bool
 }
 
-
 impl RustTokenizer {
     pub fn update_token_chunks(atb: &mut AppTextBuffer, mut search_index: Option<&mut SearchIndex>) {
         if atb.text_buffer.needs_token_chunks() && atb.text_buffer.lines.len() >0 {
@@ -65,6 +64,7 @@ impl RustTokenizer {
                 if TokenChunk::push_with_pairing(&mut atb.text_buffer.token_chunks, &mut pair_stack, state.next, offset, atb.text_buffer.flat_text.len(), token_type) {
                     atb.text_buffer.was_invalid_pair = true;
                 }
+                
                 if token_type == TokenType::Eof {
                     break
                 }
