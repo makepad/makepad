@@ -2,8 +2,13 @@
 //! rectangle to it.
 //! ```
 //! use makepad_render::*;
+<<<<<<< HEAD
 
 //! struct HelloWorldApp {
+=======
+//!
+//! struct App {
+>>>>>>> e4e4c9ec2580f5c4dff68fc9c0d46fd0da1d9367
 //!    window: Window,
 //!    pass: Pass,
 //!    color_texture: Texture,
