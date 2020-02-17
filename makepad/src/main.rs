@@ -1,3 +1,6 @@
 
 use makepad_app::*;
-main_app!(MakepadApp);
+
+fn main(){
+    main_app!(MakepadApp);
+}
