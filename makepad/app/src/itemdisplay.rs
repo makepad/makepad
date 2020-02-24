@@ -1,4 +1,3 @@
-use crate::rusteditor::*;
 use crate::plaineditor::*;
 use makepad_render::*;
 use makepad_hub::*;
@@ -102,7 +101,7 @@ impl ItemDisplay {
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
             
             let mut state = TokenizerState::new(&text_buffer.lines);
-            let mut tokenizer = RustTokenizer::new();
+            let mut tokenizer = MprsTokenizer::new();
             let mut pair_stack = Vec::new();
             let mut line_count = 0;
             let mut token_count = 0;
