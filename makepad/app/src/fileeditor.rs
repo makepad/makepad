@@ -87,7 +87,7 @@ impl FileEditor {
     pub fn update_token_chunks(path: &str, atb: &mut AppTextBuffer, search_index: &mut SearchIndex) {
         // check which file extension we have to spawn a new editor
         if path.ends_with(".rs") || path.ends_with(".toml") || path.ends_with(".ron") {
-            RustTokenizer::update_token_chunks(atb, Some(search_index));
+            RustEditor::update_token_chunks(atb, Some(search_index));
         }
         else if path.ends_with(".js") || path.ends_with(".html") {
             JSTokenizer::update_token_chunks(atb, Some(search_index));

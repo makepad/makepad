@@ -100,10 +100,6 @@ pub struct AppStorage {
     pub text_buffers: Vec<AppTextBuffer>,
 }
 
-pub enum LiveMacro {
-    Pick {token: usize, color: Color},
-    Shader {token: usize,}
-}
 
 pub struct AppTextBuffer {
     pub file_read: FileRead,
@@ -143,7 +139,7 @@ impl AppStorage {
             app_settings_file_read: FileRead::default()
         }
     }
-    
+     
     pub fn status_new_message() -> StatusId {uid!()}
     pub fn status_settings_changed() -> StatusId {uid!()}
     
