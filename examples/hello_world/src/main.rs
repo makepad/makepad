@@ -2,13 +2,8 @@
 //! rectangle to it.
 //! ```
 //! use makepad_render::*;
-<<<<<<< HEAD
 
 //! struct HelloWorldApp {
-=======
-//!
-//! struct App {
->>>>>>> e4e4c9ec2580f5c4dff68fc9c0d46fd0da1d9367
 //!    window: Window,
 //!    pass: Pass,
 //!    color_texture: Texture,
@@ -98,9 +93,7 @@
 //! # The `main_app` macro
 //!
 //! The `main_app` macro generates the code for initializing the application and running the main
-//! event loop. This requires different code depending on whether you are compiling for native or
-//! the web, so the purpose of `main_app` is to abstract over these two compilation targets.
-//! `main_app` takes an `App` as argument, on which the methods we introduced above should all be
+//! event loop. `main_app` takes an `App` as argument, on which the methods we introduced above should all be
 //! defined, and makes sure these methods are called at the appropriate time.
 //!
 //! # The `draw_app` function
@@ -184,7 +177,9 @@ struct HelloWorldApp {
     view: View,
 }
 
-main_app!(HelloWorldApp);
+fn main(){
+    main_app!(HelloWorldApp);
+}
 
 impl HelloWorldApp {
     pub fn shader() -> ShaderId {uid!()}
