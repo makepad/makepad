@@ -1,3 +1,5 @@
+mod hooks;
+
 use crate::ast::*;
 use crate::ident::Ident;
 use crate::lit::Lit;
@@ -6,7 +8,7 @@ use crate::ty::Ty;
 use crate::ty_lit::TyLit;
 use crate::value::Value;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::error;
 use std::fmt::{self, Write};
 use std::rc::Rc;
@@ -115,12 +117,24 @@ impl<'a, 'b> DeclEmitter<'a, 'b> {
 
 #[derive(Clone, Debug)]
 pub struct ShaderAttrs {
+    pub attribute_decls_attrs: Vec<AttributeDeclAttrs>,
     pub string: String,
 }
 
 #[derive(Clone, Debug)]
+pub struct AttributeDeclAttrs {
+    pub ident: Ident,
+    pub ty: Ty,
+}
+
+#[derive(Clone, Debug)]
+struct VaryingDeclAttrs {
+    ident: Ident,
+    ty: Ty,
+}
+
+#[derive(Clone, Debug)]
 struct FnDeclAttrs {
-    return_ty: Ty,
     deps: Deps,
     string: String,
 }
@@ -232,27 +246,32 @@ pub enum Error {
         ident: Ident,
         ty: Ty,
     },
-    InvalidTyForArg {
-        index: usize,
-        fn_ident: Ident,
-        expected_ty: Ty,
-        actual_ty: Ty,
-    },
     InvalidTyForAttributeVar {
         ident: Ident,
         ty: Ty,
-    },
-    InvalidTyForExpr {
-        expected_ty: Ty,
-        actual_ty: Ty,
     },
     InvalidTyForVaryingVar {
         ident: Ident,
         ty: Ty,
     },
     MemberIsNotDefinedOnTy {
-        member_ident: Ident,
+        ident: Ident,
         ty: Ty,
+    },
+    MismatchedReturnTyForFn {
+        ident: Ident,
+        expected_return_ty: Ty,
+        actual_return_ty: Ty,
+    },
+    MismatchedTyForArg {
+        index: usize,
+        fn_ident: Ident,
+        expected_ty: Ty,
+        actual_ty: Ty,
+    },
+    MismatchedTyForExpr {
+        expected_ty: Ty,
+        actual_ty: Ty,
     },
     MissingFn {
         ident: Ident,
@@ -265,23 +284,28 @@ pub enum Error {
         ident: Ident,
         dep_idents: Vec<Ident>,
     },
-    TooFewArgs {
+    TooFewArgsForCall {
         fn_ident: Ident,
         expected_count: usize,
         actual_count: usize,
     },
-    TooManyArgs {
+    TooManyArgsForCall {
         fn_ident: Ident,
         expected_count: usize,
         actual_count: usize,
     },
-    TooFewComps {
+    TooFewCompsForConsCall {
         ty_lit: TyLit,
         expected_count: usize,
         actual_count: usize,
     },
-    TooManyComps {
+    TooManyCompsForConsCall {
         ty_lit: TyLit,
+        expected_count: usize,
+        actual_count: usize,
+    },
+    TooManyParamsForFn {
+        ident: Ident,
         expected_count: usize,
         actual_count: usize,
     },
@@ -406,29 +430,11 @@ impl fmt::Display for Error {
                 "invalid return type for function {}: expected non-array type, got {}",
                 ident, ty
             ),
-            Error::InvalidTyForArg {
-                index,
-                fn_ident,
-                ref expected_ty,
-                ref actual_ty,
-            } => write!(
-                f,
-                "invalid type for argument {} in call to function {}: expected {}, got {}",
-                index, fn_ident, expected_ty, actual_ty
-            ),
             Error::InvalidTyForAttributeVar { ident, ref ty } => write!(
                 f,
                 "invalid type for attribute variable {}: expected either float, vec2, vec3, vec4, mat2, mat3, or mat4, got {}",
                 ident,
                 ty
-            ),
-            Error::InvalidTyForExpr {
-                ref expected_ty,
-                ref actual_ty,
-            } => write!(
-                f,
-                "invalid type for expression: expected {}, got {}",
-                expected_ty, actual_ty
             ),
             Error::InvalidTyForVaryingVar { ident, ref ty } => write!(
                 f,
@@ -436,7 +442,34 @@ impl fmt::Display for Error {
                 ident,
                 ty
             ),
-            Error::MemberIsNotDefinedOnTy { member_ident, ref ty } => write!(f, "{} is not defined on type {}", member_ident, ty),
+            Error::MemberIsNotDefinedOnTy { ident, ref ty } => write!(f, "{} is not defined on type {}", ident, ty),
+            Error::MismatchedReturnTyForFn {
+                ident,
+                ref expected_return_ty,
+                ref actual_return_ty,
+            } => write!(
+                f,
+                "mismatched return type for function {}: expected {}, got {}",
+                ident, expected_return_ty, actual_return_ty
+            ),
+            Error::MismatchedTyForArg {
+                index,
+                fn_ident,
+                ref expected_ty,
+                ref actual_ty,
+            } => write!(
+                f,
+                "mismatched type for argument {} in call to function {}: expected {}, got {}",
+                index, fn_ident, expected_ty, actual_ty
+            ),
+            Error::MismatchedTyForExpr {
+                ref expected_ty,
+                ref actual_ty,
+            } => write!(
+                f,
+                "mismatched type for expression: expected {}, got {}",
+                expected_ty, actual_ty
+            ),
             Error::MissingFn { ident } => write!(f, "missing function {}", ident),
             Error::MissingReturnExpr => write!(f, "missing return expression"),
             Error::StepMustBeNonZero => write!(f, "step must be non-zero"),
@@ -451,7 +484,7 @@ impl fmt::Display for Error {
                 }
                 Ok(())
             },
-            Error::TooFewArgs {
+            Error::TooFewArgsForCall {
                 fn_ident,
                 expected_count,
                 actual_count,
@@ -460,7 +493,7 @@ impl fmt::Display for Error {
                 "too few arguments for call to function {}: expected {}, got {}",
                 fn_ident, expected_count, actual_count
             ),
-            Error::TooManyArgs {
+            Error::TooManyArgsForCall {
                 fn_ident,
                 expected_count,
                 actual_count,
@@ -469,7 +502,7 @@ impl fmt::Display for Error {
                 "too many arguments for call to function {}: expected {}, got {}",
                 fn_ident, expected_count, actual_count
             ),
-            Error::TooFewComps {
+            Error::TooFewCompsForConsCall {
                 ty_lit,
                 expected_count,
                 actual_count,
@@ -478,7 +511,7 @@ impl fmt::Display for Error {
                 "too few components for constructor call to {}: expected {}, got {}",
                 ty_lit, expected_count, actual_count
             ),
-            Error::TooManyComps {
+            Error::TooManyCompsForConsCall {
                 ty_lit,
                 expected_count,
                 actual_count,
@@ -486,6 +519,15 @@ impl fmt::Display for Error {
                 f,
                 "too many components for constructor call to {}: expected {}, got {}",
                 ty_lit, expected_count, actual_count
+            ),
+            Error::TooManyParamsForFn {
+                ident,
+                expected_count,
+                actual_count,
+            } => write!(
+                f,
+                "too many parameters for function {}: expected {}, got {}",
+                ident, expected_count, actual_count
             ),
             Error::TyLitIsNotACons(ty_lit) => write!(
                 f,
@@ -522,47 +564,91 @@ impl Shader {
                 }
             }
         }
+
         let mut emitter = ShaderEmitter::new(emitter, fn_decls_by_ident, struct_decls_by_ident);
-        for attribute_decl in attribute_decls {
-            attribute_decl.emit(&mut emitter)?;
-        }
+
+        let attribute_decls_attrs = attribute_decls
+            .iter()
+            .map(|attribute_decl| attribute_decl.emit(&mut emitter))
+            .collect::<Result<Vec<_>, _>>()?;
+
         for uniform_decl in uniform_decls {
             uniform_decl.emit(&mut emitter)?;
         }
-        for varying_decl in varying_decls {
-            varying_decl.emit(&mut emitter)?;
-        }
+
+        let varying_decls_attrs = varying_decls
+            .iter()
+            .map(|varying_decl| varying_decl.emit(&mut emitter))
+            .collect::<Result<Vec<_>, _>>()?;
+
         let vertex = Ident::new("vertex");
         emitter.active_fn_idents.push(vertex);
-        let fn_decl_attrs = emitter
+        let vertex_fn_decl_attrs = emitter
             .fn_decls_by_ident
             .get(&vertex)
             .ok_or(Error::MissingFn { ident: vertex })?
             .emit(&mut emitter)?;
         emitter.active_fn_idents.pop();
-        if fn_decl_attrs.deps.has_input_varyings {
-            return Err(Error::FnCannotReadFromVaryings {
-                ident: vertex
+        if vertex_fn_decl_attrs.deps.has_input_varyings {
+            return Err(Error::FnCannotReadFromVaryings { ident: vertex });
+        }
+        emitter.fn_decls_attrs.push(vertex_fn_decl_attrs);
+        let vertex_fn_info = match emitter.find_info(vertex).unwrap() {
+            Info::Fn(info) => info,
+            _ => panic!(),
+        };
+        if vertex_fn_info.param_tys.len() != 0 {
+            return Err(Error::TooManyParamsForFn {
+                ident: vertex,
+                expected_count: 0,
+                actual_count: vertex_fn_info.param_tys.len(),
             });
         }
-        emitter.fn_decls_attrs.push(fn_decl_attrs);
+        if vertex_fn_info.return_ty != Ty::Vec4 {
+            return Err(Error::MismatchedReturnTyForFn {
+                ident: vertex,
+                expected_return_ty: Ty::Vec4,
+                actual_return_ty: vertex_fn_info.return_ty.clone(),
+            });
+        }
+
         let fragment = Ident::new("fragment");
         emitter.active_fn_idents.push(fragment);
-        let fn_decl_attrs = emitter
+        let fragment_fn_decl_attrs = emitter
             .fn_decls_by_ident
             .get(&fragment)
             .ok_or(Error::MissingFn { ident: fragment })?
             .emit(&mut emitter)?;
         emitter.active_fn_idents.pop();
-        if fn_decl_attrs.deps.has_output_varyings {
-            return Err(Error::FnCannotWriteToVaryings {
-                ident: fragment
+        if fragment_fn_decl_attrs.deps.has_output_varyings {
+            return Err(Error::FnCannotWriteToVaryings { ident: fragment });
+        }
+        emitter.fn_decls_attrs.push(fragment_fn_decl_attrs);
+        let fragment_fn_info = match emitter.find_info(fragment).unwrap() {
+            Info::Fn(info) => info,
+            _ => panic!(),
+        };
+        if fragment_fn_info.param_tys.len() != 0 {
+            return Err(Error::TooManyParamsForFn {
+                ident: fragment,
+                expected_count: 0,
+                actual_count: fragment_fn_info.param_tys.len(),
             });
         }
-        emitter.fn_decls_attrs.push(fn_decl_attrs);
+        if fragment_fn_info.return_ty != Ty::Vec4 {
+            return Err(Error::MismatchedReturnTyForFn {
+                ident: fragment,
+                expected_return_ty: Ty::Vec4,
+                actual_return_ty: fragment_fn_info.return_ty.clone(),
+            });
+        }
+
         Ok(ShaderAttrs {
+            attribute_decls_attrs: attribute_decls_attrs.clone(),
             string: {
                 let mut string = String::new();
+                hooks::write_attribute_decls(&mut string, &attribute_decls_attrs);
+                hooks::write_varying_decls(&mut string, &varying_decls_attrs);
                 for struct_decl_attrs in emitter.struct_decls_attrs {
                     writeln!(string, "{}", struct_decl_attrs.string).unwrap();
                 }
@@ -576,7 +662,7 @@ impl Shader {
 }
 
 impl AttributeDecl {
-    fn emit(&self, emitter: &mut ShaderEmitter) -> Result<(), Error> {
+    fn emit(&self, emitter: &mut ShaderEmitter) -> Result<AttributeDeclAttrs, Error> {
         let mut emitter = DeclEmitter::new(emitter);
         let ty_expr_attrs = self.ty_expr.emit(&mut emitter)?;
         match ty_expr_attrs.ty {
@@ -591,11 +677,14 @@ impl AttributeDecl {
         emitter.scope_mut().insert(
             self.ident,
             Info::Var(VarInfo {
-                ty: ty_expr_attrs.ty,
+                ty: ty_expr_attrs.ty.clone(),
                 kind: VarInfoKind::Attribute,
             }),
         );
-        Ok(())
+        Ok(AttributeDeclAttrs {
+            ident: self.ident,
+            ty: ty_expr_attrs.ty,
+        })
     }
 }
 
@@ -638,40 +727,26 @@ impl FnDecl {
             return Err(Error::IdentCannotBeRedefined(self.ident));
         }
         Ok(FnDeclAttrs {
-            return_ty: return_ty.clone(),
             deps: block_attrs.deps.clone(),
             string: {
-                let mut string = format!(
-                    "{}(",
-                    IdentAndTyRef {
-                        ident: self.ident,
-                        ty: return_ty_expr_attrs
-                            .as_ref()
-                            .map(|return_ty_expr_attrs| &return_ty_expr_attrs.ty)
-                            .unwrap_or(&Ty::Void)
-                    }
+                let mut string = String::new();
+                write_ident_and_ty(
+                    &mut string,
+                    self.ident,
+                    return_ty_expr_attrs
+                        .as_ref()
+                        .map(|return_ty_expr_attrs| &return_ty_expr_attrs.ty)
+                        .unwrap_or(&Ty::Void),
                 );
-                let mut sep = "";
-                for param_attrs in &params_attrs {
-                    write!(string, "{}{}", sep, param_attrs.string).unwrap();
-                    sep = ", ";
-                }
-                for uniform_block_ident in &block_attrs.deps.uniform_block_idents {
-                    write!(
-                        string,
-                        "{}_mpsc_{1}_uniforms: _mpsc_{1}_Uniforms",
-                        sep, uniform_block_ident
-                    )
-                    .unwrap();
-                    sep = ", ";
-                }
-                if block_attrs.deps.has_attributes {
-                    write!(string, "{}_mpsc_attributes: _mpsc_Attributes", sep).unwrap();
-                    sep = ", ";
-                }
-                if block_attrs.deps.has_input_varyings || block_attrs.deps.has_output_varyings {
-                    write!(string, "{}_mpsc_varyings: _mpsc_Varyings", sep).unwrap();
-                }
+                write!(string, "(").unwrap();
+                hooks::write_params(
+                    &mut string,
+                    &params_attrs,
+                    &block_attrs.deps.uniform_block_idents,
+                    block_attrs.deps.has_attributes,
+                    block_attrs.deps.has_input_varyings,
+                    block_attrs.deps.has_output_varyings,
+                );
                 write!(string, ") {}", block_attrs.string).unwrap();
                 string
             },
@@ -693,11 +768,11 @@ impl Param {
         }
         Ok(ParamAttrs {
             ty: ty_expr_attrs.ty.clone(),
-            string: IdentAndTyRef {
-                ident: self.ident,
-                ty: &ty_expr_attrs.ty,
-            }
-            .to_string(),
+            string: {
+                let mut string = String::new();
+                write_ident_and_ty(&mut string, self.ident, &ty_expr_attrs.ty);
+                string
+            },
         })
     }
 }
@@ -747,13 +822,11 @@ impl Member {
             ident: self.ident,
             contains_arrays: ty_expr.contains_arrays,
             ty: ty_expr.ty.clone(),
-            string: format!(
-                "{};",
-                IdentAndTyRef {
-                    ident: self.ident,
-                    ty: &ty_expr.ty,
-                }
-            ),
+            string: {
+                let mut string = String::new();
+                write_ident_and_ty(&mut string, self.ident, &ty_expr.ty);
+                string
+            },
         })
     }
 }
@@ -776,7 +849,7 @@ impl UniformDecl {
 }
 
 impl VaryingDecl {
-    fn emit(&self, emitter: &mut ShaderEmitter) -> Result<(), Error> {
+    fn emit(&self, emitter: &mut ShaderEmitter) -> Result<VaryingDeclAttrs, Error> {
         let mut emitter = DeclEmitter::new(emitter);
         let ty_expr_attrs = self.ty_expr.emit(&mut emitter)?;
         if !match ty_expr_attrs.ty {
@@ -817,11 +890,14 @@ impl VaryingDecl {
         emitter.scope_mut().insert(
             self.ident,
             Info::Var(VarInfo {
-                ty: ty_expr_attrs.ty,
+                ty: ty_expr_attrs.ty.clone(),
                 kind: VarInfoKind::Varying,
             }),
         );
-        Ok(())
+        Ok(VaryingDeclAttrs {
+            ident: self.ident,
+            ty: ty_expr_attrs.ty.clone(),
+        })
     }
 }
 
@@ -945,20 +1021,20 @@ impl ForStmt {
         emitter.is_in_for_stmt_block = is_in_for_stmt_block;
         emitter.scopes.pop();
         if from_expr_attrs.ty != Ty::Int {
-            return Err(Error::InvalidTyForExpr {
+            return Err(Error::MismatchedTyForExpr {
                 expected_ty: Ty::Int,
                 actual_ty: from_expr_attrs.ty,
             });
         }
         if to_expr_attrs.ty != Ty::Int {
-            return Err(Error::InvalidTyForExpr {
+            return Err(Error::MismatchedTyForExpr {
                 expected_ty: Ty::Int,
                 actual_ty: to_expr_attrs.ty,
             });
         }
         if let Some(step_expr_attrs) = &step_expr_attrs {
             if step_expr_attrs.ty != Ty::Int {
-                return Err(Error::InvalidTyForExpr {
+                return Err(Error::MismatchedTyForExpr {
                     expected_ty: Ty::Int,
                     actual_ty: step_expr_attrs.ty.clone(),
                 });
@@ -1036,7 +1112,7 @@ impl IfStmt {
             .map(|block_if_false| block_if_false.emit(emitter))
             .transpose()?;
         if expr_attrs.ty != Ty::Bool {
-            return Err(Error::InvalidTyForExpr {
+            return Err(Error::MismatchedTyForExpr {
                 expected_ty: Ty::Bool,
                 actual_ty: expr_attrs.ty.clone(),
             });
@@ -1099,7 +1175,7 @@ impl LetStmt {
             .clone();
         if let Some(expr_attrs) = &expr_attrs {
             if expr_attrs.ty != ty {
-                return Err(Error::InvalidTyForExpr {
+                return Err(Error::MismatchedTyForExpr {
                     expected_ty: ty.clone(),
                     actual_ty: expr_attrs.ty.clone(),
                 });
@@ -1121,13 +1197,8 @@ impl LetStmt {
                 .map(|expr_attrs| expr_attrs.deps.clone())
                 .unwrap_or_default(),
             string: {
-                let mut string = format!(
-                    "{}",
-                    IdentAndTyRef {
-                        ident: self.ident,
-                        ty: &ty
-                    }
-                );
+                let mut string = String::new();
+                write_ident_and_ty(&mut string, self.ident, &ty);
                 if let Some(expr_attrs) = &expr_attrs {
                     write!(string, " = {}", expr_attrs.value_or_string).unwrap();
                 }
@@ -1148,7 +1219,7 @@ impl ReturnStmt {
         match &expr_attrs {
             Some(expr_attrs) => {
                 if expr_attrs.ty != emitter.return_ty {
-                    return Err(Error::InvalidTyForExpr {
+                    return Err(Error::MismatchedTyForExpr {
                         expected_ty: emitter.return_ty.clone(),
                         actual_ty: expr_attrs.ty.clone(),
                     });
@@ -1235,14 +1306,20 @@ impl StructTyExpr {
             Some(info) => Some(info),
             None => {
                 if let Some(struct_decl) = emitter.parent.struct_decls_by_ident.get(&self.ident) {
-                    if let Some(index) = emitter.parent.active_struct_idents.iter().position(|&ident| ident == self.ident) {
+                    if let Some(index) = emitter
+                        .parent
+                        .active_struct_idents
+                        .iter()
+                        .position(|&ident| ident == self.ident)
+                    {
                         return Err(Error::StructHasCyclicDepChain {
                             ident: self.ident,
                             dep_idents: {
-                                let mut dep_idents = emitter.parent.active_struct_idents[index..].to_owned();
+                                let mut dep_idents =
+                                    emitter.parent.active_struct_idents[index..].to_owned();
                                 dep_idents.push(self.ident);
                                 dep_idents
-                            }
+                            },
                         });
                     }
                     emitter.parent.active_struct_idents.push(self.ident);
@@ -1302,13 +1379,13 @@ impl CondExpr {
         Ok(ExprAttrs {
             ty: {
                 if x_attrs.ty != Ty::Bool {
-                    return Err(Error::InvalidTyForExpr {
+                    return Err(Error::MismatchedTyForExpr {
                         expected_ty: Ty::Bool,
                         actual_ty: x_attrs.ty.clone(),
                     });
                 }
                 if z_attrs.ty != y_attrs.ty {
-                    return Err(Error::InvalidTyForExpr {
+                    return Err(Error::MismatchedTyForExpr {
                         expected_ty: y_attrs.ty.clone(),
                         actual_ty: z_attrs.ty.clone(),
                     });
@@ -1800,7 +1877,7 @@ impl MemberExpr {
             })
             .transpose()?
             .ok_or(Error::MemberIsNotDefinedOnTy {
-                member_ident: self.ident,
+                ident: self.ident,
                 ty: x_attrs.ty.clone(),
             })?,
             deps: x_attrs.deps,
@@ -1823,14 +1900,20 @@ impl CallExpr {
             Some(info) => info,
             None => {
                 if let Some(fn_decl) = emitter.parent.fn_decls_by_ident.get(&self.ident) {
-                    if let Some(index) = emitter.parent.active_fn_idents.iter().position(|&ident| ident == self.ident) {
+                    if let Some(index) = emitter
+                        .parent
+                        .active_fn_idents
+                        .iter()
+                        .position(|&ident| ident == self.ident)
+                    {
                         return Err(Error::FnHasCyclicDepChain {
                             ident: self.ident,
                             dep_idents: {
-                                let mut dep_idents = emitter.parent.active_fn_idents[index..].to_owned();
+                                let mut dep_idents =
+                                    emitter.parent.active_fn_idents[index..].to_owned();
                                 dep_idents.push(self.ident);
                                 dep_idents
-                            }
+                            },
                         });
                     }
                     emitter.parent.active_fn_idents.push(self.ident);
@@ -1866,7 +1949,9 @@ impl CallExpr {
                     deps
                 },
                 value_or_string: {
-                    let mut string = format!("{}(", self.ident);
+                    let mut string = String::new();
+                    hooks::write_builtin_ident(&mut string, self.ident);
+                    write!(string, "(").unwrap();
                     let mut sep = "";
                     for x_attrs in &xs_attrs {
                         write!(string, "{}{}", sep, &x_attrs.value_or_string).unwrap();
@@ -1879,14 +1964,14 @@ impl CallExpr {
             Info::Fn(info) => ExprAttrs {
                 ty: {
                     if xs_attrs.len() < info.param_tys.len() {
-                        return Err(Error::TooFewArgs {
+                        return Err(Error::TooFewArgsForCall {
                             fn_ident: self.ident,
                             expected_count: info.param_tys.len(),
                             actual_count: xs_attrs.len(),
                         });
                     }
                     if xs_attrs.len() > info.param_tys.len() {
-                        return Err(Error::TooManyArgs {
+                        return Err(Error::TooManyArgsForCall {
                             fn_ident: self.ident,
                             expected_count: info.param_tys.len(),
                             actual_count: xs_attrs.len(),
@@ -1896,7 +1981,7 @@ impl CallExpr {
                         xs_attrs.iter().zip(&info.param_tys).enumerate()
                     {
                         if &x_attrs.ty != param_ty {
-                            return Err(Error::InvalidTyForArg {
+                            return Err(Error::MismatchedTyForArg {
                                 index,
                                 fn_ident: self.ident,
                                 expected_ty: param_ty.clone(),
@@ -1914,23 +1999,17 @@ impl CallExpr {
                     deps
                 },
                 value_or_string: {
-                    let mut string = format!("{}(", self.ident);
-                    let mut sep = "";
-                    for x_attrs in &xs_attrs {
-                        write!(string, "{}{}", sep, x_attrs.value_or_string).unwrap();
-                        sep = ", ";
-                    }
-                    for uniform_block_ident in &info.deps.uniform_block_idents {
-                        write!(string, "{}_mpsc_{}_uniforms", sep, uniform_block_ident).unwrap();
-                        sep = ", ";
-                    }
-                    if info.deps.has_attributes {
-                        write!(string, "{}_mpsc_attributes", sep).unwrap();
-                        sep = ", ";
-                    }
-                    if info.deps.has_input_varyings || info.deps.has_output_varyings {
-                        write!(string, "{}_mpsc_varyings", sep).unwrap();
-                    }
+                    let mut string = String::new();
+                    hooks::write_fn_ident(&mut string, self.ident);
+                    write!(string, "(").unwrap();
+                    hooks::write_args(
+                        &mut string,
+                        &xs_attrs,
+                        &info.deps.uniform_block_idents,
+                        info.deps.has_attributes,
+                        info.deps.has_input_varyings,
+                        info.deps.has_output_varyings,
+                    );
                     write!(string, ")").unwrap();
                     string.into()
                 },
@@ -2069,14 +2148,14 @@ impl ConsCallExpr {
                 }
                 let expected_count = ty.size().unwrap();
                 if actual_count < expected_count {
-                    return Err(Error::TooFewComps {
+                    return Err(Error::TooFewCompsForConsCall {
                         ty_lit: self.ty_lit,
                         actual_count,
                         expected_count,
                     });
                 }
                 if actual_count > expected_count {
-                    return Err(Error::TooManyComps {
+                    return Err(Error::TooManyCompsForConsCall {
                         ty_lit: self.ty_lit,
                         actual_count,
                         expected_count,
@@ -2141,7 +2220,11 @@ impl VarExpr {
                         has_attributes: true,
                         ..Deps::default()
                     },
-                    value_or_string: format!("_mpsc_attributes.{}", self.ident).into(),
+                    value_or_string: {
+                        let mut string = String::new();
+                        hooks::write_attribute_var(&mut string, self.ident);
+                        string
+                    }.into(),
                 }
             }
             VarInfoKind::Local { is_mut } => {
@@ -2164,8 +2247,11 @@ impl VarExpr {
                         uniform_block_idents: [block_ident].iter().cloned().collect(),
                         ..Deps::default()
                     },
-                    value_or_string: format!("_mpsc_{}_uniforms.{}", block_ident, self.ident)
-                        .into(),
+                    value_or_string: {
+                        let mut string = String::new();
+                        hooks::write_uniform_var(&mut string, block_ident, self.ident);
+                        string
+                    }.into()
                 }
             }
             VarInfoKind::Varying => ExprAttrs {
@@ -2175,7 +2261,11 @@ impl VarExpr {
                     has_output_varyings: emitter.is_in_lvalue_context,
                     ..Deps::default()
                 },
-                value_or_string: format!("_mpsc_varyings.{}", self.ident).into(),
+                value_or_string: {
+                    let mut string = String::new();
+                    hooks::write_varying_var(&mut string, self.ident);
+                    string
+                }.into(),
             },
         })
     }
@@ -2260,7 +2350,7 @@ struct Deps {
     has_attributes: bool,
     has_input_varyings: bool,
     has_output_varyings: bool,
-    uniform_block_idents: BTreeSet<Ident>,
+    uniform_block_idents: Vec<Ident>,
 }
 
 impl Deps {
@@ -2269,11 +2359,13 @@ impl Deps {
             has_attributes: self.has_attributes || other.has_attributes,
             has_input_varyings: self.has_input_varyings || other.has_input_varyings,
             has_output_varyings: self.has_output_varyings || other.has_output_varyings,
-            uniform_block_idents: self
-                .uniform_block_idents
-                .union(&other.uniform_block_idents)
-                .cloned()
-                .collect(),
+            uniform_block_idents: {
+                let mut uniform_block_idents = self.uniform_block_idents;
+                uniform_block_idents.extend(&other.uniform_block_idents);
+                uniform_block_idents.sort();
+                uniform_block_idents.dedup();
+                uniform_block_idents
+            },
         }
     }
 }
@@ -2315,41 +2407,77 @@ impl<'a> fmt::Display for ValueOrString {
     }
 }
 
-#[derive(Clone, Debug)]
-struct IdentAndTyRef<'a> {
-    ident: Ident,
-    ty: &'a Ty,
-}
-
-impl<'a> fmt::Display for IdentAndTyRef<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self.ty {
-            Ty::Void => write!(f, "void {}", self.ident),
-            Ty::Bool => write!(f, "bool {}", self.ident),
-            Ty::Int => write!(f, "int {}", self.ident),
-            Ty::Float => write!(f, "float {}", self.ident),
-            Ty::Bvec2 => write!(f, "bvec2 {}", self.ident),
-            Ty::Bvec3 => write!(f, "bvec3 {}", self.ident),
-            Ty::Bvec4 => write!(f, "bvec4 {}", self.ident),
-            Ty::Ivec2 => write!(f, "ivec2 {}", self.ident),
-            Ty::Ivec3 => write!(f, "ivec3 {}", self.ident),
-            Ty::Ivec4 => write!(f, "ivec4 {}", self.ident),
-            Ty::Vec2 => write!(f, "vec2 {}", self.ident),
-            Ty::Vec3 => write!(f, "vec3 {}", self.ident),
-            Ty::Vec4 => write!(f, "vec4 {}", self.ident),
-            Ty::Mat2 => write!(f, "mat2 {}", self.ident),
-            Ty::Mat3 => write!(f, "mat3 {}", self.ident),
-            Ty::Mat4 => write!(f, "mat4 {}", self.ident),
-            Ty::Array { elem_ty, len } => write!(
-                f,
-                "{}[{}]",
-                IdentAndTyRef {
-                    ident: self.ident,
-                    ty: elem_ty
-                },
-                len
-            ),
-            Ty::Struct { ident } => write!(f, "{} {}", ident, self.ident),
+fn write_ident_and_ty(string: &mut String, ident: Ident, ty: &Ty) {
+    match ty {
+        Ty::Void => {
+            write!(string, "void {}", ident).unwrap();
         }
+        Ty::Bool => {
+            hooks::write_ty_lit(string, TyLit::Bool);
+            write!(string, " {}", ident).unwrap();
+        }
+        Ty::Int => {
+            hooks::write_ty_lit(string, TyLit::Int);
+            write!(string, " {}", ident).unwrap();
+        }
+        Ty::Float => {
+            hooks::write_ty_lit(string, TyLit::Float);
+            write!(string, " {}", ident).unwrap();
+        }
+        Ty::Bvec2 => {
+            hooks::write_ty_lit(string, TyLit::Bvec2);
+            write!(string, " {}", ident).unwrap();
+        }
+        Ty::Bvec3 => {
+            hooks::write_ty_lit(string, TyLit::Bvec3);
+            write!(string, " {}", ident).unwrap();
+        }
+        Ty::Bvec4 => {
+            hooks::write_ty_lit(string, TyLit::Bvec4);
+            write!(string, " {}", ident).unwrap();
+        }
+        Ty::Ivec2 => {
+            hooks::write_ty_lit(string, TyLit::Ivec2);
+            write!(string, "{}", ident).unwrap();
+        }
+        Ty::Ivec3 => {
+            hooks::write_ty_lit(string, TyLit::Ivec3);
+            write!(string, " {}", ident).unwrap();
+        }
+        Ty::Ivec4 => {
+            hooks::write_ty_lit(string, TyLit::Ivec4);
+            write!(string, " {}", ident).unwrap();
+        }
+        Ty::Vec2 => {
+            hooks::write_ty_lit(string, TyLit::Vec2);
+            write!(string, " {}", ident).unwrap();
+        }
+        Ty::Vec3 => {
+            hooks::write_ty_lit(string, TyLit::Vec3);
+            write!(string, " {}", ident).unwrap();
+        }
+        Ty::Vec4 => {
+            hooks::write_ty_lit(string, TyLit::Vec4);
+            write!(string, " {}", ident).unwrap();
+        }
+        Ty::Mat2 => {
+            hooks::write_ty_lit(string, TyLit::Mat2);
+            write!(string, " {}", ident).unwrap();
+        }
+        Ty::Mat3 => {
+            hooks::write_ty_lit(string, TyLit::Mat3);
+            write!(string, " {}", ident).unwrap();
+        }
+        Ty::Mat4 => {
+            hooks::write_ty_lit(string, TyLit::Mat4);
+            write!(string, " {}", ident).unwrap();
+        }
+        Ty::Array { elem_ty, len } => {
+            write_ident_and_ty(string, ident, elem_ty);
+            write!(string, "[{}]", len).unwrap();
+        }
+        Ty::Struct {
+            ident: struct_ident,
+        } => write!(string, "{} {}", struct_ident, ident).unwrap(),
     }
 }

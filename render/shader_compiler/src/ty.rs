@@ -57,15 +57,10 @@ impl Ty {
             Ty::Bvec4 | Ty::Ivec4 | Ty::Vec4 | Ty::Mat2 => Some(4),
             Ty::Mat3 => Some(9),
             Ty::Mat4 => Some(16),
+            Ty::Array { elem_ty, len } => elem_ty.size().map(|size| size * len),
             _ => None,
         }
     }
-}
-
-#[derive(Clone, Debug)]
-struct IdentAndTyRef<'a> {
-    ident: Ident,
-    ty: &'a Ty,
 }
 
 impl<'a> fmt::Display for Ty {
