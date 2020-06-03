@@ -1,15 +1,22 @@
-use mpsc::ast::*;
-use mpsc::emit::Emitter;
-use mpsc::lex;
-use mpsc::parse::Parser;
+use makepad_shader_compiler::ast::*;
+use makepad_shader_compiler::emit::Emitter;
+use makepad_shader_compiler::lex;
+use makepad_shader_compiler::parse::Parser;
 use std::error::Error;
 
 const SOURCE: &str = r#"
-    fn vertex() {}
+    attribute aPosition: vec2;
+    
+    varying vColor: vec3;
+    varying vTexCoord: vec4;
+
+    fn vertex() -> vec4 {
+        vColor = vec3(aPosition, 1.0);
+        return vec4(aPosition, 0.0, 1.0);
+    }
 
     fn fragment() -> vec4 {
-        foo();
-        return vec4(1.0);
+        return vec4(vColor, 1.0);
     }
 
     fn foo() {
