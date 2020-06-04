@@ -8,7 +8,7 @@ use crate::ty::Ty;
 use crate::ty_lit::TyLit;
 use crate::value::Value;
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error;
 use std::fmt::{self, Write};
 use std::rc::Rc;
@@ -118,7 +118,8 @@ impl<'a, 'b> DeclEmitter<'a, 'b> {
 #[derive(Clone, Debug)]
 pub struct ShaderAttrs {
     pub attribute_decls_attrs: Vec<AttributeDeclAttrs>,
-    pub string: String,
+    pub vertex_string: String,
+    pub fragment_string: String,
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +136,7 @@ struct VaryingDeclAttrs {
 
 #[derive(Clone, Debug)]
 struct FnDeclAttrs {
+    ident: Ident,
     deps: Deps,
     string: String,
 }
@@ -593,6 +595,7 @@ impl Shader {
             return Err(Error::FnCannotReadFromVaryings { ident: vertex });
         }
         emitter.fn_decls_attrs.push(vertex_fn_decl_attrs);
+
         let vertex_fn_info = match emitter.find_info(vertex).unwrap() {
             Info::Fn(info) => info,
             _ => panic!(),
@@ -612,6 +615,22 @@ impl Shader {
             });
         }
 
+        let mut vertex_string = String::new();
+        hooks::write_attribute_decls(&mut vertex_string, &attribute_decls_attrs);
+        hooks::write_varying_decls(&mut vertex_string, &varying_decls_attrs);
+        for struct_decl_attrs in &emitter.struct_decls_attrs {
+            writeln!(vertex_string, "{}", struct_decl_attrs.string).unwrap();
+        }
+        for fn_decl_attrs in &emitter.fn_decls_attrs {
+            if fn_decl_attrs.ident == vertex || vertex_fn_info.deps.fn_idents.contains(&fn_decl_attrs.ident) {
+                writeln!(vertex_string, "{}", fn_decl_attrs.string).unwrap();
+            }
+        }
+
+        if hooks::should_share_decls() {
+            emitter.fn_decls_attrs.clear();
+        }
+
         let fragment = Ident::new("fragment");
         emitter.active_fn_idents.push(fragment);
         let fragment_fn_decl_attrs = emitter
@@ -624,6 +643,7 @@ impl Shader {
             return Err(Error::FnCannotWriteToVaryings { ident: fragment });
         }
         emitter.fn_decls_attrs.push(fragment_fn_decl_attrs);
+
         let fragment_fn_info = match emitter.find_info(fragment).unwrap() {
             Info::Fn(info) => info,
             _ => panic!(),
@@ -643,20 +663,29 @@ impl Shader {
             });
         }
 
+        let mut fragment_string = String::new();
+        if !hooks::should_share_decls() {
+            hooks::write_attribute_decls(&mut fragment_string, &attribute_decls_attrs);
+            hooks::write_varying_decls(&mut fragment_string, &varying_decls_attrs);
+        }
+        for struct_decl_attrs in &emitter.struct_decls_attrs {
+            writeln!(fragment_string, "{}", struct_decl_attrs.string).unwrap();
+        }
+        for fn_decl_attrs in &emitter.fn_decls_attrs {
+            if fn_decl_attrs.ident == fragment
+                || fragment_fn_info
+                    .deps
+                    .fn_idents
+                    .contains(&fn_decl_attrs.ident)
+            {
+                writeln!(fragment_string, "{}", fn_decl_attrs.string).unwrap();
+            }
+        }
+
         Ok(ShaderAttrs {
             attribute_decls_attrs: attribute_decls_attrs.clone(),
-            string: {
-                let mut string = String::new();
-                hooks::write_attribute_decls(&mut string, &attribute_decls_attrs);
-                hooks::write_varying_decls(&mut string, &varying_decls_attrs);
-                for struct_decl_attrs in emitter.struct_decls_attrs {
-                    writeln!(string, "{}", struct_decl_attrs.string).unwrap();
-                }
-                for fn_decl_attrs in emitter.fn_decls_attrs {
-                    writeln!(string, "{}", fn_decl_attrs.string).unwrap();
-                }
-                string
-            },
+            vertex_string,
+            fragment_string,
         })
     }
 }
@@ -727,6 +756,7 @@ impl FnDecl {
             return Err(Error::IdentCannotBeRedefined(self.ident));
         }
         Ok(FnDeclAttrs {
+            ident: self.ident,
             deps: block_attrs.deps.clone(),
             string: {
                 let mut string = String::new();
@@ -1993,6 +2023,7 @@ impl CallExpr {
                 },
                 deps: {
                     let mut deps = info.deps.clone();
+                    deps.fn_idents.insert(self.ident);
                     for x_attrs in &xs_attrs {
                         deps = deps.union(&x_attrs.deps);
                     }
@@ -2224,7 +2255,8 @@ impl VarExpr {
                         let mut string = String::new();
                         hooks::write_attribute_var(&mut string, self.ident);
                         string
-                    }.into(),
+                    }
+                    .into(),
                 }
             }
             VarInfoKind::Local { is_mut } => {
@@ -2251,7 +2283,8 @@ impl VarExpr {
                         let mut string = String::new();
                         hooks::write_uniform_var(&mut string, block_ident, self.ident);
                         string
-                    }.into()
+                    }
+                    .into(),
                 }
             }
             VarInfoKind::Varying => ExprAttrs {
@@ -2265,7 +2298,8 @@ impl VarExpr {
                     let mut string = String::new();
                     hooks::write_varying_var(&mut string, self.ident);
                     string
-                }.into(),
+                }
+                .into(),
             },
         })
     }
@@ -2347,25 +2381,25 @@ enum VarInfoKind {
 
 #[derive(Clone, Debug, Default)]
 struct Deps {
+    fn_idents: HashSet<Ident>,
     has_attributes: bool,
     has_input_varyings: bool,
     has_output_varyings: bool,
-    uniform_block_idents: Vec<Ident>,
+    uniform_block_idents: HashSet<Ident>,
 }
 
 impl Deps {
     fn union(self, other: &Deps) -> Deps {
         Deps {
+            fn_idents: self.fn_idents.union(&other.fn_idents).cloned().collect(),
             has_attributes: self.has_attributes || other.has_attributes,
             has_input_varyings: self.has_input_varyings || other.has_input_varyings,
             has_output_varyings: self.has_output_varyings || other.has_output_varyings,
-            uniform_block_idents: {
-                let mut uniform_block_idents = self.uniform_block_idents;
-                uniform_block_idents.extend(&other.uniform_block_idents);
-                uniform_block_idents.sort();
-                uniform_block_idents.dedup();
-                uniform_block_idents
-            },
+            uniform_block_idents: self
+                .uniform_block_idents
+                .union(&other.uniform_block_idents)
+                .cloned()
+                .collect(),
         }
     }
 }

@@ -1,7 +1,14 @@
-use crate::emit::{write_ident_and_ty, AttributeDeclAttrs, ExprAttrs, ParamAttrs, VaryingDeclAttrs};
+use crate::emit::{
+    write_ident_and_ty, AttributeDeclAttrs, ExprAttrs, ParamAttrs, VaryingDeclAttrs,
+};
 use crate::ident::Ident;
 use crate::ty_lit::TyLit;
+use std::collections::HashSet;
 use std::fmt::Write;
+
+pub(in crate::emit) fn should_share_decls() -> bool {
+    true
+}
 
 pub(in crate::emit) fn write_attribute_decls(
     string: &mut String,
@@ -13,14 +20,12 @@ pub(in crate::emit) fn write_attribute_decls(
         write_ident_and_ty(string, attribute_decl_attrs.ident, &attribute_decl_attrs.ty);
         writeln!(string, ";").unwrap();
     }
-    writeln!(string, "}};").unwrap();
-    for attribute_decl_attrs in attribute_decls_attrs {
-        write_ident_and_ty(string, attribute_decl_attrs.ident, &attribute_decl_attrs.ty);
-        writeln!(string, ";").unwrap();
-    }
 }
 
-pub(in crate::emit) fn write_varying_decls(string: &mut String, varying_decls_attrs: &[VaryingDeclAttrs]) {
+pub(in crate::emit) fn write_varying_decls(
+    string: &mut String,
+    varying_decls_attrs: &[VaryingDeclAttrs],
+) {
     writeln!(string, "struct _mpsc_Varyings {{").unwrap();
     for varying_decl_attrs in varying_decls_attrs {
         write!(string, "    ").unwrap();
@@ -28,13 +33,6 @@ pub(in crate::emit) fn write_varying_decls(string: &mut String, varying_decls_at
         writeln!(string, ";").unwrap();
     }
     writeln!(string, "}};").unwrap();
-    let mut size = 0;
-    for varying_decl_attrs in varying_decls_attrs {
-        size += varying_decl_attrs.ty.size().unwrap();
-    }
-    for index in 0..((size + 3) / 4) {
-        writeln!(string, "varying _mpsc_varying_{};", index).unwrap();
-    }
 }
 
 pub(in crate::emit) fn write_builtin_ident(string: &mut String, ident: Ident) {
@@ -48,7 +46,7 @@ pub(in crate::emit) fn write_fn_ident(string: &mut String, ident: Ident) {
 pub(in crate::emit) fn write_params(
     string: &mut String,
     params_attrs: &[ParamAttrs],
-    uniform_block_idents: &[Ident],
+    uniform_block_idents: &HashSet<Ident>,
     has_attributes: bool,
     has_input_varyings: bool,
     has_output_varyings: bool,
@@ -83,7 +81,7 @@ pub(in crate::emit) fn write_params(
 pub(in crate::emit) fn write_args(
     string: &mut String,
     xs_attrs: &[ExprAttrs],
-    uniform_block_idents: &[Ident],
+    uniform_block_idents: &HashSet<Ident>,
     has_attributes: bool,
     has_input_varyings: bool,
     has_output_varyings: bool,
