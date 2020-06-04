@@ -5,6 +5,8 @@ use makepad_shader_compiler::parse::Parser;
 use std::error::Error;
 
 const SOURCE: &str = r#"
+    uniform uModelViewMatrix: mat2;
+
     attribute aPosition: vec2;
     
     varying vColor: vec3;
@@ -13,7 +15,7 @@ const SOURCE: &str = r#"
     fn vertex() -> vec4 {
         foo();
         vColor = vec3(aPosition, 1.0);
-        return vec4(aPosition, 0.0, 1.0);
+        return vec4(uModelViewMatrix * aPosition, 0.0, 1.0);
     }
 
     fn fragment() -> vec4 {

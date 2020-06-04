@@ -1,13 +1,14 @@
 use crate::emit::{
-    write_ident_and_ty, AttributeDeclAttrs, ExprAttrs, ParamAttrs, VaryingDeclAttrs,
+    write_ident_and_ty, AttributeDeclAttrs, ExprAttrs, ParamAttrs, UniformDeclAttrs,
+    VaryingDeclAttrs,
 };
 use crate::ident::Ident;
 use crate::ty_lit::TyLit;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 pub(in crate::emit) fn should_share_decls() -> bool {
-    true
+    false
 }
 
 pub(in crate::emit) fn write_attribute_decls(
@@ -19,6 +20,34 @@ pub(in crate::emit) fn write_attribute_decls(
         write!(string, "    ").unwrap();
         write_ident_and_ty(string, attribute_decl_attrs.ident, &attribute_decl_attrs.ty);
         writeln!(string, ";").unwrap();
+    }
+    writeln!(string, "}};").unwrap();
+    for attribute_decl_attrs in attribute_decls_attrs {
+        write!(string, "attribute ").unwrap();
+        write_ident_and_ty(string, attribute_decl_attrs.ident, &attribute_decl_attrs.ty);
+        writeln!(string, ";").unwrap();
+    }
+}
+
+pub(in crate::emit) fn write_uniform_decls(
+    string: &mut String,
+    uniform_decls_attrs_by_block_ident: &HashMap<Ident, Vec<UniformDeclAttrs>>,
+) {
+    for (block_ident, uniform_decls_attrs) in uniform_decls_attrs_by_block_ident {
+        writeln!(string, "struct _mpsc_{}_Uniforms {{", block_ident).unwrap();
+        for uniform_decl_attrs in uniform_decls_attrs {
+            write!(string, "    ").unwrap();
+            write_ident_and_ty(string, uniform_decl_attrs.ident, &uniform_decl_attrs.ty);
+            writeln!(string, ";").unwrap();
+        }
+    }
+    writeln!(string, "}};").unwrap();
+    for uniform_decls_attrs in uniform_decls_attrs_by_block_ident.values() {
+        for uniform_decl_attrs in uniform_decls_attrs {
+            write!(string, "uniform ").unwrap();
+            write_ident_and_ty(string, uniform_decl_attrs.ident, &uniform_decl_attrs.ty);
+            writeln!(string, ";").unwrap();
+        }
     }
 }
 
@@ -33,6 +62,13 @@ pub(in crate::emit) fn write_varying_decls(
         writeln!(string, ";").unwrap();
     }
     writeln!(string, "}};").unwrap();
+    let mut size = 0;
+    for varying_decl_attrs in varying_decls_attrs {
+        size += varying_decl_attrs.ty.size().unwrap();
+    }
+    for index in 0..(size / 4) {
+        writeln!(string, "varying _mpsc_varying_{};", index).unwrap();
+    }
 }
 
 pub(in crate::emit) fn write_builtin_ident(string: &mut String, ident: Ident) {
