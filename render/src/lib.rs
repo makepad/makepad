@@ -96,5 +96,3 @@ pub use crate::quad::*;
 pub use crate::blit::*;
 pub use crate::text::*;
 pub use crate::elements::*;
-
-pub use makepad_mprstokenizer::*;

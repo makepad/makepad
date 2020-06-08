@@ -10,7 +10,6 @@ license = "MIT"
 ipc=[]
 
 [dependencies]
-makepad-mprstokenizer =  { path = "./mprstokenizer", version = "0.1" }
 makepad-font = { path = "./vector/font", version = "0.1" }
 makepad-geometry = { path = "./vector/geometry", version = "0.1" }
 makepad-internal-iter = { path = "./vector/internal_iter", version = "0.1" }

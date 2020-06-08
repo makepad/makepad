@@ -1,6 +1,7 @@
 use makepad_render::*;
 
 use crate::textbuffer::*;
+use crate::tokentype::*;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextCursor {

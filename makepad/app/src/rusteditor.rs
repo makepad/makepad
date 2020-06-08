@@ -2,6 +2,7 @@ use makepad_render::*;
 use makepad_widget::*;
 use crate::searchindex::*;
 use crate::appstorage::*;
+use crate::mprstokenizer::*;
 
 #[derive(Clone)]
 pub struct RustEditor {
@@ -69,6 +70,9 @@ impl RustEditor {
             if pair_stack.len() > 0 {
                 atb.text_buffer.was_invalid_pair = true;
             }
+            
+            // lets parse and generate our live macro set
+            atb.live_macros.parse(&atb.text_buffer);
             
             // ok now lets write a diff with the previous one
             /*

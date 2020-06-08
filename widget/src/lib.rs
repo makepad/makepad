@@ -38,5 +38,9 @@ mod textinput;
 pub use crate::textinput::*;
 mod scrollshadow;
 pub use crate::scrollshadow::*;
+
+mod tokentype;
+pub use crate::tokentype::*;
+
 //mod texteditor;
 //pub use crate::texteditor::*;
