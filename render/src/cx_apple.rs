@@ -573,9 +573,9 @@ pub enum MTLCPUCacheMode {
 }
 
 pub const MTLResourceCPUCacheModeShift: u64 = 0;
-pub const MTLResourceCPUCacheModeMask: u64 = (0xf << MTLResourceCPUCacheModeShift);
+pub const MTLResourceCPUCacheModeMask: u64 = 0xf << MTLResourceCPUCacheModeShift;
 pub const MTLResourceStorageModeShift: u64 = 4;
-pub const MTLResourceStorageModeMask: u64 = (0xf << MTLResourceStorageModeShift);
+pub const MTLResourceStorageModeMask: u64 = 0xf << MTLResourceStorageModeShift;
 
 #[allow(non_upper_case_globals)]
 #[repr(u64)]

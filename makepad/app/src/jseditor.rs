@@ -2,6 +2,7 @@ use makepad_render::*;
 use makepad_widget::*;
 use crate::searchindex::*;
 use crate::appstorage::*;
+use crate::mprstokenizer::*;
 
 #[derive(Clone)]
 pub struct JSEditor {

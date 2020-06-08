@@ -9,6 +9,7 @@ use crate::fileeditor::*;
 use crate::buildmanager::*;
 use std::collections::HashMap;
 use crate::builder;
+use crate::livemacro::*;
 
 #[derive(Debug, Clone, SerRon, DeRon)]
 pub struct AppSettings {
@@ -107,7 +108,7 @@ pub struct AppTextBuffer {
     pub full_path: String,
     pub text_buffer: TextBuffer,
     pub text_buffer_id: AppTextBufferId,
-    pub live_macros: Vec<LiveMacro>
+    pub live_macros: LiveMacros
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
@@ -263,7 +264,7 @@ impl AppStorage {
                     read_msg: None,
                     full_path: path.to_string(),
                     text_buffer_id: tb_id,
-                    live_macros: Vec::new(),
+                    live_macros: LiveMacros::default(),
                     // write_msg: None,
                     text_buffer: TextBuffer {
                         signal: cx.new_signal(),
@@ -300,7 +301,7 @@ impl AppStorage {
                     read_msg: Some(msg),
                     full_path: path.to_string(),
                     text_buffer_id: tb_id,
-                    live_macros: Vec::new(),
+                    live_macros: LiveMacros::default(),
                     // write_msg: None,
                     text_buffer: TextBuffer {
                         signal: cx.new_signal(),

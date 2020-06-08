@@ -4,6 +4,7 @@ use crate::textbuffer::*;
 use crate::textcursor::*;
 use crate::widgetstyle::*;
 use crate::scrollshadow::*;
+use crate::tokentype::*;
 
 #[derive(Clone)]
 pub struct TextEditor {
