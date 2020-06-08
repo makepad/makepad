@@ -1,6 +1,7 @@
 use makepad_render::*;
 
 use crate::textcursor::*;
+use crate::tokentype::*;
 
 #[derive(Clone, Default)]
 pub struct TextBuffer {

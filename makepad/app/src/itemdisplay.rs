@@ -2,6 +2,7 @@ use crate::plaineditor::*;
 use makepad_render::*;
 use makepad_hub::*;
 use makepad_widget::*;
+use crate::mprstokenizer::*;
 
 #[derive(Clone, PartialEq)]
 pub enum ItemDisplayType {

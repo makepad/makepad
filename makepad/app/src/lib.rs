@@ -23,3 +23,4 @@ pub mod livemacro;
 //pub use crate::rustcompiler::*;
 pub use makepad_render::*;
 pub mod builder;
+pub mod mprstokenizer;

@@ -1,6 +1,7 @@
 use makepad_render::*;
 use crate::texteditor::*;
 use crate::textbuffer::*;
+use crate::tokentype::*;
 use crate::widgetstyle::*;
 #[derive(Clone)]
 pub struct TextInput {
