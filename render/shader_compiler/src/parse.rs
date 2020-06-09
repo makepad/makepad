@@ -46,8 +46,8 @@ where
     }
 }
 
-impl Shader {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<Shader, Error>
+impl ParsedShader {
+    pub fn parse<T>(parser: &mut Parser<T>) -> Result<ParsedShader, Error>
     where
         T: Iterator<Item = Token>,
     {
@@ -55,7 +55,7 @@ impl Shader {
         while parser.token != Token::Eof {
             decls.push(Decl::parse(parser)?)
         }
-        Ok(Shader { decls })
+        Ok(ParsedShader { decls })
     }
 }
 

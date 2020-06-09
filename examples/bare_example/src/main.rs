@@ -17,7 +17,7 @@ impl App {
     pub fn new(cx: &mut Cx) -> Self {
         Self::bg().set(cx, Quad::def_quad_shader().compose(shader!{"
             let counter: Self::counter();
-            fn pixel() -> vec4 {
+            fn pixel() -> vec4 { 
                 df_viewport(pos * vec2(w, h));
                 df_circle(0.5 * w, 0.5 * h, 0.5 * w);
                 //return df_fill(color!(green));

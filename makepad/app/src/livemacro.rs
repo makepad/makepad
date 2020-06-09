@@ -1,13 +1,18 @@
-
-use makepad_render::*;
 use makepad_widget::*;
 use crate::mprstokenizer::*;
-pub struct LiveMacroPick{
-    token:usize,
+use makepad_render::makepad_shader_compiler::ast::*;
+use makepad_render::makepad_shader_compiler::emit::Emitter;
+use makepad_render::makepad_shader_compiler::lex;
+use makepad_render::makepad_shader_compiler::parse::Parser;
+use std::error::Error;
+
+
+pub struct LiveMacroPick {
+    token: usize,
 }
 
-pub struct LiveMacroShader{
-    token:usize,
+pub struct LiveMacroShader {
+    token: usize,
 }
 
 pub enum LiveMacro {
@@ -16,37 +21,46 @@ pub enum LiveMacro {
 }
 
 #[derive(Default)]
-pub struct LiveMacros{
+pub struct LiveMacros {
     macros: Vec<LiveMacro>
 }
 
-impl LiveMacros{
-    pub fn parse(&mut self, text_buffer:&TextBuffer){
+impl LiveMacros {
+    pub fn parse(&mut self, text_buffer: &TextBuffer) {
         let mut tp = TokenParser::new(&text_buffer.flat_text, &text_buffer.token_chunks);
         while tp.advance() {
-            match tp.cur_type(){
-                TokenType::Macro=>{
+            match tp.cur_type() {
+                TokenType::Macro => {
                     if tp.eat("shader") &&
-                        tp.eat("!") && 
-                        tp.eat("{") {
-                            // ok now we are at ", hopefully
-                            // get matching pair
-                            if tp.cur_type() == TokenType::ParenOpen{
-                                let pair_token = tp.cur_pair_token();
-                                // jump to end.
-                                
-                            } 
-                            // now we should have a {
-                            // and then a "
-                            // and we should run to matching }
-                            // 
-                            // lets convert our mprs tokens to
-                            // shader tokens now
-                            // send in a TokenParser
-                            // 
+                    tp.eat("!") &&
+                    tp.eat("{") {
+                        // ok now we are at ", hopefully
+                        // get matching pair
+                        if tp.cur_type() == TokenType::ParenOpen {
+                            let start = tp.next_index;
+                            let end = tp.cur_pair_token();
+                            
+                            // don't jump, there might be actual value macros
+                            // in the shader itself
+                            if let Err(ref error) = ( || -> Result<(), Box<dyn Error>> {
+                                let tokens = lex::lex(
+                                    tp.flat_text[start..end].iter().cloned()
+                                ).collect::<Result<Vec<_>, _>>() ?;
+                                let shader = ParsedShader::parse(&mut Parser::new(tokens.iter().cloned())) ?;
+                                let shader_attrs = shader.emit(&mut Emitter::new()) ?;
+                                println!("VERTEX SHADER:");
+                                println!("{}", shader_attrs.vertex_string);
+                                println!("FRAGMENT SHADER:");
+                                println!("{}", shader_attrs.fragment_string);
+                                Ok(())
+                            })() { 
+                                println!("{}", error);
+                            }
+                            
                         }
+                    }
                 },
-                _=>()
+                _ => ()
             }
         }
         //let new_tok = &text_buffer.token_chunks[new_index];

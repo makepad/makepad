@@ -4,7 +4,7 @@ use crate::ty_lit::TyLit;
 use std::fmt;
 
 #[derive(Clone, Debug)]
-pub struct Shader {
+pub struct ParsedShader {
     pub decls: Vec<Decl>,
 }
 
