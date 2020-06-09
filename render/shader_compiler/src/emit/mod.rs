@@ -548,7 +548,7 @@ impl fmt::Display for Error {
     }
 }
 
-impl Shader {
+impl ParsedShader {
     pub fn emit(&self, emitter: &mut Emitter) -> Result<ShaderAttrs, Error> {
         let mut attribute_decls = Vec::new();
         let mut fn_decls_by_ident = HashMap::new();
