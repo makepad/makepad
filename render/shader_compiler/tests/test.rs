@@ -5,17 +5,21 @@ use makepad_shader_compiler::parse::Parser;
 use std::error::Error;
 
 const SOURCE: &str = r#"
-    uniform uModelViewMatrix: mat2;
+    uniform uModelViewMatrix: mat4;
+    uniform uPerspectiveMatrix: mat2 block draw;
 
-    attribute aPosition: vec2;
-    
+    attribute aPosition: vec4;
+    attribute aColor: vec3;
+    attribute aTexCoord: vec2;
+
     varying vColor: vec3;
-    varying vTexCoord: vec4;
+    varying vTexCoord: vec2;
+    varying vMatrix: mat4;
 
     fn vertex() -> vec4 {
         foo();
-        vColor = vec3(aPosition, 1.0);
-        return vec4(uModelViewMatrix * aPosition, 0.0, 1.0);
+        vColor = aColor;
+        return vec4(uModelViewMatrix * aPosition);
     }
 
     fn fragment() -> vec4 {
@@ -24,6 +28,7 @@ const SOURCE: &str = r#"
     }
 
     fn foo() {
+        uPerspectiveMatrix;
         qux();
     }
 
