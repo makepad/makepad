@@ -11,7 +11,6 @@ pub struct Swizzle {
 
 impl Swizzle {
     pub fn from_range(range: Range<usize>) -> Swizzle {
-        println!("POIKA {:?}", range);
         let mut indices = Vec::new();
         for index in range {
             indices.push(index);

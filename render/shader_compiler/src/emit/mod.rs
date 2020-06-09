@@ -596,64 +596,6 @@ impl ParsedShader {
             .map(|varying_decl| varying_decl.emit(&mut emitter))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let vertex = Ident::new("vertex");
-        emitter.active_fn_idents.push(vertex);
-        let vertex_fn_decl_attrs = emitter
-            .fn_decls_by_ident
-            .get(&vertex)
-            .ok_or(Error::MissingFn { ident: vertex })?
-            .emit(&mut emitter)?;
-        emitter.active_fn_idents.pop();
-        if vertex_fn_decl_attrs.deps.has_input_varyings {
-            return Err(Error::FnCannotReadFromVaryings { ident: vertex });
-        }
-        emitter.fn_decls_attrs.push(vertex_fn_decl_attrs);
-
-        let vertex_fn_info = match emitter.find_info(vertex).unwrap() {
-            Info::Fn(info) => info,
-            _ => panic!(),
-        };
-        if vertex_fn_info.param_tys.len() != 0 {
-            return Err(Error::TooManyParamsForFn {
-                ident: vertex,
-                expected_count: 0,
-                actual_count: vertex_fn_info.param_tys.len(),
-            });
-        }
-        if vertex_fn_info.return_ty != Ty::Vec4 {
-            return Err(Error::MismatchedReturnTyForFn {
-                ident: vertex,
-                expected_return_ty: Ty::Vec4,
-                actual_return_ty: vertex_fn_info.return_ty.clone(),
-            });
-        }
-
-        let mut vertex_string = String::new();
-        hooks::write_uniform_decls(&mut vertex_string, &uniform_decls_attrs_by_block_ident);
-        hooks::write_attribute_decls(&mut vertex_string, &attribute_decls_attrs);
-        hooks::write_varying_decls(&mut vertex_string, &varying_decls_attrs);
-        for struct_decl_attrs in &emitter.struct_decls_attrs {
-            writeln!(vertex_string, "{}", struct_decl_attrs.string).unwrap();
-        }
-        for fn_decl_attrs in &emitter.fn_decls_attrs {
-            if fn_decl_attrs.ident == vertex
-                || vertex_fn_info.deps.fn_idents.contains(&fn_decl_attrs.ident)
-            {
-                writeln!(vertex_string, "{}", fn_decl_attrs.string).unwrap();
-            }
-        }
-        hooks::write_vertex_main(
-            &mut vertex_string,
-            &attribute_decls_attrs,
-            &uniform_decls_attrs_by_block_ident,
-            &varying_decls_attrs,
-            &vertex_fn_info,
-        );
-
-        if hooks::should_share_decls() {
-            emitter.fn_decls_attrs.clear();
-        }
-
         let fragment = Ident::new("fragment");
         emitter.active_fn_idents.push(fragment);
         let fragment_fn_decl_attrs = emitter
@@ -688,8 +630,8 @@ impl ParsedShader {
 
         let mut fragment_string = String::new();
         if !hooks::should_share_decls() {
-            hooks::write_uniform_decls(&mut fragment_string, &uniform_decls_attrs_by_block_ident);
-            hooks::write_varying_decls(&mut fragment_string, &varying_decls_attrs);
+            hooks::write_uniform_block_structs(&mut fragment_string, &uniform_decls_attrs_by_block_ident);
+            hooks::write_varying_struct(&mut fragment_string, &varying_decls_attrs);
         }
         for struct_decl_attrs in &emitter.struct_decls_attrs {
             writeln!(fragment_string, "{}", struct_decl_attrs.string).unwrap();
@@ -704,6 +646,64 @@ impl ParsedShader {
                 writeln!(fragment_string, "{}", fn_decl_attrs.string).unwrap();
             }
         }
+
+        if hooks::should_share_decls() {
+            emitter.fn_decls_attrs.clear();
+        }
+
+        let vertex = Ident::new("vertex");
+        emitter.active_fn_idents.push(vertex);
+        let vertex_fn_decl_attrs = emitter
+            .fn_decls_by_ident
+            .get(&vertex)
+            .ok_or(Error::MissingFn { ident: vertex })?
+            .emit(&mut emitter)?;
+        emitter.active_fn_idents.pop();
+        if vertex_fn_decl_attrs.deps.has_input_varyings {
+            return Err(Error::FnCannotReadFromVaryings { ident: vertex });
+        }
+        emitter.fn_decls_attrs.push(vertex_fn_decl_attrs);
+
+        let vertex_fn_info = match emitter.find_info(vertex).unwrap() {
+            Info::Fn(info) => info,
+            _ => panic!(),
+        };
+        if vertex_fn_info.param_tys.len() != 0 {
+            return Err(Error::TooManyParamsForFn {
+                ident: vertex,
+                expected_count: 0,
+                actual_count: vertex_fn_info.param_tys.len(),
+            });
+        }
+        if vertex_fn_info.return_ty != Ty::Vec4 {
+            return Err(Error::MismatchedReturnTyForFn {
+                ident: vertex,
+                expected_return_ty: Ty::Vec4,
+                actual_return_ty: vertex_fn_info.return_ty.clone(),
+            });
+        }
+
+        let mut vertex_string = String::new();
+        hooks::write_uniform_block_structs(&mut vertex_string, &uniform_decls_attrs_by_block_ident);
+        hooks::write_attribute_struct(&mut vertex_string, &attribute_decls_attrs);
+        hooks::write_varying_struct(&mut vertex_string, &varying_decls_attrs);
+        for struct_decl_attrs in &emitter.struct_decls_attrs {
+            writeln!(vertex_string, "{}", struct_decl_attrs.string).unwrap();
+        }
+        for fn_decl_attrs in &emitter.fn_decls_attrs {
+            if fn_decl_attrs.ident == vertex
+                || vertex_fn_info.deps.fn_idents.contains(&fn_decl_attrs.ident)
+            {
+                writeln!(vertex_string, "{}", fn_decl_attrs.string).unwrap();
+            }
+        }
+        hooks::write_vertex_main(
+            &mut vertex_string,
+            &attribute_decls_attrs,
+            &uniform_decls_attrs_by_block_ident,
+            &varying_decls_attrs,
+            &vertex_fn_info,
+        );
 
         Ok(ShaderAttrs {
             attribute_decls_attrs,
@@ -801,10 +801,7 @@ impl FnDecl {
                 hooks::write_hidden_params(
                     &mut string,
                     sep,
-                    &block_attrs.deps.uniform_block_idents,
-                    block_attrs.deps.has_attributes,
-                    block_attrs.deps.has_input_varyings,
-                    block_attrs.deps.has_output_varyings,
+                    &block_attrs.deps
                 );
                 write!(string, ") {}", block_attrs.string).unwrap();
                 string
@@ -2079,10 +2076,7 @@ impl CallExpr {
                     hooks::write_hidden_args(
                         &mut string,
                         sep,
-                        &info.deps.uniform_block_idents,
-                        info.deps.has_attributes,
-                        info.deps.has_input_varyings,
-                        info.deps.has_output_varyings,
+                        &info.deps
                     );
                     write!(string, ")").unwrap();
                     string.into()
@@ -2291,7 +2285,7 @@ impl VarExpr {
                 ExprAttrs {
                     ty,
                     deps: Deps {
-                        has_attributes: true,
+                        attribute_idents: [self.ident].iter().cloned().collect(),
                         ..Deps::default()
                     },
                     value_or_string: {
@@ -2424,8 +2418,8 @@ enum VarInfoKind {
 
 #[derive(Clone, Debug, Default)]
 struct Deps {
+    attribute_idents: HashSet<Ident>,
     fn_idents: HashSet<Ident>,
-    has_attributes: bool,
     has_input_varyings: bool,
     has_output_varyings: bool,
     uniform_block_idents: HashSet<Ident>,
@@ -2434,8 +2428,12 @@ struct Deps {
 impl Deps {
     fn union(self, other: &Deps) -> Deps {
         Deps {
-            fn_idents: self.fn_idents.union(&other.fn_idents).cloned().collect(),
-            has_attributes: self.has_attributes || other.has_attributes,
+            attribute_idents: self
+                .attribute_idents
+                .union(&other.attribute_idents)
+                .cloned()
+                .collect(),
+            fn_idents: self.fn_idents.union(&other.fn_idents).cloned().collect(),        
             has_input_varyings: self.has_input_varyings || other.has_input_varyings,
             has_output_varyings: self.has_output_varyings || other.has_output_varyings,
             uniform_block_idents: self

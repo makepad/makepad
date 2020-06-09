@@ -1,39 +1,35 @@
 use crate::emit::{
-    write_ident_and_ty, AttributeDeclAttrs, FnInfo, UniformDeclAttrs,
+    write_ident_and_ty, AttributeDeclAttrs, Deps, FnInfo, UniformDeclAttrs,
     VaryingDeclAttrs,
 };
 use crate::ident::Ident;
 use crate::swizzle::Swizzle;
 use crate::ty::Ty;
 use crate::ty_lit::TyLit;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Write;
 
 pub(in crate::emit) fn should_share_decls() -> bool {
     false
 }
 
-pub(in crate::emit) fn write_attribute_decls(
+pub(in crate::emit) fn write_attribute_struct(
     string: &mut String,
     attribute_decls_attrs: &[AttributeDeclAttrs],
 ) {
-    if !attribute_decls_attrs.is_empty() {
-        writeln!(string, "struct _mpsc_Attributes {{").unwrap();
-        for attribute_decl_attrs in attribute_decls_attrs {
-            write!(string, "    ").unwrap();
-            write_ident_and_ty(string, attribute_decl_attrs.ident, &attribute_decl_attrs.ty);
-            writeln!(string, ";").unwrap();
-        }
-        writeln!(string, "}};").unwrap();
+    if attribute_decls_attrs.is_empty() {
+        return;
     }
+    writeln!(string, "struct _mpsc_Attributes {{").unwrap();
     for attribute_decl_attrs in attribute_decls_attrs {
-        write!(string, "attribute ").unwrap();
+        write!(string, "    ").unwrap();
         write_ident_and_ty(string, attribute_decl_attrs.ident, &attribute_decl_attrs.ty);
         writeln!(string, ";").unwrap();
     }
+    writeln!(string, "}};").unwrap();
 }
 
-pub(in crate::emit) fn write_uniform_decls(
+pub(in crate::emit) fn write_uniform_block_structs(
     string: &mut String,
     uniform_decls_attrs_by_block_ident: &HashMap<Ident, Vec<UniformDeclAttrs>>,
 ) {
@@ -46,33 +42,22 @@ pub(in crate::emit) fn write_uniform_decls(
         }
         writeln!(string, "}};").unwrap();
     }
-    for uniform_decls_attrs in uniform_decls_attrs_by_block_ident.values() {
-        for uniform_decl_attrs in uniform_decls_attrs {
-            write!(string, "uniform ").unwrap();
-            write_ident_and_ty(string, uniform_decl_attrs.ident, &uniform_decl_attrs.ty);
-            writeln!(string, ";").unwrap();
-        }
-    }
 }
 
-pub(in crate::emit) fn write_varying_decls(
+pub(in crate::emit) fn write_varying_struct(
     string: &mut String,
     varying_decls_attrs: &[VaryingDeclAttrs],
 ) {
-    if !varying_decls_attrs.is_empty() {  
-        writeln!(string, "struct _mpsc_Varyings {{").unwrap();
-        for varying_decl_attrs in varying_decls_attrs {
-            write!(string, "    ").unwrap();
-            write_ident_and_ty(string, varying_decl_attrs.ident, &varying_decl_attrs.ty);
-            writeln!(string, ";").unwrap();
-        }
-        writeln!(string, "}};").unwrap();
+    if varying_decls_attrs.is_empty() {
+        return;
     }
+    writeln!(string, "struct _mpsc_Varyings {{").unwrap();
     for varying_decl_attrs in varying_decls_attrs {
-        write!(string, "varying ").unwrap();
+        write!(string, "    ").unwrap();
         write_ident_and_ty(string, varying_decl_attrs.ident, &varying_decl_attrs.ty);
         writeln!(string, ";").unwrap();
     }
+    writeln!(string, "}};").unwrap();
 }
 
 pub(in crate::emit) fn write_vertex_main(
@@ -82,21 +67,41 @@ pub(in crate::emit) fn write_vertex_main(
     varying_decls_attrs: &[VaryingDeclAttrs],
     vertex_fn_info: &FnInfo,
 ) {
+    let mut attributes_size = 0;
+    for attribute_decl_attrs in attribute_decls_attrs {
+        attributes_size += attribute_decl_attrs.ty.size().unwrap();
+    }
+    // TODO: Generate packed attribute variables
+
+    for uniform_decls_attrs in uniform_decls_attrs_by_block_ident.values() {
+        for uniform_decl_attrs in uniform_decls_attrs {
+            write!(string, "uniform ").unwrap();
+            write_ident_and_ty(string, uniform_decl_attrs.ident, &uniform_decl_attrs.ty);
+            writeln!(string, ";").unwrap();
+        }
+    }
+
+    let mut varyings_size = 0;
+    for attribute_decl_attrs in attribute_decls_attrs {
+        varyings_size += attribute_decl_attrs.ty.size().unwrap();    
+    }
+    for varying_decl_attrs in varying_decls_attrs {
+        varyings_size += varying_decl_attrs.ty.size().unwrap();
+    }
+    // TODO: Generate packed varying variables
+
     writeln!(string, "fn main() {{").unwrap();
 
     if !attribute_decls_attrs.is_empty() {
         writeln!(string, "    _mpsc_Attributes _mpsc_attributes;").unwrap();
     }
-    let mut size = 0;
-    for attribute_decl_attrs in attribute_decls_attrs {
-        size += attribute_decl_attrs.ty.size().unwrap();
-    }
     let mut unpacker = VarUnpacker {
         string,
-        size,
+        size: attributes_size,
+        // TODO: Rename to src
         dst_prefix: "_mpsc_attribute",
         dst_index: 0,
-        dst_size: size.min(4),
+        dst_size: attributes_size.min(4),
         dst_offset: 0,        
     };
     for attribute_decl_attr in attribute_decls_attrs {
@@ -116,11 +121,12 @@ pub(in crate::emit) fn write_vertex_main(
 
     write!(string, "    gl_Position = vertex(").unwrap();
     let mut sep = "";
+    // TODO: Use hidden params hook
     for uniform_block_ident in &vertex_fn_info.deps.uniform_block_idents {
         write!(string, "{}_mpsc_{}_uniforms", sep, uniform_block_ident).unwrap();
         sep = ", ";
     }
-    if vertex_fn_info.deps.has_attributes {
+    if !vertex_fn_info.deps.attribute_idents.is_empty() {
         write!(string, "{}_mpsc_attributes", sep).unwrap();
         sep = ", ";
     }
@@ -129,20 +135,19 @@ pub(in crate::emit) fn write_vertex_main(
     }
     writeln!(string, ");").unwrap();
 
-    let mut size = 0;
-    for varying_decl_attrs in varying_decls_attrs {
-        size += varying_decl_attrs.ty.size().unwrap();
-    }
     let mut packer = VarPacker {
         string,
-        size,
+        size: varyings_size,
         dst_prefix: "_mpsc_varying",
         dst_index: 0,
-        dst_size: size.min(4),
+        dst_size: varyings_size.min(4),
         dst_offset: 0,        
     };
-    for varying_decl_attr in varying_decls_attrs {
-        packer.write(&format!("_mpsc_varyings.{}", varying_decl_attr.ident), &varying_decl_attr.ty);
+    for attribute_decl_attrs in attribute_decls_attrs {
+        packer.write(&format!("_mpsc_attribute.{}", attribute_decl_attrs.ident), &attribute_decl_attrs.ty);
+    }
+    for varying_decl_attrs in varying_decls_attrs {
+        packer.write(&format!("_mpsc_varyings.{}", varying_decl_attrs.ident), &varying_decl_attrs.ty);
     }
 
     writeln!(string, "}}").unwrap();
@@ -159,12 +164,9 @@ pub(in crate::emit) fn write_fn_ident(string: &mut String, ident: Ident) {
 pub(in crate::emit) fn write_hidden_params(
     string: &mut String,
     mut sep: &str,
-    uniform_block_idents: &HashSet<Ident>,
-    has_attributes: bool,
-    has_input_varyings: bool,
-    has_output_varyings: bool,
+    deps: &Deps,
 ) {
-    for uniform_block_ident in uniform_block_idents {
+    for uniform_block_ident in &deps.uniform_block_idents {
         write!(
             string,
             "{}_mpsc_{1}_Uniforms _mpsc_{1}_uniforms",
@@ -173,15 +175,15 @@ pub(in crate::emit) fn write_hidden_params(
         .unwrap();
         sep = ", ";
     }
-    if has_attributes {
+    if !deps.attribute_idents.is_empty() {
         write!(string, "{}_mpsc_Attributes _mpsc_attributes", sep).unwrap();
         sep = ", ";
     }
-    if has_input_varyings {
+    if deps.has_input_varyings {
         write!(string, "{}_mpsc_Varyings _mpsc_varyings", sep).unwrap();
         sep = ", ";
     }
-    if has_output_varyings {
+    if deps.has_output_varyings {
         write!(string, "{}out _mpsc_Varyings _mpsc_varyings", sep).unwrap();
     }
 }
@@ -189,20 +191,17 @@ pub(in crate::emit) fn write_hidden_params(
 pub(in crate::emit) fn write_hidden_args(
     string: &mut String,
     mut sep: &str,
-    uniform_block_idents: &HashSet<Ident>,
-    has_attributes: bool,
-    has_input_varyings: bool,
-    has_output_varyings: bool,
+    deps: &Deps,
 ) {
-    for uniform_block_ident in uniform_block_idents {
+    for uniform_block_ident in &deps.uniform_block_idents {
         write!(string, "{}_mpsc_{}_uniforms", sep, uniform_block_ident).unwrap();
         sep = ", ";
     }
-    if has_attributes {
+    if !deps.attribute_idents.is_empty() {
         write!(string, "{}_mpsc_attributes", sep).unwrap();
         sep = ", ";
     }
-    if has_input_varyings || has_output_varyings {
+    if deps.has_input_varyings || deps.has_output_varyings {
         write!(string, "{}_mpsc_varyings", sep).unwrap();
     }
 }
