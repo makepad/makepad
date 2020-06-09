@@ -46,7 +46,7 @@ impl TextCursor {
     pub fn collapse(&mut self, start: usize, end: usize, new_len: usize) -> isize {
         self.head = start + new_len;
         self.tail = self.head;
-        ((new_len as isize) - (end - start) as isize)
+        (new_len as isize) - (end - start) as isize
     }
     
     
