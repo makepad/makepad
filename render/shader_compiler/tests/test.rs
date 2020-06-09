@@ -38,7 +38,7 @@ const SOURCE: &str = r#"
 fn test() {
     if let Err(ref error) = (|| -> Result<(), Box<dyn Error>> {
         let tokens = lex::lex(SOURCE.chars()).collect::<Result<Vec<_>, _>>()?;
-        let shader = Shader::parse(&mut Parser::new(tokens.iter().cloned()))?;
+        let shader = ParsedShader::parse(&mut Parser::new(tokens.iter().cloned()))?;
         let shader_attrs = shader.emit(&mut Emitter::new())?;
         println!("VERTEX SHADER:");
         println!("{}", shader_attrs.vertex_string);
