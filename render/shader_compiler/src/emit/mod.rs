@@ -642,6 +642,13 @@ impl ParsedShader {
                 writeln!(vertex_string, "{}", fn_decl_attrs.string).unwrap();
             }
         }
+        hooks::write_vertex_main(
+            &mut vertex_string,
+            &attribute_decls_attrs,
+            &uniform_decls_attrs_by_block_ident,
+            &varying_decls_attrs,
+            &vertex_fn_info,
+        );
 
         if hooks::should_share_decls() {
             emitter.fn_decls_attrs.clear();
@@ -786,9 +793,14 @@ impl FnDecl {
                         .unwrap_or(&Ty::Void),
                 );
                 write!(string, "(").unwrap();
-                hooks::write_params(
+                let mut sep = "";
+                for param_attrs in params_attrs {
+                    write!(string, "{}{}", sep, param_attrs.string).unwrap();
+                    sep = ", ";
+                }            
+                hooks::write_hidden_params(
                     &mut string,
-                    &params_attrs,
+                    sep,
                     &block_attrs.deps.uniform_block_idents,
                     block_attrs.deps.has_attributes,
                     block_attrs.deps.has_input_varyings,
@@ -914,7 +926,10 @@ impl VaryingDecl {
             | Ty::Ivec4
             | Ty::Vec2
             | Ty::Vec3
-            | Ty::Vec4 => true,
+            | Ty::Vec4
+            | Ty::Mat2
+            | Ty::Mat3
+            | Ty::Mat4  => true,
             Ty::Array { ref elem_ty, .. } => match **elem_ty {
                 Ty::Bool
                 | Ty::Int
@@ -927,7 +942,10 @@ impl VaryingDecl {
                 | Ty::Ivec4
                 | Ty::Vec2
                 | Ty::Vec3
-                | Ty::Vec4 => true,
+                | Ty::Vec4
+                | Ty::Mat2
+                | Ty::Mat3
+                | Ty::Mat4 => true,
                 _ => false,
             },
             _ => false,
@@ -2053,9 +2071,14 @@ impl CallExpr {
                     let mut string = String::new();
                     hooks::write_fn_ident(&mut string, self.ident);
                     write!(string, "(").unwrap();
-                    hooks::write_args(
+                    let mut sep = "";
+                    for x_attrs in xs_attrs {
+                        write!(string, "{}{}", sep, x_attrs.value_or_string).unwrap();
+                        sep = ", ";
+                    }
+                    hooks::write_hidden_args(
                         &mut string,
-                        &xs_attrs,
+                        sep,
                         &info.deps.uniform_block_idents,
                         info.deps.has_attributes,
                         info.deps.has_input_varyings,

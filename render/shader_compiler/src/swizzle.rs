@@ -1,5 +1,7 @@
 use crate::ident::Ident;
+use std::fmt;
 use std::iter::Cloned;
+use std::ops::Range;
 use std::slice;
 
 #[derive(Clone, Debug)]
@@ -8,6 +10,15 @@ pub struct Swizzle {
 }
 
 impl Swizzle {
+    pub fn from_range(range: Range<usize>) -> Swizzle {
+        println!("POIKA {:?}", range);
+        let mut indices = Vec::new();
+        for index in range {
+            indices.push(index);
+        }
+        Swizzle { indices }
+    }
+
     pub fn parse(ident: Ident) -> Option<Swizzle> {
         let mut indices = Vec::new();
         ident.with(|string| {
@@ -61,6 +72,21 @@ impl Swizzle {
         Iter {
             iter: self.indices.iter().cloned(),
         }
+    }
+}
+
+impl fmt::Display for Swizzle {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for index in &self.indices {
+            write!(f, "{}", match index {
+                0 => "x",
+                1 => "y",
+                2 => "z",
+                3 => "w",
+                _ => panic!(),
+            })?;
+        }
+        Ok(())
     }
 }
 
