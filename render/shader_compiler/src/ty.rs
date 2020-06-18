@@ -25,45 +25,51 @@ pub enum Ty {
 }
 
 impl Ty {
-    pub fn elem_ty(&self) -> Option<Ty> {
-        match *self {
-            Ty::Bvec2 | Ty::Bvec3 | Ty::Bvec4 => Some(Ty::Bool),
-            Ty::Ivec2 | Ty::Ivec3 | Ty::Ivec4 => Some(Ty::Int),
-            Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => Some(Ty::Float),
-            Ty::Mat2 => Some(Ty::Vec2),
-            Ty::Mat3 => Some(Ty::Vec3),
-            Ty::Mat4 => Some(Ty::Vec4),
-            Ty::Array { ref elem_ty, .. } => Some((**elem_ty).clone()),
-            _ => None,
-        }
-    }
-
-    pub fn len(&self) -> Option<usize> {
-        match *self {
-            Ty::Bool | Ty::Int | Ty::Float => Some(1),
-            Ty::Bvec2 | Ty::Ivec2 | Ty::Vec2 | Ty::Mat2 => Some(2),
-            Ty::Bvec3 | Ty::Ivec3 | Ty::Vec3 | Ty::Mat3 => Some(3),
-            Ty::Bvec4 | Ty::Ivec4 | Ty::Vec4 | Ty::Mat4 => Some(4),
-            Ty::Array { len, .. } => Some(len),
-            _ => None,
-        }
-    }
-
-    pub fn size(&self) -> Option<usize> {
+    pub fn is_scalar(&self) -> bool {
         match self {
-            Ty::Bool | Ty::Int | Ty::Float => Some(1),
-            Ty::Bvec2 | Ty::Ivec2 | Ty::Vec2 => Some(2),
-            Ty::Bvec3 | Ty::Ivec3 | Ty::Vec3 => Some(3),
-            Ty::Bvec4 | Ty::Ivec4 | Ty::Vec4 | Ty::Mat2 => Some(4),
-            Ty::Mat3 => Some(9),
-            Ty::Mat4 => Some(16),
-            Ty::Array { elem_ty, len } => elem_ty.size().map(|size| size * len),
-            _ => None,
+            Ty::Bool | Ty::Int | Ty::Float => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_vector(&self) -> bool {
+        match self {
+            Ty::Bvec2
+            | Ty::Bvec3
+            | Ty::Bvec4
+            | Ty::Ivec2
+            | Ty::Ivec3
+            | Ty::Ivec4
+            | Ty::Vec2
+            | Ty::Vec3
+            | Ty::Vec4 => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_matrix(&self) -> bool {
+        match self {
+            Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => true,
+            _ => false,
+        }
+    }
+
+    pub fn size(&self) -> usize {
+        match self {
+            Ty::Void => 0,
+            Ty::Bool | Ty::Int | Ty::Float => 1,
+            Ty::Bvec2 | Ty::Ivec2 | Ty::Vec2 => 2,
+            Ty::Bvec3 | Ty::Ivec3 | Ty::Vec3 => 3,
+            Ty::Bvec4 | Ty::Ivec4 | Ty::Vec4 | Ty::Mat2 => 4,
+            Ty::Mat3 => 9,
+            Ty::Mat4 => 16,
+            Ty::Array { elem_ty, len } => elem_ty.size() * len,
+            Ty::Struct { .. } => panic!(),
         }
     }
 }
 
-impl<'a> fmt::Display for Ty {
+impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Ty::Void => write!(f, "void"),
@@ -82,8 +88,8 @@ impl<'a> fmt::Display for Ty {
             Ty::Mat2 => write!(f, "mat2"),
             Ty::Mat3 => write!(f, "mat3"),
             Ty::Mat4 => write!(f, "mat4"),
-            Ty::Array { elem_ty, len } => write!(f, "{}[{}]", elem_ty, len,),
-            Ty::Struct { ident } => write!(f, "{}", ident),
+            Ty::Array { elem_ty, len } => write!(f, "{}[{}]", elem_ty, len),
+            Ty::Struct { ident, .. } => write!(f, "{}", ident),
         }
     }
 }

@@ -1,6 +1,5 @@
 use crate::ident::Ident;
-use crate::lit::Lit;
-use crate::ty_lit::TyLit;
+use crate::lit::{Lit, TyLit};
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -32,21 +31,22 @@ pub enum Token {
     GtEq,
     Question,
     Attribute,
-    Block,
     Break,
+    Const,
     Continue,
     Else,
-    If,
-    Fn,
     For,
+    Fn,
     From,
+    If,
+    In,
     Let,
     Return,
     Step,
     Struct,
     To,
-    Uniform,
     Varying,
+    Uniform,
     LeftBracket,
     RightBracket,
     LeftBrace,
@@ -87,14 +87,15 @@ impl fmt::Display for Token {
             Token::GtEq => write!(f, ">="),
             Token::Question => write!(f, "?"),
             Token::Attribute => write!(f, "attribute"),
-            Token::Block => write!(f, "block"),
             Token::Break => write!(f, "break"),
+            Token::Const => write!(f, "const"),
             Token::Continue => write!(f, "continue"),
             Token::Else => write!(f, "else"),
             Token::Fn => write!(f, "fn"),
             Token::For => write!(f, "for"),
             Token::From => write!(f, "from"),
             Token::If => write!(f, "if"),
+            Token::In => write!(f, "in"),
             Token::Let => write!(f, "let"),
             Token::Return => write!(f, "return"),
             Token::Step => write!(f, "step"),

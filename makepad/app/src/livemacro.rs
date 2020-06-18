@@ -1,9 +1,9 @@
 use makepad_widget::*;
 use crate::mprstokenizer::*;
-use makepad_render::makepad_shader_compiler::ast::*;
-use makepad_render::makepad_shader_compiler::emit::Emitter;
+use makepad_render::makepad_shader_compiler::analyse;
+use makepad_render::makepad_shader_compiler::generate::{self, ShaderKind};
 use makepad_render::makepad_shader_compiler::lex;
-use makepad_render::makepad_shader_compiler::parse::Parser;
+use makepad_render::makepad_shader_compiler::parse;
 use std::error::Error;
 
 
@@ -45,13 +45,15 @@ impl LiveMacros {
                             if let Err(ref error) = ( || -> Result<(), Box<dyn Error>> {
                                 let tokens = lex::lex(
                                     tp.flat_text[start..end].iter().cloned()
-                                ).collect::<Result<Vec<_>, _>>() ?;
-                                let shader = ParsedShader::parse(&mut Parser::new(tokens.iter().cloned())) ?;
-                                let shader_attrs = shader.emit(&mut Emitter::new()) ?;
+                                ).collect::<Result<Vec<_>, _>>()?;
+                                let shader = parse::parse(&tokens)?;
+                                analyse::analyse(&shader)?;
+                                let vertex_string = generate::generate(ShaderKind::Vertex, &shader);
+                                let fragment_string = generate::generate(ShaderKind::Fragment, &shader);
                                 println!("VERTEX SHADER:");
-                                println!("{}", shader_attrs.vertex_string);
+                                println!("{}", vertex_string);
                                 println!("FRAGMENT SHADER:");
-                                println!("{}", shader_attrs.fragment_string);
+                                println!("{}", fragment_string);
                                 Ok(())
                             })() { 
                                 println!("{}", error);

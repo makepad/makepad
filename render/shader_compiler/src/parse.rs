@@ -2,29 +2,593 @@ use crate::ast::*;
 use crate::ident::Ident;
 use crate::lit::Lit;
 use crate::token::Token;
-use std::error;
-use std::fmt;
+use std::cell::{Cell, RefCell};
+use std::error::Error;
+use std::iter::Cloned;
+use std::slice::Iter;
 
-#[derive(Clone, Debug)]
-pub struct Parser<T> {
+pub fn parse(tokens: &[Token]) -> Result<Shader, Box<dyn Error>> {
+    let mut tokens = tokens.iter().cloned();
+    let token = tokens.next().unwrap();
+    Parser { tokens, token }.parse_shader()
+}
+
+struct Parser<'a> {
+    tokens: Cloned<Iter<'a, Token>>,
     token: Token,
-    tokens: T,
 }
 
-impl<T> Parser<T>
-where
-    T: Iterator<Item = Token>,
-{
-    pub fn new(mut tokens: T) -> Parser<T> {
-        let token = tokens.next().unwrap();
-        Parser { token, tokens }
+impl<'a> Parser<'a> {
+    fn parse_shader(&mut self) -> Result<Shader, Box<dyn Error>> {
+        let mut decls = Vec::new();
+        while self.token != Token::Eof {
+            decls.push(self.parse_decl()?);
+        }
+        Ok(Shader { decls })
     }
-}
 
-impl<T> Parser<T>
-where
-    T: Iterator<Item = Token>,
-{
+    fn parse_decl(&mut self) -> Result<Decl, Box<dyn Error>> {
+        match self.token {
+            Token::Attribute => self.parse_attribute_decl(),
+            Token::Const => self.parse_const_decl(),
+            Token::Fn => self.parse_fn_decl(),
+            Token::Struct => self.parse_struct_decl(),
+            Token::Uniform => self.parse_uniform_decl(),
+            Token::Varying => self.parse_varying_decl(),
+            _ => Err(format!("unexpected token `{}`", self.token).into()),
+        }
+    }
+
+    fn parse_attribute_decl(&mut self) -> Result<Decl, Box<dyn Error>> {
+        self.expect_token(Token::Attribute)?;
+        let ident = self.parse_ident()?;
+        self.expect_token(Token::Colon)?;
+        let ty_expr = self.parse_ty_expr()?;
+        self.expect_token(Token::Semi)?;
+        Ok(Decl::Attribute(AttributeDecl { ident, ty_expr }))
+    }
+
+    fn parse_const_decl(&mut self) -> Result<Decl, Box<dyn Error>> {
+        self.expect_token(Token::Const)?;
+        let ident = self.parse_ident()?;
+        self.expect_token(Token::Colon)?;
+        let ty_expr = self.parse_ty_expr()?;
+        self.expect_token(Token::Eq)?;
+        let expr = self.parse_expr()?;
+        self.expect_token(Token::Semi)?;
+        Ok(Decl::Const(ConstDecl {
+            ident,
+            ty_expr,
+            expr,
+        }))
+    }
+
+    fn parse_fn_decl(&mut self) -> Result<Decl, Box<dyn Error>> {
+        self.expect_token(Token::Fn)?;
+        let ident = self.parse_ident()?;
+        self.expect_token(Token::LeftParen)?;
+        let mut params = Vec::new();
+        if !self.accept_token(Token::RightParen) {
+            loop {
+                params.push(self.parse_param()?);
+                if !self.accept_token(Token::Comma) {
+                    break;
+                }
+            }
+            self.expect_token(Token::RightParen)?;
+        }
+        let return_ty_expr = if self.accept_token(Token::Arrow) {
+            Some(self.parse_ty_expr()?)
+        } else {
+            None
+        };
+        let block = self.parse_block()?;
+        Ok(Decl::Fn(FnDecl {
+            return_ty: RefCell::new(None),
+            is_used_in_vertex_shader: Cell::new(None),
+            is_used_in_fragment_shader: Cell::new(None),
+            callees: RefCell::new(None),
+            uniform_block_deps: RefCell::new(None),
+            attribute_deps: RefCell::new(None),
+            has_in_varying_deps: Cell::new(None),
+            has_out_varying_deps: Cell::new(None),
+            builtin_deps: RefCell::new(None),
+            cons_deps: RefCell::new(None),
+            ident,
+            params,
+            return_ty_expr,
+            block,
+        }))
+    }
+
+    fn parse_struct_decl(&mut self) -> Result<Decl, Box<dyn Error>> {
+        self.expect_token(Token::Struct)?;
+        let ident = self.parse_ident()?;
+        self.expect_token(Token::LeftBrace)?;
+        let mut fields = Vec::new();
+        if !self.accept_token(Token::RightBrace) {
+            loop {
+                fields.push(self.parse_field()?);
+                if !self.accept_token(Token::Comma) {
+                    break;
+                }
+            }
+            self.expect_token(Token::RightBrace)?;
+        }
+        Ok(Decl::Struct(StructDecl { ident, fields }))
+    }
+
+    fn parse_uniform_decl(&mut self) -> Result<Decl, Box<dyn Error>> {
+        self.expect_token(Token::Uniform)?;
+        let ident = self.parse_ident()?;
+        self.expect_token(Token::Colon)?;
+        let ty_expr = self.parse_ty_expr()?;
+        let block_ident = if self.accept_token(Token::In) {
+            Some(self.parse_ident()?)
+        } else {
+            None
+        };
+        self.expect_token(Token::Semi)?;
+        Ok(Decl::Uniform(UniformDecl {
+            ident,
+            ty_expr,
+            block_ident,
+        }))
+    }
+
+    fn parse_varying_decl(&mut self) -> Result<Decl, Box<dyn Error>> {
+        self.expect_token(Token::Varying)?;
+        let ident = self.parse_ident()?;
+        self.expect_token(Token::Colon)?;
+        let ty_expr = self.parse_ty_expr()?;
+        self.expect_token(Token::Semi)?;
+        Ok(Decl::Varying(VaryingDecl { ident, ty_expr }))
+    }
+
+    fn parse_param(&mut self) -> Result<Param, Box<dyn Error>> {
+        let ident = self.parse_ident()?;
+        self.expect_token(Token::Colon)?;
+        let ty_expr = self.parse_ty_expr()?;
+        Ok(Param { ident, ty_expr })
+    }
+
+    fn parse_field(&mut self) -> Result<Field, Box<dyn Error>> {
+        let ident = self.parse_ident()?;
+        self.expect_token(Token::Colon)?;
+        let ty_expr = self.parse_ty_expr()?;
+        Ok(Field { ident, ty_expr })
+    }
+
+    fn parse_block(&mut self) -> Result<Block, Box<dyn Error>> {
+        self.expect_token(Token::LeftBrace)?;
+        let mut stmts = Vec::new();
+        while !self.accept_token(Token::RightBrace) {
+            stmts.push(self.parse_stmt()?);
+        }
+        Ok(Block { stmts })
+    }
+
+    fn parse_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+        match self.token {
+            Token::Break => self.parse_break_stmt(),
+            Token::Continue => self.parse_continue_stmt(),
+            Token::For => self.parse_for_stmt(),
+            Token::If => self.parse_if_stmt(),
+            Token::Let => self.parse_let_stmt(),
+            Token::Return => self.parse_return_stmt(),
+            _ => self.parse_expr_stmt(),
+        }
+    }
+
+    fn parse_break_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+        self.expect_token(Token::Break)?;
+        self.expect_token(Token::Semi)?;
+        Ok(Stmt::Break)
+    }
+
+    fn parse_continue_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+        self.expect_token(Token::Continue)?;
+        self.expect_token(Token::Semi)?;
+        Ok(Stmt::Continue)
+    }
+
+    fn parse_for_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+        self.expect_token(Token::For)?;
+        let ident = self.parse_ident()?;
+        self.expect_token(Token::From)?;
+        let from_expr = self.parse_expr()?;
+        self.expect_token(Token::To)?;
+        let to_expr = self.parse_expr()?;
+        let step_expr = if self.accept_token(Token::Step) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        let block = Box::new(self.parse_block()?);
+        Ok(Stmt::For {
+            ident,
+            from_expr,
+            to_expr,
+            step_expr,
+            block,
+        })
+    }
+
+    fn parse_if_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+        self.expect_token(Token::If)?;
+        let expr = self.parse_expr()?;
+        let block_if_true = Box::new(self.parse_block()?);
+        let block_if_false = if self.accept_token(Token::Else) {
+            Some(Box::new(self.parse_block()?))
+        } else {
+            None
+        };
+        Ok(Stmt::If {
+            expr,
+            block_if_true,
+            block_if_false,
+        })
+    }
+
+    fn parse_let_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+        self.expect_token(Token::Let)?;
+        let ident = self.parse_ident()?;
+        let ty_expr = if self.accept_token(Token::Colon) {
+            Some(self.parse_ty_expr()?)
+        } else {
+            None
+        };
+        let expr = if self.accept_token(Token::Eq) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        self.expect_token(Token::Semi)?;
+        Ok(Stmt::Let {
+            ty: RefCell::new(None),
+            ident,
+            ty_expr,
+            expr,
+        })
+    }
+
+    fn parse_return_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+        self.expect_token(Token::Return)?;
+        let expr = if !self.accept_token(Token::Semi) {
+            let expr = self.parse_expr()?;
+            self.expect_token(Token::Semi)?;
+            Some(expr)
+        } else {
+            None
+        };
+        Ok(Stmt::Return { expr })
+    }
+
+    fn parse_expr_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+        let expr = self.parse_expr()?;
+        self.expect_token(Token::Semi)?;
+        Ok(Stmt::Expr { expr })
+    }
+
+    fn parse_ty_expr(&mut self) -> Result<TyExpr, Box<dyn Error>> {
+        let mut acc = self.parse_prim_ty_expr()?;
+        if self.accept_token(Token::LeftBracket) {
+            let elem_ty_expr = Box::new(acc);
+            match self.token {
+                Token::Lit(Lit::Int(len)) => {
+                    self.skip_token();
+                    self.expect_token(Token::RightBracket)?;
+                    acc = TyExpr {
+                        ty: RefCell::new(None),
+                        kind: TyExprKind::Array { elem_ty_expr, len },
+                    };
+                }
+                _ => return Err(format!("unexpected token `{}`", self.token).into()),
+            }
+        }
+        Ok(acc)
+    }
+
+    fn parse_prim_ty_expr(&mut self) -> Result<TyExpr, Box<dyn Error>> {
+        match self.token {
+            Token::Ident(ident) => {
+                self.skip_token();
+                Ok(TyExpr {
+                    ty: RefCell::new(None),
+                    kind: TyExprKind::Struct { ident },
+                })
+            }
+            Token::TyLit(ty_lit) => {
+                self.skip_token();
+                Ok(TyExpr {
+                    ty: RefCell::new(None),
+                    kind: TyExprKind::Lit { ty_lit },
+                })
+            }
+            _ => Err(format!("unexpected token `{}`", self.token).into()),
+        }
+    }
+
+    fn parse_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+        self.parse_assign_expr()
+    }
+
+    fn parse_assign_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+        let expr = self.parse_cond_expr()?;
+        Ok(if let Some(op) = self.token.to_assign_op() {
+            self.skip_token();
+            let left_expr = Box::new(expr);
+            let right_expr = Box::new(self.parse_assign_expr()?);
+            Expr {
+                ty: RefCell::new(None),
+                val: RefCell::new(None),
+                kind: ExprKind::Bin {
+                    op,
+                    left_expr,
+                    right_expr,
+                },
+            }
+        } else {
+            expr
+        })
+    }
+
+    fn parse_cond_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+        let expr = self.parse_or_expr()?;
+        Ok(if self.accept_token(Token::Question) {
+            let expr = Box::new(expr);
+            let expr_if_true = Box::new(self.parse_expr()?);
+            self.expect_token(Token::Colon)?;
+            let expr_if_false = Box::new(self.parse_cond_expr()?);
+            Expr {
+                ty: RefCell::new(None),
+                val: RefCell::new(None),
+                kind: ExprKind::Cond {
+                    expr,
+                    expr_if_true,
+                    expr_if_false,
+                },
+            }
+        } else {
+            expr
+        })
+    }
+
+    fn parse_or_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+        let mut acc = self.parse_and_expr()?;
+        while let Some(op) = self.token.to_or_op() {
+            self.skip_token();
+            let left_expr = Box::new(acc);
+            let right_expr = Box::new(self.parse_and_expr()?);
+            acc = Expr {
+                ty: RefCell::new(None),
+                val: RefCell::new(None),
+                kind: ExprKind::Bin {
+                    op,
+                    left_expr,
+                    right_expr,
+                },
+            };
+        }
+        Ok(acc)
+    }
+
+    fn parse_and_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+        let mut acc = self.parse_eq_expr()?;
+        while let Some(op) = self.token.to_and_op() {
+            self.skip_token();
+            let left_expr = Box::new(acc);
+            let right_expr = Box::new(self.parse_eq_expr()?);
+            acc = Expr {
+                ty: RefCell::new(None),
+                val: RefCell::new(None),
+                kind: ExprKind::Bin {
+                    op,
+                    left_expr,
+                    right_expr,
+                },
+            };
+        }
+        Ok(acc)
+    }
+
+    fn parse_eq_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+        let mut acc = self.parse_rel_expr()?;
+        while let Some(op) = self.token.to_eq_op() {
+            self.skip_token();
+            let left_expr = Box::new(acc);
+            let right_expr = Box::new(self.parse_rel_expr()?);
+            acc = Expr {
+                ty: RefCell::new(None),
+                val: RefCell::new(None),
+                kind: ExprKind::Bin {
+                    op,
+                    left_expr,
+                    right_expr,
+                },
+            };
+        }
+        Ok(acc)
+    }
+
+    fn parse_rel_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+        let mut acc = self.parse_add_expr()?;
+        while let Some(op) = self.token.to_rel_op() {
+            self.skip_token();
+            let left_expr = Box::new(acc);
+            let right_expr = Box::new(self.parse_add_expr()?);
+            acc = Expr {
+                ty: RefCell::new(None),
+                val: RefCell::new(None),
+                kind: ExprKind::Bin {
+                    op,
+                    left_expr,
+                    right_expr,
+                },
+            };
+        }
+        Ok(acc)
+    }
+
+    fn parse_add_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+        let mut acc = self.parse_mul_expr()?;
+        while let Some(op) = self.token.to_add_op() {
+            self.skip_token();
+            let left_expr = Box::new(acc);
+            let right_expr = Box::new(self.parse_mul_expr()?);
+            acc = Expr {
+                ty: RefCell::new(None),
+                val: RefCell::new(None),
+                kind: ExprKind::Bin {
+                    op,
+                    left_expr,
+                    right_expr,
+                },
+            };
+        }
+        Ok(acc)
+    }
+
+    fn parse_mul_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+        let mut acc = self.parse_postfix_expr()?;
+        while let Some(op) = self.token.to_mul_op() {
+            self.skip_token();
+            let left_expr = Box::new(acc);
+            let right_expr = Box::new(self.parse_postfix_expr()?);
+            acc = Expr {
+                ty: RefCell::new(None),
+                val: RefCell::new(None),
+                kind: ExprKind::Bin {
+                    op,
+                    left_expr,
+                    right_expr,
+                },
+            };
+        }
+        Ok(acc)
+    }
+
+    fn parse_postfix_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+        let mut acc = self.parse_un_expr()?;
+        loop {
+            match self.token {
+                Token::Dot => {
+                    self.skip_token();
+                    let expr = Box::new(acc);
+                    let field_ident = self.parse_ident()?;
+                    acc = Expr {
+                        ty: RefCell::new(None),
+                        val: RefCell::new(None),
+                        kind: ExprKind::Field { expr, field_ident },
+                    };
+                }
+                Token::LeftBracket => {
+                    self.skip_token();
+                    let expr = Box::new(acc);
+                    let index_expr = Box::new(self.parse_expr()?);
+                    self.expect_token(Token::RightBracket)?;
+                    acc = Expr {
+                        ty: RefCell::new(None),
+                        val: RefCell::new(None),
+                        kind: ExprKind::Index { expr, index_expr },
+                    };
+                }
+                _ => break,
+            }
+        }
+        Ok(acc)
+    }
+
+    fn parse_un_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+        Ok(if let Some(op) = self.token.to_un_op() {
+            self.skip_token();
+            let expr = Box::new(self.parse_un_expr()?);
+            Expr {
+                ty: RefCell::new(None),
+                val: RefCell::new(None),
+                kind: ExprKind::Un { op, expr },
+            }
+        } else {
+            self.parse_prim_expr()?
+        })
+    }
+
+    fn parse_prim_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+        match self.token {
+            Token::Ident(ident) => {
+                self.skip_token();
+                Ok(Expr {
+                    ty: RefCell::new(None),
+                    val: RefCell::new(None),
+                    kind: if self.accept_token(Token::LeftParen) {
+                        let ident = ident;
+                        let mut arg_exprs = Vec::new();
+                        if !self.accept_token(Token::RightParen) {
+                            loop {
+                                arg_exprs.push(self.parse_expr()?);
+                                if !self.accept_token(Token::Comma) {
+                                    break;
+                                }
+                            }
+                            self.expect_token(Token::RightParen)?;
+                        }
+                        ExprKind::Call { ident, arg_exprs }
+                    } else {
+                        ExprKind::Var {
+                            is_lvalue: Cell::new(None),
+                            kind: Cell::new(None),
+                            ident,
+                        }
+                    },
+                })
+            }
+            Token::Lit(lit) => {
+                self.skip_token();
+                Ok(Expr {
+                    ty: RefCell::new(None),
+                    val: RefCell::new(None),
+                    kind: ExprKind::Lit { lit },
+                })
+            }
+            Token::TyLit(ty_lit) => {
+                self.skip_token();
+                self.expect_token(Token::LeftParen)?;
+                let mut arg_exprs = Vec::new();
+                if !self.accept_token(Token::RightParen) {
+                    loop {
+                        arg_exprs.push(self.parse_expr()?);
+                        if !self.accept_token(Token::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect_token(Token::RightParen)?;
+                }
+                Ok(Expr {
+                    ty: RefCell::new(None),
+                    val: RefCell::new(None),
+                    kind: ExprKind::ConsCall { ty_lit, arg_exprs },
+                })
+            }
+            Token::LeftParen => {
+                self.skip_token();
+                let expr = self.parse_expr()?;
+                self.expect_token(Token::RightParen)?;
+                Ok(expr)
+            }
+            _ => Err(format!("unexpected token `{}`", self.token).into()),
+        }
+    }
+
+    fn parse_ident(&mut self) -> Result<Ident, Box<dyn Error>> {
+        match self.token {
+            Token::Ident(ident) => {
+                self.skip_token();
+                Ok(ident)
+            }
+            _ => Err(format!("unexpected token `{}`", self.token).into()),
+        }
+    }
+
     fn accept_token(&mut self, token: Token) -> bool {
         if self.token != token {
             return false;
@@ -33,9 +597,9 @@ where
         true
     }
 
-    fn expect_token(&mut self, token: Token) -> Result<(), Error> {
+    fn expect_token(&mut self, token: Token) -> Result<(), Box<dyn Error>> {
         if self.token != token {
-            return Err(Error::UnexpectedToken(self.token));
+            return Err(format!("unexpected token `{}`", self.token).into());
         }
         self.skip_token();
         Ok(())
@@ -43,606 +607,6 @@ where
 
     fn skip_token(&mut self) {
         self.token = self.tokens.next().unwrap();
-    }
-}
-
-impl ParsedShader {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<ParsedShader, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        let mut decls = Vec::new();
-        while parser.token != Token::Eof {
-            decls.push(Decl::parse(parser)?)
-        }
-        Ok(ParsedShader { decls })
-    }
-}
-
-impl Decl {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<Decl, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        match parser.token {
-            Token::Attribute => Ok(Decl::Attribute(AttributeDecl::parse(parser)?)),
-            Token::Fn => Ok(Decl::Fn(FnDecl::parse(parser)?)),
-            Token::Struct => Ok(Decl::Struct(StructDecl::parse(parser)?)),
-            Token::Uniform => Ok(Decl::Uniform(UniformDecl::parse(parser)?)),
-            Token::Varying => Ok(Decl::Varying(VaryingDecl::parse(parser)?)),
-            _ => Err(Error::UnexpectedToken(parser.token)),
-        }
-    }
-}
-
-impl AttributeDecl {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<AttributeDecl, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        parser.expect_token(Token::Attribute)?;
-        let ident = Ident::parse(parser)?;
-        parser.expect_token(Token::Colon)?;
-        let ty_expr = TyExpr::parse(parser)?;
-        parser.expect_token(Token::Semi)?;
-        Ok(AttributeDecl { ident, ty_expr })
-    }
-}
-
-impl FnDecl {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<FnDecl, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        parser.expect_token(Token::Fn)?;
-        let ident = Ident::parse(parser)?;
-        parser.expect_token(Token::LeftParen)?;
-        let mut params = Vec::new();
-        if !parser.accept_token(Token::RightParen) {
-            loop {
-                params.push(Param::parse(parser)?);
-                if !parser.accept_token(Token::Comma) {
-                    break;
-                }
-            }
-            parser.expect_token(Token::RightParen)?;
-        }
-        let return_ty_expr = if parser.accept_token(Token::Arrow) {
-            Some(TyExpr::parse(parser)?)
-        } else {
-            None
-        };
-        let block = Block::parse(parser)?;
-        Ok(FnDecl {
-            ident,
-            params,
-            return_ty_expr,
-            block,
-        })
-    }
-}
-
-impl Param {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<Param, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        let ident = Ident::parse(parser)?;
-        parser.expect_token(Token::Colon)?;
-        let ty_expr = TyExpr::parse(parser)?;
-        Ok(Param { ident, ty_expr })
-    }
-}
-
-impl StructDecl {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<StructDecl, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        parser.expect_token(Token::Struct)?;
-        let ident = Ident::parse(parser)?;
-        parser.expect_token(Token::LeftBrace)?;
-        let mut members = Vec::new();
-        if !parser.accept_token(Token::RightBrace) {
-            loop {
-                members.push(Member::parse(parser)?);
-                if !parser.accept_token(Token::Comma) {
-                    break;
-                }
-            }
-            parser.expect_token(Token::RightBrace)?;
-        }
-        Ok(StructDecl { ident, members })
-    }
-}
-
-impl UniformDecl {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<UniformDecl, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        parser.expect_token(Token::Uniform)?;
-        let ident = Ident::parse(parser)?;
-        parser.expect_token(Token::Colon)?;
-        let ty_expr = TyExpr::parse(parser)?;
-        let block_ident = if parser.accept_token(Token::Block) {
-            Some(Ident::parse(parser)?)
-        } else {
-            None
-        };
-        parser.expect_token(Token::Semi)?;
-        Ok(UniformDecl {
-            ident,
-            ty_expr,
-            block_ident,
-        })
-    }
-}
-
-impl VaryingDecl {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<VaryingDecl, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        parser.expect_token(Token::Varying)?;
-        let ident = Ident::parse(parser)?;
-        parser.expect_token(Token::Colon)?;
-        let ty_expr = TyExpr::parse(parser)?;
-        parser.expect_token(Token::Semi)?;
-        Ok(VaryingDecl { ident, ty_expr })
-    }
-}
-
-impl Member {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<Member, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        let ident = Ident::parse(parser)?;
-        parser.expect_token(Token::Colon)?;
-        let ty_expr = TyExpr::parse(parser)?;
-        Ok(Member { ident, ty_expr })
-    }
-}
-
-impl Block {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<Block, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        parser.expect_token(Token::LeftBrace)?;
-        let mut stmts = Vec::new();
-        while !parser.accept_token(Token::RightBrace) {
-            stmts.push(Stmt::parse(parser)?);
-        }
-        Ok(Block { stmts })
-    }
-}
-
-impl Stmt {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<Stmt, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        Ok(match parser.token {
-            Token::Break => Stmt::Break(BreakStmt::parse(parser)?),
-            Token::Continue => Stmt::Continue(ContinueStmt::parse(parser)?),
-            Token::For => Stmt::For(ForStmt::parse(parser)?),
-            Token::If => Stmt::If(IfStmt::parse(parser)?),
-            Token::Let => Stmt::Let(LetStmt::parse(parser)?),
-            Token::Return => Stmt::Return(ReturnStmt::parse(parser)?),
-            Token::LeftBrace => Stmt::Block(BlockStmt::parse(parser)?),
-            _ => Stmt::Expr(ExprStmt::parse(parser)?),
-        })
-    }
-}
-
-impl BreakStmt {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<BreakStmt, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        parser.expect_token(Token::Break)?;
-        parser.expect_token(Token::Semi)?;
-        Ok(BreakStmt)
-    }
-}
-
-impl ContinueStmt {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<ContinueStmt, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        parser.expect_token(Token::Continue)?;
-        parser.expect_token(Token::Semi)?;
-        Ok(ContinueStmt)
-    }
-}
-
-impl ForStmt {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<ForStmt, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        parser.expect_token(Token::For)?;
-        let ident = Ident::parse(parser)?;
-        parser.expect_token(Token::From)?;
-        let from_expr = Expr::parse(parser)?;
-        parser.expect_token(Token::To)?;
-        let to_expr = Expr::parse(parser)?;
-        let step_expr = if parser.accept_token(Token::Step) {
-            Some(Expr::parse(parser)?)
-        } else {
-            None
-        };
-        let block = Block::parse(parser)?;
-        Ok(ForStmt {
-            ident,
-            from_expr,
-            to_expr,
-            step_expr,
-            block,
-        })
-    }
-}
-
-impl IfStmt {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<IfStmt, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        parser.expect_token(Token::If)?;
-        let expr = Expr::parse(parser)?;
-        let block_if_true = Block::parse(parser)?;
-        let block_if_false = if parser.accept_token(Token::Else) {
-            Some(if parser.token == Token::If {
-                Block {
-                    stmts: vec![Stmt::If(IfStmt::parse(parser)?)],
-                }
-            } else {
-                Block::parse(parser)?
-            })
-        } else {
-            None
-        };
-        Ok(IfStmt {
-            expr,
-            block_if_true,
-            block_if_false,
-        })
-    }
-}
-
-impl LetStmt {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<LetStmt, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        parser.expect_token(Token::Let)?;
-        let ident = Ident::parse(parser)?;
-        let ty_expr = if parser.accept_token(Token::Colon) {
-            Some(TyExpr::parse(parser)?)
-        } else {
-            None
-        };
-        let expr = if parser.accept_token(Token::Eq) {
-            Some(Expr::parse(parser)?)
-        } else {
-            None
-        };
-        parser.expect_token(Token::Semi)?;
-        Ok(LetStmt {
-            ident,
-            ty_expr,
-            expr,
-        })
-    }
-}
-
-impl ReturnStmt {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<ReturnStmt, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        parser.expect_token(Token::Return)?;
-        let expr = if !parser.accept_token(Token::Semi) {
-            let expr = Expr::parse(parser)?;
-            parser.expect_token(Token::Semi)?;
-            Some(expr)
-        } else {
-            None
-        };
-        Ok(ReturnStmt { expr })
-    }
-}
-
-impl BlockStmt {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<BlockStmt, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        let block = Block::parse(parser)?;
-        Ok(BlockStmt { block })
-    }
-}
-
-impl ExprStmt {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<ExprStmt, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        let expr = Expr::parse(parser)?;
-        parser.expect_token(Token::Semi)?;
-        Ok(ExprStmt { expr })
-    }
-}
-
-impl TyExpr {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<TyExpr, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        let ty_expr = TyExpr::parse_prim(parser)?;
-        Ok(if parser.accept_token(Token::LeftBracket) {
-            let elem_ty_expr = Box::new(ty_expr);
-            let len = match parser.token {
-                Token::Lit(Lit::Int(lit)) => {
-                    parser.skip_token();
-                    lit
-                }
-                _ => return Err(Error::UnexpectedToken(parser.token)),
-            };
-            parser.expect_token(Token::RightBracket)?;
-            TyExpr::Array(ArrayTyExpr { elem_ty_expr, len })
-        } else {
-            ty_expr
-        })
-    }
-
-    pub fn parse_prim<T>(parser: &mut Parser<T>) -> Result<TyExpr, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        match parser.token {
-            Token::Ident(ident) => {
-                parser.skip_token();
-                Ok(TyExpr::Struct(StructTyExpr { ident }))
-            }
-            Token::TyLit(ty_lit) => {
-                parser.skip_token();
-                Ok(TyExpr::TyLit(ty_lit))
-            }
-            _ => Err(Error::UnexpectedToken(parser.token)),
-        }
-    }
-}
-
-impl Expr {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<Expr, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        Expr::parse_assign(parser)
-    }
-
-    pub fn parse_assign<T>(parser: &mut Parser<T>) -> Result<Expr, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        let mut acc = Expr::parse_cond(parser)?;
-        while let Some(op) = parser.token.to_assign_op() {
-            parser.skip_token();
-            let x = Box::new(acc);
-            let y = Box::new(Expr::parse_cond(parser)?);
-            acc = Expr::Bin(BinExpr { op, x, y });
-        }
-        Ok(acc)
-    }
-
-    pub fn parse_cond<T>(parser: &mut Parser<T>) -> Result<Expr, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        let expr = Expr::parse_or(parser)?;
-        Ok(if parser.accept_token(Token::Question) {
-            let x = Box::new(expr);
-            let y = Box::new(Expr::parse(parser)?);
-            parser.expect_token(Token::Colon)?;
-            let z = Box::new(Expr::parse_cond(parser)?);
-            Expr::Cond(CondExpr { x, y, z })
-        } else {
-            expr
-        })
-    }
-
-    pub fn parse_or<T>(parser: &mut Parser<T>) -> Result<Expr, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        let mut acc = Expr::parse_and(parser)?;
-        while let Some(op) = parser.token.to_or_op() {
-            parser.skip_token();
-            let x = Box::new(acc);
-            let y = Box::new(Expr::parse_and(parser)?);
-            acc = Expr::Bin(BinExpr { op, x, y });
-        }
-        Ok(acc)
-    }
-
-    pub fn parse_and<T>(parser: &mut Parser<T>) -> Result<Expr, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        let mut acc = Expr::parse_eq(parser)?;
-        while let Some(op) = parser.token.to_and_op() {
-            parser.skip_token();
-            let x = Box::new(acc);
-            let y = Box::new(Expr::parse_eq(parser)?);
-            acc = Expr::Bin(BinExpr { op, x, y });
-        }
-        Ok(acc)
-    }
-
-    pub fn parse_eq<T>(parser: &mut Parser<T>) -> Result<Expr, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        let mut acc = Expr::parse_rel(parser)?;
-        while let Some(op) = parser.token.to_eq_op() {
-            parser.skip_token();
-            let x = Box::new(acc);
-            let y = Box::new(Expr::parse_rel(parser)?);
-            acc = Expr::Bin(BinExpr { op, x, y });
-        }
-        Ok(acc)
-    }
-
-    pub fn parse_rel<T>(parser: &mut Parser<T>) -> Result<Expr, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        let mut acc = Expr::parse_add(parser)?;
-        while let Some(op) = parser.token.to_rel_op() {
-            parser.skip_token();
-            let x = Box::new(acc);
-            let y = Box::new(Expr::parse_add(parser)?);
-            acc = Expr::Bin(BinExpr { op, x, y });
-        }
-        Ok(acc)
-    }
-
-    pub fn parse_add<T>(parser: &mut Parser<T>) -> Result<Expr, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        let mut acc = Expr::parse_mul(parser)?;
-        while let Some(op) = parser.token.to_add_op() {
-            parser.skip_token();
-            let x = Box::new(acc);
-            let y = Box::new(Expr::parse_mul(parser)?);
-            acc = Expr::Bin(BinExpr { op, x, y });
-        }
-        Ok(acc)
-    }
-
-    pub fn parse_mul<T>(parser: &mut Parser<T>) -> Result<Expr, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        let mut acc = Expr::parse_postfix(parser)?;
-        while let Some(op) = parser.token.to_mul_op() {
-            parser.skip_token();
-            let x = Box::new(acc);
-            let y = Box::new(Expr::parse_postfix(parser)?);
-            acc = Expr::Bin(BinExpr { op, x, y });
-        }
-        Ok(acc)
-    }
-
-    pub fn parse_postfix<T>(parser: &mut Parser<T>) -> Result<Expr, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        let mut acc = Expr::parse_un(parser)?;
-        loop {
-            match parser.token {
-                Token::LeftBracket => {
-                    parser.skip_token();
-                    let x = Box::new(acc);
-                    let i = Box::new(Expr::parse(parser)?);
-                    parser.expect_token(Token::RightBracket)?;
-                    acc = Expr::Index(IndexExpr { x, i })
-                }
-                Token::Dot => {
-                    parser.skip_token();
-                    let x = Box::new(acc);
-                    let ident = Ident::parse(parser)?;
-                    acc = Expr::Member(MemberExpr { x, ident });
-                }
-                _ => break,
-            }
-        }
-        Ok(acc)
-    }
-
-    pub fn parse_un<T>(parser: &mut Parser<T>) -> Result<Expr, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        if let Some(op) = parser.token.to_un_op() {
-            parser.skip_token();
-            let x = Box::new(Expr::parse_un(parser)?);
-            Ok(Expr::Un(UnExpr { op, x }))
-        } else {
-            Expr::parse_prim(parser)
-        }
-    }
-
-    pub fn parse_prim<T>(parser: &mut Parser<T>) -> Result<Expr, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        match parser.token {
-            Token::Ident(ident) => {
-                parser.skip_token();
-                Ok(if parser.accept_token(Token::LeftParen) {
-                    let mut xs = Vec::new();
-                    if !parser.accept_token(Token::RightParen) {
-                        loop {
-                            xs.push(Expr::parse(parser)?);
-                            if !parser.accept_token(Token::Comma) {
-                                break;
-                            }
-                        }
-                        parser.expect_token(Token::RightParen)?;
-                    }
-                    Expr::Call(CallExpr { ident, xs })
-                } else {
-                    Expr::Var(VarExpr { ident })
-                })
-            }
-            Token::Lit(lit) => {
-                parser.skip_token();
-                Ok(Expr::Lit(lit))
-            }
-            Token::TyLit(ty_lit) => {
-                parser.skip_token();
-                parser.expect_token(Token::LeftParen)?;
-                let mut xs = Vec::new();
-                if !parser.accept_token(Token::RightParen) {
-                    loop {
-                        xs.push(Expr::parse(parser)?);
-                        if !parser.accept_token(Token::Comma) {
-                            break;
-                        }
-                    }
-                    parser.expect_token(Token::RightParen)?;
-                }
-                Ok(Expr::ConsCall(ConsCallExpr { ty_lit, xs }))
-            }
-            Token::LeftParen => {
-                parser.skip_token();
-                let expr = Expr::parse(parser)?;
-                parser.expect_token(Token::RightParen)?;
-                Ok(expr)
-            }
-            _ => Err(Error::UnexpectedToken(parser.token)),
-        }
-    }
-}
-
-impl Ident {
-    pub fn parse<T>(parser: &mut Parser<T>) -> Result<Ident, Error>
-    where
-        T: Iterator<Item = Token>,
-    {
-        match parser.token {
-            Token::Ident(ident) => {
-                parser.skip_token();
-                Ok(ident)
-            }
-            _ => Err(Error::UnexpectedToken(parser.token)),
-        }
     }
 }
 
@@ -682,8 +646,8 @@ impl Token {
 
     fn to_rel_op(self) -> Option<BinOp> {
         match self {
-            Token::Lt => Some(BinOp::Lt),
-            Token::LtEq => Some(BinOp::Le),
+            Token::Lt => Some(BinOp::Le),
+            Token::LtEq => Some(BinOp::Lt),
             Token::Gt => Some(BinOp::Gt),
             Token::GtEq => Some(BinOp::Ge),
             _ => None,
@@ -711,21 +675,6 @@ impl Token {
             Token::Not => Some(UnOp::Not),
             Token::Minus => Some(UnOp::Neg),
             _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum Error {
-    UnexpectedToken(Token),
-}
-
-impl error::Error for Error {}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Error::UnexpectedToken(token) => write!(f, "unexpected token {}", token),
         }
     }
 }
