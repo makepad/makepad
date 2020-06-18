@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Once;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub struct Ident(usize);
 impl Ident {
     pub fn new<'a, S>(string: S) -> Ident
@@ -14,19 +14,13 @@ impl Ident {
         let string = string.into();
         Interner::with(|interner| {
             Ident(
-                if let Some(index) = interner
-                    .string_indices_by_string
-                    .get(string.as_ref())
-                    .cloned()
-                {
+                if let Some(index) = interner.indices.get(string.as_ref()).cloned() {
                     index
                 } else {
                     let string = string.into_owned();
                     let string_index = interner.strings.len();
                     interner.strings.push(string.clone());
-                    interner
-                        .string_indices_by_string
-                        .insert(string.clone(), string_index);
+                    interner.indices.insert(string.clone(), string_index);
                     string_index
                 },
             )
@@ -38,6 +32,12 @@ impl Ident {
         F: FnOnce(&str) -> R,
     {
         Interner::with(|interner| f(&interner.strings[self.0]))
+    }
+}
+
+impl fmt::Debug for Ident {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.with(|string| write!(f, "{}", string))
     }
 }
 
@@ -62,7 +62,7 @@ impl PartialOrd for Ident {
 #[derive(Debug)]
 struct Interner {
     strings: Vec<String>,
-    string_indices_by_string: HashMap<String, usize>,
+    indices: HashMap<String, usize>,
 }
 
 impl Interner {
@@ -75,7 +75,7 @@ impl Interner {
         ONCE.call_once(|| unsafe {
             INTERNER = Some(Interner {
                 strings: Vec::new(),
-                string_indices_by_string: HashMap::new(),
+                indices: HashMap::new(),
             })
         });
         f(unsafe { INTERNER.as_mut().unwrap() })

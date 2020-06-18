@@ -1,9 +1,7 @@
 use crate::ident::Ident;
-use crate::lit::Lit;
+use crate::lit::{Lit, TyLit};
 use crate::token::Token;
-use crate::ty_lit::TyLit;
-use std::error;
-use std::fmt;
+use std::error::Error;
 
 #[derive(Clone, Debug)]
 pub struct Lex<C> {
@@ -17,7 +15,7 @@ impl<C> Lex<C>
 where
     C: Iterator<Item = char>,
 {
-    fn read_token(&mut self) -> Result<Token, Error> {
+    fn read_token(&mut self) -> Result<Token, Box<dyn Error>> {
         loop {
             self.skip_chars_while(|ch| ch.is_ascii_whitespace());
             match (self.ch_0, self.ch_1) {
@@ -26,17 +24,17 @@ where
                     loop {
                         match (self.ch_0, self.ch_1) {
                             ('\0', _) => {
-                                break Err(Error::UnterminatedBlockComment);
+                                return Err("unterminated block comment".into());
                             }
                             ('*', '/') => {
                                 self.skip_two_chars();
-                                break Ok(());
+                                break;
                             }
                             _ => {
                                 self.skip_char();
                             }
                         }
-                    }?
+                    }
                 }
                 ('/', '/') => {
                     self.skip_two_chars();
@@ -59,59 +57,59 @@ where
                 _ => break,
             }
         }
-        match (self.ch_0, self.ch_1) {
-            ('\0', _) => Ok(Token::Eof),
+        Ok(match (self.ch_0, self.ch_1) {
+            ('\0', _) => Token::Eof,
             ('!', '=') => {
                 self.skip_two_chars();
-                Ok(Token::NotEq)
+                Token::NotEq
             }
             ('!', _) => {
                 self.skip_char();
-                Ok(Token::Not)
+                Token::Not
             }
             ('&', '&') => {
                 self.skip_two_chars();
-                Ok(Token::AndAnd)
+                Token::AndAnd
             }
             ('(', _) => {
                 self.skip_char();
-                Ok(Token::LeftParen)
+                Token::LeftParen
             }
             (')', _) => {
                 self.skip_char();
-                Ok(Token::RightParen)
+                Token::RightParen
             }
             ('*', '=') => {
                 self.skip_two_chars();
-                Ok(Token::StarEq)
+                Token::StarEq
             }
             ('*', _) => {
                 self.skip_char();
-                Ok(Token::Star)
+                Token::Star
             }
             ('+', '=') => {
                 self.skip_two_chars();
-                Ok(Token::PlusEq)
+                Token::PlusEq
             }
             ('+', _) => {
                 self.skip_char();
-                Ok(Token::Plus)
+                Token::Plus
             }
             (',', _) => {
                 self.skip_char();
-                Ok(Token::Comma)
+                Token::Comma
             }
             ('-', '=') => {
                 self.skip_two_chars();
-                Ok(Token::MinusEq)
+                Token::MinusEq
             }
             ('-', '>') => {
                 self.skip_two_chars();
-                Ok(Token::Arrow)
+                Token::Arrow
             }
             ('-', _) => {
                 self.skip_char();
-                Ok(Token::Minus)
+                Token::Minus
             }
             ('.', ch) | (ch, _) if ch.is_ascii_digit() => {
                 let mut string = String::new();
@@ -133,82 +131,82 @@ where
                         string.push(ch);
                         self.read_chars_while(&mut string, |ch| ch.is_ascii_digit());
                     } else {
-                        return Err(Error::MissingFloatExp);
+                        return Err("missing float exponent".into());
                     }
                     true
                 } else {
                     false
                 };
-                Ok(if has_frac_part || has_exp_part {
+                if has_frac_part || has_exp_part {
                     Token::Lit(Lit::Float(string.parse::<f32>().unwrap()))
                 } else {
                     Token::Lit(Lit::Int(
                         string
                             .parse::<u32>()
-                            .map_err(|_| Error::OverflowingIntLit)?,
+                            .map_err(|_| "overflowing integer literal")?,
                     ))
-                })
+                }
             }
             ('.', _) => {
                 self.skip_char();
-                Ok(Token::Dot)
+                Token::Dot
             }
             ('/', '=') => {
                 self.skip_two_chars();
-                Ok(Token::SlashEq)
+                Token::SlashEq
             }
             ('/', _) => {
                 self.skip_char();
-                Ok(Token::Slash)
+                Token::Slash
             }
             (':', _) => {
                 self.skip_char();
-                Ok(Token::Colon)
+                Token::Colon
             }
             (';', _) => {
                 self.skip_char();
-                Ok(Token::Semi)
+                Token::Semi
             }
             ('<', '=') => {
                 self.skip_two_chars();
-                Ok(Token::LtEq)
+                Token::LtEq
             }
             ('<', _) => {
                 self.skip_char();
-                Ok(Token::Lt)
+                Token::Lt
             }
             ('=', '=') => {
                 self.skip_two_chars();
-                Ok(Token::EqEq)
+                Token::EqEq
             }
             ('=', _) => {
                 self.skip_char();
-                Ok(Token::Eq)
+                Token::Eq
             }
             ('>', '=') => {
                 self.skip_two_chars();
-                Ok(Token::GtEq)
+                Token::GtEq
             }
             ('>', _) => {
                 self.skip_char();
-                Ok(Token::Gt)
+                Token::Gt
             }
             ('?', _) => {
                 self.skip_char();
-                Ok(Token::Question)
+                Token::Question
             }
             (ch, _) if ch.is_ascii_alphabetic() || ch == '_' => {
                 let mut string = String::new();
                 string.push(self.read_char());
                 self.read_chars_while(&mut string, |ch| ch.is_ascii_alphanumeric() || ch == '_');
-                Ok(match string.as_str() {
+                match string.as_str() {
                     "attribute" => Token::Attribute,
                     "bool" => Token::TyLit(TyLit::Bool),
-                    "block" => Token::Block,
                     "break" => Token::Break,
                     "bvec2" => Token::TyLit(TyLit::Bvec2),
                     "bvec3" => Token::TyLit(TyLit::Bvec3),
                     "bvec4" => Token::TyLit(TyLit::Bvec4),
+                    "const" => Token::Const,
                     "continue" => Token::Continue,
                     "else" => Token::Else,
                     "false" => Token::Lit(Lit::Bool(false)),
@@ -217,6 +215,7 @@ where
                     "for" => Token::For,
                     "from" => Token::From,
                     "if" => Token::If,
+                    "in" => Token::In,
                     "int" => Token::TyLit(TyLit::Int),
                     "ivec2" => Token::TyLit(TyLit::Ivec2),
                     "ivec3" => Token::TyLit(TyLit::Ivec3),
@@ -236,30 +235,30 @@ where
                     "vec4" => Token::TyLit(TyLit::Vec4),
                     "true" => Token::Lit(Lit::Bool(true)),
                     _ => Token::Ident(Ident::new(string)),
-                })
+                }
             }
             ('[', _) => {
                 self.skip_char();
-                Ok(Token::LeftBracket)
+                Token::LeftBracket
             }
             (']', _) => {
                 self.skip_char();
-                Ok(Token::RightBracket)
+                Token::RightBracket
             }
             ('{', _) => {
                 self.skip_char();
-                Ok(Token::LeftBrace)
+                Token::LeftBrace
             }
             ('|', '|') => {
                 self.skip_two_chars();
-                Ok(Token::OrOr)
+                Token::OrOr
             }
             ('}', _) => {
                 self.skip_char();
-                Ok(Token::RightBrace)
+                Token::RightBrace
             }
-            _ => Err(Error::UnexpectedChar(self.ch_0)),
-        }
+            _ => return Err(format!("unexpected character `{}`", self.ch_0).into()),
+        })
     }
 
     fn read_chars_while<P>(&mut self, string: &mut String, mut pred: P)
@@ -322,9 +321,9 @@ impl<C> Iterator for Lex<C>
 where
     C: Iterator<Item = char>,
 {
-    type Item = Result<Token, Error>;
+    type Item = Result<Token, Box<dyn Error>>;
 
-    fn next(&mut self) -> Option<Result<Token, Error>> {
+    fn next(&mut self) -> Option<Result<Token, Box<dyn Error>>> {
         if self.is_done {
             None
         } else {
@@ -334,27 +333,6 @@ where
                 }
                 token
             }))
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum Error {
-    MissingFloatExp,
-    OverflowingIntLit,
-    UnexpectedChar(char),
-    UnterminatedBlockComment,
-}
-
-impl error::Error for Error {}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Error::MissingFloatExp => write!(f, "missing float exponent"),
-            Error::OverflowingIntLit => write!(f, "overflowing integer literal"),
-            Error::UnexpectedChar(ch) => write!(f, "unexpected character {}", ch),
-            Error::UnterminatedBlockComment => write!(f, "unterminated block comment"),
         }
     }
 }

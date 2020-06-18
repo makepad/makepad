@@ -1,16 +1,83 @@
+use crate::env::VarKind;
 use crate::ident::Ident;
-use crate::lit::Lit;
-use crate::ty_lit::TyLit;
+use crate::lit::{Lit, TyLit};
+use crate::ty::Ty;
+use crate::val::Val;
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::fmt;
 
 #[derive(Clone, Debug)]
-pub struct ParsedShader {
+pub struct Shader {
     pub decls: Vec<Decl>,
+}
+
+impl Shader {
+    pub fn find_attribute_decl(&self, ident: Ident) -> Option<&AttributeDecl> {
+        self.decls.iter().find_map(|decl| {
+            match decl {
+                Decl::Attribute(decl) => Some(decl),
+                _ => None,
+            }
+            .filter(|decl| decl.ident == ident)
+        })
+    }
+
+    pub fn find_const_decl(&self, ident: Ident) -> Option<&ConstDecl> {
+        self.decls.iter().find_map(|decl| {
+            match decl {
+                Decl::Const(decl) => Some(decl),
+                _ => None,
+            }
+            .filter(|decl| decl.ident == ident)
+        })
+    }
+
+    pub fn find_fn_decl(&self, ident: Ident) -> Option<&FnDecl> {
+        self.decls.iter().find_map(|decl| {
+            match decl {
+                Decl::Fn(decl) => Some(decl),
+                _ => None,
+            }
+            .filter(|decl| decl.ident == ident)
+        })
+    }
+
+    pub fn find_struct_decl(&self, ident: Ident) -> Option<&StructDecl> {
+        self.decls.iter().find_map(|decl| {
+            match decl {
+                Decl::Struct(decl) => Some(decl),
+                _ => None,
+            }
+            .filter(|decl| decl.ident == ident)
+        })
+    }
+
+    pub fn find_uniform_decl(&self, ident: Ident) -> Option<&UniformDecl> {
+        self.decls.iter().find_map(|decl| {
+            match decl {
+                Decl::Uniform(decl) => Some(decl),
+                _ => None,
+            }
+            .filter(|decl| decl.ident == ident)
+        })
+    }
+
+    pub fn find_varying_decl(&self, ident: Ident) -> Option<&VaryingDecl> {
+        self.decls.iter().find_map(|decl| {
+            match decl {
+                Decl::Varying(decl) => Some(decl),
+                _ => None,
+            }
+            .filter(|decl| decl.ident == ident)
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
 pub enum Decl {
     Attribute(AttributeDecl),
+    Const(ConstDecl),
     Fn(FnDecl),
     Struct(StructDecl),
     Uniform(UniformDecl),
@@ -24,7 +91,24 @@ pub struct AttributeDecl {
 }
 
 #[derive(Clone, Debug)]
+pub struct ConstDecl {
+    pub ident: Ident,
+    pub ty_expr: TyExpr,
+    pub expr: Expr,
+}
+
+#[derive(Clone, Debug)]
 pub struct FnDecl {
+    pub return_ty: RefCell<Option<Ty>>,
+    pub is_used_in_vertex_shader: Cell<Option<bool>>,
+    pub is_used_in_fragment_shader: Cell<Option<bool>>,
+    pub callees: RefCell<Option<HashSet<Ident>>>,
+    pub uniform_block_deps: RefCell<Option<HashSet<Ident>>>,
+    pub attribute_deps: RefCell<Option<HashSet<Ident>>>,
+    pub has_in_varying_deps: Cell<Option<bool>>,
+    pub has_out_varying_deps: Cell<Option<bool>>,
+    pub builtin_deps: RefCell<Option<HashSet<Ident>>>,
+    pub cons_deps: RefCell<Option<HashSet<(TyLit, Vec<Ty>)>>>,
     pub ident: Ident,
     pub params: Vec<Param>,
     pub return_ty_expr: Option<TyExpr>,
@@ -32,15 +116,15 @@ pub struct FnDecl {
 }
 
 #[derive(Clone, Debug)]
-pub struct Param {
-    pub ident: Ident,
-    pub ty_expr: TyExpr,
-}
-
-#[derive(Clone, Debug)]
 pub struct StructDecl {
     pub ident: Ident,
-    pub members: Vec<Member>,
+    pub fields: Vec<Field>,
+}
+
+impl StructDecl {
+    pub fn find_field(&self, ident: Ident) -> Option<&Field> {
+        self.fields.iter().find(|field| field.ident == ident)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -57,7 +141,13 @@ pub struct VaryingDecl {
 }
 
 #[derive(Clone, Debug)]
-pub struct Member {
+pub struct Param {
+    pub ident: Ident,
+    pub ty_expr: TyExpr,
+}
+
+#[derive(Clone, Debug)]
+pub struct Field {
     pub ident: Ident,
     pub ty_expr: TyExpr,
 }
@@ -69,138 +159,97 @@ pub struct Block {
 
 #[derive(Clone, Debug)]
 pub enum Stmt {
-    Break(BreakStmt),
-    Continue(ContinueStmt),
-    For(ForStmt),
-    If(IfStmt),
-    Let(LetStmt),
-    Return(ReturnStmt),
-    Block(BlockStmt),
-    Expr(ExprStmt),
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct BreakStmt;
-
-#[derive(Clone, Copy, Debug)]
-pub struct ContinueStmt;
-
-#[derive(Clone, Debug)]
-pub struct ForStmt {
-    pub ident: Ident,
-    pub from_expr: Expr,
-    pub to_expr: Expr,
-    pub step_expr: Option<Expr>,
-    pub block: Block,
-}
-
-#[derive(Clone, Debug)]
-pub struct IfStmt {
-    pub expr: Expr,
-    pub block_if_true: Block,
-    pub block_if_false: Option<Block>,
-}
-
-#[derive(Clone, Debug)]
-pub struct LetStmt {
-    pub ident: Ident,
-    pub ty_expr: Option<TyExpr>,
-    pub expr: Option<Expr>,
+    Break,
+    Continue,
+    For {
+        ident: Ident,
+        from_expr: Expr,
+        to_expr: Expr,
+        step_expr: Option<Expr>,
+        block: Box<Block>,
+    },
+    If {
+        expr: Expr,
+        block_if_true: Box<Block>,
+        block_if_false: Option<Box<Block>>,
+    },
+    Let {
+        ty: RefCell<Option<Ty>>,
+        ident: Ident,
+        ty_expr: Option<TyExpr>,
+        expr: Option<Expr>,
+    },
+    Return {
+        expr: Option<Expr>,
+    },
+    Block {
+        block: Box<Block>,
+    },
+    Expr {
+        expr: Expr,
+    },
 }
 
 #[derive(Clone, Debug)]
-pub struct ReturnStmt {
-    pub expr: Option<Expr>,
+pub struct TyExpr {
+    pub ty: RefCell<Option<Ty>>,
+    pub kind: TyExprKind,
 }
 
 #[derive(Clone, Debug)]
-pub struct BlockStmt {
-    pub block: Block,
+pub enum TyExprKind {
+    Array { elem_ty_expr: Box<TyExpr>, len: u32 },
+    Struct { ident: Ident },
+    Lit { ty_lit: TyLit },
 }
 
 #[derive(Clone, Debug)]
-pub struct ExprStmt {
-    pub expr: Expr,
+pub struct Expr {
+    pub ty: RefCell<Option<Ty>>,
+    pub val: RefCell<Option<Val>>,
+    pub kind: ExprKind,
 }
 
 #[derive(Clone, Debug)]
-pub enum TyExpr {
-    Array(ArrayTyExpr),
-    Struct(StructTyExpr),
-    TyLit(TyLit),
-}
-
-#[derive(Clone, Debug)]
-pub struct ArrayTyExpr {
-    pub elem_ty_expr: Box<TyExpr>,
-    pub len: u32,
-}
-
-#[derive(Clone, Debug)]
-pub struct StructTyExpr {
-    pub ident: Ident,
-}
-
-#[derive(Clone, Debug)]
-pub enum Expr {
-    Cond(CondExpr),
-    Bin(BinExpr),
-    Un(UnExpr),
-    Index(IndexExpr),
-    Member(MemberExpr),
-    Call(CallExpr),
-    ConsCall(ConsCallExpr),
-    Var(VarExpr),
-    Lit(Lit),
-}
-
-#[derive(Clone, Debug)]
-pub struct CondExpr {
-    pub x: Box<Expr>,
-    pub y: Box<Expr>,
-    pub z: Box<Expr>,
-}
-
-#[derive(Clone, Debug)]
-pub struct BinExpr {
-    pub x: Box<Expr>,
-    pub op: BinOp,
-    pub y: Box<Expr>,
-}
-
-#[derive(Clone, Debug)]
-pub struct UnExpr {
-    pub op: UnOp,
-    pub x: Box<Expr>,
-}
-
-#[derive(Clone, Debug)]
-pub struct IndexExpr {
-    pub x: Box<Expr>,
-    pub i: Box<Expr>,
-}
-
-#[derive(Clone, Debug)]
-pub struct MemberExpr {
-    pub x: Box<Expr>,
-    pub ident: Ident,
-}
-
-#[derive(Clone, Debug)]
-pub struct CallExpr {
-    pub ident: Ident,
-    pub xs: Vec<Expr>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ConsCallExpr {
-    pub ty_lit: TyLit,
-    pub xs: Vec<Expr>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct VarExpr {
-    pub ident: Ident,
+pub enum ExprKind {
+    Cond {
+        expr: Box<Expr>,
+        expr_if_true: Box<Expr>,
+        expr_if_false: Box<Expr>,
+    },
+    Bin {
+        op: BinOp,
+        left_expr: Box<Expr>,
+        right_expr: Box<Expr>,
+    },
+    Un {
+        op: UnOp,
+        expr: Box<Expr>,
+    },
+    Field {
+        expr: Box<Expr>,
+        field_ident: Ident,
+    },
+    Index {
+        expr: Box<Expr>,
+        index_expr: Box<Expr>,
+    },
+    Call {
+        ident: Ident,
+        arg_exprs: Vec<Expr>,
+    },
+    ConsCall {
+        ty_lit: TyLit,
+        arg_exprs: Vec<Expr>,
+    },
+    Var {
+        is_lvalue: Cell<Option<bool>>,
+        kind: Cell<Option<VarKind>>,
+        ident: Ident,
+    },
+    Lit {
+        lit: Lit,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]

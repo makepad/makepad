@@ -1,56 +1,68 @@
-use makepad_shader_compiler::ast::*;
-use makepad_shader_compiler::emit::Emitter;
+use makepad_shader_compiler::analyse;
+use makepad_shader_compiler::generate::{self, ShaderKind};
 use makepad_shader_compiler::lex;
-use makepad_shader_compiler::parse::Parser;
-use std::error::Error;
+use makepad_shader_compiler::parse;
 
 const SOURCE: &str = r#"
-    uniform uModelViewMatrix: mat4;
-    uniform uPerspectiveMatrix: mat2 block draw;
+    struct Foo {
+        x: float,
+        y: float
+    }
 
-    attribute aPosition: vec4;
+    struct Bar {
+        foo: Foo
+    }
+
+    const FOO: int = 10;
+    const BAR: int = FOO * 2;
+    
+    attribute aPosition: vec2;
+    attribute aBla: float;
     attribute aColor: vec3;
-    attribute aTexCoord: vec2;
 
     varying vColor: vec3;
-    varying vTexCoord: vec2;
-    varying vMatrix: mat4;
+
+    uniform uModelViewMatrix: mat4 in draw;
 
     fn vertex() -> vec4 {
         foo();
-        vColor = aColor;
-        return vec4(uModelViewMatrix * aPosition);
+        max(vec2(1.0), vec2(2.0));
     }
 
     fn fragment() -> vec4 {
         bar();
-        return vec4(vColor, 1.0);
+        aBla;
     }
 
     fn foo() {
-        uPerspectiveMatrix;
         qux();
+        vColor = vec3(1.0);
+        vec4(vec2(1.0), 1.0, 2.0);
     }
 
     fn bar() {
         qux();
+        aPosition;
+        mat4(mat3(1.0));
     }
 
-    fn qux() {}
+    fn qux() {
+        aColor;
+        let x: float;
+        x = 42.0;
+        uModelViewMatrix * vec4(1.0);
+    }
 "#;
 
 #[test]
 fn test() {
-    if let Err(ref error) = (|| -> Result<(), Box<dyn Error>> {
-        let tokens = lex::lex(SOURCE.chars()).collect::<Result<Vec<_>, _>>()?;
-        let shader = ParsedShader::parse(&mut Parser::new(tokens.iter().cloned()))?;
-        let shader_attrs = shader.emit(&mut Emitter::new())?;
-        println!("VERTEX SHADER:");
-        println!("{}", shader_attrs.vertex_string);
-        println!("FRAGMENT SHADER:");
-        println!("{}", shader_attrs.fragment_string);
-        Ok(())
-    })() {
-        println!("{}", error);
-    }
+    let mut shader = parse::parse(
+        &lex::lex(SOURCE.chars())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+    )
+    .unwrap();
+    analyse::analyse(&mut shader).unwrap();
+    println!("{}", generate::generate(ShaderKind::Vertex, &shader));
+    println!("{}", generate::generate(ShaderKind::Fragment, &shader));
 }
