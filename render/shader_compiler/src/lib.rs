@@ -6,6 +6,7 @@ pub mod builtin;
 pub mod const_eval;
 pub mod dep_analyse;
 pub mod env;
+pub mod error;
 pub mod generate;
 pub mod ident;
 pub mod lex;
