@@ -3,6 +3,7 @@ use crate::builtin::Builtin;
 use crate::env::{Env, Sym, VarKind};
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
+use crate::span::Span;
 use crate::swizzle::Swizzle;
 use crate::ty::Ty;
 use crate::util::CommaSep;
@@ -78,38 +79,47 @@ impl<'a> TyChecker<'a> {
     pub fn ty_check_expr(&mut self, expr: &Expr) -> Result<Ty, Box<dyn Error>> {
         let ty = match expr.kind {
             ExprKind::Cond {
+                span,
                 ref expr,
                 ref expr_if_true,
                 ref expr_if_false,
-            } => self.ty_check_cond_expr(expr, expr_if_true, expr_if_false),
+                ..
+            } => self.ty_check_cond_expr(span, expr, expr_if_true, expr_if_false),
             ExprKind::Bin {
+                span,
                 op,
                 ref left_expr,
                 ref right_expr,
-            } => self.ty_check_bin_expr(op, left_expr, right_expr),
-            ExprKind::Un { op, ref expr } => self.ty_check_un_expr(op, expr),
+                ..
+            } => self.ty_check_bin_expr(span, op, left_expr, right_expr),
+            ExprKind::Un { span, op, ref expr } => self.ty_check_un_expr(span, op, expr),
             ExprKind::Field {
+                span,
                 ref expr,
                 field_ident,
-            } => self.ty_check_field_expr(expr, field_ident),
+            } => self.ty_check_field_expr(span, expr, field_ident),
             ExprKind::Index {
+                span,
                 ref expr,
                 ref index_expr,
-            } => self.ty_check_index_expr(expr, index_expr),
+            } => self.ty_check_index_expr(span, expr, index_expr),
             ExprKind::Call {
+                span,
                 ident,
                 ref arg_exprs,
-            } => self.ty_check_call_expr(ident, arg_exprs),
+            } => self.ty_check_call_expr(span, ident, arg_exprs),
             ExprKind::ConsCall {
+                span,
                 ty_lit,
                 ref arg_exprs,
-            } => self.ty_check_cons_call_expr(ty_lit, arg_exprs),
+            } => self.ty_check_cons_call_expr(span, ty_lit, arg_exprs),
             ExprKind::Var {
+                span,
                 ref is_lvalue,
                 ref kind,
                 ident,
-            } => self.ty_check_var_expr(is_lvalue, kind, ident),
-            ExprKind::Lit { lit } => self.ty_check_lit_expr(lit),
+            } => self.ty_check_var_expr(span, is_lvalue, kind, ident),
+            ExprKind::Lit { span, lit } => self.ty_check_lit_expr(span, lit),
         }?;
         *expr.ty.borrow_mut() = Some(ty.clone());
         Ok(ty)
@@ -117,6 +127,7 @@ impl<'a> TyChecker<'a> {
 
     fn ty_check_cond_expr(
         &mut self,
+        _span: Span,
         expr: &Expr,
         expr_if_true: &Expr,
         expr_if_false: &Expr,
@@ -132,6 +143,7 @@ impl<'a> TyChecker<'a> {
 
     fn ty_check_bin_expr(
         &mut self,
+        _span: Span,
         op: BinOp,
         left_expr: &Expr,
         right_expr: &Expr,
@@ -304,7 +316,12 @@ impl<'a> TyChecker<'a> {
         })
     }
 
-    fn ty_check_un_expr(&mut self, op: UnOp, expr: &Expr) -> Result<Ty, Box<dyn Error>> {
+    fn ty_check_un_expr(
+        &mut self,
+        _span: Span,
+        op: UnOp,
+        expr: &Expr
+    ) -> Result<Ty, Box<dyn Error>> {
         if self.is_lvalue {
             return Err("invalid lvalue expression".into());
         }
@@ -331,6 +348,7 @@ impl<'a> TyChecker<'a> {
 
     fn ty_check_field_expr(
         &mut self,
+        _span: Span,
         expr: &Expr,
         field_ident: Ident,
     ) -> Result<Ty, Box<dyn Error>> {
@@ -402,6 +420,7 @@ impl<'a> TyChecker<'a> {
 
     fn ty_check_index_expr(
         &mut self,
+        _span: Span,
         expr: &Expr,
         index_expr: &Expr,
     ) -> Result<Ty, Box<dyn Error>> {
@@ -430,6 +449,7 @@ impl<'a> TyChecker<'a> {
 
     fn ty_check_call_expr(
         &mut self,
+        _span: Span,
         ident: Ident,
         arg_exprs: &[Expr],
     ) -> Result<Ty, Box<dyn Error>> {
@@ -516,6 +536,7 @@ impl<'a> TyChecker<'a> {
     #[allow(clippy::redundant_closure_call)]
     fn ty_check_cons_call_expr(
         &mut self,
+        _span: Span,
         ty_lit: TyLit,
         arg_exprs: &[Expr],
     ) -> Result<Ty, Box<dyn Error>> {
@@ -570,6 +591,7 @@ impl<'a> TyChecker<'a> {
 
     fn ty_check_var_expr(
         &mut self,
+        _span: Span,
         is_lvalue: &Cell<Option<bool>>,
         kind: &Cell<Option<VarKind>>,
         ident: Ident,
@@ -595,7 +617,7 @@ impl<'a> TyChecker<'a> {
         }
     }
 
-    fn ty_check_lit_expr(&mut self, lit: Lit) -> Result<Ty, Box<dyn Error>> {
+    fn ty_check_lit_expr(&mut self, _span: Span, lit: Lit) -> Result<Ty, Box<dyn Error>> {
         Ok(lit.to_ty())
     }
 }
