@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::ident::Ident;
 use crate::lit::Lit;
+use crate::span::Span;
 use crate::token::{Token, TokenWithSpan};
 use std::cell::{Cell, RefCell};
 use std::error::Error;
@@ -10,12 +11,13 @@ use std::slice::Iter;
 pub fn parse(tokens_with_span: &[TokenWithSpan]) -> Result<Shader, Box<dyn Error>> {
     let mut tokens_with_span = tokens_with_span.iter().cloned();
     let token_with_span = tokens_with_span.next().unwrap();
-    Parser { tokens_with_span, token_with_span }.parse_shader()
+    Parser { tokens_with_span, token_with_span, end: 0 }.parse_shader()
 }
 
 struct Parser<'a> {
     tokens_with_span: Cloned<Iter<'a, TokenWithSpan>>,
     token_with_span: TokenWithSpan,
+    end: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -611,7 +613,14 @@ impl<'a> Parser<'a> {
     }
 
     fn skip_token(&mut self) {
+        self.end = self.token_with_span.span.end;
         self.token_with_span = self.tokens_with_span.next().unwrap();
+    }
+
+    fn begin_span(&self) -> SpanTracker {
+        SpanTracker {
+            start: self.token_with_span.span.start,
+        }
     }
 }
 
@@ -681,5 +690,21 @@ impl Token {
             Token::Minus => Some(UnOp::Neg),
             _ => None,
         }
+    }
+}
+
+struct SpanTracker {
+    start: usize,
+}
+
+impl SpanTracker {
+    fn end<F, R>(&self, parser: &Parser, f: F) -> R
+    where
+        F: FnOnce(Span) -> R
+    {
+        f(Span {
+            start: self.start,
+            end: parser.end,
+        })
     }
 }
