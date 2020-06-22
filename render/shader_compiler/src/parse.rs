@@ -1,14 +1,14 @@
 use crate::ast::*;
+use crate::error::Error;
 use crate::ident::Ident;
 use crate::lit::Lit;
 use crate::span::Span;
 use crate::token::{Token, TokenWithSpan};
 use std::cell::{Cell, RefCell};
-use std::error::Error;
 use std::iter::Cloned;
 use std::slice::Iter;
 
-pub fn parse(tokens_with_span: &[TokenWithSpan]) -> Result<Shader, Box<dyn Error>> {
+pub fn parse(tokens_with_span: &[TokenWithSpan]) -> Result<Shader, Error> {
     let mut tokens_with_span = tokens_with_span.iter().cloned();
     let token_with_span = tokens_with_span.next().unwrap();
     Parser { tokens_with_span, token_with_span, end: 0 }.parse_shader()
@@ -21,7 +21,7 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn parse_shader(&mut self) -> Result<Shader, Box<dyn Error>> {
+    fn parse_shader(&mut self) -> Result<Shader, Error> {
         let mut decls = Vec::new();
         while self.peek_token() != Token::Eof {
             decls.push(self.parse_decl()?);
@@ -29,7 +29,7 @@ impl<'a> Parser<'a> {
         Ok(Shader { decls })
     }
 
-    fn parse_decl(&mut self) -> Result<Decl, Box<dyn Error>> {
+    fn parse_decl(&mut self) -> Result<Decl, Error> {
         let span = self.begin_span();
         match self.peek_token() {
             Token::Attribute => self.parse_attribute_decl(),
@@ -42,7 +42,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_attribute_decl(&mut self) -> Result<Decl, Box<dyn Error>> {
+    fn parse_attribute_decl(&mut self) -> Result<Decl, Error> {
         self.expect_token(Token::Attribute)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
@@ -51,7 +51,7 @@ impl<'a> Parser<'a> {
         Ok(Decl::Attribute(AttributeDecl { ident, ty_expr }))
     }
 
-    fn parse_const_decl(&mut self) -> Result<Decl, Box<dyn Error>> {
+    fn parse_const_decl(&mut self) -> Result<Decl, Error> {
         self.expect_token(Token::Const)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
@@ -66,7 +66,7 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    fn parse_fn_decl(&mut self) -> Result<Decl, Box<dyn Error>> {
+    fn parse_fn_decl(&mut self) -> Result<Decl, Error> {
         self.expect_token(Token::Fn)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::LeftParen)?;
@@ -104,7 +104,7 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    fn parse_struct_decl(&mut self) -> Result<Decl, Box<dyn Error>> {
+    fn parse_struct_decl(&mut self) -> Result<Decl, Error> {
         self.expect_token(Token::Struct)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::LeftBrace)?;
@@ -121,7 +121,7 @@ impl<'a> Parser<'a> {
         Ok(Decl::Struct(StructDecl { ident, fields }))
     }
 
-    fn parse_uniform_decl(&mut self) -> Result<Decl, Box<dyn Error>> {
+    fn parse_uniform_decl(&mut self) -> Result<Decl, Error> {
         self.expect_token(Token::Uniform)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
@@ -139,7 +139,7 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    fn parse_varying_decl(&mut self) -> Result<Decl, Box<dyn Error>> {
+    fn parse_varying_decl(&mut self) -> Result<Decl, Error> {
         self.expect_token(Token::Varying)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
@@ -148,21 +148,21 @@ impl<'a> Parser<'a> {
         Ok(Decl::Varying(VaryingDecl { ident, ty_expr }))
     }
 
-    fn parse_param(&mut self) -> Result<Param, Box<dyn Error>> {
+    fn parse_param(&mut self) -> Result<Param, Error> {
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
         let ty_expr = self.parse_ty_expr()?;
         Ok(Param { ident, ty_expr })
     }
 
-    fn parse_field(&mut self) -> Result<Field, Box<dyn Error>> {
+    fn parse_field(&mut self) -> Result<Field, Error> {
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
         let ty_expr = self.parse_ty_expr()?;
         Ok(Field { ident, ty_expr })
     }
 
-    fn parse_block(&mut self) -> Result<Block, Box<dyn Error>> {
+    fn parse_block(&mut self) -> Result<Block, Error> {
         self.expect_token(Token::LeftBrace)?;
         let mut stmts = Vec::new();
         while !self.accept_token(Token::RightBrace) {
@@ -171,7 +171,7 @@ impl<'a> Parser<'a> {
         Ok(Block { stmts })
     }
 
-    fn parse_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+    fn parse_stmt(&mut self) -> Result<Stmt, Error> {
         match self.peek_token() {
             Token::Break => self.parse_break_stmt(),
             Token::Continue => self.parse_continue_stmt(),
@@ -183,19 +183,19 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_break_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+    fn parse_break_stmt(&mut self) -> Result<Stmt, Error> {
         self.expect_token(Token::Break)?;
         self.expect_token(Token::Semi)?;
         Ok(Stmt::Break)
     }
 
-    fn parse_continue_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+    fn parse_continue_stmt(&mut self) -> Result<Stmt, Error> {
         self.expect_token(Token::Continue)?;
         self.expect_token(Token::Semi)?;
         Ok(Stmt::Continue)
     }
 
-    fn parse_for_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+    fn parse_for_stmt(&mut self) -> Result<Stmt, Error> {
         self.expect_token(Token::For)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::From)?;
@@ -217,7 +217,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_if_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+    fn parse_if_stmt(&mut self) -> Result<Stmt, Error> {
         self.expect_token(Token::If)?;
         let expr = self.parse_expr()?;
         let block_if_true = Box::new(self.parse_block()?);
@@ -233,7 +233,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_let_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+    fn parse_let_stmt(&mut self) -> Result<Stmt, Error> {
         self.expect_token(Token::Let)?;
         let ident = self.parse_ident()?;
         let ty_expr = if self.accept_token(Token::Colon) {
@@ -255,7 +255,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_return_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+    fn parse_return_stmt(&mut self) -> Result<Stmt, Error> {
         self.expect_token(Token::Return)?;
         let expr = if !self.accept_token(Token::Semi) {
             let expr = self.parse_expr()?;
@@ -267,13 +267,13 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Return { expr })
     }
 
-    fn parse_expr_stmt(&mut self) -> Result<Stmt, Box<dyn Error>> {
+    fn parse_expr_stmt(&mut self) -> Result<Stmt, Error> {
         let expr = self.parse_expr()?;
         self.expect_token(Token::Semi)?;
         Ok(Stmt::Expr { expr })
     }
 
-    fn parse_ty_expr(&mut self) -> Result<TyExpr, Box<dyn Error>> {
+    fn parse_ty_expr(&mut self) -> Result<TyExpr, Error> {
         let span = self.begin_span();
         let mut acc = self.parse_prim_ty_expr()?;
         if self.accept_token(Token::LeftBracket) {
@@ -293,7 +293,7 @@ impl<'a> Parser<'a> {
         Ok(acc)
     }
 
-    fn parse_prim_ty_expr(&mut self) -> Result<TyExpr, Box<dyn Error>> {
+    fn parse_prim_ty_expr(&mut self) -> Result<TyExpr, Error> {
         let span = self.begin_span();
         match self.peek_token() {
             Token::Ident(ident) => {
@@ -314,11 +314,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+    fn parse_expr(&mut self) -> Result<Expr, Error> {
         self.parse_assign_expr()
     }
 
-    fn parse_assign_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+    fn parse_assign_expr(&mut self) -> Result<Expr, Error> {
         let expr = self.parse_cond_expr()?;
         Ok(if let Some(op) = self.peek_token().to_assign_op() {
             self.skip_token();
@@ -338,7 +338,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_cond_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+    fn parse_cond_expr(&mut self) -> Result<Expr, Error> {
         let expr = self.parse_or_expr()?;
         Ok(if self.accept_token(Token::Question) {
             let expr = Box::new(expr);
@@ -359,7 +359,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_or_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+    fn parse_or_expr(&mut self) -> Result<Expr, Error> {
         let mut acc = self.parse_and_expr()?;
         while let Some(op) = self.peek_token().to_or_op() {
             self.skip_token();
@@ -378,7 +378,7 @@ impl<'a> Parser<'a> {
         Ok(acc)
     }
 
-    fn parse_and_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+    fn parse_and_expr(&mut self) -> Result<Expr, Error> {
         let mut acc = self.parse_eq_expr()?;
         while let Some(op) = self.peek_token().to_and_op() {
             self.skip_token();
@@ -397,7 +397,7 @@ impl<'a> Parser<'a> {
         Ok(acc)
     }
 
-    fn parse_eq_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+    fn parse_eq_expr(&mut self) -> Result<Expr, Error> {
         let mut acc = self.parse_rel_expr()?;
         while let Some(op) = self.peek_token().to_eq_op() {
             self.skip_token();
@@ -416,7 +416,7 @@ impl<'a> Parser<'a> {
         Ok(acc)
     }
 
-    fn parse_rel_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+    fn parse_rel_expr(&mut self) -> Result<Expr, Error> {
         let mut acc = self.parse_add_expr()?;
         while let Some(op) = self.peek_token().to_rel_op() {
             self.skip_token();
@@ -435,7 +435,7 @@ impl<'a> Parser<'a> {
         Ok(acc)
     }
 
-    fn parse_add_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+    fn parse_add_expr(&mut self) -> Result<Expr, Error> {
         let mut acc = self.parse_mul_expr()?;
         while let Some(op) = self.peek_token().to_add_op() {
             self.skip_token();
@@ -454,7 +454,7 @@ impl<'a> Parser<'a> {
         Ok(acc)
     }
 
-    fn parse_mul_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+    fn parse_mul_expr(&mut self) -> Result<Expr, Error> {
         let mut acc = self.parse_postfix_expr()?;
         while let Some(op) = self.peek_token().to_mul_op() {
             self.skip_token();
@@ -473,7 +473,7 @@ impl<'a> Parser<'a> {
         Ok(acc)
     }
 
-    fn parse_postfix_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+    fn parse_postfix_expr(&mut self) -> Result<Expr, Error> {
         let mut acc = self.parse_un_expr()?;
         loop {
             match self.peek_token() {
@@ -504,7 +504,7 @@ impl<'a> Parser<'a> {
         Ok(acc)
     }
 
-    fn parse_un_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+    fn parse_un_expr(&mut self) -> Result<Expr, Error> {
         Ok(if let Some(op) = self.peek_token().to_un_op() {
             self.skip_token();
             let expr = Box::new(self.parse_un_expr()?);
@@ -518,7 +518,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_prim_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+    fn parse_prim_expr(&mut self) -> Result<Expr, Error> {
         let span = self.begin_span();
         match self.peek_token() {
             Token::Ident(ident) => {
@@ -585,7 +585,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_ident(&mut self) -> Result<Ident, Box<dyn Error>> {
+    fn parse_ident(&mut self) -> Result<Ident, Error> {
         let span = self.begin_span();
         match self.peek_token() {
             Token::Ident(ident) => {
@@ -604,7 +604,7 @@ impl<'a> Parser<'a> {
         true
     }
 
-    fn expect_token(&mut self, expected: Token) -> Result<(), Box<dyn Error>> {
+    fn expect_token(&mut self, expected: Token) -> Result<(), Error> {
         let span = self.begin_span();
         let actual = self.peek_token();
         if actual != expected {
@@ -704,13 +704,13 @@ struct SpanTracker {
 }
 
 impl SpanTracker {
-    fn error(&self, parser: &Parser, message: String) -> Box<dyn Error> {
-        crate::error::Error {
+    fn error(&self, parser: &Parser, message: String) -> Error {
+        Error {
             span: Span {
                 start: self.start,
                 end: parser.end,
             },
             message,
-        }.into()
+        }
     }
 }
