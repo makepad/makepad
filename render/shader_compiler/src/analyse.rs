@@ -4,6 +4,7 @@ use crate::const_eval::ConstEvaluator;
 use crate::dep_analyse::DepAnalyser;
 use crate::env::{Env, Sym, VarKind};
 use crate::ident::Ident;
+use crate::span::Span;
 use crate::ty::Ty;
 use crate::ty_check::TyChecker;
 use std::cell::RefCell;
@@ -131,7 +132,11 @@ impl<'a> ShaderAnalyser<'a> {
         let expected_ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         let actual_ty = self
             .ty_checker()
-            .ty_check_expr_with_expected_ty(&decl.expr, &expected_ty)?;
+            .ty_check_expr_with_expected_ty(
+                Span::default(), // TODO
+                &decl.expr,
+                &expected_ty
+            )?;
         self.const_evaluator().const_eval_expr(&decl.expr)?;
         self.env.insert_sym(
             decl.ident,
@@ -425,7 +430,11 @@ impl<'a> FnDefAnalyser<'a> {
         block: &Block,
     ) -> Result<(), Box<dyn Error>> {
         self.ty_checker()
-            .ty_check_expr_with_expected_ty(from_expr, &Ty::Int)?;
+            .ty_check_expr_with_expected_ty(
+                Span::default(), // TODO
+                from_expr,
+                &Ty::Int
+            )?;
         let from = self
             .const_evaluator()
             .const_eval_expr(from_expr)?
@@ -433,7 +442,11 @@ impl<'a> FnDefAnalyser<'a> {
             .unwrap();
         self.dep_analyser().dep_analyse_expr(from_expr);
         self.ty_checker()
-            .ty_check_expr_with_expected_ty(to_expr, &Ty::Int)?;
+            .ty_check_expr_with_expected_ty(
+                Span::default(), // TODO
+                to_expr,
+                &Ty::Int
+            )?;
         let to = self
             .const_evaluator()
             .const_eval_expr(to_expr)?
@@ -442,7 +455,11 @@ impl<'a> FnDefAnalyser<'a> {
         self.dep_analyser().dep_analyse_expr(to_expr);
         if let Some(step_expr) = step_expr {
             self.ty_checker()
-                .ty_check_expr_with_expected_ty(step_expr, &Ty::Int)?;
+                .ty_check_expr_with_expected_ty(
+                    Span::default(), // TODO
+                    step_expr,
+                    &Ty::Int
+                )?;
             let step = self
                 .const_evaluator()
                 .const_eval_expr(step_expr)?
@@ -483,7 +500,11 @@ impl<'a> FnDefAnalyser<'a> {
         block_if_false: &Option<Box<Block>>,
     ) -> Result<(), Box<dyn Error>> {
         self.ty_checker()
-            .ty_check_expr_with_expected_ty(expr, &Ty::Bool)?;
+            .ty_check_expr_with_expected_ty(
+                Span::default(), // TODO
+                expr,
+                &Ty::Bool
+            )?;
         self.dep_analyser().dep_analyse_expr(expr);
         self.env.push_scope();
         self.analyse_block(block_if_true)?;
@@ -508,7 +529,11 @@ impl<'a> FnDefAnalyser<'a> {
             if let Some(expr) = expr {
                 let actual_ty = self
                     .ty_checker()
-                    .ty_check_expr_with_expected_ty(expr, &expected_ty)?;
+                    .ty_check_expr_with_expected_ty(
+                        Span::default(), // TODO
+                        expr,
+                        &expected_ty
+                    )?;
                 self.dep_analyser().dep_analyse_expr(expr);
                 actual_ty
             } else {
@@ -534,6 +559,7 @@ impl<'a> FnDefAnalyser<'a> {
     fn analyse_return_stmt(&mut self, expr: &Option<Expr>) -> Result<(), Box<dyn Error>> {
         if let Some(expr) = expr {
             self.ty_checker().ty_check_expr_with_expected_ty(
+                Span::default(), // TODO
                 expr,
                 self.decl.return_ty.borrow().as_ref().unwrap(),
             )?;
