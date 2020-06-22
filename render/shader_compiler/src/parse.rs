@@ -30,6 +30,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_decl(&mut self) -> Result<Decl, Box<dyn Error>> {
+        let span = self.begin_span();
         match self.peek_token() {
             Token::Attribute => self.parse_attribute_decl(),
             Token::Const => self.parse_const_decl(),
@@ -37,7 +38,7 @@ impl<'a> Parser<'a> {
             Token::Struct => self.parse_struct_decl(),
             Token::Uniform => self.parse_uniform_decl(),
             Token::Varying => self.parse_varying_decl(),
-            token => Err(format!("unexpected token `{}`", token).into()),
+            token => Err(span.error(self, format!("unexpected token `{}`", token).into())),
         }
     }
 
@@ -273,6 +274,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_ty_expr(&mut self) -> Result<TyExpr, Box<dyn Error>> {
+        let span = self.begin_span();
         let mut acc = self.parse_prim_ty_expr()?;
         if self.accept_token(Token::LeftBracket) {
             let elem_ty_expr = Box::new(acc);
@@ -285,13 +287,14 @@ impl<'a> Parser<'a> {
                         kind: TyExprKind::Array { elem_ty_expr, len },
                     };
                 }
-                token => return Err(format!("unexpected token `{}`", token).into()),
+                token => return Err(span.error(self, format!("unexpected token `{}`", token).into())),
             }
         }
         Ok(acc)
     }
 
     fn parse_prim_ty_expr(&mut self) -> Result<TyExpr, Box<dyn Error>> {
+        let span = self.begin_span();
         match self.peek_token() {
             Token::Ident(ident) => {
                 self.skip_token();
@@ -307,7 +310,7 @@ impl<'a> Parser<'a> {
                     kind: TyExprKind::Lit { ty_lit },
                 })
             }
-            token => Err(format!("unexpected token `{}`", token).into()),
+            token => Err(span.error(self, format!("unexpected token `{}`", token).into())),
         }
     }
 
@@ -516,6 +519,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_prim_expr(&mut self) -> Result<Expr, Box<dyn Error>> {
+        let span = self.begin_span();
         match self.peek_token() {
             Token::Ident(ident) => {
                 self.skip_token();
@@ -577,17 +581,18 @@ impl<'a> Parser<'a> {
                 self.expect_token(Token::RightParen)?;
                 Ok(expr)
             }
-            token => Err(format!("unexpected token `{}`", token).into()),
+            token => Err(span.error(self, format!("unexpected token `{}`", token).into())),
         }
     }
 
     fn parse_ident(&mut self) -> Result<Ident, Box<dyn Error>> {
+        let span = self.begin_span();
         match self.peek_token() {
             Token::Ident(ident) => {
                 self.skip_token();
                 Ok(ident)
             }
-            token => Err(format!("unexpected token `{}`", token).into()),
+            token => Err(span.error(self, format!("unexpected token `{}`", token).into())),
         }
     }
 
@@ -600,9 +605,10 @@ impl<'a> Parser<'a> {
     }
 
     fn expect_token(&mut self, expected: Token) -> Result<(), Box<dyn Error>> {
+        let span = self.begin_span();
         let actual = self.peek_token();
         if actual != expected {
-            return Err(format!("unexpected token `{}`", actual).into());
+            return Err(span.error(self, format!("unexpected token `{}`", actual).into()));
         }
         self.skip_token();
         Ok(())
@@ -698,13 +704,13 @@ struct SpanTracker {
 }
 
 impl SpanTracker {
-    fn end<F, R>(&self, parser: &Parser, f: F) -> R
-    where
-        F: FnOnce(Span) -> R
-    {
-        f(Span {
-            start: self.start,
-            end: parser.end,
-        })
+    fn error(&self, parser: &Parser, message: String) -> Box<dyn Error> {
+        crate::error::Error {
+            span: Span {
+                start: self.start,
+                end: parser.end,
+            },
+            message,
+        }.into()
     }
 }
