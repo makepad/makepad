@@ -1,6 +1,7 @@
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
-use crate::token::Token;
+use crate::span::Span;
+use crate::token::{Token, TokenWithSpan};
 use std::error::Error;
 
 #[derive(Clone, Debug)]
@@ -8,6 +9,7 @@ pub struct Lex<C> {
     chars: C,
     ch_0: char,
     ch_1: char,
+    index: usize,
     is_done: bool,
 }
 
@@ -15,7 +17,7 @@ impl<C> Lex<C>
 where
     C: Iterator<Item = char>,
 {
-    fn read_token(&mut self) -> Result<Token, Box<dyn Error>> {
+    fn read_token_with_span(&mut self) -> Result<TokenWithSpan, Box<dyn Error>> {
         loop {
             self.skip_chars_while(|ch| ch.is_ascii_whitespace());
             match (self.ch_0, self.ch_1) {
@@ -57,7 +59,8 @@ where
                 _ => break,
             }
         }
-        Ok(match (self.ch_0, self.ch_1) {
+        let span = self.begin_span();
+        let token = match (self.ch_0, self.ch_1) {
             ('\0', _) => Token::Eof,
             ('!', '=') => {
                 self.skip_two_chars();
@@ -258,7 +261,8 @@ where
                 Token::RightBrace
             }
             _ => return Err(format!("unexpected character `{}`", self.ch_0).into()),
-        })
+        };
+        Ok(span.end(self, token))
     }
 
     fn read_chars_while<P>(&mut self, string: &mut String, mut pred: P)
@@ -309,11 +313,19 @@ where
     fn skip_char(&mut self) {
         self.ch_0 = self.ch_1;
         self.ch_1 = self.chars.next().unwrap_or('\0');
+        self.index += 1;
     }
 
     fn skip_two_chars(&mut self) {
         self.ch_0 = self.chars.next().unwrap_or('\0');
         self.ch_1 = self.chars.next().unwrap_or('\0');
+        self.index += 1;
+    }
+
+    fn begin_span(&mut self) -> SpanTracker {
+        SpanTracker {
+            start: self.index
+        }
     }
 }
 
@@ -321,17 +333,17 @@ impl<C> Iterator for Lex<C>
 where
     C: Iterator<Item = char>,
 {
-    type Item = Result<Token, Box<dyn Error>>;
+    type Item = Result<TokenWithSpan, Box<dyn Error>>;
 
-    fn next(&mut self) -> Option<Result<Token, Box<dyn Error>>> {
+    fn next(&mut self) -> Option<Result<TokenWithSpan, Box<dyn Error>>> {
         if self.is_done {
             None
         } else {
-            Some(self.read_token().map(|token| {
-                if token == Token::Eof {
+            Some(self.read_token_with_span().map(|token_with_span| {
+                if token_with_span.token == Token::Eof {
                     self.is_done = true
                 }
-                token
+                token_with_span
             }))
         }
     }
@@ -348,6 +360,23 @@ where
         chars,
         ch_0,
         ch_1,
+        index: 0,
         is_done: false,
+    }
+}
+
+struct SpanTracker {
+    start: usize
+}
+
+impl SpanTracker {
+    fn end<C>(&self, lex: &Lex<C>, token: Token) -> TokenWithSpan {
+        TokenWithSpan {
+            span: Span {
+                start: self.start,
+                end: lex.index,
+            },
+            token,
+        }
     }
 }
