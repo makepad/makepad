@@ -11,6 +11,7 @@ pub mod ident;
 pub mod lex;
 pub mod lit;
 pub mod parse;
+pub mod span;
 pub mod swizzle;
 pub mod token;
 pub mod ty;
