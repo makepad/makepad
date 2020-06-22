@@ -105,7 +105,7 @@ impl Text {
             let brightness: Self::uniform_brightness();
             let curve: Self::uniform_curve();
             
-            fn get_color()->vec4{
+            fn get_color() -> vec4 {
                 return color
             }
             
@@ -119,7 +119,7 @@ impl Text {
                 if dx > 5.0 {
                     s = 0.7;
                 }
-                else if dx > 2.75 { 
+                else if dx > 2.75 {
                     s = (
                         sample2d(texturez, tex_coord3.xy + vec2(0., 0.)).z
                             + sample2d(texturez, tex_coord3.xy + vec2(dp, 0.)).z
@@ -127,7 +127,7 @@ impl Text {
                             + sample2d(texturez, tex_coord3.xy + vec2(dp, dp)).z
                     ) * 0.25;
                 }
-                else if dx > 1.75 { 
+                else if dx > 1.75 {
                     s = sample2d(texturez, tex_coord3.xy).z;
                 }
                 else if dx > 1.3 {
@@ -152,7 +152,7 @@ impl Text {
                     draw_clip.zw
                 );
                 
-                let normalized: vec2 = (clipped - min_pos + draw_scroll.xy) / vec2(w,-h);
+                let normalized: vec2 = (clipped - min_pos + draw_scroll.xy) / vec2(w, -h);
                 //rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
                 
                 tex_coord1 = mix(
@@ -346,7 +346,7 @@ impl Text {
             if c == '\n' {
                 emit = true;
                 newline = true;
-            }            
+            }
             if slot != 0 {
                 let glyph = &cx.fonts[font_id].font_loaded.as_ref().unwrap().glyphs[slot];
                 width += glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
@@ -357,7 +357,7 @@ impl Text {
                     },
                     Wrapping::Word => {
                         chunk.push(c);
-                        if c == ' ' || c == '\t' || c == ',' || c == '\n'{
+                        if c == ' ' || c == '\t' || c == ',' || c == '\n' {
                             emit = true;
                         }
                     },

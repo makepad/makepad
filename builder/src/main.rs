@@ -1,8 +1,9 @@
 // builders are networked build and file servers. This 'main' one is also compiled into makepad
 
-#[path = "../../makepad/src/builder.rs"]
-mod builder;
+ 
 use makepad_hub::*;
+#[path = "../../makepad/app/src/builder.rs"]
+mod builder;
 
 #[allow(dead_code)]
 pub fn main() {
