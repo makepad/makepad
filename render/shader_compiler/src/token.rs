@@ -5,8 +5,8 @@ use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TokenWithSpan {
-    pub token: Token,
     pub span: Span,
+    pub token: Token,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
