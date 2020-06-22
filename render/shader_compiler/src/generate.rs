@@ -2,6 +2,7 @@ use crate::ast::*;
 use crate::env::VarKind;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
+use crate::span::Span;
 use crate::swizzle::Swizzle;
 use crate::ty::Ty;
 use std::cell::{Cell, RefCell};
@@ -827,42 +828,55 @@ impl<'a> ExprGenerator<'a> {
     fn generate_expr(&mut self, expr: &Expr) {
         match expr.kind {
             ExprKind::Cond {
+                span,
                 ref expr,
                 ref expr_if_true,
                 ref expr_if_false,
-            } => self.generate_cond_expr(expr, expr_if_true, expr_if_false),
+            } => self.generate_cond_expr(span, expr, expr_if_true, expr_if_false),
             ExprKind::Bin {
+                span,
                 op,
                 ref left_expr,
                 ref right_expr,
-            } => self.generate_bin_expr(op, left_expr, right_expr),
-            ExprKind::Un { op, ref expr } => self.generate_un_expr(op, expr),
+            } => self.generate_bin_expr(span, op, left_expr, right_expr),
+            ExprKind::Un { span, op, ref expr } => self.generate_un_expr(span, op, expr),
             ExprKind::Field {
+                span,
                 ref expr,
                 field_ident,
-            } => self.generate_field_expr(expr, field_ident),
+            } => self.generate_field_expr(span, expr, field_ident),
             ExprKind::Index {
+                span,
                 ref expr,
                 ref index_expr,
-            } => self.generate_index_expr(expr, index_expr),
+            } => self.generate_index_expr(span, expr, index_expr),
             ExprKind::Call {
+                span,
                 ident,
                 ref arg_exprs,
-            } => self.generate_call_expr(ident, arg_exprs),
+            } => self.generate_call_expr(span, ident, arg_exprs),
             ExprKind::ConsCall {
+                span,
                 ty_lit,
                 ref arg_exprs,
-            } => self.generate_cons_call_expr(ty_lit, arg_exprs),
+            } => self.generate_cons_call_expr(span, ty_lit, arg_exprs),
             ExprKind::Var {
+                span,
                 ref is_lvalue,
                 ref kind,
                 ident,
-            } => self.generate_var_expr(is_lvalue, kind, ident),
-            ExprKind::Lit { lit } => self.generate_lit_expr(lit),
+            } => self.generate_var_expr(span, is_lvalue, kind, ident),
+            ExprKind::Lit { span, lit } => self.generate_lit_expr(span, lit),
         }
     }
 
-    fn generate_cond_expr(&mut self, expr: &Expr, expr_if_true: &Expr, expr_if_false: &Expr) {
+    fn generate_cond_expr(
+        &mut self,
+        _span: Span,
+        expr: &Expr,
+        expr_if_true: &Expr,
+        expr_if_false: &Expr
+    ) {
         write!(self.string, "(").unwrap();
         self.generate_expr(expr);
         write!(self.string, " ? ").unwrap();
@@ -872,7 +886,13 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, ")").unwrap();
     }
 
-    fn generate_bin_expr(&mut self, op: BinOp, left_expr: &Expr, right_expr: &Expr) {
+    fn generate_bin_expr(
+        &mut self,
+        _span: Span,
+        op: BinOp,
+        left_expr: &Expr,
+        right_expr: &Expr
+    ) {
         write!(self.string, "(").unwrap();
         self.generate_expr(left_expr);
         write!(self.string, " {} ", op).unwrap();
@@ -880,24 +900,24 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, ")").unwrap();
     }
 
-    fn generate_un_expr(&mut self, op: UnOp, expr: &Expr) {
+    fn generate_un_expr(&mut self, _span: Span, op: UnOp, expr: &Expr) {
         write!(self.string, "{}", op).unwrap();
         self.generate_expr(expr);
     }
 
-    fn generate_field_expr(&mut self, expr: &Expr, field_ident: Ident) {
+    fn generate_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident) {
         self.generate_expr(expr);
         write!(self.string, ".{}", field_ident).unwrap();
     }
 
-    fn generate_index_expr(&mut self, expr: &Expr, index_expr: &Expr) {
+    fn generate_index_expr(&mut self, _span: Span, expr: &Expr, index_expr: &Expr) {
         self.generate_expr(expr);
         write!(self.string, "[").unwrap();
         self.generate_expr(index_expr);
         write!(self.string, "]").unwrap();
     }
 
-    fn generate_call_expr(&mut self, ident: Ident, arg_exprs: &[Expr]) {
+    fn generate_call_expr(&mut self, _span: Span, ident: Ident, arg_exprs: &[Expr]) {
         write!(self.string, "{}(", ident).unwrap();
         let mut sep = "";
         for arg_expr in arg_exprs {
@@ -933,7 +953,7 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, ")").unwrap();
     }
 
-    fn generate_cons_call_expr(&mut self, ty_lit: TyLit, arg_exprs: &[Expr]) {
+    fn generate_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {
         write!(self.string, "_mpsc_{}", ty_lit).unwrap();
         for arg_expr in arg_exprs {
             write!(self.string, "_{}", arg_expr.ty.borrow().as_ref().unwrap()).unwrap();
@@ -950,6 +970,7 @@ impl<'a> ExprGenerator<'a> {
 
     fn generate_var_expr(
         &mut self,
+        _span: Span,
         _is_lvalue: &Cell<Option<bool>>,
         kind: &Cell<Option<VarKind>>,
         ident: Ident,
@@ -967,7 +988,7 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, "{}", ident).unwrap()
     }
 
-    fn generate_lit_expr(&mut self, lit: Lit) {
+    fn generate_lit_expr(&mut self, _span: Span, lit: Lit) {
         write!(self.string, "{}", lit).unwrap();
     }
 }
