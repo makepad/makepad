@@ -177,7 +177,7 @@ impl<'a> ShaderAnalyser<'a> {
         for field in &decl.fields {
             self.ty_checker().ty_check_ty_expr(&field.ty_expr)?;
         }
-        self.env.insert_sym(decl.ident, Sym::Struct)
+        self.env.insert_sym(decl.ident, Sym::TyVar { ty: Ty::Struct { ident: decl.ident } })
     }
 
     fn analyse_uniform_decl(&mut self, decl: &UniformDecl) -> Result<(), Box<dyn Error>> {
