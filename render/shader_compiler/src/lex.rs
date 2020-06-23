@@ -1,13 +1,16 @@
+
+use crate::error::Error;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
-use crate::token::Token;
-use std::error::Error;
+use crate::span::Span;
+use crate::token::{Token, TokenWithSpan};
 
 #[derive(Clone, Debug)]
 pub struct Lex<C> {
     chars: C,
     ch_0: char,
     ch_1: char,
+    index: usize,
     is_done: bool,
 }
 
@@ -15,7 +18,8 @@ impl<C> Lex<C>
 where
     C: Iterator<Item = char>,
 {
-    fn read_token(&mut self) -> Result<Token, Box<dyn Error>> {
+    fn read_token_with_span(&mut self) -> Result<TokenWithSpan, Error> {
+        let span = self.begin_span();
         loop {
             self.skip_chars_while(|ch| ch.is_ascii_whitespace());
             match (self.ch_0, self.ch_1) {
@@ -24,7 +28,7 @@ where
                     loop {
                         match (self.ch_0, self.ch_1) {
                             ('\0', _) => {
-                                return Err("unterminated block comment".into());
+                                return Err(span.error(self, "unterminated block comment".into()));
                             }
                             ('*', '/') => {
                                 self.skip_two_chars();
@@ -57,7 +61,8 @@ where
                 _ => break,
             }
         }
-        Ok(match (self.ch_0, self.ch_1) {
+        let span = self.begin_span();
+        let token = match (self.ch_0, self.ch_1) {
             ('\0', _) => Token::Eof,
             ('!', '=') => {
                 self.skip_two_chars();
@@ -131,7 +136,7 @@ where
                         string.push(ch);
                         self.read_chars_while(&mut string, |ch| ch.is_ascii_digit());
                     } else {
-                        return Err("missing float exponent".into());
+                        return Err(span.error(self, "missing float exponent".into()));
                     }
                     true
                 } else {
@@ -143,7 +148,7 @@ where
                     Token::Lit(Lit::Int(
                         string
                             .parse::<u32>()
-                            .map_err(|_| "overflowing integer literal")?,
+                            .map_err(|_| span.error(self, "overflowing integer literal".into()))?,
                     ))
                 }
             }
@@ -261,8 +266,9 @@ where
                 self.skip_char();
                 Token::RightBrace
             }
-            _ => return Err(format!("unexpected character `{}`", self.ch_0).into()),
-        })
+            _ => return Err(span.error(self, format!("unexpected character `{}`", self.ch_0).into())),
+        };
+        Ok(span.token(self, token))
     }
 
     fn read_chars_while<P>(&mut self, string: &mut String, mut pred: P)
@@ -313,11 +319,19 @@ where
     fn skip_char(&mut self) {
         self.ch_0 = self.ch_1;
         self.ch_1 = self.chars.next().unwrap_or('\0');
+        self.index += 1;
     }
 
     fn skip_two_chars(&mut self) {
         self.ch_0 = self.chars.next().unwrap_or('\0');
         self.ch_1 = self.chars.next().unwrap_or('\0');
+        self.index += 1;
+    }
+
+    fn begin_span(&mut self) -> SpanTracker {
+        SpanTracker {
+            start: self.index
+        }
     }
 }
 
@@ -325,17 +339,17 @@ impl<C> Iterator for Lex<C>
 where
     C: Iterator<Item = char>,
 {
-    type Item = Result<Token, Box<dyn Error>>;
+    type Item = Result<TokenWithSpan, Error>;
 
-    fn next(&mut self) -> Option<Result<Token, Box<dyn Error>>> {
+    fn next(&mut self) -> Option<Result<TokenWithSpan, Error>> {
         if self.is_done {
             None
         } else {
-            Some(self.read_token().map(|token| {
-                if token == Token::Eof {
+            Some(self.read_token_with_span().map(|token_with_span| {
+                if token_with_span.token == Token::Eof {
                     self.is_done = true
                 }
-                token
+                token_with_span
             }))
         }
     }
@@ -352,6 +366,33 @@ where
         chars,
         ch_0,
         ch_1,
+        index: 0,
         is_done: false,
+    }
+}
+
+struct SpanTracker {
+    start: usize
+}
+
+impl SpanTracker {
+    fn token<C>(&self, lex: &Lex<C>, token: Token) -> TokenWithSpan {
+        TokenWithSpan {
+            span: Span {
+                start: self.start,
+                end: lex.index,
+            },
+            token,
+        }
+    }
+
+    fn error<C>(&self, lex: &Lex<C>, message: String) -> Error {
+        Error {
+            span: Span {
+                start: self.start,
+                end: lex.index,
+            },
+            message,
+        }
     }
 }

@@ -1,6 +1,7 @@
 use crate::env::VarKind;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
+use crate::span::Span;
 use crate::ty::Ty;
 use crate::val::Val;
 use std::cell::{Cell, RefCell};
@@ -213,41 +214,50 @@ pub struct Expr {
 #[derive(Clone, Debug)]
 pub enum ExprKind {
     Cond {
+        span: Span,
         expr: Box<Expr>,
         expr_if_true: Box<Expr>,
         expr_if_false: Box<Expr>,
     },
     Bin {
+        span: Span,
         op: BinOp,
         left_expr: Box<Expr>,
         right_expr: Box<Expr>,
     },
     Un {
+        span: Span,
         op: UnOp,
         expr: Box<Expr>,
     },
     Field {
+        span: Span,
         expr: Box<Expr>,
         field_ident: Ident,
     },
     Index {
+        span: Span,
         expr: Box<Expr>,
         index_expr: Box<Expr>,
     },
     Call {
+        span: Span,
         ident: Ident,
         arg_exprs: Vec<Expr>,
     },
     ConsCall {
+        span: Span,
         ty_lit: TyLit,
         arg_exprs: Vec<Expr>,
     },
     Var {
+        span: Span,
         is_lvalue: Cell<Option<bool>>,
         kind: Cell<Option<VarKind>>,
         ident: Ident,
     },
     Lit {
+        span: Span,
         lit: Lit,
     },
 }

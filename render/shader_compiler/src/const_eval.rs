@@ -2,6 +2,7 @@ use crate::ast::*;
 use crate::env::VarKind;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
+use crate::span::Span;
 use crate::val::Val;
 use std::cell::Cell;
 use std::error::Error;
@@ -15,38 +16,45 @@ impl<'a> ConstEvaluator<'a> {
     pub fn const_eval_expr(&self, expr: &Expr) -> Result<Val, Box<dyn Error>> {
         let val = match expr.kind {
             ExprKind::Cond {
+                span,
                 ref expr,
                 ref expr_if_true,
                 ref expr_if_false,
-            } => self.const_eval_cond_expr(expr, expr_if_true, expr_if_false),
+            } => self.const_eval_cond_expr(span, expr, expr_if_true, expr_if_false),
             ExprKind::Bin {
+                span,
                 op,
                 ref left_expr,
                 ref right_expr,
-            } => self.const_eval_bin_expr(op, left_expr, right_expr),
-            ExprKind::Un { op, ref expr } => self.const_eval_un_expr(op, expr),
+            } => self.const_eval_bin_expr(span, op, left_expr, right_expr),
+            ExprKind::Un { span, op, ref expr } => self.const_eval_un_expr(span, op, expr),
             ExprKind::Field {
+                span,
                 ref expr,
                 field_ident,
-            } => self.const_eval_field_expr(expr, field_ident),
+            } => self.const_eval_field_expr(span, expr, field_ident),
             ExprKind::Index {
+                span,
                 ref expr,
                 ref index_expr,
-            } => self.const_eval_index_expr(expr, index_expr),
+            } => self.const_eval_index_expr(span, expr, index_expr),
             ExprKind::Call {
+                span,
                 ident,
                 ref arg_exprs,
-            } => self.const_eval_call_expr(ident, arg_exprs),
+            } => self.const_eval_call_expr(span, ident, arg_exprs),
             ExprKind::ConsCall {
+                span,
                 ty_lit,
                 ref arg_exprs,
-            } => self.const_eval_cons_call_expr(ty_lit, arg_exprs),
+            } => self.const_eval_cons_call_expr(span, ty_lit, arg_exprs),
             ExprKind::Var {
+                span,
                 ref is_lvalue,
                 ref kind,
                 ident,
-            } => self.const_eval_var_expr(is_lvalue, kind, ident),
-            ExprKind::Lit { lit } => self.const_eval_lit_expr(lit),
+            } => self.const_eval_var_expr(span, is_lvalue, kind, ident),
+            ExprKind::Lit { span, lit } => self.const_eval_lit_expr(span, lit),
         }?;
         *expr.val.borrow_mut() = Some(val.clone());
         Ok(val)
@@ -54,6 +62,7 @@ impl<'a> ConstEvaluator<'a> {
 
     fn const_eval_cond_expr(
         &self,
+        _span: Span,
         expr: &Expr,
         expr_if_true: &Expr,
         expr_if_false: &Expr,
@@ -71,6 +80,7 @@ impl<'a> ConstEvaluator<'a> {
     #[allow(clippy::float_cmp)]
     fn const_eval_bin_expr(
         &self,
+        _span: Span,
         op: BinOp,
         left_expr: &Expr,
         right_expr: &Expr,
@@ -143,7 +153,12 @@ impl<'a> ConstEvaluator<'a> {
         .ok_or_else(|| "expression is not const".into())
     }
 
-    fn const_eval_un_expr(&self, op: UnOp, expr: &Expr) -> Result<Val, Box<dyn Error>> {
+    fn const_eval_un_expr(
+        &self,
+        _span: Span,
+        op: UnOp,
+        expr: &Expr
+    ) -> Result<Val, Box<dyn Error>> {
         let val = self.const_eval_expr(expr)?;
         match op {
             UnOp::Not => match val {
@@ -161,6 +176,7 @@ impl<'a> ConstEvaluator<'a> {
 
     fn const_eval_field_expr(
         &self,
+        _span: Span,
         _expr: &Expr,
         _field_ident: Ident,
     ) -> Result<Val, Box<dyn Error>> {
@@ -169,6 +185,7 @@ impl<'a> ConstEvaluator<'a> {
 
     fn const_eval_index_expr(
         &self,
+        _span: Span,
         _expr: &Expr,
         _index_expr: &Expr,
     ) -> Result<Val, Box<dyn Error>> {
@@ -177,6 +194,7 @@ impl<'a> ConstEvaluator<'a> {
 
     fn const_eval_call_expr(
         &self,
+        _span: Span,
         _ident: Ident,
         _arg_exprs: &[Expr],
     ) -> Result<Val, Box<dyn Error>> {
@@ -185,6 +203,7 @@ impl<'a> ConstEvaluator<'a> {
 
     fn const_eval_cons_call_expr(
         &self,
+        _span: Span,
         _ty_lit: TyLit,
         _arg_exprs: &[Expr],
     ) -> Result<Val, Box<dyn Error>> {
@@ -193,6 +212,7 @@ impl<'a> ConstEvaluator<'a> {
 
     fn const_eval_var_expr(
         &self,
+        _span: Span,
         _is_lvalue: &Cell<Option<bool>>,
         kind: &Cell<Option<VarKind>>,
         ident: Ident,
@@ -212,7 +232,7 @@ impl<'a> ConstEvaluator<'a> {
         }
     }
 
-    fn const_eval_lit_expr(&self, lit: Lit) -> Result<Val, Box<dyn Error>> {
+    fn const_eval_lit_expr(&self, _span: Span, lit: Lit) -> Result<Val, Box<dyn Error>> {
         Ok(lit.to_val())
     }
 }
