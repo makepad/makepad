@@ -5,6 +5,7 @@ use crate::lit::Lit;
 use crate::span::Span;
 use crate::token::{Token, TokenWithSpan};
 use std::cell::{Cell, RefCell};
+use std::fmt::Write;
 use std::iter::Cloned;
 use std::slice::Iter;
 
@@ -35,6 +36,7 @@ impl<'a> Parser<'a> {
             Token::Attribute => self.parse_attribute_decl(),
             Token::Const => self.parse_const_decl(),
             Token::Fn => self.parse_fn_decl(),
+            Token::Instance => self.parse_instance_decl(),
             Token::Struct => self.parse_struct_decl(),
             Token::Uniform => self.parse_uniform_decl(),
             Token::Varying => self.parse_varying_decl(),
@@ -102,6 +104,31 @@ impl<'a> Parser<'a> {
             return_ty_expr,
             block,
         }))
+    }
+
+    fn parse_instance_decl(&mut self) -> Result<Decl, Error> {
+        self.expect_token(Token::Instance)?;
+        let ident = self.parse_ident()?;
+        self.expect_token(Token::Colon)?;
+        let mut string = String::new();
+        write!(string, "{}", self.parse_ident()?).unwrap();
+        self.expect_token(Token::PathSep)?;
+        loop {
+            write!(string, "::{}", self.parse_ident()?).unwrap();
+            if !self.accept_token(Token::PathSep) {
+                break;
+            }
+        }
+        self.expect_token(Token::LeftParen)?;
+        self.expect_token(Token::RightParen)?;
+        self.expect_token(Token::Semi)?;
+        let ty_expr = TyExpr {
+            ty: RefCell::new(None),
+            kind: TyExprKind::Var {
+                ident: Ident::new(string)
+            }
+        };
+        Ok(Decl::Instance(InstanceDecl { ident, ty_expr }))
     }
 
     fn parse_struct_decl(&mut self) -> Result<Decl, Error> {
