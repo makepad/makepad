@@ -199,7 +199,7 @@ pub struct TyExpr {
 #[derive(Clone, Debug)]
 pub enum TyExprKind {
     Array { elem_ty_expr: Box<TyExpr>, len: u32 },
-    Struct { ident: Ident },
+    Var { ident: Ident },
     Lit { ty_lit: TyLit },
 }
 

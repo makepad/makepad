@@ -159,6 +159,10 @@ where
                 self.skip_char();
                 Token::Slash
             }
+            (':', ':') => {
+                self.skip_char();
+                Token::PathSep
+            }
             (':', _) => {
                 self.skip_char();
                 Token::Colon

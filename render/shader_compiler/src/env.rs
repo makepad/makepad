@@ -43,7 +43,7 @@ impl Env {
 pub enum Sym {
     Builtin,
     Fn,
-    Struct,
+    TyVar { ty: Ty },
     Var { is_mut: bool, ty: Ty, kind: VarKind },
 }
 
