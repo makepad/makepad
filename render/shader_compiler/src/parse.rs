@@ -40,7 +40,10 @@ impl<'a> Parser<'a> {
             Token::Struct => self.parse_struct_decl(),
             Token::Uniform => self.parse_uniform_decl(),
             Token::Varying => self.parse_varying_decl(),
-            token => Err(span.error(self, format!("unexpected token `{}`", token).into())),
+            token => {
+                self.skip_token();
+                Err(span.error(self, format!("unexpected token `{}`", token).into()))
+            },
         }
     }
 
@@ -330,7 +333,10 @@ impl<'a> Parser<'a> {
                         kind: TyExprKind::Array { elem_ty_expr, len },
                     };
                 }
-                token => return Err(span.error(self, format!("unexpected token `{}`", token).into())),
+                token => {
+                    self.skip_token();
+                    return Err(span.error(self, format!("unexpected token `{}`", token).into()))
+                },
             }
         }
         Ok(acc)
@@ -353,7 +359,10 @@ impl<'a> Parser<'a> {
                     kind: TyExprKind::Lit { ty_lit },
                 })
             }
-            token => Err(span.error(self, format!("unexpected token `{}`", token).into())),
+            token => {
+                self.skip_token();
+                Err(span.error(self, format!("unexpected token `{}`", token).into()))
+            },
         }
     }
 
@@ -666,7 +675,10 @@ impl<'a> Parser<'a> {
                 self.expect_token(Token::RightParen)?;
                 Ok(expr)
             }
-            token => Err(span.error(self, format!("unexpected token `{}`", token).into())),
+            token => {
+                self.skip_token();
+                Err(span.error(self, format!("unexpected token `{}`", token).into()))
+            },
         }
     }
 
@@ -677,7 +689,10 @@ impl<'a> Parser<'a> {
                 self.skip_token();
                 Ok(ident)
             }
-            token => Err(span.error(self, format!("unexpected token `{}`", token).into())),
+            token => {
+                self.skip_token();
+                Err(span.error(self, format!("unexpected token `{}`", token).into()))
+            },
         }
     }
 
