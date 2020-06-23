@@ -46,7 +46,7 @@ impl<'a> TyChecker<'a> {
         Ok(Ty::Array { elem_ty, len })
     }
 
-    fn ty_check_var_ty_expr(&mut self, ident: Ident) -> Result<Ty, Box<dyn Error>> {
+    fn ty_check_var_ty_expr(&mut self, ident: Ident) -> Result<Ty, Box<dyn error::Error>> {
         match self
             .env
             .find_sym(ident)
