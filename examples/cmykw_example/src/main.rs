@@ -1,24 +1,27 @@
 use makepad_render::*;
 use makepad_widget::*;
+//use tiff::decoder::{Decoder, DecodingResult};
+//use tiff::ColorType;
 
-struct WidgetExampleApp {
+use std::fs::File;
+
+struct App {
     desktop_window: DesktopWindow, 
     menu: Menu,
     button:NormalButton,
-    buttons:ElementsCounted<NormalButton>
 }
 
 fn main(){
-    main_app!(WidgetExampleApp);
+    main_app!(App);
 }
-impl WidgetExampleApp {
+
+impl App {
     pub fn new(cx: &mut Cx) -> Self {
-        set_widget_style(cx, &StyleOptions{scale:0.5,..StyleOptions::default()});
+        set_widget_style(cx, &StyleOptions{..StyleOptions::default()});
         Self {
             desktop_window: DesktopWindow::new(cx),
             button: NormalButton::new(cx),
-            buttons:ElementsCounted::new(NormalButton::new(cx)),
-            menu:Menu::main(vec![
+             menu:Menu::main(vec![
                 Menu::sub("Example", vec![
                     Menu::line(),
                     Menu::item("Quit Example",  Cx::command_quit()),
@@ -31,10 +34,8 @@ impl WidgetExampleApp {
         self.desktop_window.handle_desktop_window(cx, event);
 
         if let ButtonEvent::Clicked = self.button.handle_normal_button(cx,event){
-            println!("CLICKED");  
-        }
-        for button in self.buttons.iter(){
-            button.handle_normal_button(cx, event);
+            // lets convert a file
+            
         }
     }
     
@@ -42,10 +43,7 @@ impl WidgetExampleApp {
         if self.desktop_window.begin_desktop_window(cx, Some(&self.menu)).is_err() {
             return
         };
-        self.button.draw_normal_button(cx, "Hello");
-        for i in 0..1000{  
-            self.buttons.get_draw(cx).draw_normal_button(cx, &format!("{}",i));
-        }
+        self.button.draw_normal_button(cx, "Convert");
         self.desktop_window.end_desktop_window(cx);
     }
 }
