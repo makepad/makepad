@@ -20,8 +20,8 @@ const SOURCE: &str = r#"
     attribute aBla: float;
     attribute aColor: vec3;
 
-    // instance iDisplacement: Foo::Bar();
-
+    instance iDisplacement: vec4;
+    
     varying vColor: vec3;
 
     uniform uModelViewMatrix: A::B::C() in draw;
