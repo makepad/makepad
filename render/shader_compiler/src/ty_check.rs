@@ -27,7 +27,7 @@ impl<'a> TyChecker<'a> {
                 ref elem_ty_expr,
                 len,
             } => self.ty_check_array_ty_expr(elem_ty_expr, len),
-            TyExprKind::Struct { ident } => self.ty_check_struct_ty_expr(ident),
+            TyExprKind::Var { ident } => self.ty_check_var_ty_expr(ident),
             TyExprKind::Lit { ty_lit } => self.ty_check_lit_ty_expr(ty_lit),
         }?;
         *ty_expr.ty.borrow_mut() = Some(ty.clone());
@@ -44,13 +44,13 @@ impl<'a> TyChecker<'a> {
         Ok(Ty::Array { elem_ty, len })
     }
 
-    fn ty_check_struct_ty_expr(&mut self, ident: Ident) -> Result<Ty, Box<dyn Error>> {
+    fn ty_check_var_ty_expr(&mut self, ident: Ident) -> Result<Ty, Box<dyn Error>> {
         match self
             .env
             .find_sym(ident)
             .ok_or_else(|| format!("`{}` is not defined in this scope", ident))?
         {
-            Sym::Struct => Ok(Ty::Struct { ident }),
+            Sym::TyVar { ty } => Ok(ty.clone()),
             _ => Err(format!("`{}` is not a type variable", ident).into()),
         }
     }
