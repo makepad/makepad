@@ -295,7 +295,7 @@ impl<'a> Parser<'a> {
                 self.skip_token();
                 Ok(TyExpr {
                     ty: RefCell::new(None),
-                    kind: TyExprKind::Struct { ident },
+                    kind: TyExprKind::Var { ident },
                 })
             }
             Token::TyLit(ty_lit) => {
