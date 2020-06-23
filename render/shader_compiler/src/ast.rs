@@ -44,6 +44,16 @@ impl Shader {
         })
     }
 
+    pub fn find_instance_decl(&self, ident: Ident) -> Option<&InstanceDecl> {
+        self.decls.iter().find_map(|decl| {
+            match decl {
+                Decl::Instance(decl) => Some(decl),
+                _ => None,
+            }
+            .filter(|decl| decl.ident == ident)
+        })
+    }
+
     pub fn find_struct_decl(&self, ident: Ident) -> Option<&StructDecl> {
         self.decls.iter().find_map(|decl| {
             match decl {
@@ -80,6 +90,7 @@ pub enum Decl {
     Attribute(AttributeDecl),
     Const(ConstDecl),
     Fn(FnDecl),
+    Instance(InstanceDecl),
     Struct(StructDecl),
     Uniform(UniformDecl),
     Varying(VaryingDecl),
@@ -114,6 +125,12 @@ pub struct FnDecl {
     pub params: Vec<Param>,
     pub return_ty_expr: Option<TyExpr>,
     pub block: Block,
+}
+
+#[derive(Clone, Debug)]
+pub struct InstanceDecl {
+    pub ident: Ident,
+    pub ty_expr: TyExpr,
 }
 
 #[derive(Clone, Debug)]

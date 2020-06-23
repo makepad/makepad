@@ -165,7 +165,7 @@ where
                 Token::Slash
             }
             (':', ':') => {
-                self.skip_char();
+                self.skip_two_chars();
                 Token::PathSep
             }
             (':', _) => {
@@ -225,6 +225,7 @@ where
                     "from" => Token::From,
                     "if" => Token::If,
                     "in" => Token::In,
+                    "instance" => Token::Instance,
                     "int" => Token::TyLit(TyLit::Int),
                     "ivec2" => Token::TyLit(TyLit::Ivec2),
                     "ivec3" => Token::TyLit(TyLit::Ivec3),
@@ -325,7 +326,7 @@ where
     fn skip_two_chars(&mut self) {
         self.ch_0 = self.chars.next().unwrap_or('\0');
         self.ch_1 = self.chars.next().unwrap_or('\0');
-        self.index += 1;
+        self.index += 2;
     }
 
     fn begin_span(&mut self) -> SpanTracker {

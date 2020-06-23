@@ -106,6 +106,7 @@ impl<'a> ShaderAnalyser<'a> {
             Decl::Attribute(decl) => self.analyse_attribute_decl(decl),
             Decl::Const(decl) => self.analyse_const_decl(decl),
             Decl::Fn(decl) => self.analyse_fn_decl(decl),
+            Decl::Instance(decl) => self.analyse_instance_decl(decl),
             Decl::Struct(decl) => self.analyse_struct_decl(decl),
             Decl::Uniform(decl) => self.analyse_uniform_decl(decl),
             Decl::Varying(decl) => self.analyse_varying_decl(decl),
@@ -176,6 +177,22 @@ impl<'a> ShaderAnalyser<'a> {
         }
         *decl.return_ty.borrow_mut() = Some(return_ty);
         self.env.insert_sym(decl.ident, Sym::Fn)
+    }
+
+    fn analyse_instance_decl(&mut self, decl: &InstanceDecl) -> Result<(), Box<dyn Error>> {
+        let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
+        match ty {
+            Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {}
+            _ => return Err("attribute must be either a floating-point scalar or vector".into()),
+        }
+        self.env.insert_sym(
+            decl.ident,
+            Sym::Var {
+                is_mut: false,
+                ty,
+                kind: VarKind::Attribute,
+            },
+        )
     }
 
     fn analyse_struct_decl(&mut self, decl: &StructDecl) -> Result<(), Box<dyn Error>> {
