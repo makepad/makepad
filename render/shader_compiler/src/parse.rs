@@ -152,7 +152,23 @@ impl<'a> Parser<'a> {
         self.expect_token(Token::Uniform)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
-        let ty_expr = self.parse_ty_expr()?;
+        let mut string = String::new();
+        write!(string, "{}", self.parse_ident()?).unwrap();
+        self.expect_token(Token::PathSep)?;
+        loop {
+            write!(string, "::{}", self.parse_ident()?).unwrap();
+            if !self.accept_token(Token::PathSep) {
+                break;
+            }
+        }
+        self.expect_token(Token::LeftParen)?;
+        self.expect_token(Token::RightParen)?;
+        let ty_expr = TyExpr {
+            ty: RefCell::new(None),
+            kind: TyExprKind::Var {
+                ident: Ident::new(string)
+            }
+        };
         let block_ident = if self.accept_token(Token::In) {
             Some(self.parse_ident()?)
         } else {
