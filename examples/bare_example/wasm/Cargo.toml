@@ -5,10 +5,13 @@ authors = ["arc"]
 edition = "2018"
 
 [lib]
-path = "../src/main.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
 
+[dependencies.bare_example_app]
+path="../app"
+
 [dependencies.makepad-render]
 path="../../../render"
+version="0.2"

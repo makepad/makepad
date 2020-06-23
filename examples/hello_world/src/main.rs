@@ -2,7 +2,6 @@
 //! rectangle to it.
 //! ```
 //! use makepad_render::*;
-
 //! struct HelloWorldApp {
 //!    window: Window,
 //!    pass: Pass,
@@ -10,8 +9,9 @@
 //!    view: View,
 //!}
 //!
-//!main_app!(HelloWorldApp);
-//!
+//!fn main(){
+//!   main_app!(HelloWorldApp);
+//!}
 //!impl HelloWorldApp {
 //!    pub fn shader() -> ShaderId {uid!()}
 //!

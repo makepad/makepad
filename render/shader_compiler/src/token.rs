@@ -1,6 +1,13 @@
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
+use crate::span::Span;
 use std::fmt;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TokenWithSpan {
+    pub span: Span,
+    pub token: Token,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Token {
