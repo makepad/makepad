@@ -10,7 +10,6 @@ use crate::ty::Ty;
 use crate::util::CommaSep;
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::error;
 use std::fmt::Write;
 use std::rc::Rc;
 
@@ -23,14 +22,15 @@ pub struct TyChecker<'a> {
 }
 
 impl<'a> TyChecker<'a> {
-    pub fn ty_check_ty_expr(&mut self, ty_expr: &TyExpr) -> Result<Ty, Box<dyn error::Error>> {
+    pub fn ty_check_ty_expr(&mut self, ty_expr: &TyExpr) -> Result<Ty, Error> {
         let ty = match ty_expr.kind {
             TyExprKind::Array {
+                span,
                 ref elem_ty_expr,
                 len,
-            } => self.ty_check_array_ty_expr(elem_ty_expr, len),
-            TyExprKind::Var { ident } => self.ty_check_var_ty_expr(ident),
-            TyExprKind::Lit { ty_lit } => self.ty_check_lit_ty_expr(ty_lit),
+            } => self.ty_check_array_ty_expr(span, elem_ty_expr, len),
+            TyExprKind::Var { span, ident } => self.ty_check_var_ty_expr(span, ident),
+            TyExprKind::Lit { span, ty_lit } => self.ty_check_lit_ty_expr(span, ty_lit),
         }?;
         *ty_expr.ty.borrow_mut() = Some(ty.clone());
         Ok(ty)
@@ -38,26 +38,41 @@ impl<'a> TyChecker<'a> {
 
     fn ty_check_array_ty_expr(
         &mut self,
+        _span: Span,
         elem_ty_expr: &TyExpr,
         len: u32,
-    ) -> Result<Ty, Box<dyn error::Error>> {
+    ) -> Result<Ty, Error> {
         let elem_ty = Rc::new(self.ty_check_ty_expr(elem_ty_expr)?);
         let len = len as usize;
         Ok(Ty::Array { elem_ty, len })
     }
 
-    fn ty_check_var_ty_expr(&mut self, ident: Ident) -> Result<Ty, Box<dyn error::Error>> {
+    fn ty_check_var_ty_expr(
+        &mut self,
+        span: Span,
+        ident: Ident
+    ) -> Result<Ty, Error> {
         match self
             .env
             .find_sym(ident)
-            .ok_or_else(|| format!("`{}` is not defined in this scope", ident))?
+            .ok_or_else(|| Error {
+                span,
+                message: format!("`{}` is not defined in this scope", ident)
+            })?
         {
             Sym::TyVar { ty } => Ok(ty.clone()),
-            _ => Err(format!("`{}` is not a type variable", ident).into()),
+            _ => Err(Error {
+                span,
+                message: format!("`{}` is not a type variable", ident)
+            }),
         }
     }
 
-    fn ty_check_lit_ty_expr(&mut self, ty_lit: TyLit) -> Result<Ty, Box<dyn error::Error>> {
+    fn ty_check_lit_ty_expr(
+        &mut self,
+        _span: Span,
+        ty_lit: TyLit
+    ) -> Result<Ty, Error> {
         Ok(ty_lit.to_ty())
     }
 
@@ -75,7 +90,6 @@ impl<'a> TyChecker<'a> {
                     "can't match expected type `{}` with actual type `{}",
                     expected_ty, actual_ty
                 )
-                .into()
             });
         }
         Ok(actual_ty)
