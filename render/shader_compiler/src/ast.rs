@@ -19,7 +19,7 @@ impl Shader {
             decls: Vec::new()
         }
     }
-    
+
     pub fn find_attribute_decl(&self, ident: Ident) -> Option<&AttributeDecl> {
         self.decls.iter().find_map(|decl| {
             match decl {
@@ -222,9 +222,19 @@ pub struct TyExpr {
 
 #[derive(Clone, Debug)]
 pub enum TyExprKind {
-    Array { elem_ty_expr: Box<TyExpr>, len: u32 },
-    Var { ident: Ident },
-    Lit { ty_lit: TyLit },
+    Array {
+        span: Span,
+        elem_ty_expr: Box<TyExpr>,
+        len: u32
+    },
+    Var {
+        span: Span,
+        ident: Ident
+    },
+    Lit {
+        span: Span,
+        ty_lit: TyLit
+    },
 }
 
 #[derive(Clone, Debug)]
