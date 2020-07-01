@@ -9,25 +9,26 @@ use std::fmt::Write;
 use std::iter::Cloned;
 use std::slice::Iter;
 
-pub fn parse(tokens_with_span: &[TokenWithSpan]) -> Result<Shader, Error> {
+pub fn parse(tokens_with_span: &[TokenWithSpan], shader: &mut Shader) -> Result<(), Error> {
     let mut tokens_with_span = tokens_with_span.iter().cloned();
     let token_with_span = tokens_with_span.next().unwrap();
-    Parser { tokens_with_span, token_with_span, end: 0 }.parse_shader()
+    Parser { tokens_with_span, token_with_span, end: 0, shader }.parse()
 }
 
 struct Parser<'a> {
     tokens_with_span: Cloned<Iter<'a, TokenWithSpan>>,
     token_with_span: TokenWithSpan,
     end: usize,
+    shader: &'a mut Shader,
 }
 
 impl<'a> Parser<'a> {
-    fn parse_shader(&mut self) -> Result<Shader, Error> {
-        let mut decls = Vec::new();
+    fn parse(&mut self) -> Result<(), Error> {
         while self.peek_token() != Token::Eof {
-            decls.push(self.parse_decl()?);
+            let decl = self.parse_decl()?;
+            self.shader.decls.push(decl);
         }
-        Ok(Shader { decls })
+        Ok(())
     }
 
     fn parse_decl(&mut self) -> Result<Decl, Error> {
