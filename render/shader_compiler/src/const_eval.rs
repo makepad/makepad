@@ -1,11 +1,11 @@
 use crate::ast::*;
 use crate::env::VarKind;
+use crate::error::Error;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
 use crate::span::Span;
 use crate::val::Val;
 use std::cell::Cell;
-use std::error::Error;
 
 #[derive(Clone, Debug)]
 pub struct ConstEvaluator<'a> {
@@ -13,7 +13,7 @@ pub struct ConstEvaluator<'a> {
 }
 
 impl<'a> ConstEvaluator<'a> {
-    pub fn const_eval_expr(&self, expr: &Expr) -> Result<Val, Box<dyn Error>> {
+    pub fn const_eval_expr(&self, expr: &Expr) -> Result<Val, Error> {
         let val = match expr.kind {
             ExprKind::Cond {
                 span,
@@ -66,7 +66,7 @@ impl<'a> ConstEvaluator<'a> {
         expr: &Expr,
         expr_if_true: &Expr,
         expr_if_false: &Expr,
-    ) -> Result<Val, Box<dyn Error>> {
+    ) -> Result<Val, Error> {
         let val = self.const_eval_expr(expr)?;
         let val_if_true = self.const_eval_expr(expr_if_true)?;
         let val_if_false = self.const_eval_expr(expr_if_false)?;
@@ -80,11 +80,11 @@ impl<'a> ConstEvaluator<'a> {
     #[allow(clippy::float_cmp)]
     fn const_eval_bin_expr(
         &self,
-        _span: Span,
+        span: Span,
         op: BinOp,
         left_expr: &Expr,
         right_expr: &Expr,
-    ) -> Result<Val, Box<dyn Error>> {
+    ) -> Result<Val, Error> {
         let left_val = self.const_eval_expr(left_expr)?;
         let right_val = self.const_eval_expr(right_expr)?;
         match op {
@@ -150,15 +150,18 @@ impl<'a> ConstEvaluator<'a> {
             },
             _ => None,
         }
-        .ok_or_else(|| "expression is not const".into())
+        .ok_or_else(|| Error {
+            span,
+            message: String::from("expression is not const")
+        })
     }
 
     fn const_eval_un_expr(
         &self,
-        _span: Span,
+        span: Span,
         op: UnOp,
         expr: &Expr
-    ) -> Result<Val, Box<dyn Error>> {
+    ) -> Result<Val, Error> {
         let val = self.const_eval_expr(expr)?;
         match op {
             UnOp::Not => match val {
@@ -171,52 +174,67 @@ impl<'a> ConstEvaluator<'a> {
                 _ => None,
             },
         }
-        .ok_or_else(|| "expression is not const".into())
+        .ok_or_else(|| Error {
+            span,
+            message: String::from("expression is not const")
+        })
     }
 
     fn const_eval_field_expr(
         &self,
-        _span: Span,
+        span: Span,
         _expr: &Expr,
         _field_ident: Ident,
-    ) -> Result<Val, Box<dyn Error>> {
-        Err("expression is not const".into())
+    ) -> Result<Val, Error> {
+        Err(Error {
+            span,
+            message: String::from("expression is not const")
+        })
     }
 
     fn const_eval_index_expr(
         &self,
-        _span: Span,
+        span: Span,
         _expr: &Expr,
         _index_expr: &Expr,
-    ) -> Result<Val, Box<dyn Error>> {
-        Err("expression is not const".into())
+    ) -> Result<Val, Error> {
+        Err(Error {
+            span,
+            message: String::from("expression is not const")
+        })
     }
 
     fn const_eval_call_expr(
         &self,
-        _span: Span,
+        span: Span,
         _ident: Ident,
         _arg_exprs: &[Expr],
-    ) -> Result<Val, Box<dyn Error>> {
-        Err("expression is not const".into())
+    ) -> Result<Val, Error> {
+        Err(Error {
+            span,
+            message: String::from("expression is not const")
+        })
     }
 
     fn const_eval_cons_call_expr(
         &self,
-        _span: Span,
+        span: Span,
         _ty_lit: TyLit,
         _arg_exprs: &[Expr],
-    ) -> Result<Val, Box<dyn Error>> {
-        Err("expression is not const".into())
+    ) -> Result<Val, Error> {
+        Err(Error {
+            span,
+            message: String::from("expression is not const")
+        })
     }
 
     fn const_eval_var_expr(
         &self,
-        _span: Span,
+        span: Span,
         _is_lvalue: &Cell<Option<bool>>,
         kind: &Cell<Option<VarKind>>,
         ident: Ident,
-    ) -> Result<Val, Box<dyn Error>> {
+    ) -> Result<Val, Error> {
         match kind.get().unwrap() {
             VarKind::Const => Ok(self
                 .shader
@@ -228,11 +246,14 @@ impl<'a> ConstEvaluator<'a> {
                 .as_ref()
                 .unwrap()
                 .clone()),
-            _ => Err("expression is not const".into()),
+            _ => Err(Error {
+                span,
+                message: String::from("expression is not const")
+            }),
         }
     }
 
-    fn const_eval_lit_expr(&self, _span: Span, lit: Lit) -> Result<Val, Box<dyn Error>> {
+    fn const_eval_lit_expr(&self, _span: Span, lit: Lit) -> Result<Val, Error> {
         Ok(lit.to_val())
     }
 }
