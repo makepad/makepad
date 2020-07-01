@@ -1,4 +1,5 @@
 use makepad_shader_compiler::analyse;
+use makepad_shader_compiler::ast::Shader;
 use makepad_shader_compiler::generate::{self, ShaderKind};
 use makepad_shader_compiler::lex;
 use makepad_shader_compiler::parse;
@@ -58,10 +59,12 @@ const SOURCE: &str = r#"
 
 #[test]
 fn test() {
-    let mut shader = parse::parse(
+    let mut shader = Shader::new();
+    parse::parse(
         &lex::lex(SOURCE.chars())
             .collect::<Result<Vec<_>, _>>()
             .unwrap(),
+        &mut shader,
     )
     .unwrap();
     analyse::analyse(&mut shader).unwrap();

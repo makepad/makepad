@@ -14,6 +14,12 @@ pub struct Shader {
 }
 
 impl Shader {
+    pub fn new() -> Shader {
+        Shader {
+            decls: Vec::new()
+        }
+    }
+    
     pub fn find_attribute_decl(&self, ident: Ident) -> Option<&AttributeDecl> {
         self.decls.iter().find_map(|decl| {
             match decl {
