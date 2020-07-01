@@ -114,6 +114,7 @@ impl<'a> Parser<'a> {
         self.expect_token(Token::Instance)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
+        let span = self.begin_span();
         let mut string = String::new();
         write!(string, "{}", self.parse_ident()?).unwrap();
         self.expect_token(Token::PathSep)?;
@@ -126,12 +127,13 @@ impl<'a> Parser<'a> {
         self.expect_token(Token::LeftParen)?;
         self.expect_token(Token::RightParen)?;
         self.expect_token(Token::Semi)?;
-        let ty_expr = TyExpr {
+        let ty_expr = span.end(&self, |span| TyExpr {
             ty: RefCell::new(None),
             kind: TyExprKind::Var {
+                span,
                 ident: Ident::new(string)
             }
-        };
+        });
         Ok(Decl::Instance(InstanceDecl { ident, ty_expr }))
     }
 
@@ -156,6 +158,7 @@ impl<'a> Parser<'a> {
         self.expect_token(Token::Uniform)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
+        let span = self.begin_span();
         let mut string = String::new();
         write!(string, "{}", self.parse_ident()?).unwrap();
         self.expect_token(Token::PathSep)?;
@@ -167,12 +170,13 @@ impl<'a> Parser<'a> {
         }
         self.expect_token(Token::LeftParen)?;
         self.expect_token(Token::RightParen)?;
-        let ty_expr = TyExpr {
+        let ty_expr = span.end(&self, |span| TyExpr {
             ty: RefCell::new(None),
             kind: TyExprKind::Var {
+                span,
                 ident: Ident::new(string)
             }
-        };
+        });
         let block_ident = if self.accept_token(Token::In) {
             Some(self.parse_ident()?)
         } else {
@@ -329,10 +333,10 @@ impl<'a> Parser<'a> {
                 Token::Lit(Lit::Int(len)) => {
                     self.skip_token();
                     self.expect_token(Token::RightBracket)?;
-                    acc = TyExpr {
+                    acc = span.end(&self, |span| TyExpr {
                         ty: RefCell::new(None),
-                        kind: TyExprKind::Array { elem_ty_expr, len },
-                    };
+                        kind: TyExprKind::Array { span, elem_ty_expr, len },
+                    });
                 }
                 token => {
                     self.skip_token();
@@ -348,17 +352,17 @@ impl<'a> Parser<'a> {
         match self.peek_token() {
             Token::Ident(ident) => {
                 self.skip_token();
-                Ok(TyExpr {
+                Ok(span.end(&self, |span| TyExpr {
                     ty: RefCell::new(None),
-                    kind: TyExprKind::Var { ident },
-                })
+                    kind: TyExprKind::Var { span, ident },
+                }))
             }
             Token::TyLit(ty_lit) => {
                 self.skip_token();
-                Ok(TyExpr {
+                Ok(span.end(&self, |span| TyExpr {
                     ty: RefCell::new(None),
-                    kind: TyExprKind::Lit { ty_lit },
-                })
+                    kind: TyExprKind::Lit { span, ty_lit },
+                }))
             }
             token => {
                 self.skip_token();
