@@ -1,6 +1,7 @@
 use makepad_widget::*;
 use crate::mprstokenizer::*;
 use makepad_render::makepad_shader_compiler::analyse;
+use makepad_render::makepad_shader_compiler::ast::Shader;
 use makepad_render::makepad_shader_compiler::generate::{self, ShaderKind};
 use makepad_render::makepad_shader_compiler::lex;
 use makepad_render::makepad_shader_compiler::parse;
@@ -46,7 +47,8 @@ impl LiveMacros {
                                 let tokens = lex::lex(
                                     tp.flat_text[start..end].iter().cloned()
                                 ).collect::<Result<Vec<_>, _>>()?;
-                                let shader = parse::parse(&tokens)?;
+                                let mut shader = Shader::new();
+                                parse::parse(&tokens, &mut shader)?;
                                 analyse::analyse(&shader)?;
                                 let vertex_string = generate::generate(ShaderKind::Vertex, &shader);
                                 let fragment_string = generate::generate(ShaderKind::Fragment, &shader);
