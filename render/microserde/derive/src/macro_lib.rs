@@ -68,7 +68,17 @@ impl TokenBuilder {
                 "?" | ";" | "&" | "^" | ":" | "::" | "," | "!" | "." | "<<" | ">>" |
                 "->" | "=>" | "<" | ">" | "<=" | ">=" | "=" | "==" | "!=" |
                 "+" | "+=" | "-" | "-=" | "*" | "*=" | "/" | "/=" => self.punct(part),
-                _ => self.ident(part) // this will error if its not an identifier
+                _ => {
+                    if part.len() == 0{
+                        continue
+                    }
+                    match part.chars().next().unwrap(){
+                        '0'..='9'=>{
+                            self.unsuf_usize(part.parse().expect(&format!("Can't parse number \"{}\"", what))) 
+                        },
+                        _=>self.ident(part)
+                    }
+                }
             };
         }
         self
@@ -92,6 +102,7 @@ impl TokenBuilder {
     pub fn string(&mut self, val: &str) -> &mut Self {self.extend(TokenTree::from(Literal::string(val)))}
     pub fn unsuf_usize(&mut self, val: usize) -> &mut Self {self.extend(TokenTree::from(Literal::usize_unsuffixed(val)))}
     pub fn suf_u16(&mut self, val: u16) -> &mut Self {self.extend(TokenTree::from(Literal::u16_suffixed(val)))}
+    pub fn chr(&mut self, val:char) -> &mut Self {self.extend(TokenTree::from(Literal::character(val)))}
     pub fn _lit(&mut self, lit: Literal) -> &mut Self {self.extend(TokenTree::from(lit))}
     
     pub fn push_group(&mut self, delim: Delimiter) -> &mut Self {
@@ -154,6 +165,8 @@ pub struct TokenParser {
     iter_stack: Vec<IntoIter>,
     current: Option<TokenTree>
 }
+
+// this parser is optimized for parsing type definitions, not general Rust code
 
 impl TokenParser {
     pub fn new(start: TokenStream) -> Self {
@@ -253,24 +266,22 @@ impl TokenParser {
         return false
     }
     
-    pub fn is_punct(&mut self, what: &str) -> bool {
-        for (last, c) in what.chars().identify_last() {
-            if let Some(TokenTree::Punct(current)) = &self.current {
-                if current.as_char() == c && current.spacing() == if last {Spacing::Alone} else {Spacing::Joint} {
-                    return true
-                }
-                else {
-                    return false
-                }
+    pub fn is_punct(&mut self, what: char) -> bool {
+        // check if our punct is multichar.
+        if let Some(TokenTree::Punct(current)) = &self.current {
+            if current.as_char() == what && (what == '>' || current.spacing() == Spacing::Alone){
+                return true
             }
             else {
                 return false
             }
         }
-        return true
+        else {
+            return false
+        }
     }
     
-    pub fn eat_punct(&mut self, what: &str) -> bool {
+    pub fn eat_punct(&mut self, what: char) -> bool {
         if self.is_punct(what) {
             self.advance();
             return true
@@ -287,37 +298,6 @@ impl TokenParser {
         return None
     }
     
-    pub fn eat_generic(&mut self) -> Option<TokenStream> {
-        let mut tb = TokenBuilder::new();
-        // if we have a <, keep running and keep a < stack
-        if self.eat_punct("<") {
-            tb.add("<");
-            let mut stack = 1;
-            // keep eating things till we are at stack 0 for a ">"
-            while stack > 0 {
-                if self.eat_punct("<") {
-                    tb.add("<");
-                    stack += 1;
-                }
-                else if self.eat_punct(">") {
-                    tb.add(">");
-                    stack -= 1;
-                }
-                else if self.eat_eot() { // shits broken
-                    return None
-                }
-                else { // store info here in generics struct
-                    if let Some(current) = &self.current {
-                        tb.extend(current.clone());
-                    }
-                    self.advance();
-                }
-            }
-            return Some(tb.end())
-        }
-        return None
-    }
-    
     pub fn eat_where_clause(&mut self, add_where: Option<&str>) -> Option<TokenStream> {
         let mut tb = TokenBuilder::new();
         if self.eat_ident("where") {
@@ -328,7 +308,7 @@ impl TokenParser {
                     tb.ident(&ident);
                     tb.stream(self.eat_generic());
                     
-                    if !self.eat_punct(":") {
+                    if !self.eat_punct(':') {
                         return None
                     }
                     tb.add(":");
@@ -338,11 +318,11 @@ impl TokenParser {
                             tb.stream(self.eat_generic());
                             // check if we have upnext
                             // {, + or ,
-                            if self.eat_punct("+") {
+                            if self.eat_punct('+') {
                                 tb.add("+");
                                 continue
                             }
-                            if self.eat_punct(",") { // next one
+                            if self.eat_punct(',') { // next one
                                 if let Some(add_where) = add_where {
                                     tb.add("+");
                                     tb.ident(add_where);
@@ -350,7 +330,7 @@ impl TokenParser {
                                 tb.add(",");
                                 break
                             }
-                            if self.is_brace() || self.is_punct(";") { // upnext is a brace.. we're done
+                            if self.is_brace() || self.is_punct(';') { // upnext is a brace.. we're done
                                 if let Some(add_where) = add_where {
                                     tb.add("+");
                                     tb.ident(add_where);
@@ -374,7 +354,7 @@ impl TokenParser {
     pub fn eat_struct_field(&mut self) -> Option<(String, TokenStream)> {
         // letsparse an ident
         if let Some(field) = self.eat_any_ident() {
-            if self.eat_punct(":") {
+            if self.eat_punct(':') {
                 if let Some(ty) = self.eat_type() {
                     return Some((field, ty))
                 }
@@ -384,12 +364,13 @@ impl TokenParser {
     }
     
     pub fn eat_all_struct_fields(&mut self, )->Option<Vec<(String, TokenStream)>>{
+        
         if self.open_brace(){
             let mut fields = Vec::new();
             while !self.eat_eot(){
                 if let Some((field, ty)) = self.eat_struct_field(){
                     fields.push((field, ty));
-                    self.eat_punct(",");
+                    self.eat_punct(',');
                 }
                 else{
                     return None
@@ -400,13 +381,47 @@ impl TokenParser {
         return None
     }
     
+
+    pub fn eat_generic(&mut self) -> Option<TokenStream> {
+        let mut tb = TokenBuilder::new();
+        // if we have a <, keep running and keep a < stack
+        
+        if self.eat_punct('<') {
+            tb.add("<");
+            let mut stack = 1;
+            // keep eating things till we are at stack 0 for a ">"
+            while stack > 0 {
+                if self.eat_punct('<') {
+                    tb.add("<");
+                    stack += 1;
+                }
+                if self.eat_punct('>') {
+                    tb.add(">");
+                    stack -= 1;
+                }
+                else if self.eat_eot() { // shits broken
+                    return None
+                }
+                else { // store info here in generics struct
+                    if let Some(current) = &self.current {
+                        tb.extend(current.clone());
+                    }
+                    self.advance();
+                }
+            }
+            
+            return Some(tb.end())
+        }
+        return None
+    }
+    
     pub fn eat_all_types(&mut self)->Option<Vec<TokenStream>>{
         if self.open_paren(){
             let mut ret = Vec::new();
             while !self.eat_eot(){
                 if let Some(tt) = self.eat_type(){
                     ret.push(tt);
-                    self.eat_punct(",");
+                    self.eat_punct(',');
                 }
                 else{
                     return None
@@ -421,7 +436,18 @@ impl TokenParser {
     
     pub fn eat_type(&mut self) -> Option<TokenStream> {
         let mut tb = TokenBuilder::new();
-        if let Some(ty) = self.eat_any_ident() {
+        if self.open_bracket(){ // array type
+            tb.add("[");
+            while !self.eat_eot(){
+                if let Some(current) = &self.current {
+                    tb.extend(current.clone());
+                }
+                self.advance();
+            }
+            tb.add("]");
+            return Some(tb.end())
+        }
+        else if let Some(ty) = self.eat_any_ident() {
             tb.ident(&ty);
             tb.stream(self.eat_generic());
 
