@@ -103,7 +103,7 @@ pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
         if let Some(name) = parser.eat_any_ident(){
             let generic = parser.eat_generic();
             let types = parser.eat_all_types();
-            let where_clause = parser.eat_where_clause(Some("SerBin"));
+            let where_clause = parser.eat_where_clause(Some("DeBin"));
 
             tb.add("impl").stream(generic.clone());
             tb.add("DeBin for").ident(&name).stream(generic).stream(where_clause);
