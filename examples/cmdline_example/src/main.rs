@@ -24,7 +24,7 @@ fn main() {
 
 use makepad_microserde::*;
 
-#[derive(SerBin, DeBin, SerJson, DeJson, PartialEq)]
+#[derive(SerBin, DeBin, SerJson, DeJson, SerRon, DeRon, PartialEq)]
 struct MyStruct<T> where T: Clone {
     a: T,
     b: u32,
@@ -39,7 +39,7 @@ struct MyStruct<T> where T: Clone {
     k: [u32;2]
 } 
 
-#[derive(SerBin, DeBin, SerJson, DeJson, PartialEq)]
+#[derive(SerBin, DeBin, SerJson, DeJson, SerRon, DeRon, PartialEq)]
 enum MyEnum<T> where T: Clone {
     One,
     Two(T, u32),
@@ -73,5 +73,8 @@ fn main() {
     let y:MyStruct<usize> = DeJson::deserialize_json(&json).unwrap();
     println!("JSON roundtrip equality {}", x == y);
     
-    
+    let ron = x.serialize_ron();
+    println!("RON Output {}", ron);
+    let y:MyStruct<usize> = DeRon::deserialize_ron(&ron).unwrap();
+    println!("RON roundtrip equality {}", x == y);
 }
