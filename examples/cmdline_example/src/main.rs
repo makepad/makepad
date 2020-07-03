@@ -23,16 +23,6 @@ fn main() {
 // lets make tinyserde dep free too!
 
 use makepad_microserde::*;
-/*
-#[derive(SerJson)] 
-struct MyStruct<T> where T:Clone{
-    step1: T,
-    step2: Option<u32>
-}
-
-#[derive(SerJson)] 
-struct MyStruct2<T>(T, u32) where T:Clone;
-*/
 
 #[derive(SerBin, DeBin, SerJson, DeJson, PartialEq)]
 struct MyStruct<T> where T: Clone {
@@ -82,4 +72,6 @@ fn main() {
     println!("JSON Output {}", json);
     let y:MyStruct<usize> = DeJson::deserialize_json(&json).unwrap();
     println!("JSON roundtrip equality {}", x == y);
+    
+    
 }

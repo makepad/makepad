@@ -150,7 +150,7 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
             tb.add("impl").stream(generic.clone());
             tb.add("DeJson for").ident(&name).stream(generic).stream(where_clause);
             tb.add("{ fn de_json ( s : &  mut makepad_microserde :: DeJsonState , i : & mut std :: str :: Chars )");
-            tb.add("-> std :: result :: Result < Self , DeJsonErr > { ");
+            tb.add("-> std :: result :: Result < Self , makepad_microserde :: DeJsonErr > { ");
 
             if let Some(types) = types{
                 tb.add("s . block_open ( i ) ? ;");
@@ -209,7 +209,7 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
             tb.add("impl").stream(generic.clone());
             tb.add("DeJson for").ident(&name).stream(generic).stream(where_clause);
             tb.add("{ fn de_json ( s : & mut makepad_microserde :: DeJsonState , i : & mut std :: str :: Chars )");
-            tb.add("-> std :: result :: Result < Self , DeJsonErr > { ");
+            tb.add("-> std :: result :: Result < Self , makepad_microserde :: DeJsonErr > { ");
             tb.add("s . curly_open ( i ) ? ;");
             tb.add("let _ = s . string ( i ) ? ;");
             tb.add("s . colon ( i ) ? ;");
