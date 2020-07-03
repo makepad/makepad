@@ -1,0 +1,22 @@
+[package]
+name = "makepad-shader-macro-impl"
+version = "0.2.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad shader macro implementation"
+license = "MIT"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+#quote = "1.0.2"
+proc-macro-hack = "0.5"
+#proc-macro2 = "1.0.1"
+
+#[dependencies.syn]
+#version = "1.0"
+#features = ["full"]
+
+[dependencies.makepad-shader-compiler] 
+path="../../shader_compiler"
