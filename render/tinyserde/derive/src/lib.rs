@@ -22,6 +22,7 @@ use syn::{
     DeriveInput,
 };
 
+
 #[proc_macro_derive(SerBin)]
 pub fn derive_ser_bin(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

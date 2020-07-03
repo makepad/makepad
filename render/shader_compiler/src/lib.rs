@@ -19,3 +19,4 @@ pub mod ty;
 pub mod ty_check;
 pub mod util;
 pub mod val;
+pub mod shader;
