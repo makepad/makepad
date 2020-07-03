@@ -31,8 +31,40 @@ impl <'a>TokenParser<'a> {
         return true;
     }
     
+    pub fn eat_should_ignore(&mut self)->bool{
+        while self.cur_type().should_ignore(){
+            if !self.advance(){
+                return false
+            }
+        }
+        return true
+    }
+    
     pub fn eat(&mut self, what:&str)->bool{
-        false
+        // eat as many ignorable tokens
+        if !self.eat_should_ignore(){
+            return false
+        }
+        // then match what in our token
+        let chunk = &self.tokens[self.index];
+        let mut off = chunk.offset;
+        for c in what.chars(){
+            if off - chunk.offset > chunk.len{
+                return false
+            }
+            if self.flat_text[off] != c{
+                return false;
+            }
+            off += 1;
+        }
+        if off - chunk.offset != chunk.len{
+            return false
+        }
+        if !self.eat_should_ignore(){
+            return false
+        }
+        self.advance();
+        true
     }
     
     pub fn prev_type(&self) -> TokenType {
@@ -47,9 +79,13 @@ impl <'a>TokenParser<'a> {
     pub fn cur_type(&self) -> TokenType {
         self.tokens[self.index].token_type
     }
+    
+    pub fn cur_offset(&self) -> usize{
+        self.tokens[self.index].offset
+    }
 
-    pub fn cur_pair_token(&self) -> usize {
-        self.tokens[self.index].pair_token
+    pub fn cur_pair_offset(&self) -> usize {
+        self.tokens[self.tokens[self.index].pair_token].offset
     }
 
     
