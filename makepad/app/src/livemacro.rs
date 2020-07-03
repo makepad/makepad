@@ -39,10 +39,12 @@ impl LiveMacros {
                         // get matching pair
                         if tp.cur_type() == TokenType::ParenOpen {
                             let start = tp.next_index;
+                            /*
                             let end = tp.cur_pair_token();
                             
                             // don't jump, there might be actual value macros
                             // in the shader itself
+                            
                             if let Err(ref error) = ( || -> Result<(), Box<dyn Error>> {
                                 let tokens = lex::lex(
                                     tp.flat_text[start..end].iter().cloned()
@@ -60,6 +62,7 @@ impl LiveMacros {
                             })() { 
                                 println!("{}", error);
                             }
+                            */
                             
                         }
                     }

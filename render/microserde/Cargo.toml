@@ -1,0 +1,10 @@
+[package]
+name = "makepad-microserde"
+version = "0.1.0"
+authors = ["makepad <info@makepad.nl>"]
+license = "MIT OR Apache-2.0"
+description = "microserde."
+edition = "2018"
+
+[dependencies]
+makepad-microserde-derive = { path = "derive", version = "0.1" }

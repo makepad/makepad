@@ -9,5 +9,11 @@ edition = "2018"
 #ron = "*"
 time = "*"
 
-[dependencies.makepad-tinyserde] 
-path="../../render/tinyserde"
+[dependencies.makepad-shader-macro] 
+path="../../render/shader_macro"
+
+[dependencies.makepad-shader-compiler] 
+path="../../render/shader_compiler"
+
+[dependencies.makepad-microserde] 
+path="../../render/microserde"
