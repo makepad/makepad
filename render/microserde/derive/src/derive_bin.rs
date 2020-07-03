@@ -152,29 +152,29 @@ pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
                 // parse ident
                 if let Some(variant) = parser.eat_any_ident(){
                     tb.suf_u16(index as u16).add("=> {");
-
+                    tb.add("std :: result :: Result :: Ok ( Self ::");
                     if let Some(types) = parser.eat_all_types(){
-                        tb.add("std :: result :: Result :: Ok ( Self ::").ident(&variant).add("(");
+                        tb.ident(&variant).add("(");
                         for _ in 0..types.len(){
                             tb.add("DeBin :: de_bin ( o , d ) ? ,");
                         }
-                        tb.add(") )");
+                        tb.add(")");
                     }
                     else if let Some(fields) = parser.eat_all_struct_fields(){ // named variant
-                        tb.add("std :: result :: Result :: Ok ( Self ::").ident(&variant).add("{");
+                        tb.ident(&variant).add("{");
                         for (field, _ty) in fields.iter(){
                             tb.ident(field).add(": DeBin :: de_bin ( o , d ) ? ,");
                         }
-                        tb.add("} )");
+                        tb.add("}");
                     }
                     else if parser.is_punct(',') || parser.is_eot(){ // bare variant
-                        tb.add("std :: result :: Result :: Ok ( Self ::").ident(&variant).add(")");
+                        tb.ident(&variant);
                     }
                     else{
                         return parser.unexpected();
                     }
                     
-                    tb.add("}");
+                    tb.add(") }");
                     index += 1;
                     parser.eat_punct(',');
                 }

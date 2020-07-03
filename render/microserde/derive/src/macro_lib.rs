@@ -110,12 +110,22 @@ impl TokenBuilder {
         self
     }
     
+    pub fn stack_as_string(&self)->String{
+        let mut ret = String::new();
+        for i in (0..self.groups.len() - 1).rev(){
+            ret.push_str(&format!("Level {}: {}", i, self.groups[i].1.to_string()));
+        }
+        ret
+    }
+    
     pub fn pop_group(&mut self, delim: Delimiter) -> &mut Self {
         if self.groups.len() < 2 {
+            eprintln!("Stack dump for error:\n{}", self.stack_as_string());
             panic!("pop_group stack is empty {}", self.groups.len());
         }
         let ts = self.groups.pop().unwrap();
         if ts.0 != delim {
+            eprintln!("Stack dump for error:\n{}", self.stack_as_string());
             panic!("pop_group Delimiter mismatch, got {:?} expected {:?}", ts.0, delim);
         }
         self.extend(TokenTree::from(Group::new(delim, ts.1)));
