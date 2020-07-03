@@ -34,7 +34,7 @@ struct MyStruct<T> where T:Clone{
 struct MyStruct2<T>(T, u32) where T:Clone;
 */
 
-#[derive(SerJson)]
+#[derive(SerJson, DeJson, PartialEq)]
 struct MyStruct<T> where T: Clone {
     a: T,
     b: u32,
@@ -49,7 +49,7 @@ struct MyStruct<T> where T: Clone {
     k: [u32;2]
 } 
 
-#[derive(SerJson)]
+#[derive(SerJson, DeJson, PartialEq)]
 enum MyEnum<T> where T: Clone {
     One,
     Two(T, u32),
@@ -73,6 +73,8 @@ fn main() {
         j: "Hello".to_string(),
         k: [10,11]
     };
-    println!("HERE {}", x.serialize_json());
-    //println!("{}",x.0);
+    let json = x.serialize_json();
+    println!("JSON Output {}", json);
+    let y:MyStruct<usize> = DeJson::deserialize_json(&json).unwrap();
+    println!("JSON roundtrip equality {}", x == y);
 }

@@ -59,6 +59,7 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
             tb.add("impl").stream(generic.clone());
             tb.add("SerJson for").ident(&name).stream(generic).stream(where_clause);
             tb.add("{ fn ser_json ( & self , d : usize , s : & mut makepad_microserde :: SerJsonState ) {");
+            tb.add("s . out . push (").chr('{').add(") ;");
             tb.add("match self {");
             
             if !parser.open_brace(){
@@ -103,11 +104,11 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
                             if ty.into_iter().next().unwrap().to_string() == "Option"{
                                 tb.add("if let Some ( t ) = ").ident(&field).add("{");
                                 tb.add("s . field ( d + 1 ,").string(&field).add(") ;");
-                                tb.add("t . ser_json ( d + 1 , s ) ; } ;");
+                                tb.add("t . ser_json ( d + 1 , s ) ; s . conl ( ) ; } ;");
                             }
                             else{
                                 tb.add("s . field ( d + 1 ,").string(&field).add(" ) ;");
-                                tb.ident(&field).add(". ser_json ( d + 1 , s ) ;");
+                                tb.ident(&field).add(". ser_json ( d + 1 , s ) ; s . conl ( ) ;");
                             }
                         }
                         tb.add("s . st_post ( d ) ; }");
@@ -126,15 +127,16 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
                     return parser.unexpected()
                 }
             }
-            tb.add("} } } ;");
+            tb.add("}");
+            tb.add("s . out . push (").chr('}').add(") ;");
+            tb.add("} } ;");
             return tb.end();
         }
     }
     return parser.unexpected()
 }
-/*
-#[proc_macro_derive(DeBin)]
-pub fn derive_de_bin(input: TokenStream) -> TokenStream {
+
+pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
     
@@ -143,91 +145,141 @@ pub fn derive_de_bin(input: TokenStream) -> TokenStream {
         if let Some(name) = parser.eat_any_ident(){
             let generic = parser.eat_generic();
             let types = parser.eat_all_types();
-            let where_clause = parser.eat_where_clause(Some("SerBin"));
+            let where_clause = parser.eat_where_clause(Some("DeJson"));
 
             tb.add("impl").stream(generic.clone());
-            tb.add("DeBin for").ident(&name).stream(generic).stream(where_clause);
-            tb.add("{ fn de_bin ( o : & mut usize , d : & [ u8 ] )");
-            tb.add("-> std :: result :: Result < Self , DeBinErr > { ");
-            tb.add("std :: result :: Result :: Ok ( Self");
+            tb.add("DeJson for").ident(&name).stream(generic).stream(where_clause);
+            tb.add("{ fn de_json ( s : &  mut makepad_microserde :: DeJsonState , i : & mut std :: str :: Chars )");
+            tb.add("-> std :: result :: Result < Self , DeJsonErr > { ");
 
             if let Some(types) = types{
+                tb.add("s . block_open ( i ) ? ;");
+                tb.add("let r = Self");
                 tb.add("(");
                 for _ in 0..types.len(){
-                     tb.add("DeBin :: de_bin ( o , d ) ?");
+                     tb.add("{ let r = DeJson :: de_json ( s , i ) ? ; s . eat_comma_block ( i ) ? ; r } ,");
                 }
-                tb.add(")");
+                tb.add(") ;");
+                tb.add("s . block_close ( i ) ? ;");
+                tb.add("std :: result :: Result :: Ok ( r ) ;");
             }
             else if let Some(fields) = parser.eat_all_struct_fields(){ 
-                tb.add("{");
-                for (field,_ty) in fields{
-                    tb.ident(&field).add(": DeBin :: de_bin ( o , d ) ? ,");
+                tb.add("s . curly_open ( i ) ? ;");
+                for (field,_ty) in &fields{
+                    tb.add("let mut").ident(&format!("_{}",field)).add("= None ;");
                 }
-                tb.add("}");
+                tb.add("while let Some ( _ ) = s . next_str ( ) {");
+                tb.add("match s . strbuf . as_ref ( ) {");
+                for (field,_ty) in &fields{
+                    tb.string(&field).add("=> { s . next_colon ( i ) ? ;");
+                    tb.ident(&format!("_{}",field)).add("= Some ( DeJson :: de_json ( s , i ) ? ) ; } ,");
+                }
+                tb.add("_ => return std :: result :: Result :: Err ( s . err_exp ( & s . strbuf ) )");
+                tb.add("} ; s . eat_comma_curly ( i ) ? ;");
+                tb.add("} ; s . curly_close ( i ) ? ;");
+                
+                tb.add("std :: result :: Result :: Ok ( Self {");
+                for (field,ty) in fields{
+                    tb.ident(&field).add(":");
+                    if ty.into_iter().next().unwrap().to_string() == "Option"{
+                        tb.add("if let Some ( t ) =").ident(&format!("_{}",field));
+                        tb.add("{ t } else { None } ,");
+                    }
+                    else{
+                        tb.add("if let Some ( t ) =").ident(&format!("_{}",field));
+                        tb.add("{ t } else { return Err ( s . err_nf (");
+                        tb.string(&field).add(") ) } ,");
+                    }
+                }
+                tb.add("} )");
             }
             else{
                 return parser.unexpected()
             }
-            tb.add(") } } ;"); 
+            tb.add("} } ;"); 
             return tb.end();
         }
     }
     else if parser.eat_ident("enum"){
+        
         if let Some(name) = parser.eat_any_ident(){
             let generic = parser.eat_generic();
-            let where_clause = parser.eat_where_clause(Some("DeBin"));
-            
+            let where_clause = parser.eat_where_clause(Some("DeJson"));
+
             tb.add("impl").stream(generic.clone());
-            tb.add("DeBin for").ident(&name).stream(generic).stream(where_clause);
-            tb.add("{ fn de_bin ( o : & mut usize , d : & [ u8 ] )");
-            tb.add("-> std :: result :: Result < Self , DeBinErr > {");
-            tb.add("let id : u16 = DeBin :: de_bin ( o , d ) ? ;");
-            tb.add("match id {");
+            tb.add("DeJson for").ident(&name).stream(generic).stream(where_clause);
+            tb.add("{ fn de_json ( s : & mut makepad_microserde :: DeJsonState , i : & mut std :: str :: Chars )");
+            tb.add("-> std :: result :: Result < Self , DeJsonErr > { ");
+            tb.add("s . curly_open ( i ) ? ;");
+            tb.add("let _ = s . string ( i ) ? ;");
+            tb.add("s . colon ( i ) ? ;");
+            tb.add("let r = std :: result :: Result :: Ok ( match s . strbuf . as_ref ( ) {");
             
             if !parser.open_brace(){
                 return parser.unexpected()
             }
-            let mut index = 0;
             while !parser.eat_eot(){
                 // parse ident
                 if let Some(variant) = parser.eat_any_ident(){
-                    tb.suf_u16(index as u16).add("=> {");
-
+                    tb.string(&variant).add("=> {");
                     if let Some(types) = parser.eat_all_types(){
-                        tb.add("std :: result :: Result :: Ok ( Self ::").ident(&variant).add("(");
+                        
+                        tb.add("s . block_open ( i ) ? ;");
+                        tb.add("let r = Self ::").ident(&variant).add("(");
                         for _ in 0..types.len(){
-                            tb.add("DeBin :: de_bin ( o , d ) ? ,");
+                            tb.add("{ let r = DeJson :: de_json ( s , i ) ? ; s . eat_comma_block ( i ) ? ; r } ,");
                         }
-                        tb.add(") )");
+                        tb.add(") ;");
+                        tb.add("s . block_close ( i ) ? ; r");
                     }
                     else if let Some(fields) = parser.eat_all_struct_fields(){ // named variant
-                        tb.add("std :: result :: Result :: Ok ( Self ::").ident(&variant).add("{");
-                        for (field, _ty) in fields.iter(){
-                            tb.ident(field).add(": DeBin :: de_bin ( o , d ) ? ,");
+                        tb.add("s . curly_open ( i ) ? ;");
+                        for (field,_ty) in &fields{
+                            tb.add("let mut").ident(&format!("_{}",field)).add("= None ;");
                         }
-                        tb.add("} )");
+                        tb.add("while let Some ( _ ) = s . next_str ( ) {");
+                        tb.add("match s . strbuf . as_ref ( ) {");
+                        for (field,_ty) in &fields{
+                            tb.string(&field).add("=> { s . next_colon ( i ) ? ;");
+                            tb.ident(&format!("_{}",field)).add("= Some ( DeJson :: de_json ( s , i ) ? ) ; } ,");
+                        }
+                        tb.add("_ => return std :: result :: Result :: Err ( s . err_exp ( & s . strbuf ) )");
+                        tb.add("} s . eat_comma_curly ( i ) ? ;");
+                        tb.add("} s . curly_close ( i ) ? ;");
+                        
+                        tb.add("Self ::").ident(&variant).add("{");
+                        for (field,ty) in fields{
+                            tb.ident(&field).add(":");
+                            if ty.into_iter().next().unwrap().to_string() == "Option"{
+                                tb.add("if let Some ( t ) =").ident(&format!("_{}",field));
+                                tb.add("{ t } else { None } ,");
+                            }
+                            else{
+                                tb.add("if let Some ( t ) =").ident(&format!("_{}",field));
+                                tb.add("{ t } else { return Err ( s . err_nf (");
+                                tb.string(&field).add(") ) } ,");
+                            }
+                        }
+                        tb.add("}");
                     }
-                    else if parser.is_punct(",") || parser.is_eot(){ // bare variant
-                        tb.add("std :: result :: Result :: Ok ( Self ::").ident(&variant).add(")");
+                    else if parser.is_punct(',') || parser.is_eot(){ // bare variant
+                        tb.add("s . block_open ( i ) ? ; s . block_close ( i ) ? ; Self ::").ident(&variant);
                     }
                     else{
                         return parser.unexpected();
                     }
                     
                     tb.add("}");
-                    index += 1;
-                    parser.eat_punct(",");
+                    parser.eat_punct(',');
                 }
                 else{
                     return parser.unexpected()
                 }
             } 
-            tb.add("_ => std :: result :: Result :: Err ( DeBinErr { o : * o , l :");
-            tb.unsuf_usize(1).add(", s : d . len ( ) } )");
-            tb.add("} } } ;");
+            tb.add("_ => return std :: result :: Result :: Err ( s . err_exp ( & s . strbuf ) )");
+            tb.add("} ) ; s . curly_close ( i ) ? ; r } }");
             return tb.end();
         }
     }
     return parser.unexpected()
 }
-*/ 
