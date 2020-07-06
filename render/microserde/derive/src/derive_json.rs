@@ -28,7 +28,7 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
                 }
                 tb.add("s . out . push (").chr(']').add(") ;");
             }
-            else if let Some(fields) = parser.eat_all_struct_fields(){ 
+            else if let Some(fields) = parser.eat_all_struct_fields(){
                 tb.add("s . st_pre ( ) ;");
                 // named struct
                 for (field,ty) in fields{
