@@ -46,7 +46,7 @@ impl CodeIcon {
         })
     }
     
-    pub fn instance_icon_id()->InstanceFloat{uid!()}
+    pub fn instance_icon_id()->FloatId{uid!()}
     
     pub fn def_code_icon_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({

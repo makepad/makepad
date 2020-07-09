@@ -135,7 +135,6 @@ pub fn derive_ser_ron_impl(input: TokenStream) -> TokenStream {
 pub fn derive_de_ron_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
-    
     parser.eat_ident("pub");
     if parser.eat_ident("struct"){
         if let Some(name) = parser.eat_any_ident(){
@@ -197,7 +196,7 @@ pub fn derive_de_ron_impl(input: TokenStream) -> TokenStream {
         }
     }
     else if parser.eat_ident("enum"){
-        
+         
         if let Some(name) = parser.eat_any_ident(){
             let generic = parser.eat_generic();
             let where_clause = parser.eat_where_clause(Some("DeRon"));

@@ -57,30 +57,30 @@ impl TrapezoidText {
             shader: cx.add_shader(Self::def_trapezoid_shader(), "TrapezoidShader"),
             trapezoidator: Trapezoidator::default(),
         }
-    }
+    } 
     
-    fn instance_a_xs()->InstanceVec2{uid!()}
-    fn instance_a_ys()->InstanceVec4{uid!()}
-    fn instance_chan()->InstanceFloat{uid!()}
+    fn a_xs()->Vec2Id{uid!()}
+    fn a_ys()->Vec4Id{uid!()}
+    fn chan()->FloatId{uid!()}
     
     pub fn def_trapezoid_shader() -> ShaderGen { 
         let mut sg = ShaderGen::new();
         sg.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
         sg.geometry_indices = vec![0, 1, 2, 2, 3, 0];
-        
-        sg.compose(shader_ast!({
+         
+        sg.compose(shader!{"
             
             let geom: vec2<Geometry>;
             
-            let a_xs: Self::instance_a_xs();
-            let a_ys: Self::instance_a_ys();
-            let chan: Self::instance_chan();
+            instance a_xs: Self::a_xs();
+            instance a_ys: Self::a_ys();
+            instance chan: Self::chan();
             
-            let v_p0: vec2<Varying>;
-            let v_p1: vec2<Varying>;
-            let v_p2: vec2<Varying>;
-            let v_p3: vec2<Varying>;
-            let v_pixel: vec2<Varying>;
+            varying v_p0: vec2;
+            varying v_p1: vec2;
+            varying v_p2: vec2;
+            varying v_p3: vec2;
+            varying v_pixel: vec2;
             
             fn intersect_line_segment_with_vertical_line(p0: vec2, p1: vec2, x: float) -> vec2 {
                 return vec2(
@@ -178,7 +178,7 @@ impl TrapezoidText {
                 //return vec4(vec2(pos.x, 1.0-pos.y) * 2.0 / vec2(4096.,4096.) - 1.0, 0.0, 1.0);
                 return camera_projection * vec4(pos, 0.0, 1.0);
             }
-        }))
+        "})
     }
 
     // test api for directly drawing a glyph
