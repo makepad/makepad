@@ -363,6 +363,7 @@ impl TokenParser {
     
     pub fn eat_struct_field(&mut self) -> Option<(String, TokenStream)> {
         // letsparse an ident
+        self.eat_ident("pub");
         if let Some(field) = self.eat_any_ident() {
             if self.eat_punct(':') {
                 if let Some(ty) = self.eat_type() {
