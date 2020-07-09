@@ -208,8 +208,8 @@ impl FileTreeItemDraw {
     pub fn walk_filler() -> WalkId {uid!()}
     pub fn walk_folder() -> WalkId {uid!()}
     
-    pub fn instance_line_vec() -> InstanceVec2 {uid!()}
-    pub fn instance_anim_pos() -> InstanceFloat {uid!()}
+    pub fn instance_line_vec() -> Vec2Id {uid!()}
+    pub fn instance_anim_pos() -> FloatId {uid!()}
     
     pub fn shader_filler() -> ShaderId {uid!()}
     

@@ -339,7 +339,7 @@ impl Area{
         return None;
     }
 
-    pub fn write_float(&self, cx:&mut Cx, prop_ident:InstanceFloat, value:f32){
+    pub fn write_float(&self, cx:&mut Cx, prop_ident:FloatId, value:f32){
         if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Float(prop_ident)){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
@@ -350,7 +350,7 @@ impl Area{
         }
     }
 
-    pub fn read_float(&self, cx:&Cx, prop_ident:InstanceFloat)->f32{
+    pub fn read_float(&self, cx:&Cx, prop_ident:FloatId)->f32{
         if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Float(prop_ident)){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
@@ -360,7 +360,7 @@ impl Area{
         0.0
     }
 
-   pub fn write_vec2(&self, cx:&mut Cx, prop_ident:InstanceVec2, value:Vec2){
+   pub fn write_vec2(&self, cx:&mut Cx, prop_ident:Vec2Id, value:Vec2){
         if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Vec2(prop_ident)){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
@@ -372,7 +372,7 @@ impl Area{
         }
    }
 
-    pub fn read_vec2(&self, cx:&Cx, prop_ident:InstanceVec2)->Vec2{
+    pub fn read_vec2(&self, cx:&Cx, prop_ident:Vec2Id)->Vec2{
         if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Vec2(prop_ident)){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
@@ -385,7 +385,7 @@ impl Area{
         Vec2::default()
     }
 
-   pub fn write_vec3(&self, cx:&mut Cx, prop_ident:InstanceVec3, value:Vec3){
+   pub fn write_vec3(&self, cx:&mut Cx, prop_ident:Vec3Id, value:Vec3){
         if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Vec3(prop_ident)){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
@@ -398,7 +398,7 @@ impl Area{
         }
     }
 
-    pub fn read_vec3(&self, cx:&Cx, prop_ident:InstanceVec3)->Vec3{
+    pub fn read_vec3(&self, cx:&Cx, prop_ident:Vec3Id)->Vec3{
         if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Vec3(prop_ident)){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
@@ -412,7 +412,7 @@ impl Area{
         Vec3::default()
     }
 
-   pub fn write_vec4(&self, cx:&mut Cx, prop_ident:InstanceVec4, value:Vec4){
+   pub fn write_vec4(&self, cx:&mut Cx, prop_ident:Vec4Id, value:Vec4){
         if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Vec4(prop_ident)){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
@@ -426,7 +426,7 @@ impl Area{
         }
    }
 
-    pub fn read_vec4(&self, cx:&Cx, prop_ident:InstanceVec4)->Vec4{
+    pub fn read_vec4(&self, cx:&Cx, prop_ident:Vec4Id)->Vec4{
         if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Vec4(prop_ident)){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
@@ -441,7 +441,7 @@ impl Area{
         Vec4::default()
     }
 
-    pub fn write_color(&self, cx:&mut Cx, prop_ident:InstanceColor, value:Color){
+    pub fn write_color(&self, cx:&mut Cx, prop_ident:ColorId, value:Color){
         if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Color(prop_ident)){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
@@ -455,7 +455,7 @@ impl Area{
         }
    }
 
-    pub fn read_color(&self, cx:&Cx, prop_ident:InstanceColor)->Color{
+    pub fn read_color(&self, cx:&Cx, prop_ident:ColorId)->Color{
         if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Color(prop_ident)){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
@@ -550,7 +550,7 @@ impl InstanceArea{
         draw_call.instance.extend_from_slice(data);
     }
 
-    pub fn push_last_float(&self, cx:&mut Cx, animator:&Animator, ident:InstanceFloat)->f32{
+    pub fn push_last_float(&self, cx:&mut Cx, animator:&Animator, ident:FloatId)->f32{
         let ret = animator.last_float(cx, ident);
         self.push_float(cx, ret);
         ret
@@ -567,7 +567,7 @@ impl InstanceArea{
         draw_call.instance.push(value);
     }
 
-    pub fn push_last_vec2(&self, cx:&mut Cx, animator:&Animator, ident:InstanceVec2)->Vec2{
+    pub fn push_last_vec2(&self, cx:&mut Cx, animator:&Animator, ident:Vec2Id)->Vec2{
         let ret =  animator.last_vec2(cx, ident);
         self.push_vec2(cx, ret);
         ret
@@ -585,7 +585,7 @@ impl InstanceArea{
         draw_call.instance.push(value.y);
     }
 
-    pub fn push_last_vec3(&self, cx:&mut Cx, animator:&Animator, ident:InstanceVec3)->Vec3{
+    pub fn push_last_vec3(&self, cx:&mut Cx, animator:&Animator, ident:Vec3Id)->Vec3{
         let ret = animator.last_vec3(cx, ident);
         self.push_vec3(cx, ret);
         ret
@@ -603,7 +603,7 @@ impl InstanceArea{
         draw_call.instance.push(value.z);
     }
 
-    pub fn push_last_vec4(&self, cx:&mut Cx, animator:&Animator, ident:InstanceVec4)->Vec4{
+    pub fn push_last_vec4(&self, cx:&mut Cx, animator:&Animator, ident:Vec4Id)->Vec4{
         let ret = animator.last_vec4(cx, ident);
         self.push_vec4(cx, ret);
         ret
@@ -622,7 +622,7 @@ impl InstanceArea{
         draw_call.instance.push(value.w);
     }
 
-    pub fn push_last_color(&self, cx:&mut Cx, animator:&Animator, ident:InstanceColor)->Color{
+    pub fn push_last_color(&self, cx:&mut Cx, animator:&Animator, ident:ColorId)->Color{
         let ret = animator.last_color(cx, ident);
         self.push_color(cx, ret);
         ret

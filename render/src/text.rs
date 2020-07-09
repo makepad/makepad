@@ -58,7 +58,7 @@ impl Text {
         }
     }
     
-    pub fn instance_font_tc() -> InstanceVec4 {uid!()}
+    pub fn instance_font_tc() -> Vec4Id {uid!()}
     pub fn instance_color() -> InstanceColor {uid!()}
     pub fn instance_x() -> InstanceFloat {uid!()}
     pub fn instance_y() -> InstanceFloat {uid!()}
