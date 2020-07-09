@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::cell::RefCell;
 
-pub use crate::shadergen::*;
+pub use makepad_shader_compiler::shader::*;
+pub use makepad_shader_compiler::uid;
+
 pub use crate::fonts::*;
 pub use crate::turtle::*;
 pub use crate::cursor::*;
@@ -10,7 +12,6 @@ pub use crate::view::*;
 pub use crate::pass::*;
 pub use crate::texture::*;
 pub use crate::text::*;
-pub use crate::shader::*;
 
 pub use crate::math::*;
 pub use crate::events::*;

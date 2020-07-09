@@ -23,8 +23,8 @@ impl Quad {
         }
     }
     
-    pub fn instance_x() -> InstanceFloat {uid!()}
-    pub fn instance_y() -> InstanceFloat {uid!()}
+    pub fn instance_x() -> FloatId {uid!()}
+    pub fn instance_y() -> FloatId {uid!()}
     pub fn instance_w() -> InstanceFloat {uid!()}
     pub fn instance_h() -> InstanceFloat {uid!()}
     pub fn instance_z() -> InstanceFloat {uid!()}

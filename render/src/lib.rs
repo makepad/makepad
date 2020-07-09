@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 // shared modules
-#[macro_use]
-mod shader;
+//#[macro_use]
+//mod shader;
 #[macro_use]
 mod styling;
 #[macro_use]
@@ -84,7 +84,7 @@ mod elements;
 mod math;
 mod colors;
 mod area;
-mod shadergen;
+//mod shadergen;
 mod quad;
 mod blit;
 mod text;
@@ -97,3 +97,4 @@ pub use crate::blit::*;
 pub use crate::text::*;
 pub use crate::elements::*;
 pub use makepad_shader_compiler;
+pub use makepad_shader_macro;
