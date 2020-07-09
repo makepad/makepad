@@ -337,15 +337,15 @@ impl TextEditor {
     pub fn shader_search_marker() -> ShaderId {uid!()}
     pub fn shader_message_marker() -> ShaderId {uid!()}
     
-    pub fn instance_indent_id() -> InstanceFloat {uid!()}
+    pub fn instance_indent_id() -> FloatId {uid!()}
     pub fn uniform_indent_sel() -> UniformFloat {uid!()}
     pub fn uniform_cursor_blink() -> UniformFloat {uid!()}
-    pub fn instance_select_prev_x() -> InstanceFloat {uid!()}
-    pub fn instance_select_prev_w() -> InstanceFloat {uid!()}
-    pub fn instance_select_next_x() -> InstanceFloat {uid!()}
-    pub fn instance_select_next_w() -> InstanceFloat {uid!()}
+    pub fn instance_select_prev_x() -> FloatId {uid!()}
+    pub fn instance_select_prev_w() -> FloatId {uid!()}
+    pub fn instance_select_next_x() -> FloatId {uid!()}
+    pub fn instance_select_next_w() -> FloatId {uid!()}
     pub fn uniform_highlight_visible() -> UniformFloat {uid!()}
-    pub fn instance_shadow_dir() -> InstanceFloat {uid!()}
+    pub fn instance_shadow_dir() -> FloatId {uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         Self::layout_bg().set(cx, Layout::default());

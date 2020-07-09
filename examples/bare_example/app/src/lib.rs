@@ -11,7 +11,7 @@ pub struct BareExampleApp {
 
 impl BareExampleApp {
     pub fn bg() -> ShaderId {uid!()}
-    pub fn counter() -> InstanceFloat {uid!()}
+    pub fn counter() -> FloatId {uid!()}
     pub fn new(cx: &mut Cx) -> Self {
         /*
         shader!{"

@@ -1,4 +1,4 @@
-use makepad_tinyserde::*;
+use makepad_microserde::*;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, SerRon, DeRon)]
 pub struct Rect{

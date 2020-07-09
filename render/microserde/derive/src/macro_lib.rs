@@ -7,13 +7,13 @@ use proc_macro::token_stream::IntoIter;
 
 pub fn error_span(err: &str, span: Span) -> TokenStream {
     let mut tb = TokenBuilder::new();
-    tb.ident_with_span("compile_error", span).add("! (").string(err).add(")");
+    tb.ident_with_span("compile_error", span).add("! (").string(err).add(") ;");
     tb.end()
 }
 
 pub fn error(err: &str) -> TokenStream {
     let mut tb = TokenBuilder::new();
-    tb.add("compile_error ! (").string(err).add(")");
+    tb.add("compile_error ! (").string(err).add(") ;");
     tb.end()
 }
 
@@ -363,6 +363,7 @@ impl TokenParser {
     
     pub fn eat_struct_field(&mut self) -> Option<(String, TokenStream)> {
         // letsparse an ident
+        self.eat_ident("pub");
         if let Some(field) = self.eat_any_ident() {
             if self.eat_punct(':') {
                 if let Some(ty) = self.eat_type() {

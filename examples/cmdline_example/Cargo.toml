@@ -14,6 +14,3 @@ path="../../render/shader_macro"
 
 [dependencies.makepad-shader-compiler] 
 path="../../render/shader_compiler"
-
-[dependencies.makepad-microserde] 
-path="../../render/microserde"
