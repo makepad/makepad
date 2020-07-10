@@ -42,7 +42,6 @@ impl<'a> Parser<'a> {
             Token::Uniform => self.parse_uniform_decl(),
             Token::Varying => self.parse_varying_decl(),
             token => {
-                self.skip_token();
                 Err(span.error(self, format!("unexpected token `{}`", token).into()))
             },
         }
@@ -339,7 +338,6 @@ impl<'a> Parser<'a> {
                     });
                 }
                 token => {
-                    self.skip_token();
                     return Err(span.error(self, format!("unexpected token `{}`", token).into()))
                 },
             }
@@ -365,7 +363,6 @@ impl<'a> Parser<'a> {
                 }))
             }
             token => {
-                self.skip_token();
                 Err(span.error(self, format!("unexpected token `{}`", token).into()))
             },
         }
@@ -430,7 +427,7 @@ impl<'a> Parser<'a> {
             acc = span.end(self, |span| Expr {
                 ty: RefCell::new(None),
                 val: RefCell::new(None),
-                kind: ExprKind::Bin { 
+                kind: ExprKind::Bin {
                     span,
                     op,
                     left_expr,
@@ -625,7 +622,7 @@ impl<'a> Parser<'a> {
                             }
                             self.expect_token(Token::RightParen)?;
                         }
-                        span.end(self, |span| ExprKind::Call { 
+                        span.end(self, |span| ExprKind::Call {
                             span,
                             ident,
                             arg_exprs
@@ -667,7 +664,7 @@ impl<'a> Parser<'a> {
                 Ok(span.end(self, |span| Expr {
                     ty: RefCell::new(None),
                     val: RefCell::new(None),
-                    kind: ExprKind::ConsCall { 
+                    kind: ExprKind::ConsCall {
                         span,
                         ty_lit,
                         arg_exprs
@@ -681,7 +678,6 @@ impl<'a> Parser<'a> {
                 Ok(expr)
             }
             token => {
-                self.skip_token();
                 Err(span.error(self, format!("unexpected token `{}`", token).into()))
             },
         }
@@ -695,7 +691,6 @@ impl<'a> Parser<'a> {
                 Ok(ident)
             }
             token => {
-                self.skip_token();
                 Err(span.error(self, format!("unexpected token `{}`", token).into()))
             },
         }
@@ -823,7 +818,7 @@ impl SpanTracker {
         Error {
             span: Span {
                 start: self.start,
-                end: parser.end,
+                end: parser.token_with_span.span.end,
             },
             message,
         }
