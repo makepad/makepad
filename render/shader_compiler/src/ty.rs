@@ -20,6 +20,7 @@ pub enum Ty {
     Mat2,
     Mat3,
     Mat4,
+    Texture2D,
     Array { elem_ty: Rc<Ty>, len: usize },
     Struct { ident: Ident },
 }
@@ -63,6 +64,7 @@ impl Ty {
             Ty::Bvec4 | Ty::Ivec4 | Ty::Vec4 | Ty::Mat2 => 4,
             Ty::Mat3 => 9,
             Ty::Mat4 => 16,
+            Ty::Texture2D => panic!(),
             Ty::Array { elem_ty, len } => elem_ty.size() * len,
             Ty::Struct { .. } => panic!(),
         }
@@ -88,6 +90,7 @@ impl fmt::Display for Ty {
             Ty::Mat2 => write!(f, "mat2"),
             Ty::Mat3 => write!(f, "mat3"),
             Ty::Mat4 => write!(f, "mat4"),
+            Ty::Texture2D => write!(f, "texture2D"),
             Ty::Array { elem_ty, len } => write!(f, "{}[{}]", elem_ty, len),
             Ty::Struct { ident, .. } => write!(f, "{}", ident),
         }

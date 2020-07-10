@@ -39,6 +39,7 @@ impl<'a> Parser<'a> {
             Token::Fn => self.parse_fn_decl(),
             Token::Instance => self.parse_instance_decl(),
             Token::Struct => self.parse_struct_decl(),
+            Token::Texture => self.parse_texture_decl(),
             Token::Uniform => self.parse_uniform_decl(),
             Token::Varying => self.parse_varying_decl(),
             token => {
@@ -113,26 +114,8 @@ impl<'a> Parser<'a> {
         self.expect_token(Token::Instance)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
-        let span = self.begin_span();
-        let mut string = String::new();
-        write!(string, "{}", self.parse_ident()?).unwrap();
-        self.expect_token(Token::PathSep)?;
-        loop {
-            write!(string, "::{}", self.parse_ident()?).unwrap();
-            if !self.accept_token(Token::PathSep) {
-                break;
-            }
-        }
-        self.expect_token(Token::LeftParen)?;
-        self.expect_token(Token::RightParen)?;
+        let ty_expr = self.parse_ty_path()?;
         self.expect_token(Token::Semi)?;
-        let ty_expr = span.end(&self, |span| TyExpr {
-            ty: RefCell::new(None),
-            kind: TyExprKind::Var {
-                span,
-                ident: Ident::new(string)
-            }
-        });
         Ok(Decl::Instance(InstanceDecl { ident, ty_expr }))
     }
 
@@ -153,29 +136,20 @@ impl<'a> Parser<'a> {
         Ok(Decl::Struct(StructDecl { ident, fields }))
     }
 
+    fn parse_texture_decl(&mut self) -> Result<Decl, Error> {
+        self.expect_token(Token::Texture)?;
+        let ident = self.parse_ident()?;
+        self.expect_token(Token::Colon)?;
+        let ty_expr = self.parse_ty_path()?;
+        self.expect_token(Token::Semi)?;
+        Ok(Decl::Texture(TextureDecl { ident, ty_expr }))
+    }
+
     fn parse_uniform_decl(&mut self) -> Result<Decl, Error> {
         self.expect_token(Token::Uniform)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
-        let span = self.begin_span();
-        let mut string = String::new();
-        write!(string, "{}", self.parse_ident()?).unwrap();
-        self.expect_token(Token::PathSep)?;
-        loop {
-            write!(string, "::{}", self.parse_ident()?).unwrap();
-            if !self.accept_token(Token::PathSep) {
-                break;
-            }
-        }
-        self.expect_token(Token::LeftParen)?;
-        self.expect_token(Token::RightParen)?;
-        let ty_expr = span.end(&self, |span| TyExpr {
-            ty: RefCell::new(None),
-            kind: TyExprKind::Var {
-                span,
-                ident: Ident::new(string)
-            }
-        });
+        let ty_expr = self.parse_ty_path()?;
         let block_ident = if self.accept_token(Token::In) {
             Some(self.parse_ident()?)
         } else {
@@ -321,6 +295,28 @@ impl<'a> Parser<'a> {
         let expr = self.parse_expr()?;
         self.expect_token(Token::Semi)?;
         Ok(Stmt::Expr { expr })
+    }
+
+    fn parse_ty_path(&mut self) -> Result<TyExpr, Error> {
+        let span = self.begin_span();
+        let mut string = String::new();
+        write!(string, "{}", self.parse_ident()?).unwrap();
+        self.expect_token(Token::PathSep)?;
+        loop {
+            write!(string, "::{}", self.parse_ident()?).unwrap();
+            if !self.accept_token(Token::PathSep) {
+                break;
+            }
+        }
+        self.expect_token(Token::LeftParen)?;
+        self.expect_token(Token::RightParen)?;
+        Ok(span.end(&self, |span| TyExpr {
+            ty: RefCell::new(None),
+            kind: TyExprKind::Var {
+                span,
+                ident: Ident::new(string)
+            }
+        }))
     }
 
     fn parse_ty_expr(&mut self) -> Result<TyExpr, Error> {
