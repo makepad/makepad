@@ -98,6 +98,7 @@ pub enum Decl {
     Fn(FnDecl),
     Instance(InstanceDecl),
     Struct(StructDecl),
+    Texture(TextureDecl),
     Uniform(UniformDecl),
     Varying(VaryingDecl),
 }
@@ -149,6 +150,12 @@ impl StructDecl {
     pub fn find_field(&self, ident: Ident) -> Option<&Field> {
         self.fields.iter().find(|field| field.ident == ident)
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct TextureDecl {
+    pub ident: Ident,
+    pub ty_expr: TyExpr,
 }
 
 #[derive(Clone, Debug)]
