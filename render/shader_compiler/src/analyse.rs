@@ -108,6 +108,7 @@ impl<'a> ShaderAnalyser<'a> {
             Decl::Fn(decl) => self.analyse_fn_decl(decl),
             Decl::Instance(decl) => self.analyse_instance_decl(decl),
             Decl::Struct(decl) => self.analyse_struct_decl(decl),
+            Decl::Texture(decl) => self.analyse_texture_decl(decl),
             Decl::Uniform(decl) => self.analyse_uniform_decl(decl),
             Decl::Varying(decl) => self.analyse_varying_decl(decl),
         }
@@ -200,6 +201,22 @@ impl<'a> ShaderAnalyser<'a> {
             self.ty_checker().ty_check_ty_expr(&field.ty_expr)?;
         }
         self.env.insert_sym(decl.ident, Sym::TyVar { ty: Ty::Struct { ident: decl.ident } })
+    }
+
+    fn analyse_texture_decl(&mut self, decl: &TextureDecl) -> Result<(), Box<dyn Error>> {
+        let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
+        match ty {
+            Ty::Texture2D => {}
+            _ => return Err("texture must be a texture2D".into()),
+        }
+        self.env.insert_sym(
+            decl.ident,
+            Sym::Var {
+                is_mut: false,
+                ty,
+                kind: VarKind::Texture,
+            },
+        )
     }
 
     fn analyse_uniform_decl(&mut self, decl: &UniformDecl) -> Result<(), Box<dyn Error>> {

@@ -982,6 +982,7 @@ impl<'a> ExprGenerator<'a> {
             },
             VarKind::Const => {}
             VarKind::Local => {}
+            VarKind::Texture => {}
             VarKind::Varying => write!(self.string, "_mpsc_varyings.").unwrap(),
             VarKind::Uniform => {}
         }
@@ -1011,6 +1012,7 @@ fn write_ident_and_ty(string: &mut String, ident: Ident, ty: &Ty) {
         Ty::Mat2 => write!(string, "mat2 {}", ident).unwrap(),
         Ty::Mat3 => write!(string, "mat3 {}", ident).unwrap(),
         Ty::Mat4 => write!(string, "mat4 {}", ident).unwrap(),
+        Ty::Texture2D => panic!(),
         Ty::Array { ref elem_ty, len } => {
             write_ident_and_ty(string, ident, elem_ty);
             write!(string, "[{}]", len).unwrap();

@@ -237,6 +237,7 @@ where
                     "return" => Token::Return,
                     "step" => Token::Step,
                     "struct" => Token::Struct,
+                    "texture" => Token::Texture,
                     "to" => Token::To,
                     "uniform" => Token::Uniform,
                     "varying" => Token::Varying,

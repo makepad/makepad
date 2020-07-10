@@ -52,6 +52,7 @@ pub enum VarKind {
     Attribute,
     Const,
     Local,
+    Texture,
     Uniform,
     Varying,
 }
