@@ -16,13 +16,15 @@ const SOURCE: &str = r#"
 
     const FOO: int = 10;
     const BAR: int = FOO * 2;
-    
+
+    texture tTexture: Foo::Bar();
+
     attribute aPosition: vec2;
     attribute aBla: float;
     attribute aColor: vec3;
 
-    instance iDisplacement: vec4;
-    
+    instance iDisplacement: Self::displacement();
+
     varying vColor: vec3;
 
     uniform uModelViewMatrix: A::B::C() in draw;
