@@ -540,12 +540,12 @@ impl CxView {
     }
     
     pub fn def_uniforms(sg: ShaderGen) -> ShaderGen {
-        sg.compose(shader_ast!({
-            let view_transform: mat4<ViewUniform>;
-            let draw_clip: vec4<DrawUniform>;
-            let draw_scroll: vec4<DrawUniform>;
-            let draw_zbias: float<DrawUniform>;
-        }))
+        sg.compose(shader!{"
+           // uniform view_transform:mat4 in view_uniforms;
+           // uniform draw_clip:vec4 in view_uniforms;
+           // uniform draw_scroll:vec4 in view_uniforms;
+           // uniform draw_zbias:float in view_uniforms;
+        "})
     }
     
     pub fn uniform_view_transform(&mut self, v: &Mat4) {

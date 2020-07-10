@@ -3,6 +3,7 @@ use std::cell::RefCell;
 
 pub use makepad_shader_compiler::shader::*;
 pub use makepad_shader_compiler::uid;
+pub use makepad_shader_macro::*;
 
 pub use crate::fonts::*;
 pub use crate::turtle::*;

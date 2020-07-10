@@ -8,6 +8,18 @@ use makepad_shader_compiler::ast::{Shader, Decl, TyExprKind};
 mod macro_lib; 
 use crate::macro_lib::*;
 
+fn byte_to_row_col(byte:usize, source:&str)->(usize,usize){
+    let lines = source.split("\n");
+    let mut o = 0;
+    for (index,line) in lines.enumerate(){
+        if byte >= o && byte < o+line.len(){
+            return (index, byte - o)
+        }
+        o += line.len() + 1;
+    }
+    return (0,0)
+}
+
 // The actual macro
 #[proc_macro_hack]
 pub fn shader(input: TokenStream) -> TokenStream {
@@ -24,13 +36,19 @@ pub fn shader(input: TokenStream) -> TokenStream {
         let source = &source_quoted[1..source_quoted.len() - 1];
         let tokens = lex::lex(source.chars()).collect::<Result<Vec<_>, _>>();
         if let Err(err) = tokens {
-            return error(&format!("Shader lex error: {}", err));
+            let start = byte_to_row_col(err.span.start, source);
+            eprintln!("{} {} {}", err, err.span.start, err.span.end);
+            return error_span(&format!("Shader error relative line:{} col:{} len:{} - {}", start.0, start.1 + 1, err.span.end - err.span.start, err), lit.span());
         }
         let tokens = tokens.unwrap();
         
+
         let mut shader = Shader::new();
         if let Err(err) = parse::parse(&tokens, &mut shader) {
-            return error_span(&format!("Shader parse error: {}", err), lit.span());
+            // lets find the span info
+            eprintln!("{} {} {}",err,err.span.start, err.span.end);
+            let start = byte_to_row_col(err.span.start, source);
+            return error_span(&format!("Shader error relative line:{} col:{} len:{} - {}", start.0, start.1 + 1, err.span.end - err.span.start, err), lit.span());
         }
         
         let mut tb = TokenBuilder::new();
@@ -46,7 +64,7 @@ pub fn shader(input: TokenStream) -> TokenStream {
                 }
             }
             tb.add("( ) . prop_id ( )");
-            tb.add("}");
+            tb.add("} ,");
         }
         for decl in &shader.decls {
             match decl {
@@ -85,11 +103,7 @@ pub fn shader(input: TokenStream) -> TokenStream {
             // return error
             return error("shader macro needs single string as argument");
         }
-        
         let output = tb.end();
-        //return tb.end();
-        eprintln!("MADE: {}", output);
-        
         return output
     }
     else {

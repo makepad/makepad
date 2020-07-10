@@ -1,4 +1,4 @@
- 
+
 use std::hash::{Hash, Hasher};
 use std::any::TypeId;
 use crate::ty::*;

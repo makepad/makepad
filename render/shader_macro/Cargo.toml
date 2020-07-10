@@ -9,3 +9,4 @@ license = "MIT"
 [dependencies]
 makepad-shader-macro-impl = { path = "./shader_macro_impl", version = "0.2" }
 proc-macro-hack = "0.5"
+
