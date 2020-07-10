@@ -24,16 +24,16 @@ impl Blit {
         }
     }
     
-    pub fn instance_x()->InstanceFloat{uid!()}
-    pub fn instance_y()->InstanceFloat{uid!()}
-    pub fn instance_w()->InstanceFloat{uid!()}
-    pub fn instance_h()->InstanceFloat{uid!()}
-    pub fn instance_min_x()->InstanceFloat{uid!()}
-    pub fn instance_min_y()->InstanceFloat{uid!()}
-    pub fn instance_max_x()->InstanceFloat{uid!()}
-    pub fn instance_max_y()->InstanceFloat{uid!()}
-    pub fn instance_z()->InstanceFloat{uid!()}
-    pub fn instance_color()->InstanceColor{uid!()}
+    pub fn instance_x()->FloatId{uid!()}
+    pub fn instance_y()->FloatId{uid!()}
+    pub fn instance_w()->FloatId{uid!()}
+    pub fn instance_h()->FloatId{uid!()}
+    pub fn instance_min_x()->FloatId{uid!()}
+    pub fn instance_min_y()->FloatId{uid!()}
+    pub fn instance_max_x()->FloatId{uid!()}
+    pub fn instance_max_y()->FloatId{uid!()}
+    pub fn instance_z()->FloatId{uid!()}
+    pub fn instance_color()->ColorId{uid!()}
     pub fn uniform_alpha()->UniformFloat{uid!()}
     
     pub fn def_blit_shader() -> ShaderGen {
