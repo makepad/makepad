@@ -1,5 +1,5 @@
 use makepad_render::*;
-use makepad_tinyserde::*;
+use makepad_microserde::*;
 use crate::widgetstyle::*;
 
 #[derive(Clone)]

@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 
-pub fn analyse(shader: &Shader) -> Result<(), Box<dyn Error>> {
+pub fn analyse(shader_ast: &ShaderAst) -> Result<(), Box<dyn Error>> {
     let builtins = builtin::generate_builtins();
     let mut env = Env::new();
     env.push_scope();
@@ -21,7 +21,7 @@ pub fn analyse(shader: &Shader) -> Result<(), Box<dyn Error>> {
     env.push_scope();
     ShaderAnalyser {
         builtins,
-        shader,
+        shader_ast,
         env,
     }
     .analyse_shader()
@@ -30,7 +30,7 @@ pub fn analyse(shader: &Shader) -> Result<(), Box<dyn Error>> {
 #[derive(Debug)]
 struct ShaderAnalyser<'a> {
     builtins: HashMap<Ident, Builtin>,
-    shader: &'a Shader,
+    shader_ast: &'a ShaderAst,
     env: Env,
 }
 
@@ -38,7 +38,7 @@ impl<'a> ShaderAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
             builtins: &self.builtins,
-            shader: self.shader,
+            shader_ast: self.shader_ast,
             env: &self.env,
             is_lvalue: false,
         }
@@ -46,21 +46,21 @@ impl<'a> ShaderAnalyser<'a> {
 
     fn const_evaluator(&self) -> ConstEvaluator {
         ConstEvaluator {
-            shader: self.shader,
+            shader_ast: self.shader_ast,
         }
     }
 
     fn analyse_shader(&mut self) -> Result<(), Box<dyn Error>> {
         self.env.push_scope();
-        for decl in &self.shader.decls {
+        for decl in &self.shader_ast.decls {
             self.analyse_decl(decl)?;
         }
-        for decl in &self.shader.decls {
+        for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Fn(decl) => {
                     FnDefAnalyser {
                         builtins: &self.builtins,
-                        shader: self.shader,
+                        shader_ast: self.shader_ast,
                         decl,
                         env: &mut self.env,
                         is_inside_loop: false,
@@ -71,7 +71,7 @@ impl<'a> ShaderAnalyser<'a> {
             }
         }
         self.env.pop_scope();
-        for decl in &self.shader.decls {
+        for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Fn(decl) => {
                     decl.is_used_in_vertex_shader.set(Some(false));
@@ -83,21 +83,21 @@ impl<'a> ShaderAnalyser<'a> {
         self.analyse_call_tree(
             ShaderKind::Vertex,
             &mut Vec::new(),
-            self.shader.find_fn_decl(Ident::new("vertex")).unwrap(),
+            self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap(),
         )?;
         self.analyse_call_tree(
             ShaderKind::Fragment,
             &mut Vec::new(),
-            self.shader.find_fn_decl(Ident::new("fragment")).unwrap(),
+            self.shader_ast.find_fn_decl(Ident::new("fragment")).unwrap(),
         )?;
         let mut visited = HashSet::new();
         self.propagate_deps(
             &mut visited,
-            self.shader.find_fn_decl(Ident::new("vertex")).unwrap(),
+            self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap(),
         )?;
         self.propagate_deps(
             &mut visited,
-            self.shader.find_fn_decl(Ident::new("fragment")).unwrap(),
+            self.shader_ast.find_fn_decl(Ident::new("fragment")).unwrap(),
         )
     }
 
@@ -206,7 +206,7 @@ impl<'a> ShaderAnalyser<'a> {
     fn analyse_texture_decl(&mut self, decl: &TextureDecl) -> Result<(), Box<dyn Error>> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         match ty {
-            Ty::Texture2D => {}
+            Ty::Texture2d => {}
             _ => return Err("texture must be a texture2D".into()),
         }
         self.env.insert_sym(
@@ -255,7 +255,7 @@ impl<'a> ShaderAnalyser<'a> {
     ) -> Result<(), Box<dyn Error>> {
         call_stack.push(decl.ident);
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
-            let callee_decl = self.shader.find_fn_decl(callee).unwrap();
+            let callee_decl = self.shader_ast.find_fn_decl(callee).unwrap();
             if match kind {
                 ShaderKind::Vertex => callee_decl.is_used_in_vertex_shader.get().unwrap(),
                 ShaderKind::Fragment => callee_decl.is_used_in_fragment_shader.get().unwrap(),
@@ -282,7 +282,7 @@ impl<'a> ShaderAnalyser<'a> {
             return Ok(());
         }
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
-            let callee_decl = self.shader.find_fn_decl(callee).unwrap();
+            let callee_decl = self.shader_ast.find_fn_decl(callee).unwrap();
             self.propagate_deps(visited, callee_decl)?;
             decl.uniform_block_deps
                 .borrow_mut()
@@ -345,7 +345,7 @@ impl<'a> ShaderAnalyser<'a> {
 #[derive(Debug)]
 struct FnDefAnalyser<'a> {
     builtins: &'a HashMap<Ident, Builtin>,
-    shader: &'a Shader,
+    shader_ast: &'a ShaderAst,
     decl: &'a FnDecl,
     env: &'a mut Env,
     is_inside_loop: bool,
@@ -355,7 +355,7 @@ impl<'a> FnDefAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
             builtins: self.builtins,
-            shader: self.shader,
+            shader_ast: self.shader_ast,
             env: &self.env,
             is_lvalue: false,
         }
@@ -363,13 +363,13 @@ impl<'a> FnDefAnalyser<'a> {
 
     fn const_evaluator(&self) -> ConstEvaluator {
         ConstEvaluator {
-            shader: self.shader,
+            shader_ast: self.shader_ast,
         }
     }
 
     fn dep_analyser(&self) -> DepAnalyser {
         DepAnalyser {
-            shader: self.shader,
+            shader_ast: self.shader_ast,
             decl: self.decl,
             env: &self.env,
         }

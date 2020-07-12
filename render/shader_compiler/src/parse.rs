@@ -9,24 +9,24 @@ use std::fmt::Write;
 use std::iter::Cloned;
 use std::slice::Iter;
 
-pub fn parse(tokens_with_span: &[TokenWithSpan], shader: &mut Shader) -> Result<(), Error> {
+pub fn parse(tokens_with_span: &[TokenWithSpan], shader_ast: &mut ShaderAst) -> Result<(), Error> {
     let mut tokens_with_span = tokens_with_span.iter().cloned();
     let token_with_span = tokens_with_span.next().unwrap();
-    Parser { tokens_with_span, token_with_span, end: 0, shader }.parse()
+    Parser { tokens_with_span, token_with_span, end: 0, shader_ast }.parse()
 }
 
 struct Parser<'a> {
     tokens_with_span: Cloned<Iter<'a, TokenWithSpan>>,
     token_with_span: TokenWithSpan,
     end: usize,
-    shader: &'a mut Shader,
+    shader_ast: &'a mut ShaderAst,
 }
 
 impl<'a> Parser<'a> {
     fn parse(&mut self) -> Result<(), Error> {
         while self.peek_token() != Token::Eof {
             let decl = self.parse_decl()?;
-            self.shader.decls.push(decl);
+            self.shader_ast.decls.push(decl);
         }
         Ok(())
     }
@@ -246,7 +246,12 @@ impl<'a> Parser<'a> {
         let expr = self.parse_expr()?;
         let block_if_true = Box::new(self.parse_block()?);
         let block_if_false = if self.accept_token(Token::Else) {
-            Some(Box::new(self.parse_block()?))
+            if self.peek_token() == Token::If{
+                Some(Box::new(Block{stmts:vec![self.parse_if_stmt()?]}))
+            }
+            else{
+                Some(Box::new(self.parse_block()?))
+            }
         } else {
             None
         };
@@ -606,31 +611,42 @@ impl<'a> Parser<'a> {
                 Ok(Expr {
                     ty: RefCell::new(None),
                     val: RefCell::new(None),
-                    kind: if self.accept_token(Token::LeftParen) {
-                        let ident = ident;
-                        let mut arg_exprs = Vec::new();
-                        if !self.accept_token(Token::RightParen) {
-                            loop {
-                                arg_exprs.push(self.parse_expr()?);
-                                if !self.accept_token(Token::Comma) {
-                                    break;
-                                }
-                            }
-                            self.expect_token(Token::RightParen)?;
+                    kind: {
+                        let paren_expected = if self.accept_token(Token::Not){
+                            // a macro call is just a call.
+                            self.expect_token(Token::LeftParen)?;
+                            true
                         }
-                        span.end(self, |span| ExprKind::Call {
-                            span,
-                            ident,
-                            arg_exprs
-                        })
-                    } else {
-                        span.end(self, |span| ExprKind::Var {
-                            span,
-                            is_lvalue: Cell::new(None),
-                            kind: Cell::new(None),
-                            ident,
-                        })
-                    },
+                        else{
+                            false
+                        };
+                        
+                        if paren_expected || self.accept_token(Token::LeftParen) {
+                            let ident = ident;
+                            let mut arg_exprs = Vec::new();
+                            if !self.accept_token(Token::RightParen) {
+                                loop {
+                                    arg_exprs.push(self.parse_expr()?);
+                                    if !self.accept_token(Token::Comma) {
+                                        break;
+                                    }
+                                }
+                                self.expect_token(Token::RightParen)?;
+                            }
+                            span.end(self, |span| ExprKind::Call {
+                                span,
+                                ident,
+                                arg_exprs
+                            })
+                        } else {
+                            span.end(self, |span| ExprKind::Var {
+                                span,
+                                is_lvalue: Cell::new(None),
+                                kind: Cell::new(None),
+                                ident,
+                            })
+                        }
+                    }
                 })
             }
             Token::Lit(lit) => {

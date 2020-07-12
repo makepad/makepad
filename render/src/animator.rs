@@ -29,7 +29,7 @@ pub struct Animator {
     next: Option<Anim>,
     pub area: Area,
     pub theme_update_id: usize,
-    pub last_values: Vec<(InstanceType, AnimLastValue)>,
+    pub last_values: Vec<(PropId, AnimLastValue)>,
 }
 
 impl Animator {
@@ -206,7 +206,7 @@ impl Animator {
         }
     }
     
-    pub fn find_track_index(&mut self, ident: InstanceType) -> Option<usize> {
+    pub fn find_track_index(&mut self, ident: PropId) -> Option<usize> {
         // find our track
         for (track_index, track) in &mut self.current.as_ref().unwrap().tracks.iter().enumerate() {
             if track.ident() == ident {
@@ -220,7 +220,7 @@ impl Animator {
         let last = Self::_last_float(ident, &self.last_values);
         let mut ret = last;
         if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(InstanceType::Float(ident)) {
+            if let Some(track_index) = self.find_track_index(PropId::Float(ident)) {
                 if let Track::Float(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
                     ret = Track::compute_track_float(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
                 }
@@ -234,8 +234,8 @@ impl Animator {
         Self::_last_float(ident, &self.last_values)
     }
     
-    pub fn _last_float(ident: FloatId, last_float: &Vec<(InstanceType, AnimLastValue)>) -> f32 {
-        if let Some((_, value)) = last_float.iter().find( | v | v.0 == InstanceType::Float(ident)) {
+    pub fn _last_float(ident: FloatId, last_float: &Vec<(PropId, AnimLastValue)>) -> f32 {
+        if let Some((_, value)) = last_float.iter().find( | v | v.0 == PropId::Float(ident)) {
             if let AnimLastValue::Float(value) = value {
                 return *value
             }
@@ -247,8 +247,8 @@ impl Animator {
         Self::_set_last_float(ident, value, &mut self.last_values)
     }
     
-    pub fn _set_last_float(ident: FloatId, value: f32, last_values: &mut Vec<(InstanceType, AnimLastValue)>) {
-        let ty_ident = InstanceType::Float(ident);
+    pub fn _set_last_float(ident: FloatId, value: f32, last_values: &mut Vec<(PropId, AnimLastValue)>) {
+        let ty_ident = PropId::Float(ident);
         if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
             *last = AnimLastValue::Float(value);
         }
@@ -261,7 +261,7 @@ impl Animator {
         let last = Self::_last_vec2(ident, &self.last_values);
         let mut ret = last;
         if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(InstanceType::Vec2(ident)) {
+            if let Some(track_index) = self.find_track_index(PropId::Vec2(ident)) {
                 if let Track::Vec2(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
                     ret = Track::compute_track_vec2(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
                 }
@@ -275,8 +275,8 @@ impl Animator {
         Self::_last_vec2(ident, &self.last_values)
     }
     
-    pub fn _last_vec2(ident: Vec2Id, last_values: &Vec<(InstanceType, AnimLastValue)>) -> Vec2 {
-        if let Some((_, value)) = last_values.iter().find( | v | v.0 == InstanceType::Vec2(ident)) {
+    pub fn _last_vec2(ident: Vec2Id, last_values: &Vec<(PropId, AnimLastValue)>) -> Vec2 {
+        if let Some((_, value)) = last_values.iter().find( | v | v.0 == PropId::Vec2(ident)) {
             if let AnimLastValue::Vec2(value) = value {
                 return *value
             }
@@ -288,8 +288,8 @@ impl Animator {
         Self::_set_last_vec2(ident, value, &mut self.last_values);
     }
     
-    pub fn _set_last_vec2(ident: Vec2Id, value: Vec2, last_values: &mut Vec<(InstanceType, AnimLastValue)>) {
-        let ty_ident = InstanceType::Vec2(ident);
+    pub fn _set_last_vec2(ident: Vec2Id, value: Vec2, last_values: &mut Vec<(PropId, AnimLastValue)>) {
+        let ty_ident = PropId::Vec2(ident);
         if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
             *last = AnimLastValue::Vec2(value);
         }
@@ -302,7 +302,7 @@ impl Animator {
         let last = Self::_last_vec3(ident, &self.last_values);
         let mut ret = last;
         if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(InstanceType::Vec3(ident)) {
+            if let Some(track_index) = self.find_track_index(PropId::Vec3(ident)) {
                 if let Track::Vec3(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
                     ret = Track::compute_track_vec3(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
                 }
@@ -316,8 +316,8 @@ impl Animator {
         Self::_last_vec3(ident, &self.last_values)
     }
     
-    pub fn _last_vec3(ident: Vec3Id, last_values: &Vec<(InstanceType, AnimLastValue)>) -> Vec3 {
-        if let Some((_, value)) = last_values.iter().find( | v | v.0 == InstanceType::Vec3(ident)) {
+    pub fn _last_vec3(ident: Vec3Id, last_values: &Vec<(PropId, AnimLastValue)>) -> Vec3 {
+        if let Some((_, value)) = last_values.iter().find( | v | v.0 == PropId::Vec3(ident)) {
             if let AnimLastValue::Vec3(value) = value {
                 return *value
             }
@@ -329,8 +329,8 @@ impl Animator {
         Self::_set_last_vec3(ident, value, &mut self.last_values);
     }
     
-    pub fn _set_last_vec3(ident: Vec3Id, value: Vec3, last_values: &mut Vec<(InstanceType, AnimLastValue)>) {
-        let ty_ident = InstanceType::Vec3(ident);
+    pub fn _set_last_vec3(ident: Vec3Id, value: Vec3, last_values: &mut Vec<(PropId, AnimLastValue)>) {
+        let ty_ident = PropId::Vec3(ident);
         if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
             *last = AnimLastValue::Vec3(value);
         }
@@ -343,7 +343,7 @@ impl Animator {
         let last = Self::_last_vec4(ident, &self.last_values);
         let mut ret = last;
         if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(InstanceType::Vec4(ident)) {
+            if let Some(track_index) = self.find_track_index(PropId::Vec4(ident)) {
                 if let Track::Vec4(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
                     ret = Track::compute_track_vec4(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
                 }
@@ -357,8 +357,8 @@ impl Animator {
         Self::_last_vec4(ident, &self.last_values)
     }
     
-    pub fn _last_vec4(ident: Vec4Id, last_values: &Vec<(InstanceType, AnimLastValue)>) -> Vec4 {
-        if let Some((_, value)) = last_values.iter().find( | v | v.0 == InstanceType::Vec4(ident)) {
+    pub fn _last_vec4(ident: Vec4Id, last_values: &Vec<(PropId, AnimLastValue)>) -> Vec4 {
+        if let Some((_, value)) = last_values.iter().find( | v | v.0 == PropId::Vec4(ident)) {
             if let AnimLastValue::Vec4(value) = value {
                 return *value
             }
@@ -370,8 +370,8 @@ impl Animator {
         Self::_set_last_vec4(ident, value, &mut self.last_values);
     }
     
-    pub fn _set_last_vec4(ident: Vec4Id, value: Vec4, last_values: &mut Vec<(InstanceType, AnimLastValue)>) {
-        let ty_ident = InstanceType::Vec4(ident);
+    pub fn _set_last_vec4(ident: Vec4Id, value: Vec4, last_values: &mut Vec<(PropId, AnimLastValue)>) {
+        let ty_ident = PropId::Vec4(ident);
         if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
             *last = AnimLastValue::Vec4(value);
         }
@@ -382,7 +382,7 @@ impl Animator {
     
     pub fn calc_color(&mut self, cx: &mut Cx, ident: ColorId, time: f64) -> Color {
         if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(InstanceType::Color(ident)) {
+            if let Some(track_index) = self.find_track_index(PropId::Color(ident)) {
                 if let Track::Color(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
                     let last = Self::_last_color(ident, &self.last_values);
                     let ret = Track::compute_track_color(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
@@ -396,7 +396,7 @@ impl Animator {
     }
     
     pub fn last_color(&self, _cx: &Cx, ident: ColorId) -> Color {
-        if let Some((_, value)) = self.last_values.iter().find( | v | v.0 == InstanceType::Color(ident)) {
+        if let Some((_, value)) = self.last_values.iter().find( | v | v.0 == PropId::Color(ident)) {
             if let AnimLastValue::Color(value) = value {
                 return *value
             }
@@ -404,8 +404,8 @@ impl Animator {
         Color::default()
     }
     
-    pub fn _last_color(ident: ColorId, last_values: &Vec<(InstanceType, AnimLastValue)>) -> Color {
-        if let Some((_, value)) = last_values.iter().find( | v | v.0 == InstanceType::Color(ident)) {
+    pub fn _last_color(ident: ColorId, last_values: &Vec<(PropId, AnimLastValue)>) -> Color {
+        if let Some((_, value)) = last_values.iter().find( | v | v.0 == PropId::Color(ident)) {
             if let AnimLastValue::Color(value) = value {
                 return *value
             }
@@ -418,8 +418,8 @@ impl Animator {
         Self::_set_last_color(ident, value, &mut self.last_values);
     }
     
-    pub fn _set_last_color(ident: ColorId, value: Color, last_values: &mut Vec<(InstanceType, AnimLastValue)>) {
-        let ty_ident = InstanceType::Color(ident);
+    pub fn _set_last_color(ident: ColorId, value: Color, last_values: &mut Vec<(PropId, AnimLastValue)>) {
+        let ty_ident = PropId::Color(ident);
         if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
             *last = AnimLastValue::Color(value)
         }
@@ -1097,22 +1097,22 @@ impl Track {
         return lerp(*val1, val2.1, f)
     }
     
-    pub fn ident(&self) -> InstanceType {
+    pub fn ident(&self) -> PropId {
         match self {
             Track::Float(ft) => {
-                InstanceType::Float(ft.ident)
+                PropId::Float(ft.ident)
             },
             Track::Vec2(ft) => {
-                InstanceType::Vec2(ft.ident)
+                PropId::Vec2(ft.ident)
             }
             Track::Vec3(ft) => {
-                InstanceType::Vec3(ft.ident)
+                PropId::Vec3(ft.ident)
             }
             Track::Vec4(ft) => {
-                InstanceType::Vec4(ft.ident)
+                PropId::Vec4(ft.ident)
             }
             Track::Color(ft) => {
-                InstanceType::Color(ft.ident)
+                PropId::Color(ft.ident)
             }
         }
     }

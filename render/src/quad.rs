@@ -49,8 +49,8 @@ impl Quad {
             instance color: Self::color();
             
             //let dpi_dilate: float<Uniform>;
-            fn scroll() -> vec2{
-                return draw_scroll.xy
+            fn scroll() -> vec2{ 
+                return draw_scroll.xy;
             }
             
             fn vertex() -> vec4 {

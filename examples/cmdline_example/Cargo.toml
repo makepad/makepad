@@ -9,8 +9,8 @@ edition = "2018"
 #ron = "*"
 time = "*"
 
-[dependencies.makepad-shader-macro] 
-path="../../render/shader_macro"
+[dependencies.makepad-live-macros] 
+path="../../render/live_macros"
 
 [dependencies.makepad-shader-compiler] 
 path="../../render/shader_compiler"

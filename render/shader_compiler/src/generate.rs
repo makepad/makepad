@@ -14,12 +14,12 @@ pub enum ShaderKind {
     Fragment,
 }
 
-pub fn generate(kind: ShaderKind, shader: &Shader) -> String {
+pub fn generate(kind: ShaderKind, shader_ast: &ShaderAst) -> String {
     let mut string = String::new();
     ShaderGenerator {
         string: &mut string,
         kind,
-        shader,
+        shader_ast,
     }
     .generate_shader();
     string
@@ -29,24 +29,24 @@ pub fn generate(kind: ShaderKind, shader: &Shader) -> String {
 struct ShaderGenerator<'a> {
     string: &'a mut String,
     kind: ShaderKind,
-    shader: &'a Shader,
+    shader_ast: &'a ShaderAst,
 }
 
 impl<'a> ShaderGenerator<'a> {
     fn generate_shader(&mut self) {
-        for decl in &self.shader.decls {
+        for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Struct(decl) => self.generate_struct_decl(decl),
                 _ => {}
             }
         }
-        for decl in &self.shader.decls {
+        for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Const(decl) => self.generate_const_decl(decl),
                 _ => {}
             }
         }
-        for decl in &self.shader.decls {
+        for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Uniform(decl) => self.generate_uniform_decl(decl),
                 _ => {}
@@ -57,7 +57,7 @@ impl<'a> ShaderGenerator<'a> {
             ShaderKind::Fragment => Ident::new("fragment"),
         };
         for (ty_lit, param_tys) in self
-            .shader
+            .shader_ast
             .find_fn_decl(ident)
             .unwrap()
             .cons_deps
@@ -202,7 +202,7 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn generate_fn_defs(&mut self, ident: Ident) {
-        let decl = self.shader.find_fn_decl(ident).unwrap();
+        let decl = self.shader_ast.find_fn_decl(ident).unwrap();
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
             self.generate_fn_defs(callee);
         }
@@ -210,7 +210,7 @@ impl<'a> ShaderGenerator<'a> {
             string: self.string,
             indent_level: 0,
             kind: self.kind,
-            shader: &self.shader,
+            shader_ast: &self.shader_ast,
             decl,
         }
         .generate_fn_def()
@@ -220,13 +220,13 @@ impl<'a> ShaderGenerator<'a> {
         ExprGenerator {
             string: self.string,
             kind: self.kind,
-            shader: self.shader,
+            shader_ast: self.shader_ast,
         }
         .generate_expr(expr)
     }
 
     fn generate_vertex_shader(&mut self) {
-        let vertex_decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
+        let vertex_decl = self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap();
         let total_packed_attribute_size = self.compute_total_packed_attribute_size();
         self.generate_packed_attributes(total_packed_attribute_size);
         let total_packed_varying_size = self.compute_total_packed_varying_size();
@@ -260,7 +260,7 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn generate_fragment_shader(&mut self) {
-        let fragment_decl = self.shader.find_fn_decl(Ident::new("fragment")).unwrap();
+        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("fragment")).unwrap();
         let total_packed_varying_size = self.compute_total_packed_varying_size();
         self.generate_packed_varyings(total_packed_varying_size);
         writeln!(self.string, "void main() {{").unwrap();
@@ -288,7 +288,7 @@ impl<'a> ShaderGenerator<'a> {
 
     fn compute_total_packed_attribute_size(&mut self) -> usize {
         let mut total_packed_attribute_size = 0;
-        for decl in &self.shader.decls {
+        for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl) => {
                     total_packed_attribute_size +=
@@ -325,9 +325,9 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn compute_total_packed_varying_size(&mut self) -> usize {
-        let fragment_decl = self.shader.find_fn_decl(Ident::new("fragment")).unwrap();
+        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("fragment")).unwrap();
         let mut total_packed_varying_size = 0;
-        for decl in &self.shader.decls {
+        for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl)
                     if fragment_decl
@@ -426,7 +426,7 @@ impl<'a> ShaderGenerator<'a> {
                 }
             }
         };
-        for decl in &self.shader.decls {
+        for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl) => {
                     unpack_attribute(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
@@ -437,7 +437,7 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn generate_pack_varyings(&mut self, total_packed_varying_size: usize) {
-        let fragment_decl = self.shader.find_fn_decl(Ident::new("fragment")).unwrap();
+        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("fragment")).unwrap();
         let mut remaining_packed_varying_size = total_packed_varying_size;
         let mut current_packed_varying_index = 0;
         let mut current_packed_varying_size = remaining_packed_varying_size.min(4);
@@ -491,7 +491,7 @@ impl<'a> ShaderGenerator<'a> {
                 }
             }
         };
-        for decl in &self.shader.decls {
+        for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl)
                     if fragment_decl
@@ -506,7 +506,7 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
-        for decl in &self.shader.decls {
+        for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Varying(decl) => {
                     pack_varying(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
@@ -517,7 +517,7 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn generate_unpack_varyings(&mut self, total_packed_varying_size: usize) {
-        let fragment_decl = self.shader.find_fn_decl(Ident::new("fragment")).unwrap();
+        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("fragment")).unwrap();
         let mut remaining_packed_varying_size = total_packed_varying_size;
         let mut current_packed_varying_index = 0;
         let mut current_packed_varying_size = remaining_packed_varying_size.min(4);
@@ -571,7 +571,7 @@ impl<'a> ShaderGenerator<'a> {
                 }
             }
         };
-        for decl in &self.shader.decls {
+        for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl)
                     if fragment_decl
@@ -586,7 +586,7 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
-        for decl in &self.shader.decls {
+        for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Varying(decl) => {
                     unpack_varying(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
@@ -602,7 +602,7 @@ struct FnDefGenerator<'a> {
     string: &'a mut String,
     indent_level: usize,
     kind: ShaderKind,
-    shader: &'a Shader,
+    shader_ast: &'a ShaderAst,
     decl: &'a FnDecl,
 }
 
@@ -806,7 +806,7 @@ impl<'a> FnDefGenerator<'a> {
         ExprGenerator {
             string: self.string,
             kind: self.kind,
-            shader: self.shader,
+            shader_ast: self.shader_ast,
         }
         .generate_expr(expr)
     }
@@ -821,7 +821,7 @@ impl<'a> FnDefGenerator<'a> {
 struct ExprGenerator<'a> {
     string: &'a mut String,
     kind: ShaderKind,
-    shader: &'a Shader,
+    shader_ast: &'a ShaderAst,
 }
 
 impl<'a> ExprGenerator<'a> {
@@ -925,7 +925,7 @@ impl<'a> ExprGenerator<'a> {
             self.generate_expr(arg_expr);
             sep = ", ";
         }
-        if let Some(decl) = self.shader.find_fn_decl(ident) {
+        if let Some(decl) = self.shader_ast.find_fn_decl(ident) {
             for &ident in decl.uniform_block_deps.borrow().as_ref().unwrap() {
                 write!(self.string, "{}_mpsc_{1}_uniforms", sep, ident).unwrap();
                 sep = ", ";
@@ -1012,7 +1012,7 @@ fn write_ident_and_ty(string: &mut String, ident: Ident, ty: &Ty) {
         Ty::Mat2 => write!(string, "mat2 {}", ident).unwrap(),
         Ty::Mat3 => write!(string, "mat3 {}", ident).unwrap(),
         Ty::Mat4 => write!(string, "mat4 {}", ident).unwrap(),
-        Ty::Texture2D => panic!(),
+        Ty::Texture2d => panic!(),
         Ty::Array { ref elem_ty, len } => {
             write_ident_and_ty(string, ident, elem_ty);
             write!(string, "[{}]", len).unwrap();

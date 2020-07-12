@@ -60,8 +60,8 @@ impl CommandId{
     }
 }
 
-impl Into<CommandId> for UniqueId {
-    fn into(self) -> CommandId {CommandId(self.0)}
+impl Into<CommandId> for TypeId {
+    fn into(self) -> CommandId {CommandId(self)}
 }
 
 
