@@ -30,8 +30,8 @@ impl NormalButton {
     pub fn anim_over() -> AnimId {uid!()}
     pub fn anim_down() -> AnimId {uid!()}
     pub fn shader_bg() -> ShaderId {uid!()}
-    pub fn instance_hover() -> InstanceFloat {uid!()}
-    pub fn instance_down() -> InstanceFloat {uid!()}
+    pub fn hover() -> FloatId {uid!()}
+    pub fn down() -> FloatId {uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         Self::layout_bg().set(cx, Layout {
@@ -50,40 +50,40 @@ impl NormalButton {
         });
         
         Self::anim_default().set(cx,Anim::new(Play::Cut {duration: 0.1}, vec![
-            Track::float(Self::instance_hover(), Ease::Lin, vec![(1., 0.)]),
-            Track::float(Self::instance_down(), Ease::Lin, vec![(1.0, 0.)]),
-            Track::color(Text::instance_color(), Ease::Lin, vec![(1., color("#9"))]),
+            Track::float(Self::hover(), Ease::Lin, vec![(1., 0.)]),
+            Track::float(Self::down(), Ease::Lin, vec![(1.0, 0.)]),
+            Track::color(Text::color(), Ease::Lin, vec![(1., color("#9"))]),
         ]));
         
         Self::anim_over().set(cx, Anim::new(Play::Cut {duration: 0.1}, vec![
-            Track::float(Self::instance_down(), Ease::Lin, vec![(0., 0.)]),
-            Track::float(Self::instance_hover(), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
-            Track::color(Text::instance_color(), Ease::Lin, vec![(0., color("#f"))]),
+            Track::float(Self::down(), Ease::Lin, vec![(0., 0.)]),
+            Track::float(Self::hover(), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
+            Track::color(Text::color(), Ease::Lin, vec![(0., color("#f"))]),
         ]));
         
         Self::anim_down().set(cx,Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::float(Self::instance_down(), Ease::OutExp, vec![(0.0, 1.0), (1.0, 1.0)]),
-            Track::float(Self::instance_hover(), Ease::Lin, vec![(1.0, 1.0)]),
-            Track::color(Text::instance_color(), Ease::Lin, vec![(0., color("#c"))]),
+            Track::float(Self::down(), Ease::OutExp, vec![(0.0, 1.0), (1.0, 1.0)]),
+            Track::float(Self::hover(), Ease::Lin, vec![(1.0, 1.0)]),
+            Track::color(Text::color(), Ease::Lin, vec![(0., color("#c"))]),
         ]));
         
         // lets define the shader
-        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"
             
-            let hover: Self::instance_hover();
-            let down: Self::instance_down();
+            instance hover: Self::hover();
+            instance down: Self::down();
             const shadow: float = 3.0;
             const border_radius: float = 2.5;
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 df_box(shadow, shadow, w - shadow*(1.+down), h- shadow*(1.+down), border_radius);
                 df_blur = 6.0;
-                df_fill(mix(color("#0007"), color("#0"), hover));
+                df_fill(mix(color!("#0007"), color("#0"), hover));
                 df_blur = 0.001;
                 df_box(shadow, shadow, w - shadow*2., h - shadow*2., border_radius);
                 return df_fill(mix(mix(color("#3"),color("#4"),hover), color("#2a2a2a"), down));
             }
-        })));
+        "}));
     }
     
     pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {

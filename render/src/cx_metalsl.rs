@@ -20,6 +20,7 @@ pub enum PackType {
 }
 
 impl Cx {
+    /*
     pub fn mtl_compile_all_shaders(&mut self, metal_cx: &MetalCx) {
         for sh in &mut self.shaders {
             let mtlsh = Self::mtl_compile_shader(sh, metal_cx);
@@ -316,9 +317,9 @@ impl Cx {
             }
         });
         return Ok(());
-    }
+    }*/
 }
-
+/*
 impl<'a> SlCx<'a> {
     pub fn map_call(&self, name: &str, args: &Vec<Sl>) -> MapCallResult {
         match name {
@@ -399,4 +400,4 @@ impl<'a> SlCx<'a> {
             ShVarStore::Varying => return format!("_vary.{}", var.name),
         }
     }
-}
+}*/

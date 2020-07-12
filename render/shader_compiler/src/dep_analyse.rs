@@ -7,7 +7,7 @@ use std::cell::Cell;
 
 #[derive(Clone, Debug)]
 pub struct DepAnalyser<'a> {
-    pub shader: &'a Shader,
+    pub shader_ast: &'a ShaderAst,
     pub decl: &'a FnDecl,
     pub env: &'a Env,
 }
@@ -157,7 +157,7 @@ impl<'a> DepAnalyser<'a> {
                         .as_mut()
                         .unwrap()
                         .insert(
-                            self.shader
+                            self.shader_ast
                                 .find_uniform_decl(ident)
                                 .unwrap()
                                 .block_ident

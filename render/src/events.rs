@@ -484,12 +484,9 @@ impl Signal {
 #[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
 pub struct StatusId(pub TypeId);
 
-impl Into<StatusId> for UniqueId {
-    fn into(self) -> StatusId {StatusId(self.0)}
+impl Into<StatusId> for TypeId {
+    fn into(self) -> StatusId {StatusId(self)}
 }
-
-
-
 
 
 

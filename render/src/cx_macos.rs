@@ -17,7 +17,7 @@ impl Cx {
         
         let mut metal_windows: Vec<MetalWindow> = Vec::new();
 
-        self.mtl_compile_all_shaders(&metal_cx);
+        //self.mtl_compile_all_shaders(&metal_cx);
 
         self.load_theme_fonts();
         

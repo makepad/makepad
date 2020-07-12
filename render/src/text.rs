@@ -58,55 +58,57 @@ impl Text {
         }
     }
     
-    pub fn instance_font_tc() -> Vec4Id {uid!()}
-    pub fn instance_color() -> InstanceColor {uid!()}
-    pub fn instance_x() -> InstanceFloat {uid!()}
-    pub fn instance_y() -> InstanceFloat {uid!()}
-    pub fn instance_w() -> InstanceFloat {uid!()}
-    pub fn instance_h() -> InstanceFloat {uid!()}
-    pub fn instance_z() -> InstanceFloat {uid!()}
-    pub fn instance_base_x() -> InstanceFloat {uid!()}
-    pub fn instance_base_y() -> InstanceFloat {uid!()}
-    pub fn instance_font_size() -> InstanceFloat {uid!()}
-    pub fn instance_marker() -> InstanceFloat {uid!()}
-    pub fn instance_char_offset() -> InstanceFloat {uid!()}
+    pub fn font_tc() -> Vec4Id {uid!()}
+    pub fn color() -> ColorId {uid!()}
+    pub fn x() -> FloatId {uid!()}
+    pub fn y() -> FloatId {uid!()}
+    pub fn w() -> FloatId {uid!()}
+    pub fn h() -> FloatId {uid!()}
+    pub fn z() -> FloatId {uid!()}
+    pub fn base_x() -> FloatId {uid!()}
+    pub fn base_y() -> FloatId {uid!()}
+    pub fn font_size() -> FloatId {uid!()}
+    pub fn marker() -> FloatId {uid!()}
+    pub fn char_offset() -> FloatId {uid!()}
     
-    pub fn uniform_brightness() -> UniformFloat {uid!()}
-    pub fn uniform_curve() -> UniformFloat {uid!()}
+    pub fn brightness() -> FloatId {uid!()}
+    pub fn curve() -> FloatId {uid!()}
+    
+    pub fn texturez() -> Texture2dId {uid!()}
     
     pub fn def_text_shader() -> ShaderGen {
         // lets add the draw shader lib
         let mut sg = ShaderGen::new();
         sg.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
         sg.geometry_indices = vec![0, 1, 2, 0, 3, 2];
-        sg.compose(shader_ast!({
-            let geom: vec2<Geometry>;
-            let texturez: texture2d<Texture>;
+        sg.compose(shader!{" 
+            attribute geom: vec2;
+            texture texturez: Self::texturez();
             
-            let font_tc: Self::instance_font_tc();
-            let color: Self::instance_color();
-            let x: Self::instance_x();
-            let y: Self::instance_y();
-            let w: Self::instance_w();
-            let h: Self::instance_h();
-            let z: Self::instance_z();
-            let base_x: Self::instance_base_x();
-            let base_y: Self::instance_base_y();
-            let font_size: Self::instance_font_size();
-            let char_offset: Self::instance_char_offset();
-            let marker: Self::instance_marker();
+            instance font_tc: Self::font_tc();
+            instance color: Self::color();
+            instance x: Self::x();
+            instance y: Self::y();
+            instance w: Self::w();
+            instance h: Self::h();
+            instance z: Self::z();
+            instance base_x: Self::base_x();
+            instance base_y: Self::base_y();
+            instance font_size: Self::font_size();
+            instance char_offset: Self::char_offset();
+            instance marker: Self::marker();
             
-            let tex_coord1: vec2<Varying>;
-            let tex_coord2: vec2<Varying>;
-            let tex_coord3: vec2<Varying>;
-            let clipped: vec2<Varying>;
+            varying tex_coord1: vec2;
+            varying tex_coord2: vec2;
+            varying tex_coord3: vec2;
+            varying clipped: vec2;
             //let rect: vec4<Varying>;
             
-            let brightness: Self::uniform_brightness();
-            let curve: Self::uniform_curve();
+            uniform brightness: Self::brightness();
+            uniform curve: Self::curve();
             
             fn get_color() -> vec4 {
-                return color
+                return color;
             }
             
             fn pixel() -> vec4 {
@@ -139,7 +141,7 @@ impl Text {
                 
                 s = pow(s, curve);
                 let col = get_color();
-                return vec4(s * col.rgb * brightness * col.a, s * col.a); // + color("#a");
+                return vec4(s * col.rgb * brightness * col.a, s * col.a); 
             }
             
             fn vertex() -> vec4 {
@@ -175,11 +177,10 @@ impl Text {
                 
                 return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + draw_zbias, 1.)));
             }
-        }))
+        "})
     }
     
     pub fn begin_text(&mut self, cx: &mut Cx) -> AlignedInstance {
-        
         //let font_id = self.font.font_id.unwrap();
         let inst = cx.new_instance(&self.shader, 0);
         let aligned = cx.align_instance(inst);
@@ -407,11 +408,11 @@ impl Text {
     pub fn find_closest_offset(&self, cx: &Cx, area: &Area, pos: Vec2) -> usize {
         let scroll_pos = area.get_scroll_pos(cx);
         let spos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
-        let x_o = area.get_instance_offset(cx, Self::instance_base_x().instance_type()).unwrap();
-        let y_o = area.get_instance_offset(cx, Self::instance_base_y().instance_type()).unwrap();
-        let w_o = area.get_instance_offset(cx, Self::instance_w().instance_type()).unwrap();
-        let font_size_o = area.get_instance_offset(cx, Self::instance_font_size().instance_type()).unwrap();
-        let char_offset_o = area.get_instance_offset(cx, Self::instance_char_offset().instance_type()).unwrap();
+        let x_o = area.get_instance_offset(cx, Self::base_x().into()).unwrap();
+        let y_o = area.get_instance_offset(cx, Self::base_y().into()).unwrap();
+        let w_o = area.get_instance_offset(cx, Self::w().into()).unwrap();
+        let font_size_o = area.get_instance_offset(cx, Self::font_size().into()).unwrap();
+        let char_offset_o = area.get_instance_offset(cx, Self::char_offset().into()).unwrap();
         let read = area.get_read_ref(cx);
         let text_style = &self.text_style;
         let line_spacing = text_style.line_spacing;

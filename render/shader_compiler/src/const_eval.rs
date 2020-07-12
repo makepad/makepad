@@ -9,7 +9,7 @@ use std::cell::Cell;
 
 #[derive(Clone, Debug)]
 pub struct ConstEvaluator<'a> {
-    pub shader: &'a Shader,
+    pub shader_ast: &'a ShaderAst,
 }
 
 impl<'a> ConstEvaluator<'a> {
@@ -237,7 +237,7 @@ impl<'a> ConstEvaluator<'a> {
     ) -> Result<Val, Error> {
         match kind.get().unwrap() {
             VarKind::Const => Ok(self
-                .shader
+                .shader_ast
                 .find_const_decl(ident)
                 .unwrap()
                 .expr
