@@ -34,9 +34,9 @@ impl Cx{
 
 
 #[derive(PartialEq, Copy, Clone, Hash, Eq)]
-pub struct FloatId(pub TypeId);
+pub struct FloatStyleId(pub TypeId);
 
-impl FloatId {
+impl FloatStyleId {
     pub fn set(&self, cx: &mut Cx, value: f32) {
         cx.get_mut_style_top().floats.insert(*self, value);
     }
@@ -51,9 +51,6 @@ impl FloatId {
     }
 }
 
-impl Into<FloatId> for UniqueId {
-    fn into(self) -> FloatId {FloatId(self.0)}
-}
 
 
 
@@ -61,9 +58,9 @@ impl Into<FloatId> for UniqueId {
 
 
 #[derive(PartialEq, Copy, Clone, Hash, Eq)]
-pub struct ColorId(pub TypeId);
+pub struct ColorStyleId(pub TypeId);
 
-impl ColorId {
+impl ColorStyleId {
     pub fn set(&self, cx: &mut Cx, value: Color) {
         cx.get_mut_style_top().colors.insert(*self, value);
     }
@@ -76,10 +73,6 @@ impl ColorId {
         }
         *cx.style_base.colors.get(&*self).expect("Cannot find ColorId")
     }
-}
-
-impl Into<ColorId> for UniqueId {
-    fn into(self) -> ColorId {ColorId(self.0)}
 }
 
 
@@ -105,8 +98,8 @@ impl TextStyleId {
     }
 }
 
-impl Into<TextStyleId> for UniqueId {
-    fn into(self) -> TextStyleId {TextStyleId(self.0)}
+impl Into<TextStyleId> for TypeId {
+    fn into(self) -> TextStyleId {TextStyleId(self)}
 }
 
 
@@ -130,8 +123,8 @@ impl LayoutId {
     }
 }
 
-impl Into<LayoutId> for UniqueId {
-    fn into(self) -> LayoutId {LayoutId(self.0)}
+impl Into<LayoutId> for TypeId {
+    fn into(self) -> LayoutId {LayoutId(self)}
 }
 
 
@@ -157,8 +150,8 @@ impl WalkId {
 }
 
 
-impl Into<WalkId> for UniqueId {
-    fn into(self) -> WalkId {WalkId(self.0)}
+impl Into<WalkId> for TypeId {
+    fn into(self) -> WalkId {WalkId(self)}
 }
 
 
@@ -184,8 +177,8 @@ impl AnimId {
     }
 }
 
-impl Into<AnimId> for UniqueId {
-    fn into(self) -> AnimId {AnimId(self.0)}
+impl Into<AnimId> for TypeId {
+    fn into(self) -> AnimId {AnimId(self)}
 }
 
 
@@ -211,8 +204,8 @@ impl ShaderId {
 }
 
 
-impl Into<ShaderId> for UniqueId {
-    fn into(self) -> ShaderId {ShaderId(self.0)}
+impl Into<ShaderId> for TypeId {
+    fn into(self) -> ShaderId {ShaderId(self)}
 }
 
 
@@ -222,8 +215,8 @@ impl Into<ShaderId> for UniqueId {
 #[derive(PartialEq, Copy, Clone, Hash, Eq)]
 pub struct StyleId(pub TypeId);
 
-impl Into<StyleId> for UniqueId {
-    fn into(self) -> StyleId {StyleId(self.0)}
+impl Into<StyleId> for TypeId {
+    fn into(self) -> StyleId {StyleId(self)}
 }
 
 

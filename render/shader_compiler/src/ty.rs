@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Ty {
+    Texture2d,
     Void,
     Bool,
     Int,
@@ -20,7 +21,6 @@ pub enum Ty {
     Mat2,
     Mat3,
     Mat4,
-    Texture2D,
     Array { elem_ty: Rc<Ty>, len: usize },
     Struct { ident: Ident },
 }
@@ -58,13 +58,13 @@ impl Ty {
     pub fn size(&self) -> usize {
         match self {
             Ty::Void => 0,
+            Ty::Texture2d =>0,
             Ty::Bool | Ty::Int | Ty::Float => 1,
             Ty::Bvec2 | Ty::Ivec2 | Ty::Vec2 => 2,
             Ty::Bvec3 | Ty::Ivec3 | Ty::Vec3 => 3,
             Ty::Bvec4 | Ty::Ivec4 | Ty::Vec4 | Ty::Mat2 => 4,
             Ty::Mat3 => 9,
             Ty::Mat4 => 16,
-            Ty::Texture2D => panic!(),
             Ty::Array { elem_ty, len } => elem_ty.size() * len,
             Ty::Struct { .. } => panic!(),
         }
@@ -74,6 +74,7 @@ impl Ty {
 impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Ty::Texture2d => write!(f, "texture2d"),
             Ty::Void => write!(f, "void"),
             Ty::Bool => write!(f, "bool"),
             Ty::Int => write!(f, "int"),
@@ -90,7 +91,6 @@ impl fmt::Display for Ty {
             Ty::Mat2 => write!(f, "mat2"),
             Ty::Mat3 => write!(f, "mat3"),
             Ty::Mat4 => write!(f, "mat4"),
-            Ty::Texture2D => write!(f, "texture2D"),
             Ty::Array { elem_ty, len } => write!(f, "{}[{}]", elem_ty, len),
             Ty::Struct { ident, .. } => write!(f, "{}", ident),
         }

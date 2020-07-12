@@ -9,13 +9,13 @@ use std::collections::HashSet;
 use std::fmt;
 
 #[derive(Clone, Debug)]
-pub struct Shader {
+pub struct ShaderAst {
     pub decls: Vec<Decl>,
 }
 
-impl Shader {
-    pub fn new() -> Shader {
-        Shader {
+impl ShaderAst {
+    pub fn new() -> ShaderAst {
+        ShaderAst {
             decls: Vec::new()
         }
     }
@@ -199,7 +199,7 @@ pub enum Stmt {
         step_expr: Option<Expr>,
         block: Box<Block>,
     },
-    If {
+    If { 
         expr: Expr,
         block_if_true: Box<Block>,
         block_if_false: Option<Box<Block>>,
