@@ -3,7 +3,7 @@ use std::cell::RefCell;
 
 pub use makepad_shader_compiler::shader::*;
 pub use makepad_shader_compiler::uid;
-pub use makepad_shader_macro::*;
+pub use makepad_live_macros::*;
 
 pub use crate::fonts::*;
 pub use crate::turtle::*;
@@ -23,6 +23,8 @@ pub use crate::area::*;
 pub use crate::menu::*;
 pub use crate::styling::*;
 pub use crate::liveclient::*;
+pub use crate::shader::*;
+
 
 #[cfg(all(not(feature = "ipc"), target_os = "linux"))] 
 pub use crate::cx_linux::*;
@@ -178,13 +180,13 @@ pub struct CxCommandSetting {
 
 #[derive(Default)]
 pub struct CxStyle {
-    pub colors: HashMap<ColorId, Color>,
+    pub floats: HashMap<FloatStyleId, f32>,
+    pub colors: HashMap<ColorStyleId, Color>,
     pub text_styles: HashMap<TextStyleId, TextStyle>,
     pub layouts: HashMap<LayoutId, Layout>,
     pub walks: HashMap<WalkId, Walk>,
     pub anims: HashMap<AnimId, Anim>,
     pub shaders: HashMap<ShaderId, Shader>,
-    pub floats: HashMap<FloatId, f32>,
 }
 
 pub const NUM_FINGERS: usize = 10;

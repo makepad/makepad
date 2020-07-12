@@ -4,7 +4,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use crate::hubmsg::*;
 use crate::hubclient::*;
 use crate::hubrouter::*;
-use makepad_tinyserde::*;
+use makepad_microserde::*;
 
 #[derive(Debug, Clone, SerBin, DeBin, SerRon, DeRon, PartialEq)]
 pub enum HubServerConfig {

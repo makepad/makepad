@@ -24,18 +24,18 @@ impl Blit {
         }
     }
     
-    pub fn instance_x()->FloatId{uid!()}
-    pub fn instance_y()->FloatId{uid!()}
-    pub fn instance_w()->FloatId{uid!()}
-    pub fn instance_h()->FloatId{uid!()}
-    pub fn instance_min_x()->FloatId{uid!()}
-    pub fn instance_min_y()->FloatId{uid!()}
-    pub fn instance_max_x()->FloatId{uid!()}
-    pub fn instance_max_y()->FloatId{uid!()}
-    pub fn instance_z()->FloatId{uid!()}
-    pub fn instance_color()->ColorId{uid!()}
-    pub fn uniform_alpha()->UniformFloat{uid!()}
-    
+    pub fn x()->FloatId{uid!()}
+    pub fn y()->FloatId{uid!()}
+    pub fn w()->FloatId{uid!()}
+    pub fn h()->FloatId{uid!()}
+    pub fn min_x()->FloatId{uid!()}
+    pub fn min_y()->FloatId{uid!()}
+    pub fn max_x()->FloatId{uid!()}
+    pub fn max_y()->FloatId{uid!()}
+    pub fn z()->FloatId{uid!()}
+    pub fn color()->ColorId{uid!()}
+    pub fn alpha()->FloatId{uid!()}
+    pub fn texturez()->Texture2dId{uid!()}
     pub fn def_blit_shader() -> ShaderGen {
         // lets add the draw shader lib
         let mut sb = ShaderGen::new();
@@ -43,21 +43,22 @@ impl Blit {
         sb.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
         sb.geometry_indices = vec![0, 1, 2, 2, 3, 0];
         
-        sb.compose(shader_ast!({
+        sb.compose(shader!{"
             
-            let geom: vec2<Geometry>;
-            let x: Self::instance_x();
-            let y: Self::instance_y();
-            let w: Self::instance_w();
-            let h: Self::instance_h();
-            let min_x: Self::instance_min_x();
-            let min_y: Self::instance_min_y();
-            let max_x: Self::instance_max_x();
-            let max_y: Self::instance_max_y();
-            let tc: vec2<Varying>;
-            let alpha: Self::uniform_alpha();
-            let texturez:texture2d<Texture>;
-            let v_pixel: vec2<Varying>;
+            attribute geom: vec2;
+            instance x: Self::x();
+            instance y: Self::y();
+            instance w: Self::w();
+            instance h: Self::h();
+            instance min_x: Self::min_x();
+            instance min_y: Self::min_y();
+            instance max_x: Self::max_x();
+            instance max_y: Self::max_y();
+            varying tc: vec2;
+            uniform alpha: Self::alpha();
+            
+            texture texturez:Self::texturez();
+            varying v_pixel: vec2;
             //let dpi_dilate: float<Uniform>;
             
             fn vertex() -> vec4 {
@@ -79,7 +80,7 @@ impl Blit {
                 return vec4(sample2d(texturez, tc.xy).rgb, alpha);
             }
             
-        }))
+        "})
     }
     
     

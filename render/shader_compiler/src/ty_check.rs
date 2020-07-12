@@ -16,7 +16,7 @@ use std::rc::Rc;
 #[derive(Clone, Debug)]
 pub struct TyChecker<'a> {
     pub builtins: &'a HashMap<Ident, Builtin>,
-    pub shader: &'a Shader,
+    pub shader_ast: &'a ShaderAst,
     pub env: &'a Env,
     pub is_lvalue: bool,
 }
@@ -434,7 +434,7 @@ impl<'a> TyChecker<'a> {
                 })
             }
             Ty::Struct { ident } => Ok(self
-                .shader
+                .shader_ast
                 .find_struct_decl(ident)
                 .unwrap()
                 .find_field(field_ident)
@@ -549,7 +549,7 @@ impl<'a> TyChecker<'a> {
                     .clone())
             }
             Sym::Fn => {
-                let fn_decl = self.shader.find_fn_decl(ident).unwrap();
+                let fn_decl = self.shader_ast.find_fn_decl(ident).unwrap();
                 if arg_exprs.len() < fn_decl.params.len() {
                     return Err(Error {
                         span,

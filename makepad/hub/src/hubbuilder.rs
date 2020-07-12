@@ -5,7 +5,7 @@ use crate::hubclient::*;
 use crate::httpserver::*;
 use crate::wasmstrip::*;
 
-use makepad_tinyserde::*;
+use makepad_microserde::*;
 
 use std::sync::{Arc, Mutex};
 use std::fs;

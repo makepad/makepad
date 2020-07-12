@@ -56,6 +56,14 @@ impl TokenBuilder {
         }
     }
     
+    pub fn file_macro(&mut self, span: Span) -> &mut Self {
+        self.ident_with_span("file", span).add("! ( )")
+    }
+
+    pub fn line_macro(&mut self, span: Span) -> &mut Self {
+        self.ident_with_span("line", span).add("! ( ) as usize")
+    }
+        
     pub fn add(&mut self, what: &str) -> &mut Self {
         for part in what.split(" ") {
             match part {

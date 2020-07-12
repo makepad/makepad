@@ -5,7 +5,7 @@ use std::io::BufReader;
 use std::str;
 use std::time::Duration;
 use std::collections::HashMap;
-use makepad_tinyserde::*;
+use makepad_microserde::*;
 
 #[derive(Debug, Clone, SerBin, DeBin, PartialEq, SerRon, DeRon)]
 pub enum HttpServerConfig {
