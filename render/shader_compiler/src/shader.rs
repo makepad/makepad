@@ -3,6 +3,14 @@ use std::hash::{Hash, Hasher};
 use std::any::TypeId;
 use crate::ty::*;
 
+#[derive(Clone, Copy, Hash, PartialEq, Debug)]
+pub struct LiveLoc{
+    pub file:&'static str,
+    pub line:usize,
+    pub column:usize
+}
+
+
 #[derive(Clone, Hash, PartialEq)]
 pub struct PropDef{
     pub name: String,
@@ -12,8 +20,7 @@ pub struct PropDef{
 
 #[derive(Clone, Hash, PartialEq)]
 pub struct ShaderSub{
-    pub file:&'static str,
-    pub line:usize,
+    pub loc:LiveLoc,
     pub code:String,
     pub instance_props:Vec<PropDef>,
     pub uniform_props:Vec<PropDef>
@@ -77,28 +84,28 @@ impl PropId{
     }
 }
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Eq)]
 pub struct Texture2dId(pub TypeId);
 
 impl Into<PropId> for Texture2dId{
     fn into(self) -> PropId{PropId::Texture2d(self)}
 }
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Eq)]
 pub struct ColorId(pub TypeId);
 
 impl Into<PropId> for ColorId{
     fn into(self) -> PropId{PropId::Color(self)}
 }
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Eq)]
 pub struct Vec4Id(pub TypeId);
 
 impl Into<PropId> for Vec4Id{
     fn into(self) -> PropId{PropId::Vec4(self)}
 }
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Eq)]
 pub struct Vec3Id(pub TypeId);
 
 impl Into<PropId> for Vec3Id{
@@ -106,7 +113,7 @@ impl Into<PropId> for Vec3Id{
 }
 
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Eq)]
 pub struct Vec2Id(pub TypeId);
 
 impl Into<PropId> for Vec2Id{
@@ -114,7 +121,7 @@ impl Into<PropId> for Vec2Id{
 }
 
 
-#[derive(Hash, PartialEq, Copy, Clone)]
+#[derive(Hash, PartialEq, Copy, Clone, Eq)]
 pub struct FloatId(pub TypeId);
 
 impl Into<PropId> for FloatId{

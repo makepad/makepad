@@ -158,7 +158,7 @@ impl DesktopWindow {
         
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
-        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(30, 30, 30)));
+        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color!(30, 30, 30).get(cx)));
         self.pass.set_depth_texture(cx, &mut self.depth_texture, ClearDepth::ClearWith(1.0));
         
         let _ = self.main_view.begin_view(cx, Layout::default());

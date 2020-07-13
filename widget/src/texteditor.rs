@@ -337,15 +337,15 @@ impl TextEditor {
     pub fn shader_search_marker() -> ShaderId {uid!()}
     pub fn shader_message_marker() -> ShaderId {uid!()}
     
-    pub fn instance_indent_id() -> FloatId {uid!()}
-    pub fn uniform_indent_sel() -> UniformFloat {uid!()}
-    pub fn uniform_cursor_blink() -> UniformFloat {uid!()}
-    pub fn instance_select_prev_x() -> FloatId {uid!()}
-    pub fn instance_select_prev_w() -> FloatId {uid!()}
-    pub fn instance_select_next_x() -> FloatId {uid!()}
-    pub fn instance_select_next_w() -> FloatId {uid!()}
-    pub fn uniform_highlight_visible() -> UniformFloat {uid!()}
-    pub fn instance_shadow_dir() -> FloatId {uid!()}
+    pub fn indent_id() -> FloatId {uid!()}
+    pub fn indent_sel() -> FloatId {uid!()}
+    pub fn cursor_blink() -> FloatId {uid!()}
+    pub fn select_prev_x() -> FloatId {uid!()}
+    pub fn select_prev_w() -> FloatId {uid!()}
+    pub fn select_next_x() -> FloatId {uid!()}
+    pub fn select_next_w() -> FloatId {uid!()}
+    pub fn highlight_visible() -> FloatId {uid!()}
+    pub fn shadow_dir() -> FloatId {uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         Self::layout_bg().set(cx, Layout::default());
@@ -354,10 +354,10 @@ impl TextEditor {
         Self::padding_top().set(cx, 27.);
         Self::text_style_editor_text().set(cx, Theme::text_style_fixed().get(cx));
         
-        Self::shader_indent_lines().set(cx, Quad::def_quad_shader().compose(shader_ast !({
-            let indent_id: Self::instance_indent_id();
+        Self::shader_indent_lines().set(cx, Quad::def_quad_shader().compose(shader!{"
+            instance indent_id: Self::indent_id();
             // uniforms
-            let indent_sel: Self::uniform_indent_sel();
+            uniform indent_sel: Self::indent_sel();
             fn pixel() -> vec4 {
                 let col = color;
                 let thickness = 0.8 + dpi_dilate * 0.5;
@@ -373,25 +373,25 @@ impl TextEditor {
                 df_line_to(1., h + 1.);
                 return df_stroke(col, thickness);
             }
-        })));
+        "}));
         
-        Self::shader_cursor().set(cx, Quad::def_quad_shader().compose(shader_ast !({
-            let blink: Self::uniform_cursor_blink();
+        Self::shader_cursor().set(cx, Quad::def_quad_shader().compose(shader !{"
+            uniform blink: Self::cursor_blink();
             fn pixel() -> vec4 {
                 if blink<0.5 {
-                    return vec4(color.rgb * color.a, color.a)
+                    return vec4(color.rgb * color.a, color.a);
                 }
                 else {
                     return vec4(0., 0., 0., 0.);
                 }
             }
-        })));
+        "}));
         
-        Self::shader_selection().set(cx, Quad::def_quad_shader().compose(shader_ast !({
-            let prev_x: Self::instance_select_prev_x();
-            let prev_w: Self::instance_select_prev_w();
-            let next_x: Self::instance_select_next_x();
-            let next_w: Self::instance_select_next_w();
+        Self::shader_selection().set(cx, Quad::def_quad_shader().compose(shader!{"
+            instance prev_x: Self::select_prev_x();
+            instance prev_w: Self::select_prev_w();
+            instance next_x: Self::select_next_x();
+            instance next_w: Self::select_next_w();
             const gloopiness: float = 8.;
             const border_radius: float = 2.;
             
@@ -420,9 +420,9 @@ impl TextEditor {
                 //df_shape *= cos(pos.x*8.)+cos(pos.y*16.);
                 return df_fill(color);
             }
-        })));
+        "}));
         
-        Self::shader_paren_pair().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_paren_pair().set(cx, Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 //df_rect(0.,0.,w,h);
@@ -434,9 +434,9 @@ impl TextEditor {
                 //df_rect(0.01,0.,w,h);
                 //return df_fill(color);
             }
-        })));
+        "}));
         
-        Self::shader_cursor_row().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_cursor_row().set(cx, Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 df_rect(0., 0., w, h);
@@ -448,7 +448,7 @@ impl TextEditor {
                 df_line_to(w,h-0.5);
                 returndf_stroke(color,0.75+dpi_dilate*0.75);*/
             }
-        })));
+        "}));
         /*
         Self::shader_select_highlight().set(cx,   Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
@@ -470,22 +470,22 @@ impl TextEditor {
             }
         })));*/
         
-        Self::shader_search_marker().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_search_marker().set(cx, Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
                 let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
                 df_viewport(pos2 * vec2(w, h));
                 //df_rect(0.,0.,w,h);
                 df_move_to(0., h - 1.);
                 df_line_to(w, h - 1.);
-                return df_stroke(color("white"), 0.8);
+                return df_stroke(color!(white), 0.8);
                 /*
                 df_viewport(pos * vec2(w, h));
                 df_box(0.5, 0.5, w - 1., h - 1., 1.);
                 return df_fill(color);*/
             }
-        })));
+        "}));
         
-        Self::shader_message_marker().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_message_marker().set(cx, Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
                 let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
                 df_viewport(pos2 * vec2(w, h));
@@ -494,13 +494,13 @@ impl TextEditor {
                 df_line_to(w, h - 1.);
                 return df_stroke(color, 0.8);
             }
-        })));
+        "}));
         
-        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
                 return vec4(color.rgb * color.a, color.a);
             }
-        })));
+        "}));
     }
     
     pub fn apply_style(&mut self, cx: &mut Cx) {
@@ -575,7 +575,7 @@ impl TextEditor {
         cx.stop_timer(&mut self._cursor_blink_timer);
         self._cursor_blink_timer = cx.start_timer(self.cursor_blink_speed * 0.5, false);
         self._cursor_blink_flipflop = 0.;
-        self._cursor_area.write_uniform_float(cx, Self::uniform_cursor_blink(), self._cursor_blink_flipflop);
+        self._cursor_area.write_uniform_float(cx, Self::cursor_blink(), self._cursor_blink_flipflop);
     }
     
     fn handle_finger_down(&mut self, cx: &mut Cx, fe: &FingerDownEvent, text_buffer: &mut TextBuffer) {
@@ -1002,9 +1002,9 @@ impl TextEditor {
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
                 self._undo_id += 1;
                 self._highlight_visibility = 1.0;
-                self._cursor_area.write_uniform_float(cx, Self::uniform_cursor_blink(), self._cursor_blink_flipflop);
+                self._cursor_area.write_uniform_float(cx, Self::cursor_blink(), self._cursor_blink_flipflop);
                 if self.highlight_area_on {
-                    self._highlight_area.write_uniform_float(cx, Self::uniform_highlight_visible(), self._highlight_visibility);
+                    self._highlight_area.write_uniform_float(cx, Self::highlight_visible(), self._highlight_visibility);
                 }
                 
                 // ok see if we changed.
@@ -1222,7 +1222,7 @@ impl TextEditor {
             //    align: Align::left_top(),
             //    ..self.bg_layout.clone()
             //});
-            self.text.color = color("#666");
+            self.text.color = color!(#666).get(cx);
             self.text.draw_text(cx, "...");
             //self.bg.end_quad(cx, &bg_inst);
             //self._bg_area = bg_inst.into_area();
@@ -2030,7 +2030,7 @@ impl TextEditor {
                 self._line_geometry[self._last_cursor_pos.row].indent_id
             }else {0.};
             let area: Area = indent_inst.clone().into();
-            area.write_uniform_float(cx, Self::uniform_indent_sel(), indent_id);
+            area.write_uniform_float(cx, Self::indent_sel(), indent_id);
         }
     }
     

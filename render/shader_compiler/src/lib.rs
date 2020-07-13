@@ -21,3 +21,4 @@ pub mod util;
 pub mod val;
 #[macro_use]
 pub mod shader;
+pub mod colors;
