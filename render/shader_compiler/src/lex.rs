@@ -1,4 +1,3 @@
-
 use crate::error::Error;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
@@ -73,6 +72,62 @@ where
                 self.skip_char();
                 Token::Not
             }
+            ('#', _) => {
+                self.skip_char();
+                let mut digits = Vec::new();
+                while let Some(ch) = self.read_char_if(|ch| ch.is_ascii_hexdigit()) {
+                    digits.push(ch.to_digit(16).unwrap());
+                }
+                let mut value = 0;
+                match digits.len() {
+                    1 => {
+                        for &digit in digits.iter().cycle().take(6) {
+                            value = value << 4 | digit;
+                        }
+                        for &digit in &[0xF, 0xF] {
+                            value = value << 4 | digit;
+                        }
+                    }
+                    2 => {
+                        for &digit in digits.iter().cycle().take(6) {
+                            value = value << 4 | digit;
+                        }
+                        for &digit in &[0xF, 0xF] {
+                            value = value << 4 | digit;
+                        }
+                    }
+                    3 => {
+                        for &digit in &digits {
+                            value = value << 4 | digit;
+                            value = value << 4 | digit;
+                        }
+                        for &digit in &[0xF, 0xF] {
+                            value = value << 4 | digit;
+                        }
+                    }
+                    4 => {
+                        for &digit in &digits {
+                            value = value << 4 | digit;
+                            value = value << 4 | digit;
+                        }
+                    }
+                    6 => {
+                        for &digit in &digits {
+                            value = value << 4 | digit;
+                        }
+                        for &digit in &[0xF, 0xF] {
+                            value = value << 4 | digit;
+                        }
+                    }
+                    8 => {
+                        for &digit in &digits {
+                            value = value << 4 | digit;
+                        }
+                    }
+                    _ => return Err(span.error(self, "invalid color literal".into())),
+                }
+                Token::Lit(Lit::Int(value))
+            }
             ('&', '&') => {
                 self.skip_two_chars();
                 Token::AndAnd
@@ -146,11 +201,9 @@ where
                 if has_frac_part || has_exp_part {
                     Token::Lit(Lit::Float(string.parse::<f32>().unwrap()))
                 } else {
-                    Token::Lit(Lit::Int(
-                        string
-                            .parse::<u32>()
-                            .map_err(|_| span.error(self, "overflowing integer literal".into()))?,
-                    ))
+                    Token::Lit(Lit::Int(string.parse::<u32>().map_err(|_| {
+                        span.error(self, "overflowing integer literal".into())
+                    })?))
                 }
             }
             ('.', _) => {
@@ -269,7 +322,9 @@ where
                 self.skip_char();
                 Token::RightBrace
             }
-            _ => return Err(span.error(self, format!("unexpected character `{}`", self.ch_0).into())),
+            _ => {
+                return Err(span.error(self, format!("unexpected character `{}`", self.ch_0).into()))
+            }
         };
         Ok(span.token(self, token))
     }
