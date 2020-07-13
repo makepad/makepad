@@ -1,5 +1,5 @@
 use makepad_shader_compiler::analyse;
-use makepad_shader_compiler::ast::Shader;
+use makepad_shader_compiler::ast::ShaderAst;
 use makepad_shader_compiler::generate::{self, ShaderKind};
 use makepad_shader_compiler::lex;
 use makepad_shader_compiler::parse;
@@ -56,12 +56,13 @@ const SOURCE: &str = r#"
         let x: float;
         x = 42.0;
         uModelViewMatrix * vec4(1.0);
+        #123;
     }
 "#;
 
 #[test]
 fn test() {
-    let mut shader = Shader::new();
+    let mut shader = ShaderAst::new();
     parse::parse(
         &lex::lex(SOURCE.chars())
             .collect::<Result<Vec<_>, _>>()
