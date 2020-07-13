@@ -1,8 +1,9 @@
 use proc_macro_hack::proc_macro_hack;
-use proc_macro::{TokenTree, TokenStream};
+use proc_macro::{TokenTree, TokenStream, Span};
 use makepad_shader_compiler::lex;
 use makepad_shader_compiler::parse;
 use makepad_shader_compiler::ast::{ShaderAst, Decl, TyExprKind};
+use makepad_shader_compiler::colors::Color;
 
 #[path = "../../../microserde/derive/src/macro_lib.rs"]
 mod macro_lib; 
@@ -18,6 +19,13 @@ fn byte_to_row_col(byte:usize, source:&str)->(usize,usize){
         o += line.len() + 1;
     }
     return (0,0)
+}
+
+fn live_loc(tb:&mut TokenBuilder, span:Span){
+    tb.add("LiveLoc {");
+    tb.add("file :").ident_with_span("file", span).add("! ( )").add(",");
+    tb.add("line :").ident_with_span("line", span).add("! ( ) as usize").add(",");
+    tb.add("column : ").ident_with_span("column", span).add("! ( ) as usize").add("}");
 }
 
 // The actual macro
@@ -51,9 +59,9 @@ pub fn shader(input: TokenStream) -> TokenStream {
         
         let mut tb = TokenBuilder::new();
         tb.add("ShaderSub {");
-        tb.add("file : ").file_macro(lit.span()).add(",");
-        tb.add("line : ").line_macro(lit.span()).add(",");
-        tb.add("code :").string(source).add(". to_string ( ) , instance_props : vec ! [");
+        tb.add("loc :");
+        live_loc(&mut tb, lit.span());
+        tb.add(", code :").string(source).add(". to_string ( ) , instance_props : vec ! [");
         
         fn prop_def(tb: &mut TokenBuilder, decl_ident: String, call_ident: String) {
             tb.add("PropDef { name :").string(&decl_ident).add(". to_string ( )");
@@ -119,18 +127,83 @@ pub fn shader(input: TokenStream) -> TokenStream {
 // The actual macro
 #[proc_macro_hack]
 pub fn color(input: TokenStream) -> TokenStream {
+
+    fn parse_color_channel(tt:&TokenTree)->f32{
+        if let TokenTree::Literal(c) = tt{
+            let c = c.to_string();
+            let parsed = c.parse();
+            if !parsed.is_ok(){
+                return 1.0;
+            }
+            let parsed = parsed.unwrap();
+            if c.contains("."){
+                return parsed;
+            }else{
+                return parsed / 255.0;
+            }
+        }
+        return 1.0;
+    }
     
-    let mut input_iter = input.into_iter();
+    let items = input.into_iter().collect::<Vec<TokenTree>>();
     // get the first, error if more
-    if let Some(item) = input_iter.next() {
-        eprintln!("{:?}", item);
-        
+    let color = if items.len() == 1{
+        if let TokenTree::Ident(ident) = &items[0]{
+            Color::parse(&format!("#{}", ident.to_string()))
+        }
+        else{
+            return error("color macro argument error");
+        }
     }
-    else{
-        return error("color macro is empty");
+    else if items.len() == 2{
+        if let TokenTree::Punct(pct) = &items[0]{
+            if pct.as_char() != '#'{
+                return error_span("color macro argument error", pct.span());
+            }
+            if let TokenTree::Ident(ident) = &items[1] {
+                Color::parse(&format!("#{}", ident.to_string()))
+            }
+            else if let TokenTree::Literal(lit) = &items[1]{
+                Color::parse(&format!("#{}", lit.to_string()))
+            }
+            else{
+                return error("color macro argument error");
+            }
+        }
+        else{
+            return error("color macro argument error");
+        }
     }
-        
+    else if items.len() == 5{ // its rgb
+        Color{
+            r:parse_color_channel(&items[0]),
+            g:parse_color_channel(&items[2]),
+            b:parse_color_channel(&items[4]),
+            a:1.0
+        }
+    }
+    else if items.len() == 7{
+        Color{
+            r:parse_color_channel(&items[0]),
+            g:parse_color_channel(&items[2]),
+            b:parse_color_channel(&items[4]),
+            a:parse_color_channel(&items[6]),
+        }
+    }else{
+        return error("color macro argument error");
+    };
     
-    TokenStream::new()
+    let mut tb = TokenBuilder::new();
+    tb.add("LiveColor {");
+    tb.add("loc :");
+    live_loc(&mut tb, items[0].span());
+    // now the color
+    tb.add(", color : Color {");
+    tb.add("r :").unsuf_f32(color.r).add(",");
+    tb.add("g :").unsuf_f32(color.g).add(",");
+    tb.add("b :").unsuf_f32(color.b).add(",");
+    tb.add("a :").unsuf_f32(color.a);
+    tb.add("} }");
+    tb.end()
 }
 

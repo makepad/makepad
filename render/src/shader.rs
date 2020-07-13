@@ -14,7 +14,7 @@ pub struct RectInstanceProps {
 }
 
 impl RectInstanceProps {
-    pub fn construct(sg: &ShaderGen, instances: &Vec<PropDef>) -> RectInstanceProps {
+    pub fn construct(instances: &Vec<PropDef>) -> RectInstanceProps {
         let mut x = None;
         let mut y = None;
         let mut w = None;
@@ -81,7 +81,7 @@ pub struct NamedProps {
 }
 
 impl NamedProps {
-    pub fn construct(sg: &ShaderGen, in_props: &Vec<PropDef>)->NamedProps{
+    pub fn construct(in_props: &Vec<PropDef>)->NamedProps{
         let mut offset = 0;
         let mut out_props = Vec::new();
         for prop in in_props {
@@ -101,7 +101,7 @@ impl NamedProps {
 }
 
 impl InstanceProps {
-    pub fn construct(sg: &ShaderGen, in_props: &Vec<PropDef>)->InstanceProps{
+    pub fn construct(in_props: &Vec<PropDef>)->InstanceProps{
         let mut offset = 0;
         let mut out_props = Vec::new();
         for prop in in_props {
@@ -122,7 +122,7 @@ impl InstanceProps {
 }
 
 impl UniformProps{
-    pub fn construct(sg: &ShaderGen, in_props: &Vec<PropDef>)->UniformProps{
+    pub fn construct(in_props: &Vec<PropDef>)->UniformProps{
         let mut out_props = Vec::new();
         let mut offset = 0;
     

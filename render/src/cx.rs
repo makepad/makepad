@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::cell::RefCell;
 
 pub use makepad_shader_compiler::shader::*;
+pub use makepad_shader_compiler::colors::*;
 pub use makepad_shader_compiler::uid;
 pub use makepad_live_macros::*;
 
@@ -16,7 +17,6 @@ pub use crate::text::*;
 
 pub use crate::math::*;
 pub use crate::events::*;
-pub use crate::colors::*;
 pub use crate::elements::*; 
 pub use crate::animator::*;
 pub use crate::area::*;
@@ -180,8 +180,8 @@ pub struct CxCommandSetting {
 
 #[derive(Default)]
 pub struct CxStyle {
-    pub floats: HashMap<FloatStyleId, f32>,
-    pub colors: HashMap<ColorStyleId, Color>,
+    pub floats: HashMap<FloatId, f32>,
+    pub colors: HashMap<ColorId, Color>,
     pub text_styles: HashMap<TextStyleId, TextStyle>,
     pub layouts: HashMap<LayoutId, Layout>,
     pub walks: HashMap<WalkId, Walk>,

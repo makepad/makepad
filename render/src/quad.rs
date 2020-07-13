@@ -19,7 +19,7 @@ impl Quad {
         Self {
             shader: cx.add_shader(Self::def_quad_shader(), "Quad"),
             z: 0.0,
-            color: color("green")
+            color: color!(green).get(cx)
         }
     }
     

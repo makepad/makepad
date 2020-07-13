@@ -53,7 +53,7 @@ impl Text {
             shader: cx.add_shader(Self::def_text_shader(), "TextAtlas"),
             z: 0.0,
             wrapping: Wrapping::Word,
-            color: color("white"),
+            color: color!(white).get(cx),
             font_scale: 1.0,
         }
     }
