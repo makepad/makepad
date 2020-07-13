@@ -612,16 +612,13 @@ impl<'a> Parser<'a> {
                     ty: RefCell::new(None),
                     val: RefCell::new(None),
                     kind: {
-                        let paren_expected = if self.accept_token(Token::Not){
-                            // a macro call is just a call.
+                        let is_call_expr = if self.accept_token(Token::Not) {
                             self.expect_token(Token::LeftParen)?;
                             true
-                        }
-                        else{
-                            false
+                        } else {
+                            self.accept_token(Token::LeftParen) 
                         };
-                        
-                        if paren_expected || self.accept_token(Token::LeftParen) {
+                        if is_call_expr {
                             let ident = ident;
                             let mut arg_exprs = Vec::new();
                             if !self.accept_token(Token::RightParen) {
