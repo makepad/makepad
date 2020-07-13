@@ -4,6 +4,17 @@ use std::net::{TcpStream, SocketAddr};
 // live value connection client
 const LIVE_SERVER_DEFAULT_PORT:u16 = 45823;
 
+
+pub trait LiveColorGet{
+    fn get(&self, cx:&Cx)->Color;
+}
+
+impl LiveColorGet for LiveColor{
+    fn get(&self, _cx:&Cx)->Color{
+        return Color::default();
+    }    
+}
+
 pub struct LiveClient{
     pub colors: HashMap<String, HashMap<(usize,usize), Color>>
 }
