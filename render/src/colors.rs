@@ -1,5 +1,21 @@
 
-use crate::math::*;
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Color{
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32
+}
+
+pub fn mix(a:Color, b:Color, f:f32)->Color{
+    let nf = 1.0 - f;
+    return Color{
+        r: nf * a.r + f * b.r,
+        g: nf * a.g + f * b.g,
+        b: nf * a.b + f * b.b,
+        a: nf * a.a + f * b.a,
+    }
+}
 
 pub fn color256(r:i32, g:i32, b:i32)->Color{
     Color{r:r as f32 / 255., g:g as f32 / 255., b:b as f32 / 255., a:1.}

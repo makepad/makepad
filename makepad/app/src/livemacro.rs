@@ -1,19 +1,12 @@
 use makepad_widget::*;
 use crate::mprstokenizer::*;
-use makepad_render::makepad_shader_compiler::analyse;
-use makepad_render::makepad_shader_compiler::ast::Shader;
-use makepad_render::makepad_shader_compiler::generate::{self, ShaderKind};
-use makepad_render::makepad_shader_compiler::lex;
-use makepad_render::makepad_shader_compiler::parse;
-use std::error::Error;
-
 
 pub struct LiveMacroPick {
-    token: usize,
+    _token: usize,
 }
 
 pub struct LiveMacroShader {
-    token: usize,
+    _token: usize,
 }
 
 pub enum LiveMacro {
@@ -23,7 +16,7 @@ pub enum LiveMacro {
 
 #[derive(Default)]
 pub struct LiveMacros {
-    macros: Vec<LiveMacro>
+    _macros: Vec<LiveMacro>
 }
 
 impl LiveMacros {
@@ -38,7 +31,7 @@ impl LiveMacros {
                         // ok now we are at ", hopefully
                         // get matching pair
                         if tp.cur_type() == TokenType::ParenOpen {
-                            let start = tp.next_index;
+                            //let start = tp.next_index;
                             /*
                             let end = tp.cur_pair_token();
                             

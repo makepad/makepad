@@ -36,12 +36,17 @@ impl Cx{
 #[derive(PartialEq, Copy, Clone, Hash, Eq)]
 pub struct FloatStyleId(pub TypeId);
 
-impl FloatStyleId {
-    pub fn set(&self, cx: &mut Cx, value: f32) {
+pub trait FloatStyle{
+    fn set(&self, cx: &mut Cx, value: f32);
+    fn get(&self, cx: &Cx) -> f32;
+}
+
+impl FloatStyle for FloatId{
+    fn set(&self, cx: &mut Cx, value: f32) {
         cx.get_mut_style_top().floats.insert(*self, value);
     }
     
-    pub fn get(&self, cx: &Cx) -> f32 {
+    fn get(&self, cx: &Cx) -> f32 {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].floats.get(self){
                 return *value
@@ -52,20 +57,20 @@ impl FloatStyleId {
 }
 
 
-
-
 // Colors
 
 
-#[derive(PartialEq, Copy, Clone, Hash, Eq)]
-pub struct ColorStyleId(pub TypeId);
+pub trait ColorStyle{
+    fn set(&self, cx: &mut Cx, value: Color);
+    fn get(&self, cx: &Cx) -> Color;
+}
 
-impl ColorStyleId {
-    pub fn set(&self, cx: &mut Cx, value: Color) {
+impl ColorStyle for ColorId{
+    fn set(&self, cx: &mut Cx, value: Color) {
         cx.get_mut_style_top().colors.insert(*self, value);
     }
     
-    pub fn get(&self, cx: &Cx) -> Color {
+    fn get(&self, cx: &Cx) -> Color {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].colors.get(self){
                 return *value

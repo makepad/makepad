@@ -56,14 +56,6 @@ impl TokenBuilder {
         }
     }
     
-    pub fn file_macro(&mut self, span: Span) -> &mut Self {
-        self.ident_with_span("file", span).add("! ( )")
-    }
-
-    pub fn line_macro(&mut self, span: Span) -> &mut Self {
-        self.ident_with_span("line", span).add("! ( ) as usize")
-    }
-        
     pub fn add(&mut self, what: &str) -> &mut Self {
         for part in what.split(" ") {
             match part {
@@ -110,6 +102,7 @@ impl TokenBuilder {
     pub fn string(&mut self, val: &str) -> &mut Self {self.extend(TokenTree::from(Literal::string(val)))}
     pub fn unsuf_usize(&mut self, val: usize) -> &mut Self {self.extend(TokenTree::from(Literal::usize_unsuffixed(val)))}
     pub fn suf_u16(&mut self, val: u16) -> &mut Self {self.extend(TokenTree::from(Literal::u16_suffixed(val)))}
+    pub fn unsuf_f32(&mut self, val: f32) -> &mut Self {self.extend(TokenTree::from(Literal::f32_unsuffixed(val)))}
     pub fn chr(&mut self, val:char) -> &mut Self {self.extend(TokenTree::from(Literal::character(val)))}
     pub fn _lit(&mut self, lit: Literal) -> &mut Self {self.extend(TokenTree::from(lit))}
     

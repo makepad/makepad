@@ -1,7 +1,7 @@
 //use syn::Type;
 use makepad_render::*;
 use makepad_widget::*;
-use makepad_tinyserde::*;
+use makepad_microserde::*;
 use std::collections::HashMap;
 
 use crate::appstorage::*;

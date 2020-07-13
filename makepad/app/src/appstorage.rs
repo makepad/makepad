@@ -2,7 +2,7 @@
 use makepad_render::*;
 use makepad_widget::*;
 use makepad_hub::*;
-use makepad_tinyserde::*;
+use makepad_microserde::*;
 use crate::appwindow::*;
 use crate::filetree::*;
 use crate::fileeditor::*;
