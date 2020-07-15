@@ -737,7 +737,7 @@ impl<'a> Parser<'a> {
 
     fn begin_span(&self) -> SpanTracker {
         SpanTracker {
-            file_id: self.token_with_span.span.file_id,
+            loc_id: self.token_with_span.span.loc_id,
             start: self.token_with_span.span.start,
         }
     }
@@ -813,7 +813,7 @@ impl Token {
 }
 
 struct SpanTracker {
-    file_id: usize,
+    loc_id: usize,
     start: usize,
 }
 
@@ -823,7 +823,7 @@ impl SpanTracker {
         F: FnOnce(Span) -> R
     {
         f(Span {
-            file_id: self.file_id,
+            loc_id: self.loc_id,
             start: self.start,
             end: parser.end,
         })
@@ -832,7 +832,7 @@ impl SpanTracker {
     fn error(&self, parser: &Parser, message: String) -> Error {
         Error {
             span: Span {
-                file_id: self.file_id,
+                loc_id: self.loc_id,
                 start: self.start,
                 end: parser.token_with_span.span.end,
             },
