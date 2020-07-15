@@ -24,15 +24,14 @@ impl BareExampleApp {
             }
         "};*/
         
-        Self::bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
-            let counter: Self::counter();
+        Self::bg().set(cx, Quad::def_quad_shader().compose(shader!{"
+            instance counter: Self::counter();
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 df_circle(0.5 * w, 0.5 * h, 0.5 * w);
-                //return df_fill(color("green"));
-                return df_fill(mix(color("green"), color("blue"), abs(sin(counter))));
-            }
-        })));
+                return df_fill(mix(color!(green), color!(blue), abs(sin(counter))));
+            }  
+        "}));
         
         Self {
             window: Window::new(cx),
@@ -59,7 +58,7 @@ impl BareExampleApp {
     pub fn draw_app(&mut self, cx: &mut Cx) {
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
-        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(32, 0, 0)));
+        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(Color::rgb(32, 0, 0)));
         if self.main_view.begin_view(cx, Layout::default()).is_ok() {
             
             self.quad.shader = Self::bg().get(cx);

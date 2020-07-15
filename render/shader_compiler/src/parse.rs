@@ -612,13 +612,16 @@ impl<'a> Parser<'a> {
                     ty: RefCell::new(None),
                     val: RefCell::new(None),
                     kind: {
-                        let is_call_expr = if self.accept_token(Token::Not) {
+                        let paren_expected = if self.accept_token(Token::Not){
+                            // a macro call is just a call.
                             self.expect_token(Token::LeftParen)?;
                             true
-                        } else {
-                            self.accept_token(Token::LeftParen) 
+                        }
+                        else{
+                            false
                         };
-                        if is_call_expr {
+                        
+                        if paren_expected || self.accept_token(Token::LeftParen) {
                             let ident = ident;
                             let mut arg_exprs = Vec::new();
                             if !self.accept_token(Token::RightParen) {
@@ -734,6 +737,7 @@ impl<'a> Parser<'a> {
 
     fn begin_span(&self) -> SpanTracker {
         SpanTracker {
+            file_id: self.token_with_span.span.file_id,
             start: self.token_with_span.span.start,
         }
     }
@@ -809,6 +813,7 @@ impl Token {
 }
 
 struct SpanTracker {
+    file_id: usize,
     start: usize,
 }
 
@@ -818,6 +823,7 @@ impl SpanTracker {
         F: FnOnce(Span) -> R
     {
         f(Span {
+            file_id: self.file_id,
             start: self.start,
             end: parser.end,
         })
@@ -826,6 +832,7 @@ impl SpanTracker {
     fn error(&self, parser: &Parser, message: String) -> Error {
         Error {
             span: Span {
+                file_id: self.file_id,
                 start: self.start,
                 end: parser.token_with_span.span.end,
             },
