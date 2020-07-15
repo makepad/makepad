@@ -44,6 +44,19 @@ impl ShaderGen{
         //let sg = CxView::def_uniforms(sg);
         sg
     }
+        
+        
+    pub fn byte_to_row_col(byte:usize, source:&str)->(usize,usize){
+        let lines = source.split("\n");
+        let mut o = 0;
+        for (index,line) in lines.enumerate(){
+            if byte >= o && byte < o+line.len(){
+                return (index, byte - o)
+            }
+            o += line.len() + 1;
+        }
+        return (0,0)
+    }
     
     pub fn compose(mut self, sub: ShaderSub) -> Self {
         self.subs.push(sub);

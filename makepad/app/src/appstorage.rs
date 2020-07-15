@@ -12,7 +12,7 @@ use crate::builder;
 use crate::livemacro::*;
 
 #[derive(Debug, Clone, SerRon, DeRon)]
-pub struct AppSettings {
+pub struct AppSettings { 
     pub build_on_save: bool,
     pub exec_when_done: bool,
     pub style_options: StyleOptions,
