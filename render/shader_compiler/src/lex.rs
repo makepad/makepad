@@ -1,3 +1,4 @@
+
 use crate::error::Error;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
@@ -7,6 +8,7 @@ use crate::token::{Token, TokenWithSpan};
 #[derive(Clone, Debug)]
 pub struct Lex<C> {
     chars: C,
+    file_id: usize,
     ch_0: char,
     ch_1: char,
     index: usize,
@@ -70,62 +72,6 @@ where
             ('!', _) => {
                 self.skip_char();
                 Token::Not
-            }
-            ('#', _) => {
-                self.skip_char();
-                let mut digits = Vec::new();
-                while let Some(ch) = self.read_char_if(|ch| ch.is_ascii_hexdigit()) {
-                    digits.push(ch.to_digit(16).unwrap());
-                }
-                let mut value = 0;
-                match digits.len() {
-                    1 => {
-                        for &digit in digits.iter().cycle().take(6) {
-                            value = value << 4 | digit;
-                        }
-                        for &digit in &[0xF, 0xF] {
-                            value = value << 4 | digit;
-                        }
-                    }
-                    2 => {
-                        for &digit in digits.iter().cycle().take(6) {
-                            value = value << 4 | digit;
-                        }
-                        for &digit in &[0xF, 0xF] {
-                            value = value << 4 | digit;
-                        }
-                    }
-                    3 => {
-                        for &digit in &digits {
-                            value = value << 4 | digit;
-                            value = value << 4 | digit;
-                        }
-                        for &digit in &[0xF, 0xF] {
-                            value = value << 4 | digit;
-                        }
-                    }
-                    4 => {
-                        for &digit in &digits {
-                            value = value << 4 | digit;
-                            value = value << 4 | digit;
-                        }
-                    }
-                    6 => {
-                        for &digit in &digits {
-                            value = value << 4 | digit;
-                        }
-                        for &digit in &[0xF, 0xF] {
-                            value = value << 4 | digit;
-                        }
-                    }
-                    8 => {
-                        for &digit in &digits {
-                            value = value << 4 | digit;
-                        }
-                    }
-                    _ => return Err(span.error(self, "invalid color literal".into())),
-                }
-                Token::Lit(Lit::Int(value))
             }
             ('&', '&') => {
                 self.skip_two_chars();
@@ -200,9 +146,11 @@ where
                 if has_frac_part || has_exp_part {
                     Token::Lit(Lit::Float(string.parse::<f32>().unwrap()))
                 } else {
-                    Token::Lit(Lit::Int(string.parse::<u32>().map_err(|_| {
-                        span.error(self, "overflowing integer literal".into())
-                    })?))
+                    Token::Lit(Lit::Int(
+                        string
+                            .parse::<u32>()
+                            .map_err(|_| span.error(self, "overflowing integer literal".into()))?,
+                    ))
                 }
             }
             ('.', _) => {
@@ -321,9 +269,7 @@ where
                 self.skip_char();
                 Token::RightBrace
             }
-            _ => {
-                return Err(span.error(self, format!("unexpected character `{}`", self.ch_0).into()))
-            }
+            _ => return Err(span.error(self, format!("unexpected character `{}`", self.ch_0).into())),
         };
         Ok(span.token(self, token))
     }
@@ -386,7 +332,10 @@ where
     }
 
     fn begin_span(&mut self) -> SpanTracker {
-        SpanTracker { start: self.index }
+        SpanTracker {
+            file_id: self.file_id,
+            start: self.index
+        }
     }
 }
 
@@ -410,7 +359,7 @@ where
     }
 }
 
-pub fn lex<C>(chars: C) -> Lex<C::IntoIter>
+pub fn lex<C>(chars: C, file_id:usize) -> Lex<C::IntoIter>
 where
     C: IntoIterator<Item = char>,
 {
@@ -421,19 +370,22 @@ where
         chars,
         ch_0,
         ch_1,
+        file_id,
         index: 0,
         is_done: false,
     }
 }
 
 struct SpanTracker {
-    start: usize,
+    file_id: usize,
+    start: usize
 }
 
 impl SpanTracker {
     fn token<C>(&self, lex: &Lex<C>, token: Token) -> TokenWithSpan {
         TokenWithSpan {
             span: Span {
+                file_id: self.file_id,
                 start: self.start,
                 end: lex.index,
             },
@@ -444,6 +396,7 @@ impl SpanTracker {
     fn error<C>(&self, lex: &Lex<C>, message: String) -> Error {
         Error {
             span: Span {
+                file_id: self.file_id,
                 start: self.start,
                 end: lex.index,
             },

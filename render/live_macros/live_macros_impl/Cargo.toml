@@ -10,7 +10,7 @@ license = "MIT"
 proc-macro = true
 
 [dependencies]
-proc-macro-hack = "0.5"
+proc-macro-hack = "0.5" 
 
 [dependencies.makepad-shader-compiler] 
 path="../../shader_compiler"

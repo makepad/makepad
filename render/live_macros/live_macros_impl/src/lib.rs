@@ -4,22 +4,12 @@ use makepad_shader_compiler::lex;
 use makepad_shader_compiler::parse;
 use makepad_shader_compiler::ast::{ShaderAst, Decl, TyExprKind};
 use makepad_shader_compiler::colors::Color;
+use makepad_shader_compiler::shader::ShaderGen;
 
 #[path = "../../../microserde/derive/src/macro_lib.rs"]
 mod macro_lib; 
 use crate::macro_lib::*;
 
-fn byte_to_row_col(byte:usize, source:&str)->(usize,usize){
-    let lines = source.split("\n");
-    let mut o = 0;
-    for (index,line) in lines.enumerate(){
-        if byte >= o && byte < o+line.len(){
-            return (index, byte - o)
-        }
-        o += line.len() + 1;
-    }
-    return (0,0)
-}
 
 fn live_loc(tb:&mut TokenBuilder, span:Span){
     tb.add("LiveLoc {");
@@ -42,10 +32,10 @@ pub fn shader(input: TokenStream) -> TokenStream {
         }
         
         let source = &source_quoted[1..source_quoted.len() - 1];
-        let tokens = lex::lex(source.chars()).collect::<Result<Vec<_>, _>>();
+        let tokens = lex::lex(source.chars(), 0).collect::<Result<Vec<_>, _>>();
         if let Err(err) = tokens {
-            let start = byte_to_row_col(err.span.start, source);
-            return error_span(&format!("Shader error relative line:{} col:{} len:{} - {}", start.0, start.1 + 1, err.span.end - err.span.start, err), lit.span());
+            let start = ShaderGen::byte_to_row_col(err.span.start, source);
+            return error_span(&format!("Shader lex error relative line:{} col:{} len:{} - {}", start.0, start.1 + 1, err.span.end - err.span.start, err), lit.span());
         }
         let tokens = tokens.unwrap();
         
@@ -53,8 +43,8 @@ pub fn shader(input: TokenStream) -> TokenStream {
         let mut shader = ShaderAst::new();
         if let Err(err) = parse::parse(&tokens, &mut shader) {
             // lets find the span info
-            let start = byte_to_row_col(err.span.start, source);
-            return error_span(&format!("Shader error relative line:{} col:{} len:{} - {}", start.0, start.1 + 1, err.span.end - err.span.start, err), lit.span());
+            let start = ShaderGen::byte_to_row_col(err.span.start, source);
+            return error_span(&format!("Shader parse error relative line:{} col:{} len:{} - {}", start.0, start.1 + 1, err.span.end - err.span.start, err), lit.span());
         }
         
         let mut tb = TokenBuilder::new();

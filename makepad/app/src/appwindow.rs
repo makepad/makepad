@@ -18,12 +18,12 @@ use crate::rusteditor::*;
 use crate::jseditor::*;
 use crate::plaineditor::*;
 
-#[derive(Debug, Clone, SerRon, DeRon)]
+#[derive(Debug, Clone, SerRon, DeRon)] 
 pub enum Panel {
-    LogList,
+    LogList,  
     SearchResults,
     ItemDisplay,
-    Keyboard,
+    Keyboard, 
     FileTree,
     FileEditorTarget,
     FileEditor {path: String, scroll_pos: Vec2, editor_id: u64}
