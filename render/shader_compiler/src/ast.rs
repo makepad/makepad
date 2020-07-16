@@ -127,6 +127,7 @@ pub struct FnDecl {
     pub callees: RefCell<Option<HashSet<Ident>>>,
     pub uniform_block_deps: RefCell<Option<HashSet<Ident>>>,
     pub attribute_deps: RefCell<Option<HashSet<Ident>>>,
+    pub instance_deps: RefCell<Option<HashSet<Ident>>>,
     pub has_in_varying_deps: Cell<Option<bool>>,
     pub has_out_varying_deps: Cell<Option<bool>>,
     pub builtin_deps: RefCell<Option<HashSet<Ident>>>,

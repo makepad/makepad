@@ -55,6 +55,7 @@ pub enum Sym {
 pub enum VarKind {
     Attribute,
     Const,
+    Instance,
     Local,
     Texture,
     Uniform,

@@ -53,7 +53,7 @@ impl<'a> Parser<'a> {
         self.expect_token(Token::Attribute)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
-        let ty_expr = self.parse_ty_expr()?;
+        let ty_expr = self.parse_ty_path()?;
         self.expect_token(Token::Semi)?;
         Ok(span.end(&self, |span| Decl::Attribute(AttributeDecl {
             span,
@@ -108,6 +108,7 @@ impl<'a> Parser<'a> {
             callees: RefCell::new(None),
             uniform_block_deps: RefCell::new(None),
             attribute_deps: RefCell::new(None),
+            instance_deps: RefCell::new(None),
             has_in_varying_deps: Cell::new(None),
             has_out_varying_deps: Cell::new(None),
             builtin_deps: RefCell::new(None),
