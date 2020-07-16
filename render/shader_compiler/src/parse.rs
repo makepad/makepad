@@ -49,15 +49,21 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_attribute_decl(&mut self) -> Result<Decl, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Attribute)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
         let ty_expr = self.parse_ty_expr()?;
         self.expect_token(Token::Semi)?;
-        Ok(Decl::Attribute(AttributeDecl { ident, ty_expr }))
+        Ok(span.end(&self, |span| Decl::Attribute(AttributeDecl {
+            span,
+            ident,
+            ty_expr
+        })))
     }
 
     fn parse_const_decl(&mut self) -> Result<Decl, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Const)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
@@ -65,14 +71,16 @@ impl<'a> Parser<'a> {
         self.expect_token(Token::Eq)?;
         let expr = self.parse_expr()?;
         self.expect_token(Token::Semi)?;
-        Ok(Decl::Const(ConstDecl {
+        Ok(span.end(&self, |span| Decl::Const(ConstDecl {
+            span,
             ident,
             ty_expr,
             expr,
-        }))
+        })))
     }
 
     fn parse_fn_decl(&mut self) -> Result<Decl, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Fn)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::LeftParen)?;
@@ -92,7 +100,8 @@ impl<'a> Parser<'a> {
             None
         };
         let block = self.parse_block()?;
-        Ok(Decl::Fn(FnDecl {
+        Ok(span.end(&self, |span| Decl::Fn(FnDecl {
+            span,
             return_ty: RefCell::new(None),
             is_used_in_vertex_shader: Cell::new(None),
             is_used_in_fragment_shader: Cell::new(None),
@@ -107,19 +116,25 @@ impl<'a> Parser<'a> {
             params,
             return_ty_expr,
             block,
-        }))
+        })))
     }
 
     fn parse_instance_decl(&mut self) -> Result<Decl, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Instance)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
         let ty_expr = self.parse_ty_path()?;
         self.expect_token(Token::Semi)?;
-        Ok(Decl::Instance(InstanceDecl { ident, ty_expr }))
+        Ok(span.end(&self, |span| Decl::Instance(InstanceDecl {
+            span,
+            ident,
+            ty_expr
+        })))
     }
 
     fn parse_struct_decl(&mut self) -> Result<Decl, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Struct)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::LeftBrace)?;
@@ -133,19 +148,29 @@ impl<'a> Parser<'a> {
             }
             self.expect_token(Token::RightBrace)?;
         }
-        Ok(Decl::Struct(StructDecl { ident, fields }))
+        Ok(span.end(&self, |span| Decl::Struct(StructDecl {
+            span,
+            ident,
+            fields
+        })))
     }
 
     fn parse_texture_decl(&mut self) -> Result<Decl, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Texture)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
         let ty_expr = self.parse_ty_path()?;
         self.expect_token(Token::Semi)?;
-        Ok(Decl::Texture(TextureDecl { ident, ty_expr }))
+        Ok(span.end(&self, |span| Decl::Texture(TextureDecl {
+            span,
+            ident,
+            ty_expr
+        })))
     }
 
     fn parse_uniform_decl(&mut self) -> Result<Decl, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Uniform)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
@@ -156,20 +181,26 @@ impl<'a> Parser<'a> {
             None
         };
         self.expect_token(Token::Semi)?;
-        Ok(Decl::Uniform(UniformDecl {
+        Ok(span.end(&self, |span| Decl::Uniform(UniformDecl {
+            span,
             ident,
             ty_expr,
             block_ident,
-        }))
+        })))
     }
 
     fn parse_varying_decl(&mut self) -> Result<Decl, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Varying)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
         let ty_expr = self.parse_ty_expr()?;
         self.expect_token(Token::Semi)?;
-        Ok(Decl::Varying(VaryingDecl { ident, ty_expr }))
+        Ok(span.end(&self, |span| Decl::Varying(VaryingDecl {
+            span,
+            ident,
+            ty_expr
+        })))
     }
 
     fn parse_param(&mut self) -> Result<Param, Error> {
