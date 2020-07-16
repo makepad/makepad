@@ -3,15 +3,15 @@ use crate::builtin::{self, Builtin};
 use crate::const_eval::ConstEvaluator;
 use crate::dep_analyse::DepAnalyser;
 use crate::env::{Env, Sym, VarKind};
+use crate::error::Error;
 use crate::ident::Ident;
 use crate::span::Span;
 use crate::ty::Ty;
 use crate::ty_check::TyChecker;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::error::Error;
 
-pub fn analyse(shader_ast: &ShaderAst) -> Result<(), Box<dyn Error>> {
+pub fn analyse(shader_ast: &ShaderAst) -> Result<(), Box<dyn std::error::Error>> {
     let builtins = builtin::generate_builtins();
     let mut env = Env::new();
     env.push_scope();
@@ -50,7 +50,7 @@ impl<'a> ShaderAnalyser<'a> {
         }
     }
 
-    fn analyse_shader(&mut self) -> Result<(), Box<dyn Error>> {
+    fn analyse_shader(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.env.push_scope();
         for decl in &self.shader_ast.decls {
             self.analyse_decl(decl)?;
@@ -101,7 +101,7 @@ impl<'a> ShaderAnalyser<'a> {
         )
     }
 
-    fn analyse_decl(&mut self, decl: &Decl) -> Result<(), Box<dyn Error>> {
+    fn analyse_decl(&mut self, decl: &Decl) -> Result<(), Box<dyn std::error::Error>> {
         match decl {
             Decl::Attribute(decl) => self.analyse_attribute_decl(decl),
             Decl::Const(decl) => self.analyse_const_decl(decl),
@@ -114,7 +114,7 @@ impl<'a> ShaderAnalyser<'a> {
         }
     }
 
-    fn analyse_attribute_decl(&mut self, decl: &AttributeDecl) -> Result<(), Box<dyn Error>> {
+    fn analyse_attribute_decl(&mut self, decl: &AttributeDecl) -> Result<(), Box<dyn std::error::Error>> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         match ty {
             Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {}
@@ -130,7 +130,7 @@ impl<'a> ShaderAnalyser<'a> {
         )
     }
 
-    fn analyse_const_decl(&mut self, decl: &ConstDecl) -> Result<(), Box<dyn Error>> {
+    fn analyse_const_decl(&mut self, decl: &ConstDecl) -> Result<(), Box<dyn std::error::Error>> {
         let expected_ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         let actual_ty = self
             .ty_checker()
@@ -150,7 +150,7 @@ impl<'a> ShaderAnalyser<'a> {
         )
     }
 
-    fn analyse_fn_decl(&mut self, decl: &FnDecl) -> Result<(), Box<dyn Error>> {
+    fn analyse_fn_decl(&mut self, decl: &FnDecl) -> Result<(), Box<dyn std::error::Error>> {
         for param in &decl.params {
             self.ty_checker().ty_check_ty_expr(&param.ty_expr)?;
         }
@@ -180,7 +180,7 @@ impl<'a> ShaderAnalyser<'a> {
         self.env.insert_sym(decl.ident, Sym::Fn)
     }
 
-    fn analyse_instance_decl(&mut self, decl: &InstanceDecl) -> Result<(), Box<dyn Error>> {
+    fn analyse_instance_decl(&mut self, decl: &InstanceDecl) -> Result<(), Box<dyn std::error::Error>> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         match ty {
             Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {}
@@ -196,14 +196,14 @@ impl<'a> ShaderAnalyser<'a> {
         )
     }
 
-    fn analyse_struct_decl(&mut self, decl: &StructDecl) -> Result<(), Box<dyn Error>> {
+    fn analyse_struct_decl(&mut self, decl: &StructDecl) -> Result<(), Box<dyn std::error::Error>> {
         for field in &decl.fields {
             self.ty_checker().ty_check_ty_expr(&field.ty_expr)?;
         }
         self.env.insert_sym(decl.ident, Sym::TyVar { ty: Ty::Struct { ident: decl.ident } })
     }
 
-    fn analyse_texture_decl(&mut self, decl: &TextureDecl) -> Result<(), Box<dyn Error>> {
+    fn analyse_texture_decl(&mut self, decl: &TextureDecl) -> Result<(), Box<dyn std::error::Error>> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         match ty {
             Ty::Texture2d => {}
@@ -219,7 +219,7 @@ impl<'a> ShaderAnalyser<'a> {
         )
     }
 
-    fn analyse_uniform_decl(&mut self, decl: &UniformDecl) -> Result<(), Box<dyn Error>> {
+    fn analyse_uniform_decl(&mut self, decl: &UniformDecl) -> Result<(), Box<dyn std::error::Error>> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         self.env.insert_sym(
             decl.ident,
@@ -231,7 +231,7 @@ impl<'a> ShaderAnalyser<'a> {
         )
     }
 
-    fn analyse_varying_decl(&mut self, decl: &VaryingDecl) -> Result<(), Box<dyn Error>> {
+    fn analyse_varying_decl(&mut self, decl: &VaryingDecl) -> Result<(), Box<dyn std::error::Error>> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         match ty {
             Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {}
@@ -252,7 +252,7 @@ impl<'a> ShaderAnalyser<'a> {
         kind: ShaderKind,
         call_stack: &mut Vec<Ident>,
         decl: &FnDecl,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         call_stack.push(decl.ident);
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
             let callee_decl = self.shader_ast.find_fn_decl(callee).unwrap();
@@ -277,7 +277,7 @@ impl<'a> ShaderAnalyser<'a> {
         &mut self,
         visited: &mut HashSet<Ident>,
         decl: &FnDecl,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if visited.contains(&decl.ident) {
             return Ok(());
         }
@@ -375,7 +375,7 @@ impl<'a> FnDefAnalyser<'a> {
         }
     }
 
-    fn analyse_fn_def(&mut self) -> Result<(), Box<dyn Error>> {
+    fn analyse_fn_def(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.env.push_scope();
         for param in &self.decl.params {
             self.env.insert_sym(
@@ -406,66 +406,89 @@ impl<'a> FnDefAnalyser<'a> {
         Ok(())
     }
 
-    fn analyse_block(&mut self, block: &Block) -> Result<(), Box<dyn Error>> {
+    fn analyse_block(&mut self, block: &Block) -> Result<(), Box<dyn std::error::Error>> {
         for stmt in &block.stmts {
             self.analyse_stmt(stmt)?;
         }
         Ok(())
     }
 
-    fn analyse_stmt(&mut self, stmt: &Stmt) -> Result<(), Box<dyn Error>> {
+    fn analyse_stmt(&mut self, stmt: &Stmt) -> Result<(), Box<dyn std::error::Error>> {
         match *stmt {
-            Stmt::Break => self.analyse_break_stmt(),
-            Stmt::Continue => self.analyse_continue_stmt(),
+            Stmt::Break {
+                span
+            } => self.analyse_break_stmt(span),
+            Stmt::Continue {
+                span
+            } => self.analyse_continue_stmt(span),
             Stmt::For {
+                span,
                 ident,
                 ref from_expr,
                 ref to_expr,
                 ref step_expr,
                 ref block,
-            } => self.analyse_for_stmt(ident, from_expr, to_expr, step_expr, block),
+            } => self.analyse_for_stmt(span, ident, from_expr, to_expr, step_expr, block),
             Stmt::If {
+                span,
                 ref expr,
                 ref block_if_true,
                 ref block_if_false,
-            } => self.analyse_if_stmt(expr, block_if_true, block_if_false),
+            } => self.analyse_if_stmt(span, expr, block_if_true, block_if_false),
             Stmt::Let {
+                span,
                 ref ty,
                 ident,
                 ref ty_expr,
                 ref expr,
-            } => self.analyse_let_stmt(ty, ident, ty_expr, expr),
-            Stmt::Return { ref expr } => self.analyse_return_stmt(expr),
-            Stmt::Block { ref block } => self.analyse_block_stmt(block),
-            Stmt::Expr { ref expr } => self.analyse_expr_stmt(expr),
+            } => self.analyse_let_stmt(span, ty, ident, ty_expr, expr),
+            Stmt::Return {
+                span,
+                ref expr
+            } => self.analyse_return_stmt(span, expr),
+            Stmt::Block {
+                span,
+                ref block
+            } => self.analyse_block_stmt(span, block),
+            Stmt::Expr {
+                span,
+                ref expr
+            } => self.analyse_expr_stmt(span, expr),
         }
     }
 
-    fn analyse_break_stmt(&self) -> Result<(), Box<dyn Error>> {
+    fn analyse_break_stmt(&self, span: Span) -> Result<(), Box<dyn std::error::Error>> {
         if !self.is_inside_loop {
-            return Err("break outside loop".into());
+            return Err(Error {
+                span,
+                message: String::from("break outside loop"),
+            }.into());
         }
         Ok(())
     }
 
-    fn analyse_continue_stmt(&self) -> Result<(), Box<dyn Error>> {
+    fn analyse_continue_stmt(&self, span: Span) -> Result<(), Box<dyn std::error::Error>> {
         if !self.is_inside_loop {
-            return Err("continue outside loop".into());
+            return Err(Error {
+                span,
+                message: String::from("continue outside loop"),
+            }.into());
         }
         Ok(())
     }
 
     fn analyse_for_stmt(
         &mut self,
+        span: Span,
         ident: Ident,
         from_expr: &Expr,
         to_expr: &Expr,
         step_expr: &Option<Expr>,
         block: &Block,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.ty_checker()
             .ty_check_expr_with_expected_ty(
-                Span::default(), // TODO
+                span,
                 from_expr,
                 &Ty::Int
             )?;
@@ -477,7 +500,7 @@ impl<'a> FnDefAnalyser<'a> {
         self.dep_analyser().dep_analyse_expr(from_expr);
         self.ty_checker()
             .ty_check_expr_with_expected_ty(
-                Span::default(), // TODO
+                span,
                 to_expr,
                 &Ty::Int
             )?;
@@ -490,7 +513,7 @@ impl<'a> FnDefAnalyser<'a> {
         if let Some(step_expr) = step_expr {
             self.ty_checker()
                 .ty_check_expr_with_expected_ty(
-                    Span::default(), // TODO
+                    span,
                     step_expr,
                     &Ty::Int
                 )?;
@@ -500,13 +523,22 @@ impl<'a> FnDefAnalyser<'a> {
                 .to_int()
                 .unwrap();
             if step == 0 {
-                return Err("step must not be zero".into());
+                return Err(Error {
+                    span,
+                    message: String::from("step must not be zero"),
+                }.into());
             }
             if from < to && step < 0 {
-                return Err("step must be positive".into());
+                return Err(Error {
+                    span,
+                    message: String::from("step must not be positive"),
+                }.into());
             }
             if from > to && step > 0 {
-                return Err("step must be negative".into());
+                return Err(Error {
+                    span,
+                    message: String::from("step must not be negative"),
+                }.into());
             }
             self.dep_analyser().dep_analyse_expr(step_expr);
         }
@@ -529,13 +561,14 @@ impl<'a> FnDefAnalyser<'a> {
 
     fn analyse_if_stmt(
         &mut self,
+        span: Span,
         expr: &Expr,
         block_if_true: &Block,
         block_if_false: &Option<Box<Block>>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.ty_checker()
             .ty_check_expr_with_expected_ty(
-                Span::default(), // TODO
+                span,
                 expr,
                 &Ty::Bool
             )?;
@@ -553,18 +586,19 @@ impl<'a> FnDefAnalyser<'a> {
 
     fn analyse_let_stmt(
         &mut self,
+        span: Span,
         ty: &RefCell<Option<Ty>>,
         ident: Ident,
         ty_expr: &Option<TyExpr>,
         expr: &Option<Expr>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         *ty.borrow_mut() = Some(if let Some(ty_expr) = ty_expr {
             let expected_ty = self.ty_checker().ty_check_ty_expr(ty_expr)?;
             if let Some(expr) = expr {
                 let actual_ty = self
                     .ty_checker()
                     .ty_check_expr_with_expected_ty(
-                        Span::default(), // TODO
+                        span,
                         expr,
                         &expected_ty
                     )?;
@@ -578,7 +612,10 @@ impl<'a> FnDefAnalyser<'a> {
             self.dep_analyser().dep_analyse_expr(expr);
             ty
         } else {
-            return Err(format!("can't infer type of variable `{}`", ident).into());
+            return Err(Error {
+                span,
+                message: format!("can't infer type of variable `{}`", ident),
+            }.into());
         });
         self.env.insert_sym(
             ident,
@@ -590,28 +627,43 @@ impl<'a> FnDefAnalyser<'a> {
         )
     }
 
-    fn analyse_return_stmt(&mut self, expr: &Option<Expr>) -> Result<(), Box<dyn Error>> {
+    fn analyse_return_stmt(
+        &mut self,
+        span: Span,
+        expr: &Option<Expr>
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(expr) = expr {
             self.ty_checker().ty_check_expr_with_expected_ty(
-                Span::default(), // TODO
+                span,
                 expr,
                 self.decl.return_ty.borrow().as_ref().unwrap(),
             )?;
             self.dep_analyser().dep_analyse_expr(expr);
         } else if self.decl.return_ty.borrow().as_ref().unwrap() != &Ty::Void {
-            return Err("missing return expression".into());
+            return Err(Error {
+                span,
+                message: String::from("missing return expression"),
+            }.into());
         }
         Ok(())
     }
 
-    fn analyse_block_stmt(&mut self, block: &Block) -> Result<(), Box<dyn Error>> {
+    fn analyse_block_stmt(
+        &mut self,
+        _span: Span,
+        block: &Block
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.env.push_scope();
         self.analyse_block(block)?;
         self.env.pop_scope();
         Ok(())
     }
 
-    fn analyse_expr_stmt(&mut self, expr: &Expr) -> Result<(), Box<dyn Error>> {
+    fn analyse_expr_stmt(
+        &mut self,
+        _span: Span,
+        expr: &Expr
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.ty_checker().ty_check_expr(expr)?;
         self.dep_analyser().dep_analyse_expr(expr);
         Ok(())

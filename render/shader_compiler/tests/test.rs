@@ -64,7 +64,7 @@ const SOURCE: &str = r#"
 fn test() {
     let mut shader = ShaderAst::new();
     parse::parse(
-        &lex::lex(SOURCE.chars())
+        &lex::lex(SOURCE.chars(), 0)
             .collect::<Result<Vec<_>, _>>()
             .unwrap(),
         &mut shader,
