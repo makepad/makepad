@@ -195,7 +195,8 @@ impl<'a> ShaderAnalyser<'a> {
             decl.span,
             decl.ident,
             Sym::Fn
-        )
+        ).ok();
+        Ok(())
     }
 
     fn analyse_instance_decl(&mut self, decl: &InstanceDecl) -> Result<(), Error> {
