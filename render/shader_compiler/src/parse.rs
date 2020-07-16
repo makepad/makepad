@@ -85,13 +85,16 @@ impl<'a> Parser<'a> {
         self.expect_token(Token::Fn)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::LeftParen)?;
+        let mut has_self = false;
         let mut params = Vec::new();
         if !self.accept_token(Token::RightParen) {
-            loop {
+            if self.accept_token(Token::Self_) {
+                has_self = true;
+            } else {
                 params.push(self.parse_param()?);
-                if !self.accept_token(Token::Comma) {
-                    break;
-                }
+            }
+            while self.accept_token(Token::Comma) {
+                params.push(self.parse_param()?);
             }
             self.expect_token(Token::RightParen)?;
         }
@@ -115,6 +118,7 @@ impl<'a> Parser<'a> {
             builtin_deps: RefCell::new(None),
             cons_deps: RefCell::new(None),
             ident,
+            has_self,
             params,
             return_ty_expr,
             block,
