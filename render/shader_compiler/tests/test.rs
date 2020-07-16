@@ -6,7 +6,7 @@ use makepad_shader_compiler::parse;
 
 const SOURCE: &str = r#"
     impl Cx {
-        fn foo() {
+        fn foo(self, bla: float) {
 
         }
     }
