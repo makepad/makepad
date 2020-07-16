@@ -686,42 +686,59 @@ impl<'a> FnDefGenerator<'a> {
     fn generate_stmt(&mut self, stmt: &Stmt) {
         self.write_indent();
         match *stmt {
-            Stmt::Break => self.generate_break_stmt(),
-            Stmt::Continue => self.generate_continue_stmt(),
+            Stmt::Break {
+                span
+            } => self.generate_break_stmt(span),
+            Stmt::Continue {
+                span
+            } => self.generate_continue_stmt(span),
             Stmt::For {
+                span,
                 ident,
                 ref from_expr,
                 ref to_expr,
                 ref step_expr,
                 ref block,
-            } => self.generate_for_stmt(ident, from_expr, to_expr, step_expr, block),
+            } => self.generate_for_stmt(span, ident, from_expr, to_expr, step_expr, block),
             Stmt::If {
+                span,
                 ref expr,
                 ref block_if_true,
                 ref block_if_false,
-            } => self.generate_if_stmt(expr, block_if_true, block_if_false),
+            } => self.generate_if_stmt(span, expr, block_if_true, block_if_false),
             Stmt::Let {
+                span,
                 ref ty,
                 ident,
                 ref ty_expr,
                 ref expr,
-            } => self.generate_let_stmt(ty, ident, ty_expr, expr),
-            Stmt::Return { ref expr } => self.generate_return_stmt(expr),
-            Stmt::Block { ref block } => self.generate_block_stmt(block),
-            Stmt::Expr { ref expr } => self.generate_expr_stmt(expr),
+            } => self.generate_let_stmt(span, ty, ident, ty_expr, expr),
+            Stmt::Return {
+                span,
+                ref expr
+            } => self.generate_return_stmt(span, expr),
+            Stmt::Block {
+                span,
+                ref block
+            } => self.generate_block_stmt(span, block),
+            Stmt::Expr {
+                span,
+                ref expr
+            } => self.generate_expr_stmt(span, expr),
         }
     }
 
-    fn generate_break_stmt(&mut self) {
+    fn generate_break_stmt(&mut self, _span: Span) {
         writeln!(self.string, "break;").unwrap();
     }
 
-    fn generate_continue_stmt(&mut self) {
+    fn generate_continue_stmt(&mut self, _span: Span) {
         writeln!(self.string, "continue;").unwrap();
     }
 
     fn generate_for_stmt(
         &mut self,
+        _span: Span,
         ident: Ident,
         from_expr: &Expr,
         to_expr: &Expr,
@@ -754,6 +771,7 @@ impl<'a> FnDefGenerator<'a> {
 
     fn generate_if_stmt(
         &mut self,
+        _span: Span,
         expr: &Expr,
         block_if_true: &Block,
         block_if_false: &Option<Box<Block>>,
@@ -770,6 +788,7 @@ impl<'a> FnDefGenerator<'a> {
 
     fn generate_let_stmt(
         &mut self,
+        _span: Span,
         ty: &RefCell<Option<Ty>>,
         ident: Ident,
         _ty_expr: &Option<TyExpr>,
@@ -783,7 +802,7 @@ impl<'a> FnDefGenerator<'a> {
         writeln!(self.string, ";").unwrap();
     }
 
-    fn generate_return_stmt(&mut self, expr: &Option<Expr>) {
+    fn generate_return_stmt(&mut self, _span: Span, expr: &Option<Expr>) {
         write!(self.string, "return").unwrap();
         if let Some(expr) = expr {
             write!(self.string, " ").unwrap();
@@ -792,12 +811,12 @@ impl<'a> FnDefGenerator<'a> {
         writeln!(self.string, ";").unwrap();
     }
 
-    fn generate_block_stmt(&mut self, block: &Block) {
+    fn generate_block_stmt(&mut self, _span: Span, block: &Block) {
         self.generate_block(block);
         writeln!(self.string).unwrap();
     }
 
-    fn generate_expr_stmt(&mut self, expr: &Expr) {
+    fn generate_expr_stmt(&mut self, _span: Span, expr: &Expr) {
         self.generate_expr(expr);
         writeln!(self.string, ";").unwrap();
     }
