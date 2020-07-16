@@ -481,6 +481,7 @@ impl<'a> FnDefAnalyser<'a> {
         *self.decl.callees.borrow_mut() = Some(HashSet::new());
         *self.decl.uniform_block_deps.borrow_mut() = Some(HashSet::new());
         *self.decl.attribute_deps.borrow_mut() = Some(HashSet::new());
+        *self.decl.instance_deps.borrow_mut() = Some(HashSet::new());
         self.decl.has_in_varying_deps.set(Some(false));
         self.decl.has_out_varying_deps.set(Some(false));
         *self.decl.builtin_deps.borrow_mut() = Some(HashSet::new());
