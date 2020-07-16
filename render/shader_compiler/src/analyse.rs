@@ -176,6 +176,9 @@ impl<'a> ShaderAnalyser<'a> {
         )
     }
 
+    // TODO: Add an optional struct_ident.
+    // If set, append this to the function name.
+    // If not set, check that the function does not have a self parameter. 
     fn analyse_fn_decl(&mut self, decl: &FnDecl) -> Result<(), Error> {
         for param in &decl.params {
             self.ty_checker().ty_check_ty_expr(&param.ty_expr)?;
@@ -453,6 +456,8 @@ impl<'a> FnDefAnalyser<'a> {
         }
     }
 
+    // TODO: Add an optional struct_ident.
+    // If set, define an additional parameter of type struct_ident.
     fn analyse_fn_def(&mut self) -> Result<(), Error> {
         self.env.push_scope();
         for param in &self.decl.params {

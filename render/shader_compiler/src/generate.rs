@@ -908,7 +908,17 @@ impl<'a> ExprGenerator<'a> {
                 ref left_expr,
                 ref right_expr,
             } => self.generate_bin_expr(span, op, left_expr, right_expr),
-            ExprKind::Un { span, op, ref expr } => self.generate_un_expr(span, op, expr),
+            ExprKind::Un {
+                span,
+                op,
+                ref expr
+            } => self.generate_un_expr(span, op, expr),
+            ExprKind::MethodCall {
+                span,
+                ref expr,
+                method_ident,
+                ref arg_exprs
+            } => self.generate_method_call_expr(span, expr, method_ident, arg_exprs),
             ExprKind::Field {
                 span,
                 ref expr,
@@ -972,6 +982,16 @@ impl<'a> ExprGenerator<'a> {
     fn generate_un_expr(&mut self, _span: Span, op: UnOp, expr: &Expr) {
         write!(self.string, "{}", op).unwrap();
         self.generate_expr(expr);
+    }
+
+    fn generate_method_call_expr(
+        &mut self,
+        _span: Span,
+        _expr: &Expr,
+        _method_ident: Ident,
+        _arg_exprs: &[Expr]
+    ) {
+        unimplemented!() // TODO: Generate method calls
     }
 
     fn generate_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident) {
