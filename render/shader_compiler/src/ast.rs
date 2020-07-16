@@ -134,6 +134,7 @@ pub struct FnDecl {
     pub builtin_deps: RefCell<Option<HashSet<Ident>>>,
     pub cons_deps: RefCell<Option<HashSet<(TyLit, Vec<Ty>)>>>,
     pub ident: Ident,
+    pub has_self: bool,
     pub params: Vec<Param>,
     pub return_ty_expr: Option<TyExpr>,
     pub block: Block,
