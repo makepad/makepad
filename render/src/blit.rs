@@ -24,6 +24,7 @@ impl Blit {
         }
     }
     
+    fn geom()->Vec2Id{uid!()}
     pub fn x()->FloatId{uid!()}
     pub fn y()->FloatId{uid!()}
     pub fn w()->FloatId{uid!()}
@@ -45,7 +46,7 @@ impl Blit {
         
         sb.compose(shader!{"
             
-            attribute geom: vec2;
+            attribute geom: Self::geom();
             instance x: Self::x();
             instance y: Self::y();
             instance w: Self::w();
