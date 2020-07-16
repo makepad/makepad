@@ -278,6 +278,7 @@ where
                     "for" => Token::For,
                     "from" => Token::From,
                     "if" => Token::If,
+                    "impl" => Token::Impl,
                     "in" => Token::In,
                     "instance" => Token::Instance,
                     "int" => Token::TyLit(TyLit::Int),
