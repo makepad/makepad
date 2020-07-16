@@ -150,6 +150,14 @@ impl<'a> DepAnalyser<'a> {
                         .unwrap()
                         .insert(ident);
                 }
+                VarKind::Instance => {
+                    self.decl
+                        .instance_deps
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .insert(ident);
+                }
                 VarKind::Uniform => {
                     self.decl
                         .uniform_block_deps

@@ -214,7 +214,7 @@ impl<'a> ShaderAnalyser<'a> {
             Sym::Var {
                 is_mut: false,
                 ty,
-                kind: VarKind::Attribute,
+                kind: VarKind::Instance,
             },
         )
     }
@@ -335,6 +335,11 @@ impl<'a> ShaderAnalyser<'a> {
                 .as_mut()
                 .unwrap()
                 .extend(callee_decl.attribute_deps.borrow().as_ref().unwrap());
+            decl.instance_deps
+                .borrow_mut()
+                .as_mut()
+                .unwrap()
+                .extend(callee_decl.instance_deps.borrow().as_ref().unwrap());
             decl.has_in_varying_deps.set(Some(
                 decl.has_in_varying_deps.get().unwrap()
                     || callee_decl.has_in_varying_deps.get().unwrap(),
