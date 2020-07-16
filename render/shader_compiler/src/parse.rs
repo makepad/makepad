@@ -208,18 +208,21 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_break_stmt(&mut self) -> Result<Stmt, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Break)?;
         self.expect_token(Token::Semi)?;
-        Ok(Stmt::Break)
+        Ok(span.end(&self, |span| Stmt::Break { span }))
     }
 
     fn parse_continue_stmt(&mut self) -> Result<Stmt, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Continue)?;
         self.expect_token(Token::Semi)?;
-        Ok(Stmt::Continue)
+        Ok(span.end(&self, |span| Stmt::Continue { span }))
     }
 
     fn parse_for_stmt(&mut self) -> Result<Stmt, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::For)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::From)?;
@@ -232,16 +235,18 @@ impl<'a> Parser<'a> {
             None
         };
         let block = Box::new(self.parse_block()?);
-        Ok(Stmt::For {
+        Ok(span.end(&self, |span| Stmt::For {
+            span,
             ident,
             from_expr,
             to_expr,
             step_expr,
             block,
-        })
+        }))
     }
 
     fn parse_if_stmt(&mut self) -> Result<Stmt, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::If)?;
         let expr = self.parse_expr()?;
         let block_if_true = Box::new(self.parse_block()?);
@@ -255,14 +260,16 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        Ok(Stmt::If {
+        Ok(span.end(&self, |span| Stmt::If {
+            span,
             expr,
             block_if_true,
             block_if_false,
-        })
+        }))
     }
 
     fn parse_let_stmt(&mut self) -> Result<Stmt, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Let)?;
         let ident = self.parse_ident()?;
         let ty_expr = if self.accept_token(Token::Colon) {
@@ -276,15 +283,17 @@ impl<'a> Parser<'a> {
             None
         };
         self.expect_token(Token::Semi)?;
-        Ok(Stmt::Let {
+        Ok(span.end(&self, |span| Stmt::Let {
+            span,
             ty: RefCell::new(None),
             ident,
             ty_expr,
             expr,
-        })
+        }))
     }
 
     fn parse_return_stmt(&mut self) -> Result<Stmt, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Return)?;
         let expr = if !self.accept_token(Token::Semi) {
             let expr = self.parse_expr()?;
@@ -293,13 +302,14 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        Ok(Stmt::Return { expr })
+        Ok(span.end(&self, |span| Stmt::Return { span, expr }))
     }
 
     fn parse_expr_stmt(&mut self) -> Result<Stmt, Error> {
+        let span = self.begin_span();
         let expr = self.parse_expr()?;
         self.expect_token(Token::Semi)?;
-        Ok(Stmt::Expr { expr })
+        Ok(span.end(&self, |span| Stmt::Expr { span, expr }))
     }
 
     fn parse_ty_path(&mut self) -> Result<TyExpr, Error> {
