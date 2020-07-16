@@ -414,7 +414,7 @@ where
     }
 }
 
-pub fn lex<C>(chars: C, loc_id:usize) -> Lex<C::IntoIter>
+pub fn lex<C>(chars: C, loc_id: usize) -> Lex<C::IntoIter>
 where
     C: IntoIterator<Item = char>,
 {

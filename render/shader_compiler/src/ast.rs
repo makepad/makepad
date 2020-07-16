@@ -190,9 +190,14 @@ pub struct Block {
 
 #[derive(Clone, Debug)]
 pub enum Stmt {
-    Break,
-    Continue,
+    Break {
+        span: Span,
+    },
+    Continue {
+        span: Span,
+    },
     For {
+        span: Span,
         ident: Ident,
         from_expr: Expr,
         to_expr: Expr,
@@ -200,23 +205,28 @@ pub enum Stmt {
         block: Box<Block>,
     },
     If { 
+        span: Span,
         expr: Expr,
         block_if_true: Box<Block>,
         block_if_false: Option<Box<Block>>,
     },
     Let {
+        span: Span,
         ty: RefCell<Option<Ty>>,
         ident: Ident,
         ty_expr: Option<TyExpr>,
         expr: Option<Expr>,
     },
     Return {
+        span: Span,
         expr: Option<Expr>,
     },
     Block {
+        span: Span,
         block: Box<Block>,
     },
     Expr {
+        span: Span,
         expr: Expr,
     },
 }
