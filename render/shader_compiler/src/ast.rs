@@ -105,12 +105,14 @@ pub enum Decl {
 
 #[derive(Clone, Debug)]
 pub struct AttributeDecl {
+    pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
 }
 
 #[derive(Clone, Debug)]
 pub struct ConstDecl {
+    pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
     pub expr: Expr,
@@ -118,6 +120,7 @@ pub struct ConstDecl {
 
 #[derive(Clone, Debug)]
 pub struct FnDecl {
+    pub span: Span,
     pub return_ty: RefCell<Option<Ty>>,
     pub is_used_in_vertex_shader: Cell<Option<bool>>,
     pub is_used_in_fragment_shader: Cell<Option<bool>>,
@@ -136,12 +139,14 @@ pub struct FnDecl {
 
 #[derive(Clone, Debug)]
 pub struct InstanceDecl {
+    pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
 }
 
 #[derive(Clone, Debug)]
 pub struct StructDecl {
+    pub span: Span,
     pub ident: Ident,
     pub fields: Vec<Field>,
 }
@@ -154,12 +159,14 @@ impl StructDecl {
 
 #[derive(Clone, Debug)]
 pub struct TextureDecl {
+    pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
 }
 
 #[derive(Clone, Debug)]
 pub struct UniformDecl {
+    pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
     pub block_ident: Option<Ident>,
@@ -167,6 +174,7 @@ pub struct UniformDecl {
 
 #[derive(Clone, Debug)]
 pub struct VaryingDecl {
+    pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
 }
