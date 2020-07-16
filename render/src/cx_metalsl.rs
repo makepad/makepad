@@ -113,32 +113,36 @@ impl Cx {
     pub fn mtl_assemble_shader(sg: &ShaderGen) -> Result<(String, CxShaderMapping), SlErr> {
         // ok lets parse everything. this should never give errors
         let mut shader = ShaderAst::new();
+        let mut input_props = Vec::new();
         for (index,sub) in sg.subs.iter().enumerate() {
             // lets tokenize the sub
             let tokens = lex::lex(sub.code.chars(), index).collect::<Result<Vec<_>, _>>();
             if let Err(err) = &tokens {
                 let start = ShaderGen::byte_to_row_col(err.span.start, &sub.code);
-                println!("Shader lex error {}:{} col:{} len:{} - {}", sub.loc.file, start.0 + sub.loc.line, start.1 + 1, err.span.end - err.span.start, err);
+                println!("Shader lex error {}:{} col:{} - {}", sub.loc.file, start.0 + sub.loc.line, start.1 + 1, err);
             }
             let tokens = tokens.unwrap();
             if let Err(err) = parse::parse(&tokens, &mut shader) {
                 // lets find the span info
                 let start = ShaderGen::byte_to_row_col(err.span.start, &sub.code);
-                println!("Shader parse error {}:{} col:{} len:{} - {}", sub.loc.file, start.0 + sub.loc.line, start.1 + 1, err.span.end - err.span.start, err);
+                println!("Shader parse error {}:{} col:{} - {}", sub.loc.file, start.0 + sub.loc.line, start.1 + 1, err);
             }
+            // lets add our instance_props
+            input_props.extend(sub.attribute_props.iter());
+            input_props.extend(sub.instance_props.iter());
+            input_props.extend(sub.uniform_props.iter());
         }
         
+        // lets collect all our 
         
         // ok now we have the shader, lets analyse
-        if let Err(err) = analyse::analyse(&mut shader){
-            println!("Shader analyse error {}", err);
-            //let sub = &sg.subs[err.span.file_id];
-            
-            //let start = ShaderGen::byte_to_row_col(err.span.start, &sub.code);
-            //println!("Shader parse error {}:{} col:{} len:{} - {}", sub.loc.file, start.0 + sub.loc.line, start.1 + 1, err.span.end - err.span.start, err);
+        if let Err(err) = analyse::analyse(&mut shader, &input_props){
+            let sub = &sg.subs[err.span.loc_id];
+            let start = ShaderGen::byte_to_row_col(err.span.start, &sub.code);
+            println!("Shader analyse error {}:{} col:{} - {}", sub.loc.file, start.0 + sub.loc.line, start.1 + 1, err);
         }
         println!("{}", generate::generate(ShaderKind::Vertex, &shader));
-        println!("{}", generate::generate(ShaderKind::Fragment, &shader));        
+        println!("{}", generate::generate(ShaderKind::Fragment, &shader));
         
         return Err(SlErr {msg: "".to_string()});
         

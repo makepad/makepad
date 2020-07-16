@@ -23,6 +23,7 @@ impl Quad {
         }
     }
     
+    pub fn geom()->Vec2Id{uid!()}
     pub fn x() -> FloatId {uid!()}
     pub fn y() -> FloatId {uid!()}
     pub fn w() -> FloatId {uid!()}
@@ -38,7 +39,7 @@ impl Quad {
         
         sg.compose(shader!{"
             
-            attribute geom: vec2;
+            attribute geom: Self::geom();
             varying pos: vec2;
             
             instance x: Self::x();

@@ -22,6 +22,7 @@ pub struct PropDef{
 pub struct ShaderSub{
     pub loc:LiveLoc,
     pub code:String,
+    pub attribute_props:Vec<PropDef>,
     pub instance_props:Vec<PropDef>,
     pub uniform_props:Vec<PropDef>
 }

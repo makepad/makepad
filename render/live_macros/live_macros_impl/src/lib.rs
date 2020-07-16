@@ -51,7 +51,7 @@ pub fn shader(input: TokenStream) -> TokenStream {
         tb.add("ShaderSub {");
         tb.add("loc :");
         live_loc(&mut tb, lit.span());
-        tb.add(", code :").string(source).add(". to_string ( ) , instance_props : vec ! [");
+        tb.add(", code :").string(source).add(". to_string ( ) ,");
         
         fn prop_def(tb: &mut TokenBuilder, decl_ident: String, call_ident: String) {
             tb.add("PropDef { name :").string(&decl_ident).add(". to_string ( )");
@@ -66,6 +66,23 @@ pub fn shader(input: TokenStream) -> TokenStream {
             tb.add("( ) . prop_id ( )");
             tb.add("} ,");
         }
+        tb.add("attribute_props : vec ! [");
+        for decl in &shader.decls {
+            match decl {
+                Decl::Attribute(decl) => {
+                    match decl.ty_expr.kind {
+                        TyExprKind::Var {ident, ..} => {
+                            prop_def(&mut tb, decl.ident.to_string(), ident.to_string());
+                        },
+                        _ => {
+                            return error(&format!("Type expression for attribute {}", decl.ident));
+                        }
+                    }
+                },
+                _ => ()
+            }
+        }
+        tb.add("] , instance_props : vec ! [");
         for decl in &shader.decls {
             match decl {
                 Decl::Instance(decl) => {
