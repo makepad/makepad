@@ -61,6 +61,7 @@ impl TrapezoidText {
         }
     } 
     
+    fn geom()->Vec2Id{uid!()}
     fn a_xs()->Vec2Id{uid!()}
     fn a_ys()->Vec4Id{uid!()}
     fn chan()->FloatId{uid!()}
@@ -72,7 +73,7 @@ impl TrapezoidText {
          
         sg.compose(shader!{"
             
-            attribute geom: vec2;
+            attribute geom: Self::geom();
             
             instance a_xs: Self::a_xs();
             instance a_ys: Self::a_ys();

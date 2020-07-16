@@ -58,6 +58,7 @@ impl Text {
         }
     }
     
+    fn geom()->Vec2Id{uid!()}
     pub fn font_tc() -> Vec4Id {uid!()}
     pub fn color() -> ColorId {uid!()}
     pub fn x() -> FloatId {uid!()}
@@ -78,11 +79,12 @@ impl Text {
     
     pub fn def_text_shader() -> ShaderGen {
         // lets add the draw shader lib
-        let mut sg = ShaderGen::new();
+        let mut sg = Cx::shader_defs(ShaderGen::new());
+
         sg.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
         sg.geometry_indices = vec![0, 1, 2, 0, 3, 2];
         sg.compose(shader!{" 
-            attribute geom: vec2;
+            attribute geom: Self::geom();
             texture texturez: Self::texturez();
             
             instance font_tc: Self::font_tc();

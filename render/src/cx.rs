@@ -304,6 +304,13 @@ impl Default for Cx {
 
 impl Cx {
     
+    pub fn shader_defs(sg:ShaderGen)->ShaderGen{
+        let sg = CxShader::def_df(sg);
+        let sg = CxPass::def_uniforms(sg);
+        let sg = CxView::def_uniforms(sg);
+        sg        
+    }
+    
     pub fn add_shader(&mut self, sg: ShaderGen, name: &str) -> Shader {
         let inst_id = self.shader_instance_id;
         self.shader_instance_id += 1;
