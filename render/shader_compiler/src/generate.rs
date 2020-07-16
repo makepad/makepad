@@ -229,6 +229,8 @@ impl<'a> ShaderGenerator<'a> {
         let vertex_decl = self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap();
         let total_packed_attribute_size = self.compute_total_packed_attribute_size();
         self.generate_packed_attributes(total_packed_attribute_size);
+        let total_packed_instance_size = self.compute_total_packed_instance_size();
+        self.generate_packed_attributes(total_packed_instance_size);
         let total_packed_varying_size = self.compute_total_packed_varying_size();
         self.generate_packed_varyings(total_packed_varying_size);
         writeln!(self.string, "void main() {{").unwrap();
@@ -324,6 +326,44 @@ impl<'a> ShaderGenerator<'a> {
         }
     }
 
+    fn compute_total_packed_instance_size(&mut self) -> usize {
+        let mut total_packed_instance_size = 0;
+        for decl in &self.shader_ast.decls {
+            match decl {
+                Decl::Attribute(decl) => {
+                    total_packed_instance_size +=
+                        decl.ty_expr.ty.borrow().as_ref().unwrap().size();
+                }
+                _ => {}
+            }
+        }
+        total_packed_instance_size
+    }
+
+    fn generate_packed_instances(&mut self, total_packed_instance_size: usize) {
+        let mut remaining_packed_instance_size = total_packed_instance_size;
+        let mut current_packed_instance_index = 0;
+        loop {
+            let current_packed_instance_size = remaining_packed_instance_size.min(4);
+            writeln!(
+                self.string,
+                "instance {} _mpsc_packed_instance_{};",
+                match current_packed_instance_size {
+                    0 => break,
+                    1 => "float",
+                    2 => "vec2",
+                    3 => "vec3",
+                    4 => "vec4",
+                    _ => panic!(),
+                },
+                current_packed_instance_index,
+            )
+            .unwrap();
+            remaining_packed_instance_size -= current_packed_instance_size;
+            current_packed_instance_index += 1;
+        }
+    }
+
     fn compute_total_packed_varying_size(&mut self) -> usize {
         let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("fragment")).unwrap();
         let mut total_packed_varying_size = 0;
@@ -332,6 +372,16 @@ impl<'a> ShaderGenerator<'a> {
                 Decl::Attribute(decl)
                     if fragment_decl
                         .attribute_deps
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .contains(&decl.ident) =>
+                {
+                    total_packed_varying_size += decl.ty_expr.ty.borrow().as_ref().unwrap().size();
+                }
+                Decl::Instance(decl)
+                    if fragment_decl
+                        .instance_deps
                         .borrow()
                         .as_ref()
                         .unwrap()
@@ -955,6 +1005,10 @@ impl<'a> ExprGenerator<'a> {
                         write!(self.string, "{}_mpsc_attributes", sep).unwrap();
                         sep = ", ";
                     }
+                    if !decl.instance_deps.borrow().as_ref().unwrap().is_empty() {
+                        write!(self.string, "{}_mpsc_instances", sep).unwrap();
+                        sep = ", ";
+                    }
                     if decl.has_out_varying_deps.get().unwrap() {
                         write!(self.string, "{}_mpsc_varyings", sep).unwrap();
                     }
@@ -1000,6 +1054,10 @@ impl<'a> ExprGenerator<'a> {
                 ShaderKind::Fragment => write!(self.string, "_mpsc_varyings.").unwrap(),
             },
             VarKind::Const => {}
+            VarKind::Instance => match self.kind {
+                ShaderKind::Vertex => write!(self.string, "_mpsc_instances.").unwrap(),
+                ShaderKind::Fragment => write!(self.string, "_mpsc_varyings.").unwrap(),
+            },
             VarKind::Local => {}
             VarKind::Texture => {}
             VarKind::Varying => write!(self.string, "_mpsc_varyings.").unwrap(),
