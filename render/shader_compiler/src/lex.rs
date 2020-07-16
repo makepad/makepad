@@ -290,6 +290,7 @@ where
                     "mat3" => Token::TyLit(TyLit::Mat3),
                     "mat4" => Token::TyLit(TyLit::Mat4),
                     "return" => Token::Return,
+                    "self" => Token::Self_,
                     "step" => Token::Step,
                     "struct" => Token::Struct,
                     "texture" => Token::Texture,
