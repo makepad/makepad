@@ -924,6 +924,11 @@ impl<'a> ExprGenerator<'a> {
                 ident,
                 ref arg_exprs,
             } => self.generate_call_expr(span, ident, arg_exprs),
+            ExprKind::MacroCall {
+                span,
+                ident,
+                ref arg_exprs,
+            } => self.generate_macro_call_expr(span, ident, arg_exprs),
             ExprKind::ConsCall {
                 span,
                 ty_lit,
@@ -1025,6 +1030,11 @@ impl<'a> ExprGenerator<'a> {
         }
         write!(self.string, ")").unwrap();
     }
+    
+    fn generate_macro_call_expr(&mut self, _span: Span, _ident: Ident, _arg_exprs: &[Expr]) {
+        write!(self.string, "").unwrap();
+    }
+
 
     fn generate_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {
         write!(self.string, "_mpsc_{}", ty_lit).unwrap();

@@ -127,6 +127,11 @@ impl<'a> TyChecker<'a> {
                 ident,
                 ref arg_exprs,
             } => self.ty_check_call_expr(span, ident, arg_exprs),
+            ExprKind::MacroCall {
+                span,
+                ident,
+                ref arg_exprs,
+            } => self.ty_check_macro_call_expr(span, ident, arg_exprs),
             ExprKind::ConsCall {
                 span,
                 ty_lit,
@@ -494,6 +499,18 @@ impl<'a> TyChecker<'a> {
             });
         }
         Ok(elem_ty)
+    }
+
+    fn ty_check_macro_call_expr(
+        &mut self,
+        span: Span,
+        _ident: Ident,
+        _arg_exprs: &[Expr],
+    ) -> Result<Ty, Error> {
+        return Err(Error {
+            span,
+            message: "implement macro call".into()
+        });
     }
 
     fn ty_check_call_expr(
