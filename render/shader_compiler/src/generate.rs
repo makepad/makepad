@@ -712,7 +712,6 @@ impl<'a> FnDefGenerator<'a> {
                 {
                     write!(self.string, "{}_mpsc_Varyings _mpsc_varyings", sep).unwrap();
                 }
-                write!(self.string, ")").unwrap();
             }
         }
         write!(self.string, ") ").unwrap();
@@ -908,7 +907,16 @@ impl<'a> ExprGenerator<'a> {
                 ref left_expr,
                 ref right_expr,
             } => self.generate_bin_expr(span, op, left_expr, right_expr),
-            ExprKind::Un { span, op, ref expr } => self.generate_un_expr(span, op, expr),
+            ExprKind::Un {
+                span,
+                op,
+                ref expr
+            } => self.generate_un_expr(span, op, expr),
+            ExprKind::MethodCall {
+                span,
+                ident,
+                ref arg_exprs
+            } => self.generate_method_call_expr(span, ident, arg_exprs),
             ExprKind::Field {
                 span,
                 ref expr,
@@ -974,6 +982,24 @@ impl<'a> ExprGenerator<'a> {
         self.generate_expr(expr);
     }
 
+    fn generate_method_call_expr(
+        &mut self,
+        span: Span,
+        ident: Ident,
+        arg_exprs: &[Expr]
+    ) {
+        match arg_exprs[0].ty.borrow().as_ref().unwrap() {
+            Ty::Struct { ident: struct_ident } => {
+                self.generate_call_expr(
+                    span,
+                    Ident::new(format!("{}::{}", struct_ident, ident)),
+                    arg_exprs
+                );
+            },
+            _ => panic!()
+        }
+    }
+
     fn generate_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident) {
         self.generate_expr(expr);
         write!(self.string, ".{}", field_ident).unwrap();
@@ -1019,7 +1045,6 @@ impl<'a> ExprGenerator<'a> {
                     {
                         write!(self.string, "{}_mpsc_varyings", sep).unwrap();
                     }
-                    write!(self.string, ")").unwrap();
                 }
             }
         }

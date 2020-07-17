@@ -640,17 +640,35 @@ impl<'a> Parser<'a> {
             match self.peek_token() {
                 Token::Dot => {
                     self.skip_token();
-                    let expr = Box::new(acc);
-                    let field_ident = self.parse_ident()?;
-                    acc = span.end(self, |span| Expr {
+                    let ident = self.parse_ident()?;
+                    acc = Expr {
                         ty: RefCell::new(None),
                         val: RefCell::new(None),
-                        kind: ExprKind::Field {
-                            span,
-                            expr,
-                            field_ident
-                        },
-                    });
+                        kind: if self.accept_token(Token::LeftParen) {
+                            let mut arg_exprs = vec![acc];
+                            if !self.accept_token(Token::RightParen) {
+                                loop {
+                                    arg_exprs.push(self.parse_expr()?);
+                                    if !self.accept_token(Token::Comma) {
+                                        break;
+                                    }
+                                }
+                                self.expect_token(Token::RightParen)?;
+                            }
+                            span.end(self, |span| ExprKind::MethodCall {
+                                span,
+                                ident,
+                                arg_exprs,
+                            })
+                        } else {
+                            let expr = Box::new(acc);
+                            span.end(self, |span| ExprKind::Field {
+                                span,
+                                expr,
+                                field_ident: ident,
+                            })
+                        }
+                    };
                 }
                 Token::LeftBracket => {
                     self.skip_token();
