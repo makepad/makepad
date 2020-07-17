@@ -111,7 +111,16 @@ impl<'a> TyChecker<'a> {
                 ref right_expr,
                 ..
             } => self.ty_check_bin_expr(span, op, left_expr, right_expr),
-            ExprKind::Un { span, op, ref expr } => self.ty_check_un_expr(span, op, expr),
+            ExprKind::Un {
+                span,
+                op,
+                ref expr
+            } => self.ty_check_un_expr(span, op, expr),
+            ExprKind::MethodCall {
+                span,
+                ident,
+                ref arg_exprs,
+            } => self.ty_check_method_call_expr(span, ident, arg_exprs),
             ExprKind::Field {
                 span,
                 ref expr,
@@ -381,11 +390,11 @@ impl<'a> TyChecker<'a> {
         })
     }
 
-    fn ty_check_field_expr(
+    fn ty_check_method_call_expr(
         &mut self,
         span: Span,
-        expr: &Expr,
-        field_ident: Ident,
+        ident: Ident,
+        arg_exprs: &[Expr]
     ) -> Result<Ty, Error> {
         if self.is_lvalue {
             return Err(Error {
@@ -393,6 +402,31 @@ impl<'a> TyChecker<'a> {
                 message: "invalid lvalue expression".into()
             });
         }
+        let was_lvalue = self.is_lvalue;
+        self.is_lvalue = false;
+        let ty = self.ty_check_expr(&arg_exprs[0])?;
+        self.is_lvalue = was_lvalue;
+        match ty {
+            Ty::Struct { ident: struct_ident } => {
+                self.ty_check_call_expr(
+                    span,
+                    Ident::new(format!("{}::{}", struct_ident, ident)),
+                    &arg_exprs
+                )
+            },
+            _ => Err(Error {
+                span,
+                message: format!("method `{}` is not defined on type `{}`", ident, ty)
+            })
+        }
+    }
+
+    fn ty_check_field_expr(
+        &mut self,
+        span: Span,
+        expr: &Expr,
+        field_ident: Ident,
+    ) -> Result<Ty, Error> {
         let ty = self.ty_check_expr(expr)?;
         match ty {
             ref ty if ty.is_vector() => {
@@ -469,12 +503,6 @@ impl<'a> TyChecker<'a> {
         expr: &Expr,
         index_expr: &Expr,
     ) -> Result<Ty, Error> {
-        if self.is_lvalue {
-            return Err(Error {
-                span,
-                message: "invalid lvalue expression".into()
-            });
-        }
         let ty = self.ty_check_expr(expr)?;
         let was_lvalue = self.is_lvalue;
         self.is_lvalue = false;
@@ -579,7 +607,7 @@ impl<'a> TyChecker<'a> {
                         .into()
                     });
                 }
-                if arg_exprs.len() < fn_decl.params.len() {
+                if arg_exprs.len() > fn_decl.params.len() {
                     return Err(Error {
                         span,
                         message: format!(
