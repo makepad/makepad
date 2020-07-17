@@ -713,6 +713,19 @@ impl<'a> Parser<'a> {
     fn parse_prim_expr(&mut self) -> Result<Expr, Error> {
         let span = self.begin_span();
         match self.peek_token() {
+            Token::Self_ => {
+                self.skip_token();
+                Ok(Expr {
+                    ty: RefCell::new(None),
+                    val: RefCell::new(None),
+                    kind: span.end(self, |span| ExprKind::Var {
+                        span,
+                        is_lvalue: Cell::new(None),
+                        kind: Cell::new(None),
+                        ident: Ident::new("self"),
+                    })
+                })
+            }
             Token::Ident(mut ident) => {
                 self.skip_token();
                 Ok(Expr {
@@ -806,7 +819,7 @@ impl<'a> Parser<'a> {
             },
         }
     }
-    
+
     fn parse_ident(&mut self) -> Result<Ident, Error> {
         let span = self.begin_span();
         match self.peek_token() {
