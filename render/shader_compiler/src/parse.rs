@@ -615,41 +615,16 @@ impl<'a> Parser<'a> {
                 Token::Dot => {
                     self.skip_token();
                     let expr = Box::new(acc);
-                    let ident = self.parse_ident()?;
-                    acc = if self.accept_token(Token::LeftParen) {
-                        let method_ident = ident;
-                        let mut arg_exprs = Vec::new();
-                        if !self.accept_token(Token::RightParen) {
-                            loop {
-                                arg_exprs.push(self.parse_expr()?);
-                                if !self.accept_token(Token::Comma) {
-                                    break;
-                                }
-                            }
-                            self.expect_token(Token::RightParen)?;
-                        }
-                        span.end(self, |span| Expr {
-                            ty: RefCell::new(None),
-                            val: RefCell::new(None),
-                            kind: ExprKind::MethodCall {
-                                span,
-                                expr,
-                                method_ident,
-                                arg_exprs,
-                            }
-                        })
-                    } else {
-                        let field_ident = ident;
-                        span.end(self, |span| Expr {
-                            ty: RefCell::new(None),
-                            val: RefCell::new(None),
-                            kind: ExprKind::Field {
-                                span,
-                                expr,
-                                field_ident
-                            },
-                        })
-                    }
+                    let field_ident = self.parse_ident()?;
+                    acc = span.end(self, |span| Expr {
+                        ty: RefCell::new(None),
+                        val: RefCell::new(None),
+                        kind: ExprKind::Field {
+                            span,
+                            expr,
+                            field_ident
+                        },
+                    });
                 }
                 Token::LeftBracket => {
                     self.skip_token();
@@ -700,13 +675,17 @@ impl<'a> Parser<'a> {
                     ty: RefCell::new(None),
                     val: RefCell::new(None),
                     kind: {
-                        let is_call = if self.accept_token(Token::Not) {
+                        let paren_expected = if self.accept_token(Token::Not){
+                            // a macro call is just a call.
                             self.expect_token(Token::LeftParen)?;
                             true
-                        } else {
-                            self.accept_token(Token::LeftParen)
+                        }
+                        else{
+                            false
                         };
-                        if is_call {
+                        
+                        if paren_expected || self.accept_token(Token::LeftParen) {
+                            let ident = ident;
                             let mut arg_exprs = Vec::new();
                             if !self.accept_token(Token::RightParen) {
                                 loop {
