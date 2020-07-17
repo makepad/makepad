@@ -96,7 +96,6 @@ pub enum Decl {
     Attribute(AttributeDecl),
     Const(ConstDecl),
     Fn(FnDecl),
-    Impl(ImplDecl),
     Instance(InstanceDecl),
     Struct(StructDecl),
     Texture(TextureDecl),
@@ -134,17 +133,9 @@ pub struct FnDecl {
     pub builtin_deps: RefCell<Option<HashSet<Ident>>>,
     pub cons_deps: RefCell<Option<HashSet<(TyLit, Vec<Ty>)>>>,
     pub ident: Ident,
-    pub has_self: bool,
     pub params: Vec<Param>,
     pub return_ty_expr: Option<TyExpr>,
     pub block: Block,
-}
-
-#[derive(Clone, Debug)]
-pub struct ImplDecl {
-    pub span: Span,
-    pub ident: Ident,
-    pub fn_decls: Vec<FnDecl>,
 }
 
 #[derive(Clone, Debug)]
