@@ -303,12 +303,12 @@ pub enum ExprKind {
         span: Span,
         ident: Ident,
         arg_exprs: Vec<Expr>,
-    },/*
+    },
     MacroCall {
         span: Span,
         ident: Ident,
         arg_exprs: Vec<Expr>,
-    },*/
+    },
     ConsCall {
         span: Span,
         ty_lit: TyLit,
