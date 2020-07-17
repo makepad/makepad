@@ -112,12 +112,6 @@ impl<'a> TyChecker<'a> {
                 ..
             } => self.ty_check_bin_expr(span, op, left_expr, right_expr),
             ExprKind::Un { span, op, ref expr } => self.ty_check_un_expr(span, op, expr),
-            ExprKind::MethodCall {
-                span,
-                ref expr,
-                method_ident,
-                ref arg_exprs
-            } => self.ty_check_method_call_expr(span, expr, method_ident, arg_exprs),
             ExprKind::Field {
                 span,
                 ref expr,
@@ -382,12 +376,11 @@ impl<'a> TyChecker<'a> {
         })
     }
 
-    fn ty_check_method_call_expr(
+    fn ty_check_field_expr(
         &mut self,
         span: Span,
         expr: &Expr,
-        method_ident: Ident,
-        arg_exprs: &[Expr],
+        field_ident: Ident,
     ) -> Result<Ty, Error> {
         if self.is_lvalue {
             return Err(Error {
@@ -395,30 +388,6 @@ impl<'a> TyChecker<'a> {
                 message: "invalid lvalue expression".into()
             });
         }
-        self.is_lvalue = true;
-        let ty = self.ty_check_expr(expr)?;
-        self.is_lvalue = false;
-        match ty {
-            Ty::Struct { ident } => {
-                self.ty_check_call_expr(
-                    span,
-                    Ident::new(format!("{}::{}", ident, method_ident)),
-                    arg_exprs
-                )
-            }
-            _ => Err(Error {
-                span,
-                message: String::from("receiver of method call is not a struct"),
-            })
-        }
-    }
-
-    fn ty_check_field_expr(
-        &mut self,
-        span: Span,
-        expr: &Expr,
-        field_ident: Ident,
-    ) -> Result<Ty, Error> {
         let ty = self.ty_check_expr(expr)?;
         match ty {
             ref ty if ty.is_vector() => {
@@ -495,6 +464,12 @@ impl<'a> TyChecker<'a> {
         expr: &Expr,
         index_expr: &Expr,
     ) -> Result<Ty, Error> {
+        if self.is_lvalue {
+            return Err(Error {
+                span,
+                message: "invalid lvalue expression".into()
+            });
+        }
         let ty = self.ty_check_expr(expr)?;
         let was_lvalue = self.is_lvalue;
         self.is_lvalue = false;
