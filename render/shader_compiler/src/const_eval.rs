@@ -43,6 +43,11 @@ impl<'a> ConstEvaluator<'a> {
                 ident,
                 ref arg_exprs,
             } => self.const_eval_call_expr(span, ident, arg_exprs),
+            ExprKind::MacroCall {
+                span,
+                ident,
+                ref arg_exprs,
+            } => self.const_eval_macro_call_expr(span, ident, arg_exprs),
             ExprKind::ConsCall {
                 span,
                 ty_lit,
@@ -215,6 +220,20 @@ impl<'a> ConstEvaluator<'a> {
             message: String::from("expression is not const")
         })
     }
+    
+    
+    fn const_eval_macro_call_expr(
+        &self,
+        span: Span,
+        _ident: Ident,
+        _arg_exprs: &[Expr],
+    ) -> Result<Val, Error> {
+        Err(Error {
+            span,
+            message: String::from("expression is not const")
+        })
+    }
+    
 
     fn const_eval_cons_call_expr(
         &self,

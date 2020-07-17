@@ -43,6 +43,11 @@ impl<'a> DepAnalyser<'a> {
                 ident,
                 ref arg_exprs,
             } => self.dep_analyse_call_expr(span, ident, arg_exprs),
+            ExprKind::MacroCall {
+                span,
+                ident,
+                ref arg_exprs,
+            } => self.dep_analyse_macro_call_expr(span, ident, arg_exprs),
             ExprKind::ConsCall {
                 span,
                 ty_lit,
@@ -118,6 +123,10 @@ impl<'a> DepAnalyser<'a> {
             }
             _ => panic!(),
         }
+    }
+    
+    
+    fn dep_analyse_macro_call_expr(&mut self, _span: Span, _ident: Ident, _arg_exprs: &[Expr]) {
     }
 
     fn dep_analyse_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {
