@@ -3,7 +3,6 @@ use crate::env::{Env, Sym, VarKind};
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
 use crate::span::Span;
-use crate::ty::Ty;
 use std::cell::Cell;
 
 #[derive(Clone, Debug)]
@@ -28,17 +27,7 @@ impl<'a> DepAnalyser<'a> {
                 ref left_expr,
                 ref right_expr,
             } => self.dep_analyse_bin_expr(span, op, left_expr, right_expr),
-            ExprKind::Un {
-                span,
-                op,
-                ref expr
-            } => self.dep_analyse_un_expr(span, op, expr),
-            ExprKind::MethodCall {
-                span,
-                ref expr,
-                method_ident,
-                ref arg_exprs
-            } => self.dep_analyse_method_call_expr(span, expr, method_ident, arg_exprs),
+            ExprKind::Un { span, op, ref expr } => self.dep_analyse_un_expr(span, op, expr),
             ExprKind::Field {
                 span,
                 ref expr,
@@ -95,26 +84,6 @@ impl<'a> DepAnalyser<'a> {
 
     fn dep_analyse_un_expr(&mut self, _span: Span, _op: UnOp, expr: &Expr) {
         self.dep_analyse_expr(expr);
-    }
-
-    fn dep_analyse_method_call_expr(
-        &mut self,
-        _span: Span,
-        expr: &Expr,
-        method_ident: Ident,
-        _arg_exprs: &[Expr]
-    ) {
-        match expr.ty.borrow().as_ref().unwrap() {
-            Ty::Struct { ident } =>{
-                self.decl
-                    .callees
-                    .borrow_mut()
-                    .as_mut()
-                    .unwrap()
-                    .insert(Ident::new(format!("{}::{}", ident, method_ident)));
-            }
-            _ => panic!(),
-        }
     }
 
     fn dep_analyse_field_expr(&mut self, _span: Span, expr: &Expr, _field_ident: Ident) {
