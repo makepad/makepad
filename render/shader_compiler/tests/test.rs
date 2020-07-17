@@ -15,6 +15,10 @@ const SOURCE: &str = r#"
         fn bar(self) {
 
         }
+
+        fn qux(self, x: float) -> float {
+            return 2.0 * x;
+        }
     }
 
     fn vertex() -> vec4 {
@@ -23,7 +27,8 @@ const SOURCE: &str = r#"
     }
 
     fn fragment() -> vec4 {
-        
+        let cx: Cx;
+        cx.qux(10.0);
     }
 "#;
 
