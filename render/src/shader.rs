@@ -199,6 +199,21 @@ impl CxShader{
             const TORAD: float = 0.017453292519943295;
             const GOLDEN: float = 1.618033988749895;
             
+            struct Df{
+                pos:vec2,
+                result:vec4,
+                last_pos:vec2,
+                start_pos:vec2,
+                shape:float,
+                clip:float,
+                has_clip:float,
+                old_shape:float,
+                blur:float,
+                aa:float,
+                scale:float,
+                field: float
+            }
+            /*
             let df_pos: vec2<Local>;
             let df_result: vec4<Local>;
             let df_last_pos: vec2<Local>;
@@ -432,7 +447,7 @@ impl CxShader{
                 let d: float = q.x - min(q.w, q.y);
                 let e: float = 1.0e-10;
                 return vec4(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x, c.w);
-            }
+            }*/
         "})
     }    
 }

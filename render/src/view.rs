@@ -269,7 +269,7 @@ impl Cx {
         dc.instance.truncate(0);
         dc.current_instance_offset = 0;
         dc.uniforms.truncate(0);
-        dc.textures_2d.truncate(0); 
+        dc.textures_2d.truncate(0);
         dc.instance_dirty = true;
         dc.uniforms_dirty = true;
         dc.do_h_scroll = true;
@@ -415,7 +415,7 @@ impl DrawCall {
         self.draw_uniforms.draw_scroll_w = local_scroll.y;
     }
     
-    pub fn set_zbias(&mut self, zbias:f32){
+    pub fn set_zbias(&mut self, zbias: f32) {
         self.draw_uniforms.draw_zbias = zbias;
     }
     
@@ -479,28 +479,28 @@ pub struct CxView {
     pub clipped: bool
 }
 
-impl CxView { 
+impl CxView {
     pub fn initialize(&mut self, pass_id: usize, clipped: bool, redraw_id: u64) {
         self.clipped = clipped;
         self.redraw_id = redraw_id;
-        self.pass_id = pass_id; 
-    } 
+        self.pass_id = pass_id;
+    }
     
-    pub fn get_scrolled_rect(&self)->Rect{
-        Rect{
-            x:self.rect.x + self.parent_scroll.x,
-            y:self.rect.y + self.parent_scroll.y,
-            w:self.rect.w, 
-            h:self.rect.h ,
+    pub fn get_scrolled_rect(&self) -> Rect {
+        Rect {
+            x: self.rect.x + self.parent_scroll.x,
+            y: self.rect.y + self.parent_scroll.y,
+            w: self.rect.w,
+            h: self.rect.h,
         }
     }
-
-    pub fn get_inverse_scrolled_rect(&self)->Rect{
-        Rect{
-            x:self.rect.x - self.parent_scroll.x,
-            y:self.rect.y - self.parent_scroll.y,
-            w:self.rect.w, 
-            h:self.rect.h ,
+    
+    pub fn get_inverse_scrolled_rect(&self) -> Rect {
+        Rect {
+            x: self.rect.x - self.parent_scroll.x,
+            y: self.rect.y - self.parent_scroll.y,
+            w: self.rect.w,
+            h: self.rect.h,
         }
     }
     
@@ -539,12 +539,17 @@ impl CxView {
         Vec2 {x: xs, y: ys}
     }
     
+    fn view_transform() -> Mat4Id {uid!()}
+    fn draw_clip() -> Vec4Id {uid!()}
+    fn draw_scroll() -> Vec4Id {uid!()}
+    fn draw_zbias() -> FloatId {uid!()}
+    
     pub fn def_uniforms(sg: ShaderGen) -> ShaderGen {
         sg.compose(shader!{"
-           // uniform view_transform:mat4 in view_uniforms;
-           // uniform draw_clip:vec4 in view_uniforms;
-           // uniform draw_scroll:vec4 in view_uniforms;
-           // uniform draw_zbias:float in view_uniforms;
+            uniform view_transform: Self::view_transform() in view_uniforms;
+            uniform draw_clip: Self::draw_clip() in view_uniforms;
+            uniform draw_scroll: Self::draw_scroll() in view_uniforms;
+            uniform draw_zbias: Self::draw_zbias() in view_uniforms;
         "})
     }
     
