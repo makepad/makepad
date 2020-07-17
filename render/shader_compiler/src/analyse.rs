@@ -67,18 +67,6 @@ impl<'a> ShaderAnalyser<'a> {
                     }
                     .analyse_fn_def()?;
                 }
-                Decl::Impl(decl) => {
-                    for decl in &decl.fn_decls {
-                        FnDefAnalyser {
-                            builtins: &self.builtins,
-                            shader_ast: self.shader_ast,
-                            decl,
-                            env: &mut self.env,
-                            is_inside_loop: false,
-                        }
-                        .analyse_fn_def()?;
-                    }
-                }
                 _ => {}
             }
         }
@@ -92,32 +80,24 @@ impl<'a> ShaderAnalyser<'a> {
                 _ => {}
             }
         }
-        let vertex_decl = self.shader_ast.find_fn_decl(Ident::new("vertex")).ok_or(Error {
-            span: Span::default(),
-            message: String::from("missing vertex function"),
-        })?;
-        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("fragment")).ok_or(Error {
-            span: Span::default(),
-            message: String::from("missing fragment function"),
-        })?;
         self.analyse_call_tree(
             ShaderKind::Vertex,
             &mut Vec::new(),
-            vertex_decl,
+            self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap(),
         )?;
         self.analyse_call_tree(
             ShaderKind::Fragment,
             &mut Vec::new(),
-            fragment_decl,
+            self.shader_ast.find_fn_decl(Ident::new("fragment")).unwrap(),
         )?;
         let mut visited = HashSet::new();
         self.propagate_deps(
             &mut visited,
-            vertex_decl,
+            self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap(),
         )?;
         self.propagate_deps(
             &mut visited,
-            fragment_decl,
+            self.shader_ast.find_fn_decl(Ident::new("fragment")).unwrap(),
         )
     }
 
@@ -126,7 +106,6 @@ impl<'a> ShaderAnalyser<'a> {
             Decl::Attribute(decl) => self.analyse_attribute_decl(decl),
             Decl::Const(decl) => self.analyse_const_decl(decl),
             Decl::Fn(decl) => self.analyse_fn_decl(decl),
-            Decl::Impl(decl) => self.analyse_impl_decl(decl),
             Decl::Instance(decl) => self.analyse_instance_decl(decl),
             Decl::Struct(decl) => self.analyse_struct_decl(decl),
             Decl::Texture(decl) => self.analyse_texture_decl(decl),
@@ -217,13 +196,6 @@ impl<'a> ShaderAnalyser<'a> {
             decl.ident,
             Sym::Fn
         ).ok();
-        Ok(())
-    }
-
-    fn analyse_impl_decl(&mut self, decl: &ImplDecl) -> Result<(), Error> {
-        for decl in &decl.fn_decls {
-            self.analyse_fn_decl(decl)?;
-        }
         Ok(())
     }
 
