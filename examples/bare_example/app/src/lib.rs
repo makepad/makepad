@@ -27,9 +27,11 @@ impl BareExampleApp {
         Self::bg().set(cx, Quad::def_quad_shader().compose(shader!{"
             instance counter: Self::counter();
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_circle(0.5 * w, 0.5 * h, 0.5 * w);
-                return df_fill(mix(color!(green), color!(blue), abs(sin(counter))));
+                return color!(red);
+                
+                //df_viewport(pos * vec2(w, h));
+                //df_circle(0.5 * w, 0.5 * h, 0.5 * w);
+                //return df_fill(mix(color!(green), color!(blue), abs(sin(counter))));
             }  
         "}));
         
