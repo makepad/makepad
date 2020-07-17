@@ -17,15 +17,12 @@ pub fn analyse(shader_ast: &ShaderAst, input_props: &[&PropDef]) -> Result<(), E
     let mut env = Env::new();
     env.push_scope();
     
-    // lets insert_sym all our symbols
     for prop in input_props {
         env.insert_sym(
             Span::default(),
             Ident::new(&prop.ident),
-            Sym::TyVar {
-                ty: prop.prop_id.shader_ty(),
-            }
-        )?;
+            Sym::TyVar{ty:prop.prop_id.shader_ty()}
+        ) ?;
     }
     
     for &ident in builtins.keys() {
@@ -80,6 +77,18 @@ impl<'a> ShaderAnalyser<'a> {
                     }
                     .analyse_fn_def() ?;
                 }
+                Decl::Impl(decl) => {
+                    for decl in &decl.fn_decls {
+                        FnDefAnalyser {
+                            builtins: &self.builtins,
+                            shader_ast: self.shader_ast,
+                            decl,
+                            env: &mut self.env,
+                            is_inside_loop: false,
+                        }
+                        .analyse_fn_def() ?;
+                    }
+                }
                 _ => {}
             }
         }
@@ -93,24 +102,32 @@ impl<'a> ShaderAnalyser<'a> {
                 _ => {}
             }
         }
+        let vertex_decl = self.shader_ast.find_fn_decl(Ident::new("vertex")).ok_or(Error {
+            span: Span::default(),
+            message: String::from("missing vertex function"),
+        }) ?;
+        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("fragment")).ok_or(Error {
+            span: Span::default(),
+            message: String::from("missing fragment function"),
+        }) ?;
         self.analyse_call_tree(
             ShaderKind::Vertex,
             &mut Vec::new(),
-            self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap(),
+            vertex_decl,
         ) ?;
         self.analyse_call_tree(
             ShaderKind::Fragment,
             &mut Vec::new(),
-            self.shader_ast.find_fn_decl(Ident::new("fragment")).unwrap(),
+            fragment_decl,
         ) ?;
         let mut visited = HashSet::new();
         self.propagate_deps(
             &mut visited,
-            self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap(),
+            vertex_decl,
         ) ?;
         self.propagate_deps(
             &mut visited,
-            self.shader_ast.find_fn_decl(Ident::new("fragment")).unwrap(),
+            fragment_decl,
         )
     }
     
@@ -119,6 +136,7 @@ impl<'a> ShaderAnalyser<'a> {
             Decl::Attribute(decl) => self.analyse_attribute_decl(decl),
             Decl::Const(decl) => self.analyse_const_decl(decl),
             Decl::Fn(decl) => self.analyse_fn_decl(decl),
+            Decl::Impl(decl) => self.analyse_impl_decl(decl),
             Decl::Instance(decl) => self.analyse_instance_decl(decl),
             Decl::Struct(decl) => self.analyse_struct_decl(decl),
             Decl::Texture(decl) => self.analyse_texture_decl(decl),
@@ -209,6 +227,13 @@ impl<'a> ShaderAnalyser<'a> {
             decl.ident,
             Sym::Fn
         ).ok();
+        Ok(())
+    }
+    
+    fn analyse_impl_decl(&mut self, decl: &ImplDecl) -> Result<(), Error> {
+        for decl in &decl.fn_decls {
+            self.analyse_fn_decl(decl) ?;
+        }
         Ok(())
     }
     
@@ -461,6 +486,7 @@ impl<'a> FnDefAnalyser<'a> {
         *self.decl.callees.borrow_mut() = Some(HashSet::new());
         *self.decl.uniform_block_deps.borrow_mut() = Some(HashSet::new());
         *self.decl.attribute_deps.borrow_mut() = Some(HashSet::new());
+        *self.decl.instance_deps.borrow_mut() = Some(HashSet::new());
         self.decl.has_in_varying_deps.set(Some(false));
         self.decl.has_out_varying_deps.set(Some(false));
         *self.decl.builtin_deps.borrow_mut() = Some(HashSet::new());

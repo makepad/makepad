@@ -38,12 +38,7 @@ impl Eq for ShaderGen {}
 
 impl ShaderGen{
     pub fn new() -> Self {
-        let sg = ShaderGen::default();
-        //let sg = CxShader::def_builtins(sg);
-        //let sg = CxShader::def_df(sg);
-        //let sg = CxPass::def_uniforms(sg);
-        //let sg = CxView::def_uniforms(sg);
-        sg
+        ShaderGen::default()
     }
         
         
@@ -78,22 +73,24 @@ impl Hash for ShaderGen {
 #[derive(Clone, PartialEq, Hash)]
 pub enum PropId{
     Texture2d(Texture2dId),
-    Float(FloatId),
     Color(ColorId),
     Vec4(Vec4Id),
     Vec3(Vec3Id),
-    Vec2(Vec2Id)
+    Vec2(Vec2Id),
+    Float(FloatId),
+    Mat4(Mat4Id)
 }
 
 impl PropId{
     pub fn shader_ty(&self)->Ty{
-        match self{
-            PropId::Texture2d(t)=>t.shader_ty(),
-            PropId::Color(t)=>t.shader_ty(),
-            PropId::Vec4(t)=>t.shader_ty(),
-            PropId::Vec3(t)=>t.shader_ty(),
-            PropId::Vec2(t)=>t.shader_ty(),
-            PropId::Float(t)=>t.shader_ty(),
+        match self.clone(){
+            PropId::Texture2d(t)=>t.into(),
+            PropId::Color(t)=>t.into(),
+            PropId::Vec4(t)=>t.into(),
+            PropId::Vec3(t)=>t.into(),
+            PropId::Vec2(t)=>t.into(),
+            PropId::Float(t)=>t.into(),
+            PropId::Mat4(t)=>t.into(),
         }
     }
 }
@@ -105,12 +102,34 @@ impl Into<PropId> for Texture2dId{
     fn into(self) -> PropId{PropId::Texture2d(self)}
 }
 
+
+impl Into<Ty> for Texture2dId{
+    fn into(self) -> Ty{Ty::Texture2d}
+}
+
+
+impl Into<Texture2dId> for TypeId{
+    fn into(self) -> Texture2dId{Texture2dId(self)}
+}
+
+
 #[derive(Hash, PartialEq, Copy, Clone, Eq)]
 pub struct ColorId(pub TypeId);
 
 impl Into<PropId> for ColorId{
     fn into(self) -> PropId{PropId::Color(self)}
 }
+
+impl Into<Ty> for ColorId{
+    fn into(self) -> Ty{Ty::Vec4}
+}
+
+impl Into<ColorId> for TypeId{
+    fn into(self) -> ColorId{ColorId(self)}
+}
+
+
+
 
 #[derive(Hash, PartialEq, Copy, Clone, Eq)]
 pub struct Vec4Id(pub TypeId);
@@ -119,12 +138,31 @@ impl Into<PropId> for Vec4Id{
     fn into(self) -> PropId{PropId::Vec4(self)}
 }
 
+impl Into<Vec4Id> for TypeId{
+    fn into(self) -> Vec4Id{Vec4Id(self)}
+}
+
+impl Into<Ty> for Vec4Id{
+    fn into(self) -> Ty{Ty::Vec4}
+}
+
+
+
 #[derive(Hash, PartialEq, Copy, Clone, Eq)]
 pub struct Vec3Id(pub TypeId);
 
 impl Into<PropId> for Vec3Id{
     fn into(self) -> PropId{PropId::Vec3(self)}
 }
+
+impl Into<Vec3Id> for TypeId{
+    fn into(self) -> Vec3Id{Vec3Id(self)}
+}
+
+impl Into<Ty> for Vec3Id{
+    fn into(self) -> Ty{Ty::Vec3}
+}
+
 
 
 #[derive(Hash, PartialEq, Copy, Clone, Eq)]
@@ -134,6 +172,15 @@ impl Into<PropId> for Vec2Id{
     fn into(self) -> PropId{PropId::Vec2(self)}
 }
 
+impl Into<Vec2Id> for TypeId{
+    fn into(self) -> Vec2Id{Vec2Id(self)}
+}
+
+impl Into<Ty> for Vec2Id{
+    fn into(self) -> Ty{Ty::Vec2}
+}
+
+
 
 #[derive(Hash, PartialEq, Copy, Clone, Eq)]
 pub struct FloatId(pub TypeId);
@@ -142,6 +189,31 @@ impl Into<PropId> for FloatId{
     fn into(self) -> PropId{PropId::Float(self)}
 }
 
+impl Into<FloatId> for TypeId{
+    fn into(self) -> FloatId{FloatId(self)}
+}
+
+impl Into<Ty> for FloatId{
+    fn into(self) -> Ty{Ty::Float}
+}
+
+
+#[derive(Hash, PartialEq, Copy, Clone, Eq)]
+pub struct Mat4Id(pub TypeId);
+
+impl Into<PropId> for Mat4Id{
+    fn into(self) -> PropId{PropId::Mat4(self)}
+}
+
+impl Into<Mat4Id> for TypeId{
+    fn into(self) -> Mat4Id{Mat4Id(self)}
+}
+
+impl Into<Ty> for Mat4Id{
+    fn into(self) -> Ty{Ty::Mat4}
+}
+
+
 
 #[macro_export]
 macro_rules!uid { 
@@ -149,59 +221,4 @@ macro_rules!uid {
         struct Unique{};
         std::any::TypeId::of::<Unique>().into()
     }}
-}
-
-impl Texture2dId{
-    pub fn shader_ty(&self) -> Ty{Ty::Texture2d}
-    pub fn prop_id(&self) -> PropId{PropId::Texture2d(*self)}
-}
-
-impl Into<Texture2dId> for TypeId{
-    fn into(self) -> Texture2dId{Texture2dId(self)}
-}
-
-impl ColorId{
-    pub fn shader_ty(&self) -> Ty{Ty::Vec4}
-    pub fn prop_id(&self) -> PropId{PropId::Color(*self)}
-}
-
-impl Into<ColorId> for TypeId{
-    fn into(self) -> ColorId{ColorId(self)}
-}
-
-
-impl Vec4Id{
-    pub fn shader_ty(&self) -> Ty{Ty::Vec4}
-    pub fn prop_id(&self) -> PropId{PropId::Vec4(*self)}
-}
-
-impl Into<Vec4Id> for TypeId{
-    fn into(self) -> Vec4Id{Vec4Id(self)}
-}
-
-impl Vec3Id{
-    pub fn shader_ty(&self) -> Ty{Ty::Vec3}
-    pub fn prop_id(&self) -> PropId{PropId::Vec3(*self)}
-}
-
-impl Into<Vec3Id> for TypeId{
-    fn into(self) -> Vec3Id{Vec3Id(self)}
-}
-
-impl Vec2Id{
-    pub fn shader_ty(&self) -> Ty{Ty::Vec2}
-    pub fn prop_id(&self) -> PropId{PropId::Vec2(*self)}
-}
-
-impl Into<Vec2Id> for TypeId{
-    fn into(self) -> Vec2Id{Vec2Id(self)}
-}
-
-impl FloatId{
-    pub fn shader_ty(&self) -> Ty{Ty::Float}
-    pub fn prop_id(&self) -> PropId{PropId::Float(*self)}
-}
-
-impl Into<FloatId> for TypeId{
-    fn into(self) -> FloatId{FloatId(self)}
 }
