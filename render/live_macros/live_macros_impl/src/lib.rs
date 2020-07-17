@@ -63,7 +63,7 @@ pub fn shader(input: TokenStream) -> TokenStream {
                     tb.add("::");
                 }
             }
-            tb.add("( ) . prop_id ( )");
+            tb.add("( ) . into ( )");
             tb.add("} ,");
         }
         tb.add("attribute_props : vec ! [");
