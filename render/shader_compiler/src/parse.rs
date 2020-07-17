@@ -713,56 +713,50 @@ impl<'a> Parser<'a> {
     fn parse_prim_expr(&mut self) -> Result<Expr, Error> {
         let span = self.begin_span();
         match self.peek_token() {
-            Token::Ident(ident) => {
+            Token::Ident(mut ident) => {
                 self.skip_token();
                 Ok(Expr {
                     ty: RefCell::new(None),
                     val: RefCell::new(None),
                     kind: {
-                        let is_macro = if self.accept_token(Token::Not) {
-                            // a macro call is just a call.
-                            self.expect_token(Token::LeftParen) ?;
-                            true
-                        }
-                        else {
-                            false
-                        };
-                        
-                        if is_macro || self.accept_token(Token::LeftParen) {
-                            let ident = ident;
-                            let mut arg_exprs = Vec::new();
-                            if !self.accept_token(Token::RightParen) {
-                                loop {
-                                    arg_exprs.push(self.parse_expr() ?);
-                                    if !self.accept_token(Token::Comma) {
-                                        break;
-                                    }
-                                }
-                                self.expect_token(Token::RightParen) ?;
+                        match self.peek_token() {
+                            Token::Not => {
+                                self.skip_token();
+                                let arg_exprs = self.parse_arg_exprs()?;
+                                span.end(self, |span| ExprKind::MacroCall {
+                                    span,
+                                    ident,
+                                    arg_exprs
+                                })
                             }
-                            span.end(self, | span | {
-                                if is_macro {
-                                    ExprKind::MacroCall {
-                                        span,
-                                        ident,
-                                        arg_exprs
-                                    }
-                                }
-                                else {
-                                    ExprKind::Call {
-                                        span,
-                                        ident,
-                                        arg_exprs
-                                    }
-                                }
-                            })
-                        } else {
-                            span.end(self, | span | ExprKind::Var {
-                                span,
-                                is_lvalue: Cell::new(None),
-                                kind: Cell::new(None),
-                                ident,
-                            })
+                            Token::PathSep => {
+                                self.skip_token();
+                                ident = Ident::new(
+                                    format!("{}::{}", ident, self.parse_ident()?)
+                                );
+                                let arg_exprs = self.parse_arg_exprs()?;
+                                span.end(self, |span| ExprKind::Call {
+                                    span,
+                                    ident,
+                                    arg_exprs
+                                })
+                            }
+                            Token::LeftParen => {
+                                let arg_exprs = self.parse_arg_exprs()?;
+                                span.end(self, |span| ExprKind::Call {
+                                    span,
+                                    ident,
+                                    arg_exprs
+                                })
+                            }
+                            _ => {
+                                span.end(self, |span| ExprKind::Var {
+                                    span,
+                                    is_lvalue: Cell::new(None),
+                                    kind: Cell::new(None),
+                                    ident,
+                                })
+                            }
                         }
                     }
                 })
@@ -824,6 +818,21 @@ impl<'a> Parser<'a> {
                 Err(span.error(self, format!("unexpected token `{}`", token).into()))
             },
         }
+    }
+
+    fn parse_arg_exprs(&mut self) -> Result<Vec<Expr>, Error> {
+        self.expect_token(Token::LeftParen)?;
+        let mut arg_exprs = Vec::new();
+        if !self.accept_token(Token::RightParen) {
+            loop {
+                arg_exprs.push(self.parse_expr()?);
+                if !self.accept_token(Token::Comma) {
+                    break;
+                }
+            }
+            self.expect_token(Token::RightParen)?;
+        }
+        Ok(arg_exprs)
     }
     
     fn accept_token(&mut self, token: Token) -> bool {
