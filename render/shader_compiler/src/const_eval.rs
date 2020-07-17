@@ -4,6 +4,7 @@ use crate::error::Error;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
 use crate::span::Span;
+use crate::ty::Ty;
 use crate::val::Val;
 use std::cell::Cell;
 
@@ -27,7 +28,16 @@ impl<'a> ConstEvaluator<'a> {
                 ref left_expr,
                 ref right_expr,
             } => self.const_eval_bin_expr(span, op, left_expr, right_expr),
-            ExprKind::Un { span, op, ref expr } => self.const_eval_un_expr(span, op, expr),
+            ExprKind::Un {
+                span,
+                op,
+                ref expr
+            } => self.const_eval_un_expr(span, op, expr),
+            ExprKind::MethodCall {
+                span,
+                ident,
+                ref arg_exprs,
+            } => self.const_eval_method_call_expr(span, ident, arg_exprs),
             ExprKind::Field {
                 span,
                 ref expr,
@@ -178,6 +188,24 @@ impl<'a> ConstEvaluator<'a> {
             span,
             message: String::from("expression is not const")
         })
+    }
+
+    fn const_eval_method_call_expr(
+        &self,
+        span: Span,
+        ident: Ident,
+        arg_exprs: &[Expr]
+    ) -> Result<Val, Error> {
+        match arg_exprs[0].ty.borrow().as_ref().unwrap() {
+            Ty::Struct { ident: struct_ident } => {
+                self.const_eval_call_expr(
+                    span,
+                    Ident::new(format!("{}::{}", struct_ident, ident)),
+                    arg_exprs
+                )
+            },
+            _ => panic!()
+        }
     }
 
     fn const_eval_field_expr(

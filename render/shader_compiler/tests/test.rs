@@ -18,11 +18,12 @@ const SOURCE: &str = r#"
     }
 
     fn vertex() -> vec4 {
-
+        let cx: Cx;
+        cx.bar();
     }
 
     fn fragment() -> vec4 {
-    
+        
     }
 "#;
 

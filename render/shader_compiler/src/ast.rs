@@ -289,6 +289,11 @@ pub enum ExprKind {
         op: UnOp,
         expr: Box<Expr>,
     },
+    MethodCall {
+        span: Span,
+        ident: Ident,
+        arg_exprs: Vec<Expr>,
+    },
     Field {
         span: Span,
         expr: Box<Expr>,
