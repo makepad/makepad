@@ -70,7 +70,7 @@ fn test() {
         &mut shader,
     )
     .unwrap();
-    analyse::analyse(&mut shader).unwrap();
+    analyse::analyse(&mut shader, &Vec::new()).unwrap();
     println!("{}", generate::generate(ShaderKind::Vertex, &shader));
     println!("{}", generate::generate(ShaderKind::Fragment, &shader));
 }
