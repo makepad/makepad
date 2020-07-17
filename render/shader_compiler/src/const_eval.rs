@@ -28,12 +28,6 @@ impl<'a> ConstEvaluator<'a> {
                 ref right_expr,
             } => self.const_eval_bin_expr(span, op, left_expr, right_expr),
             ExprKind::Un { span, op, ref expr } => self.const_eval_un_expr(span, op, expr),
-            ExprKind::MethodCall {
-                span,
-                ref expr,
-                method_ident,
-                ref arg_exprs,
-            } => self.const_eval_method_call_expr(span, expr, method_ident, arg_exprs),
             ExprKind::Field {
                 span,
                 ref expr,
@@ -181,19 +175,6 @@ impl<'a> ConstEvaluator<'a> {
             },
         }
         .ok_or_else(|| Error {
-            span,
-            message: String::from("expression is not const")
-        })
-    }
-
-    fn const_eval_method_call_expr(
-        &self,
-        span: Span,
-        _expr: &Expr,
-        _method_ident: Ident,
-        _arg_exprs: &[Expr],
-    ) -> Result<Val, Error> {
-        Err(Error {
             span,
             message: String::from("expression is not const")
         })
