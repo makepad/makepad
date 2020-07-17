@@ -8,8 +8,9 @@ const SOURCE: &str = r#"
     struct Cx {}
 
     impl Cx {
-        fn foo() {
-
+        fn foo() -> Cx {
+            let cx: Cx;
+            return cx;
         }
 
         fn bar(self) {
@@ -22,12 +23,12 @@ const SOURCE: &str = r#"
     }
 
     fn vertex() -> vec4 {
-        let cx: Cx;
+        let cx = Cx::foo();
         cx.bar();
     }
 
     fn fragment() -> vec4 {
-        let cx: Cx;
+        let cx = Cx::foo();
         cx.qux(10.0);
     }
 "#;
