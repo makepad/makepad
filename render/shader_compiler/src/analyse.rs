@@ -1,3 +1,4 @@
+use crate::shader::PropDef;
 use crate::ast::*;
 use crate::builtin::{self, Builtin};
 use crate::const_eval::ConstEvaluator;
@@ -11,10 +12,18 @@ use crate::ty_check::TyChecker;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-pub fn analyse(shader_ast: &ShaderAst) -> Result<(), Error> {
+pub fn analyse(shader_ast: &ShaderAst, input_props: &[&PropDef]) -> Result<(), Error>{
     let builtins = builtin::generate_builtins();
     let mut env = Env::new();
     env.push_scope();
+
+    for prop in input_props {
+        env.insert_sym(
+            Span::default(),
+            Ident::new(&prop.ident),
+            Sym::TyVar{ty:prop.prop_id.shader_ty()}
+        ) ?;
+    }
     for &ident in builtins.keys() {
         env.insert_sym(Span::default(), ident, Sym::Builtin)?;
     }
