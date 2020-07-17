@@ -19,6 +19,7 @@ const SOURCE: &str = r#"
 
         fn qux(self, x: float) -> float {
             return 2.0 * x;
+            self.bar();
         }
     }
 
