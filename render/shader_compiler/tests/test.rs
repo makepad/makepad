@@ -73,5 +73,5 @@ fn test() {
         }
     ]).unwrap();
     println!("{}", generate::generate(ShaderKind::Vertex, &shader));
-    println!("{}", generate::generate(ShaderKind::Fragment, &shader));
+    println!("{}", generate::generate(ShaderKind::Pixel, &shader));
 }
