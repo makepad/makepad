@@ -123,41 +123,41 @@ impl CxShader {
                 field: float
             }
             
-            impl Col {
-                fn iq_pal(t: float, a: vec3, b: vec3, c: vec3, d: vec3) -> vec3 {
+            impl Pal {
+                fn iq(t: float, a: vec3, b: vec3, c: vec3, d: vec3) -> vec3 {
                     return a + b * cos(6.28318 * (c * t + d));
                 }
                 
-                fn iq_pal0(t: float) -> vec3 {
+                fn iq0(t: float) -> vec3 {
                     return mix(vec3(0., 0., 0.), vec3(1., 1., 1.), cos(t * PI) * 0.5 + 0.5);
                 }
                 
-                fn iq_pal1(t: float) -> vec3 {
-                    return Col::iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0., 0.33, 0.67));
+                fn iq1(t: float) -> vec3 {
+                    return Pal::iq(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0., 0.33, 0.67));
                 }
                 
-                fn iq_pal2(t: float) -> vec3 {
-                    return Col::iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0., 0.1, 0.2));
+                fn iq2(t: float) -> vec3 {
+                    return Pal::iq(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0., 0.1, 0.2));
                 }
                 
-                fn iq_pal3(t: float) -> vec3 {
-                    return Col::iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0.3, 0.2, 0.2));
+                fn iq3(t: float) -> vec3 {
+                    return Pal::iq(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0.3, 0.2, 0.2));
                 }
                 
-                fn iq_pal4(t: float) -> vec3 {
-                    return Col::iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 0.5), vec3(0.8, 0.9, 0.3));
+                fn iq4(t: float) -> vec3 {
+                    return Pal::iq(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 0.5), vec3(0.8, 0.9, 0.3));
                 }
                 
-                fn iq_pal5(t: float) -> vec3 {
-                    return Col::iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 0.7, 0.4), vec3(0, 0.15, 0.20));
+                fn iq5(t: float) -> vec3 {
+                    return Pal::iq(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 0.7, 0.4), vec3(0, 0.15, 0.20));
                 }
                 
-                fn iq_pal6(t: float) -> vec3 {
-                    return Col::iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(2., 1.0, 0.), vec3(0.5, 0.2, 0.25));
+                fn iq6(t: float) -> vec3 {
+                    return Pal::iq(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(2., 1.0, 0.), vec3(0.5, 0.2, 0.25));
                 }
                 
-                fn iq_pal7(t: float) -> vec3 {
-                    return Col::iq_pal(t, vec3(0.8, 0.5, 0.4), vec3(0.2, 0.4, 0.2), vec3(2., 1.0, 1.0), vec3(0., 0.25, 0.25));
+                fn iq7(t: float) -> vec3 {
+                    return Pal::iq(t, vec3(0.8, 0.5, 0.4), vec3(0.2, 0.4, 0.2), vec3(2., 1.0, 1.0), vec3(0., 0.25, 0.25));
                 }
                 
                 fn hsv2rgb(c: vec4) -> vec4 { //http://gamedev.stackexchange.com/questions/59797/glsl-shader-change-hue-saturation-brightness
@@ -265,7 +265,7 @@ impl CxShader {
                 }
                 
                 fn glow_keep(self, color: vec4, width: float) -> vec4 {
-                    let f = df_calc_blur(abs(self.shape) - width / self.scale);
+                    let f = self.calc_blur(abs(self.shape) - width / self.scale);
                     let source = vec4(color.rgb * color.a, color.a);
                     let dest = self.result;
                     self.result = vec4(source.rgb * f, 0.) + dest;
@@ -338,7 +338,7 @@ impl CxShader {
                     let ba = p - self.last_pos;
                     let h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
                     let s = sign(pa.x * ba.y - pa.y * ba.x);
-                    self.field = length(pa - ba * h) / df_scale;
+                    self.field = length(pa - ba * h) / self.scale;
                     self.old_shape = self.shape;
                     self.shape = min(self.shape, self.field);
                     self.clip = max(self.clip, self.field * s);
@@ -347,7 +347,7 @@ impl CxShader {
                 }
                 
                 fn close_path(self) {
-                    line_to(self.start_pos.x, self.start_pos.y);
+                    self.line_to(self.start_pos.x, self.start_pos.y);
                 }
             }
             
