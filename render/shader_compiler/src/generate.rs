@@ -227,9 +227,9 @@ impl<'a> ShaderGenerator<'a> {
 
     fn generate_vertex_shader(&mut self) {
         let vertex_decl = self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap();
-        self.generate_attribute_struct();
-        self.generate_instance_struct();
-        self.generate_varying_struct();
+        self.generate_attributes_struct();
+        self.generate_instances_struct();
+        self.generate_varyings_struct();
         let total_packed_attribute_size = self.compute_total_packed_attribute_size();
         self.generate_packed_attributes(total_packed_attribute_size);
         let total_packed_varying_size = self.compute_total_packed_varying_size();
@@ -290,7 +290,7 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, "}}").unwrap();
     }
 
-    fn generate_attribute_struct(&mut self) {
+    fn generate_attributes_struct(&mut self) {
         writeln!(self.string, "struct _mpsc_Attributes {{").unwrap();
         for decl in &self.shader_ast.decls {
             match decl {
@@ -309,7 +309,7 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, "}};").unwrap();
     }
 
-    fn generate_instance_struct(&mut self) {
+    fn generate_instances_struct(&mut self) {
         writeln!(self.string, "struct _mpsc_Instances {{").unwrap();
         for decl in &self.shader_ast.decls {
             match decl {
@@ -328,8 +328,56 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, "}};").unwrap();
     }
 
-    fn generate_varying_struct(&mut self) {
-
+    fn generate_varyings_struct(&mut self) {
+        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
+        writeln!(self.string, "struct _mpsc_Varyings {{").unwrap();
+        for decl in &self.shader_ast.decls {
+            match decl {
+                Decl::Attribute(decl)
+                    if fragment_decl
+                        .attribute_deps
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .contains(&decl.ident) =>
+                {
+                    write!(self.string, "    ").unwrap();
+                    write_ident_and_ty(
+                        &mut self.string,
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                    );
+                    writeln!(self.string, ";").unwrap();
+                }
+                Decl::Instance(decl)
+                    if fragment_decl
+                        .instance_deps
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .contains(&decl.ident) =>
+                {
+                    write!(self.string, "    ").unwrap();
+                    write_ident_and_ty(
+                        &mut self.string,
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                    );
+                    writeln!(self.string, ";").unwrap();
+                }
+                Decl::Varying(decl) => {
+                    write!(self.string, "    ").unwrap();
+                    write_ident_and_ty(
+                        &mut self.string,
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                    );
+                    writeln!(self.string, ";").unwrap();
+                }
+                _ => {}
+            }
+        }
+        writeln!(self.string, "}};").unwrap();
     }
 
     fn compute_total_packed_attribute_size(&mut self) -> usize {
@@ -439,13 +487,13 @@ impl<'a> ShaderGenerator<'a> {
         let mut current_packed_attribute_offset = 0;
         let mut unpack_attribute = {
             let string = &mut self.string;
-            move |ident: Ident, ty: &Ty, struct_name: &str| {
+            move |ident: Ident, ty: &Ty, target_name: &str| {
                 let current_attribute_size = ty.size();
                 let mut current_attribute_offset = 0;
                 while current_attribute_offset < current_attribute_size {
                     let count = (current_packed_attribute_size - current_packed_attribute_offset)
                         .min(current_attribute_size - current_attribute_offset);
-                    write!(string, "    {}.{}", struct_name, ident).unwrap();
+                    write!(string, "    {}.{}", target_name, ident).unwrap();
                     if current_attribute_size > 1 {
                         write!(
                             string,
@@ -515,7 +563,7 @@ impl<'a> ShaderGenerator<'a> {
         let mut current_packed_varying_offset = 0;
         let mut pack_varying = {
             let string = &mut self.string;
-            move |ident: Ident, ty: &Ty| {
+            move |ident: Ident, ty: &Ty, source_name: &str| {
                 let current_varying_size = ty.size();
                 let mut current_varying_offset = 0;
                 while current_varying_offset < current_varying_size {
@@ -538,7 +586,7 @@ impl<'a> ShaderGenerator<'a> {
                         )
                         .unwrap();
                     }
-                    write!(string, " = _mpsc_varyings.{}", ident).unwrap();
+                    write!(string, " = {}.{}", source_name, ident).unwrap();
                     if current_varying_size > 1 {
                         write!(
                             string,
@@ -572,15 +620,32 @@ impl<'a> ShaderGenerator<'a> {
                         .unwrap()
                         .contains(&decl.ident) =>
                 {
-                    pack_varying(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
+                    pack_varying(
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                        "_mpsc_attributes",
+                    );
                 }
-                _ => {}
-            }
-        }
-        for decl in &self.shader_ast.decls {
-            match decl {
+                Decl::Instance(decl)
+                    if fragment_decl
+                        .instance_deps
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .contains(&decl.ident) =>
+                {
+                    pack_varying(
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                        "_mpsc_instances",
+                    );
+                }
                 Decl::Varying(decl) => {
-                    pack_varying(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
+                    pack_varying(
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                        "_mpsc_varyings",
+                    );
                 }
                 _ => {}
             }
@@ -654,11 +719,16 @@ impl<'a> ShaderGenerator<'a> {
                 {
                     unpack_varying(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
                 }
-                _ => {}
-            }
-        }
-        for decl in &self.shader_ast.decls {
-            match decl {
+                Decl::Instance(decl)
+                    if fragment_decl
+                        .attribute_deps
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .contains(&decl.ident) =>
+                {
+                    unpack_varying(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
+                }
                 Decl::Varying(decl) => {
                     unpack_varying(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
                 }
