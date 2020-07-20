@@ -7,7 +7,6 @@ pub mod const_eval;
 pub mod dep_analyse;
 pub mod env;
 pub mod error;
-pub mod generate;
 pub mod ident;
 pub mod lex;
 pub mod lit;
@@ -22,3 +21,8 @@ pub mod val;
 #[macro_use]
 pub mod shader;
 pub mod colors;
+
+#[cfg(all(target_os = "macos"))]
+pub mod gen_metal;
+#[cfg(all(target_os = "macos"))]
+pub use gen_metal::*;
