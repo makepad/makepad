@@ -1,6 +1,6 @@
 use makepad_shader_compiler::analyse;
 use makepad_shader_compiler::ast::ShaderAst;
-use makepad_shader_compiler::generate::{self, ShaderKind};
+use makepad_shader_compiler::generate_glsl::{self, ShaderKind};
 use makepad_shader_compiler::lex;
 use makepad_shader_compiler::parse;
 use makepad_shader_compiler::shader::*;
@@ -38,7 +38,7 @@ const SOURCE: &str = r#"
         let cx = Cx::foo();
         cx.bar();
         for i from 0 to 10 step 2 {
-            
+
         }
     }
 
@@ -75,6 +75,6 @@ fn test() {
             prop_id: my_instance().into()
         }
     ]).unwrap();
-    println!("{}", generate::generate(ShaderKind::Vertex, &shader));
-    println!("{}", generate::generate(ShaderKind::Pixel, &shader));
+    println!("{}", generate_glsl::generate(&shader, ShaderKind::Vertex));
+    println!("{}", generate_glsl::generate(&shader, ShaderKind::Fragment));
 }
