@@ -308,7 +308,7 @@ impl<'a> Parser<'a> {
         let from_expr = self.parse_expr() ?;
         self.expect_token(Token::To) ?;
         let to_expr = self.parse_expr() ?;
-        let step_expr = if self.accept_token(Token::Step) {
+        let step_expr = if self.accept_token(Token::Ident(Ident::new("step"))) {
             Some(self.parse_expr() ?)
         } else {
             None
