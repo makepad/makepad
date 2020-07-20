@@ -739,7 +739,7 @@ impl<'a> Parser<'a> {
                                 span.end(self, |span| ExprKind::MacroCall {
                                     span,
                                     ident,
-                                    analysis:Cell::new(None),
+                                    analysis: Cell::new(None),
                                     arg_exprs
                                 })
                             }
