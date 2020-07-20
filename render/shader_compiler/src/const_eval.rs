@@ -57,6 +57,7 @@ impl<'a> ConstEvaluator<'a> {
                 span,
                 ident,
                 ref arg_exprs,
+                ..
             } => self.const_eval_macro_call_expr(span, ident, arg_exprs),
             ExprKind::ConsCall {
                 span,

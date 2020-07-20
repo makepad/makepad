@@ -97,7 +97,7 @@ impl<'a> ShaderAnalyser<'a> {
         self.analyse_call_tree(
             ShaderKind::Fragment,
             &mut Vec::new(),
-            self.shader_ast.find_fn_decl(Ident::new("fragment")).unwrap(),
+            self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap(),
         )?;
         let mut visited = HashSet::new();
         self.propagate_deps(
@@ -106,7 +106,7 @@ impl<'a> ShaderAnalyser<'a> {
         )?;
         self.propagate_deps(
             &mut visited,
-            self.shader_ast.find_fn_decl(Ident::new("fragment")).unwrap(),
+            self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap(),
         )
     }
 
