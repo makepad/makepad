@@ -3,6 +3,8 @@ use makepad_shader_compiler::ast::ShaderAst;
 use makepad_shader_compiler::generate::{self, ShaderKind};
 use makepad_shader_compiler::lex;
 use makepad_shader_compiler::parse;
+use makepad_shader_compiler::shader::*;
+use makepad_shader_compiler::uid;
 
 const SOURCE: &str = r#"
     struct Cx {}
@@ -23,12 +25,17 @@ const SOURCE: &str = r#"
         }
     }
 
+    attribute aPosition: Self::my_attribute();
+    attribute aColor: Self::my_attribute();
+
+    instance iRotation: Self::my_instance();
+
     fn vertex() -> vec4 {
         let cx = Cx::foo();
         cx.bar();
     }
 
-    fn fragment() -> vec4 {
+    fn pixel() -> vec4 {
         let cx = Cx::foo();
         cx.qux(10.0);
     }
@@ -36,6 +43,9 @@ const SOURCE: &str = r#"
 
 #[test]
 fn test() {
+    fn my_attribute() -> Vec3Id { uid!() }
+    fn my_instance() -> Vec3Id { uid!() }
+
     let mut shader = ShaderAst::new();
     parse::parse(
         &lex::lex(SOURCE.chars(), 0)
@@ -44,7 +54,18 @@ fn test() {
         &mut shader,
     )
     .unwrap();
-    analyse::analyse(&mut shader, &Vec::new()).unwrap();
+    analyse::analyse(&mut shader, &[
+        &PropDef {
+            name: String::from("my_attribute"),
+            ident: String::from("Self::my_attribute"),
+            prop_id: my_attribute().into()
+        },
+        &PropDef {
+            name: String::from("my_instance"),
+            ident: String::from("Self::my_instance"),
+            prop_id: my_instance().into()
+        }
+    ]).unwrap();
     println!("{}", generate::generate(ShaderKind::Vertex, &shader));
     println!("{}", generate::generate(ShaderKind::Fragment, &shader));
 }
