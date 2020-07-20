@@ -721,7 +721,7 @@ impl<'a> ShaderGenerator<'a> {
                 }
                 Decl::Instance(decl)
                     if fragment_decl
-                        .attribute_deps
+                        .instance_deps
                         .borrow()
                         .as_ref()
                         .unwrap()
