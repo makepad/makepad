@@ -19,9 +19,145 @@ use {
     }
 };
 
-struct BlockGenerator<'a> {
+pub enum ShaderKind {
+    Vertex,
+    Fragment,
+}
+
+pub fn generate(shader: &ShaderAst, kind: ShaderKind) -> String {
+    let mut string = String::new();
+    ShaderGenerator {
+        shader,
+        kind,
+        string: &mut string,
+    }
+    .generate_shader();
+    string
+}
+
+struct ShaderGenerator<'a> {
+    shader: &'a ShaderAst,
+    kind: ShaderKind,
     string: &'a mut String,
+}
+
+impl<'a> ShaderGenerator<'a> {
+    fn generate_shader(&mut self) {
+        let packed_attributes_component_counts = match self.kind {
+            ShaderKind::Vertex => Some(self.compute_packed_attributes_component_count()),
+            ShaderKind::Fragment => None,
+        };
+        for decl in &self.shader.decls {
+            match decl {
+                Decl::Struct(decl) => self.generate_struct_decl(decl),
+                _ => {}
+            }
+        }
+        for decl in &self.shader.decls {
+            match decl {
+                Decl::Const(decl) => self.generate_const_decl(decl),
+                _ => {}
+            }
+        }
+        for decl in &self.shader.decls {
+            match decl {
+                Decl::Uniform(decl) => self.generate_uniform_decl(decl),
+                _ => {}
+            }
+        }
+        if let Some(packed_attributes_component_counts) = packed_attributes_component_counts {
+            self.generate_packed_attribute_declarations(packed_attributes_component_counts);
+        }
+    }
+
+    fn compute_packed_attributes_component_count(&self) -> usize {
+        let mut packed_attributes_component_count = 0;
+        for decl in &self.shader.decls {
+            packed_attributes_component_count += match decl {
+                Decl::Attribute(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
+                Decl::Instance(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
+                _ => 0,
+            }
+        }
+        packed_attributes_component_count
+    }
+
+    fn generate_const_decl(&mut self, decl: &ConstDecl) {
+        write!(self.string, "const ").unwrap();
+        write_ident_and_ty(
+            &mut self.string,
+            decl.ident,
+            decl.ty_expr.ty.borrow().as_ref().unwrap(),
+        );
+        write!(self.string, " = ").unwrap();
+        self.generate_expr(&decl.expr);
+        writeln!(self.string, ";").unwrap();
+    }
+
+    fn generate_struct_decl(&mut self, decl: &StructDecl) {
+        write!(self.string, "struct {} {{", decl.ident).unwrap();
+        if !decl.fields.is_empty() {
+            writeln!(self.string).unwrap();
+            for field in &decl.fields {
+                write!(self.string, "    ").unwrap();
+                write_ident_and_ty(
+                    &mut self.string,
+                    field.ident,
+                    field.ty_expr.ty.borrow().as_ref().unwrap(),
+                );
+                writeln!(self.string, ";").unwrap();
+            }
+        }
+        writeln!(self.string, "}};").unwrap();
+    }
+
+    fn generate_uniform_decl(&mut self, decl: &UniformDecl) {
+        write!(self.string, "uniform ").unwrap();
+        write_ident_and_ty(
+            self.string,
+            decl.ident,
+            decl.ty_expr.ty.borrow().as_ref().unwrap(),
+        );
+        writeln!(self.string, ";").unwrap();
+    }
+
+    fn generate_packed_attribute_declarations(
+        &mut self,
+        mut packed_attributes_component_count: usize
+    ) {
+        let mut packed_attribute_index = 0;
+        loop {
+            let packed_attribute_component_count = packed_attributes_component_count.min(4);
+            writeln!(
+                self.string,
+                "attribute {} _m_packed_attribute_{};",
+                match packed_attribute_component_count {
+                    0 => break,
+                    1 => "float",
+                    2 => "vec2",
+                    3 => "vec3",
+                    4 => "vec4",
+                    _ => panic!(),
+                },
+                packed_attribute_index,
+            )
+            .unwrap();
+            packed_attributes_component_count -= packed_attribute_component_count;
+            packed_attribute_index += 1;
+        }
+    }
+
+    fn generate_expr(&mut self, expr: &Expr) {
+        ExprGenerator {
+            string: self.string,
+        }
+        .generate_expr(expr)
+    }
+}
+
+struct BlockGenerator<'a> {
     indent_level: usize,
+    string: &'a mut String,
 }
 
 impl<'a> BlockGenerator<'a> {
