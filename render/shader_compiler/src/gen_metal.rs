@@ -14,11 +14,10 @@ pub enum ShaderKind {
     Pixel,
 }
 
-pub fn generate(kind: ShaderKind, shader_ast: &ShaderAst) -> String {
+pub fn generate(shader_ast: &ShaderAst) -> String {
     let mut string = String::new();
     ShaderGenerator {
         string: &mut string,
-        kind,
         shader_ast,
     }
     .generate_shader();
@@ -28,12 +27,12 @@ pub fn generate(kind: ShaderKind, shader_ast: &ShaderAst) -> String {
 #[derive(Debug)]
 struct ShaderGenerator<'a> {
     string: &'a mut String,
-    kind: ShaderKind,
     shader_ast: &'a ShaderAst,
 }
 
 impl<'a> ShaderGenerator<'a> {
     fn generate_shader(&mut self) {
+        /*
         for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Struct(decl) => self.generate_struct_decl(decl),
@@ -45,7 +44,7 @@ impl<'a> ShaderGenerator<'a> {
                 Decl::Const(decl) => self.generate_const_decl(decl),
                 _ => {}
             }
-        }
+        }*/
         for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Uniform(decl) => self.generate_uniform_decl(decl),
@@ -67,10 +66,11 @@ impl<'a> ShaderGenerator<'a> {
         {
             self.generate_cons(*ty_lit, param_tys);
         }
-        self.generate_fn_defs(match self.kind {
-            ShaderKind::Vertex => Ident::new("vertex"),
-            ShaderKind::Pixel => Ident::new("pixel"),
-        });
+        self.generate_fn_defs(Ident::new("vertex")),
+        self.generate_fn_defs(Ident::new("pixel")),
+        // lets generate vertex and pixelshaders.
+        
+        
         match self.kind {
             ShaderKind::Vertex => self.generate_vertex_shader(),
             ShaderKind::Pixel => self.generate_pixel_shader(),

@@ -8,7 +8,7 @@ use makepad_shader_compiler::lex;
 use makepad_shader_compiler::parse;
 use makepad_shader_compiler::ast::{ShaderAst, Decl, TyExprKind};
 use makepad_shader_compiler::colors::Color;
-use makepad_shader_compiler::generate::{self, ShaderKind};
+use makepad_shader_compiler::{generate,ShaderKind};
 
 
 #[derive(Clone)]
@@ -141,8 +141,7 @@ impl Cx {
             let start = ShaderGen::byte_to_row_col(err.span.start, &sub.code);
             println!("Shader analyse error {}:{} col:{} - {}", sub.loc.file, start.0 + sub.loc.line, start.1 + 1, err);
         }
-        println!("{}", generate::generate(ShaderKind::Vertex, &shader));
-        println!("{}", generate::generate(ShaderKind::Pixel, &shader));
+        println!("{}", generate(&shader));
         
         return Err(SlErr {msg: "".to_string()});
         
