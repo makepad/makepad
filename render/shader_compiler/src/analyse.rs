@@ -182,7 +182,7 @@ impl<'a> ShaderAnalyser<'a> {
                     message: String::from("function `vertex` must return a value of type `vec4`"),
                 })
             }
-        } else if decl.ident == Ident::new("fragment") {
+        } else if decl.ident == Ident::new("pixel") {
             match return_ty {
                 Ty::Vec4 => {}
                 _ => return Err(Error {
