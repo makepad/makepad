@@ -1152,7 +1152,6 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, "").unwrap();
     }
 
-
     fn generate_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {
         write!(self.string, "_mpsc_{}", ty_lit).unwrap();
         for arg_expr in arg_exprs {
