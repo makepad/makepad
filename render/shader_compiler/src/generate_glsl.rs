@@ -43,10 +43,6 @@ struct ShaderGenerator<'a> {
 
 impl<'a> ShaderGenerator<'a> {
     fn generate_shader(&mut self) {
-        let packed_attributes_component_counts = match self.kind {
-            ShaderKind::Vertex => Some(self.compute_packed_attributes_component_count()),
-            ShaderKind::Fragment => None,
-        };
         for decl in &self.shader.decls {
             match decl {
                 Decl::Struct(decl) => self.generate_struct_decl(decl),
@@ -65,21 +61,15 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
+        let packed_attributes_component_counts = match self.kind {
+            ShaderKind::Vertex => Some(self.compute_packed_attributes_component_count()),
+            ShaderKind::Fragment => None,
+        };
         if let Some(packed_attributes_component_counts) = packed_attributes_component_counts {
             self.generate_packed_attribute_declarations(packed_attributes_component_counts);
         }
-    }
-
-    fn compute_packed_attributes_component_count(&self) -> usize {
-        let mut packed_attributes_component_count = 0;
-        for decl in &self.shader.decls {
-            packed_attributes_component_count += match decl {
-                Decl::Attribute(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
-                Decl::Instance(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
-                _ => 0,
-            }
-        }
-        packed_attributes_component_count
+        let packed_varyings_component_counts = self.compute_packed_varyings_component_count();
+        self.generate_packed_varying_declarations(packed_varyings_component_counts);
     }
 
     fn generate_const_decl(&mut self, decl: &ConstDecl) {
@@ -121,6 +111,18 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, ";").unwrap();
     }
 
+    fn compute_packed_attributes_component_count(&self) -> usize {
+        let mut packed_attributes_component_count = 0;
+        for decl in &self.shader.decls {
+            packed_attributes_component_count += match decl {
+                Decl::Attribute(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
+                Decl::Instance(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
+                _ => 0,
+            }
+        }
+        packed_attributes_component_count
+    }
+
     fn generate_packed_attribute_declarations(
         &mut self,
         mut packed_attributes_component_count: usize
@@ -144,6 +146,49 @@ impl<'a> ShaderGenerator<'a> {
             .unwrap();
             packed_attributes_component_count -= packed_attribute_component_count;
             packed_attribute_index += 1;
+        }
+    }
+
+    fn compute_packed_varyings_component_count(&self) -> usize {
+        let mut packed_varyings_component_count = 0;
+        for decl in &self.shader.decls {
+            packed_varyings_component_count += match decl {
+                Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                    decl.ty_expr.ty.borrow().as_ref().unwrap().size()
+                },
+                Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                    decl.ty_expr.ty.borrow().as_ref().unwrap().size()
+                }
+                Decl::Varying(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
+                _ => 0,
+            }
+        }
+        packed_varyings_component_count
+    }
+
+    fn generate_packed_varying_declarations(
+        &mut self,
+        mut packed_varyings_component_count: usize
+    ) {
+        let mut packed_varying_index = 0;
+        loop {
+            let packed_varying_component_count = packed_varyings_component_count.min(4);
+            writeln!(
+                self.string,
+                "varying {} _m_packed_varying_{};",
+                match packed_varying_component_count {
+                    0 => break,
+                    1 => "float",
+                    2 => "vec2",
+                    3 => "vec3",
+                    4 => "vec4",
+                    _ => panic!(),
+                },
+                packed_varying_index,
+            )
+            .unwrap();
+            packed_varyings_component_count -= packed_varying_component_count;
+            packed_varying_index += 1;
         }
     }
 

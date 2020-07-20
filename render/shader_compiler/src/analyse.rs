@@ -82,6 +82,12 @@ impl<'a> ShaderAnalyser<'a> {
         self.env.pop_scope();
         for decl in &self.shader_ast.decls {
             match decl {
+                Decl::Attribute(decl) => {
+                    decl.is_used_in_fragment_shader.set(Some(false));
+                },
+                Decl::Instance(decl) => {
+                    decl.is_used_in_fragment_shader.set(Some(false));
+                },
                 Decl::Fn(decl) => {
                     decl.is_used_in_vertex_shader.set(Some(false));
                     decl.is_used_in_fragment_shader.set(Some(false));
@@ -100,14 +106,31 @@ impl<'a> ShaderAnalyser<'a> {
             self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap(),
         )?;
         let mut visited = HashSet::new();
+        let vertex_decl = self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap();
         self.propagate_deps(
             &mut visited,
-            self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap(),
+            vertex_decl,
         )?;
+        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
         self.propagate_deps(
             &mut visited,
-            self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap(),
-        )
+            fragment_decl,
+        )?;
+        for &attribute_dep in vertex_decl.attribute_deps.borrow().as_ref().unwrap() {
+            self.shader_ast
+                .find_attribute_decl(attribute_dep)
+                .unwrap()
+                .is_used_in_fragment_shader
+                .set(Some(true));
+        }
+        for &instance_dep in vertex_decl.instance_deps.borrow().as_ref().unwrap() {
+            self.shader_ast
+                .find_instance_decl(instance_dep)
+                .unwrap()
+                .is_used_in_fragment_shader
+                .set(Some(true));
+        }
+        Ok(())
     }
 
     fn analyse_decl(&mut self, decl: &Decl) -> Result<(), Error> {

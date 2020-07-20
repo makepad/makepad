@@ -105,6 +105,7 @@ pub enum Decl {
 
 #[derive(Clone, Debug)]
 pub struct AttributeDecl {
+    pub is_used_in_fragment_shader: Cell<Option<bool>>,
     pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
@@ -140,6 +141,7 @@ pub struct FnDecl {
 
 #[derive(Clone, Debug)]
 pub struct InstanceDecl {
+    pub is_used_in_fragment_shader: Cell<Option<bool>>,
     pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
