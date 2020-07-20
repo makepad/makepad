@@ -70,18 +70,10 @@ impl<'a> ShaderGenerator<'a> {
         }
         let packed_varyings_component_counts = self.compute_packed_varyings_component_count();
         self.generate_packed_varying_declarations(packed_varyings_component_counts);
-    }
-
-    fn generate_const_decl(&mut self, decl: &ConstDecl) {
-        write!(self.string, "const ").unwrap();
-        write_ident_and_ty(
-            &mut self.string,
-            decl.ident,
-            decl.ty_expr.ty.borrow().as_ref().unwrap(),
-        );
-        write!(self.string, " = ").unwrap();
-        self.generate_expr(&decl.expr);
-        writeln!(self.string, ";").unwrap();
+        self.generate_fn_decl(self.shader.find_fn_decl(match self.kind {
+            ShaderKind::Vertex => Ident::new("vertex"),
+            ShaderKind::Fragment => Ident::new("pixel"),
+        }).unwrap());
     }
 
     fn generate_struct_decl(&mut self, decl: &StructDecl) {
@@ -99,6 +91,18 @@ impl<'a> ShaderGenerator<'a> {
             }
         }
         writeln!(self.string, "}};").unwrap();
+    }
+
+    fn generate_const_decl(&mut self, decl: &ConstDecl) {
+        write!(self.string, "const ").unwrap();
+        write_ident_and_ty(
+            &mut self.string,
+            decl.ident,
+            decl.ty_expr.ty.borrow().as_ref().unwrap(),
+        );
+        write!(self.string, " = ").unwrap();
+        self.generate_expr(&decl.expr);
+        writeln!(self.string, ";").unwrap();
     }
 
     fn generate_uniform_decl(&mut self, decl: &UniformDecl) {
@@ -190,6 +194,39 @@ impl<'a> ShaderGenerator<'a> {
             packed_varyings_component_count -= packed_varying_component_count;
             packed_varying_index += 1;
         }
+    }
+
+    fn generate_fn_decl(&mut self, decl: &FnDecl) {
+        for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
+            self.generate_fn_decl(self.shader.find_fn_decl(callee).unwrap());
+        }
+        write_ident_and_ty(
+            &mut self.string,
+            decl.ident,
+            decl.return_ty.borrow().as_ref().unwrap(),
+        );
+        write!(self.string, "(").unwrap();
+        let mut sep = "";
+        for param in &decl.params {
+            write!(self.string, "{}", sep).unwrap();
+            write_ident_and_ty(
+                &mut self.string,
+                param.ident,
+                param.ty_expr.ty.borrow().as_ref().unwrap(),
+            );
+            sep = ", ";
+        }
+        write!(self.string, ") ").unwrap();
+        self.generate_block(&decl.block);
+        writeln!(self.string).unwrap();
+    }
+
+    fn generate_block(&mut self, block: &Block) {
+        BlockGenerator {
+            indent_level: 0,
+            string: self.string
+        }
+        .generate_block(block)
     }
 
     fn generate_expr(&mut self, expr: &Expr) {
