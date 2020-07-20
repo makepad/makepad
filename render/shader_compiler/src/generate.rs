@@ -227,14 +227,16 @@ impl<'a> ShaderGenerator<'a> {
 
     fn generate_vertex_shader(&mut self) {
         let vertex_decl = self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap();
+        self.generate_attribute_struct();
+        self.generate_instance_struct();
+        self.generate_varying_struct();
         let total_packed_attribute_size = self.compute_total_packed_attribute_size();
         self.generate_packed_attributes(total_packed_attribute_size);
-        let total_packed_instance_size = self.compute_total_packed_instance_size();
-        self.generate_packed_attributes(total_packed_instance_size);
         let total_packed_varying_size = self.compute_total_packed_varying_size();
         self.generate_packed_varyings(total_packed_varying_size);
         writeln!(self.string, "void main() {{").unwrap();
         writeln!(self.string, "    _mpsc_Attributes _mpsc_attributes;").unwrap();
+        writeln!(self.string, "    _mpsc_Instances _mpsc_instances;").unwrap();
         self.generate_unpack_attributes(total_packed_attribute_size);
         writeln!(self.string, "    _mpsc_Varyings _mpsc_varyings;").unwrap();
         write!(self.string, "    gl_Position = vertex(").unwrap();
@@ -288,11 +290,57 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, "}}").unwrap();
     }
 
+    fn generate_attribute_struct(&mut self) {
+        writeln!(self.string, "struct _mpsc_Attributes {{").unwrap();
+        for decl in &self.shader_ast.decls {
+            match decl {
+                Decl::Attribute(decl) => {
+                    write!(self.string, "    ").unwrap();
+                    write_ident_and_ty(
+                        &mut self.string,
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                    );
+                    writeln!(self.string, ";").unwrap();
+                }
+                _ => {}
+            }
+        }
+        writeln!(self.string, "}};").unwrap();
+    }
+
+    fn generate_instance_struct(&mut self) {
+        writeln!(self.string, "struct _mpsc_Instances {{").unwrap();
+        for decl in &self.shader_ast.decls {
+            match decl {
+                Decl::Instance(decl) => {
+                    write!(self.string, "    ").unwrap();
+                    write_ident_and_ty(
+                        &mut self.string,
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                    );
+                    writeln!(self.string, ";").unwrap();
+                }
+                _ => {}
+            }
+        }
+        writeln!(self.string, "}};").unwrap();
+    }
+
+    fn generate_varying_struct(&mut self) {
+
+    }
+
     fn compute_total_packed_attribute_size(&mut self) -> usize {
         let mut total_packed_attribute_size = 0;
         for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl) => {
+                    total_packed_attribute_size +=
+                        decl.ty_expr.ty.borrow().as_ref().unwrap().size();
+                }
+                Decl::Instance(decl) => {
                     total_packed_attribute_size +=
                         decl.ty_expr.ty.borrow().as_ref().unwrap().size();
                 }
@@ -323,44 +371,6 @@ impl<'a> ShaderGenerator<'a> {
             .unwrap();
             remaining_packed_attribute_size -= current_packed_attribute_size;
             current_packed_attribute_index += 1;
-        }
-    }
-
-    fn compute_total_packed_instance_size(&mut self) -> usize {
-        let mut total_packed_instance_size = 0;
-        for decl in &self.shader_ast.decls {
-            match decl {
-                Decl::Attribute(decl) => {
-                    total_packed_instance_size +=
-                        decl.ty_expr.ty.borrow().as_ref().unwrap().size();
-                }
-                _ => {}
-            }
-        }
-        total_packed_instance_size
-    }
-
-    fn generate_packed_instances(&mut self, total_packed_instance_size: usize) {
-        let mut remaining_packed_instance_size = total_packed_instance_size;
-        let mut current_packed_instance_index = 0;
-        loop {
-            let current_packed_instance_size = remaining_packed_instance_size.min(4);
-            writeln!(
-                self.string,
-                "instance {} _mpsc_packed_instance_{};",
-                match current_packed_instance_size {
-                    0 => break,
-                    1 => "float",
-                    2 => "vec2",
-                    3 => "vec3",
-                    4 => "vec4",
-                    _ => panic!(),
-                },
-                current_packed_instance_index,
-            )
-            .unwrap();
-            remaining_packed_instance_size -= current_packed_instance_size;
-            current_packed_instance_index += 1;
         }
     }
 
@@ -429,13 +439,13 @@ impl<'a> ShaderGenerator<'a> {
         let mut current_packed_attribute_offset = 0;
         let mut unpack_attribute = {
             let string = &mut self.string;
-            move |ident: Ident, ty: &Ty| {
+            move |ident: Ident, ty: &Ty, struct_name: &str| {
                 let current_attribute_size = ty.size();
                 let mut current_attribute_offset = 0;
                 while current_attribute_offset < current_attribute_size {
                     let count = (current_packed_attribute_size - current_packed_attribute_offset)
                         .min(current_attribute_size - current_attribute_offset);
-                    write!(string, "    _mpsc_attributes.{}", ident).unwrap();
+                    write!(string, "    {}.{}", struct_name, ident).unwrap();
                     if current_attribute_size > 1 {
                         write!(
                             string,
@@ -479,7 +489,18 @@ impl<'a> ShaderGenerator<'a> {
         for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl) => {
-                    unpack_attribute(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
+                    unpack_attribute(
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                        "_mpsc_attributes"
+                    );
+                },
+                Decl::Instance(decl) => {
+                    unpack_attribute(
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                        "_mpsc_instances"
+                    );
                 }
                 _ => {}
             }
