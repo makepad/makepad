@@ -614,7 +614,7 @@ impl<'a> Parser<'a> {
     
     fn parse_mul_expr(&mut self) -> Result<Expr, Error> {
         let span = self.begin_span();
-        let mut acc = self.parse_postfix_expr() ?;
+        let mut acc = self.parse_un_expr() ?;
         while let Some(op) = self.peek_token().to_mul_op() {
             self.skip_token();
             let left_expr = Box::new(acc);
@@ -633,9 +633,28 @@ impl<'a> Parser<'a> {
         Ok(acc)
     }
     
+    fn parse_un_expr(&mut self) -> Result<Expr, Error> {
+        let span = self.begin_span();
+        Ok(if let Some(op) = self.peek_token().to_un_op() {
+            self.skip_token();
+            let expr = Box::new(self.parse_un_expr() ?);
+            span.end(self, | span | Expr {
+                ty: RefCell::new(None),
+                val: RefCell::new(None),
+                kind: ExprKind::Un {
+                    span,
+                    op,
+                    expr
+                },
+            })
+        } else {
+            self.parse_postfix_expr() ?
+        })
+    }
+    
     fn parse_postfix_expr(&mut self) -> Result<Expr, Error> {
         let span = self.begin_span();
-        let mut acc = self.parse_un_expr() ?;
+        let mut acc = self.parse_prim_expr() ?;
         loop {
             match self.peek_token() {
                 Token::Dot => {
@@ -689,25 +708,6 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(acc)
-    }
-    
-    fn parse_un_expr(&mut self) -> Result<Expr, Error> {
-        let span = self.begin_span();
-        Ok(if let Some(op) = self.peek_token().to_un_op() {
-            self.skip_token();
-            let expr = Box::new(self.parse_un_expr() ?);
-            span.end(self, | span | Expr {
-                ty: RefCell::new(None),
-                val: RefCell::new(None),
-                kind: ExprKind::Un {
-                    span,
-                    op,
-                    expr
-                },
-            })
-        } else {
-            self.parse_prim_expr() ?
-        })
     }
     
     fn parse_prim_expr(&mut self) -> Result<Expr, Error> {
