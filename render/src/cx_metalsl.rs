@@ -142,7 +142,7 @@ impl Cx {
             println!("Shader analyse error {}:{} col:{} - {}", sub.loc.file, start.0 + sub.loc.line, start.1 + 1, err);
         }
         println!("{}", generate::generate(ShaderKind::Vertex, &shader));
-        println!("{}", generate::generate(ShaderKind::Fragment, &shader));
+        println!("{}", generate::generate(ShaderKind::Pixel, &shader));
         
         return Err(SlErr {msg: "".to_string()});
         
