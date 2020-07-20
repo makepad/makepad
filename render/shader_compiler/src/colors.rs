@@ -34,8 +34,69 @@ impl Color {
         Color {r: r as f32 / 255., g: g as f32 / 255., b: b as f32 / 255., a: a as f32 / 255.}
     }
     
-    pub fn parse(name:&str) -> Color {
-        match name.to_lowercase().as_ref() {
+    pub fn from_u32(val:u32) -> Color{
+        Color{
+            r:((val>>24)&0xff) as f32 / 255.0,
+            g:((val>>16)&0xff) as f32 / 255.0,
+            b:((val>>8)&0xff) as f32 / 255.0,
+            a:((val>>0)&0xff) as f32 / 255.0
+        }
+    }
+    
+    pub fn parse_hex(hex:&str) -> Result<Color, ()> {
+        let bytes = hex.as_bytes();
+        
+        fn hex_to_int(c: u32) -> Result<u32, ()> {
+            if c >= 48 && c <= 57 {
+                return Ok(c - 48)
+            }
+            if c >= 65 && c <= 70 {
+                return Ok(c - 65 + 10)
+            }
+            if c >= 97 && c <= 102 {
+                return Ok(c - 97 + 10)
+            }
+            return Err(())
+        }
+        
+        match bytes.len() {
+            1 => { // #w
+                let val = hex_to_int(bytes[1] as u32)? as f32 / 15.0;
+                return Ok(Color {r: val, g: val, b: val, a: 1.0})
+            },
+            2 => { // #rgb
+                let r = hex_to_int(bytes[0] as u32)? as f32 / 15.0;
+                let g = hex_to_int(bytes[1] as u32)? as f32 / 15.0;
+                let b = hex_to_int(bytes[2] as u32)? as f32 / 15.0;
+                return Ok(Color {r: r, g: g, b: b, a: 1.0})
+            },
+            4 => { // #rgba
+                let r = hex_to_int(bytes[0] as u32)? as f32 / 15.0;
+                let g = hex_to_int(bytes[1] as u32)? as f32 / 15.0;
+                let b = hex_to_int(bytes[2] as u32)? as f32 / 15.0;
+                let a = hex_to_int(bytes[3] as u32)? as f32 / 15.0;
+                return Ok(Color {r: r, g: g, b: b, a: a})
+            },
+            6 => { // #rrggbb
+                let r = ((hex_to_int(bytes[0] as u32)? << 4) + hex_to_int(bytes[1] as u32)?) as f32 / 255.0;
+                let g = ((hex_to_int(bytes[2] as u32)? << 4) + hex_to_int(bytes[3] as u32)?) as f32 / 255.0;
+                let b = ((hex_to_int(bytes[4] as u32)? << 4) + hex_to_int(bytes[5] as u32)?) as f32 / 255.0;
+                return Ok(Color {r: r, g: g, b: b, a: 1.0})
+            },
+            8 => { // #rrggbbaa
+                let r = ((hex_to_int(bytes[0] as u32)? << 4) + hex_to_int(bytes[1] as u32)?) as f32 / 255.0;
+                let g = ((hex_to_int(bytes[2] as u32)? << 4) + hex_to_int(bytes[3] as u32)?) as f32 / 255.0;
+                let b = ((hex_to_int(bytes[4] as u32)? << 4) + hex_to_int(bytes[5] as u32)?) as f32 / 255.0;
+                let a = ((hex_to_int(bytes[6] as u32)? << 4) + hex_to_int(bytes[7] as u32)?) as f32 / 255.0;
+                return Ok(Color {r: r, g: g, b: b, a: a})
+            }
+            _ => ()
+        }
+        return Err(())
+    }
+    
+    pub fn parse_name(name:&str) -> Result<Color, ()> {
+        Ok(match name.to_lowercase().as_ref() {
             "aliceblue" => Color {r: 0.9411764705882353, g: 0.9725490196078431, b: 1.0, a: 1.0},
             "antiquewhite" => Color {r: 0.9803921568627451, g: 0.9215686274509803, b: 0.8431372549019608, a: 1.0},
             "aqua" => Color {r: 0.0, g: 1.0, b: 1.0, a: 1.0},
@@ -436,59 +497,7 @@ impl Color {
             "bluegrey700" => Color {r: 0.27058823529411763, g: 0.35294117647058826, b: 0.39215686274509803, a: 1.0},
             "bluegrey800" => Color {r: 0.21568627450980393, g: 0.2784313725490196, b: 0.30980392156862746, a: 1.0},
             "bluegrey900" => Color {r: 0.14901960784313725, g: 0.19607843137254902, b: 0.2196078431372549, a: 1.0},
-            color => {
-                let bytes = color.as_bytes();
-                if bytes[0] == '#' as u8 {
-                    match bytes.len() {
-                        2 => { // #c
-                            let val = hex_to_int(bytes[1] as u32) as f32 / 15.0;
-                            return Color {r: val, g: val, b: val, a: 1.0}
-                        },
-                        4 => { // #abc
-                            let r = hex_to_int(bytes[1] as u32) as f32 / 15.0;
-                            let g = hex_to_int(bytes[2] as u32) as f32 / 15.0;
-                            let b = hex_to_int(bytes[3] as u32) as f32 / 15.0;
-                            return Color {r: r, g: g, b: b, a: 1.0}
-                        },
-                        5 => { // #abcd
-                            let r = hex_to_int(bytes[1] as u32) as f32 / 15.0;
-                            let g = hex_to_int(bytes[2] as u32) as f32 / 15.0;
-                            let b = hex_to_int(bytes[3] as u32) as f32 / 15.0;
-                            let a = hex_to_int(bytes[4] as u32) as f32 / 15.0;
-                            return Color {r: r, g: g, b: b, a: a}
-                        },
-                        7 => { // #aabbcc
-                            let r = ((hex_to_int(bytes[1] as u32) << 4) + hex_to_int(bytes[2] as u32)) as f32 / 255.0;
-                            let g = ((hex_to_int(bytes[3] as u32) << 4) + hex_to_int(bytes[4] as u32)) as f32 / 255.0;
-                            let b = ((hex_to_int(bytes[5] as u32) << 4) + hex_to_int(bytes[6] as u32)) as f32 / 255.0;
-                            return Color {r: r, g: g, b: b, a: 1.0}
-                        },
-                        9 => {
-                            let r = ((hex_to_int(bytes[1] as u32) << 4) + hex_to_int(bytes[2] as u32)) as f32 / 255.0;
-                            let g = ((hex_to_int(bytes[3] as u32) << 4) + hex_to_int(bytes[4] as u32)) as f32 / 255.0;
-                            let b = ((hex_to_int(bytes[5] as u32) << 4) + hex_to_int(bytes[6] as u32)) as f32 / 255.0;
-                            let a = ((hex_to_int(bytes[7] as u32) << 4) + hex_to_int(bytes[8] as u32)) as f32 / 255.0;
-                            return Color {r: r, g: g, b: b, a: a}
-                        }
-                        _ => ()
-                    }
-                };
-                return Color {r: 1.0, g: 1.0, b: 1.0, a: 1.0}
-            }
-        }
+            _=> return Err(())
+        })
     }
-}
-
-
-fn hex_to_int(c: u32) -> u32 {
-    if c >= 48 && c <= 57 {
-        return c - 48
-    }
-    if c >= 65 && c <= 70 {
-        return c - 65 + 10
-    }
-    if c >= 97 && c <= 102 {
-        return c - 97 + 10
-    }
-    return 0
 }

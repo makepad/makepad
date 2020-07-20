@@ -57,6 +57,7 @@ impl<'a> DepAnalyser<'a> {
                 span,
                 ident,
                 ref arg_exprs,
+                ..
             } => self.dep_analyse_macro_call_expr(span, ident, arg_exprs),
             ExprKind::ConsCall {
                 span,

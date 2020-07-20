@@ -365,7 +365,7 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn compute_total_packed_varying_size(&mut self) -> usize {
-        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("fragment")).unwrap();
+        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
         let mut total_packed_varying_size = 0;
         for decl in &self.shader_ast.decls {
             match decl {
@@ -487,7 +487,7 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn generate_pack_varyings(&mut self, total_packed_varying_size: usize) {
-        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("fragment")).unwrap();
+        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
         let mut remaining_packed_varying_size = total_packed_varying_size;
         let mut current_packed_varying_index = 0;
         let mut current_packed_varying_size = remaining_packed_varying_size.min(4);
@@ -936,6 +936,7 @@ impl<'a> ExprGenerator<'a> {
                 span,
                 ident,
                 ref arg_exprs,
+                ..
             } => self.generate_macro_call_expr(span, ident, arg_exprs),
             ExprKind::ConsCall {
                 span,

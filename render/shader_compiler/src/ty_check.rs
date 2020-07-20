@@ -8,6 +8,8 @@ use crate::span::Span;
 use crate::swizzle::Swizzle;
 use crate::ty::Ty;
 use crate::util::CommaSep;
+use crate::colors::Color;
+
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -29,45 +31,45 @@ impl<'a> TyChecker<'a> {
                 ref elem_ty_expr,
                 len,
             } => self.ty_check_array_ty_expr(span, elem_ty_expr, len),
-            TyExprKind::Var { span, ident } => self.ty_check_var_ty_expr(span, ident),
-            TyExprKind::Lit { span, ty_lit } => self.ty_check_lit_ty_expr(span, ty_lit),
-        }?;
+            TyExprKind::Var {span, ident} => self.ty_check_var_ty_expr(span, ident),
+            TyExprKind::Lit {span, ty_lit} => self.ty_check_lit_ty_expr(span, ty_lit),
+        } ?;
         *ty_expr.ty.borrow_mut() = Some(ty.clone());
         Ok(ty)
     }
-
+    
     fn ty_check_array_ty_expr(
         &mut self,
         _span: Span,
         elem_ty_expr: &TyExpr,
         len: u32,
     ) -> Result<Ty, Error> {
-        let elem_ty = Rc::new(self.ty_check_ty_expr(elem_ty_expr)?);
+        let elem_ty = Rc::new(self.ty_check_ty_expr(elem_ty_expr) ?);
         let len = len as usize;
-        Ok(Ty::Array { elem_ty, len })
+        Ok(Ty::Array {elem_ty, len})
     }
-
+    
     fn ty_check_var_ty_expr(
         &mut self,
         span: Span,
         ident: Ident
     ) -> Result<Ty, Error> {
         match self
-            .env
+        .env
             .find_sym(ident)
-            .ok_or_else(|| Error {
-                span,
-                message: format!("`{}` is not defined in this scope", ident)
-            })?
+            .ok_or_else( || Error {
+            span,
+            message: format!("`{}` is not defined in this scope", ident)
+        }) ?
         {
-            Sym::TyVar { ty } => Ok(ty.clone()),
+            Sym::TyVar {ty} => Ok(ty.clone()),
             _ => Err(Error {
                 span,
                 message: format!("`{}` is not a type variable", ident)
             }),
         }
     }
-
+    
     fn ty_check_lit_ty_expr(
         &mut self,
         _span: Span,
@@ -75,26 +77,27 @@ impl<'a> TyChecker<'a> {
     ) -> Result<Ty, Error> {
         Ok(ty_lit.to_ty())
     }
-
+    
     pub fn ty_check_expr_with_expected_ty(
         &mut self,
         span: Span,
         expr: &Expr,
         expected_ty: &Ty,
     ) -> Result<Ty, Error> {
-        let actual_ty = self.ty_check_expr(expr)?;
+        let actual_ty = self.ty_check_expr(expr) ?;
         if &actual_ty != expected_ty {
             return Err(Error {
                 span,
                 message: format!(
                     "can't match expected type `{}` with actual type `{}",
-                    expected_ty, actual_ty
+                    expected_ty,
+                    actual_ty
                 )
             });
         }
         Ok(actual_ty)
     }
-
+    
     pub fn ty_check_expr(&mut self, expr: &Expr) -> Result<Ty, Error> {
         let ty = match expr.kind {
             ExprKind::Cond {
@@ -139,8 +142,9 @@ impl<'a> TyChecker<'a> {
             ExprKind::MacroCall {
                 span,
                 ident,
+                ref analysis,
                 ref arg_exprs,
-            } => self.ty_check_macro_call_expr(span, ident, arg_exprs),
+            } => self.ty_check_macro_call_expr(span, ident, arg_exprs, analysis),
             ExprKind::ConsCall {
                 span,
                 ty_lit,
@@ -152,12 +156,12 @@ impl<'a> TyChecker<'a> {
                 ref kind,
                 ident,
             } => self.ty_check_var_expr(span, is_lvalue, kind, ident),
-            ExprKind::Lit { span, lit } => self.ty_check_lit_expr(span, lit),
-        }?;
+            ExprKind::Lit {span, lit} => self.ty_check_lit_expr(span, lit),
+        } ?;
         *expr.ty.borrow_mut() = Some(ty.clone());
         Ok(ty)
     }
-
+    
     fn ty_check_cond_expr(
         &mut self,
         span: Span,
@@ -171,12 +175,12 @@ impl<'a> TyChecker<'a> {
                 message: "invalid lvalue expression".into()
             });
         }
-        self.ty_check_expr_with_expected_ty(span, expr, &Ty::Bool)?;
-        let ty_if_true = self.ty_check_expr(expr_if_true)?;
-        self.ty_check_expr_with_expected_ty(span, expr_if_false, &ty_if_true)?;
+        self.ty_check_expr_with_expected_ty(span, expr, &Ty::Bool) ?;
+        let ty_if_true = self.ty_check_expr(expr_if_true) ?;
+        self.ty_check_expr_with_expected_ty(span, expr_if_false, &ty_if_true) ?;
         Ok(ty_if_true)
     }
-
+    
     fn ty_check_bin_expr(
         &mut self,
         span: Span,
@@ -197,9 +201,9 @@ impl<'a> TyChecker<'a> {
             }
             _ => {}
         }
-        let left_ty = self.ty_check_expr(left_expr)?;
+        let left_ty = self.ty_check_expr(left_expr) ?;
         self.is_lvalue = was_lvalue;
-        let right_ty = self.ty_check_expr(right_expr)?;
+        let right_ty = self.ty_check_expr(right_expr) ?;
         match op {
             BinOp::Assign => {
                 if left_ty == right_ty {
@@ -346,16 +350,18 @@ impl<'a> TyChecker<'a> {
                 _ => None,
             },
         }
-        .ok_or_else(|| Error {
+        .ok_or_else( || Error {
             span,
             message: format!(
                 "can't apply binary operator `{}` to operands of type `{}` and `{}",
-                op, left_ty, right_ty
+                op,
+                left_ty,
+                right_ty
             )
-            .into()
+                .into()
         })
     }
-
+    
     fn ty_check_un_expr(
         &mut self,
         span: Span,
@@ -368,7 +374,7 @@ impl<'a> TyChecker<'a> {
                 message: "invalid lvalue expression".into()
             });
         }
-        let ty = self.ty_check_expr(expr)?;
+        let ty = self.ty_check_expr(expr) ?;
         match op {
             UnOp::Not => match ty {
                 Ty::Bool => Some(Ty::Bool),
@@ -380,16 +386,17 @@ impl<'a> TyChecker<'a> {
                 _ => None,
             },
         }
-        .ok_or_else(|| Error {
+        .ok_or_else( || Error {
             span,
             message: format!(
                 "can't apply unary operator `{}` to operand of type `{}`",
-                op, ty
+                op,
+                ty
             )
-            .into()
+                .into()
         })
     }
-
+    
     fn ty_check_method_call_expr(
         &mut self,
         span: Span,
@@ -404,10 +411,10 @@ impl<'a> TyChecker<'a> {
         }
         let was_lvalue = self.is_lvalue;
         self.is_lvalue = false;
-        let ty = self.ty_check_expr(&arg_exprs[0])?;
+        let ty = self.ty_check_expr(&arg_exprs[0]) ?;
         self.is_lvalue = was_lvalue;
         match ty {
-            Ty::Struct { ident: struct_ident } => {
+            Ty::Struct {ident: struct_ident} => {
                 self.ty_check_call_expr(
                     span,
                     Ident::new(format!("{}::{}", struct_ident, ident)),
@@ -420,33 +427,33 @@ impl<'a> TyChecker<'a> {
             })
         }
     }
-
+    
     fn ty_check_field_expr(
         &mut self,
         span: Span,
         expr: &Expr,
         field_ident: Ident,
     ) -> Result<Ty, Error> {
-        let ty = self.ty_check_expr(expr)?;
+        let ty = self.ty_check_expr(expr) ?;
         match ty {
             ref ty if ty.is_vector() => {
                 let swizzle = Swizzle::parse(field_ident)
-                    .filter(|swizzle| {
-                        if swizzle.len() > 4 {
+                    .filter( | swizzle | {
+                    if swizzle.len() > 4 {
+                        return false;
+                    }
+                    let size = ty.size();
+                    for &index in swizzle {
+                        if index > size {
                             return false;
                         }
-                        let size = ty.size();
-                        for &index in swizzle {
-                            if index > size {
-                                return false;
-                            }
-                        }
-                        true
-                    })
-                    .ok_or_else(|| Error {
-                        span,
-                        message: format!("field `{}` is not defined on type `{}`", field_ident, ty)
-                    })?;
+                    }
+                    true
+                })
+                    .ok_or_else( || Error {
+                    span,
+                    message: format!("field `{}` is not defined on type `{}`", field_ident, ty)
+                }) ?;
                 Ok(match ty {
                     Ty::Bvec2 | Ty::Bvec3 | Ty::Bvec4 => match swizzle.len() {
                         1 => Ty::Bool,
@@ -472,41 +479,31 @@ impl<'a> TyChecker<'a> {
                     _ => panic!(),
                 })
             }
-            Ty::Struct { ident } => Ok(self
-                .shader_ast
-                .find_struct_decl(ident)
-                .unwrap()
-                .find_field(field_ident)
-                .ok_or(Error {
-                    span,
-                    message: format!(
-                        "field `{}` is not defined on type `{}`",
-                        field_ident, ident
-                    )
-                })?
-                .ty_expr
-                .ty
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .clone()),
+            Ty::Struct {ident} => Ok(self .shader_ast .find_struct_decl(ident) .unwrap() .find_field(field_ident) .ok_or(Error {
+                span,
+                message: format!(
+                    "field `{}` is not defined on type `{}`",
+                    field_ident,
+                    ident
+                )
+            }) ? .ty_expr .ty .borrow() .as_ref() .unwrap() .clone()),
             _ => Err(Error {
                 span,
                 message: format!("can't access field on value of type `{}`", ty).into()
             }),
         }
     }
-
+    
     fn ty_check_index_expr(
         &mut self,
         span: Span,
         expr: &Expr,
         index_expr: &Expr,
     ) -> Result<Ty, Error> {
-        let ty = self.ty_check_expr(expr)?;
+        let ty = self.ty_check_expr(expr) ?;
         let was_lvalue = self.is_lvalue;
         self.is_lvalue = false;
-        let index_ty = self.ty_check_expr(index_expr)?;
+        let index_ty = self.ty_check_expr(index_expr) ?;
         self.is_lvalue = was_lvalue;
         let elem_ty = match ty {
             Ty::Bvec2 | Ty::Bvec3 | Ty::Bvec4 => Ty::Bool,
@@ -528,19 +525,102 @@ impl<'a> TyChecker<'a> {
         }
         Ok(elem_ty)
     }
-
+    
     fn ty_check_macro_call_expr(
         &mut self,
         span: Span,
-        _ident: Ident,
-        _arg_exprs: &[Expr],
+        ident: Ident,
+        arg_exprs: &[Expr],
+        analysis: &Cell<Option<MacroCallAnalysis>>,
     ) -> Result<Ty, Error> {
+        fn parse_color_channel(arg: &Expr, span: Span) -> Result<f32, Error> {
+            match arg.kind {
+                ExprKind::Lit {span, lit} => {
+                    if let Lit::Int(val) = lit {
+                        Ok(val as f32 / 255.0)
+                    }
+                    else if let Lit::Float(val) = lit {
+                        Ok(val)
+                    }
+                    else {
+                        Err(Error {
+                            span,
+                            message: "color channel invalid".into()
+                        })
+                    }
+                }
+                _ => Err(Error {
+                    span,
+                    message: "color channel invalid".into()
+                })
+            }
+        }
+        
+        if ident == Ident::new("color") {
+            if arg_exprs.len() == 1 {
+                let color = match arg_exprs[0].kind {
+                    ExprKind::Var {span, ident, ..} => {
+                        // lets dump this in the color parser
+                        let res = Color::parse_name(&ident.to_string());
+                        if let Err(()) = res {
+                            Err(span)
+                        }
+                        else {
+                            Ok(res.unwrap())
+                        }
+                    },
+                    ExprKind::Lit {span, lit} => {
+                        if let Lit::Int(val) = lit {
+                            Ok(Color::from_u32(val))
+                        }
+                        else {
+                            Err(span)
+                        }
+                    },
+                    _ => {
+                        Err(span)
+                    }
+                };
+                if let Err(span) = color {
+                    return Err(Error {
+                        span,
+                        message: "color argument invalid!".into()
+                    });
+                }
+                let color = color.unwrap();
+                analysis.set(Some(MacroCallAnalysis::Color {
+                    r: color.r,
+                    g: color.g,
+                    b: color.b,
+                    a: color.a,
+                }));
+                return Ok(Ty::Vec4)
+            }
+            else if arg_exprs.len() == 3 {
+                analysis.set(Some(MacroCallAnalysis::Color {
+                    r: parse_color_channel(&arg_exprs[0], span) ?,
+                    g: parse_color_channel(&arg_exprs[1], span) ?,
+                    b: parse_color_channel(&arg_exprs[2], span) ?,
+                    a: 1.0,
+                }));
+                return Ok(Ty::Vec4)
+            }
+            else if arg_exprs.len() == 4 {
+                analysis.set(Some(MacroCallAnalysis::Color {
+                    r: parse_color_channel(&arg_exprs[0], span) ?,
+                    g: parse_color_channel(&arg_exprs[1], span) ?,
+                    b: parse_color_channel(&arg_exprs[2], span) ?,
+                    a: parse_color_channel(&arg_exprs[3], span) ?,
+                }));
+                return Ok(Ty::Vec4)
+            }
+        }
         return Err(Error {
             span,
-            message: "implement macro call".into()
+            message: "color requires 1, 3 or 4 arguments!".into()
         });
     }
-
+    
     fn ty_check_call_expr(
         &mut self,
         span: Span,
@@ -554,44 +634,40 @@ impl<'a> TyChecker<'a> {
             });
         }
         for arg_expr in arg_exprs {
-            self.ty_check_expr(arg_expr)?;
+            self.ty_check_expr(arg_expr) ?;
         }
         match self
-            .env
+        .env
             .find_sym(ident)
-            .ok_or_else(|| Error {
-                span,
-                message: format!("`{}` is not defined", ident)
-            })?
+            .ok_or_else( || Error {
+            span,
+            message: format!("`{}` is not defined", ident)
+        }) ?
         {
             Sym::Builtin => {
                 let builtin = self.builtins.get(&ident).unwrap();
                 let arg_tys = arg_exprs
                     .iter()
-                    .map(|arg_expr| arg_expr.ty.borrow().as_ref().unwrap().clone())
+                    .map( | arg_expr | arg_expr.ty.borrow().as_ref().unwrap().clone())
                     .collect::<Vec<_>>();
-                Ok(builtin
-                    .return_tys
-                    .get(&arg_tys)
-                    .ok_or({
-                        let mut message = String::new();
-                        write!(
-                            message,
-                            "can't apply builtin `{}` to arguments of types ",
-                            ident
-                        )
+                Ok(builtin .return_tys .get(&arg_tys) .ok_or({
+                    let mut message = String::new();
+                    write!(
+                        message,
+                        "can't apply builtin `{}` to arguments of types ",
+                        ident
+                    )
                         .unwrap();
-                        let mut sep = "";
-                        for arg_ty in arg_tys {
-                            write!(message, "{}{}", sep, arg_ty).unwrap();
-                            sep = ", ";
-                        }
-                        Error {
-                            span,
-                            message,
-                        }
-                    })?
-                    .clone())
+                    let mut sep = "";
+                    for arg_ty in arg_tys {
+                        write!(message, "{}{}", sep, arg_ty).unwrap();
+                        sep = ", ";
+                    }
+                    Error {
+                        span,
+                        message,
+                    }
+                }) ? .clone())
             }
             Sym::Fn => {
                 let fn_decl = self.shader_ast.find_fn_decl(ident).unwrap();
@@ -604,7 +680,7 @@ impl<'a> TyChecker<'a> {
                             fn_decl.params.len(),
                             arg_exprs.len(),
                         )
-                        .into()
+                            .into()
                     });
                 }
                 if arg_exprs.len() > fn_decl.params.len() {
@@ -616,11 +692,11 @@ impl<'a> TyChecker<'a> {
                             fn_decl.params.len(),
                             arg_exprs.len()
                         )
-                        .into()
+                            .into()
                     });
                 }
                 for (index, (arg_expr, param)) in
-                    arg_exprs.iter().zip(fn_decl.params.iter()).enumerate()
+                arg_exprs.iter().zip(fn_decl.params.iter()).enumerate()
                 {
                     let arg_ty = arg_expr.ty.borrow();
                     let arg_ty = arg_ty.as_ref().unwrap();
@@ -647,7 +723,7 @@ impl<'a> TyChecker<'a> {
             }),
         }
     }
-
+    
     #[allow(clippy::redundant_closure_call)]
     fn ty_check_cons_call_expr(
         &mut self,
@@ -664,29 +740,31 @@ impl<'a> TyChecker<'a> {
         let ty = ty_lit.to_ty();
         let arg_tys = arg_exprs
             .iter()
-            .map(|arg_expr| self.ty_check_expr(arg_expr))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map( | arg_expr | self.ty_check_expr(arg_expr))
+            .collect::<Result<Vec<_>, _>>() ?;
         match (&ty, arg_tys.as_slice()) {
             (ty, [arg_ty]) if ty.is_scalar() && arg_ty.is_scalar() => Ok(ty.clone()),
             (ty, [arg_ty]) if ty.is_vector() && arg_ty.is_scalar() => Ok(ty.clone()),
             (ty, arg_tys)
-                if ty.is_vector()
-                    && (|| {
-                        arg_tys.iter().all(|arg_ty| {
-                            arg_ty.is_scalar() || arg_ty.is_vector() || arg_ty.is_matrix()
-                        })
-                    })() =>
+            if ty.is_vector()
+                && ( || {
+                arg_tys.iter().all( | arg_ty | {
+                    arg_ty.is_scalar() || arg_ty.is_vector() || arg_ty.is_matrix()
+                })
+            })() =>
             {
                 let expected_size = ty.size();
-                let actual_size = arg_tys.iter().map(|arg_ty| arg_ty.size()).sum::<usize>();
+                let actual_size = arg_tys.iter().map( | arg_ty | arg_ty.size()).sum::<usize>();
                 if actual_size < expected_size {
                     return Err(Error {
                         span,
                         message: format!(
                             "not enough components for call to constructor `{}`: expected {}, got {}",
-                            ty_lit, actual_size, expected_size,
+                            ty_lit,
+                            actual_size,
+                            expected_size,
                         )
-                        .into()
+                            .into()
                     });
                 }
                 if actual_size > expected_size {
@@ -694,9 +772,11 @@ impl<'a> TyChecker<'a> {
                         span,
                         message: format!(
                             "too many components for call to constructor `{}`: expected {}, got {}",
-                            ty_lit, actual_size, expected_size,
+                            ty_lit,
+                            actual_size,
+                            expected_size,
                         )
-                        .into()
+                            .into()
                     });
                 }
                 Ok(ty.clone())
@@ -706,16 +786,16 @@ impl<'a> TyChecker<'a> {
             }
             _ => Err(Error {
                 span,
-                    message: format!(
+                message: format!(
                     "can't construct value of type `{}` with arguments of types `{}`",
                     ty,
                     CommaSep(&arg_tys)
                 )
-                .into()
+                    .into()
             }),
         }
     }
-
+    
     fn ty_check_var_expr(
         &mut self,
         span: Span,
@@ -724,12 +804,12 @@ impl<'a> TyChecker<'a> {
         ident: Ident,
     ) -> Result<Ty, Error> {
         match *self
-            .env
+        .env
             .find_sym(ident)
-            .ok_or_else(|| Error {
-                span,
-                message: format!("`{}` is not defined in this scope", ident)
-            })?
+            .ok_or_else( || Error {
+            span,
+            message: format!("`{}` is not defined in this scope", ident)
+        }) ?
         {
             Sym::Var {
                 is_mut,
@@ -752,7 +832,7 @@ impl<'a> TyChecker<'a> {
             }),
         }
     }
-
+    
     fn ty_check_lit_expr(&mut self, _span: Span, lit: Lit) -> Result<Ty, Error> {
         Ok(lit.to_ty())
     }
