@@ -133,39 +133,39 @@ impl CxShader {
                 }
                 
                 fn iq_pal1(t: float) -> vec3 {
-                    return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0., 0.33, 0.67));
+                    return Col::iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0., 0.33, 0.67));
                 }
                 
                 fn iq_pal2(t: float) -> vec3 {
-                    return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0., 0.1, 0.2));
+                    return Col::iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0., 0.1, 0.2));
                 }
                 
                 fn iq_pal3(t: float) -> vec3 {
-                    return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0.3, 0.2, 0.2));
+                    return Col::iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0.3, 0.2, 0.2));
                 }
                 
                 fn iq_pal4(t: float) -> vec3 {
-                    return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 0.5), vec3(0.8, 0.9, 0.3));
+                    return Col::iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 0.5), vec3(0.8, 0.9, 0.3));
                 }
                 
                 fn iq_pal5(t: float) -> vec3 {
-                    return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 0.7, 0.4), vec3(0, 0.15, 0.20));
+                    return Col::iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 0.7, 0.4), vec3(0, 0.15, 0.20));
                 }
                 
                 fn iq_pal6(t: float) -> vec3 {
-                    return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(2., 1.0, 0.), vec3(0.5, 0.2, 0.25));
+                    return Col::iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(2., 1.0, 0.), vec3(0.5, 0.2, 0.25));
                 }
                 
                 fn iq_pal7(t: float) -> vec3 {
-                    return df_iq_pal(t, vec3(0.8, 0.5, 0.4), vec3(0.2, 0.4, 0.2), vec3(2., 1.0, 1.0), vec3(0., 0.25, 0.25));
+                    return Col::iq_pal(t, vec3(0.8, 0.5, 0.4), vec3(0.2, 0.4, 0.2), vec3(2., 1.0, 1.0), vec3(0., 0.25, 0.25));
                 }
                 
                 fn hsv2rgb(c: vec4) -> vec4 { //http://gamedev.stackexchange.com/questions/59797/glsl-shader-change-hue-saturation-brightness
-                    let K: vec4 = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-                    let p: vec4 = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+                    let K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+                    let p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
                     return vec4(c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y), c.w);
                 }
-                
+                /*
                 fn rgb2hsv(c: vec4) -> vec4 {
                     let K: vec4 = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
                     let p: vec4 = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
@@ -174,179 +174,180 @@ impl CxShader {
                     let d: float = q.x - min(q.w, q.y);
                     let e: float = 1.0e-10;
                     return vec4(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x, c.w);
-                }
+                }*/
             }
             
             impl Df {
+                /*
+                fn df_viewport(pos: vec2) -> Df {
+                    return Df{
+                        pos: pos,
+                        result: vec4(0., 0., 0., 0.),
+                        old_shape:1e+20,
+                        shape: 1e+20,
+                        clip: -1e+20,
+                        blur: 0.00001,
+                        aa: Df::antialias(pos),
+                        scale: 1.0,
+                        field: 0.0,
+                        clip: 0.0,
+                        has_clip: 0.0,
+                    }
+                }*/
                 
-                fn df_viewport(pos: vec2) -> vec2 {
-                    df_pos = pos;
-                    df_result = vec4(0., 0., 0., 0.);
-                    df_old_shape =
-                    df_shape = 1e+20;
-                    df_clip = -1e+20;
-                    df_blur = 0.00001;
-                    df_aa = df_antialias(pos);
-                    df_scale = 1.0;
-                    df_field = 0.0;
-                    df_clip = 0.0;
-                    df_has_clip = 0.0;
-                    return df_pos;
+                fn antialias(p: vec2) -> float {
+                    return 1.0 / length(vec2(length(dFdx(p)), length(dFdy(p))));
                 }
                 
-                fn df_antialias(p: vec2) -> float {
-                    return 1.0 / length(vec2(length(dfdx(p)), length(dfdy(p))));
+                fn translate(self, x: float, y: float) -> vec2 {
+                    self.pos -= vec2(x, y);
+                    return self.pos;
                 }
                 
-                fn df_translate(x: float, y: float) -> vec2 {
-                    df_pos -= vec2(x, y);
-                    return df_pos;
+                fn rotate(self, a: float, x: float, y: float) {
+                    let ca = cos(-a);
+                    let sa = sin(-a);
+                    let p = self.pos - vec2(x, y);
+                    self.pos = vec2(p.x * ca - p.y * sa, p.x * sa + p.y * ca) + vec2(x, y);
                 }
                 
-                fn df_rotate(a: float, x: float, y: float) {
-                    let ca: float = cos(-a);
-                    let sa: float = sin(-a);
-                    let p: vec2 = df_pos - vec2(x, y);
-                    df_pos = vec2(p.x * ca - p.y * sa, p.x * sa + p.y * ca) + vec2(x, y);
+                fn scale(self, f: float, x: float, y: float) {
+                    self.scale *= f;
+                    self.pos = (self.pos - vec2(x, y)) * f + vec2(x, y);
                 }
                 
-                fn df_scale(f: float, x: float, y: float) {
-                    df_scale *= f;
-                    df_pos = (df_pos - vec2(x, y)) * f + vec2(x, y);
+                fn clear(self, color: vec4) {
+                    self.result = vec4(color.rgb * color.a + self.result.rgb * (1.0 - color.a), color.a);
                 }
                 
-                fn df_clear(color: vec4) {
-                    df_result = vec4(color.rgb * color.a + df_result.rgb * (1.0 - color.a), color.a);
-                }
-                
-                fn df_calc_blur(w: float) -> float {
-                    let wa: float = clamp(-w * df_aa, 0.0, 1.0);
-                    let wb: float = 1.0;
-                    if df_blur > 0.001 {
-                        wb = clamp(-w / df_blur, 0.0, 1.0)
+                fn calc_blur(self,  w: float) -> float {
+                    let wa = clamp(-w * self.aa, 0.0, 1.0);
+                    let wb = 1.0;
+                    if self.blur > 0.001 {
+                        wb = clamp(-w / self.blur, 0.0, 1.0);
                     }
                     return wa * wb;
                 }
                 
-                fn df_fill_keep(color: vec4) -> vec4 {
-                    let f: float = df_calc_blur(df_shape);
-                    let source: vec4 = vec4(color.rgb * color.a, color.a);
-                    df_result = source * f + df_result * (1. - source.a * f);
-                    if df_has_clip > 0.5 {
-                        let f2: float = 1. - df_calc_blur(-df_clip);
-                        df_result = source * f2 + df_result * (1. - source.a * f2);
+                fn fill_keep(self, color: vec4) -> vec4 {
+                    let f = self.calc_blur(self.shape);
+                    let source = vec4(color.rgb * color.a, color.a);
+                    self.result = source * f + self.result * (1. - source.a * f);
+                    if self.has_clip > 0.5 {
+                        let f2 = 1.0 - self.calc_blur(-self.clip);
+                        self.result = source * f2 + self.result * (1. - source.a * f2);
                     }
-                    return df_result;
+                    return self.result;
                 }
                 
-                fn df_fill(color: vec4) -> vec4 {
-                    df_fill_keep(color);
-                    df_old_shape = df_shape = 1e+20;
-                    df_clip = -1e+20;
-                    df_has_clip = 0.;
-                    return df_result;
+                fn fill(self, color: vec4) -> vec4 {
+                    self.fill_keep(color);
+                    self.old_shape = self.shape = 1e+20;
+                    self.clip = -1e+20;
+                    self.has_clip = 0.;
+                    return self.result;
                 }
                 
-                fn df_stroke_keep(color: vec4, width: float) -> vec4 {
-                    let f: float = df_calc_blur(abs(df_shape) - width / df_scale);
-                    let source: vec4 = vec4(color.rgb * color.a, color.a);
-                    let dest: vec4 = df_result;
-                    df_result = source * f + dest * (1.0 - source.a * f);
-                    return df_result;
+                fn stroke_keep(self, color: vec4, width: float) -> vec4 {
+                    let f = self.calc_blur(abs(self.shape) - width / self.scale);
+                    let source = vec4(color.rgb * color.a, color.a);
+                    let dest = self.result;
+                    self.result = source * f + dest * (1.0 - source.a * f);
+                    return self.result;
                 }
                 
-                fn df_stroke(color: vec4, width: float) -> vec4 {
-                    df_stroke_keep(color, width);
-                    df_old_shape = df_shape = 1e+20;
-                    df_clip = -1e+20;
-                    df_has_clip = 0.;
-                    return df_result;
+                fn stroke(self, color: vec4, width: float) -> vec4 {
+                    self.stroke_keep(color, width);
+                    self.old_shape = self.shape = 1e+20;
+                    self.clip = -1e+20;
+                    self.has_clip = 0.;
+                    return self.result;
                 }
                 
-                fn df_glow_keep(color: vec4, width: float) -> vec4 {
-                    let f: float = df_calc_blur(abs(df_shape) - width / df_scale);
-                    let source: vec4 = vec4(color.rgb * color.a, color.a);
-                    let dest: vec4 = df_result;
-                    df_result = vec4(source.rgb * f, 0.) + dest;
-                    return df_result;
+                fn glow_keep(self, color: vec4, width: float) -> vec4 {
+                    let f = df_calc_blur(abs(self.shape) - width / self.scale);
+                    let source = vec4(color.rgb * color.a, color.a);
+                    let dest = self.result;
+                    self.result = vec4(source.rgb * f, 0.) + dest;
+                    return self.result;
                 }
                 
-                fn df_glow(color: vec4, width: float) -> vec4 {
-                    df_glow_keep(color, width);
-                    df_old_shape = df_shape = 1e+20;
-                    df_clip = -1e+20;
-                    df_has_clip = 0.;
-                    return df_result;
+                fn glow(self, color: vec4, width: float) -> vec4 {
+                    self.glow_keep(color, width);
+                    self.old_shape = self.shape = 1e+20;
+                    self.clip = -1e+20;
+                    self.has_clip = 0.;
+                    return self.result;
                 }
                 
-                fn df_union() {
-                    df_old_shape = df_shape = min(df_field, df_old_shape);
+                fn union(self) {
+                    self.old_shape = self.shape = min(self.field, self.old_shape);
                 }
                 
-                fn df_intersect() {
-                    df_old_shape = df_shape = max(df_field, df_old_shape);
+                fn intersect(self) {
+                    self.old_shape = self.shape = max(self.field, self.old_shape);
                 }
                 
-                fn df_subtract() {
-                    df_old_shape = df_shape = max(-df_field, df_old_shape);
+                fn subtract(self) {
+                    self.old_shape = self.shape = max(-self.field, self.old_shape);
                 }
                 
-                fn df_gloop(k: float) {
-                    let h: float = clamp(0.5 + 0.5 * (df_old_shape - df_field) / k, 0.0, 1.0);
-                    df_old_shape = df_shape = mix(df_old_shape, df_field, h) - k * h * (1.0 - h);
+                fn gloop(self, k: float) {
+                    let h = clamp(0.5 + 0.5 * (self.old_shape - self.field) / k, 0.0, 1.0);
+                    self.old_shape = self.shape = mix(self.old_shape, self.field, h) - k * h * (1.0 - h);
                 }
                 
-                fn df_blend(k: float) {
-                    df_old_shape = df_shape = mix(df_old_shape, df_field, k);
+                fn blend(self, k: float) {
+                    self.old_shape = self.shape = mix(self.old_shape, self.field, k);
                 }
                 
-                fn df_circle(x: float, y: float, r: float) {
-                    let c: vec2 = df_pos - vec2(x, y);
-                    df_field = (length(c.xy) - r) / df_scale;
-                    df_old_shape = df_shape;
-                    df_shape = min(df_shape, df_field);
+                fn circle(self, x: float, y: float, r: float) {
+                    let c = self.pos - vec2(x, y);
+                    self.field = (length(c.xy) - r) / self.scale;
+                    self.old_shape = self.shape;
+                    self.shape = min(self.shape, self.field);
                 }
                 
-                fn df_box(x: float, y: float, w: float, h: float, r: float) {
-                    let p: vec2 = df_pos - vec2(x, y);
-                    let size: vec2 = vec2(0.5 * w, 0.5 * h);
-                    let bp: vec2 = max(abs(p - size.xy) - (size.xy - vec2(2. * r, 2. * r).xy), vec2(0., 0.));
-                    df_field = (length(bp) - 2. * r) / df_scale;
-                    df_old_shape = df_shape;
-                    df_shape = min(df_shape, df_field);
+                fn box(self, x: float, y: float, w: float, h: float, r: float) {
+                    let p = self.pos - vec2(x, y);
+                    let size = vec2(0.5 * w, 0.5 * h);
+                    let bp = max(abs(p - size.xy) - (size.xy - vec2(2. * r, 2. * r).xy), vec2(0., 0.));
+                    self.field = (length(bp) - 2. * r) / self.scale;
+                    self.old_shape = self.shape;
+                    self.shape = min(self.shape, self.field);
                 }
                 
-                fn df_rect(x: float, y: float, w: float, h: float) {
-                    let s: vec2 = vec2(w, h) * 0.5;
-                    let d: vec2 = abs(vec2(x, y) - df_pos + s) - s;
-                    let dm: vec2 = min(d, vec2(0., 0.));
-                    df_field = max(dm.x, dm.y) + length(max(d, vec2(0., 0.)));
-                    df_old_shape = df_shape;
-                    df_shape = min(df_shape, df_field);
+                fn rect(self, x: float, y: float, w: float, h: float) {
+                    let s = vec2(w, h) * 0.5;
+                    let d = abs(vec2(x, y) - self.pos + s) - s;
+                    let dm = min(d, vec2(0., 0.));
+                    self.field = max(dm.x, dm.y) + length(max(d, vec2(0., 0.)));
+                    self.old_shape = self.shape;
+                    self.shape = min(self.shape, self.field);
                 }
                 
-                fn df_move_to(x: float, y: float) {
-                    df_last_pos =
-                    df_start_pos = vec2(x, y);
+                fn move_to(self, x: float, y: float) {
+                    self.last_pos =
+                    self.start_pos = vec2(x, y);
                 }
                 
-                fn df_line_to(x: float, y: float) {
-                    let p: vec2 = vec2(x, y);
+                fn line_to(self, x: float, y: float) {
+                    let p = vec2(x, y);
                     
-                    let pa: vec2 = df_pos - df_last_pos;
-                    let ba: vec2 = p - df_last_pos;
-                    let h: float = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
-                    let s: float = sign(pa.x * ba.y - pa.y * ba.x);
-                    df_field = length(pa - ba * h) / df_scale;
-                    df_old_shape = df_shape;
-                    df_shape = min(df_shape, df_field);
-                    df_clip = max(df_clip, df_field * s);
-                    df_has_clip = 1.0;
-                    df_last_pos = p;
+                    let pa = self.pos - self.last_pos;
+                    let ba = p - self.last_pos;
+                    let h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+                    let s = sign(pa.x * ba.y - pa.y * ba.x);
+                    self.field = length(pa - ba * h) / df_scale;
+                    self.old_shape = self.shape;
+                    self.shape = min(self.shape, self.field);
+                    self.clip = max(self.clip, self.field * s);
+                    self.has_clip = 1.0;
+                    self.last_pos = p;
                 }
                 
-                fn df_close_path() {
-                    df_line_to(df_start_pos.x, df_start_pos.y);
+                fn close_path(self) {
+                    line_to(self.start_pos.x, self.start_pos.y);
                 }
             }
             
