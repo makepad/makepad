@@ -49,27 +49,32 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
+
         for decl in &self.shader.decls {
             match decl {
                 Decl::Const(decl) => self.generate_const_decl(decl),
                 _ => {}
             }
         }
+
         for decl in &self.shader.decls {
             match decl {
                 Decl::Uniform(decl) => self.generate_uniform_decl(decl),
                 _ => {}
             }
         }
-        let packed_attributes_component_counts = match self.kind {
-            ShaderKind::Vertex => Some(self.compute_packed_attributes_component_count()),
+
+        let packed_attributes_size = match self.kind {
+            ShaderKind::Vertex => Some(self.compute_packed_attributes_size()),
             ShaderKind::Fragment => None,
         };
-        if let Some(packed_attributes_component_counts) = packed_attributes_component_counts {
-            self.generate_packed_attribute_declarations(packed_attributes_component_counts);
+        if let Some(packed_attributes_size) = packed_attributes_size {
+            self.generate_packed_attribute_declarations(packed_attributes_size);
         }
-        let packed_varyings_component_counts = self.compute_packed_varyings_component_count();
-        self.generate_packed_varying_declarations(packed_varyings_component_counts);
+
+        let packed_varyings_size = self.compute_packed_varyings_size();
+        self.generate_packed_varying_declarations(packed_varyings_size);
+
         self.generate_fn_decl(self.shader.find_fn_decl(match self.kind {
             ShaderKind::Vertex => Ident::new("vertex"),
             ShaderKind::Fragment => Ident::new("pixel"),
@@ -115,29 +120,29 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, ";").unwrap();
     }
 
-    fn compute_packed_attributes_component_count(&self) -> usize {
-        let mut packed_attributes_component_count = 0;
+    fn compute_packed_attributes_size(&self) -> usize {
+        let mut packed_attributes_size = 0;
         for decl in &self.shader.decls {
-            packed_attributes_component_count += match decl {
+            packed_attributes_size += match decl {
                 Decl::Attribute(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
                 Decl::Instance(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
                 _ => 0,
             }
         }
-        packed_attributes_component_count
+        packed_attributes_size
     }
 
     fn generate_packed_attribute_declarations(
         &mut self,
-        mut packed_attributes_component_count: usize
+        mut packed_attributes_size: usize
     ) {
         let mut packed_attribute_index = 0;
         loop {
-            let packed_attribute_component_count = packed_attributes_component_count.min(4);
+            let packed_attribute_size = packed_attributes_size.min(4);
             writeln!(
                 self.string,
                 "attribute {} _m_packed_attribute_{};",
-                match packed_attribute_component_count {
+                match packed_attribute_size {
                     0 => break,
                     1 => "float",
                     2 => "vec2",
@@ -148,15 +153,15 @@ impl<'a> ShaderGenerator<'a> {
                 packed_attribute_index,
             )
             .unwrap();
-            packed_attributes_component_count -= packed_attribute_component_count;
+            packed_attributes_size -= packed_attribute_size;
             packed_attribute_index += 1;
         }
     }
 
-    fn compute_packed_varyings_component_count(&self) -> usize {
-        let mut packed_varyings_component_count = 0;
+    fn compute_packed_varyings_size(&self) -> usize {
+        let mut packed_varyings_size = 0;
         for decl in &self.shader.decls {
-            packed_varyings_component_count += match decl {
+            packed_varyings_size += match decl {
                 Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
                     decl.ty_expr.ty.borrow().as_ref().unwrap().size()
                 },
@@ -167,20 +172,20 @@ impl<'a> ShaderGenerator<'a> {
                 _ => 0,
             }
         }
-        packed_varyings_component_count
+        packed_varyings_size
     }
 
     fn generate_packed_varying_declarations(
         &mut self,
-        mut packed_varyings_component_count: usize
+        mut packed_varyings_size: usize
     ) {
         let mut packed_varying_index = 0;
         loop {
-            let packed_varying_component_count = packed_varyings_component_count.min(4);
+            let packed_varying_size = packed_varyings_size.min(4);
             writeln!(
                 self.string,
                 "varying {} _m_packed_varying_{};",
-                match packed_varying_component_count {
+                match packed_varying_size {
                     0 => break,
                     1 => "float",
                     2 => "vec2",
@@ -191,7 +196,7 @@ impl<'a> ShaderGenerator<'a> {
                 packed_varying_index,
             )
             .unwrap();
-            packed_varyings_component_count -= packed_varying_component_count;
+            packed_varyings_size -= packed_varying_size;
             packed_varying_index += 1;
         }
     }
@@ -234,6 +239,25 @@ impl<'a> ShaderGenerator<'a> {
             string: self.string,
         }
         .generate_expr(expr)
+    }
+}
+
+struct AttributeUnpacker<'a> {
+    packed_attributes_size: usize,
+    packed_attribute_index: usize,
+    packed_attribute_size: usize,
+    packed_attribute_offset: usize,
+    string: &'a mut String
+}
+
+impl<'a> AttributeUnpacker<'a> {
+    fn unpack_attribute(&mut self, ident: Ident, ty: &Ty) {
+        let attribute_size = ty.size();
+        let mut attribute_offset = 0;
+        while attribute_offset < attribute_size {
+            self.packed_attribute_size - self.packed_attribute_offset;
+            attribute_size - attribute_offset;
+        }
     }
 }
 
