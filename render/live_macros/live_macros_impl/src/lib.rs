@@ -135,70 +135,100 @@ pub fn shader(input: TokenStream) -> TokenStream {
 #[proc_macro_hack]
 pub fn color(input: TokenStream) -> TokenStream {
 
-    fn parse_color_channel(tt:&TokenTree)->f32{
+    fn parse_color_channel(tt:&TokenTree)->Result<f32, Span>{
         if let TokenTree::Literal(c) = tt{
-            let c = c.to_string();
-            let parsed = c.parse();
+            let s = c.to_string();
+            let parsed = s.parse();
             if !parsed.is_ok(){
-                return 1.0;
+                return Err(c.span());
             }
             let parsed = parsed.unwrap();
-            if c.contains("."){
-                return parsed;
+            if s.contains("."){
+                return Ok(parsed);
             }else{
-                return parsed / 255.0;
+                return Ok(parsed / 255.0);
             }
         }
-        return 1.0;
+        return Err(tt.span());
+    }
+    
+    fn parse_color_args(items:&Vec<TokenTree>)->Result<Color, Span>{
+        // get the first, error if more
+        let color = if items.len() == 1{
+            if let TokenTree::Ident(ident) = &items[0]{
+                let res = Color::parse_name(&ident.to_string());
+                if let Err(()) = res{
+                    return Err(ident.span())
+                }
+                else{
+                    res.unwrap()
+                }
+            }
+            else{
+                return Err(items[0].span())
+            }
+        }
+        else if items.len() == 2{
+            if let TokenTree::Punct(pct) = &items[0]{
+                if pct.as_char() != '#'{
+                    return Err(pct.span());
+                }
+                if let TokenTree::Ident(ident) = &items[1] {
+                    let res =  Color::parse_hex(&ident.to_string());
+                    if let Err(()) = res{
+                        return Err(ident.span())
+                    }
+                    else{
+                        res.unwrap()
+                    }
+                }
+                else if let TokenTree::Literal(lit) = &items[1]{
+                     let res = Color::parse_hex(&lit.to_string());
+                     if let Err(()) = res{
+                        return Err(lit.span())
+                    }
+                    else{
+                        res.unwrap()
+                    }
+                }
+                else{
+                    return Err(items[1].span())
+                }
+            }
+            else{
+                return Err(items[0].span())
+            }
+        }
+        else if items.len() == 5{ // its rgb
+            Color{
+                r:parse_color_channel(&items[0])?,
+                g:parse_color_channel(&items[2])?,
+                b:parse_color_channel(&items[4])?,
+                a:1.0
+            }
+        }
+        else if items.len() == 7{
+            Color{
+                r:parse_color_channel(&items[0])?,
+                g:parse_color_channel(&items[2])?,
+                b:parse_color_channel(&items[4])?,
+                a:parse_color_channel(&items[6])?,
+            }
+        }else{
+            return Err(items[0].span());
+        };
+        Ok(color)
     }
     
     let items = input.into_iter().collect::<Vec<TokenTree>>();
-    // get the first, error if more
-    let color = if items.len() == 1{
-        if let TokenTree::Ident(ident) = &items[0]{
-            Color::parse(&format!("#{}", ident.to_string()))
-        }
-        else{
-            return error("color macro argument error");
-        }
-    }
-    else if items.len() == 2{
-        if let TokenTree::Punct(pct) = &items[0]{
-            if pct.as_char() != '#'{
-                return error_span("color macro argument error", pct.span());
-            }
-            if let TokenTree::Ident(ident) = &items[1] {
-                Color::parse(&format!("#{}", ident.to_string()))
-            }
-            else if let TokenTree::Literal(lit) = &items[1]{
-                Color::parse(&format!("#{}", lit.to_string()))
-            }
-            else{
-                return error("color macro argument error");
-            }
-        }
-        else{
-            return error("color macro argument error");
-        }
-    }
-    else if items.len() == 5{ // its rgb
-        Color{
-            r:parse_color_channel(&items[0]),
-            g:parse_color_channel(&items[2]),
-            b:parse_color_channel(&items[4]),
-            a:1.0
-        }
-    }
-    else if items.len() == 7{
-        Color{
-            r:parse_color_channel(&items[0]),
-            g:parse_color_channel(&items[2]),
-            b:parse_color_channel(&items[4]),
-            a:parse_color_channel(&items[6]),
-        }
-    }else{
+    if items.len() == 0{
         return error("color macro argument error");
-    };
+    }
+    let result = parse_color_args(&items);
+    if let Err(span) = result{
+        return error_span("cannot parse color macro arguments", span);
+    }
+    let color = result.unwrap();
     
     let mut tb = TokenBuilder::new();
     tb.add("LiveColor {");

@@ -312,6 +312,7 @@ pub enum ExprKind {
     MacroCall {
         span: Span,
         ident: Ident,
+        analysis: Cell<Option<MacroCallAnalysis>>,
         arg_exprs: Vec<Expr>,
     },
     ConsCall {
@@ -321,14 +322,19 @@ pub enum ExprKind {
     },
     Var {
         span: Span,
-        is_lvalue: Cell<Option<bool>>,
         kind: Cell<Option<VarKind>>,
+        is_lvalue: Cell<Option<bool>>,
         ident: Ident,
     },
     Lit {
         span: Span,
         lit: Lit,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum MacroCallAnalysis{
+    Color{r:f32,g:f32,b:f32,a:f32}
 }
 
 #[derive(Clone, Copy, Debug)]
