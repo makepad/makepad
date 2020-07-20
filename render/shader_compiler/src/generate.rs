@@ -11,7 +11,7 @@ use std::fmt::Write;
 #[derive(Clone, Copy, Debug)]
 pub enum ShaderKind {
     Vertex,
-    Fragment,
+    Pixel,
 }
 
 pub fn generate(kind: ShaderKind, shader_ast: &ShaderAst) -> String {
@@ -54,7 +54,7 @@ impl<'a> ShaderGenerator<'a> {
         }
         let ident = match self.kind {
             ShaderKind::Vertex => Ident::new("vertex"),
-            ShaderKind::Fragment => Ident::new("pixel"),
+            ShaderKind::Pixel => Ident::new("pixel"),
         };
         for (ty_lit, param_tys) in self
             .shader_ast
@@ -69,11 +69,11 @@ impl<'a> ShaderGenerator<'a> {
         }
         self.generate_fn_defs(match self.kind {
             ShaderKind::Vertex => Ident::new("vertex"),
-            ShaderKind::Fragment => Ident::new("pixel"),
+            ShaderKind::Pixel => Ident::new("pixel"),
         });
         match self.kind {
             ShaderKind::Vertex => self.generate_vertex_shader(),
-            ShaderKind::Fragment => self.generate_fragment_shader(),
+            ShaderKind::Pixel => self.generate_pixel_shader(),
         }
     }
 
@@ -117,7 +117,7 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn generate_cons(&mut self, ty_lit: TyLit, param_tys: &[Ty]) {
-        write!(self.string, "{0} _mpsc_{0}", ty_lit).unwrap();
+        write!(self.string, "{0} _m_{0}", ty_lit).unwrap();
         for param_ty in param_tys {
             write!(self.string, "_{}", param_ty).unwrap();
         }
@@ -235,14 +235,14 @@ impl<'a> ShaderGenerator<'a> {
         let total_packed_varying_size = self.compute_total_packed_varying_size();
         self.generate_packed_varyings(total_packed_varying_size);
         writeln!(self.string, "void main() {{").unwrap();
-        writeln!(self.string, "    _mpsc_Attributes _mpsc_attributes;").unwrap();
-        writeln!(self.string, "    _mpsc_Instances _mpsc_instances;").unwrap();
+        writeln!(self.string, "    _m_Attributes _m_attributes;").unwrap();
+        writeln!(self.string, "    _m_Instances _m_instances;").unwrap();
         self.generate_unpack_attributes(total_packed_attribute_size);
-        writeln!(self.string, "    _mpsc_Varyings _mpsc_varyings;").unwrap();
+        writeln!(self.string, "    _m_Varyings _m_varyings;").unwrap();
         write!(self.string, "    gl_Position = vertex(").unwrap();
         let mut sep = "";
         for &ident in vertex_decl.uniform_block_deps.borrow().as_ref().unwrap() {
-            write!(self.string, "{}_mpsc_{1}_uniforms", sep, ident).unwrap();
+            write!(self.string, "{}_m_{1}_uniforms", sep, ident).unwrap();
             sep = ", ";
         }
         if !vertex_decl
@@ -252,46 +252,46 @@ impl<'a> ShaderGenerator<'a> {
             .unwrap()
             .is_empty()
         {
-            write!(self.string, "{}_mpsc_attributes", sep).unwrap();
+            write!(self.string, "{}_m_attributes", sep).unwrap();
             sep = ", ";
         }
         if vertex_decl.has_out_varying_deps.get().unwrap() {
-            write!(self.string, "{}_mpsc_varyings", sep).unwrap();
+            write!(self.string, "{}_m_varyings", sep).unwrap();
         }
         writeln!(self.string, ");").unwrap();
         self.generate_pack_varyings(total_packed_varying_size);
         writeln!(self.string, "}}").unwrap();
     }
 
-    fn generate_fragment_shader(&mut self) {
-        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
+    fn generate_pixel_shader(&mut self) {
+        let pixel_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
         let total_packed_varying_size = self.compute_total_packed_varying_size();
         self.generate_packed_varyings(total_packed_varying_size);
         writeln!(self.string, "void main() {{").unwrap();
-        writeln!(self.string, "    _mpsc_Varyings _mpsc_varyings;").unwrap();
+        writeln!(self.string, "    _m_Varyings _m_varyings;").unwrap();
         self.generate_unpack_varyings(total_packed_varying_size);
-        write!(self.string, "    gl_FragColor = fragment(").unwrap();
+        write!(self.string, "    gl_FragColor = pixel(").unwrap();
         let mut sep = "";
-        for &ident in fragment_decl.uniform_block_deps.borrow().as_ref().unwrap() {
-            write!(self.string, "{}_mpsc_{1}_uniforms", sep, ident).unwrap();
+        for &ident in pixel_decl.uniform_block_deps.borrow().as_ref().unwrap() {
+            write!(self.string, "{}_m_{1}_uniforms", sep, ident).unwrap();
             sep = ", ";
         }
-        if !fragment_decl
+        if !pixel_decl
             .attribute_deps
             .borrow()
             .as_ref()
             .unwrap()
             .is_empty()
-            || fragment_decl.has_out_varying_deps.get().unwrap()
+            || pixel_decl.has_out_varying_deps.get().unwrap()
         {
-            write!(self.string, "{}_mpsc_varyings", sep).unwrap();
+            write!(self.string, "{}_m_varyings", sep).unwrap();
         }
         writeln!(self.string, ");").unwrap();
         writeln!(self.string, "}}").unwrap();
     }
 
     fn generate_attributes_struct(&mut self) {
-        writeln!(self.string, "struct _mpsc_Attributes {{").unwrap();
+        writeln!(self.string, "struct _m_Attributes {{").unwrap();
         for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl) => {
@@ -310,7 +310,7 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn generate_instances_struct(&mut self) {
-        writeln!(self.string, "struct _mpsc_Instances {{").unwrap();
+        writeln!(self.string, "struct _m_Instances {{").unwrap();
         for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Instance(decl) => {
@@ -329,12 +329,12 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn generate_varyings_struct(&mut self) {
-        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
-        writeln!(self.string, "struct _mpsc_Varyings {{").unwrap();
+        let pixel_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
+        writeln!(self.string, "struct _m_Varyings {{").unwrap();
         for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl)
-                    if fragment_decl
+                    if pixel_decl
                         .attribute_deps
                         .borrow()
                         .as_ref()
@@ -350,7 +350,7 @@ impl<'a> ShaderGenerator<'a> {
                     writeln!(self.string, ";").unwrap();
                 }
                 Decl::Instance(decl)
-                    if fragment_decl
+                    if pixel_decl
                         .instance_deps
                         .borrow()
                         .as_ref()
@@ -405,7 +405,7 @@ impl<'a> ShaderGenerator<'a> {
             let current_packed_attribute_size = remaining_packed_attribute_size.min(4);
             writeln!(
                 self.string,
-                "attribute {} _mpsc_packed_attribute_{};",
+                "attribute {} _m_packed_attribute_{};",
                 match current_packed_attribute_size {
                     0 => break,
                     1 => "float",
@@ -423,12 +423,12 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn compute_total_packed_varying_size(&mut self) -> usize {
-        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
+        let pixel_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
         let mut total_packed_varying_size = 0;
         for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl)
-                    if fragment_decl
+                    if pixel_decl
                         .attribute_deps
                         .borrow()
                         .as_ref()
@@ -438,7 +438,7 @@ impl<'a> ShaderGenerator<'a> {
                     total_packed_varying_size += decl.ty_expr.ty.borrow().as_ref().unwrap().size();
                 }
                 Decl::Instance(decl)
-                    if fragment_decl
+                    if pixel_decl
                         .instance_deps
                         .borrow()
                         .as_ref()
@@ -507,7 +507,7 @@ impl<'a> ShaderGenerator<'a> {
                     }
                     write!(
                         string,
-                        " = _mpsc_packed_attribute_{}",
+                        " = _m_packed_attribute_{}",
                         current_packed_attribute_index
                     )
                     .unwrap();
@@ -540,14 +540,14 @@ impl<'a> ShaderGenerator<'a> {
                     unpack_attribute(
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                        "_mpsc_attributes"
+                        "_m_attributes"
                     );
                 },
                 Decl::Instance(decl) => {
                     unpack_attribute(
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                        "_mpsc_instances"
+                        "_m_instances"
                     );
                 }
                 _ => {}
@@ -556,7 +556,7 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn generate_pack_varyings(&mut self, total_packed_varying_size: usize) {
-        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
+        let pixel_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
         let mut remaining_packed_varying_size = total_packed_varying_size;
         let mut current_packed_varying_index = 0;
         let mut current_packed_varying_size = remaining_packed_varying_size.min(4);
@@ -571,7 +571,7 @@ impl<'a> ShaderGenerator<'a> {
                         .min(current_varying_size - current_varying_offset);
                     write!(
                         string,
-                        "    _mpsc_packed_varying_{}",
+                        "    _m_packed_varying_{}",
                         current_packed_varying_index
                     )
                     .unwrap();
@@ -613,7 +613,7 @@ impl<'a> ShaderGenerator<'a> {
         for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl)
-                    if fragment_decl
+                    if pixel_decl
                         .attribute_deps
                         .borrow()
                         .as_ref()
@@ -627,7 +627,7 @@ impl<'a> ShaderGenerator<'a> {
                     );
                 }
                 Decl::Instance(decl)
-                    if fragment_decl
+                    if pixel_decl
                         .instance_deps
                         .borrow()
                         .as_ref()
@@ -666,7 +666,7 @@ impl<'a> ShaderGenerator<'a> {
                 while current_varying_offset < current_varying_size {
                     let count = (current_packed_varying_size - current_packed_varying_offset)
                         .min(current_varying_size - current_varying_offset);
-                    write!(string, "    _mpsc_varyings.{}", ident).unwrap();
+                    write!(string, "    _m_varyings.{}", ident).unwrap();
                     if current_varying_size > 1 {
                         write!(
                             string,
@@ -680,7 +680,7 @@ impl<'a> ShaderGenerator<'a> {
                     }
                     write!(
                         string,
-                        " = _mpsc_packed_varying_{}",
+                        " = _m_packed_varying_{}",
                         current_packed_varying_index
                     )
                     .unwrap();
@@ -768,7 +768,7 @@ impl<'a> FnDefGenerator<'a> {
         for &ident in self.decl.uniform_block_deps.borrow().as_ref().unwrap() {
             write!(
                 self.string,
-                "{}_mpsc_{1}_Uniforms _mpsc_{1}_uniforms",
+                "{}_m_{1}_Uniforms _m_{1}_uniforms",
                 sep, ident
             )
             .unwrap();
@@ -784,14 +784,14 @@ impl<'a> FnDefGenerator<'a> {
                     .unwrap()
                     .is_empty()
                 {
-                    write!(self.string, "{}_mpsc_Attributes _mpsc_attributes", sep).unwrap();
+                    write!(self.string, "{}_m_Attributes _m_attributes", sep).unwrap();
                     sep = ", ";
                 }
                 if self.decl.has_out_varying_deps.get().unwrap() {
-                    write!(self.string, "{}out _mpsc_Varyings _mpsc_varyings", sep).unwrap();
+                    write!(self.string, "{}out _m_Varyings _m_varyings", sep).unwrap();
                 }
             }
-            ShaderKind::Fragment => {
+            ShaderKind::Pixel => {
                 if !self
                     .decl
                     .attribute_deps
@@ -801,7 +801,7 @@ impl<'a> FnDefGenerator<'a> {
                     .is_empty()
                     || self.decl.has_in_varying_deps.get().unwrap()
                 {
-                    write!(self.string, "{}_mpsc_Varyings _mpsc_varyings", sep).unwrap();
+                    write!(self.string, "{}_m_Varyings _m_varyings", sep).unwrap();
                 }
             }
         }
@@ -1119,28 +1119,28 @@ impl<'a> ExprGenerator<'a> {
         }
         if let Some(decl) = self.shader_ast.find_fn_decl(ident) {
             for &ident in decl.uniform_block_deps.borrow().as_ref().unwrap() {
-                write!(self.string, "{}_mpsc_{1}_uniforms", sep, ident).unwrap();
+                write!(self.string, "{}_m_{1}_uniforms", sep, ident).unwrap();
                 sep = ", ";
             }
             match self.kind {
                 ShaderKind::Vertex => {
                     if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty() {
-                        write!(self.string, "{}_mpsc_attributes", sep).unwrap();
+                        write!(self.string, "{}_m_attributes", sep).unwrap();
                         sep = ", ";
                     }
                     if !decl.instance_deps.borrow().as_ref().unwrap().is_empty() {
-                        write!(self.string, "{}_mpsc_instances", sep).unwrap();
+                        write!(self.string, "{}_m_instances", sep).unwrap();
                         sep = ", ";
                     }
                     if decl.has_out_varying_deps.get().unwrap() {
-                        write!(self.string, "{}_mpsc_varyings", sep).unwrap();
+                        write!(self.string, "{}_m_varyings", sep).unwrap();
                     }
                 }
-                ShaderKind::Fragment => {
+                ShaderKind::Pixel => {
                     if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty()
                         || decl.has_in_varying_deps.get().unwrap()
                     {
-                        write!(self.string, "{}_mpsc_varyings", sep).unwrap();
+                        write!(self.string, "{}_m_varyings", sep).unwrap();
                     }
                 }
             }
@@ -1177,17 +1177,17 @@ impl<'a> ExprGenerator<'a> {
     ) {
         match kind.get().unwrap() {
             VarKind::Attribute => match self.kind {
-                ShaderKind::Vertex => write!(self.string, "_mpsc_attributes.").unwrap(),
-                ShaderKind::Fragment => write!(self.string, "_mpsc_varyings.").unwrap(),
+                ShaderKind::Vertex => write!(self.string, "_m_attributes.").unwrap(),
+                ShaderKind::Pixel => write!(self.string, "_m_varyings.").unwrap(),
             },
             VarKind::Const => {}
             VarKind::Instance => match self.kind {
-                ShaderKind::Vertex => write!(self.string, "_mpsc_instances.").unwrap(),
-                ShaderKind::Fragment => write!(self.string, "_mpsc_varyings.").unwrap(),
+                ShaderKind::Vertex => write!(self.string, "_m_instances.").unwrap(),
+                ShaderKind::Pixel => write!(self.string, "_m_varyings.").unwrap(),
             },
             VarKind::Local => {}
             VarKind::Texture => {}
-            VarKind::Varying => write!(self.string, "_mpsc_varyings.").unwrap(),
+            VarKind::Varying => write!(self.string, "_m_varyings.").unwrap(),
             VarKind::Uniform => {}
         }
         write!(self.string, "{}", ident).unwrap()
