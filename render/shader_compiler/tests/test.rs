@@ -32,6 +32,8 @@ const SOURCE: &str = r#"
 
     instance iRotation: Self::my_instance();
 
+    varying vColor: vec3;
+
     fn vertex() -> vec4 {
         let cx = Cx::foo();
         cx.bar();
@@ -39,6 +41,8 @@ const SOURCE: &str = r#"
 
     fn pixel() -> vec4 {
         let cx = Cx::foo();
+        aPosition;
+        iRotation;
         cx.qux(10.0);
     }
 "#;
