@@ -84,6 +84,7 @@ impl<'a> Parser<'a> {
         let ty_expr = self.parse_ty_path() ?;
         self.expect_token(Token::Semi) ?;
         Ok(span.end(&self, | span | AttributeDecl {
+            is_used_in_fragment_shader: Cell::new(None),
             span,
             ident,
             ty_expr
@@ -175,6 +176,7 @@ impl<'a> Parser<'a> {
         let ty_expr = self.parse_ty_path() ?;
         self.expect_token(Token::Semi) ?;
         Ok(span.end(&self, | span | InstanceDecl {
+            is_used_in_fragment_shader: Cell::new(None),
             span,
             ident,
             ty_expr
