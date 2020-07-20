@@ -37,6 +37,9 @@ const SOURCE: &str = r#"
     fn vertex() -> vec4 {
         let cx = Cx::foo();
         cx.bar();
+        for i from 0 to 10 step 2 {
+            
+        }
     }
 
     fn pixel() -> vec4 {
