@@ -7,7 +7,9 @@ use makepad_shader_compiler::shader::*;
 use makepad_shader_compiler::uid;
 
 const SOURCE: &str = r#"
-    struct Cx {}
+    struct Cx {
+        prop: float
+    }
 
     impl Cx {
         fn foo() -> Cx {
@@ -16,7 +18,7 @@ const SOURCE: &str = r#"
         }
 
         fn bar(self) {
-
+            -self.prop;
         }
 
         fn qux(self, x: float) -> float {
