@@ -73,64 +73,64 @@ impl DesktopButton {
             instance button_type: Self::button_type();
             
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h)); // );
-                df_aa *= 3.0;
+                let df = Df::viewport(pos * vec2(w, h)); // );
+                df.aa *= 3.0;
                 let sz = 4.5;
                 let c = vec2(w, h) * vec2(0.5, 0.5);
                 // WindowsMin
                 if abs(button_type - 1.) < 0.1 {
-                    df_clear(mix(color!(#3), mix(color!(#6), color!(#9), down), hover));
-                    df_move_to(c.x - sz, c.y);
-                    df_line_to(c.x + sz, c.y);
-                    df_stroke(color!(white), 0.5 + 0.5 * dpi_dilate);
-                    return df_result;
+                    df.clear(mix(color!(#3), mix(color!(#6), color!(#9), down), hover));
+                    df.move_to(c.x - sz, c.y);
+                    df.line_to(c.x + sz, c.y);
+                    df.stroke(color!(white), 0.5 + 0.5 * dpi_dilate);
+                    return df.result;
                 }
                 // WindowsMax
                 if abs(button_type - 2.) < 0.1 {
-                    df_clear(mix(color!(#3), mix(color!(#6), color!(#9), down), hover));
-                    df_rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
-                    df_stroke(color!(white), 0.5 + 0.5 * dpi_dilate);
-                    return df_result;
+                    df.clear(mix(color!(#3), mix(color!(#6), color!(#9), down), hover));
+                    df.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
+                    df.stroke(color!(white), 0.5 + 0.5 * dpi_dilate);
+                    return df.result;
                 }
                 // WindowsMaxToggled
                 if abs(button_type - 3.) < 0.1 {
                     let clear = mix(color!(#3), mix(color!(#6), color!(#9), down), hover);
-                    df_clear(clear);
+                    df.clear(clear);
                     let sz = 3.5;
-                    df_rect(c.x - sz + 1., c.y - sz - 1., 2. * sz, 2. * sz);
-                    df_stroke(color!(white), 0.5 + 0.5 * dpi_dilate);
-                    df_rect(c.x - sz - 1., c.y - sz + 1., 2. * sz, 2. * sz);
-                    df_fill_keep(clear);
-                    df_stroke(color!(white), 0.5 + 0.5 * dpi_dilate);
+                    df.rect(c.x - sz + 1., c.y - sz - 1., 2. * sz, 2. * sz);
+                    df.stroke(color!(white), 0.5 + 0.5 * dpi_dilate);
+                    df.rect(c.x - sz - 1., c.y - sz + 1., 2. * sz, 2. * sz);
+                    df.fill_keep(clear);
+                    df.stroke(color!(white), 0.5 + 0.5 * dpi_dilate);
                     
-                    return df_result;
+                    return df.result;
                 }
                 // WindowsClose
                 if abs(button_type - 4.) < 0.1 {
-                    df_clear(mix(color!(#3), mix(color!(#e00), color!(#c00), down), hover));
-                    df_move_to(c.x - sz, c.y - sz);
-                    df_line_to(c.x + sz, c.y + sz);
-                    df_move_to(c.x - sz, c.y + sz);
-                    df_line_to(c.x + sz, c.y - sz);
-                    df_stroke(color!(white), 0.5 + 0.5 * dpi_dilate);
-                    return df_result;
+                    df.clear(mix(color!(#3), mix(color!(#e00), color!(#c00), down), hover));
+                    df.move_to(c.x - sz, c.y - sz);
+                    df.line_to(c.x + sz, c.y + sz);
+                    df.move_to(c.x - sz, c.y + sz);
+                    df.line_to(c.x + sz, c.y - sz);
+                    df.stroke(color!(white), 0.5 + 0.5 * dpi_dilate);
+                    return df.result;
                 }
                 // VRMode
                 if abs(button_type - 5.) < 0.1 {
-                    df_clear(mix(color!(#3), mix(color!(#0aa), color!(#077), down), hover));
+                    df.clear(mix(color!(#3), mix(color!(#0aa), color!(#077), down), hover));
                     let w = 12.;
                     let h = 8.;
-                    df_box(c.x - w, c.y - h, 2. * w, 2. * h, 2.);
+                    df.box(c.x - w, c.y - h, 2. * w, 2. * h, 2.);
                     // subtract 2 eyes
-                    df_circle(c.x - 5.5,c.y,3.5);
-                    df_subtract();
-                    df_circle(c.x + 5.5,c.y,3.5);
-                    df_subtract();
-                    df_circle(c.x, c.y + h-0.75,2.5);
-                    df_subtract();
-                    df_fill(color!(#8));
+                    df.circle(c.x - 5.5,c.y,3.5);
+                    df.subtract();
+                    df.circle(c.x + 5.5,c.y,3.5);
+                    df.subtract();
+                    df.circle(c.x, c.y + h-0.75,2.5);
+                    df.subtract();
+                    df.fill(color!(#8));
                     
-                    return df_result;
+                    return df.result;
                 }
                 return color!(red);/*
                 df_viewport(pos * vec2(w, h));

@@ -114,6 +114,22 @@ pub fn shader(input: TokenStream) -> TokenStream {
                 _ => ()
             }
         }
+        tb.add("] , texture_props : vec ! [");
+        for decl in &shader.decls {
+            match decl {
+                Decl::Texture(decl) => {
+                    match decl.ty_expr.kind {
+                        TyExprKind::Var {ident, ..} => {
+                            prop_def(&mut tb, decl.ident.to_string(), ident.to_string());
+                        },
+                        _ => {
+                            return error(&format!("Type expression for uniform {}", decl.ident));
+                        }
+                    }
+                },
+                _ => ()
+            }
+        }
         tb.add("] }");
         
         if input_iter.next().is_some() {
@@ -170,6 +186,7 @@ pub fn color(input: TokenStream) -> TokenStream {
         }
         else if items.len() == 2{
             if let TokenTree::Punct(pct) = &items[0]{
+               
                 if pct.as_char() != '#'{
                     return Err(pct.span());
                 }

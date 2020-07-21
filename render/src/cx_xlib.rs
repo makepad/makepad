@@ -1571,15 +1571,15 @@ struct MwmHints {
     pub status: c_ulong,
 }
 
-const MWM_HINTS_FUNCTIONS: c_ulong = (1 << 0);
-const MWM_HINTS_DECORATIONS: c_ulong = (1 << 1);
+const MWM_HINTS_FUNCTIONS: c_ulong = 1 << 0;
+const MWM_HINTS_DECORATIONS: c_ulong = 1 << 1;
 
-const MWM_FUNC_ALL: c_ulong = (1 << 0);
-const MWM_FUNC_RESIZE: c_ulong = (1 << 1);
-const MWM_FUNC_MOVE: c_ulong = (1 << 2);
-const MWM_FUNC_MINIMIZE: c_ulong = (1 << 3);
-const MWM_FUNC_MAXIMIZE: c_ulong = (1 << 4);
-const MWM_FUNC_CLOSE: c_ulong = (1 << 5);
+const MWM_FUNC_ALL: c_ulong = 1 << 0;
+const MWM_FUNC_RESIZE: c_ulong = 1 << 1;
+const MWM_FUNC_MOVE: c_ulong = 1 << 2;
+const MWM_FUNC_MINIMIZE: c_ulong = 1 << 3;
+const MWM_FUNC_MAXIMIZE: c_ulong = 1 << 4;
+const MWM_FUNC_CLOSE: c_ulong = 1 << 5;
 const _NET_WM_MOVERESIZE_SIZE_TOPLEFT: c_long = 0;
 const _NET_WM_MOVERESIZE_SIZE_TOP: c_long = 1;
 const _NET_WM_MOVERESIZE_SIZE_TOPRIGHT: c_long = 2;

@@ -368,10 +368,10 @@ impl TextEditor {
                 else {
                     col *= vec4(0.75, 0.75, 0.75, 0.75);
                 }
-                df_viewport(pos * vec2(w, h));
-                df_move_to(1., -1.);
-                df_line_to(1., h + 1.);
-                return df_stroke(col, thickness);
+                let cx = Df::viewport(pos * vec2(w, h));
+                cx.move_to(1., -1.);
+                cx.line_to(1., h + 1.);
+                return cx.stroke(col, thickness);
             }
         "}));
         
@@ -407,30 +407,30 @@ impl TextEditor {
             }
             
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_box(0., 0., w, h, border_radius);
+                let cx = Df::viewport(pos * vec2(w, h));
+                cx.box(0., 0., w, h, border_radius);
                 if prev_w > 0. {
-                    df_box(prev_x, -h, prev_w, h, border_radius);
-                    df_gloop(gloopiness);
+                    cx.box(prev_x, -h, prev_w, h, border_radius);
+                    cx.gloop(gloopiness);
                 }
                 if next_w > 0. {
-                    df_box(next_x, h, next_w, h, border_radius);
-                    df_gloop(gloopiness);
+                    cx.box(next_x, h, next_w, h, border_radius);
+                    cx.gloop(gloopiness);
                 }
                 //df_shape *= cos(pos.x*8.)+cos(pos.y*16.);
-                return df_fill(color);
+                return cx.fill(color);
             }
         "}));
         
         Self::shader_paren_pair().set(cx, Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
+                let cx = Df::viewport(pos * vec2(w, h));
                 //df_rect(0.,0.,w,h);
                 //df_rect(0.5,0.5,w-1.,h-1.);
                 //return df_stroke(color, 0.75 + dpi_dilate*0.75);
                 //df_rect(0.,h-1.-dpi_dilate,w,1.+dpi_dilate);
-                df_rect(0., h - 1.5 - dpi_dilate, w, 1.5 + dpi_dilate);
-                return df_fill(color);
+                cx.rect(0., h - 1.5 - dpi_dilate, w, 1.5 + dpi_dilate);
+                return cx.fill(color);
                 //df_rect(0.01,0.,w,h);
                 //return df_fill(color);
             }
@@ -438,9 +438,9 @@ impl TextEditor {
         
         Self::shader_cursor_row().set(cx, Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_rect(0., 0., w, h);
-                return df_fill(color);
+                let cx = Df::viewport(pos * vec2(w, h));
+                cx.rect(0., 0., w, h);
+                return cx.fill(color);
                 /*
                 df_move_to(0.,0.5);
                 df_line_to(w,0.5);
@@ -473,11 +473,11 @@ impl TextEditor {
         Self::shader_search_marker().set(cx, Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
                 let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
-                df_viewport(pos2 * vec2(w, h));
+                let cx = Df::viewport(pos2 * vec2(w, h));
                 //df_rect(0.,0.,w,h);
-                df_move_to(0., h - 1.);
-                df_line_to(w, h - 1.);
-                return df_stroke(color!(white), 0.8);
+                cx.move_to(0., h - 1.);
+                cx.line_to(w, h - 1.);
+                return cx.stroke(color!(white), 0.8);
                 /*
                 df_viewport(pos * vec2(w, h));
                 df_box(0.5, 0.5, w - 1., h - 1., 1.);
@@ -488,11 +488,11 @@ impl TextEditor {
         Self::shader_message_marker().set(cx, Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
                 let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
-                df_viewport(pos2 * vec2(w, h));
+                let cx = Df::viewport(pos2 * vec2(w, h));
                 //df_rect(0.,0.,w,h);
-                df_move_to(0., h - 1.);
-                df_line_to(w, h - 1.);
-                return df_stroke(color, 0.8);
+                cx.move_to(0., h - 1.);
+                cx.line_to(w, h - 1.);
+                return cx.stroke(color, 0.8);
             }
         "}));
         

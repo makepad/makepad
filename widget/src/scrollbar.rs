@@ -98,14 +98,14 @@ impl ScrollBar {
             const border_radius: float = 1.5;
             
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
+                let df = Df::viewport(pos * vec2(w, h));
                 if is_vertical > 0.5 {
-                    df_box(1., h * norm_scroll, w * 0.5, h * norm_handle, border_radius);
+                    df.box(1., h * norm_scroll, w * 0.5, h * norm_handle, border_radius);
                 }
                 else {
-                    df_box(w * norm_scroll, 1., w * norm_handle, h * 0.5, border_radius);
+                    df.box(w * norm_scroll, 1., w * norm_handle, h * 0.5, border_radius);
                 }
-                return df_fill_keep(color);
+                return df.fill_keep(color);
             }
         "}));
     }
