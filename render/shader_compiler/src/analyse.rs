@@ -340,6 +340,10 @@ impl<'a> ShaderAnalyser<'a> {
                     )
                 });
             }
+            match kind {
+                ShaderKind::Vertex => decl.is_used_in_vertex_shader.set(Some(true)),
+                ShaderKind::Fragment => decl.is_used_in_fragment_shader.set(Some(true)),
+            }
             self.analyse_call_tree(kind, call_stack, callee_decl)?;
         }
         call_stack.pop();
@@ -398,6 +402,26 @@ impl<'a> ShaderAnalyser<'a> {
                     .iter()
                     .cloned(),
             );
+        }
+        if decl.is_used_in_vertex_shader.get().unwrap() && decl.is_used_in_fragment_shader.get().unwrap() {
+            if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty() {
+                return Err(Error {
+                    span: decl.span,
+                    message: format!(
+                        "function `{}` can't read from or write to any attributes, because it is used in both the vertex and the fragment shader",
+                        decl.ident
+                    ),
+                });
+            }
+            if !decl.instance_deps.borrow().as_ref().unwrap().is_empty() {
+                return Err(Error {
+                    span: decl.span,
+                    message: format!(
+                        "function `{}` can't read from or write to any instances, because it is used in both the vertex and the fragment shader",
+                        decl.ident
+                    ),
+                });
+            }
         }
         if decl.is_used_in_vertex_shader.get().unwrap() && decl.has_in_varying_deps.get().unwrap() {
             return Err(Error {
