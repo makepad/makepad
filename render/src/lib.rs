@@ -97,5 +97,5 @@ pub use crate::quad::*;
 pub use crate::blit::*;
 pub use crate::text::*;
 pub use crate::elements::*;
-pub use makepad_shader_compiler::shader::*;
+pub use makepad_shader_compiler::shadergen::*;
 pub use makepad_live_macros::*;

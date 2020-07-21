@@ -275,7 +275,7 @@ impl Cx {
         out
     }
     */
-    pub fn gl_assemble_shader(sg: &ShaderGen, shtype: GLShaderType) -> Result<(String, String, CxShaderMapping), String> {
+    pub fn gl_assemble_shader(_sg: &ShaderGen, _shtype: GLShaderType) -> Result<(String, String, CxShaderMapping), String> {
         Err("Hello".to_string())
         /*
         let mut vtx_out = String::new();
