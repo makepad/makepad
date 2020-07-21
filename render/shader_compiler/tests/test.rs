@@ -41,7 +41,7 @@ const SOURCE: &str = r#"
         let cx = Cx::foo();
         cx.bar();
         for i from 0 to 10 step 2 {
-
+            vec4(1.0, vec2(2.0, 3.0), 4.0);
         }
         return vec4(1.0);
     }
