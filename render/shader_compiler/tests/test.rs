@@ -40,6 +40,7 @@ const SOURCE: &str = r#"
         for i from 0 to 10 step 2 {
 
         }
+        return vec4(1.0);
     }
 
     fn pixel() -> vec4 {
@@ -47,6 +48,7 @@ const SOURCE: &str = r#"
         aPosition;
         iRotation;
         cx.qux(10.0);
+        return vec4(1.0);
     }
 "#;
 
