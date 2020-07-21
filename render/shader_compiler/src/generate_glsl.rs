@@ -8,6 +8,7 @@ use {
             TyLit
         },
         span::Span,
+        swizzle::Swizzle,
         ty::Ty,
     },
     std::{
@@ -19,30 +20,72 @@ use {
     }
 };
 
-pub enum ShaderKind {
-    Vertex,
-    Fragment,
-}
-
-pub fn generate(shader: &ShaderAst, kind: ShaderKind) -> String {
+pub fn generate_vertex_shader(shader: &ShaderAst) -> String {
     let mut string = String::new();
     ShaderGenerator {
         shader,
-        kind,
         string: &mut string,
     }
-    .generate_shader();
+    .generate_vertex_shader();
+    string
+}
+
+pub fn generate_fragment_shader(shader: &ShaderAst) -> String {
+    let mut string = String::new();
+    ShaderGenerator {
+        shader,
+        string: &mut string,
+    }
+    .generate_fragment_shader();
     string
 }
 
 struct ShaderGenerator<'a> {
     shader: &'a ShaderAst,
-    kind: ShaderKind,
     string: &'a mut String,
 }
 
 impl<'a> ShaderGenerator<'a> {
-    fn generate_shader(&mut self) {
+    fn generate_vertex_shader(&mut self) {
+        let packed_attributes_size = self.compute_packed_attributes_size();
+        let packed_varyings_size = self.compute_packed_varyings_size();
+        self.generate_declarations(Some(packed_attributes_size), packed_varyings_size);
+        writeln!(self.string, "void main() {{").unwrap();
+        let mut attribute_unpacker = AttributeUnpacker::new(
+            packed_attributes_size,
+            &mut self.string
+        );
+        for decl in &self.shader.decls {
+            match decl {
+                Decl::Attribute(decl) => {
+                    attribute_unpacker.unpack_attribute(
+                        "_m_attributes",
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                    );
+                },
+                Decl::Instance(decl) => {
+                    attribute_unpacker.unpack_attribute(
+                        "_m_instances",
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        write!(self.string, "}}").unwrap();
+    }
+
+    fn generate_fragment_shader(&mut self) {
+        // TODO
+    }
+
+    fn generate_declarations(
+        &mut self,
+        packed_attributes_size: Option<usize>,
+        packed_varyings_size: usize
+    ) {
         for decl in &self.shader.decls {
             match decl {
                 Decl::Struct(decl) => self.generate_struct_decl(decl),
@@ -64,21 +107,13 @@ impl<'a> ShaderGenerator<'a> {
             }
         }
 
-        let packed_attributes_size = match self.kind {
-            ShaderKind::Vertex => Some(self.compute_packed_attributes_size()),
-            ShaderKind::Fragment => None,
-        };
         if let Some(packed_attributes_size) = packed_attributes_size {
             self.generate_packed_attribute_declarations(packed_attributes_size);
         }
 
-        let packed_varyings_size = self.compute_packed_varyings_size();
         self.generate_packed_varying_declarations(packed_varyings_size);
 
-        self.generate_fn_decl(self.shader.find_fn_decl(match self.kind {
-            ShaderKind::Vertex => Ident::new("vertex"),
-            ShaderKind::Fragment => Ident::new("pixel"),
-        }).unwrap());
+        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("vertex")).unwrap());
     }
 
     fn generate_struct_decl(&mut self, decl: &StructDecl) {
@@ -251,12 +286,56 @@ struct AttributeUnpacker<'a> {
 }
 
 impl<'a> AttributeUnpacker<'a> {
-    fn unpack_attribute(&mut self, ident: Ident, ty: &Ty) {
+    fn new(packed_attributes_size: usize, string: &mut String) -> AttributeUnpacker {
+        AttributeUnpacker {
+            packed_attributes_size,
+            packed_attribute_index: 0,
+            packed_attribute_size: packed_attributes_size.min(4),
+            packed_attribute_offset: 0,
+            string,
+        }
+    }
+
+    fn unpack_attribute(&mut self, dst: &str, ident: Ident, ty: &Ty) {
         let attribute_size = ty.size();
         let mut attribute_offset = 0;
         while attribute_offset < attribute_size {
-            self.packed_attribute_size - self.packed_attribute_offset;
-            attribute_size - attribute_offset;
+            let count = attribute_size - attribute_offset;
+            let packed_count = self.packed_attribute_size - self.packed_attribute_offset;
+            let min_count = count.min(packed_count);
+            write!(self.string, "    {}.{}", dst, ident).unwrap();
+            if attribute_size > 1 {
+                write!(
+                    self.string,
+                    ".{}",
+                    Swizzle::from_range(
+                        attribute_offset,
+                        attribute_offset + min_count
+                    )
+                )
+                .unwrap();
+            }
+            write!(self.string, " = _m_packed_attribute_{}", self.packed_attribute_index).unwrap();
+            if self.packed_attribute_size > 1 {
+                write!(
+                    self.string,
+                    ".{}",
+                    Swizzle::from_range(
+                        self.packed_attribute_offset,
+                        self.packed_attribute_offset + min_count
+                    )
+                )
+                .unwrap();
+            }
+            writeln!(self.string, ";").unwrap();
+            attribute_offset += min_count;
+            self.packed_attribute_offset += min_count;
+            if self.packed_attribute_offset == self.packed_attribute_size {
+                self.packed_attributes_size -= self.packed_attribute_size;
+                self.packed_attribute_index += 1;
+                self.packed_attribute_size = self.packed_attribute_size.min(4);
+                self.packed_attribute_offset = 0;
+            } 
         }
     }
 }
