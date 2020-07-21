@@ -383,6 +383,9 @@ impl<'a> TyChecker<'a> {
             UnOp::Neg => match ty {
                 Ty::Int => Some(Ty::Int),
                 Ty::Float => Some(Ty::Float),
+                Ty::Vec2 => Some(Ty::Vec2),
+                Ty::Vec3 => Some(Ty::Vec3),
+                Ty::Vec4 => Some(Ty::Vec4),
                 _ => None,
             },
         }
@@ -417,7 +420,7 @@ impl<'a> TyChecker<'a> {
             Ty::Struct {ident: struct_ident} => {
                 self.ty_check_call_expr(
                     span,
-                    Ident::new(format!("{}::{}", struct_ident, ident)),
+                    Ident::new(format!("mpsc__{}_{}", struct_ident, ident)),
                     &arg_exprs
                 )
             },

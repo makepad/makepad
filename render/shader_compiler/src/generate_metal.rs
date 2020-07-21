@@ -366,7 +366,7 @@ impl<'a> ShaderGenerator<'a> {
         BlockGenerator {
             shader: self.shader,
             indent_level: 0,
-            backend_writer: &GlslBackendWriter,
+            backend_writer: &MetalBackendWriter,
             string: self.string
         }
         .generate_block(block)
@@ -375,16 +375,16 @@ impl<'a> ShaderGenerator<'a> {
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             shader: self.shader,
-            use_hidden_parameters: false,
-            use_generated_constructors: false,
-            backend_writer: &GlslBackendWriter,
+            use_hidden_parameters: true,
+            use_generated_constructors: true,
+            backend_writer: &MetalBackendWriter,
             string: self.string,
         }
         .generate_expr(expr)
     }
 
     fn write_ident_and_ty(&mut self, ident: Ident, ty: &Ty) {
-        GlslBackendWriter.write_ident_and_ty(
+        MetalBackendWriter.write_ident_and_ty(
             &mut self.string,
             ident,
             ty
@@ -530,10 +530,26 @@ impl<'a> VarUnpacker<'a> {
     }
 }
 
-struct GlslBackendWriter;
+struct MetalBackendWriter;
 
-impl BackendWriter for GlslBackendWriter {
+impl BackendWriter for MetalBackendWriter {
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit) {
-        write!(string, "{}", ty_lit).unwrap();
+        write!(string, "{}", match ty_lit {
+            TyLit::Bool => "bool",
+            TyLit::Int => "int",
+            TyLit::Float => "float",
+            TyLit::Bvec2 => "bool2",
+            TyLit::Bvec3 => "bool3",
+            TyLit::Bvec4 => "bool4",
+            TyLit::Ivec2 => "int2",
+            TyLit::Ivec3 => "int3",
+            TyLit::Ivec4 => "int4",
+            TyLit::Vec2 => "float2",
+            TyLit::Vec3 => "float3",
+            TyLit::Vec4 => "float4",
+            TyLit::Mat2 => "mat2",
+            TyLit::Mat3 => "mat3",
+            TyLit::Mat4 => "mat4",
+        }).unwrap();
     }
 }

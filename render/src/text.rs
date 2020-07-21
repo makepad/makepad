@@ -114,7 +114,7 @@ impl Text {
             }
             
             fn pixel() -> vec4 {
-                let dx = dfdx(vec2(tex_coord1.x * 2048.0, 0.)).x;
+                let dx = dFdx(vec2(tex_coord1.x * 2048.0, 0.)).x;
                 let dp = 1.0 / 2048.0;
                 
                 // basic hardcoded mipmapping so it stops 'swimming' in VR

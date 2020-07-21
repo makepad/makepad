@@ -24,7 +24,8 @@ pub struct ShaderSub{
     pub code:String,
     pub attribute_props:Vec<PropDef>,
     pub instance_props:Vec<PropDef>,
-    pub uniform_props:Vec<PropDef>
+    pub uniform_props:Vec<PropDef>,
+    pub texture_props:Vec<PropDef>
 }
 
 #[derive(Default, Clone, PartialEq)]

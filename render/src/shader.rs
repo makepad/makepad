@@ -178,22 +178,21 @@ impl CxShader {
             }
             
             impl Df {
-                /*
-                fn df_viewport(pos: vec2) -> Df {
-                    return Df{
-                        pos: pos,
-                        result: vec4(0., 0., 0., 0.),
-                        old_shape:1e+20,
-                        shape: 1e+20,
-                        clip: -1e+20,
-                        blur: 0.00001,
-                        aa: Df::antialias(pos),
-                        scale: 1.0,
-                        field: 0.0,
-                        clip: 0.0,
-                        has_clip: 0.0,
-                    }
-                }*/
+                fn viewport(pos: vec2) -> Df {
+                    let df:Df;
+                    df.pos=  pos;
+                    df.result = vec4(0., 0., 0., 0.);
+                    df.old_shape = 1e+20;
+                    df.shape = 1e+20;
+                    df.clip = -1e+20;
+                    df.blur = 0.00001;
+                    df.aa = Df::antialias(pos);
+                    df.scale = 1.0;
+                    df.field = 0.0;
+                    df.clip = 0.0;
+                    df.has_clip = 0.0;
+                    return df;
+                }
                 
                 fn antialias(p: vec2) -> float {
                     return 1.0 / length(vec2(length(dFdx(p)), length(dFdy(p))));

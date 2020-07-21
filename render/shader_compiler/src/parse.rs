@@ -84,6 +84,7 @@ impl<'a> Parser<'a> {
         let ty_expr = self.parse_ty_path() ?;
         self.expect_token(Token::Semi) ?;
         Ok(span.end(&self, | span | AttributeDecl {
+            is_used_in_fragment_shader: Cell::new(None),
             span,
             ident,
             ty_expr
@@ -111,7 +112,7 @@ impl<'a> Parser<'a> {
         let span = self.begin_span();
         self.expect_token(Token::Fn) ?;
         let ident = if let Some(prefix) = prefix {
-            Ident::new(format!("{}::{}", prefix, self.parse_ident() ?))
+            Ident::new(format!("mpsc__{}_{}", prefix, self.parse_ident() ?))
         } else {
             self.parse_ident() ?
         };
@@ -175,6 +176,7 @@ impl<'a> Parser<'a> {
         let ty_expr = self.parse_ty_path() ?;
         self.expect_token(Token::Semi) ?;
         Ok(span.end(&self, | span | InstanceDecl {
+            is_used_in_fragment_shader: Cell::new(None),
             span,
             ident,
             ty_expr
@@ -746,7 +748,7 @@ impl<'a> Parser<'a> {
                             Token::PathSep => {
                                 self.skip_token();
                                 ident = Ident::new(
-                                    format!("{}::{}", ident, self.parse_ident()?)
+                                    format!("mpsc__{}_{}", ident, self.parse_ident()?)
                                 );
                                 let arg_exprs = self.parse_arg_exprs()?;
                                 span.end(self, |span| ExprKind::Call {

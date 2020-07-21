@@ -85,9 +85,9 @@ impl Splitter {
         Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"
             
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_box(0., 0., w, h, 0.5);
-                return df_fill(color);
+                let df = Df::viewport(pos * vec2(w, h));
+                df.box(0., 0., w, h, 0.5);
+                return df.fill(color);
             }
         "}));
     }

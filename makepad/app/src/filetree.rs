@@ -258,18 +258,18 @@ impl FileTreeItemDraw {
             instance anim_pos: Self::anim_pos();
             
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
+                let df = Df::viewport(pos * vec2(w, h));
                 if anim_pos<-0.5 {
-                    df_move_to(0.5 * w, line_vec.x * h);
-                    df_line_to(0.5 * w, line_vec.y * h);
-                    return df_stroke(color*0.5, 1.);
+                    df.move_to(0.5 * w, line_vec.x * h);
+                    df.line_to(0.5 * w, line_vec.y * h);
+                    return df.stroke(color*0.5, 1.);
                 }
                 else { // its a folder
-                    df_box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
-                    df_box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
-                    df_union(); 
+                    df.box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
+                    df.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
+                    df.union(); 
                     // ok so.
-                    return df_fill(color);
+                    return df.fill(color);
                 }
             }
         "}));
@@ -357,9 +357,9 @@ impl FileTree {
     pub fn def_drag_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_box(0., 0., w, h, 2.);
-                return df_fill(color);
+                let df = Df::viewport(pos * vec2(w, h));
+                df.box(0., 0., w, h, 2.);
+                return df.fill(color);
             }
         "})
     }
