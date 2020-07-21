@@ -50,6 +50,27 @@ impl<'a> ShaderGenerator<'a> {
         let packed_attributes_size = self.compute_packed_attributes_size();
         let packed_varyings_size = self.compute_packed_varyings_size();
         self.generate_declarations(Some(packed_attributes_size), packed_varyings_size);
+        for decl in &self.shader.decls {
+            match decl {
+                Decl::Attribute(decl) => {
+                    write_ident_and_ty(
+                        &mut self.string,
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                    );
+                    writeln!(self.string, ";").unwrap();
+                },
+                Decl::Instance(decl) => {
+                    write_ident_and_ty(
+                        &mut self.string,
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                    );
+                    writeln!(self.string, ";").unwrap();
+                },
+                _ => {}
+            }
+        }
         self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("vertex")).unwrap());
         writeln!(self.string, "void main() {{").unwrap();
         let mut attribute_unpacker = VarUnpacker::new(
@@ -108,6 +129,35 @@ impl<'a> ShaderGenerator<'a> {
     fn generate_fragment_shader(&mut self) {
         let packed_varyings_size = self.compute_packed_varyings_size();
         self.generate_declarations(None, packed_varyings_size);
+        for decl in &self.shader.decls {
+            match decl {
+                Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                    write_ident_and_ty(
+                        &mut self.string,
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                    );
+                    writeln!(self.string, ";").unwrap();
+                }
+                Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                    write_ident_and_ty(
+                        &mut self.string,
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                    );
+                    writeln!(self.string, ";").unwrap();
+                }
+                Decl::Varying(decl) => {
+                    write_ident_and_ty(
+                        &mut self.string,
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                    );
+                    writeln!(self.string, ";").unwrap();
+                },
+                _ => {}
+            }
+        }
         self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("pixel")).unwrap());
         writeln!(self.string, "void main() {{").unwrap();
         let mut varying_unpacker = VarUnpacker::new(
