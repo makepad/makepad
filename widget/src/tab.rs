@@ -80,14 +80,14 @@ impl Tab {
             const border_width: float = 1.0;
             
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_rect(-1., -1., w + 2., h + 2.);
-                df_fill(color);
-                df_move_to(w, 0.);
-                df_line_to(w, h);
-                df_move_to(0., 0.);
-                df_line_to(0., h);
-                return df_stroke(border_color, 1.);
+                let cx = Df::viewport(pos * vec2(w, h));
+                cx.rect(-1., -1., w + 2., h + 2.);
+                cx.fill(color);
+                cx.move_to(w, 0.);
+                cx.line_to(w, h);
+                cx.move_to(0., 0.);
+                cx.line_to(0., h);
+                return cx.stroke(border_color, 1.);
             }
         "}));
     }

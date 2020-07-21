@@ -75,13 +75,13 @@ impl NormalButton {
             const shadow: float = 3.0;
             const border_radius: float = 2.5;
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_box(shadow, shadow, w - shadow*(1.+down), h- shadow*(1.+down), border_radius);
-                df_blur = 6.0;
-                df_fill(mix(color!(#0007), color(#0), hover));
-                df_blur = 0.001;
-                df_box(shadow, shadow, w - shadow*2., h - shadow*2., border_radius);
-                return df_fill(mix(mix(color(#3),color(#4),hover), color(#2a), down));
+                let cx = Df::viewport(pos * vec2(w, h));
+                cx.box(shadow, shadow, w - shadow*(1.+down), h- shadow*(1.+down), border_radius);
+                cx.blur = 6.0;
+                cx.fill(mix(color!(#0007), color!(#0), hover));
+                cx.blur = 0.001;
+                cx.box(shadow, shadow, w - shadow*2., h - shadow*2., border_radius);
+                return cx.fill(mix(mix(color!(#3),color!(#4),hover), color!(#2a), down));
             }
         "}));
     }

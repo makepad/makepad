@@ -61,16 +61,16 @@ impl TabClose {
             instance hover: Self::hover();
             instance down: Self::down();
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
+                let cx = Df::viewport(pos * vec2(w, h));
                 let hover_max: float = (hover * 0.2 + 0.8) * 0.5;
                 let hover_min: float = 1. - hover_max;
                 let c: vec2 = vec2(w, h) * 0.5;
-                df_rotate(down, c.x, c.y);
-                df_move_to(c.x * hover_min, c.y * hover_min);
-                df_line_to(c.x + c.x * hover_max, c.y + c.y * hover_max);
-                df_move_to(c.x + c.x * hover_max, c.y * hover_min);
-                df_line_to(c.x * hover_min, c.y + c.y * hover_max);
-                return df_stroke(color, 1. + down * 0.2);
+                cx.rotate(down, c.x, c.y);
+                cx.move_to(c.x * hover_min, c.y * hover_min);
+                cx.line_to(c.x + c.x * hover_max, c.y + c.y * hover_max);
+                cx.move_to(c.x + c.x * hover_max, c.y * hover_min);
+                cx.line_to(c.x * hover_min, c.y + c.y * hover_max);
+                return cx.stroke(color, 1. + down * 0.2);
                 //return df_fill(color);
             }
         "}));

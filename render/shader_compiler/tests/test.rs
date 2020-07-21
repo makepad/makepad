@@ -1,6 +1,6 @@
 use makepad_shader_compiler::analyse;
 use makepad_shader_compiler::ast::ShaderAst;
-use makepad_shader_compiler::generate::{self, ShaderKind};
+use makepad_shader_compiler::generate_metal;
 use makepad_shader_compiler::lex;
 use makepad_shader_compiler::parse;
 use makepad_shader_compiler::shader::*;
@@ -14,6 +14,8 @@ const SOURCE: &str = r#"
     impl Cx {
         fn foo() -> Cx {
             let cx: Cx;
+            aPosition;
+            iRotation;
             return cx;
         }
 
@@ -22,6 +24,7 @@ const SOURCE: &str = r#"
         }
 
         fn qux(self, x: float) -> float {
+            aPosition;
             return 2.0 * x;
             self.bar();
         }
@@ -38,15 +41,15 @@ const SOURCE: &str = r#"
         let cx = Cx::foo();
         cx.bar();
         for i from 0 to 10 step 2 {
-            
+            vec4(1.0, vec2(2.0, 3.0), 4.0);
         }
+        return vec4(1.0);
     }
 
     fn pixel() -> vec4 {
         let cx = Cx::foo();
-        aPosition;
-        iRotation;
         cx.qux(10.0);
+        return vec4(1.0);
     }
 "#;
 
@@ -75,6 +78,6 @@ fn test() {
             prop_id: my_instance().into()
         }
     ]).unwrap();
-    println!("{}", generate::generate(ShaderKind::Vertex, &shader));
-    println!("{}", generate::generate(ShaderKind::Pixel, &shader));
+    println!("{}", generate_metal::generate_vertex_shader(&shader));
+    println!("{}", generate_metal::generate_fragment_shader(&shader));
 }

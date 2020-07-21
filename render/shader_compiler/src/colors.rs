@@ -61,10 +61,10 @@ impl Color {
         
         match bytes.len() {
             1 => { // #w
-                let val = hex_to_int(bytes[1] as u32)? as f32 / 15.0;
+                let val = hex_to_int(bytes[0] as u32)? as f32 / 15.0;
                 return Ok(Color {r: val, g: val, b: val, a: 1.0})
             },
-            2 => { // #rgb
+            3 => { // #rgb
                 let r = hex_to_int(bytes[0] as u32)? as f32 / 15.0;
                 let g = hex_to_int(bytes[1] as u32)? as f32 / 15.0;
                 let b = hex_to_int(bytes[2] as u32)? as f32 / 15.0;

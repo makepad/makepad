@@ -6,7 +6,15 @@ pub enum GLShaderType {
 }
 
 impl Cx {
-    
+        
+    pub fn ceil_div4(base: usize) -> usize {
+        let r = base >> 2;
+        if base & 3 != 0 {
+            return r + 1
+        }
+        r
+    }
+    /*
     pub fn gl_assemble_uniforms(unis: &Vec<ShVar>) -> String {
         let mut out = String::new();
         for uni in unis {
@@ -18,14 +26,7 @@ impl Cx {
         };
         out
     }
-    
-    pub fn ceil_div4(base: usize) -> usize {
-        let r = base >> 2;
-        if base & 3 != 0 {
-            return r + 1
-        }
-        r
-    }
+
     
     pub fn gl_assemble_texture_slots(unis: &Vec<ShVar>) -> String {
         let mut out = String::new();
@@ -273,9 +274,10 @@ impl Cx {
         }
         out
     }
-    
-    pub fn gl_assemble_shader(sg: &ShaderGen, shtype: GLShaderType) -> Result<(String, String, CxShaderMapping), SlErr> {
-        
+    */
+    pub fn gl_assemble_shader(sg: &ShaderGen, shtype: GLShaderType) -> Result<(String, String, CxShaderMapping), String> {
+        Err("Hello".to_string())
+        /*
         let mut vtx_out = String::new();
         let mut pix_out = String::new();
         match shtype {
@@ -477,11 +479,11 @@ impl Cx {
             pass_uniforms,
             uniforms,
             texture_slots,
-        }))
+        }))*/
     }
 }
 
-
+/*
 impl<'a> SlCx<'a> {
     pub fn map_call(&self, name: &str, args: &Vec<Sl>) -> MapCallResult {
         match name {
@@ -560,4 +562,4 @@ impl<'a> SlCx<'a> {
         var.name.clone()
     }
     
-}
+}*/
