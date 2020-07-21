@@ -4,7 +4,7 @@ use makepad_shader_compiler::lex;
 use makepad_shader_compiler::parse;
 use makepad_shader_compiler::ast::{ShaderAst, Decl, TyExprKind};
 use makepad_shader_compiler::colors::Color;
-use makepad_shader_compiler::shader::ShaderGen;
+use makepad_shader_compiler::shadergen::ShaderGen;
 
 #[path = "../../../microserde/derive/src/macro_lib.rs"]
 mod macro_lib; 
