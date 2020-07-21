@@ -112,7 +112,7 @@ impl<'a> Parser<'a> {
         let span = self.begin_span();
         self.expect_token(Token::Fn) ?;
         let ident = if let Some(prefix) = prefix {
-            Ident::new(format!("{}::{}", prefix, self.parse_ident() ?))
+            Ident::new(format!("_m__{}_{}", prefix, self.parse_ident() ?))
         } else {
             self.parse_ident() ?
         };
@@ -748,7 +748,7 @@ impl<'a> Parser<'a> {
                             Token::PathSep => {
                                 self.skip_token();
                                 ident = Ident::new(
-                                    format!("{}::{}", ident, self.parse_ident()?)
+                                    format!("_m__{}_{}", ident, self.parse_ident()?)
                                 );
                                 let arg_exprs = self.parse_arg_exprs()?;
                                 span.end(self, |span| ExprKind::Call {
