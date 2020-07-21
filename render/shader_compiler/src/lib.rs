@@ -22,5 +22,5 @@ pub mod ty_check;
 pub mod util;
 pub mod val;
 #[macro_use]
-pub mod shader;
+pub mod shadergen;
 pub mod colors;

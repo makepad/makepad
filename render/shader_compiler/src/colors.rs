@@ -1,4 +1,4 @@
-use crate::shader::LiveLoc;
+use crate::shadergen::LiveLoc;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LiveColor {
