@@ -7,6 +7,7 @@ use crate::swizzle::Swizzle;
 use crate::ty::Ty;
 use std::cell::{Cell, RefCell};
 use std::fmt::Write;
+use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ShaderKind {
@@ -51,32 +52,62 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
-        let ident = match self.kind {
-            ShaderKind::Vertex => Ident::new("vertex"),
-            ShaderKind::Pixel => Ident::new("pixel"),
-        };
-        for (ty_lit, param_tys) in self
-            .shader_ast
-            .find_fn_decl(ident)
-            .unwrap()
-            .cons_deps
+
+        let mut merge_cons = HashSet::new();
+        for (ty_lit, param_tys) in self.shader_ast.find_fn_decl(Ident::new("vertex"))
+            .unwrap().cons_deps.borrow().as_ref().unwrap()
+        {
+            merge_cons.insert((ty_lit.clone(), param_tys.clone()));
+        }
+        for (ty_lit, param_tys) in self.shader_ast.find_fn_decl(Ident::new("pixel"))
+            .unwrap().cons_deps.borrow().as_ref().unwrap()
+        {
+            merge_cons.insert((ty_lit.clone(), param_tys.clone()));
+        }
+        
+        for (ty_lit, param_tys) in merge_cons {
+            self.generate_cons(ty_lit, &param_tys);
+        }
+        
+        // todo merge these
+        self.generate_fn_defs(Ident::new("vertex"), ShaderKind::Vertex);
+        self.generate_fn_defs(Ident::new("pixel"), ShaderKind::Pixel);
+        
+        let vertex_decl = self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap();
+        
+        self.generate_attributes_struct();
+        self.generate_instances_struct();
+        self.generate_varyings_struct();
+        
+        writeln!(self.string, "void main() {{").unwrap();
+        writeln!(self.string, "    _m_Attributes _m_attributes;").unwrap();
+        writeln!(self.string, "    _m_Instances _m_instances;").unwrap();
+        writeln!(self.string, "    _m_Varyings _m_varyings;").unwrap();
+        write!(self.string, "    gl_Position = vertex(").unwrap();
+        let mut sep = "";
+        for &ident in vertex_decl.uniform_block_deps.borrow().as_ref().unwrap() {
+            write!(self.string, "{}_m_{1}_uniforms", sep, ident).unwrap();
+            sep = ", ";
+        }
+        if !vertex_decl
+            .attribute_deps
             .borrow()
             .as_ref()
             .unwrap()
+            .is_empty()
         {
-            self.generate_cons(*ty_lit, param_tys);
+            write!(self.string, "{}_m_attributes", sep).unwrap();
+            sep = ", ";
         }
-        self.generate_fn_defs(Ident::new("vertex")),
-        self.generate_fn_defs(Ident::new("pixel")),
+        if vertex_decl.has_out_varying_deps.get().unwrap() {
+            write!(self.string, "{}_m_varyings", sep).unwrap();
+        }
+        writeln!(self.string, ");").unwrap();
+        writeln!(self.string, "}}").unwrap();
+        
         // lets generate vertex and pixelshaders.
-        
-        
-        match self.kind {
-            ShaderKind::Vertex => self.generate_vertex_shader(),
-            ShaderKind::Pixel => self.generate_pixel_shader(),
-        }
     }
-
+    
     fn generate_struct_decl(&mut self, decl: &StructDecl) {
         write!(self.string, "struct {} {{", decl.ident).unwrap();
         if !decl.fields.is_empty() {
@@ -93,7 +124,7 @@ impl<'a> ShaderGenerator<'a> {
         }
         writeln!(self.string, "}};").unwrap();
     }
-
+    
     fn generate_const_decl(&mut self, decl: &ConstDecl) {
         write!(self.string, "const ").unwrap();
         write_ident_and_ty(
@@ -102,10 +133,10 @@ impl<'a> ShaderGenerator<'a> {
             decl.ty_expr.ty.borrow().as_ref().unwrap(),
         );
         write!(self.string, " = ").unwrap();
-        self.generate_expr(&decl.expr);
+        self.generate_expr(&decl.expr, ShaderKind::Vertex);
         writeln!(self.string, ";").unwrap();
     }
-
+    
     fn generate_uniform_decl(&mut self, decl: &UniformDecl) {
         write!(self.string, "uniform ").unwrap();
         write_ident_and_ty(
@@ -115,7 +146,7 @@ impl<'a> ShaderGenerator<'a> {
         );
         writeln!(self.string, ";").unwrap();
     }
-
+    
     fn generate_cons(&mut self, ty_lit: TyLit, param_tys: &[Ty]) {
         write!(self.string, "{0} _m_{0}", ty_lit).unwrap();
         for param_ty in param_tys {
@@ -173,9 +204,9 @@ impl<'a> ShaderGenerator<'a> {
                                     self.string,
                                     "{}{}",
                                     sep,
-                                    if column_index == row_index { 1.0 } else { 0.0 }
+                                    if column_index == row_index {1.0} else {0.0}
                                 )
-                                .unwrap();
+                                    .unwrap();
                             }
                             sep = ", ";
                         }
@@ -200,69 +231,35 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, ")").unwrap();
         writeln!(self.string, "}}").unwrap();
     }
-
-    fn generate_fn_defs(&mut self, ident: Ident) {
+    
+    fn generate_fn_defs(&mut self, ident: Ident, kind:ShaderKind) {
         let decl = self.shader_ast.find_fn_decl(ident).unwrap();
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
-            self.generate_fn_defs(callee);
+            self.generate_fn_defs(callee, kind);
         }
         FnDefGenerator {
             string: self.string,
             indent_level: 0,
-            kind: self.kind,
+            kind: kind,
             shader_ast: &self.shader_ast,
             decl,
         }
         .generate_fn_def()
     }
-
-    fn generate_expr(&mut self, expr: &Expr) {
+    
+    fn generate_expr(&mut self, expr: &Expr, kind:ShaderKind) {
         ExprGenerator {
             string: self.string,
-            kind: self.kind,
+            kind: kind,
             shader_ast: self.shader_ast,
         }
         .generate_expr(expr)
     }
-
+    
     fn generate_vertex_shader(&mut self) {
-        let vertex_decl = self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap();
-        self.generate_attributes_struct();
-        self.generate_instances_struct();
-        self.generate_varyings_struct();
-        let total_packed_attribute_size = self.compute_total_packed_attribute_size();
-        self.generate_packed_attributes(total_packed_attribute_size);
-        let total_packed_varying_size = self.compute_total_packed_varying_size();
-        self.generate_packed_varyings(total_packed_varying_size);
-        writeln!(self.string, "void main() {{").unwrap();
-        writeln!(self.string, "    _m_Attributes _m_attributes;").unwrap();
-        writeln!(self.string, "    _m_Instances _m_instances;").unwrap();
-        self.generate_unpack_attributes(total_packed_attribute_size);
-        writeln!(self.string, "    _m_Varyings _m_varyings;").unwrap();
-        write!(self.string, "    gl_Position = vertex(").unwrap();
-        let mut sep = "";
-        for &ident in vertex_decl.uniform_block_deps.borrow().as_ref().unwrap() {
-            write!(self.string, "{}_m_{1}_uniforms", sep, ident).unwrap();
-            sep = ", ";
-        }
-        if !vertex_decl
-            .attribute_deps
-            .borrow()
-            .as_ref()
-            .unwrap()
-            .is_empty()
-        {
-            write!(self.string, "{}_m_attributes", sep).unwrap();
-            sep = ", ";
-        }
-        if vertex_decl.has_out_varying_deps.get().unwrap() {
-            write!(self.string, "{}_m_varyings", sep).unwrap();
-        }
-        writeln!(self.string, ");").unwrap();
-        self.generate_pack_varyings(total_packed_varying_size);
-        writeln!(self.string, "}}").unwrap();
+      
     }
-
+    
     fn generate_pixel_shader(&mut self) {
         let pixel_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
         let total_packed_varying_size = self.compute_total_packed_varying_size();
@@ -289,7 +286,7 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, ");").unwrap();
         writeln!(self.string, "}}").unwrap();
     }
-
+    
     fn generate_attributes_struct(&mut self) {
         writeln!(self.string, "struct _m_Attributes {{").unwrap();
         for decl in &self.shader_ast.decls {
@@ -308,7 +305,7 @@ impl<'a> ShaderGenerator<'a> {
         }
         writeln!(self.string, "}};").unwrap();
     }
-
+    
     fn generate_instances_struct(&mut self) {
         writeln!(self.string, "struct _m_Instances {{").unwrap();
         for decl in &self.shader_ast.decls {
@@ -327,19 +324,19 @@ impl<'a> ShaderGenerator<'a> {
         }
         writeln!(self.string, "}};").unwrap();
     }
-
+    
     fn generate_varyings_struct(&mut self) {
         let pixel_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
         writeln!(self.string, "struct _m_Varyings {{").unwrap();
         for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl)
-                    if pixel_decl
-                        .attribute_deps
-                        .borrow()
-                        .as_ref()
-                        .unwrap()
-                        .contains(&decl.ident) =>
+                if pixel_decl
+                    .attribute_deps
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .contains(&decl.ident) =>
                 {
                     write!(self.string, "    ").unwrap();
                     write_ident_and_ty(
@@ -350,12 +347,12 @@ impl<'a> ShaderGenerator<'a> {
                     writeln!(self.string, ";").unwrap();
                 }
                 Decl::Instance(decl)
-                    if pixel_decl
-                        .instance_deps
-                        .borrow()
-                        .as_ref()
-                        .unwrap()
-                        .contains(&decl.ident) =>
+                if pixel_decl
+                    .instance_deps
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .contains(&decl.ident) =>
                 {
                     write!(self.string, "    ").unwrap();
                     write_ident_and_ty(
@@ -379,25 +376,25 @@ impl<'a> ShaderGenerator<'a> {
         }
         writeln!(self.string, "}};").unwrap();
     }
-
+    
     fn compute_total_packed_attribute_size(&mut self) -> usize {
         let mut total_packed_attribute_size = 0;
         for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl) => {
                     total_packed_attribute_size +=
-                        decl.ty_expr.ty.borrow().as_ref().unwrap().size();
+                    decl.ty_expr.ty.borrow().as_ref().unwrap().size();
                 }
                 Decl::Instance(decl) => {
                     total_packed_attribute_size +=
-                        decl.ty_expr.ty.borrow().as_ref().unwrap().size();
+                    decl.ty_expr.ty.borrow().as_ref().unwrap().size();
                 }
                 _ => {}
             }
         }
         total_packed_attribute_size
     }
-
+    
     fn generate_packed_attributes(&mut self, total_packed_attribute_size: usize) {
         let mut remaining_packed_attribute_size = total_packed_attribute_size;
         let mut current_packed_attribute_index = 0;
@@ -416,34 +413,34 @@ impl<'a> ShaderGenerator<'a> {
                 },
                 current_packed_attribute_index,
             )
-            .unwrap();
+                .unwrap();
             remaining_packed_attribute_size -= current_packed_attribute_size;
             current_packed_attribute_index += 1;
         }
     }
-
+    
     fn compute_total_packed_varying_size(&mut self) -> usize {
         let pixel_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
         let mut total_packed_varying_size = 0;
         for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl)
-                    if pixel_decl
-                        .attribute_deps
-                        .borrow()
-                        .as_ref()
-                        .unwrap()
-                        .contains(&decl.ident) =>
+                if pixel_decl
+                    .attribute_deps
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .contains(&decl.ident) =>
                 {
                     total_packed_varying_size += decl.ty_expr.ty.borrow().as_ref().unwrap().size();
                 }
                 Decl::Instance(decl)
-                    if pixel_decl
-                        .instance_deps
-                        .borrow()
-                        .as_ref()
-                        .unwrap()
-                        .contains(&decl.ident) =>
+                if pixel_decl
+                    .instance_deps
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .contains(&decl.ident) =>
                 {
                     total_packed_varying_size += decl.ty_expr.ty.borrow().as_ref().unwrap().size();
                 }
@@ -455,7 +452,7 @@ impl<'a> ShaderGenerator<'a> {
         }
         total_packed_varying_size
     }
-
+    
     fn generate_packed_varyings(&mut self, total_packed_varying_size: usize) {
         let mut remaining_packed_varying_size = total_packed_varying_size;
         let mut current_packed_varying_index = 0;
@@ -474,12 +471,12 @@ impl<'a> ShaderGenerator<'a> {
                 },
                 current_packed_varying_index,
             )
-            .unwrap();
+                .unwrap();
             remaining_packed_varying_size -= current_packed_varying_size;
             current_packed_varying_index += 1;
         }
     }
-
+    
     fn generate_unpack_attributes(&mut self, total_packed_attribute_size: usize) {
         let mut remaining_packed_attribute_size = total_packed_attribute_size;
         let mut current_packed_attribute_index = 0;
@@ -487,7 +484,9 @@ impl<'a> ShaderGenerator<'a> {
         let mut current_packed_attribute_offset = 0;
         let mut unpack_attribute = {
             let string = &mut self.string;
-            move |ident: Ident, ty: &Ty, target_name: &str| {
+            move | ident: Ident,
+            ty: &Ty,
+            target_name: &str | {
                 let current_attribute_size = ty.size();
                 let mut current_attribute_offset = 0;
                 while current_attribute_offset < current_attribute_size {
@@ -503,14 +502,14 @@ impl<'a> ShaderGenerator<'a> {
                                 current_attribute_offset + count
                             )
                         )
-                        .unwrap();
+                            .unwrap();
                     }
                     write!(
                         string,
                         " = _m_packed_attribute_{}",
                         current_packed_attribute_index
                     )
-                    .unwrap();
+                        .unwrap();
                     if current_packed_attribute_size > 1 {
                         write!(
                             string,
@@ -520,7 +519,7 @@ impl<'a> ShaderGenerator<'a> {
                                 current_packed_attribute_offset + count
                             )
                         )
-                        .unwrap();
+                            .unwrap();
                     }
                     writeln!(string, ";").unwrap();
                     current_attribute_offset += count;
@@ -554,7 +553,7 @@ impl<'a> ShaderGenerator<'a> {
             }
         }
     }
-
+    
     fn generate_pack_varyings(&mut self, total_packed_varying_size: usize) {
         let pixel_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
         let mut remaining_packed_varying_size = total_packed_varying_size;
@@ -563,7 +562,9 @@ impl<'a> ShaderGenerator<'a> {
         let mut current_packed_varying_offset = 0;
         let mut pack_varying = {
             let string = &mut self.string;
-            move |ident: Ident, ty: &Ty, source_name: &str| {
+            move | ident: Ident,
+            ty: &Ty,
+            source_name: &str | {
                 let current_varying_size = ty.size();
                 let mut current_varying_offset = 0;
                 while current_varying_offset < current_varying_size {
@@ -574,7 +575,7 @@ impl<'a> ShaderGenerator<'a> {
                         "    _m_packed_varying_{}",
                         current_packed_varying_index
                     )
-                    .unwrap();
+                        .unwrap();
                     if current_packed_varying_size > 1 {
                         write!(
                             string,
@@ -584,7 +585,7 @@ impl<'a> ShaderGenerator<'a> {
                                 current_packed_varying_offset + count
                             )
                         )
-                        .unwrap();
+                            .unwrap();
                     }
                     write!(string, " = {}.{}", source_name, ident).unwrap();
                     if current_varying_size > 1 {
@@ -596,7 +597,7 @@ impl<'a> ShaderGenerator<'a> {
                                 current_varying_offset + count
                             )
                         )
-                        .unwrap();
+                            .unwrap();
                     }
                     writeln!(string, ";").unwrap();
                     current_packed_varying_offset += count;
@@ -613,12 +614,12 @@ impl<'a> ShaderGenerator<'a> {
         for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl)
-                    if pixel_decl
-                        .attribute_deps
-                        .borrow()
-                        .as_ref()
-                        .unwrap()
-                        .contains(&decl.ident) =>
+                if pixel_decl
+                    .attribute_deps
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .contains(&decl.ident) =>
                 {
                     pack_varying(
                         decl.ident,
@@ -627,12 +628,12 @@ impl<'a> ShaderGenerator<'a> {
                     );
                 }
                 Decl::Instance(decl)
-                    if pixel_decl
-                        .instance_deps
-                        .borrow()
-                        .as_ref()
-                        .unwrap()
-                        .contains(&decl.ident) =>
+                if pixel_decl
+                    .instance_deps
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .contains(&decl.ident) =>
                 {
                     pack_varying(
                         decl.ident,
@@ -651,7 +652,7 @@ impl<'a> ShaderGenerator<'a> {
             }
         }
     }
-
+    
     fn generate_unpack_varyings(&mut self, total_packed_varying_size: usize) {
         let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
         let mut remaining_packed_varying_size = total_packed_varying_size;
@@ -660,7 +661,8 @@ impl<'a> ShaderGenerator<'a> {
         let mut current_packed_varying_offset = 0;
         let mut unpack_varying = {
             let string = &mut self.string;
-            move |ident: Ident, ty: &Ty| {
+            move | ident: Ident,
+            ty: &Ty | {
                 let current_varying_size = ty.size();
                 let mut current_varying_offset = 0;
                 while current_varying_offset < current_varying_size {
@@ -676,14 +678,14 @@ impl<'a> ShaderGenerator<'a> {
                                 current_varying_offset + count
                             )
                         )
-                        .unwrap();
+                            .unwrap();
                     }
                     write!(
                         string,
                         " = _m_packed_varying_{}",
                         current_packed_varying_index
                     )
-                    .unwrap();
+                        .unwrap();
                     if current_packed_varying_size > 1 {
                         write!(
                             string,
@@ -693,7 +695,7 @@ impl<'a> ShaderGenerator<'a> {
                                 current_packed_varying_offset + count
                             )
                         )
-                        .unwrap();
+                            .unwrap();
                     }
                     writeln!(string, ";").unwrap();
                     current_varying_offset += count;
@@ -710,22 +712,22 @@ impl<'a> ShaderGenerator<'a> {
         for decl in &self.shader_ast.decls {
             match decl {
                 Decl::Attribute(decl)
-                    if fragment_decl
-                        .attribute_deps
-                        .borrow()
-                        .as_ref()
-                        .unwrap()
-                        .contains(&decl.ident) =>
+                if fragment_decl
+                    .attribute_deps
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .contains(&decl.ident) =>
                 {
                     unpack_varying(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
                 }
                 Decl::Instance(decl)
-                    if fragment_decl
-                        .instance_deps
-                        .borrow()
-                        .as_ref()
-                        .unwrap()
-                        .contains(&decl.ident) =>
+                if fragment_decl
+                    .instance_deps
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .contains(&decl.ident) =>
                 {
                     unpack_varying(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
                 }
@@ -769,15 +771,16 @@ impl<'a> FnDefGenerator<'a> {
             write!(
                 self.string,
                 "{}_m_{1}_Uniforms _m_{1}_uniforms",
-                sep, ident
+                sep,
+                ident
             )
-            .unwrap();
+                .unwrap();
             sep = ", ";
         }
         match self.kind {
             ShaderKind::Vertex => {
                 if !self
-                    .decl
+                .decl
                     .attribute_deps
                     .borrow()
                     .as_ref()
@@ -793,7 +796,7 @@ impl<'a> FnDefGenerator<'a> {
             }
             ShaderKind::Pixel => {
                 if !self
-                    .decl
+                .decl
                     .attribute_deps
                     .borrow()
                     .as_ref()
@@ -809,7 +812,7 @@ impl<'a> FnDefGenerator<'a> {
         self.generate_block(&self.decl.block);
         writeln!(self.string).unwrap();
     }
-
+    
     fn generate_block(&mut self, block: &Block) {
         write!(self.string, "{{").unwrap();
         if !block.stmts.is_empty() {
@@ -822,7 +825,7 @@ impl<'a> FnDefGenerator<'a> {
         }
         write!(self.string, "}}").unwrap()
     }
-
+    
     fn generate_stmt(&mut self, stmt: &Stmt) {
         self.write_indent();
         match *stmt {
@@ -867,15 +870,15 @@ impl<'a> FnDefGenerator<'a> {
             } => self.generate_expr_stmt(span, expr),
         }
     }
-
+    
     fn generate_break_stmt(&mut self, _span: Span) {
         writeln!(self.string, "break;").unwrap();
     }
-
+    
     fn generate_continue_stmt(&mut self, _span: Span) {
         writeln!(self.string, "continue;").unwrap();
     }
-
+    
     fn generate_for_stmt(
         &mut self,
         _span: Span,
@@ -898,17 +901,17 @@ impl<'a> FnDefGenerator<'a> {
             self.string,
             "for (int {0} = {1}; {0} {2} {3}; {0} {4} {5} ",
             ident,
-            if from <= to { from } else { from - 1 },
-            if from <= to { "<" } else { ">=" },
+            if from <= to {from} else {from - 1},
+            if from <= to {"<"} else {">="},
             to,
-            if step > 0 { "+=" } else { "-=" },
+            if step > 0 {"+="} else {"-="},
             step.abs()
         )
-        .unwrap();
+            .unwrap();
         self.generate_block(block);
         writeln!(self.string).unwrap();
     }
-
+    
     fn generate_if_stmt(
         &mut self,
         _span: Span,
@@ -925,7 +928,7 @@ impl<'a> FnDefGenerator<'a> {
         }
         writeln!(self.string).unwrap();
     }
-
+    
     fn generate_let_stmt(
         &mut self,
         _span: Span,
@@ -941,7 +944,7 @@ impl<'a> FnDefGenerator<'a> {
         }
         writeln!(self.string, ";").unwrap();
     }
-
+    
     fn generate_return_stmt(&mut self, _span: Span, expr: &Option<Expr>) {
         write!(self.string, "return").unwrap();
         if let Some(expr) = expr {
@@ -950,17 +953,17 @@ impl<'a> FnDefGenerator<'a> {
         }
         writeln!(self.string, ";").unwrap();
     }
-
+    
     fn generate_block_stmt(&mut self, _span: Span, block: &Block) {
         self.generate_block(block);
         writeln!(self.string).unwrap();
     }
-
+    
     fn generate_expr_stmt(&mut self, _span: Span, expr: &Expr) {
         self.generate_expr(expr);
         writeln!(self.string, ";").unwrap();
     }
-
+    
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             string: self.string,
@@ -969,7 +972,7 @@ impl<'a> FnDefGenerator<'a> {
         }
         .generate_expr(expr)
     }
-
+    
     fn write_indent(&mut self) {
         for _ in 0..self.indent_level {
             write!(self.string, "    ").unwrap();
@@ -1040,10 +1043,10 @@ impl<'a> ExprGenerator<'a> {
                 ref kind,
                 ident,
             } => self.generate_var_expr(span, is_lvalue, kind, ident),
-            ExprKind::Lit { span, lit } => self.generate_lit_expr(span, lit),
+            ExprKind::Lit {span, lit} => self.generate_lit_expr(span, lit),
         }
     }
-
+    
     fn generate_cond_expr(
         &mut self,
         _span: Span,
@@ -1059,7 +1062,7 @@ impl<'a> ExprGenerator<'a> {
         self.generate_expr(expr_if_false);
         write!(self.string, ")").unwrap();
     }
-
+    
     fn generate_bin_expr(
         &mut self,
         _span: Span,
@@ -1073,12 +1076,12 @@ impl<'a> ExprGenerator<'a> {
         self.generate_expr(right_expr);
         write!(self.string, ")").unwrap();
     }
-
+    
     fn generate_un_expr(&mut self, _span: Span, op: UnOp, expr: &Expr) {
         write!(self.string, "{}", op).unwrap();
         self.generate_expr(expr);
     }
-
+    
     fn generate_method_call_expr(
         &mut self,
         span: Span,
@@ -1086,7 +1089,7 @@ impl<'a> ExprGenerator<'a> {
         arg_exprs: &[Expr]
     ) {
         match arg_exprs[0].ty.borrow().as_ref().unwrap() {
-            Ty::Struct { ident: struct_ident } => {
+            Ty::Struct {ident: struct_ident} => {
                 self.generate_call_expr(
                     span,
                     Ident::new(format!("{}::{}", struct_ident, ident)),
@@ -1096,19 +1099,19 @@ impl<'a> ExprGenerator<'a> {
             _ => panic!()
         }
     }
-
+    
     fn generate_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident) {
         self.generate_expr(expr);
         write!(self.string, ".{}", field_ident).unwrap();
     }
-
+    
     fn generate_index_expr(&mut self, _span: Span, expr: &Expr, index_expr: &Expr) {
         self.generate_expr(expr);
         write!(self.string, "[").unwrap();
         self.generate_expr(index_expr);
         write!(self.string, "]").unwrap();
     }
-
+    
     fn generate_call_expr(&mut self, _span: Span, ident: Ident, arg_exprs: &[Expr]) {
         write!(self.string, "{}(", ident).unwrap();
         let mut sep = "";
@@ -1151,8 +1154,8 @@ impl<'a> ExprGenerator<'a> {
     fn generate_macro_call_expr(&mut self, _span: Span, _ident: Ident, _arg_exprs: &[Expr]) {
         write!(self.string, "").unwrap();
     }
-
-
+    
+    
     fn generate_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {
         write!(self.string, "_mpsc_{}", ty_lit).unwrap();
         for arg_expr in arg_exprs {
@@ -1167,7 +1170,7 @@ impl<'a> ExprGenerator<'a> {
         }
         write!(self.string, ")").unwrap();
     }
-
+    
     fn generate_var_expr(
         &mut self,
         _span: Span,
@@ -1192,7 +1195,7 @@ impl<'a> ExprGenerator<'a> {
         }
         write!(self.string, "{}", ident).unwrap()
     }
-
+    
     fn generate_lit_expr(&mut self, _span: Span, lit: Lit) {
         write!(self.string, "{}", lit).unwrap();
     }
@@ -1217,7 +1220,7 @@ fn write_ident_and_ty(string: &mut String, ident: Ident, ty: &Ty) {
         Ty::Mat3 => write!(string, "mat3 {}", ident).unwrap(),
         Ty::Mat4 => write!(string, "mat4 {}", ident).unwrap(),
         Ty::Texture2d => panic!(),
-        Ty::Array { ref elem_ty, len } => {
+        Ty::Array {ref elem_ty, len} => {
             write_ident_and_ty(string, ident, elem_ty);
             write!(string, "[{}]", len).unwrap();
         }

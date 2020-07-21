@@ -310,9 +310,9 @@ pub enum ExprKind {
         arg_exprs: Vec<Expr>,
     },
     MacroCall {
+        analysis: Cell<Option<MacroCallAnalysis>>,
         span: Span,
         ident: Ident,
-        analysis: Cell<Option<MacroCallAnalysis>>,
         arg_exprs: Vec<Expr>,
     },
     ConsCall {
