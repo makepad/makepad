@@ -9,6 +9,7 @@ pub mod env;
 pub mod error;
 pub mod generate;
 pub mod generate_glsl;
+pub mod generate_metal;
 pub mod ident;
 pub mod lex;
 pub mod lit;
