@@ -1,6 +1,6 @@
 use makepad_shader_compiler::analyse;
 use makepad_shader_compiler::ast::ShaderAst;
-use makepad_shader_compiler::generate_glsl::{self, ShaderKind};
+use makepad_shader_compiler::generate_glsl;
 use makepad_shader_compiler::lex;
 use makepad_shader_compiler::parse;
 use makepad_shader_compiler::shader::*;
@@ -75,6 +75,6 @@ fn test() {
             prop_id: my_instance().into()
         }
     ]).unwrap();
-    println!("{}", generate_glsl::generate(&shader, ShaderKind::Vertex));
-    println!("{}", generate_glsl::generate(&shader, ShaderKind::Fragment));
+    println!("{}", generate_glsl::generate_vertex_shader(&shader));
+    println!("{}", generate_glsl::generate_fragment_shader(&shader));
 }
