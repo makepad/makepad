@@ -417,7 +417,7 @@ impl<'a> TyChecker<'a> {
             Ty::Struct {ident: struct_ident} => {
                 self.ty_check_call_expr(
                     span,
-                    Ident::new(format!("_m__{}_{}", struct_ident, ident)),
+                    Ident::new(format!("mpsc__{}_{}", struct_ident, ident)),
                     &arg_exprs
                 )
             },

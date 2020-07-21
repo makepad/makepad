@@ -68,13 +68,21 @@ impl<'a> ShaderGenerator<'a> {
                     );
                     writeln!(self.string, ";").unwrap();
                 },
+                Decl::Varying(decl) => {
+                    write_ident_and_ty(
+                        &mut self.string,
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                    );
+                    writeln!(self.string, ";").unwrap();
+                },
                 _ => {}
             }
         }
         self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("vertex")).unwrap());
         writeln!(self.string, "void main() {{").unwrap();
         let mut attribute_unpacker = VarUnpacker::new(
-            "_m_packed_attribute",
+            "mpsc_packed_attribute",
             packed_attributes_size,
             &mut self.string
         );
@@ -97,7 +105,7 @@ impl<'a> ShaderGenerator<'a> {
         }
         writeln!(self.string, "    gl_Position = vertex();").unwrap();
         let mut varying_packer = VarPacker::new(
-            "_m_packed_varying",
+            "mpsc_packed_varying",
             packed_varyings_size,
             &mut self.string
         );
@@ -162,7 +170,7 @@ impl<'a> ShaderGenerator<'a> {
         self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("pixel")).unwrap());
         writeln!(self.string, "void main() {{").unwrap();
         let mut varying_unpacker = VarUnpacker::new(
-            "_m_packed_varying",
+            "mpsc_packed_varying",
             packed_varyings_size,
             &mut self.string
         );
@@ -286,7 +294,7 @@ impl<'a> ShaderGenerator<'a> {
             let packed_attribute_size = packed_attributes_size.min(4);
             writeln!(
                 self.string,
-                "attribute {} _m_packed_attribute_{};",
+                "attribute {} mpsc_packed_attribute_{};",
                 match packed_attribute_size {
                     0 => break,
                     1 => "float",
@@ -329,7 +337,7 @@ impl<'a> ShaderGenerator<'a> {
             let packed_varying_size = packed_varyings_size.min(4);
             writeln!(
                 self.string,
-                "varying {} _m_packed_varying_{};",
+                "varying {} mpsc_packed_varying_{};",
                 match packed_varying_size {
                     0 => break,
                     1 => "float",
@@ -448,7 +456,7 @@ impl<'a> VarPacker<'a> {
             if self.packed_var_offset == self.packed_var_size {
                 self.packed_vars_size -= self.packed_var_size;
                 self.packed_var_index += 1;
-                self.packed_var_size = self.packed_var_size.min(4);
+                self.packed_var_size = self.packed_vars_size.min(4);
                 self.packed_var_offset = 0;
             }
             var_offset += min_count; 
@@ -518,7 +526,7 @@ impl<'a> VarUnpacker<'a> {
             if self.packed_var_offset == self.packed_var_size {
                 self.packed_vars_size -= self.packed_var_size;
                 self.packed_var_index += 1;
-                self.packed_var_size = self.packed_var_size.min(4);
+                self.packed_var_size = self.packed_vars_size.min(4);
                 self.packed_var_offset = 0;
             } 
         }
@@ -815,7 +823,7 @@ impl<'a> ExprGenerator<'a> {
             Ty::Struct { ident: struct_ident } => {
                 self.generate_call_expr(
                     span,
-                    Ident::new(format!("_m__{}_{}", struct_ident, ident)),
+                    Ident::new(format!("mpsc__{}_{}", struct_ident, ident)),
                     arg_exprs
                 );
             },
@@ -881,11 +889,7 @@ impl<'a> ExprGenerator<'a> {
         ty_lit: TyLit,
         arg_exprs: &[Expr]
     ) {
-        write!(self.string, "_m_{}", ty_lit).unwrap();
-        for arg_expr in arg_exprs {
-            write!(self.string, "_{}", arg_expr.ty.borrow().as_ref().unwrap()).unwrap();
-        }
-        write!(self.string, "(").unwrap();
+        write!(self.string, "{}(", ty_lit).unwrap();
         let mut sep = "";
         for arg_expr in arg_exprs {
             write!(self.string, "{}", sep).unwrap();
