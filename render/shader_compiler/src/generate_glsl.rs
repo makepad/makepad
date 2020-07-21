@@ -95,6 +95,7 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
+        writeln!(self.string, "    gl_Position = vertex();").unwrap();
         let mut varying_packer = VarPacker::new(
             "_m_packed_varying",
             packed_varyings_size,
@@ -123,7 +124,7 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
-        write!(self.string, "}}").unwrap();
+        writeln!(self.string, "}}").unwrap();
     }
 
     fn generate_fragment_shader(&mut self) {
@@ -188,7 +189,8 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
-        write!(self.string, "}}").unwrap();
+        writeln!(self.string, "    gl_FragColor = pixel();").unwrap();
+        writeln!(self.string, "}}").unwrap();
     }
 
     fn generate_declarations(
