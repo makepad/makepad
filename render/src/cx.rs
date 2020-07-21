@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::cell::RefCell;
 
-pub use makepad_shader_compiler::shader::*;
+pub use makepad_shader_compiler::shadergen::*;
 pub use makepad_shader_compiler::colors::*;
 pub use makepad_shader_compiler::uid;
 pub use makepad_live_macros::*;

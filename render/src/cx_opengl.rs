@@ -430,7 +430,7 @@ impl Cx {
     pub fn opengl_has_shader_error(compile: bool, shader: usize, source: &str) -> Option<String> {
         //None
         unsafe {
-            
+             
             let mut success = i32::from(gl::FALSE);
             
             if compile {
@@ -442,7 +442,7 @@ impl Cx {
             
             if success != i32::from(gl::TRUE) {
                 let mut length = 0;
-                if compile {
+                if compile { 
                     gl::GetShaderiv(shader as u32, gl::INFO_LOG_LENGTH, &mut length);
                 } else {
                     gl::GetProgramiv(shader as u32, gl::INFO_LOG_LENGTH, &mut length);
@@ -500,7 +500,7 @@ impl Cx {
         attribs
     }
     
-    pub fn opengl_get_uniforms(program: u32, sg: &ShaderGen, unis: &Vec<PropDef>) -> Vec<OpenglUniform> {
+    pub fn opengl_get_uniforms(program: u32, unis: &Vec<PropDef>) -> Vec<OpenglUniform> {
         let mut gl_uni = Vec::new();
         
         for uni in unis {
@@ -538,6 +538,9 @@ impl Cx {
     }
     
     pub fn opengl_compile_shader(sh: &mut CxShader, opengl_cx: &OpenglCx) -> Result<(), String> {
+        
+        // lets compile.
+        
         
         let (vertex, fragment, mapping) = Self::gl_assemble_shader(&sh.shader_gen, GLShaderType::OpenGL) ?;
         // now we have a pixel and a vertex shader
@@ -585,10 +588,10 @@ impl Cx {
                 },
                 geom_attribs,
                 inst_attribs,
-                pass_uniforms: Self::opengl_get_uniforms(program, &sh.shader_gen, &mapping.pass_uniforms),
-                view_uniforms: Self::opengl_get_uniforms(program, &sh.shader_gen, &mapping.view_uniforms),
-                draw_uniforms: Self::opengl_get_uniforms(program, &sh.shader_gen, &mapping.draw_uniforms),
-                uniforms: Self::opengl_get_uniforms(program, &sh.shader_gen, &mapping.uniforms),
+                pass_uniforms: Self::opengl_get_uniforms(program,  &mapping.pass_uniforms),
+                view_uniforms: Self::opengl_get_uniforms(program, &mapping.view_uniforms),
+                draw_uniforms: Self::opengl_get_uniforms(program, &mapping.draw_uniforms),
+                uniforms: Self::opengl_get_uniforms(program, &mapping.uniforms),
             });
             sh.mapping = mapping;
             return Ok(());

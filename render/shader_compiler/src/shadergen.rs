@@ -2,6 +2,11 @@
 use std::hash::{Hash, Hasher};
 use std::any::TypeId;
 use crate::ty::*;
+use crate::ast::ShaderAst;
+use crate::lex;
+use crate::parse;
+use crate::analyse;
+use crate::error::Error;
 
 #[derive(Clone, Copy, Hash, PartialEq, Debug)]
 pub struct LiveLoc{
@@ -24,7 +29,7 @@ pub struct ShaderSub{
     pub code:String,
     pub attribute_props:Vec<PropDef>,
     pub instance_props:Vec<PropDef>,
-    pub uniform_props:Vec<PropDef>,
+    pub uniform_props:Vec<PropDef>, 
     pub texture_props:Vec<PropDef>
 }
 
@@ -37,11 +42,17 @@ pub struct ShaderGen {
 
 impl Eq for ShaderGen {}
 
+pub struct ShaderGenError{
+    pub file:String,
+    pub line:usize,
+    pub col:usize,
+    pub msg:String
+}
+
 impl ShaderGen{
     pub fn new() -> Self {
         ShaderGen::default()
     }
-        
         
     pub fn byte_to_row_col(byte:usize, source:&str)->(usize,usize){
         let lines = source.split("\n");
@@ -55,9 +66,50 @@ impl ShaderGen{
         return (0,0)
     }
     
+    pub fn shader_gen_error(err:&Error, sub:&ShaderSub)->ShaderGenError{
+        // lets find the span info
+        let start = ShaderGen::byte_to_row_col(err.span.start, &sub.code);
+        ShaderGenError{
+            file: sub.loc.file.to_string(), 
+            line: start.0 + sub.loc.line, 
+            col: start.1 + 1, 
+            msg: err.to_string()
+        }
+    }
+    
     pub fn compose(mut self, sub: ShaderSub) -> Self {
         self.subs.push(sub);
         self
+    }
+    
+    pub fn lex_parse_analyse(&self)->Result<ShaderAst, ShaderGenError>{
+        let mut shader_ast = ShaderAst::new();
+        let mut input_props = Vec::new();
+        for (index,sub) in self.subs.iter().enumerate() {
+            // lets tokenize the sub
+            let tokens = lex::lex(sub.code.chars(), index).collect::<Result<Vec<_>, _>>();
+            if let Err(err) = &tokens {
+                return Err(Self::shader_gen_error(err, sub));
+            }
+            let tokens = tokens.unwrap();
+            if let Err(err) = parse::parse(&tokens, &mut shader_ast) {
+                return Err(Self::shader_gen_error(&err, sub));
+            }
+            // lets add our instance_props
+            input_props.extend(sub.attribute_props.iter());
+            input_props.extend(sub.instance_props.iter());
+            input_props.extend(sub.uniform_props.iter());
+            input_props.extend(sub.texture_props.iter());
+        }
+        
+        // lets collect all our 
+        // ok now we have the shader, lets analyse
+        if let Err(err) = analyse::analyse(&mut shader_ast, &input_props){
+            let sub = &self.subs[err.span.loc_id];
+            return Err(Self::shader_gen_error(&err, sub));
+        }
+        
+        Ok(shader_ast)
     }
 }
 

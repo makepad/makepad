@@ -1,4 +1,4 @@
-use crate::shader::PropDef;
+use crate::shadergen::PropDef;
 use crate::ast::*;
 use crate::builtin::{self, Builtin};
 use crate::const_eval::ConstEvaluator;
