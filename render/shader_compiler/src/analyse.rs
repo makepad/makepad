@@ -116,14 +116,14 @@ impl<'a> ShaderAnalyser<'a> {
             &mut visited,
             fragment_decl,
         )?;
-        for &attribute_dep in vertex_decl.attribute_deps.borrow().as_ref().unwrap() {
+        for &attribute_dep in fragment_decl.attribute_deps.borrow().as_ref().unwrap() {
             self.shader_ast
                 .find_attribute_decl(attribute_dep)
                 .unwrap()
                 .is_used_in_fragment_shader
                 .set(Some(true));
         }
-        for &instance_dep in vertex_decl.instance_deps.borrow().as_ref().unwrap() {
+        for &instance_dep in fragment_decl.instance_deps.borrow().as_ref().unwrap() {
             self.shader_ast
                 .find_instance_decl(instance_dep)
                 .unwrap()

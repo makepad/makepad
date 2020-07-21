@@ -50,23 +50,23 @@ impl<'a> ShaderGenerator<'a> {
         let packed_attributes_size = self.compute_packed_attributes_size();
         let packed_varyings_size = self.compute_packed_varyings_size();
         self.generate_declarations(Some(packed_attributes_size), packed_varyings_size);
+        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("vertex")).unwrap());
         writeln!(self.string, "void main() {{").unwrap();
-        let mut attribute_unpacker = AttributeUnpacker::new(
+        let mut attribute_unpacker = VarUnpacker::new(
+            "_m_packed_attribute",
             packed_attributes_size,
             &mut self.string
         );
         for decl in &self.shader.decls {
             match decl {
                 Decl::Attribute(decl) => {
-                    attribute_unpacker.unpack_attribute(
-                        "_m_attributes",
+                    attribute_unpacker.unpack_var(
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
                 },
                 Decl::Instance(decl) => {
-                    attribute_unpacker.unpack_attribute(
-                        "_m_instances",
+                    attribute_unpacker.unpack_var(
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
@@ -74,11 +74,71 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
+        let mut varying_packer = VarPacker::new(
+            "_m_packed_varying",
+            packed_varyings_size,
+            &mut self.string
+        );
+        for decl in &self.shader.decls {
+            match decl {
+                Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                    varying_packer.pack_var(
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                    );
+                },
+                Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                    varying_packer.pack_var(
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                    );
+                }
+                Decl::Varying(decl) => {
+                    varying_packer.pack_var(
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                    );
+                },
+                _ => {}
+            }
+        }
         write!(self.string, "}}").unwrap();
     }
 
     fn generate_fragment_shader(&mut self) {
-        // TODO
+        let packed_varyings_size = self.compute_packed_varyings_size();
+        self.generate_declarations(None, packed_varyings_size);
+        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("pixel")).unwrap());
+        writeln!(self.string, "void main() {{").unwrap();
+        let mut varying_unpacker = VarUnpacker::new(
+            "_m_packed_varying",
+            packed_varyings_size,
+            &mut self.string
+        );
+        for decl in &self.shader.decls {
+            match decl {
+                Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                    varying_unpacker.unpack_var(
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                    );
+                },
+                Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                    varying_unpacker.unpack_var(
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                    );
+                }
+                Decl::Varying(decl) => {
+                    varying_unpacker.unpack_var(
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                    );
+                },
+                _ => {}
+            }
+        }
+        write!(self.string, "}}").unwrap();
     }
 
     fn generate_declarations(
@@ -112,8 +172,6 @@ impl<'a> ShaderGenerator<'a> {
         }
 
         self.generate_packed_varying_declarations(packed_varyings_size);
-
-        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("vertex")).unwrap());
     }
 
     fn generate_struct_decl(&mut self, decl: &StructDecl) {
@@ -277,64 +335,139 @@ impl<'a> ShaderGenerator<'a> {
     }
 }
 
-struct AttributeUnpacker<'a> {
-    packed_attributes_size: usize,
-    packed_attribute_index: usize,
-    packed_attribute_size: usize,
-    packed_attribute_offset: usize,
+struct VarPacker<'a> {
+    packed_var_prefix: &'a str,
+    packed_vars_size: usize,
+    packed_var_index: usize,
+    packed_var_size: usize,
+    packed_var_offset: usize,
     string: &'a mut String
 }
 
-impl<'a> AttributeUnpacker<'a> {
-    fn new(packed_attributes_size: usize, string: &mut String) -> AttributeUnpacker {
-        AttributeUnpacker {
-            packed_attributes_size,
-            packed_attribute_index: 0,
-            packed_attribute_size: packed_attributes_size.min(4),
-            packed_attribute_offset: 0,
+impl<'a> VarPacker<'a> {
+    fn new(
+        packed_var_prefix: &'a str,
+        packed_vars_size: usize,
+        string: &'a mut String
+    ) -> VarPacker<'a> {
+        VarPacker {
+            packed_var_prefix,
+            packed_vars_size,
+            packed_var_index: 0,
+            packed_var_size: packed_vars_size.min(4),
+            packed_var_offset: 0,
             string,
         }
     }
 
-    fn unpack_attribute(&mut self, dst: &str, ident: Ident, ty: &Ty) {
-        let attribute_size = ty.size();
-        let mut attribute_offset = 0;
-        while attribute_offset < attribute_size {
-            let count = attribute_size - attribute_offset;
-            let packed_count = self.packed_attribute_size - self.packed_attribute_offset;
+    fn pack_var(&mut self, ident: Ident, ty: &Ty) {
+        let var_size = ty.size();
+        let mut var_offset = 0;
+        while var_offset < var_size {
+            let count = var_size - var_offset;
+            let packed_count = self.packed_var_size - self.packed_var_offset;
             let min_count = count.min(packed_count);
-            write!(self.string, "    {}.{}", dst, ident).unwrap();
-            if attribute_size > 1 {
+            write!(self.string, "    {}_{}", self.packed_var_prefix, self.packed_var_index).unwrap();
+            if self.packed_var_size > 1 {
                 write!(
                     self.string,
                     ".{}",
                     Swizzle::from_range(
-                        attribute_offset,
-                        attribute_offset + min_count
+                        self.packed_var_offset,
+                        self.packed_var_offset + min_count
                     )
                 )
                 .unwrap();
             }
-            write!(self.string, " = _m_packed_attribute_{}", self.packed_attribute_index).unwrap();
-            if self.packed_attribute_size > 1 {
+            write!(self.string, " = {}", ident).unwrap();
+            if var_size > 1 {
                 write!(
                     self.string,
                     ".{}",
                     Swizzle::from_range(
-                        self.packed_attribute_offset,
-                        self.packed_attribute_offset + min_count
+                        var_offset,
+                        var_offset + min_count
                     )
                 )
                 .unwrap();
             }
             writeln!(self.string, ";").unwrap();
-            attribute_offset += min_count;
-            self.packed_attribute_offset += min_count;
-            if self.packed_attribute_offset == self.packed_attribute_size {
-                self.packed_attributes_size -= self.packed_attribute_size;
-                self.packed_attribute_index += 1;
-                self.packed_attribute_size = self.packed_attribute_size.min(4);
-                self.packed_attribute_offset = 0;
+            self.packed_var_offset += min_count;
+            if self.packed_var_offset == self.packed_var_size {
+                self.packed_vars_size -= self.packed_var_size;
+                self.packed_var_index += 1;
+                self.packed_var_size = self.packed_var_size.min(4);
+                self.packed_var_offset = 0;
+            }
+            var_offset += min_count; 
+        }
+    }
+}
+
+struct VarUnpacker<'a> {
+    packed_var_prefix: &'a str,
+    packed_vars_size: usize,
+    packed_var_index: usize,
+    packed_var_size: usize,
+    packed_var_offset: usize,
+    string: &'a mut String
+}
+
+impl<'a> VarUnpacker<'a> {
+    fn new(
+        packed_var_prefix: &'a str,
+        packed_vars_size: usize,
+        string: &'a mut String
+    ) -> VarUnpacker<'a> {
+        VarUnpacker {
+            packed_var_prefix,
+            packed_vars_size,
+            packed_var_index: 0,
+            packed_var_size: packed_vars_size.min(4),
+            packed_var_offset: 0,
+            string,
+        }
+    }
+
+    fn unpack_var(&mut self, ident: Ident, ty: &Ty) {
+        let var_size = ty.size();
+        let mut var_offset = 0;
+        while var_offset < var_size {
+            let count = var_size - var_offset;
+            let packed_count = self.packed_var_size - self.packed_var_offset;
+            let min_count = count.min(packed_count);
+            write!(self.string, "    {}", ident).unwrap();
+            if var_size > 1 {
+                write!(
+                    self.string,
+                    ".{}",
+                    Swizzle::from_range(
+                        var_offset,
+                        var_offset + min_count
+                    )
+                )
+                .unwrap();
+            }
+            write!(self.string, " = {}_{}", self.packed_var_prefix, self.packed_var_index).unwrap();
+            if self.packed_var_size > 1 {
+                write!(
+                    self.string,
+                    ".{}",
+                    Swizzle::from_range(
+                        self.packed_var_offset,
+                        self.packed_var_offset + min_count
+                    )
+                )
+                .unwrap();
+            }
+            writeln!(self.string, ";").unwrap();
+            var_offset += min_count;
+            self.packed_var_offset += min_count;
+            if self.packed_var_offset == self.packed_var_size {
+                self.packed_vars_size -= self.packed_var_size;
+                self.packed_var_index += 1;
+                self.packed_var_size = self.packed_var_size.min(4);
+                self.packed_var_offset = 0;
             } 
         }
     }
