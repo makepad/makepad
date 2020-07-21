@@ -11,15 +11,287 @@ use {
         ty::Ty,
     },
     std::{
-        cell::Cell,
+        cell::{
+            Cell,
+            RefCell,
+        },
         fmt::Write,
     },
 };
+
+pub trait BackendWriter {
+    fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
+
+    fn write_ident_and_ty(&self, string: &mut String, ident: Ident, ty: &Ty) {
+        match *ty {
+            Ty::Void => write!(string, "void {}", ident).unwrap(),
+            Ty::Bool => {
+                self.write_ty_lit(string, TyLit::Bool);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Int => {
+                self.write_ty_lit(string, TyLit::Int);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Float => {
+                self.write_ty_lit(string, TyLit::Float);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Bvec2 => {
+                self.write_ty_lit(string, TyLit::Bvec2);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Bvec3 => {
+                self.write_ty_lit(string, TyLit::Bvec3);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Bvec4 => {
+                self.write_ty_lit(string, TyLit::Bvec4);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Ivec2 => {
+                self.write_ty_lit(string, TyLit::Ivec2);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Ivec3 => {
+                self.write_ty_lit(string, TyLit::Ivec3);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Ivec4 => {
+                self.write_ty_lit(string, TyLit::Ivec4);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Vec2 => {
+                self.write_ty_lit(string, TyLit::Vec2);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Vec3 => {
+                self.write_ty_lit(string, TyLit::Vec3);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Vec4 => {
+                self.write_ty_lit(string, TyLit::Vec4);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Mat2 => {
+                self.write_ty_lit(string, TyLit::Mat2);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Mat3 => {
+                self.write_ty_lit(string, TyLit::Mat3);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Mat4 => {
+                self.write_ty_lit(string, TyLit::Mat4);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Texture2d => panic!(),
+            Ty::Array { ref elem_ty, len } => {
+                self.write_ident_and_ty(string, ident, elem_ty);
+                write!(string, "[{}]", len).unwrap();
+            }
+            Ty::Struct {
+                ident: struct_ident,
+            } => {
+                write!(string, "{} {}", struct_ident, ident).unwrap();
+            }
+        }   
+    }
+}
+
+pub struct BlockGenerator<'a> {
+    pub shader: &'a ShaderAst,
+    pub indent_level: usize,
+    pub backend_writer: &'a dyn BackendWriter,
+    pub string: &'a mut String,
+}
+
+impl<'a> BlockGenerator<'a> {
+    pub fn generate_block(&mut self, block: &Block) {
+        write!(self.string, "{{").unwrap();
+        if !block.stmts.is_empty() {
+            writeln!(self.string).unwrap();
+            self.indent_level += 1;
+            for stmt in &block.stmts {
+                self.generate_stmt(stmt);
+            }
+            self.indent_level -= 1;
+        }
+        write!(self.string, "}}").unwrap()
+    }
+
+    fn generate_stmt(&mut self, stmt: &Stmt) {
+        self.write_indent();
+        match *stmt {
+            Stmt::Break {
+                span
+            } => self.generate_break_stmt(span),
+            Stmt::Continue {
+                span
+            } => self.generate_continue_stmt(span),
+            Stmt::For {
+                span,
+                ident,
+                ref from_expr,
+                ref to_expr,
+                ref step_expr,
+                ref block,
+            } => self.generate_for_stmt(span, ident, from_expr, to_expr, step_expr, block),
+            Stmt::If {
+                span,
+                ref expr,
+                ref block_if_true,
+                ref block_if_false,
+            } => self.generate_if_stmt(span, expr, block_if_true, block_if_false),
+            Stmt::Let {
+                span,
+                ref ty,
+                ident,
+                ref ty_expr,
+                ref expr,
+            } => self.generate_let_stmt(span, ty, ident, ty_expr, expr),
+            Stmt::Return {
+                span,
+                ref expr
+            } => self.generate_return_stmt(span, expr),
+            Stmt::Block {
+                span,
+                ref block
+            } => self.generate_block_stmt(span, block),
+            Stmt::Expr {
+                span,
+                ref expr
+            } => self.generate_expr_stmt(span, expr),
+        }
+    }
+
+    fn generate_break_stmt(&mut self, _span: Span) {
+        writeln!(self.string, "break;").unwrap();
+    }
+
+    fn generate_continue_stmt(&mut self, _span: Span) {
+        writeln!(self.string, "continue;").unwrap();
+    }
+
+    fn generate_for_stmt(
+        &mut self,
+        _span: Span,
+        ident: Ident,
+        from_expr: &Expr,
+        to_expr: &Expr,
+        step_expr: &Option<Expr>,
+        block: &Block,
+    ) {
+        let from = from_expr.val.borrow().as_ref().unwrap().to_int().unwrap();
+        let to = to_expr.val.borrow().as_ref().unwrap().to_int().unwrap();
+        let step = if let Some(step_expr) = step_expr {
+            step_expr.val.borrow().as_ref().unwrap().to_int().unwrap()
+        } else if from < to {
+            1
+        } else {
+            -1
+        };
+        write!(
+            self.string,
+            "for (int {0} = {1}; {0} {2} {3}; {0} {4} {5}) ",
+            ident,
+            if from <= to { from } else { from - 1 },
+            if from <= to { "<" } else { ">=" },
+            to,
+            if step > 0 { "+=" } else { "-=" },
+            step.abs()
+        )
+        .unwrap();
+        self.generate_block(block);
+        writeln!(self.string).unwrap();
+    }
+
+    fn generate_if_stmt(
+        &mut self,
+        _span: Span,
+        expr: &Expr,
+        block_if_true: &Block,
+        block_if_false: &Option<Box<Block>>,
+    ) {
+        write!(self.string, "if (").unwrap();
+        self.generate_expr(expr);
+        write!(self.string, " ").unwrap();
+        self.generate_block(block_if_true);
+        if let Some(block_if_false) = block_if_false {
+            self.generate_block(block_if_false);
+        }
+        writeln!(self.string).unwrap();
+    }
+
+    fn generate_let_stmt(
+        &mut self,
+        _span: Span,
+        ty: &RefCell<Option<Ty>>,
+        ident: Ident,
+        _ty_expr: &Option<TyExpr>,
+        expr: &Option<Expr>,
+    ) {
+        self.write_ident_and_ty(
+            ident,
+            ty.borrow().as_ref().unwrap()
+        );
+        if let Some(expr) = expr {
+            write!(self.string, " = ").unwrap();
+            self.generate_expr(expr);
+        }
+        writeln!(self.string, ";").unwrap();
+    }
+
+    fn generate_return_stmt(&mut self, _span: Span, expr: &Option<Expr>) {
+        write!(self.string, "return").unwrap();
+        if let Some(expr) = expr {
+            write!(self.string, " ").unwrap();
+            self.generate_expr(expr);
+        }
+        writeln!(self.string, ";").unwrap();
+    }
+
+    fn generate_block_stmt(&mut self, _span: Span, block: &Block) {
+        self.generate_block(block);
+        writeln!(self.string).unwrap();
+    }
+
+    fn generate_expr_stmt(&mut self, _span: Span, expr: &Expr) {
+        self.generate_expr(expr);
+        writeln!(self.string, ";").unwrap();
+    }
+
+    fn generate_expr(&mut self, expr: &Expr) {
+        ExprGenerator {
+            shader: self.shader,
+            use_hidden_parameters: false,
+            use_generated_constructors: false,
+            backend_writer: self.backend_writer,
+            string: self.string,
+        }
+        .generate_expr(expr)
+    }
+
+    fn write_indent(&mut self) {
+        for _ in 0..self.indent_level {
+            write!(self.string, "    ").unwrap();
+        }
+    }
+
+    fn write_ident_and_ty(&mut self, ident: Ident, ty: &Ty) {
+        self.backend_writer.write_ident_and_ty(
+            &mut self.string,
+            ident,
+            ty
+        );
+    }
+}
 
 pub struct ExprGenerator<'a> {
     pub shader: &'a ShaderAst,
     pub use_hidden_parameters: bool,
     pub use_generated_constructors: bool,
+    pub backend_writer: &'a dyn BackendWriter,
     pub string: &'a mut String,
 }
 
@@ -231,12 +503,13 @@ impl<'a> ExprGenerator<'a> {
         arg_exprs: &[Expr]
     ) {
         if self.use_generated_constructors {
-            write!(self.string, "mpsc_{}", ty_lit).unwrap();
+            write!(self.string, "mpsc_").unwrap();
+            self.write_ty_lit(ty_lit);
             for arg_expr in arg_exprs {
                 write!(self.string, "_{}", arg_expr.ty.borrow().as_ref().unwrap()).unwrap();
             }
         } else {
-            write!(self.string, "{}", ty_lit).unwrap();
+            self.write_ty_lit(ty_lit);
         }
         write!(self.string, "(").unwrap();
         let mut sep = "";
@@ -264,6 +537,10 @@ impl<'a> ExprGenerator<'a> {
         lit: Lit
     ) {
         write!(self.string, "{}", lit).unwrap();
+    }
+
+    fn write_ty_lit(&mut self, ty_lit: TyLit) {
+        self.backend_writer.write_ty_lit(&mut self.string, ty_lit);
     }
 }
 
