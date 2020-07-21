@@ -385,6 +385,7 @@ impl<'a> ShaderGenerator<'a> {
         ExprGenerator {
             shader: self.shader,
             use_struct_threading: true,
+            use_generated_constructors: true,
             string: self.string,
         }
         .generate_expr(expr)
@@ -691,6 +692,7 @@ impl<'a> BlockGenerator<'a> {
         ExprGenerator {
             shader: self.shader,
             use_struct_threading: true,
+            use_generated_constructors: true,
             string: self.string,
         }
         .generate_expr(expr)
