@@ -384,7 +384,7 @@ impl<'a> ShaderGenerator<'a> {
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             shader: self.shader,
-            use_struct_threading: true,
+            use_hidden_parameters: true,
             use_generated_constructors: true,
             string: self.string,
         }
@@ -691,7 +691,7 @@ impl<'a> BlockGenerator<'a> {
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             shader: self.shader,
-            use_struct_threading: true,
+            use_hidden_parameters: true,
             use_generated_constructors: true,
             string: self.string,
         }
