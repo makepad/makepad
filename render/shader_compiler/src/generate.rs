@@ -19,6 +19,7 @@ use {
 pub struct ExprGenerator<'a> {
     pub shader: &'a ShaderAst,
     pub use_struct_threading: bool,
+    pub use_generated_constructors: bool,
     pub string: &'a mut String,
 }
 
@@ -229,7 +230,15 @@ impl<'a> ExprGenerator<'a> {
         ty_lit: TyLit,
         arg_exprs: &[Expr]
     ) {
-        write!(self.string, "{}(", ty_lit).unwrap();
+        if self.use_generated_constructors {
+            write!(self.string, "mpsc_{}", ty_lit).unwrap();
+            for arg_expr in arg_exprs {
+                write!(self.string, "_{}", arg_expr.ty.borrow().as_ref().unwrap()).unwrap();
+            }
+        } else {
+            write!(self.string, "{}", ty_lit).unwrap();
+        }
+        write!(self.string, "(").unwrap();
         let mut sep = "";
         for arg_expr in arg_exprs {
             write!(self.string, "{}", sep).unwrap();
