@@ -1,16 +1,17 @@
 use {
     crate::{
         ast::*,
-        generate::ExprGenerator,
+        generate::{
+            BlockGenerator,
+            ExprGenerator,
+            BackendWriter,
+        },
         ident::Ident,
-        span::Span,
+        lit::TyLit,
         swizzle::Swizzle,
         ty::Ty,
     },
-    std::{
-        cell::RefCell,
-        fmt::Write,
-    }
+    std::fmt::Write,
 };
 
 pub fn generate_vertex_shader(shader: &ShaderAst) -> String {
@@ -46,24 +47,21 @@ impl<'a> ShaderGenerator<'a> {
         for decl in &self.shader.decls {
             match decl {
                 Decl::Attribute(decl) => {
-                    write_ident_and_ty(
-                        &mut self.string,
+                    self.write_ident_and_ty(
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
                     writeln!(self.string, ";").unwrap();
                 },
                 Decl::Instance(decl) => {
-                    write_ident_and_ty(
-                        &mut self.string,
+                    self.write_ident_and_ty(
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
                     writeln!(self.string, ";").unwrap();
                 },
                 Decl::Varying(decl) => {
-                    write_ident_and_ty(
-                        &mut self.string,
+                    self.write_ident_and_ty(
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
@@ -134,24 +132,21 @@ impl<'a> ShaderGenerator<'a> {
         for decl in &self.shader.decls {
             match decl {
                 Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    write_ident_and_ty(
-                        &mut self.string,
+                    self.write_ident_and_ty(
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
                     writeln!(self.string, ";").unwrap();
                 }
                 Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    write_ident_and_ty(
-                        &mut self.string,
+                    self.write_ident_and_ty(
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
                     writeln!(self.string, ";").unwrap();
                 }
                 Decl::Varying(decl) => {
-                    write_ident_and_ty(
-                        &mut self.string,
+                    self.write_ident_and_ty(
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
@@ -233,8 +228,7 @@ impl<'a> ShaderGenerator<'a> {
             writeln!(self.string).unwrap();
             for field in &decl.fields {
                 write!(self.string, "    ").unwrap();
-                write_ident_and_ty(
-                    &mut self.string,
+                self.write_ident_and_ty(
                     field.ident,
                     field.ty_expr.ty.borrow().as_ref().unwrap(),
                 );
@@ -246,8 +240,7 @@ impl<'a> ShaderGenerator<'a> {
 
     fn generate_const_decl(&mut self, decl: &ConstDecl) {
         write!(self.string, "const ").unwrap();
-        write_ident_and_ty(
-            &mut self.string,
+        self.write_ident_and_ty(
             decl.ident,
             decl.ty_expr.ty.borrow().as_ref().unwrap(),
         );
@@ -258,8 +251,7 @@ impl<'a> ShaderGenerator<'a> {
 
     fn generate_uniform_decl(&mut self, decl: &UniformDecl) {
         write!(self.string, "uniform ").unwrap();
-        write_ident_and_ty(
-            self.string,
+        self.write_ident_and_ty(
             decl.ident,
             decl.ty_expr.ty.borrow().as_ref().unwrap(),
         );
@@ -351,8 +343,7 @@ impl<'a> ShaderGenerator<'a> {
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
             self.generate_fn_decl(self.shader.find_fn_decl(callee).unwrap());
         }
-        write_ident_and_ty(
-            &mut self.string,
+        self.write_ident_and_ty(
             decl.ident,
             decl.return_ty.borrow().as_ref().unwrap(),
         );
@@ -360,8 +351,7 @@ impl<'a> ShaderGenerator<'a> {
         let mut sep = "";
         for param in &decl.params {
             write!(self.string, "{}", sep).unwrap();
-            write_ident_and_ty(
-                &mut self.string,
+            self.write_ident_and_ty(
                 param.ident,
                 param.ty_expr.ty.borrow().as_ref().unwrap(),
             );
@@ -376,6 +366,7 @@ impl<'a> ShaderGenerator<'a> {
         BlockGenerator {
             shader: self.shader,
             indent_level: 0,
+            backend_writer: &MetalBackendWriter,
             string: self.string
         }
         .generate_block(block)
@@ -386,9 +377,18 @@ impl<'a> ShaderGenerator<'a> {
             shader: self.shader,
             use_hidden_parameters: true,
             use_generated_constructors: true,
+            backend_writer: &MetalBackendWriter,
             string: self.string,
         }
         .generate_expr(expr)
+    }
+
+    fn write_ident_and_ty(&mut self, ident: Ident, ty: &Ty) {
+        MetalBackendWriter.write_ident_and_ty(
+            &mut self.string,
+            ident,
+            ty
+        );
     }
 }
 
@@ -530,206 +530,26 @@ impl<'a> VarUnpacker<'a> {
     }
 }
 
-struct BlockGenerator<'a> {
-    shader: &'a ShaderAst,
-    indent_level: usize,
-    string: &'a mut String,
-}
+struct MetalBackendWriter;
 
-impl<'a> BlockGenerator<'a> {
-    fn generate_block(&mut self, block: &Block) {
-        write!(self.string, "{{").unwrap();
-        if !block.stmts.is_empty() {
-            writeln!(self.string).unwrap();
-            self.indent_level += 1;
-            for stmt in &block.stmts {
-                self.generate_stmt(stmt);
-            }
-            self.indent_level -= 1;
-        }
-        write!(self.string, "}}").unwrap()
-    }
-
-    fn generate_stmt(&mut self, stmt: &Stmt) {
-        self.write_indent();
-        match *stmt {
-            Stmt::Break {
-                span
-            } => self.generate_break_stmt(span),
-            Stmt::Continue {
-                span
-            } => self.generate_continue_stmt(span),
-            Stmt::For {
-                span,
-                ident,
-                ref from_expr,
-                ref to_expr,
-                ref step_expr,
-                ref block,
-            } => self.generate_for_stmt(span, ident, from_expr, to_expr, step_expr, block),
-            Stmt::If {
-                span,
-                ref expr,
-                ref block_if_true,
-                ref block_if_false,
-            } => self.generate_if_stmt(span, expr, block_if_true, block_if_false),
-            Stmt::Let {
-                span,
-                ref ty,
-                ident,
-                ref ty_expr,
-                ref expr,
-            } => self.generate_let_stmt(span, ty, ident, ty_expr, expr),
-            Stmt::Return {
-                span,
-                ref expr
-            } => self.generate_return_stmt(span, expr),
-            Stmt::Block {
-                span,
-                ref block
-            } => self.generate_block_stmt(span, block),
-            Stmt::Expr {
-                span,
-                ref expr
-            } => self.generate_expr_stmt(span, expr),
-        }
-    }
-
-    fn generate_break_stmt(&mut self, _span: Span) {
-        writeln!(self.string, "break;").unwrap();
-    }
-
-    fn generate_continue_stmt(&mut self, _span: Span) {
-        writeln!(self.string, "continue;").unwrap();
-    }
-
-    fn generate_for_stmt(
-        &mut self,
-        _span: Span,
-        ident: Ident,
-        from_expr: &Expr,
-        to_expr: &Expr,
-        step_expr: &Option<Expr>,
-        block: &Block,
-    ) {
-        let from = from_expr.val.borrow().as_ref().unwrap().to_int().unwrap();
-        let to = to_expr.val.borrow().as_ref().unwrap().to_int().unwrap();
-        let step = if let Some(step_expr) = step_expr {
-            step_expr.val.borrow().as_ref().unwrap().to_int().unwrap()
-        } else if from < to {
-            1
-        } else {
-            -1
-        };
-        write!(
-            self.string,
-            "for (int {0} = {1}; {0} {2} {3}; {0} {4} {5}) ",
-            ident,
-            if from <= to { from } else { from - 1 },
-            if from <= to { "<" } else { ">=" },
-            to,
-            if step > 0 { "+=" } else { "-=" },
-            step.abs()
-        )
-        .unwrap();
-        self.generate_block(block);
-        writeln!(self.string).unwrap();
-    }
-
-    fn generate_if_stmt(
-        &mut self,
-        _span: Span,
-        expr: &Expr,
-        block_if_true: &Block,
-        block_if_false: &Option<Box<Block>>,
-    ) {
-        write!(self.string, "if (").unwrap();
-        self.generate_expr(expr);
-        write!(self.string, " ").unwrap();
-        self.generate_block(block_if_true);
-        if let Some(block_if_false) = block_if_false {
-            self.generate_block(block_if_false);
-        }
-        writeln!(self.string).unwrap();
-    }
-
-    fn generate_let_stmt(
-        &mut self,
-        _span: Span,
-        ty: &RefCell<Option<Ty>>,
-        ident: Ident,
-        _ty_expr: &Option<TyExpr>,
-        expr: &Option<Expr>,
-    ) {
-        write_ident_and_ty(&mut self.string, ident, ty.borrow().as_ref().unwrap());
-        if let Some(expr) = expr {
-            write!(self.string, " = ").unwrap();
-            self.generate_expr(expr);
-        }
-        writeln!(self.string, ";").unwrap();
-    }
-
-    fn generate_return_stmt(&mut self, _span: Span, expr: &Option<Expr>) {
-        write!(self.string, "return").unwrap();
-        if let Some(expr) = expr {
-            write!(self.string, " ").unwrap();
-            self.generate_expr(expr);
-        }
-        writeln!(self.string, ";").unwrap();
-    }
-
-    fn generate_block_stmt(&mut self, _span: Span, block: &Block) {
-        self.generate_block(block);
-        writeln!(self.string).unwrap();
-    }
-
-    fn generate_expr_stmt(&mut self, _span: Span, expr: &Expr) {
-        self.generate_expr(expr);
-        writeln!(self.string, ";").unwrap();
-    }
-
-    fn generate_expr(&mut self, expr: &Expr) {
-        ExprGenerator {
-            shader: self.shader,
-            use_hidden_parameters: true,
-            use_generated_constructors: true,
-            string: self.string,
-        }
-        .generate_expr(expr)
-    }
-
-    fn write_indent(&mut self) {
-        for _ in 0..self.indent_level {
-            write!(self.string, "    ").unwrap();
-        }
-    }
-}
-
-fn write_ident_and_ty(string: &mut String, ident: Ident, ty: &Ty) {
-    match *ty {
-        Ty::Void => write!(string, "void {}", ident).unwrap(),
-        Ty::Bool => write!(string, "bool {}", ident).unwrap(),
-        Ty::Int => write!(string, "int {}", ident).unwrap(),
-        Ty::Float => write!(string, "float {}", ident).unwrap(),
-        Ty::Bvec2 => write!(string, "bvec2 {}", ident).unwrap(),
-        Ty::Bvec3 => write!(string, "bvec3 {}", ident).unwrap(),
-        Ty::Bvec4 => write!(string, "bvec4 {}", ident).unwrap(),
-        Ty::Ivec2 => write!(string, "ivec2 {}", ident).unwrap(),
-        Ty::Ivec3 => write!(string, "ivec3 {}", ident).unwrap(),
-        Ty::Ivec4 => write!(string, "ivec4 {}", ident).unwrap(),
-        Ty::Vec2 => write!(string, "vec2 {}", ident).unwrap(),
-        Ty::Vec3 => write!(string, "vec3 {}", ident).unwrap(),
-        Ty::Vec4 => write!(string, "vec4 {}", ident).unwrap(),
-        Ty::Mat2 => write!(string, "mat2 {}", ident).unwrap(),
-        Ty::Mat3 => write!(string, "mat3 {}", ident).unwrap(),
-        Ty::Mat4 => write!(string, "mat4 {}", ident).unwrap(),
-        Ty::Texture2d => panic!(),
-        Ty::Array { ref elem_ty, len } => {
-            write_ident_and_ty(string, ident, elem_ty);
-            write!(string, "[{}]", len).unwrap();
-        }
-        Ty::Struct {
-            ident: struct_ident,
-        } => write!(string, "{} {}", struct_ident, ident).unwrap(),
+impl BackendWriter for MetalBackendWriter {
+    fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit) {
+        write!(string, "{}", match ty_lit {
+            TyLit::Bool => "bool",
+            TyLit::Int => "int",
+            TyLit::Float => "float",
+            TyLit::Bvec2 => "bool2",
+            TyLit::Bvec3 => "bool3",
+            TyLit::Bvec4 => "bool4",
+            TyLit::Ivec2 => "int2",
+            TyLit::Ivec3 => "int3",
+            TyLit::Ivec4 => "int4",
+            TyLit::Vec2 => "float2",
+            TyLit::Vec3 => "float3",
+            TyLit::Vec4 => "float4",
+            TyLit::Mat2 => "mat2",
+            TyLit::Mat3 => "mat3",
+            TyLit::Mat4 => "mat4",
+        }).unwrap();
     }
 }
