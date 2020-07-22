@@ -616,7 +616,7 @@ impl<'a> ShaderGenerator<'a> {
             .shader_ast
             .find_fn_decl(ident)
             .unwrap()
-            .cons_deps
+            .cons_fn_deps
             .borrow()
             .as_ref()
             .unwrap()

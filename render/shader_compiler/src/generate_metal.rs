@@ -30,8 +30,116 @@ struct ShaderGenerator<'a> {
 
 impl<'a> ShaderGenerator<'a> {
     fn generate_shader(&mut self) {
-        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("vertex")).unwrap());
-        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("pixel")).unwrap());
+        let vertex_decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
+        self.generate_fn_decl(vertex_decl);
+        for (ty_lit, param_tys) in vertex_decl
+            .cons_fn_deps
+            .borrow()
+            .as_ref()
+            .unwrap()
+        {
+            self.generate_cons_fn(*ty_lit, param_tys);
+        }
+        let fragment_decl = self.shader.find_fn_decl(Ident::new("pixel")).unwrap();
+        self.generate_fn_decl(fragment_decl);
+        for (ty_lit, param_tys) in fragment_decl
+            .cons_fn_deps
+            .borrow()
+            .as_ref()
+            .unwrap()
+        {
+            self.generate_cons_fn(*ty_lit, param_tys);
+        }
+    }
+
+    fn generate_cons_fn(&mut self, ty_lit: TyLit, param_tys: &[Ty]) {
+        write!(self.string, "{0} mpsc_{0}", ty_lit).unwrap();
+        for param_ty in param_tys {
+            write!(self.string, "_{}", param_ty).unwrap();
+        }
+        write!(self.string, "(").unwrap();
+        let mut sep = "";
+        if param_tys.len() == 1 {
+            self.write_ident_and_ty(Ident::new("x"), &param_tys[0])
+        } else {
+            for (index, param_ty) in param_tys.iter().enumerate() {
+                write!(self.string, "{}", sep).unwrap();
+                self.write_ident_and_ty(
+                    Ident::new(format!("x{}", index)),
+                    param_ty,
+                );
+                sep = ", ";
+            }
+        }
+        writeln!(self.string, ") {{").unwrap();
+        write!(self.string, "    {}(", ty_lit).unwrap();
+        let ty = ty_lit.to_ty();
+        if param_tys.len() == 1 {
+            let param_ty = &param_tys[0];
+            match param_ty {
+                Ty::Bool | Ty::Int | Ty::Float => {
+                    let mut sep = "";
+                    for _ in 0..ty.size() {
+                        write!(self.string, "{}x", sep).unwrap();
+                        sep = ", ";
+                    }
+                }
+                Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => {
+                    let dst_size = match ty {
+                        Ty::Mat2 => 2,
+                        Ty::Mat3 => 3,
+                        Ty::Mat4 => 4,
+                        _ => panic!(),
+                    };
+                    let src_size = match param_ty {
+                        Ty::Mat2 => 2,
+                        Ty::Mat3 => 3,
+                        Ty::Mat4 => 4,
+                        _ => panic!(),
+                    };
+                    let mut sep = "";
+                    for col_index in 0..dst_size {
+                        for row_index in 0..dst_size {
+                            if row_index < src_size && col_index < src_size {
+                                write!(
+                                    self.string,
+                                    "{}x[{}][{}]",
+                                    sep,
+                                    col_index,
+                                    row_index
+                                )
+                                .unwrap();
+                            } else {
+                                write!(
+                                    self.string,
+                                    "{}{}",
+                                    sep,
+                                    if col_index == row_index { 1.0 } else { 0.0 }
+                                )
+                                .unwrap();
+                            }
+                            sep = ", ";
+                        }
+                    }
+                }
+                _ => panic!(),
+            }
+        } else {
+            let mut sep = "";
+            for (index_0, param_ty) in param_tys.iter().enumerate() {
+                if param_ty.size() == 1 {
+                    write!(self.string, "{}x{}", sep, index_0).unwrap();
+                    sep = ", ";
+                } else {
+                    for index_1 in 0..param_ty.size() {
+                        write!(self.string, "{}x{}[{}]", sep, index_0, index_1).unwrap();
+                        sep = ", ";
+                    }
+                }
+            }
+        }
+        writeln!(self.string, ")").unwrap();
+        writeln!(self.string, "}}").unwrap();
     }
 
     fn generate_fn_decl(&mut self, decl: &FnDecl) {

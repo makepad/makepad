@@ -162,7 +162,7 @@ impl<'a> DepAnalyser<'a> {
         for arg_expr in arg_exprs {
             self.dep_analyse_expr(arg_expr);
         }
-        self.decl.cons_deps.borrow_mut().as_mut().unwrap().insert((
+        self.decl.cons_fn_deps.borrow_mut().as_mut().unwrap().insert((
             ty_lit,
             arg_exprs
                 .iter()
