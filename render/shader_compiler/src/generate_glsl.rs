@@ -11,6 +11,7 @@ use {
         swizzle::Swizzle,
         ty::Ty,
     },
+    std::collections::HashSet,
     std::fmt::Write,
 };
 
@@ -75,7 +76,8 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
-        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("vertex")).unwrap());
+        let mut visited = HashSet::new();
+        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("vertex")).unwrap(), &mut visited);
         writeln!(self.string, "void main() {{").unwrap();
         let mut attribute_unpacker = VarUnpacker::new(
             "mpsc_packed_attribute",
@@ -170,7 +172,8 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
-        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("pixel")).unwrap());
+        let mut visited = HashSet::new();
+        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("pixel")).unwrap(), &mut visited);
         writeln!(self.string, "void main() {{").unwrap();
         let mut varying_unpacker = VarUnpacker::new(
             "mpsc_packed_varying",
@@ -395,10 +398,15 @@ impl<'a> ShaderGenerator<'a> {
         }
     }
 
-    fn generate_fn_decl(&mut self, decl: &FnDecl) {
+    fn generate_fn_decl(&mut self, decl: &FnDecl, visited:&mut HashSet<String>) {
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
-            self.generate_fn_decl(self.shader.find_fn_decl(callee).unwrap());
+            self.generate_fn_decl(self.shader.find_fn_decl(callee).unwrap(), visited);
         }
+        let ident_str = decl.ident.to_string();
+        if visited.contains(&ident_str){
+            return
+        }
+        visited.insert(ident_str);
         self.write_ident_and_ty(
             decl.ident,
             decl.return_ty.borrow().as_ref().unwrap(),
