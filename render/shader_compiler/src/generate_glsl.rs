@@ -42,8 +42,13 @@ struct ShaderGenerator<'a> {
 impl<'a> ShaderGenerator<'a> {
     fn generate_vertex_shader(&mut self) {
         let packed_attributes_size = self.compute_packed_attributes_size();
+        let packed_instances_size = self.compute_packed_instances_size();
         let packed_varyings_size = self.compute_packed_varyings_size();
-        self.generate_decls(Some(packed_attributes_size), packed_varyings_size);
+        self.generate_decls(
+            Some(packed_attributes_size),
+            Some(packed_instances_size),
+            packed_varyings_size
+        );
         for decl in &self.shader.decls {
             match decl {
                 Decl::Attribute(decl) => {
@@ -85,12 +90,22 @@ impl<'a> ShaderGenerator<'a> {
                         decl.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
                 },
+                _ => {}
+            }
+        }
+        let mut instance_unpacker = VarUnpacker::new(
+            "mpsc_packed_instance",
+            packed_instances_size,
+            &mut self.string
+        );
+        for decl in &self.shader.decls {
+            match decl {
                 Decl::Instance(decl) => {
-                    attribute_unpacker.unpack_var(
+                    instance_unpacker.unpack_var(
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
-                }
+                },
                 _ => {}
             }
         }
@@ -128,7 +143,7 @@ impl<'a> ShaderGenerator<'a> {
 
     fn generate_fragment_shader(&mut self) {
         let packed_varyings_size = self.compute_packed_varyings_size();
-        self.generate_decls(None, packed_varyings_size);
+        self.generate_decls(None, None, packed_varyings_size);
         for decl in &self.shader.decls {
             match decl {
                 Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
@@ -192,6 +207,7 @@ impl<'a> ShaderGenerator<'a> {
     fn generate_decls(
         &mut self,
         packed_attributes_size: Option<usize>,
+        packed_instances_size: Option<usize>,
         packed_varyings_size: usize
     ) {
         for decl in &self.shader.decls {
@@ -217,6 +233,10 @@ impl<'a> ShaderGenerator<'a> {
 
         if let Some(packed_attributes_size) = packed_attributes_size {
             self.generate_packed_attribute_decls(packed_attributes_size);
+        }
+
+        if let Some(packed_instances_size) = packed_instances_size {
+            self.generate_packed_instance_decls(packed_instances_size);
         }
 
         self.generate_packed_varying_decls(packed_varyings_size);
@@ -263,7 +283,6 @@ impl<'a> ShaderGenerator<'a> {
         for decl in &self.shader.decls {
             packed_attributes_size += match decl {
                 Decl::Attribute(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
-                Decl::Instance(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
                 _ => 0,
             }
         }
@@ -296,6 +315,43 @@ impl<'a> ShaderGenerator<'a> {
         }
     }
 
+    fn compute_packed_instances_size(&self) -> usize {
+        let mut packed_instances_size = 0;
+        for decl in &self.shader.decls {
+            packed_instances_size += match decl {
+                Decl::Instance(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
+                _ => 0,
+            }
+        }
+        packed_instances_size
+    }
+
+    fn generate_packed_instance_decls(
+        &mut self,
+        mut packed_instances_size: usize
+    ) {
+        let mut packed_instance_index = 0;
+        loop {
+            let packed_instance_size = packed_instances_size.min(4);
+            writeln!(
+                self.string,
+                "attribute {} mpsc_packed_instance_{};",
+                match packed_instance_size {
+                    0 => break,
+                    1 => "float",
+                    2 => "vec2",
+                    3 => "vec3",
+                    4 => "vec4",
+                    _ => panic!(),
+                },
+                packed_instance_index,
+            )
+            .unwrap();
+            packed_instances_size -= packed_instance_size;
+            packed_instance_index += 1;
+        }
+    }
+    
     fn compute_packed_varyings_size(&self) -> usize {
         let mut packed_varyings_size = 0;
         for decl in &self.shader.decls {
