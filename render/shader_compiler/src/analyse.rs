@@ -321,7 +321,6 @@ impl<'a> ShaderAnalyser<'a> {
         call_stack: &mut Vec<Ident>,
         decl: &FnDecl,
     ) -> Result<(), Error> {
-        println!("PENIS {:?} {:?}", kind, decl.ident);
         call_stack.push(decl.ident);
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
             let callee_decl = self.shader_ast.find_fn_decl(callee).unwrap();
@@ -394,9 +393,9 @@ impl<'a> ShaderAnalyser<'a> {
                     .iter()
                     .cloned(),
             );
-            decl.cons_deps.borrow_mut().as_mut().unwrap().extend(
+            decl.cons_fn_deps.borrow_mut().as_mut().unwrap().extend(
                 callee_decl
-                    .cons_deps
+                    .cons_fn_deps
                     .borrow()
                     .as_ref()
                     .unwrap()
@@ -498,7 +497,7 @@ impl<'a> FnDefAnalyser<'a> {
         *self.decl.instance_deps.borrow_mut() = Some(HashSet::new());
         self.decl.has_varying_deps.set(Some(false));
         *self.decl.builtin_deps.borrow_mut() = Some(HashSet::new());
-        *self.decl.cons_deps.borrow_mut() = Some(HashSet::new());
+        *self.decl.cons_fn_deps.borrow_mut() = Some(HashSet::new());
         self.analyse_block(&self.decl.block)?;
         self.env.pop_scope();
         Ok(())
