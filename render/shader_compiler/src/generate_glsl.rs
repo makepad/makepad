@@ -234,6 +234,13 @@ impl<'a> ShaderGenerator<'a> {
             }
         }
 
+        for decl in &self.shader.decls {
+            match decl {
+                Decl::Texture(decl) => self.generate_texture_decl(decl),
+                _ => {}
+            }
+        }
+
         if let Some(packed_attributes_size) = packed_attributes_size {
             self.generate_packed_attribute_decls(packed_attributes_size);
         }
@@ -273,6 +280,15 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn generate_uniform_decl(&mut self, decl: &UniformDecl) {
+        write!(self.string, "uniform ").unwrap();
+        self.write_ident_and_ty(
+            decl.ident,
+            decl.ty_expr.ty.borrow().as_ref().unwrap(),
+        );
+        writeln!(self.string, ";").unwrap();
+    }
+
+    fn generate_texture_decl(&mut self, decl: &TextureDecl) {
         write!(self.string, "uniform ").unwrap();
         self.write_ident_and_ty(
             decl.ident,
@@ -603,6 +619,23 @@ struct GlslBackendWriter;
 
 impl BackendWriter for GlslBackendWriter {
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit) {
-        write!(string, "{}", ty_lit).unwrap();
+        write!(string, "{}", match ty_lit {
+            TyLit::Bool => "bool",
+            TyLit::Int => "int",
+            TyLit::Float => "float",
+            TyLit::Bvec2 => "bvec2",
+            TyLit::Bvec3 => "bvec3",
+            TyLit::Bvec4 => "bvec4",
+            TyLit::Ivec2 => "ivec2",
+            TyLit::Ivec3 => "ivec3",
+            TyLit::Ivec4 => "ivec4",
+            TyLit::Vec2 => "vec2",
+            TyLit::Vec3 => "vec3",
+            TyLit::Vec4 => "vec4",
+            TyLit::Mat2 => "mat2",
+            TyLit::Mat3 => "mat3",
+            TyLit::Mat4 => "mat4",
+            TyLit::Texture2D => "sampler2D",
+        }).unwrap();
     }
 }
