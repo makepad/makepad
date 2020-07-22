@@ -109,28 +109,28 @@ impl CxShader {
                     return 1.0 / length(vec2(length(dFdx(p)), length(dFdy(p))));
                 }
                 
-                fn translate(self, x: float, y: float) -> vec2 {
+                fn translate(inout self, x: float, y: float) -> vec2 {
                     self.pos -= vec2(x, y);
                     return self.pos;
                 }
                 
-                fn rotate(self, a: float, x: float, y: float) {
+                fn rotate(inout self, a: float, x: float, y: float) {
                     let ca = cos(-a);
                     let sa = sin(-a);
                     let p = self.pos - vec2(x, y);
                     self.pos = vec2(p.x * ca - p.y * sa, p.x * sa + p.y * ca) + vec2(x, y);
                 }
                 
-                fn scale(self, f: float, x: float, y: float) {
+                fn scale(inout self, f: float, x: float, y: float) {
                     self.scale *= f;
                     self.pos = (self.pos - vec2(x, y)) * f + vec2(x, y);
                 }
                 
-                fn clear(self, color: vec4) {
+                fn clear(inout self, color: vec4) {
                     self.result = vec4(color.rgb * color.a + self.result.rgb * (1.0 - color.a), color.a);
                 }
                 
-                fn calc_blur(self,  w: float) -> float {
+                fn calc_blur(inout self,  w: float) -> float {
                     let wa = clamp(-w * self.aa, 0.0, 1.0);
                     let wb = 1.0;
                     if self.blur > 0.001 {
@@ -139,7 +139,7 @@ impl CxShader {
                     return wa * wb;
                 }
                 
-                fn fill_keep(self, color: vec4) -> vec4 {
+                fn fill_keep(inout self, color: vec4) -> vec4 {
                     let f = self.calc_blur(self.shape);
                     let source = vec4(color.rgb * color.a, color.a);
                     self.result = source * f + self.result * (1. - source.a * f);
@@ -150,7 +150,7 @@ impl CxShader {
                     return self.result;
                 }
                 
-                fn fill(self, color: vec4) -> vec4 {
+                fn fill(inout self, color: vec4) -> vec4 {
                     self.fill_keep(color);
                     self.old_shape = self.shape = 1e+20;
                     self.clip = -1e+20;
@@ -158,7 +158,7 @@ impl CxShader {
                     return self.result;
                 }
                 
-                fn stroke_keep(self, color: vec4, width: float) -> vec4 {
+                fn stroke_keep(inout self, color: vec4, width: float) -> vec4 {
                     let f = self.calc_blur(abs(self.shape) - width / self.scale);
                     let source = vec4(color.rgb * color.a, color.a);
                     let dest = self.result;
@@ -166,7 +166,7 @@ impl CxShader {
                     return self.result;
                 }
                 
-                fn stroke(self, color: vec4, width: float) -> vec4 {
+                fn stroke(inout self, color: vec4, width: float) -> vec4 {
                     self.stroke_keep(color, width);
                     self.old_shape = self.shape = 1e+20;
                     self.clip = -1e+20;
@@ -174,7 +174,7 @@ impl CxShader {
                     return self.result;
                 }
                 
-                fn glow_keep(self, color: vec4, width: float) -> vec4 {
+                fn glow_keep(inout self, color: vec4, width: float) -> vec4 {
                     let f = self.calc_blur(abs(self.shape) - width / self.scale);
                     let source = vec4(color.rgb * color.a, color.a);
                     let dest = self.result;
@@ -182,7 +182,7 @@ impl CxShader {
                     return self.result;
                 }
                 
-                fn glow(self, color: vec4, width: float) -> vec4 {
+                fn glow(inout self, color: vec4, width: float) -> vec4 {
                     self.glow_keep(color, width);
                     self.old_shape = self.shape = 1e+20;
                     self.clip = -1e+20;
@@ -190,35 +190,35 @@ impl CxShader {
                     return self.result;
                 }
                 
-                fn union(self) {
+                fn union(inout self) {
                     self.old_shape = self.shape = min(self.field, self.old_shape);
                 }
                 
-                fn intersect(self) {
+                fn intersect(inout self) {
                     self.old_shape = self.shape = max(self.field, self.old_shape);
                 }
                 
-                fn subtract(self) {
+                fn subtract(inout self) {
                     self.old_shape = self.shape = max(-self.field, self.old_shape);
                 }
                 
-                fn gloop(self, k: float) {
+                fn gloop(inout self, k: float) {
                     let h = clamp(0.5 + 0.5 * (self.old_shape - self.field) / k, 0.0, 1.0);
                     self.old_shape = self.shape = mix(self.old_shape, self.field, h) - k * h * (1.0 - h);
                 }
                 
-                fn blend(self, k: float) {
+                fn blend(inout self, k: float) {
                     self.old_shape = self.shape = mix(self.old_shape, self.field, k);
                 }
                 
-                fn circle(self, x: float, y: float, r: float) {
+                fn circle(inout self, x: float, y: float, r: float) {
                     let c = self.pos - vec2(x, y);
                     self.field = (length(c.xy) - r) / self.scale;
                     self.old_shape = self.shape;
                     self.shape = min(self.shape, self.field);
                 }
                 
-                fn box(self, x: float, y: float, w: float, h: float, r: float) {
+                fn box(inout self, x: float, y: float, w: float, h: float, r: float) {
                     let p = self.pos - vec2(x, y);
                     let size = vec2(0.5 * w, 0.5 * h);
                     let bp = max(abs(p - size.xy) - (size.xy - vec2(2. * r, 2. * r).xy), vec2(0., 0.));
@@ -227,7 +227,7 @@ impl CxShader {
                     self.shape = min(self.shape, self.field);
                 }
                 
-                fn rect(self, x: float, y: float, w: float, h: float) {
+                fn rect(inout self, x: float, y: float, w: float, h: float) {
                     let s = vec2(w, h) * 0.5;
                     let d = abs(vec2(x, y) - self.pos + s) - s;
                     let dm = min(d, vec2(0., 0.));
@@ -236,12 +236,12 @@ impl CxShader {
                     self.shape = min(self.shape, self.field);
                 }
                 
-                fn move_to(self, x: float, y: float) {
+                fn move_to(inout self, x: float, y: float) {
                     self.last_pos =
                     self.start_pos = vec2(x, y);
                 }
                 
-                fn line_to(self, x: float, y: float) {
+                fn line_to(inout self, x: float, y: float) {
                     let p = vec2(x, y);
                     
                     let pa = self.pos - self.last_pos;
@@ -256,7 +256,7 @@ impl CxShader {
                     self.last_pos = p;
                 }
                 
-                fn close_path(self) {
+                fn close_path(inout self) {
                     self.line_to(self.start_pos.x, self.start_pos.y);
                 }
             }
