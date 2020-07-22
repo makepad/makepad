@@ -28,19 +28,19 @@ impl Cx{
         }
     }
 
-}
+} 
 
 // floats
 
 
 #[derive(PartialEq, Copy, Clone, Hash, Eq)]
 pub struct FloatStyleId(pub TypeId);
-
+ 
 pub trait FloatStyle{ 
     fn set(&self, cx: &mut Cx, value: f32);
     fn get(&self, cx: &Cx) -> f32;
 }
-
+ 
 impl FloatStyle for FloatId{
     fn set(&self, cx: &mut Cx, value: f32) {
         cx.get_mut_style_top().floats.insert(*self, value);
