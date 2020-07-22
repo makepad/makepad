@@ -246,6 +246,7 @@ impl BackendWriter for MetalBackendWriter {
             TyLit::Mat2 => "mat2",
             TyLit::Mat3 => "mat3",
             TyLit::Mat4 => "mat4",
+            TyLit::Texture2D => panic!(), // TODO
         }).unwrap();
     }
 }

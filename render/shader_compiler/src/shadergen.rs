@@ -160,7 +160,7 @@ impl Into<PropId> for Texture2dId{
 
 
 impl Into<Ty> for Texture2dId{
-    fn into(self) -> Ty{Ty::Texture2d}
+    fn into(self) -> Ty{Ty::Texture2D}
 }
 
 

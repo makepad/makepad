@@ -61,6 +61,7 @@ pub enum TyLit {
     Mat2,
     Mat3,
     Mat4,
+    Texture2D,
 }
 
 impl TyLit {
@@ -81,6 +82,7 @@ impl TyLit {
             TyLit::Mat2 => Ty::Mat2,
             TyLit::Mat3 => Ty::Mat3,
             TyLit::Mat4 => Ty::Mat4,
+            TyLit::Texture2D => Ty::Texture2D,
         }
     }
 }
@@ -106,6 +108,7 @@ impl fmt::Display for TyLit {
                 TyLit::Mat2 => "mat2",
                 TyLit::Mat3 => "mat3",
                 TyLit::Mat4 => "mat4",
+                TyLit::Texture2D => "texture2D",
             }
         )
     }
