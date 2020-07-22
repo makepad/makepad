@@ -266,7 +266,7 @@ impl CxShader {
 }
 
 
-#[derive(Default, Clone)]
+#[derive(Debug,Default, Clone)]
 pub struct RectInstanceProps {
     pub x: Option<usize>,
     pub y: Option<usize>,
@@ -299,7 +299,7 @@ impl RectInstanceProps {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug,Clone)]
 pub struct InstanceProp {
     pub name: String,
     pub prop_id: PropId,
@@ -307,13 +307,13 @@ pub struct InstanceProp {
     pub slots: usize
 }
 
-#[derive(Default, Clone)]
+#[derive(Debug,Default, Clone)]
 pub struct InstanceProps {
     pub props: Vec<InstanceProp>,
     pub total_slots: usize,
 }
 
-#[derive(Clone)]
+#[derive(Debug,Clone)]
 pub struct UniformProp {
     pub name: String,
     pub prop_id: PropId,
@@ -321,20 +321,20 @@ pub struct UniformProp {
     pub slots: usize
 }
 
-#[derive(Default, Clone)]
+#[derive(Debug,Default, Clone)]
 pub struct UniformProps {
     pub props: Vec<UniformProp>,
     pub total_slots: usize,
 }
 
-#[derive(Clone)]
+#[derive(Debug,Clone)]
 pub struct NamedProp {
     pub name: String,
     pub offset: usize,
     pub slots: usize
 }
 
-#[derive(Default, Clone)]
+#[derive(Debug,Default, Clone)]
 pub struct NamedProps {
     pub props: Vec<NamedProp>,
     pub total_slots: usize,
@@ -423,7 +423,7 @@ impl UniformProps {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct CxShaderMapping {
     pub rect_instance_props: RectInstanceProps,
     pub uniform_props: UniformProps,

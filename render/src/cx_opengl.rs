@@ -425,7 +425,7 @@ impl Cx {
             if let Err(err) = openglsh {
                 panic!("Shader compile error {}", err);
             }
-        };
+        }; 
     }
     
     pub fn opengl_has_shader_error(compile: bool, shader: usize, source: &str) -> Option<String> {
@@ -479,9 +479,9 @@ impl Cx {
         let stride = (slots * mem::size_of::<f32>()) as i32;
         let num_attr = Self::ceil_div4(slots);
         for i in 0..num_attr {
-            let mut name = prefix.to_string();
-            name.push_str(&i.to_string());
-            name.push_str("\0");
+            let mut name0 = prefix.to_string();
+            name0.push_str(&i.to_string());
+            name0.push_str("\0");
             
             let mut size = ((slots - i * 4)) as i32;
             if size > 4 {
@@ -490,7 +490,10 @@ impl Cx {
             unsafe {
                 attribs.push(
                     OpenglAttribute {
-                        loc: gl::GetAttribLocation(program, name.as_ptr() as *const _) as u32,
+                        loc: {
+                            let loc = gl::GetAttribLocation(program, name0.as_ptr() as *const _) as u32;
+                            loc
+                        },
                         offset: (i * 4 * mem::size_of::<f32>()) as usize,
                         size: size,
                         stride: stride
@@ -510,7 +513,7 @@ impl Cx {
             name0.push_str("\0");
             unsafe {
                 gl_uni.push(OpenglUniform {
-                    loc: gl::GetUniformLocation(program, name0.as_ptr() as *const _),
+                    loc:gl::GetUniformLocation(program, name0.as_ptr() as *const _),
                     name: uni.name.clone(),
                     size: uni.prop_id.shader_ty().size()
                 })
@@ -555,7 +558,7 @@ impl Cx {
     
         let vertex = format!("#version 100\nprecision highp float;\nprecision highp int;\n{}\0", vertex);
         let fragment = format!("#version 100\n#extension GL_OES_standard_derivatives : enable\nprecision highp float;\nprecision highp int;\n{}\0", fragment);
-        
+        println!("{} {}", sh.name, fragment);  
         unsafe { 
             let vs = gl::CreateShader(gl::VERTEX_SHADER);
             gl::ShaderSource(vs, 1, [vertex.as_ptr() as *const _].as_ptr(), ptr::null());
@@ -581,8 +584,8 @@ impl Cx {
             gl::DeleteShader(vs);
             gl::DeleteShader(fs);
             
-            let geom_attribs = Self::opengl_get_attributes(program, "geomattr", mapping.attribute_props.total_slots);
-            let inst_attribs = Self::opengl_get_attributes(program, "instattr", mapping.instance_props.total_slots);
+            let geom_attribs = Self::opengl_get_attributes(program, "mpsc_packed_attribute_", mapping.attribute_props.total_slots);
+            let inst_attribs = Self::opengl_get_attributes(program, "mpsc_packed_instance_", mapping.instance_props.total_slots);
             
             // lets fetch the uniform positions for our uniforms
             sh.platform = Some(CxPlatformShader {
@@ -1007,7 +1010,7 @@ pub struct OpenglAttribute {
     pub stride: i32
 }
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct OpenglUniform {
     pub loc: i32,
     pub name: String,
