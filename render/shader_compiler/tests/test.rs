@@ -87,6 +87,5 @@ fn test() {
             prop_id: my_instance().into()
         }
     ]).unwrap();
-    println!("{}", generate_metal::generate_vertex_shader(&shader));
-    println!("{}", generate_metal::generate_fragment_shader(&shader));
+    println!("{}", generate_metal::generate_shader(&shader));
 }
