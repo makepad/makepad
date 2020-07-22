@@ -11,7 +11,7 @@ pub trait LiveColorGet{
 
 impl LiveColorGet for LiveColor{
     fn get(&self, _cx:&Cx)->Color{
-        return Color::default();
+        self.color
     }    
 }
 

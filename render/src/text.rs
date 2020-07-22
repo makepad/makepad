@@ -142,7 +142,7 @@ impl Text {
                 }
                 
                 s = pow(s, curve);
-                let col = get_color();
+                let col = get_color();//color!(white);//get_color();
                 return vec4(s * col.rgb * brightness * col.a, s * col.a); 
             }
             
