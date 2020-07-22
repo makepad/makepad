@@ -584,8 +584,8 @@ impl Cx {
             gl::DeleteShader(vs);
             gl::DeleteShader(fs);
             
-            let geom_attribs = Self::opengl_get_attributes(program, "mpsc_packed_attribute_", mapping.attribute_props.total_slots);
-            let inst_attribs = Self::opengl_get_attributes(program, "mpsc_packed_instance_", mapping.instance_props.total_slots);
+            let attributes = Self::opengl_get_attributes(program, "mpsc_packed_attribute_", mapping.attribute_props.total_slots);
+            let instances = Self::opengl_get_attributes(program, "mpsc_packed_instance_", mapping.instance_props.total_slots);
             
             // lets fetch the uniform positions for our uniforms
             sh.platform = Some(CxPlatformShader {
@@ -600,8 +600,8 @@ impl Cx {
                     buf.update_with_f32_data(opengl_cx, &sh.shader_gen.geometry_vertices);
                     buf
                 },
-                geom_attribs,
-                inst_attribs,
+                attributes,
+                instances,
                 pass_uniforms: Self::opengl_get_uniforms(program,  &mapping.pass_uniforms),
                 view_uniforms: Self::opengl_get_uniforms(program, &mapping.view_uniforms),
                 draw_uniforms: Self::opengl_get_uniforms(program, &mapping.draw_uniforms),
@@ -948,8 +948,8 @@ pub struct CxPlatformShader {
     pub program: u32,
     pub geom_vbuf: OpenglBuffer,
     pub geom_ibuf: OpenglBuffer,
-    pub geom_attribs: Vec<OpenglAttribute>,
-    pub inst_attribs: Vec<OpenglAttribute>,
+    pub attributes: Vec<OpenglAttribute>,
+    pub instances: Vec<OpenglAttribute>,
     pub pass_uniforms: Vec<OpenglUniform>,
     pub view_uniforms: Vec<OpenglUniform>,
     pub draw_uniforms: Vec<OpenglUniform>,
@@ -1048,14 +1048,14 @@ impl CxPlatformDrawCall {
                 
                 // bind the vertex and indexbuffers
                 gl::BindBuffer(gl::ARRAY_BUFFER, shp.geom_vbuf.gl_buffer.unwrap());
-                for attr in &shp.geom_attribs {
+                for attr in &shp.attributes {
                     gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
                     gl::EnableVertexAttribArray(attr.loc);
                 }
                 
                 gl::BindBuffer(gl::ARRAY_BUFFER, self.inst_vbuf.gl_buffer.unwrap());
                 
-                for attr in &shp.inst_attribs {
+                for attr in &shp.instances {
                     gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
                     gl::EnableVertexAttribArray(attr.loc);
                     gl::VertexAttribDivisor(attr.loc, 1 as gl::types::GLuint);
