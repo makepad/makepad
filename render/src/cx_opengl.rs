@@ -556,8 +556,19 @@ impl Cx {
         let fragment = generate_fragment_shader(&shader_ast);
         let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen);
     
-        let vertex = format!("#version 100\nprecision highp float;\nprecision highp int;\n{}\0", vertex);
-        let fragment = format!("#version 100\n#extension GL_OES_standard_derivatives : enable\nprecision highp float;\nprecision highp int;\n{}\0", fragment);
+        let vertex = format!("
+            #version 100
+            precision highp float;
+            precision highp int;
+            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
+            {}\0", vertex);
+        let fragment = format!("
+            #version 100
+            #extension GL_OES_standard_derivatives : enable
+            precision highp float;
+            precision highp int;
+            vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
+            {}\0", fragment);
         //println!("{} {}", sh.name, fragment);  
         unsafe { 
             let vs = gl::CreateShader(gl::VERTEX_SHADER);
