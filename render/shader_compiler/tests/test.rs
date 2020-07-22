@@ -9,7 +9,7 @@ use makepad_shader_compiler::uid;
 
 const SOURCE: &str = r#"
     struct Cx {
-        prop: float
+        pos: vec2
     }
 
     impl Cx {
@@ -20,13 +20,18 @@ const SOURCE: &str = r#"
 
         fn bar(inout self) {
             tTexture;
-            -self.prop;
+            -self.pos;
         }
 
         fn qux(self, x: float) -> float {
             aPosition;
             return 2.0 * x;
             self.bar();
+        }
+
+        fn translate(inout self, x: float, y: float) -> vec2 {
+            self.pos -= vec2(x, y);
+            return self.pos;
         }
     }
 
