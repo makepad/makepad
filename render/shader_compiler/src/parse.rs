@@ -160,7 +160,7 @@ impl<'a> Parser<'a> {
             instance_deps: RefCell::new(None),
             has_varying_deps: Cell::new(None),
             builtin_deps: RefCell::new(None),
-            cons_deps: RefCell::new(None),
+            cons_fn_deps: RefCell::new(None),
             ident,
             params,
             return_ty_expr,

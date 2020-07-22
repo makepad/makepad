@@ -132,7 +132,7 @@ pub struct FnDecl {
     pub instance_deps: RefCell<Option<HashSet<Ident>>>,
     pub has_varying_deps: Cell<Option<bool>>,
     pub builtin_deps: RefCell<Option<HashSet<Ident>>>,
-    pub cons_deps: RefCell<Option<HashSet<(TyLit, Vec<Ty>)>>>,
+    pub cons_fn_deps: RefCell<Option<HashSet<(TyLit, Vec<Ty>)>>>,
     pub ident: Ident,
     pub params: Vec<Param>,
     pub return_ty_expr: Option<TyExpr>,
