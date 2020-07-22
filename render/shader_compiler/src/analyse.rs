@@ -366,6 +366,10 @@ impl<'a> ShaderAnalyser<'a> {
                 .as_mut()
                 .unwrap()
                 .extend(callee_decl.uniform_block_deps.borrow().as_ref().unwrap());
+            decl.has_texture_deps.set(Some(
+                decl.has_texture_deps.get().unwrap()
+                    || callee_decl.has_texture_deps.get().unwrap(),
+            ));
             decl.attribute_deps
                 .borrow_mut()
                 .as_mut()
@@ -503,6 +507,7 @@ impl<'a> FnDefAnalyser<'a> {
         );
         *self.decl.callees.borrow_mut() = Some(HashSet::new());
         *self.decl.uniform_block_deps.borrow_mut() = Some(HashSet::new());
+        self.decl.has_texture_deps.set(Some(false));
         *self.decl.attribute_deps.borrow_mut() = Some(HashSet::new());
         *self.decl.instance_deps.borrow_mut() = Some(HashSet::new());
         self.decl.has_in_varying_deps.set(Some(false));

@@ -365,8 +365,10 @@ impl<'a> ShaderGenerator<'a> {
     fn generate_block(&mut self, block: &Block) {
         BlockGenerator {
             shader: self.shader,
-            indent_level: 0,
             backend_writer: &GlslBackendWriter,
+            use_hidden_parameters: false,
+            use_generated_constructors: false,
+            indent_level: 0,
             string: self.string
         }
         .generate_block(block)
@@ -375,9 +377,9 @@ impl<'a> ShaderGenerator<'a> {
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             shader: self.shader,
+            backend_writer: &GlslBackendWriter,
             use_hidden_parameters: false,
             use_generated_constructors: false,
-            backend_writer: &GlslBackendWriter,
             string: self.string,
         }
         .generate_expr(expr)
