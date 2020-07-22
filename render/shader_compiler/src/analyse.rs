@@ -265,7 +265,7 @@ impl<'a> ShaderAnalyser<'a> {
     fn analyse_texture_decl(&mut self, decl: &TextureDecl) -> Result<(), Error> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         match ty {
-            Ty::Texture2d => {}
+            Ty::Texture2D => {}
             _ => return Err(Error {
                 span: decl.span,
                 message: String::from("texture must be a texture2D"),
