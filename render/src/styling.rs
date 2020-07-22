@@ -194,7 +194,7 @@ pub struct ShaderId(pub TypeId);
 
 impl ShaderId {
     pub fn set(&self, cx: &mut Cx, sg: ShaderGen) {
-        let shader = cx.add_shader(sg, &format!("{:?}", self.0));
+        let shader = cx.add_shader(sg, &format!("Style Shader {:?}", self.0));
         cx.get_mut_style_top().shaders.insert(*self, shader);
     }
     
