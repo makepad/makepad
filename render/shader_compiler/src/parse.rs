@@ -155,6 +155,7 @@ impl<'a> Parser<'a> {
             is_used_in_fragment_shader: Cell::new(None),
             callees: RefCell::new(None),
             uniform_block_deps: RefCell::new(None),
+            has_texture_deps: Cell::new(None),
             attribute_deps: RefCell::new(None),
             instance_deps: RefCell::new(None),
             has_in_varying_deps: Cell::new(None),
