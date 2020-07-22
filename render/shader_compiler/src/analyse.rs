@@ -380,13 +380,9 @@ impl<'a> ShaderAnalyser<'a> {
                 .as_mut()
                 .unwrap()
                 .extend(callee_decl.instance_deps.borrow().as_ref().unwrap());
-            decl.has_in_varying_deps.set(Some(
-                decl.has_in_varying_deps.get().unwrap()
-                    || callee_decl.has_in_varying_deps.get().unwrap(),
-            ));
-            decl.has_out_varying_deps.set(Some(
-                decl.has_out_varying_deps.get().unwrap()
-                    || callee_decl.has_out_varying_deps.get().unwrap(),
+            decl.has_varying_deps.set(Some(
+                decl.has_varying_deps.get().unwrap()
+                    || callee_decl.has_varying_deps.get().unwrap(),
             ));
             decl.builtin_deps.borrow_mut().as_mut().unwrap().extend(
                 callee_decl
@@ -412,7 +408,7 @@ impl<'a> ShaderAnalyser<'a> {
                 return Err(Error {
                     span: decl.span,
                     message: format!(
-                        "function `{}` can't read from or write to any attributes, because it is used in both the vertex and the fragment shader",
+                        "function `{}` can't access any attributes, since it's used in both the vertex and fragment shader",
                         decl.ident
                     ),
                 });
@@ -421,31 +417,20 @@ impl<'a> ShaderAnalyser<'a> {
                 return Err(Error {
                     span: decl.span,
                     message: format!(
-                        "function `{}` can't read from or write to any instances, because it is used in both the vertex and the fragment shader",
+                        "function `{}` can't access any instances, since it's used in both the vertex and fragment shader",
                         decl.ident
                     ),
                 });
             }
-        }
-        if decl.is_used_in_vertex_shader.get().unwrap() && decl.has_in_varying_deps.get().unwrap() {
-            return Err(Error {
-                span: decl.span,
-                message: format!(
-                    "function `{}` can't read from any varyings, because it is used in the vertex shader",
-                    decl.ident
-                ),
-            });
-        }
-        if decl.is_used_in_fragment_shader.get().unwrap()
-            && decl.has_out_varying_deps.get().unwrap()
-        {
-            return Err(Error {
-                span: decl.span,
-                message: format!(
-                    "function `{}` can't write to any varyings, because it is used in the fragment shader",
-                    decl.ident
-                ),
-            });
+            if decl.has_varying_deps.get().unwrap() {
+                return Err(Error {
+                    span: decl.span,
+                    message: format!(
+                        "function `{}` can't access any varyings, since it's used in both the vertex and fragment shader",
+                        decl.ident
+                    ),
+                });
+            }
         }
         visited.insert(decl.ident);
         Ok(())
@@ -510,8 +495,7 @@ impl<'a> FnDefAnalyser<'a> {
         self.decl.has_texture_deps.set(Some(false));
         *self.decl.attribute_deps.borrow_mut() = Some(HashSet::new());
         *self.decl.instance_deps.borrow_mut() = Some(HashSet::new());
-        self.decl.has_in_varying_deps.set(Some(false));
-        self.decl.has_out_varying_deps.set(Some(false));
+        self.decl.has_varying_deps.set(Some(false));
         *self.decl.builtin_deps.borrow_mut() = Some(HashSet::new());
         *self.decl.cons_deps.borrow_mut() = Some(HashSet::new());
         self.analyse_block(&self.decl.block)?;
