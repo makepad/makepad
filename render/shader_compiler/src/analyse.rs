@@ -321,6 +321,7 @@ impl<'a> ShaderAnalyser<'a> {
         call_stack: &mut Vec<Ident>,
         decl: &FnDecl,
     ) -> Result<(), Error> {
+        println!("PENIS {:?} {:?}", kind, decl.ident);
         call_stack.push(decl.ident);
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
             let callee_decl = self.shader_ast.find_fn_decl(callee).unwrap();
@@ -340,13 +341,13 @@ impl<'a> ShaderAnalyser<'a> {
                     )
                 });
             }
-            match kind {
-                ShaderKind::Vertex => decl.is_used_in_vertex_shader.set(Some(true)),
-                ShaderKind::Fragment => decl.is_used_in_fragment_shader.set(Some(true)),
-            }
             self.analyse_call_tree(kind, call_stack, callee_decl)?;
         }
         call_stack.pop();
+        match kind {
+            ShaderKind::Vertex => decl.is_used_in_vertex_shader.set(Some(true)),
+            ShaderKind::Fragment => decl.is_used_in_fragment_shader.set(Some(true)),
+        }
         Ok(())
     }
 

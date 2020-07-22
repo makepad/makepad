@@ -14,8 +14,6 @@ const SOURCE: &str = r#"
     impl Cx {
         fn foo() -> Cx {
             let cx: Cx;
-            aPosition;
-            iRotation;
             return cx;
         }
 
