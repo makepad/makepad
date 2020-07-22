@@ -213,7 +213,7 @@ impl<'a> BlockGenerator<'a> {
         block_if_true: &Block,
         block_if_false: &Option<Box<Block>>,
     ) {
-        write!(self.string, "if (").unwrap();
+        write!(self.string, "if").unwrap();
         self.generate_expr(expr);
         write!(self.string, " ").unwrap();
         self.generate_block(block_if_true);

@@ -284,7 +284,7 @@ impl Area{
                     InstanceReadRef{
                         offset:inst.instance_offset, 
                         count:inst.instance_count, 
-                        slots:sh.mapping.instance_slots,
+                        slots:sh.mapping.instance_props.total_slots,
                         buffer:&draw_call.instance
                     }
                 )
@@ -310,7 +310,7 @@ impl Area{
                     InstanceWriteRef{
                         offset:inst.instance_offset, 
                         count:inst.instance_count, 
-                        slots:sh.mapping.instance_slots,
+                        slots:sh.mapping.instance_props.total_slots,
                         buffer:&mut draw_call.instance
                     }
                 )

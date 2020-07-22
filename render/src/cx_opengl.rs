@@ -6,6 +6,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_ulong, c_void};
 use std::ptr;
 use std::mem;
+use makepad_shader_compiler::generate_glsl::{generate_vertex_shader, generate_fragment_shader};
 
 impl Cx {
     
@@ -72,7 +73,7 @@ impl Cx {
                 unsafe {
                     gl::UseProgram(shp.program);
                     gl::BindVertexArray(draw_call.platform.vao.unwrap());
-                    let instances = draw_call.instance.len() / sh.mapping.instance_slots;
+                    let instances = draw_call.instance.len() / sh.mapping.instance_props.total_slots;
                     let indices = sh.shader_gen.geometry_indices.len();
                     
                     let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
@@ -413,7 +414,7 @@ impl Cx {
         */
     //self.render_view(pass_id, view_id, true, &Rect::zero(), &opengl_cx);
     // commit
-    //}
+    //} 
     
     pub fn opengl_compile_all_shaders(&mut self, opengl_cx: &OpenglCx) {
         unsafe {
@@ -422,7 +423,7 @@ impl Cx {
         for sh in &mut self.shaders {
             let openglsh = Self::opengl_compile_shader(sh, opengl_cx);
             if let Err(err) = openglsh {
-                panic!("Got opengl shader compile error:: {}", err);
+                panic!("Shader compile error {}", err);
             }
         };
     }
@@ -540,12 +541,22 @@ impl Cx {
     pub fn opengl_compile_shader(sh: &mut CxShader, opengl_cx: &OpenglCx) -> Result<(), String> {
         
         // lets compile.
+        let shader_ast = sh.shader_gen.lex_parse_analyse();
         
+        if let Err(err) = shader_ast{
+            return Err(format!("Got shader error: {}:{} {}", err.file, err.line, err.msg));
+        } 
+        let shader_ast = shader_ast.unwrap();
         
-        let (vertex, fragment, mapping) = Self::gl_assemble_shader(&sh.shader_gen, GLShaderType::OpenGL) ?;
-        // now we have a pixel and a vertex shader
-        // so lets now pass it to GL
-        unsafe {
+        // lets generate the vertexshader
+        let vertex = generate_vertex_shader(&shader_ast);
+        let fragment = generate_fragment_shader(&shader_ast);
+        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen);
+    
+        let vertex = format!("#version 100\nprecision highp float;\nprecision highp int;\n{}\0", vertex);
+        let fragment = format!("#version 100\n#extension GL_OES_standard_derivatives : enable\nprecision highp float;\nprecision highp int;\n{}\0", fragment);
+        
+        unsafe { 
             let vs = gl::CreateShader(gl::VERTEX_SHADER);
             gl::ShaderSource(vs, 1, [vertex.as_ptr() as *const _].as_ptr(), ptr::null());
             gl::CompileShader(vs);
@@ -570,8 +581,8 @@ impl Cx {
             gl::DeleteShader(vs);
             gl::DeleteShader(fs);
             
-            let geom_attribs = Self::opengl_get_attributes(program, "geomattr", mapping.geometry_slots);
-            let inst_attribs = Self::opengl_get_attributes(program, "instattr", mapping.instance_slots);
+            let geom_attribs = Self::opengl_get_attributes(program, "geomattr", mapping.attribute_props.total_slots);
+            let inst_attribs = Self::opengl_get_attributes(program, "instattr", mapping.instance_props.total_slots);
             
             // lets fetch the uniform positions for our uniforms
             sh.platform = Some(CxPlatformShader {
@@ -595,6 +606,7 @@ impl Cx {
             });
             sh.mapping = mapping;
             return Ok(());
+            
         }
     }
 }
