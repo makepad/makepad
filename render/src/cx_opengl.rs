@@ -424,7 +424,7 @@ impl Cx {
             let openglsh = Self::opengl_compile_shader(sh, opengl_cx);
             if let Err(err) = openglsh {
                 panic!("Shader compile error {}", err);
-            }
+            } 
         }; 
     }
     
@@ -558,7 +558,7 @@ impl Cx {
     
         let vertex = format!("#version 100\nprecision highp float;\nprecision highp int;\n{}\0", vertex);
         let fragment = format!("#version 100\n#extension GL_OES_standard_derivatives : enable\nprecision highp float;\nprecision highp int;\n{}\0", fragment);
-        println!("{} {}", sh.name, fragment);  
+        //println!("{} {}", sh.name, fragment);  
         unsafe { 
             let vs = gl::CreateShader(gl::VERTEX_SHADER);
             gl::ShaderSource(vs, 1, [vertex.as_ptr() as *const _].as_ptr(), ptr::null());
@@ -572,7 +572,7 @@ impl Cx {
             gl::CompileShader(fs);
             if let Some(error) = Self::opengl_has_shader_error(true, fs as usize, &fragment) {
                 return Err(format!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error))
-            }
+            } 
             
             let program = gl::CreateProgram();
             gl::AttachShader(program, vs);
