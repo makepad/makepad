@@ -106,7 +106,10 @@ impl<'a> ShaderGenerator<'a> {
             }
         }
         let mut visited = HashSet::new();
-        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("vertex")).unwrap(), &mut visited);
+        self.generate_fn_decl(
+            self.shader.find_fn_decl(Ident::new("vertex")).unwrap(),
+            &mut visited
+        );
         writeln!(self.string, "void main() {{").unwrap();
         let mut attribute_unpacker = VarUnpacker::new(
             "mpsc_packed_attribute",
@@ -208,7 +211,10 @@ impl<'a> ShaderGenerator<'a> {
             }
         }
         let mut visited = HashSet::new();
-        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("pixel")).unwrap(), &mut visited);
+        self.generate_fn_decl(
+            self.shader.find_fn_decl(Ident::new("pixel")).unwrap(),
+            &mut visited
+        );
         writeln!(self.string, "void main() {{").unwrap();
         let mut varying_unpacker = VarUnpacker::new(
             "mpsc_packed_varying",
@@ -277,14 +283,26 @@ impl<'a> ShaderGenerator<'a> {
         }
 
         if let Some(packed_attributes_size) = packed_attributes_size {
-            self.generate_packed_attribute_decls(packed_attributes_size);
+            self.generate_packed_var_decls(
+                "attribute",
+                "mpsc_packed_attribute",
+                packed_attributes_size
+            );
         }
 
         if let Some(packed_instances_size) = packed_instances_size {
-            self.generate_packed_instance_decls(packed_instances_size);
+            self.generate_packed_var_decls(
+                "attribute",
+                "mpsc_packed_instance",
+                packed_instances_size
+            );
         }
 
-        self.generate_packed_varying_decls(packed_varyings_size);
+        self.generate_packed_var_decls(
+            "varying",
+            "mpsc_packed_varying",
+            packed_varyings_size,
+        );
     }
 
     fn generate_struct_decl(&mut self, decl: &StructDecl) {
@@ -343,32 +361,6 @@ impl<'a> ShaderGenerator<'a> {
         packed_attributes_size
     }
 
-    fn generate_packed_attribute_decls(
-        &mut self,
-        mut packed_attributes_size: usize
-    ) {
-        let mut packed_attribute_index = 0;
-        loop {
-            let packed_attribute_size = packed_attributes_size.min(4);
-            writeln!(
-                self.string,
-                "attribute {} mpsc_packed_attribute_{};",
-                match packed_attribute_size {
-                    0 => break,
-                    1 => "float",
-                    2 => "vec2",
-                    3 => "vec3",
-                    4 => "vec4",
-                    _ => panic!(),
-                },
-                packed_attribute_index,
-            )
-            .unwrap();
-            packed_attributes_size -= packed_attribute_size;
-            packed_attribute_index += 1;
-        }
-    }
-
     fn compute_packed_instances_size(&self) -> usize {
         let mut packed_instances_size = 0;
         for decl in &self.shader.decls {
@@ -378,32 +370,6 @@ impl<'a> ShaderGenerator<'a> {
             }
         }
         packed_instances_size
-    }
-
-    fn generate_packed_instance_decls(
-        &mut self,
-        mut packed_instances_size: usize
-    ) {
-        let mut packed_instance_index = 0;
-        loop {
-            let packed_instance_size = packed_instances_size.min(4);
-            writeln!(
-                self.string,
-                "attribute {} mpsc_packed_instance_{};",
-                match packed_instance_size {
-                    0 => break,
-                    1 => "float",
-                    2 => "vec2",
-                    3 => "vec3",
-                    4 => "vec4",
-                    _ => panic!(),
-                },
-                packed_instance_index,
-            )
-            .unwrap();
-            packed_instances_size -= packed_instance_size;
-            packed_instance_index += 1;
-        }
     }
     
     fn compute_packed_varyings_size(&self) -> usize {
@@ -423,17 +389,20 @@ impl<'a> ShaderGenerator<'a> {
         packed_varyings_size
     }
 
-    fn generate_packed_varying_decls(
+    fn generate_packed_var_decls(
         &mut self,
-        mut packed_varyings_size: usize
+        packed_var_qualifier: &'a str,
+        packed_var_name: &'a str,
+        mut packed_vars_size: usize
     ) {
-        let mut packed_varying_index = 0;
+        let mut packed_var_index = 0;
         loop {
-            let packed_varying_size = packed_varyings_size.min(4);
+            let packed_var_size = packed_vars_size.min(4);
             writeln!(
                 self.string,
-                "varying {} mpsc_packed_varying_{};",
-                match packed_varying_size {
+                "{} {} {}_{};",
+                packed_var_qualifier,
+                match packed_var_size {
                     0 => break,
                     1 => "float",
                     2 => "vec2",
@@ -441,23 +410,22 @@ impl<'a> ShaderGenerator<'a> {
                     4 => "vec4",
                     _ => panic!(),
                 },
-                packed_varying_index,
+                packed_var_name,
+                packed_var_index,
             )
             .unwrap();
-            packed_varyings_size -= packed_varying_size;
-            packed_varying_index += 1;
+            packed_vars_size -= packed_var_size;
+            packed_var_index += 1;
         }
     }
 
-    fn generate_fn_decl(&mut self, decl: &FnDecl, visited:&mut HashSet<String>) {
+    fn generate_fn_decl(&mut self, decl: &FnDecl, visited: &mut HashSet<Ident>) {
+        if visited.contains(&decl.ident) {
+            return;
+        }
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
             self.generate_fn_decl(self.shader.find_fn_decl(callee).unwrap(), visited);
         }
-        let ident_str = decl.ident.to_string();
-        if visited.contains(&ident_str){
-            return
-        }
-        visited.insert(ident_str);
         self.write_ident_and_ty(
             decl.ident,
             decl.return_ty.borrow().as_ref().unwrap(),
@@ -478,6 +446,7 @@ impl<'a> ShaderGenerator<'a> {
         write!(self.string, ") ").unwrap();
         self.generate_block(&decl.block);
         writeln!(self.string).unwrap();
+        visited.insert(decl.ident);
     }
 
     fn generate_block(&mut self, block: &Block) {
@@ -513,7 +482,7 @@ impl<'a> ShaderGenerator<'a> {
 }
 
 struct VarPacker<'a> {
-    packed_var_prefix: &'a str,
+    packed_var_name: &'a str,
     packed_vars_size: usize,
     packed_var_index: usize,
     packed_var_size: usize,
@@ -523,12 +492,12 @@ struct VarPacker<'a> {
 
 impl<'a> VarPacker<'a> {
     fn new(
-        packed_var_prefix: &'a str,
+        packed_var_name: &'a str,
         packed_vars_size: usize,
         string: &'a mut String
     ) -> VarPacker<'a> {
         VarPacker {
-            packed_var_prefix,
+            packed_var_name,
             packed_vars_size,
             packed_var_index: 0,
             packed_var_size: packed_vars_size.min(4),
@@ -544,7 +513,7 @@ impl<'a> VarPacker<'a> {
             let count = var_size - var_offset;
             let packed_count = self.packed_var_size - self.packed_var_offset;
             let min_count = count.min(packed_count);
-            write!(self.string, "    {}_{}", self.packed_var_prefix, self.packed_var_index).unwrap();
+            write!(self.string, "    {}_{}", self.packed_var_name, self.packed_var_index).unwrap();
             if self.packed_var_size > 1 {
                 write!(
                     self.string,
@@ -582,7 +551,7 @@ impl<'a> VarPacker<'a> {
 }
 
 struct VarUnpacker<'a> {
-    packed_var_prefix: &'a str,
+    packed_var_name: &'a str,
     packed_vars_size: usize,
     packed_var_index: usize,
     packed_var_size: usize,
@@ -592,12 +561,12 @@ struct VarUnpacker<'a> {
 
 impl<'a> VarUnpacker<'a> {
     fn new(
-        packed_var_prefix: &'a str,
+        packed_var_name: &'a str,
         packed_vars_size: usize,
         string: &'a mut String
     ) -> VarUnpacker<'a> {
         VarUnpacker {
-            packed_var_prefix,
+            packed_var_name,
             packed_vars_size,
             packed_var_index: 0,
             packed_var_size: packed_vars_size.min(4),
@@ -626,7 +595,7 @@ impl<'a> VarUnpacker<'a> {
                 )
                 .unwrap();
             }
-            write!(self.string, " = {}_{}", self.packed_var_prefix, self.packed_var_index).unwrap();
+            write!(self.string, " = {}_{}", self.packed_var_name, self.packed_var_index).unwrap();
             if self.packed_var_size > 1 {
                 write!(
                     self.string,
