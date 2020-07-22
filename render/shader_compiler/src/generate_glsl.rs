@@ -407,6 +407,9 @@ impl<'a> ShaderGenerator<'a> {
         let mut sep = "";
         for param in &decl.params {
             write!(self.string, "{}", sep).unwrap();
+            if param.is_inout {
+                write!(self.string, "inout ").unwrap();
+            }
             self.write_ident_and_ty(
                 param.ident,
                 param.ty_expr.ty.borrow().as_ref().unwrap(),
