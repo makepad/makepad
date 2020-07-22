@@ -477,7 +477,7 @@ impl<'a> FnDefAnalyser<'a> {
                 param.span,
                 param.ident,
                 Sym::Var {
-                    is_mut: param.is_inout,
+                    is_mut: true,
                     ty: param.ty_expr.ty.borrow().as_ref().unwrap().clone(),
                     kind: VarKind::Local,
                 },
