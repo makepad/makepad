@@ -547,9 +547,9 @@ impl CxView {
     pub fn def_uniforms(sg: ShaderGen) -> ShaderGen {
         sg.compose(shader!{"
             uniform view_transform: Self::view_transform() in view;
-            uniform draw_clip: Self::draw_clip() in view;
-            uniform draw_scroll: Self::draw_scroll() in view;
-            uniform draw_zbias: Self::draw_zbias() in view;
+            uniform draw_clip: Self::draw_clip() in draw;
+            uniform draw_scroll: Self::draw_scroll() in draw;
+            uniform draw_zbias: Self::draw_zbias() in draw;
         "})
     }
     

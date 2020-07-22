@@ -498,9 +498,17 @@ impl<'a> ExprGenerator<'a> {
         _ident: Ident,
         _arg_exprs: &[Expr],
     ) {
+        fn float_to_string(v:f32)->String{
+            if v.abs().fract() < 0.00000001{ 
+                format!("{}.0", v)
+            }
+            else{
+                format!("{}", v)
+            }
+        }
         match analysis.get().unwrap() {
             MacroCallAnalysis::Color { r, g, b, a } => {
-                write!(self.string, "vec4({}, {}, {}, {})", r, g, b, a).unwrap();
+                write!(self.string, "vec4({}, {}, {}, {})", float_to_string(r), float_to_string(g), float_to_string(b), float_to_string(a)).unwrap();
             }
         }
     }

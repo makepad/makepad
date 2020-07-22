@@ -16,7 +16,7 @@ pub struct LiveLoc{
 }
 
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Debug, Clone, Hash, PartialEq)]
 pub struct PropDef{
     pub name: String,
     pub ident: String,
@@ -24,7 +24,7 @@ pub struct PropDef{
     pub prop_id:PropId
 }
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Debug, Clone, Hash, PartialEq)]
 pub struct ShaderSub{
     pub loc:LiveLoc,
     pub code:String,
@@ -83,7 +83,7 @@ impl ShaderGen{
     pub fn compose(mut self, sub: ShaderSub) -> Self {
         self.subs.push(sub);
         self
-    }
+    } 
     
     pub fn lex_parse_analyse(&self)->Result<ShaderAst, ShaderGenError>{
         let mut shader_ast = ShaderAst::new();
@@ -126,7 +126,7 @@ impl Hash for ShaderGen {
     }
 }
 
-#[derive(Clone, PartialEq, Hash)]
+#[derive(Debug,  Clone, PartialEq, Hash)]
 pub enum PropId{
     Texture2d(Texture2dId),
     Color(ColorId),
@@ -151,7 +151,7 @@ impl PropId{
     }
 }
 
-#[derive(Hash, PartialEq, Copy, Clone, Eq)]
+#[derive(Debug,  Hash, PartialEq, Copy, Clone, Eq)]
 pub struct Texture2dId(pub TypeId);
 
 impl Into<PropId> for Texture2dId{
@@ -169,7 +169,7 @@ impl Into<Texture2dId> for TypeId{
 }
 
 
-#[derive(Hash, PartialEq, Copy, Clone, Eq)]
+#[derive(Debug, Hash, PartialEq, Copy, Clone, Eq)]
 pub struct ColorId(pub TypeId);
 
 impl Into<PropId> for ColorId{
@@ -187,7 +187,7 @@ impl Into<ColorId> for TypeId{
 
 
 
-#[derive(Hash, PartialEq, Copy, Clone, Eq)]
+#[derive(Debug, Hash, PartialEq, Copy, Clone, Eq)]
 pub struct Vec4Id(pub TypeId);
 
 impl Into<PropId> for Vec4Id{
@@ -204,7 +204,7 @@ impl Into<Ty> for Vec4Id{
 
 
 
-#[derive(Hash, PartialEq, Copy, Clone, Eq)]
+#[derive(Debug, Hash, PartialEq, Copy, Clone, Eq)]
 pub struct Vec3Id(pub TypeId);
 
 impl Into<PropId> for Vec3Id{
@@ -221,7 +221,7 @@ impl Into<Ty> for Vec3Id{
 
 
 
-#[derive(Hash, PartialEq, Copy, Clone, Eq)]
+#[derive(Debug, Hash, PartialEq, Copy, Clone, Eq)]
 pub struct Vec2Id(pub TypeId);
 
 impl Into<PropId> for Vec2Id{
@@ -238,7 +238,7 @@ impl Into<Ty> for Vec2Id{
 
 
 
-#[derive(Hash, PartialEq, Copy, Clone, Eq)]
+#[derive(Debug, Hash, PartialEq, Copy, Clone, Eq)]
 pub struct FloatId(pub TypeId);
 
 impl Into<PropId> for FloatId{
@@ -254,7 +254,7 @@ impl Into<Ty> for FloatId{
 }
 
 
-#[derive(Hash, PartialEq, Copy, Clone, Eq)]
+#[derive(Debug, Hash, PartialEq, Copy, Clone, Eq)]
 pub struct Mat4Id(pub TypeId);
 
 impl Into<PropId> for Mat4Id{
