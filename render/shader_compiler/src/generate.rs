@@ -101,8 +101,10 @@ pub trait BackendWriter {
 
 pub struct BlockGenerator<'a> {
     pub shader: &'a ShaderAst,
-    pub indent_level: usize,
     pub backend_writer: &'a dyn BackendWriter,
+    pub use_hidden_params: bool,
+    pub use_generated_cons_fns: bool,
+    pub indent_level: usize,
     pub string: &'a mut String,
 }
 
@@ -264,9 +266,9 @@ impl<'a> BlockGenerator<'a> {
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             shader: self.shader,
-            use_hidden_parameters: false,
-            use_generated_constructors: false,
             backend_writer: self.backend_writer,
+            use_hidden_params: self.use_hidden_params,
+            use_generated_cons_fns: self.use_generated_cons_fns,
             string: self.string,
         }
         .generate_expr(expr)
@@ -289,9 +291,9 @@ impl<'a> BlockGenerator<'a> {
 
 pub struct ExprGenerator<'a> {
     pub shader: &'a ShaderAst,
-    pub use_hidden_parameters: bool,
-    pub use_generated_constructors: bool,
     pub backend_writer: &'a dyn BackendWriter,
+    pub use_hidden_params: bool,
+    pub use_generated_cons_fns: bool,
     pub string: &'a mut String,
 }
 
@@ -453,10 +455,14 @@ impl<'a> ExprGenerator<'a> {
             self.generate_expr(arg_expr);
             sep = ", ";
         }
-        if self.use_hidden_parameters {
+        if self.use_hidden_params {
             if let Some(decl) = self.shader.find_fn_decl(ident) {
                 for &ident in decl.uniform_block_deps.borrow().as_ref().unwrap() {
                     write!(self.string, "{}mpsc_{}_uniforms", sep, ident).unwrap();
+                    sep = ", ";
+                }
+                if decl.has_texture_deps.get().unwrap() {
+                    write!(self.string, "{}mpsc_textures", sep).unwrap();
                     sep = ", ";
                 }
                 if decl.is_used_in_vertex_shader.get().unwrap() {
@@ -468,11 +474,14 @@ impl<'a> ExprGenerator<'a> {
                         write!(self.string, "{}mpsc_instances", sep).unwrap();
                         sep = ", ";
                     }
-                }
-                if decl.is_used_in_fragment_shader.get().unwrap() {
+                    if decl.has_varying_deps.get().unwrap() {
+                        write!(self.string, "{}mpsc_varyings", sep).unwrap();
+                    }
+                } else {
+                    assert!(decl.is_used_in_fragment_shader.get().unwrap());
                     if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty()
                         || decl.instance_deps.borrow().as_ref().unwrap().is_empty()
-                        || decl.has_in_varying_deps.get().unwrap()
+                        || decl.has_varying_deps.get().unwrap()
                     {
                         write!(self.string, "{}mpsc_varyings", sep).unwrap();
                     }
@@ -502,7 +511,7 @@ impl<'a> ExprGenerator<'a> {
         ty_lit: TyLit,
         arg_exprs: &[Expr]
     ) {
-        if self.use_generated_constructors {
+        if self.use_generated_cons_fns {
             write!(self.string, "mpsc_").unwrap();
             self.write_ty_lit(ty_lit);
             for arg_expr in arg_exprs {
@@ -607,7 +616,7 @@ impl<'a> ShaderGenerator<'a> {
             .shader_ast
             .find_fn_decl(ident)
             .unwrap()
-            .cons_deps
+            .cons_fn_deps
             .borrow()
             .as_ref()
             .unwrap()
