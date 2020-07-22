@@ -196,6 +196,9 @@ impl<'a> DepAnalyser<'a> {
                         .unwrap()
                         .insert(ident);
                 }
+                VarKind::Texture => {
+                    self.decl.has_texture_deps.set(Some(true));
+                }
                 VarKind::Uniform => {
                     self.decl
                         .uniform_block_deps
