@@ -120,8 +120,12 @@ impl<'a> Parser<'a> {
         let mut params = Vec::new();
         if !self.accept_token(Token::RightParen) {
             if let Some(prefix) = prefix {
+                let span = self.begin_span();
+                let is_inout = self.accept_token(Token::Inout);
                 if self.accept_token(Token::Self_) {
-                    params.push(Param {
+                    params.push(span.end(self, |span| Param {
+                        span,
+                        is_inout,
                         ident: Ident::new("self"),
                         ty_expr: TyExpr {
                             ty: RefCell::new(None),
@@ -130,9 +134,17 @@ impl<'a> Parser<'a> {
                                 ident: prefix,
                             },
                         }
-                    })
+                    }))
                 } else {
-                    params.push(self.parse_param() ?);
+                    let ident = self.parse_ident()?;
+                    self.expect_token(Token::Colon)?;
+                    let ty_expr = self.parse_ty_expr()?;
+                    params.push(span.end(self, |span| Param {
+                        span,
+                        is_inout,
+                        ident,
+                        ty_expr,        
+                    }));
                 }
             } else {
                 params.push(self.parse_param() ?);
@@ -254,10 +266,17 @@ impl<'a> Parser<'a> {
     }
     
     fn parse_param(&mut self) -> Result<Param, Error> {
+        let span = self.begin_span();
+        let is_inout = self.accept_token(Token::Inout);
         let ident = self.parse_ident() ?;
         self.expect_token(Token::Colon) ?;
         let ty_expr = self.parse_ty_expr() ?;
-        Ok(Param {ident, ty_expr})
+        Ok(span.end(self, |span| Param {
+            span,
+            is_inout,
+            ident,
+            ty_expr
+        }))
     }
     
     fn parse_field(&mut self) -> Result<Field, Error> {

@@ -280,6 +280,7 @@ where
                     "if" => Token::If,
                     "impl" => Token::Impl,
                     "in" => Token::In,
+                    "inout" => Token::Inout,
                     "instance" => Token::Instance,
                     "int" => Token::TyLit(TyLit::Int),
                     "ivec2" => Token::TyLit(TyLit::Ivec2),
