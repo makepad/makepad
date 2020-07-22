@@ -127,6 +127,7 @@ pub struct FnDecl {
     pub is_used_in_fragment_shader: Cell<Option<bool>>,
     pub callees: RefCell<Option<HashSet<Ident>>>,
     pub uniform_block_deps: RefCell<Option<HashSet<Ident>>>,
+    pub has_texture_deps: Cell<Option<bool>>,
     pub attribute_deps: RefCell<Option<HashSet<Ident>>>,
     pub instance_deps: RefCell<Option<HashSet<Ident>>>,
     pub has_in_varying_deps: Cell<Option<bool>>,
