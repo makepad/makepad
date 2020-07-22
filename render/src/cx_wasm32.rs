@@ -2,6 +2,7 @@ use std::mem;
 use std::ptr;
 use std::alloc;
 use crate::cx::*;
+use makepad_shader_compiler::ty::Ty;
 
 impl Cx {
     
@@ -826,11 +827,19 @@ impl FromWasm {
         self.mu32 as u32
     }
     
-    fn add_shvarvec(&mut self, shvars: &Vec<ShVar>) {
+    fn add_propdefvec(&mut self, shvars: &Vec<PropDef>) {
         self.fit(1);
         self.mu32(shvars.len() as u32);
         for shvar in shvars {
-            self.add_string(&shvar.ty);
+            self.add_string(match shvar.prop_id.shader_ty(){
+                Ty::Vec4=>"vec4",
+                Ty::Vec3=>"vec3",
+                Ty::Vec2=>"vec2",
+                Ty::Float=>"float",
+                Ty::Mat4=>"mat4",
+                Ty::Texture2D=>"sampler2D",
+                _=>panic!("unexpected type in add_propdefvec")
+            });
             self.add_string(&shvar.name);
         }
     }
@@ -849,13 +858,13 @@ impl FromWasm {
         self.add_string(fragment);
         self.add_string(vertex);
         self.fit(2);
-        self.mu32(mapping.geometry_slots as u32);
-        self.mu32(mapping.instance_slots as u32);
-        self.add_shvarvec(&mapping.pass_uniforms);
-        self.add_shvarvec(&mapping.view_uniforms);
-        self.add_shvarvec(&mapping.draw_uniforms);
-        self.add_shvarvec(&mapping.uniforms);
-        self.add_shvarvec(&mapping.texture_slots);
+        self.mu32(mapping.attribute_props.total_slots as u32);
+        self.mu32(mapping.instance_props.total_slots as u32);
+        self.add_propdefvec(&mapping.pass_uniforms);
+        self.add_propdefvec(&mapping.view_uniforms);
+        self.add_propdefvec(&mapping.draw_uniforms);
+        self.add_propdefvec(&mapping.uniforms);
+        self.add_propdefvec(&mapping.textures);
     }
     
     pub fn alloc_array_buffer(&mut self, buffer_id: usize, len: usize, data: *const f32) {
