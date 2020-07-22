@@ -1,6 +1,7 @@
 use makepad_shader_compiler::analyse;
 use makepad_shader_compiler::ast::ShaderAst;
-use makepad_shader_compiler::generate_metal;
+use makepad_shader_compiler::generate_glsl;
+// use makepad_shader_compiler::generate_metal;
 use makepad_shader_compiler::lex;
 use makepad_shader_compiler::parse;
 use makepad_shader_compiler::shadergen::*;
@@ -72,18 +73,23 @@ fn test() {
         &PropDef {
             name: String::from("my_texture"),
             ident: String::from("Self::my_texture"),
-            prop_id: my_texture().into()
+            prop_id: my_texture().into(),
+            block: None,
         },
         &PropDef {
             name: String::from("my_attribute"),
             ident: String::from("Self::my_attribute"),
-            prop_id: my_attribute().into()
+            prop_id: my_attribute().into(),
+            block: None,
         },
         &PropDef {
             name: String::from("my_instance"),
             ident: String::from("Self::my_instance"),
-            prop_id: my_instance().into()
+            prop_id: my_instance().into(),
+            block: None,
         }
     ]).unwrap();
-    println!("{}", generate_metal::generate_shader(&shader));
+    println!("{}", generate_glsl::generate_vertex_shader(&shader));
+    println!("{}", generate_glsl::generate_fragment_shader(&shader));
+    // println!("{}", generate_metal::generate_shader(&shader));
 }
