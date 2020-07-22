@@ -53,9 +53,16 @@ pub fn shader(input: TokenStream) -> TokenStream {
         live_loc(&mut tb, lit.span());
         tb.add(", code :").string(source).add(". to_string ( ) ,");
         
-        fn prop_def(tb: &mut TokenBuilder, decl_ident: String, call_ident: String) {
+        fn prop_def(tb: &mut TokenBuilder, decl_ident: String, call_ident: String, block:Option<String>) {
             tb.add("PropDef { name :").string(&decl_ident).add(". to_string ( )");
             tb.add(", ident :").string(&call_ident).add(". to_string ( ) ,");
+            tb.add("block :");
+            if let Some(block) = block{
+                tb.add("Some (").string(&block).add(". to_string ( ) ) ,");
+            }
+            else{
+                tb.add("None ,");
+            }
             tb.add("prop_id :");
             for (last, part) in call_ident.split("::").identify_last() {
                 tb.ident(part);
@@ -66,13 +73,13 @@ pub fn shader(input: TokenStream) -> TokenStream {
             tb.add("( ) . into ( )");
             tb.add("} ,");
         }
-        tb.add("attribute_props : vec ! [");
+        tb.add("attributes : vec ! [");
         for decl in &shader.decls {
             match decl {
                 Decl::Attribute(decl) => {
                     match decl.ty_expr.kind {
                         TyExprKind::Var {ident, ..} => {
-                            prop_def(&mut tb, decl.ident.to_string(), ident.to_string());
+                            prop_def(&mut tb, decl.ident.to_string(), ident.to_string(), None);
                         },
                         _ => {
                             return error(&format!("Type expression for attribute {}", decl.ident));
@@ -82,13 +89,13 @@ pub fn shader(input: TokenStream) -> TokenStream {
                 _ => ()
             }
         }
-        tb.add("] , instance_props : vec ! [");
+        tb.add("] , instances : vec ! [");
         for decl in &shader.decls {
             match decl {
                 Decl::Instance(decl) => {
                     match decl.ty_expr.kind {
                         TyExprKind::Var {ident, ..} => {
-                            prop_def(&mut tb, decl.ident.to_string(), ident.to_string());
+                            prop_def(&mut tb, decl.ident.to_string(), ident.to_string(), None);
                         },
                         _ => {
                             return error(&format!("Type expression for instance {}", decl.ident));
@@ -98,13 +105,18 @@ pub fn shader(input: TokenStream) -> TokenStream {
                 _ => ()
             }
         }
-        tb.add("] , uniform_props : vec ! [");
+        tb.add("] , uniforms : vec ! [");
         for decl in &shader.decls {
             match decl {
                 Decl::Uniform(decl) => {
                     match decl.ty_expr.kind {
                         TyExprKind::Var {ident, ..} => {
-                            prop_def(&mut tb, decl.ident.to_string(), ident.to_string());
+                            if let Some(block) = decl.block_ident{
+                                prop_def(&mut tb, decl.ident.to_string(), ident.to_string(), Some(block.to_string()));
+                            }
+                            else{
+                                prop_def(&mut tb, decl.ident.to_string(), ident.to_string(), None);
+                            }
                         },
                         _ => {
                             return error(&format!("Type expression for uniform {}", decl.ident));
@@ -114,13 +126,13 @@ pub fn shader(input: TokenStream) -> TokenStream {
                 _ => ()
             }
         }
-        tb.add("] , texture_props : vec ! [");
+        tb.add("] , textures : vec ! [");
         for decl in &shader.decls {
             match decl {
                 Decl::Texture(decl) => {
                     match decl.ty_expr.kind {
                         TyExprKind::Var {ident, ..} => {
-                            prop_def(&mut tb, decl.ident.to_string(), ident.to_string());
+                            prop_def(&mut tb, decl.ident.to_string(), ident.to_string(), None);
                         },
                         _ => {
                             return error(&format!("Type expression for uniform {}", decl.ident));

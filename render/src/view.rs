@@ -292,9 +292,9 @@ impl Cx {
                 if dc.sub_view_id == 0 && dc.shader_id == shader_id && dc.shader_instance_id == shader_instance_id {
                     // reuse this drawcmd and add an instance
                     dc.current_instance_offset = dc.instance.len();
-                    let slot_align = dc.instance.len() % sh.mapping.instance_slots;
+                    let slot_align = dc.instance.len() % sh.mapping.instance_props.total_slots;
                     if slot_align != 0 {
-                        panic!("Instance offset disaligned! shader: {} misalign: {} slots: {}", shader_id, slot_align, sh.mapping.instance_slots);
+                        panic!("Instance offset disaligned! shader: {} misalign: {} slots: {}", shader_id, slot_align, sh.mapping.instance_props.total_slots);
                     }
                     return dc.get_current_instance_area(instance_count);
                 }
