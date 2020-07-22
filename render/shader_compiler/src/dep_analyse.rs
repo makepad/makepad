@@ -174,7 +174,7 @@ impl<'a> DepAnalyser<'a> {
     fn dep_analyse_var_expr(
         &mut self,
         _span: Span,
-        is_lvalue: &Cell<Option<bool>>,
+        _is_lvalue: &Cell<Option<bool>>,
         _kind: &Cell<Option<VarKind>>,
         ident: Ident,
     ) {
@@ -214,11 +214,7 @@ impl<'a> DepAnalyser<'a> {
                         );
                 }
                 VarKind::Varying => {
-                    if is_lvalue.get().unwrap() {
-                        self.decl.has_out_varying_deps.set(Some(true));
-                    } else {
-                        self.decl.has_in_varying_deps.set(Some(true));
-                    }
+                    self.decl.has_varying_deps.set(Some(true));
                 }
                 _ => {}
             },
