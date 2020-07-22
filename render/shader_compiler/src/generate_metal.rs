@@ -31,25 +31,24 @@ struct ShaderGenerator<'a> {
 impl<'a> ShaderGenerator<'a> {
     fn generate_shader(&mut self) {
         let vertex_decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
-        self.generate_fn_decl(vertex_decl);
-        for (ty_lit, param_tys) in vertex_decl
-            .cons_fn_deps
-            .borrow()
-            .as_ref()
-            .unwrap()
-        {
-            self.generate_cons_fn(*ty_lit, param_tys);
-        }
         let fragment_decl = self.shader.find_fn_decl(Ident::new("pixel")).unwrap();
-        self.generate_fn_decl(fragment_decl);
-        for (ty_lit, param_tys) in fragment_decl
+        for &(ty_lit, ref param_tys) in vertex_decl
             .cons_fn_deps
-            .borrow()
+            .borrow_mut()
             .as_ref()
             .unwrap()
+            .union(
+                fragment_decl
+                    .cons_fn_deps
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+            )
         {
-            self.generate_cons_fn(*ty_lit, param_tys);
+            self.generate_cons_fn(ty_lit, param_tys);
         }
+        self.generate_fn_decl(vertex_decl);
+        self.generate_fn_decl(fragment_decl);
     }
 
     fn generate_cons_fn(&mut self, ty_lit: TyLit, param_tys: &[Ty]) {
