@@ -90,8 +90,8 @@ impl<'a> ShaderGenerator<'a> {
         BlockGenerator {
             shader: self.shader,
             backend_writer: &MetalBackendWriter,
-            use_hidden_parameters: true,
-            use_generated_constructors: true,
+            use_hidden_params: true,
+            use_generated_cons_fns: true,
             indent_level: 0,
             string: self.string
         }
@@ -102,8 +102,8 @@ impl<'a> ShaderGenerator<'a> {
         ExprGenerator {
             shader: self.shader,
             backend_writer: &MetalBackendWriter,
-            use_hidden_parameters: true,
-            use_generated_constructors: true,
+            use_hidden_params: true,
+            use_generated_cons_fns: true,
             string: self.string,
         }
         .generate_expr(expr)
