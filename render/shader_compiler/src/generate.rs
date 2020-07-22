@@ -412,7 +412,7 @@ impl<'a> ExprGenerator<'a> {
             Ty::Struct { ident: struct_ident } => {
                 self.generate_call_expr(
                     span,
-                    Ident::new(format!("mpsc__{}_{}", struct_ident, ident)),
+                    Ident::new(format!("mpsc_{}_{}", struct_ident, ident)),
                     arg_exprs
                 );
             },
