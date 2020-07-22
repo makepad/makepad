@@ -8,7 +8,6 @@ use {
         },
         ident::Ident,
         lit::TyLit,
-        swizzle::Swizzle,
         ty::Ty,
     },
     std::fmt::Write,
@@ -32,6 +31,7 @@ struct ShaderGenerator<'a> {
 impl<'a> ShaderGenerator<'a> {
     fn generate_shader(&mut self) {
         self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("vertex")).unwrap());
+        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("pixel")).unwrap());
     }
 
     fn generate_fn_decl(&mut self, decl: &FnDecl) {

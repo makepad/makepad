@@ -474,11 +474,15 @@ impl<'a> ExprGenerator<'a> {
                         write!(self.string, "{}mpsc_instances", sep).unwrap();
                         sep = ", ";
                     }
+                    if !decl.has_varying_deps.get().unwrap() {
+                        write!(self.string, "{}mpsc_varyings", sep).unwrap();
+                        sep = ", ";
+                    }
                 }
                 if decl.is_used_in_fragment_shader.get().unwrap() {
                     if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty()
                         || decl.instance_deps.borrow().as_ref().unwrap().is_empty()
-                        || decl.has_in_varying_deps.get().unwrap()
+                        || decl.has_varying_deps.get().unwrap()
                     {
                         write!(self.string, "{}mpsc_varyings", sep).unwrap();
                     }
