@@ -162,7 +162,7 @@ impl<'a> DepAnalyser<'a> {
         for arg_expr in arg_exprs {
             self.dep_analyse_expr(arg_expr);
         }
-        self.decl.cons_deps.borrow_mut().as_mut().unwrap().insert((
+        self.decl.cons_fn_deps.borrow_mut().as_mut().unwrap().insert((
             ty_lit,
             arg_exprs
                 .iter()
@@ -174,7 +174,7 @@ impl<'a> DepAnalyser<'a> {
     fn dep_analyse_var_expr(
         &mut self,
         _span: Span,
-        is_lvalue: &Cell<Option<bool>>,
+        _is_lvalue: &Cell<Option<bool>>,
         _kind: &Cell<Option<VarKind>>,
         ident: Ident,
     ) {
@@ -196,6 +196,9 @@ impl<'a> DepAnalyser<'a> {
                         .unwrap()
                         .insert(ident);
                 }
+                VarKind::Texture => {
+                    self.decl.has_texture_deps.set(Some(true));
+                }
                 VarKind::Uniform => {
                     self.decl
                         .uniform_block_deps
@@ -211,11 +214,7 @@ impl<'a> DepAnalyser<'a> {
                         );
                 }
                 VarKind::Varying => {
-                    if is_lvalue.get().unwrap() {
-                        self.decl.has_out_varying_deps.set(Some(true));
-                    } else {
-                        self.decl.has_in_varying_deps.set(Some(true));
-                    }
+                    self.decl.has_varying_deps.set(Some(true));
                 }
                 _ => {}
             },

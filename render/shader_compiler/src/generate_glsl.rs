@@ -43,7 +43,7 @@ impl<'a> ShaderGenerator<'a> {
     fn generate_vertex_shader(&mut self) {
         let packed_attributes_size = self.compute_packed_attributes_size();
         let packed_varyings_size = self.compute_packed_varyings_size();
-        self.generate_declarations(Some(packed_attributes_size), packed_varyings_size);
+        self.generate_decls(Some(packed_attributes_size), packed_varyings_size);
         for decl in &self.shader.decls {
             match decl {
                 Decl::Attribute(decl) => {
@@ -128,7 +128,7 @@ impl<'a> ShaderGenerator<'a> {
 
     fn generate_fragment_shader(&mut self) {
         let packed_varyings_size = self.compute_packed_varyings_size();
-        self.generate_declarations(None, packed_varyings_size);
+        self.generate_decls(None, packed_varyings_size);
         for decl in &self.shader.decls {
             match decl {
                 Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
@@ -189,7 +189,7 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, "}}").unwrap();
     }
 
-    fn generate_declarations(
+    fn generate_decls(
         &mut self,
         packed_attributes_size: Option<usize>,
         packed_varyings_size: usize
@@ -216,10 +216,10 @@ impl<'a> ShaderGenerator<'a> {
         }
 
         if let Some(packed_attributes_size) = packed_attributes_size {
-            self.generate_packed_attribute_declarations(packed_attributes_size);
+            self.generate_packed_attribute_decls(packed_attributes_size);
         }
 
-        self.generate_packed_varying_declarations(packed_varyings_size);
+        self.generate_packed_varying_decls(packed_varyings_size);
     }
 
     fn generate_struct_decl(&mut self, decl: &StructDecl) {
@@ -270,7 +270,7 @@ impl<'a> ShaderGenerator<'a> {
         packed_attributes_size
     }
 
-    fn generate_packed_attribute_declarations(
+    fn generate_packed_attribute_decls(
         &mut self,
         mut packed_attributes_size: usize
     ) {
@@ -313,7 +313,7 @@ impl<'a> ShaderGenerator<'a> {
         packed_varyings_size
     }
 
-    fn generate_packed_varying_declarations(
+    fn generate_packed_varying_decls(
         &mut self,
         mut packed_varyings_size: usize
     ) {
@@ -365,8 +365,10 @@ impl<'a> ShaderGenerator<'a> {
     fn generate_block(&mut self, block: &Block) {
         BlockGenerator {
             shader: self.shader,
-            indent_level: 0,
             backend_writer: &GlslBackendWriter,
+            use_hidden_params: false,
+            use_generated_cons_fns: false,
+            indent_level: 0,
             string: self.string
         }
         .generate_block(block)
@@ -375,9 +377,9 @@ impl<'a> ShaderGenerator<'a> {
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             shader: self.shader,
-            use_hidden_parameters: false,
-            use_generated_constructors: false,
             backend_writer: &GlslBackendWriter,
+            use_hidden_params: false,
+            use_generated_cons_fns: false,
             string: self.string,
         }
         .generate_expr(expr)
