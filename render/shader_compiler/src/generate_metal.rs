@@ -8,29 +8,18 @@ use {
         },
         ident::Ident,
         lit::TyLit,
-        swizzle::Swizzle,
         ty::Ty,
     },
     std::fmt::Write,
 };
 
-pub fn generate_vertex_shader(shader: &ShaderAst) -> String {
+pub fn generate_shader(shader: &ShaderAst) -> String {
     let mut string = String::new();
     ShaderGenerator {
         shader,
         string: &mut string,
     }
-    .generate_vertex_shader();
-    string
-}
-
-pub fn generate_fragment_shader(shader: &ShaderAst) -> String {
-    let mut string = String::new();
-    ShaderGenerator {
-        shader,
-        string: &mut string,
-    }
-    .generate_fragment_shader();
+    .generate_shader();
     string
 }
 
@@ -40,303 +29,116 @@ struct ShaderGenerator<'a> {
 }
 
 impl<'a> ShaderGenerator<'a> {
-    fn generate_vertex_shader(&mut self) {
-        let packed_attributes_size = self.compute_packed_attributes_size();
-        let packed_varyings_size = self.compute_packed_varyings_size();
-        self.generate_declarations(Some(packed_attributes_size), packed_varyings_size);
-        for decl in &self.shader.decls {
-            match decl {
-                Decl::Attribute(decl) => {
-                    self.write_ident_and_ty(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap()
-                    );
-                    writeln!(self.string, ";").unwrap();
-                },
-                Decl::Instance(decl) => {
-                    self.write_ident_and_ty(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap()
-                    );
-                    writeln!(self.string, ";").unwrap();
-                },
-                Decl::Varying(decl) => {
-                    self.write_ident_and_ty(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap()
-                    );
-                    writeln!(self.string, ";").unwrap();
-                },
-                _ => {}
-            }
+    fn generate_shader(&mut self) {
+        let vertex_decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
+        let fragment_decl = self.shader.find_fn_decl(Ident::new("pixel")).unwrap();
+        for &(ty_lit, ref param_tys) in vertex_decl
+            .cons_fn_deps
+            .borrow_mut()
+            .as_ref()
+            .unwrap()
+            .union(
+                fragment_decl
+                    .cons_fn_deps
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+            )
+        {
+            self.generate_cons_fn(ty_lit, param_tys);
         }
-        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("vertex")).unwrap());
-        writeln!(self.string, "void main() {{").unwrap();
-        let mut attribute_unpacker = VarUnpacker::new(
-            "mpsc_packed_attribute",
-            packed_attributes_size,
-            &mut self.string
-        );
-        for decl in &self.shader.decls {
-            match decl {
-                Decl::Attribute(decl) => {
-                    attribute_unpacker.unpack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                },
-                Decl::Instance(decl) => {
-                    attribute_unpacker.unpack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                }
-                _ => {}
-            }
-        }
-        writeln!(self.string, "    gl_Position = vertex();").unwrap();
-        let mut varying_packer = VarPacker::new(
-            "mpsc_packed_varying",
-            packed_varyings_size,
-            &mut self.string
-        );
-        for decl in &self.shader.decls {
-            match decl {
-                Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    varying_packer.pack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                },
-                Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    varying_packer.pack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                }
-                Decl::Varying(decl) => {
-                    varying_packer.pack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                },
-                _ => {}
-            }
-        }
-        writeln!(self.string, "}}").unwrap();
+        self.generate_fn_decl(vertex_decl);
+        self.generate_fn_decl(fragment_decl);
     }
 
-    fn generate_fragment_shader(&mut self) {
-        let packed_varyings_size = self.compute_packed_varyings_size();
-        self.generate_declarations(None, packed_varyings_size);
-        for decl in &self.shader.decls {
-            match decl {
-                Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    self.write_ident_and_ty(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap()
-                    );
-                    writeln!(self.string, ";").unwrap();
-                }
-                Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    self.write_ident_and_ty(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap()
-                    );
-                    writeln!(self.string, ";").unwrap();
-                }
-                Decl::Varying(decl) => {
-                    self.write_ident_and_ty(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap()
-                    );
-                    writeln!(self.string, ";").unwrap();
-                },
-                _ => {}
-            }
+    fn generate_cons_fn(&mut self, ty_lit: TyLit, param_tys: &[Ty]) {
+        write!(self.string, "{0} mpsc_{0}", ty_lit).unwrap();
+        for param_ty in param_tys {
+            write!(self.string, "_{}", param_ty).unwrap();
         }
-        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("pixel")).unwrap());
-        writeln!(self.string, "void main() {{").unwrap();
-        let mut varying_unpacker = VarUnpacker::new(
-            "mpsc_packed_varying",
-            packed_varyings_size,
-            &mut self.string
-        );
-        for decl in &self.shader.decls {
-            match decl {
-                Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    varying_unpacker.unpack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                },
-                Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    varying_unpacker.unpack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                }
-                Decl::Varying(decl) => {
-                    varying_unpacker.unpack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                },
-                _ => {}
-            }
-        }
-        writeln!(self.string, "    gl_FragColor = pixel();").unwrap();
-        writeln!(self.string, "}}").unwrap();
-    }
-
-    fn generate_declarations(
-        &mut self,
-        packed_attributes_size: Option<usize>,
-        packed_varyings_size: usize
-    ) {
-        for decl in &self.shader.decls {
-            match decl {
-                Decl::Struct(decl) => self.generate_struct_decl(decl),
-                _ => {}
-            }
-        }
-
-        for decl in &self.shader.decls {
-            match decl {
-                Decl::Const(decl) => self.generate_const_decl(decl),
-                _ => {}
-            }
-        }
-
-        for decl in &self.shader.decls {
-            match decl {
-                Decl::Uniform(decl) => self.generate_uniform_decl(decl),
-                _ => {}
-            }
-        }
-
-        if let Some(packed_attributes_size) = packed_attributes_size {
-            self.generate_packed_attribute_declarations(packed_attributes_size);
-        }
-
-        self.generate_packed_varying_declarations(packed_varyings_size);
-    }
-
-    fn generate_struct_decl(&mut self, decl: &StructDecl) {
-        write!(self.string, "struct {} {{", decl.ident).unwrap();
-        if !decl.fields.is_empty() {
-            writeln!(self.string).unwrap();
-            for field in &decl.fields {
-                write!(self.string, "    ").unwrap();
+        write!(self.string, "(").unwrap();
+        let mut sep = "";
+        if param_tys.len() == 1 {
+            self.write_ident_and_ty(Ident::new("x"), &param_tys[0])
+        } else {
+            for (index, param_ty) in param_tys.iter().enumerate() {
+                write!(self.string, "{}", sep).unwrap();
                 self.write_ident_and_ty(
-                    field.ident,
-                    field.ty_expr.ty.borrow().as_ref().unwrap(),
+                    Ident::new(format!("x{}", index)),
+                    param_ty,
                 );
-                writeln!(self.string, ";").unwrap();
+                sep = ", ";
             }
         }
-        writeln!(self.string, "}};").unwrap();
-    }
-
-    fn generate_const_decl(&mut self, decl: &ConstDecl) {
-        write!(self.string, "const ").unwrap();
-        self.write_ident_and_ty(
-            decl.ident,
-            decl.ty_expr.ty.borrow().as_ref().unwrap(),
-        );
-        write!(self.string, " = ").unwrap();
-        self.generate_expr(&decl.expr);
-        writeln!(self.string, ";").unwrap();
-    }
-
-    fn generate_uniform_decl(&mut self, decl: &UniformDecl) {
-        write!(self.string, "uniform ").unwrap();
-        self.write_ident_and_ty(
-            decl.ident,
-            decl.ty_expr.ty.borrow().as_ref().unwrap(),
-        );
-        writeln!(self.string, ";").unwrap();
-    }
-
-    fn compute_packed_attributes_size(&self) -> usize {
-        let mut packed_attributes_size = 0;
-        for decl in &self.shader.decls {
-            packed_attributes_size += match decl {
-                Decl::Attribute(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
-                Decl::Instance(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
-                _ => 0,
-            }
-        }
-        packed_attributes_size
-    }
-
-    fn generate_packed_attribute_declarations(
-        &mut self,
-        mut packed_attributes_size: usize
-    ) {
-        let mut packed_attribute_index = 0;
-        loop {
-            let packed_attribute_size = packed_attributes_size.min(4);
-            writeln!(
-                self.string,
-                "attribute {} mpsc_packed_attribute_{};",
-                match packed_attribute_size {
-                    0 => break,
-                    1 => "float",
-                    2 => "vec2",
-                    3 => "vec3",
-                    4 => "vec4",
-                    _ => panic!(),
-                },
-                packed_attribute_index,
-            )
-            .unwrap();
-            packed_attributes_size -= packed_attribute_size;
-            packed_attribute_index += 1;
-        }
-    }
-
-    fn compute_packed_varyings_size(&self) -> usize {
-        let mut packed_varyings_size = 0;
-        for decl in &self.shader.decls {
-            packed_varyings_size += match decl {
-                Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    decl.ty_expr.ty.borrow().as_ref().unwrap().size()
-                },
-                Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    decl.ty_expr.ty.borrow().as_ref().unwrap().size()
+        writeln!(self.string, ") {{").unwrap();
+        write!(self.string, "    {}(", ty_lit).unwrap();
+        let ty = ty_lit.to_ty();
+        if param_tys.len() == 1 {
+            let param_ty = &param_tys[0];
+            match param_ty {
+                Ty::Bool | Ty::Int | Ty::Float => {
+                    let mut sep = "";
+                    for _ in 0..ty.size() {
+                        write!(self.string, "{}x", sep).unwrap();
+                        sep = ", ";
+                    }
                 }
-                Decl::Varying(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
-                _ => 0,
+                Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => {
+                    let dst_size = match ty {
+                        Ty::Mat2 => 2,
+                        Ty::Mat3 => 3,
+                        Ty::Mat4 => 4,
+                        _ => panic!(),
+                    };
+                    let src_size = match param_ty {
+                        Ty::Mat2 => 2,
+                        Ty::Mat3 => 3,
+                        Ty::Mat4 => 4,
+                        _ => panic!(),
+                    };
+                    let mut sep = "";
+                    for col_index in 0..dst_size {
+                        for row_index in 0..dst_size {
+                            if row_index < src_size && col_index < src_size {
+                                write!(
+                                    self.string,
+                                    "{}x[{}][{}]",
+                                    sep,
+                                    col_index,
+                                    row_index
+                                )
+                                .unwrap();
+                            } else {
+                                write!(
+                                    self.string,
+                                    "{}{}",
+                                    sep,
+                                    if col_index == row_index { 1.0 } else { 0.0 }
+                                )
+                                .unwrap();
+                            }
+                            sep = ", ";
+                        }
+                    }
+                }
+                _ => panic!(),
+            }
+        } else {
+            let mut sep = "";
+            for (index_0, param_ty) in param_tys.iter().enumerate() {
+                if param_ty.size() == 1 {
+                    write!(self.string, "{}x{}", sep, index_0).unwrap();
+                    sep = ", ";
+                } else {
+                    for index_1 in 0..param_ty.size() {
+                        write!(self.string, "{}x{}[{}]", sep, index_0, index_1).unwrap();
+                        sep = ", ";
+                    }
+                }
             }
         }
-        packed_varyings_size
-    }
-
-    fn generate_packed_varying_declarations(
-        &mut self,
-        mut packed_varyings_size: usize
-    ) {
-        let mut packed_varying_index = 0;
-        loop {
-            let packed_varying_size = packed_varyings_size.min(4);
-            writeln!(
-                self.string,
-                "varying {} mpsc_packed_varying_{};",
-                match packed_varying_size {
-                    0 => break,
-                    1 => "float",
-                    2 => "vec2",
-                    3 => "vec3",
-                    4 => "vec4",
-                    _ => panic!(),
-                },
-                packed_varying_index,
-            )
-            .unwrap();
-            packed_varyings_size -= packed_varying_size;
-            packed_varying_index += 1;
-        }
+        writeln!(self.string, ")").unwrap();
+        writeln!(self.string, "}}").unwrap();
     }
 
     fn generate_fn_decl(&mut self, decl: &FnDecl) {
@@ -357,6 +159,35 @@ impl<'a> ShaderGenerator<'a> {
             );
             sep = ", ";
         }
+        for &ident in decl.uniform_block_deps.borrow().as_ref().unwrap() {
+            write!(self.string, "{}_mpsc_{1}_Uniforms mpsc_{1}_uniforms", sep, ident).unwrap();
+            sep = ", ";
+        }
+        if decl.has_texture_deps.get().unwrap() {
+            write!(self.string, "{}_mpsc_Textures mpsc_textures", sep).unwrap();
+            sep = ", ";
+        }
+        if decl.is_used_in_vertex_shader.get().unwrap() {
+            if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty() {
+                write!(self.string, "{}_mpsc_Attributes mpsc_attributes", sep).unwrap();
+                sep = ", ";
+            }
+            if !decl.instance_deps.borrow().as_ref().unwrap().is_empty() {
+                write!(self.string, "{}_mpsc_Instances mpsc_instances", sep).unwrap();
+                sep = ", ";
+            }
+            if decl.has_varying_deps.get().unwrap() {
+                write!(self.string, "{}_mpsc_Varyings mpsc_varyings", sep).unwrap();
+            }
+        } else {
+            assert!(decl.is_used_in_fragment_shader.get().unwrap());
+            if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty()
+                || decl.instance_deps.borrow().as_ref().unwrap().is_empty()
+                || decl.has_varying_deps.get().unwrap()
+            {
+                write!(self.string, "{}_mpsc_Varyings mpsc_varyings", sep).unwrap();
+            }
+        }
         write!(self.string, ") ").unwrap();
         self.generate_block(&decl.block);
         writeln!(self.string).unwrap();
@@ -365,8 +196,10 @@ impl<'a> ShaderGenerator<'a> {
     fn generate_block(&mut self, block: &Block) {
         BlockGenerator {
             shader: self.shader,
-            indent_level: 0,
             backend_writer: &MetalBackendWriter,
+            use_hidden_params: true,
+            use_generated_cons_fns: true,
+            indent_level: 0,
             string: self.string
         }
         .generate_block(block)
@@ -375,9 +208,9 @@ impl<'a> ShaderGenerator<'a> {
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             shader: self.shader,
-            use_hidden_parameters: true,
-            use_generated_constructors: true,
             backend_writer: &MetalBackendWriter,
+            use_hidden_params: true,
+            use_generated_cons_fns: true,
             string: self.string,
         }
         .generate_expr(expr)
@@ -389,144 +222,6 @@ impl<'a> ShaderGenerator<'a> {
             ident,
             ty
         );
-    }
-}
-
-struct VarPacker<'a> {
-    packed_var_prefix: &'a str,
-    packed_vars_size: usize,
-    packed_var_index: usize,
-    packed_var_size: usize,
-    packed_var_offset: usize,
-    string: &'a mut String
-}
-
-impl<'a> VarPacker<'a> {
-    fn new(
-        packed_var_prefix: &'a str,
-        packed_vars_size: usize,
-        string: &'a mut String
-    ) -> VarPacker<'a> {
-        VarPacker {
-            packed_var_prefix,
-            packed_vars_size,
-            packed_var_index: 0,
-            packed_var_size: packed_vars_size.min(4),
-            packed_var_offset: 0,
-            string,
-        }
-    }
-
-    fn pack_var(&mut self, ident: Ident, ty: &Ty) {
-        let var_size = ty.size();
-        let mut var_offset = 0;
-        while var_offset < var_size {
-            let count = var_size - var_offset;
-            let packed_count = self.packed_var_size - self.packed_var_offset;
-            let min_count = count.min(packed_count);
-            write!(self.string, "    {}_{}", self.packed_var_prefix, self.packed_var_index).unwrap();
-            if self.packed_var_size > 1 {
-                write!(
-                    self.string,
-                    ".{}",
-                    Swizzle::from_range(
-                        self.packed_var_offset,
-                        self.packed_var_offset + min_count
-                    )
-                )
-                .unwrap();
-            }
-            write!(self.string, " = {}", ident).unwrap();
-            if var_size > 1 {
-                write!(
-                    self.string,
-                    ".{}",
-                    Swizzle::from_range(
-                        var_offset,
-                        var_offset + min_count
-                    )
-                )
-                .unwrap();
-            }
-            writeln!(self.string, ";").unwrap();
-            self.packed_var_offset += min_count;
-            if self.packed_var_offset == self.packed_var_size {
-                self.packed_vars_size -= self.packed_var_size;
-                self.packed_var_index += 1;
-                self.packed_var_size = self.packed_vars_size.min(4);
-                self.packed_var_offset = 0;
-            }
-            var_offset += min_count; 
-        }
-    }
-}
-
-struct VarUnpacker<'a> {
-    packed_var_prefix: &'a str,
-    packed_vars_size: usize,
-    packed_var_index: usize,
-    packed_var_size: usize,
-    packed_var_offset: usize,
-    string: &'a mut String
-}
-
-impl<'a> VarUnpacker<'a> {
-    fn new(
-        packed_var_prefix: &'a str,
-        packed_vars_size: usize,
-        string: &'a mut String
-    ) -> VarUnpacker<'a> {
-        VarUnpacker {
-            packed_var_prefix,
-            packed_vars_size,
-            packed_var_index: 0,
-            packed_var_size: packed_vars_size.min(4),
-            packed_var_offset: 0,
-            string,
-        }
-    }
-
-    fn unpack_var(&mut self, ident: Ident, ty: &Ty) {
-        let var_size = ty.size();
-        let mut var_offset = 0;
-        while var_offset < var_size {
-            let count = var_size - var_offset;
-            let packed_count = self.packed_var_size - self.packed_var_offset;
-            let min_count = count.min(packed_count);
-            write!(self.string, "    {}", ident).unwrap();
-            if var_size > 1 {
-                write!(
-                    self.string,
-                    ".{}",
-                    Swizzle::from_range(
-                        var_offset,
-                        var_offset + min_count
-                    )
-                )
-                .unwrap();
-            }
-            write!(self.string, " = {}_{}", self.packed_var_prefix, self.packed_var_index).unwrap();
-            if self.packed_var_size > 1 {
-                write!(
-                    self.string,
-                    ".{}",
-                    Swizzle::from_range(
-                        self.packed_var_offset,
-                        self.packed_var_offset + min_count
-                    )
-                )
-                .unwrap();
-            }
-            writeln!(self.string, ";").unwrap();
-            var_offset += min_count;
-            self.packed_var_offset += min_count;
-            if self.packed_var_offset == self.packed_var_size {
-                self.packed_vars_size -= self.packed_var_size;
-                self.packed_var_index += 1;
-                self.packed_var_size = self.packed_vars_size.min(4);
-                self.packed_var_offset = 0;
-            } 
-        }
     }
 }
 
