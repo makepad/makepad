@@ -38,7 +38,7 @@ struct ShaderGenerator<'a> {
     shader: &'a ShaderAst,
     string: &'a mut String,
 }
-
+ 
 impl<'a> ShaderGenerator<'a> {
     fn generate_vertex_shader(&mut self) {
         let packed_attributes_size = self.compute_packed_attributes_size();

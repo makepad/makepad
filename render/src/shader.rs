@@ -5,95 +5,6 @@ pub struct Shader {
     pub shader_id: Option<(usize, usize)>,
 }
 
-#[derive(Default, Clone)]
-pub struct RectInstanceProps {
-    pub x: Option<usize>,
-    pub y: Option<usize>,
-    pub w: Option<usize>,
-    pub h: Option<usize>,
-}
-impl RectInstanceProps {
-    pub fn construct(instances: &Vec<PropDef>) -> RectInstanceProps {
-        let mut x = None;
-        let mut y = None;
-        let mut w = None;
-        let mut h = None;
-        let mut slot = 0;
-        for inst in instances {
-            match inst.name.as_ref() {
-                "x" => x = Some(slot),
-                "y" => y = Some(slot),
-                "w" => w = Some(slot),
-                "h" => h = Some(slot),
-                _ => ()
-            }
-            slot += inst.prop_id.shader_ty().size(); //sg.get_type_slots(&inst.ty);
-        };
-        RectInstanceProps {
-            x: x,
-            y: y,
-            w: w,
-            h: h
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct InstanceProp {
-    pub name: String,
-    pub prop_id: PropId,
-    pub offset: usize,
-    pub slots: usize
-}
-
-#[derive(Default, Clone)]
-pub struct InstanceProps {
-    pub props: Vec<InstanceProp>,
-    pub total_slots: usize,
-}
-
-#[derive(Clone)]
-pub struct UniformProp {
-    pub name: String,
-    pub prop_id: PropId,
-    pub offset: usize,
-    pub slots: usize
-}
-#[derive(Default, Clone)]
-pub struct UniformProps {
-    pub props: Vec<UniformProp>,
-    pub total_slots: usize,
-}
-#[derive(Clone)]
-pub struct NamedProp {
-    pub name: String,
-    pub offset: usize,
-    pub slots: usize
-}
-#[derive(Default, Clone)]
-pub struct NamedProps {
-    pub props: Vec<NamedProp>,
-    pub total_slots: usize,
-}
-impl NamedProps {
-    pub fn construct(in_props: &Vec<PropDef>) -> NamedProps {
-        let mut offset = 0;
-        let mut out_props = Vec::new();
-        for prop in in_props {
-            let slots = prop.prop_id.shader_ty().size();
-            out_props.push(NamedProp {
-                name: prop.name.clone(),
-                offset: offset,
-                slots: slots
-            });
-            offset += slots
-        };
-        NamedProps {
-            props: out_props,
-            total_slots: offset
-        }
-    }
-}
 
 impl CxShader {
     pub fn def_df(sg: ShaderGen) -> ShaderGen {
@@ -355,6 +266,100 @@ impl CxShader {
 }
 
 
+#[derive(Default, Clone)]
+pub struct RectInstanceProps {
+    pub x: Option<usize>,
+    pub y: Option<usize>,
+    pub w: Option<usize>,
+    pub h: Option<usize>,
+}
+impl RectInstanceProps {
+    pub fn construct(instances: &Vec<PropDef>) -> RectInstanceProps {
+        let mut x = None;
+        let mut y = None;
+        let mut w = None;
+        let mut h = None;
+        let mut slot = 0;
+        for inst in instances {
+            match inst.name.as_ref() {
+                "x" => x = Some(slot),
+                "y" => y = Some(slot),
+                "w" => w = Some(slot),
+                "h" => h = Some(slot),
+                _ => ()
+            }
+            slot += inst.prop_id.shader_ty().size(); //sg.get_type_slots(&inst.ty);
+        };
+        RectInstanceProps {
+            x: x,
+            y: y,
+            w: w,
+            h: h
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct InstanceProp {
+    pub name: String,
+    pub prop_id: PropId,
+    pub offset: usize,
+    pub slots: usize
+}
+
+#[derive(Default, Clone)]
+pub struct InstanceProps {
+    pub props: Vec<InstanceProp>,
+    pub total_slots: usize,
+}
+
+#[derive(Clone)]
+pub struct UniformProp {
+    pub name: String,
+    pub prop_id: PropId,
+    pub offset: usize,
+    pub slots: usize
+}
+
+#[derive(Default, Clone)]
+pub struct UniformProps {
+    pub props: Vec<UniformProp>,
+    pub total_slots: usize,
+}
+
+#[derive(Clone)]
+pub struct NamedProp {
+    pub name: String,
+    pub offset: usize,
+    pub slots: usize
+}
+
+#[derive(Default, Clone)]
+pub struct NamedProps {
+    pub props: Vec<NamedProp>,
+    pub total_slots: usize,
+}
+
+impl NamedProps {
+    pub fn construct(in_props: &Vec<PropDef>) -> NamedProps {
+        let mut offset = 0;
+        let mut out_props = Vec::new();
+        for prop in in_props {
+            let slots = prop.prop_id.shader_ty().size();
+            out_props.push(NamedProp {
+                name: prop.name.clone(),
+                offset: offset,
+                slots: slots
+            });
+            offset += slots
+        };
+        NamedProps {
+            props: out_props,
+            total_slots: offset
+        }
+    }
+}
+
 
 impl InstanceProps {
     pub fn construct(in_props: &Vec<PropDef>) -> InstanceProps {
@@ -420,18 +425,62 @@ impl UniformProps {
 
 #[derive(Default, Clone)]
 pub struct CxShaderMapping {
-    pub instance_slots: usize,
-    pub geometry_slots: usize,
-    pub geometries: Vec<PropDef>,
+    pub rect_instance_props: RectInstanceProps,
+    pub uniform_props: UniformProps,
+    pub instance_props: InstanceProps,
     pub instances: Vec<PropDef>,
+    //pub instance_slots: usize,
+    pub attribute_props: InstanceProps,
+    pub attributes: Vec<PropDef>,
     pub draw_uniforms: Vec<PropDef>,
     pub view_uniforms: Vec<PropDef>,
     pub pass_uniforms: Vec<PropDef>,
     pub uniforms: Vec<PropDef>,
-    pub texture_slots: Vec<PropDef>,
-    pub rect_instance_props: RectInstanceProps,
-    pub uniform_props: UniformProps,
-    pub instance_props: InstanceProps,
+    pub textures: Vec<PropDef>,
+}
+
+impl CxShaderMapping{
+    pub fn from_shader_gen(gen:&ShaderGen)->Self{
+        
+        let mut instances = Vec::new();
+        let mut attributes = Vec::new();
+        let mut uniforms = Vec::new();
+        let mut draw_uniforms = Vec::new();
+        let mut view_uniforms = Vec::new();
+        let mut pass_uniforms = Vec::new();
+        let mut textures = Vec::new();
+        for sub in &gen.subs{
+            instances.extend(sub.instances.clone());
+            attributes.extend(sub.attributes.clone());
+            textures.extend(sub.textures.clone());
+            for uni in &sub.uniforms{
+                if let Some(block) = &uni.block{
+                    match block.as_ref(){
+                        "draw"=>draw_uniforms.push(uni.clone()),
+                        "view"=>view_uniforms.push(uni.clone()),
+                        "pass"=>pass_uniforms.push(uni.clone()),
+                        _=>()
+                    }
+                }
+                else{
+                    uniforms.push(uni.clone());
+                }
+            }
+        }
+        CxShaderMapping{
+            rect_instance_props: RectInstanceProps::construct(&instances),
+            uniform_props: UniformProps::construct(&uniforms),
+            instance_props: InstanceProps::construct(&instances),
+            attribute_props: InstanceProps::construct(&attributes),
+            instances: instances,
+            attributes: attributes,
+            draw_uniforms: draw_uniforms,
+            view_uniforms: view_uniforms,
+            pass_uniforms: pass_uniforms,
+            uniforms: uniforms,
+            textures: textures,
+        }
+    }
 }
 
 #[derive(Default, Clone)]
