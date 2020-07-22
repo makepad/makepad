@@ -18,7 +18,7 @@ const SOURCE: &str = r#"
             return cx;
         }
 
-        fn bar(self) {
+        fn bar(inout self) {
             tTexture;
             -self.prop;
         }

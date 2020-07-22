@@ -184,6 +184,8 @@ pub struct VaryingDecl {
 
 #[derive(Clone, Debug)]
 pub struct Param {
+    pub span: Span,
+    pub is_inout: bool,
     pub ident: Ident,
     pub ty_expr: TyExpr,
 }

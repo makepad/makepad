@@ -474,10 +474,10 @@ impl<'a> FnDefAnalyser<'a> {
         self.env.push_scope();
         for param in &self.decl.params {
             self.env.insert_sym(
-                self.decl.span, // TODO: This is the wrong span
+                param.span,
                 param.ident,
                 Sym::Var {
-                    is_mut: true,
+                    is_mut: param.is_inout,
                     ty: param.ty_expr.ty.borrow().as_ref().unwrap().clone(),
                     kind: VarKind::Local,
                 },
