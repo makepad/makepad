@@ -83,8 +83,8 @@ impl<'a> TyChecker<'a> {
         span: Span,
         expr: &Expr,
         expected_ty: &Ty,
-    ) -> Result<(bool, Ty), Error> {
-        let (is_lvalue, actual_ty) = self.ty_check_expr(expr) ?;
+    ) -> Result<Ty, Error> {
+        let actual_ty = self.ty_check_expr(expr) ?;
         if &actual_ty != expected_ty {
             return Err(Error {
                 span,
@@ -95,11 +95,11 @@ impl<'a> TyChecker<'a> {
                 )
             });
         }
-        Ok((is_lvalue, actual_ty))
+        Ok(actual_ty)
     }
     
-    pub fn ty_check_expr(&mut self, expr: &Expr) -> Result<(bool, Ty), Error> {
-        let (is_lvalue, ty) = match expr.kind {
+    pub fn ty_check_expr(&mut self, expr: &Expr) -> Result<Ty, Error> {
+        let ty = match expr.kind {
             ExprKind::Cond {
                 span,
                 ref expr,
@@ -159,7 +159,7 @@ impl<'a> TyChecker<'a> {
             ExprKind::Lit {span, lit} => self.ty_check_lit_expr(span, lit),
         } ?;
         *expr.ty.borrow_mut() = Some(ty.clone());
-        Ok(is_lvalue, ty)
+        Ok(ty)
     }
     
     fn ty_check_cond_expr(
