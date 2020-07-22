@@ -42,8 +42,6 @@ mod cx_webgl;
 #[cfg(all(not(feature="ipc"),target_arch = "wasm32"))]
 mod cx_wasm32;
 
-#[cfg(all(not(feature="ipc"),any(target_arch = "wasm32", target_os = "linux")))]
-mod cx_glsl;
 
 #[cfg(all(not(feature="ipc"),any(target_os = "linux", target_os="macos", target_os="windows")))]
 mod cx_desktop;

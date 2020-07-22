@@ -41,6 +41,29 @@ struct ShaderGenerator<'a> {
 }
  
 impl<'a> ShaderGenerator<'a> {
+    
+        
+    fn write_ty_init(&mut self, ty: &Ty) {
+        write!(self.string, "{}", match ty {
+            Ty::Bool => "false",
+            Ty::Int => "0",
+            Ty::Float => "0.0",
+            Ty::Bvec2 => "bvec2(0)",
+            Ty::Bvec3 => "bvec3(0)",
+            Ty::Bvec4 => "bvec4(0)",
+            Ty::Ivec2 => "ivec2(0)",
+            Ty::Ivec3 => "ivec3(0)",
+            Ty::Ivec4 => "ivec4(0)",
+            Ty::Vec2 => "vec2(0.0)",
+            Ty::Vec3 => "vec3(0.0)",
+            Ty::Vec4 => "vec4(0.0)",
+            Ty::Mat2 => "mat2(0.0)",
+            Ty::Mat3 => "mat3(0.0)",
+            Ty::Mat4 => "mat4(0.0)",
+            _ => panic!("unexpected as initializeable type"),
+        }).unwrap()
+    }
+    
     fn generate_vertex_shader(&mut self) {
         let packed_attributes_size = self.compute_packed_attributes_size();
         let packed_instances_size = self.compute_packed_instances_size();
@@ -57,6 +80,8 @@ impl<'a> ShaderGenerator<'a> {
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
+                    write!(self.string, "=").unwrap();
+                    self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());
                     writeln!(self.string, ";").unwrap();
                 },
                 Decl::Instance(decl) => {
@@ -64,6 +89,8 @@ impl<'a> ShaderGenerator<'a> {
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
+                    write!(self.string, "=").unwrap();
+                    self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());
                     writeln!(self.string, ";").unwrap();
                 },
                 Decl::Varying(decl) => {
@@ -71,6 +98,8 @@ impl<'a> ShaderGenerator<'a> {
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
+                    write!(self.string, "=").unwrap();
+                    self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());
                     writeln!(self.string, ";").unwrap();
                 },
                 _ => {}
@@ -153,6 +182,8 @@ impl<'a> ShaderGenerator<'a> {
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
+                    write!(self.string, "=").unwrap();
+                    self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());                    
                     writeln!(self.string, ";").unwrap();
                 }
                 Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
@@ -160,6 +191,8 @@ impl<'a> ShaderGenerator<'a> {
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
+                    write!(self.string, "=").unwrap();
+                    self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());                    
                     writeln!(self.string, ";").unwrap();
                 }
                 Decl::Varying(decl) => {
@@ -167,6 +200,8 @@ impl<'a> ShaderGenerator<'a> {
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
+                    write!(self.string, "=").unwrap();
+                    self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());                    
                     writeln!(self.string, ";").unwrap();
                 },
                 _ => {}
@@ -580,6 +615,7 @@ impl<'a> VarUnpacker<'a> {
             let min_count = count.min(packed_count);
             write!(self.string, "    {}", ident).unwrap();
             if var_size > 1 {
+                
                 write!(
                     self.string,
                     ".{}",
@@ -638,4 +674,5 @@ impl BackendWriter for GlslBackendWriter {
             TyLit::Texture2D => "sampler2D",
         }).unwrap();
     }
+
 }

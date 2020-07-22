@@ -127,7 +127,7 @@ impl Hash for ShaderGen {
 }
 
 #[derive(Debug,  Clone, PartialEq, Hash)]
-pub enum PropId{
+pub enum PropId{ 
     Texture2d(Texture2dId),
     Color(ColorId),
     Vec4(Vec4Id),

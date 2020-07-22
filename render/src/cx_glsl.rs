@@ -7,13 +7,7 @@ pub enum GLShaderType {
 
 impl Cx {
         
-    pub fn ceil_div4(base: usize) -> usize {
-        let r = base >> 2;
-        if base & 3 != 0 {
-            return r + 1
-        }
-        r
-    }
+
     /*
     pub fn gl_assemble_uniforms(unis: &Vec<ShVar>) -> String {
         let mut out = String::new();

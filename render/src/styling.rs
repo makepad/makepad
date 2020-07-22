@@ -36,7 +36,7 @@ impl Cx{
 #[derive(PartialEq, Copy, Clone, Hash, Eq)]
 pub struct FloatStyleId(pub TypeId);
 
-pub trait FloatStyle{
+pub trait FloatStyle{ 
     fn set(&self, cx: &mut Cx, value: f32);
     fn get(&self, cx: &Cx) -> f32;
 }
