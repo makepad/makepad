@@ -28,11 +28,10 @@ impl BareExampleApp {
             instance counter: Self::counter();
             fn pixel() -> vec4 {
                 
-                return color!(#101);
-                
-                //df_viewport(pos * vec2(w, h));
-                //df_circle(0.5 * w, 0.5 * h, 0.5 * w);
-                //return df_fill(mix(color!(green), color!(blue), abs(sin(counter))));
+                //return color!(red);
+                let df = Df::viewport(pos * vec2(w, h));
+                df.circle(0.5 * w, 0.5 * h, 0.5 * w);
+                return df.fill(color!(white));//mix(color!(green), color!(blue), abs(sin(counter))));
             }  
         "}));
         

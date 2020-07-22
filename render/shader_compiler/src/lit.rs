@@ -33,7 +33,7 @@ impl fmt::Display for Lit {
             Lit::Bool(lit) => write!(f, "{}", lit),
             Lit::Int(lit) => write!(f, "{}", lit),
             Lit::Float(lit) =>{
-                if lit.abs().fract() < 0.00000001{
+                if lit.abs().fract() < 0.00000001{ 
                     write!(f, "{}.0", lit)
                 }
                 else{
