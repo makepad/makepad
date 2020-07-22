@@ -379,7 +379,7 @@ impl Cx {
                     let sh = &self.shaders[draw_call.shader_id];
                     for i in 0..inst.instance_count {
                         if let Some(x) = sh.mapping.rect_instance_props.x {
-                            draw_call.instance[inst.instance_offset + x + i * sh.mapping.instance_slots] += dx;
+                            draw_call.instance[inst.instance_offset + x + i * sh.mapping.instance_props.total_slots] += dx;
                         }
                     }
                 },
@@ -399,7 +399,7 @@ impl Cx {
                     let sh = &self.shaders[draw_call.shader_id];
                     for i in 0..inst.instance_count {
                         if let Some(y) = sh.mapping.rect_instance_props.y {
-                            draw_call.instance[inst.instance_offset + y + i * sh.mapping.instance_slots] += dy;
+                            draw_call.instance[inst.instance_offset + y + i * sh.mapping.instance_props.total_slots] += dy;
                         }
                     }
                 },

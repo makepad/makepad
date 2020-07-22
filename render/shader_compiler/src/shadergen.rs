@@ -20,6 +20,7 @@ pub struct LiveLoc{
 pub struct PropDef{
     pub name: String,
     pub ident: String,
+    pub block: Option<String>,
     pub prop_id:PropId
 }
 
@@ -27,10 +28,10 @@ pub struct PropDef{
 pub struct ShaderSub{
     pub loc:LiveLoc,
     pub code:String,
-    pub attribute_props:Vec<PropDef>,
-    pub instance_props:Vec<PropDef>,
-    pub uniform_props:Vec<PropDef>, 
-    pub texture_props:Vec<PropDef>
+    pub attributes:Vec<PropDef>,
+    pub instances:Vec<PropDef>,
+    pub uniforms:Vec<PropDef>, 
+    pub textures:Vec<PropDef>
 }
 
 #[derive(Default, Clone, PartialEq)]
@@ -42,12 +43,14 @@ pub struct ShaderGen {
 
 impl Eq for ShaderGen {}
 
+#[derive(Debug)]
 pub struct ShaderGenError{
     pub file:String,
     pub line:usize,
     pub col:usize,
     pub msg:String
 }
+
 
 impl ShaderGen{
     pub fn new() -> Self {
@@ -84,7 +87,7 @@ impl ShaderGen{
     
     pub fn lex_parse_analyse(&self)->Result<ShaderAst, ShaderGenError>{
         let mut shader_ast = ShaderAst::new();
-        let mut input_props = Vec::new();
+        let mut inputs = Vec::new();
         for (index,sub) in self.subs.iter().enumerate() {
             // lets tokenize the sub
             let tokens = lex::lex(sub.code.chars(), index).collect::<Result<Vec<_>, _>>();
@@ -96,15 +99,15 @@ impl ShaderGen{
                 return Err(Self::shader_gen_error(&err, sub));
             }
             // lets add our instance_props
-            input_props.extend(sub.attribute_props.iter());
-            input_props.extend(sub.instance_props.iter());
-            input_props.extend(sub.uniform_props.iter());
-            input_props.extend(sub.texture_props.iter());
+            inputs.extend(sub.attributes.iter());
+            inputs.extend(sub.instances.iter());
+            inputs.extend(sub.uniforms.iter());
+            inputs.extend(sub.textures.iter());
         }
         
         // lets collect all our 
         // ok now we have the shader, lets analyse
-        if let Err(err) = analyse::analyse(&mut shader_ast, &input_props){
+        if let Err(err) = analyse::analyse(&mut shader_ast, &inputs){
             let sub = &self.subs[err.span.loc_id];
             return Err(Self::shader_gen_error(&err, sub));
         }
