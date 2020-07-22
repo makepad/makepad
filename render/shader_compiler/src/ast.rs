@@ -41,7 +41,7 @@ impl ShaderAst {
     }
 
     pub fn find_fn_decl(&self, ident: Ident) -> Option<&FnDecl> {
-        self.decls.iter().find_map(|decl| {
+        self.decls.iter().rev().find_map(|decl| {
             match decl {
                 Decl::Fn(decl) => Some(decl),
                 _ => None,
