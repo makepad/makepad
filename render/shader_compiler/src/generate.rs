@@ -102,8 +102,8 @@ pub trait BackendWriter {
 pub struct BlockGenerator<'a> {
     pub shader: &'a ShaderAst,
     pub backend_writer: &'a dyn BackendWriter,
-    pub use_hidden_parameters: bool,
-    pub use_generated_constructors: bool,
+    pub use_hidden_params: bool,
+    pub use_generated_cons_fns: bool,
     pub indent_level: usize,
     pub string: &'a mut String,
 }
@@ -267,8 +267,8 @@ impl<'a> BlockGenerator<'a> {
         ExprGenerator {
             shader: self.shader,
             backend_writer: self.backend_writer,
-            use_hidden_parameters: self.use_hidden_parameters,
-            use_generated_constructors: self.use_generated_constructors,
+            use_hidden_params: self.use_hidden_params,
+            use_generated_cons_fns: self.use_generated_cons_fns,
             string: self.string,
         }
         .generate_expr(expr)
@@ -292,8 +292,8 @@ impl<'a> BlockGenerator<'a> {
 pub struct ExprGenerator<'a> {
     pub shader: &'a ShaderAst,
     pub backend_writer: &'a dyn BackendWriter,
-    pub use_hidden_parameters: bool,
-    pub use_generated_constructors: bool,
+    pub use_hidden_params: bool,
+    pub use_generated_cons_fns: bool,
     pub string: &'a mut String,
 }
 
@@ -455,7 +455,7 @@ impl<'a> ExprGenerator<'a> {
             self.generate_expr(arg_expr);
             sep = ", ";
         }
-        if self.use_hidden_parameters {
+        if self.use_hidden_params {
             if let Some(decl) = self.shader.find_fn_decl(ident) {
                 for &ident in decl.uniform_block_deps.borrow().as_ref().unwrap() {
                     write!(self.string, "{}mpsc_{}_uniforms", sep, ident).unwrap();
@@ -511,7 +511,7 @@ impl<'a> ExprGenerator<'a> {
         ty_lit: TyLit,
         arg_exprs: &[Expr]
     ) {
-        if self.use_generated_constructors {
+        if self.use_generated_cons_fns {
             write!(self.string, "mpsc_").unwrap();
             self.write_ty_lit(ty_lit);
             for arg_expr in arg_exprs {
