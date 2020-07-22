@@ -3,7 +3,7 @@ use makepad_shader_compiler::ast::ShaderAst;
 use makepad_shader_compiler::generate_metal;
 use makepad_shader_compiler::lex;
 use makepad_shader_compiler::parse;
-use makepad_shader_compiler::shader::*;
+use makepad_shader_compiler::shadergen::*;
 use makepad_shader_compiler::uid;
 
 const SOURCE: &str = r#"
@@ -14,12 +14,11 @@ const SOURCE: &str = r#"
     impl Cx {
         fn foo() -> Cx {
             let cx: Cx;
-            aPosition;
-            iRotation;
             return cx;
         }
 
         fn bar(self) {
+            tTexture;
             -self.prop;
         }
 
@@ -29,6 +28,8 @@ const SOURCE: &str = r#"
             self.bar();
         }
     }
+
+    texture tTexture: Self::my_texture();
 
     attribute aPosition: Self::my_attribute();
     attribute aColor: Self::my_attribute();
@@ -55,6 +56,7 @@ const SOURCE: &str = r#"
 
 #[test]
 fn test() {
+    fn my_texture() -> Texture2dId { uid!() }
     fn my_attribute() -> Vec3Id { uid!() }
     fn my_instance() -> Vec3Id { uid!() }
 
@@ -68,6 +70,11 @@ fn test() {
     .unwrap();
     analyse::analyse(&mut shader, &[
         &PropDef {
+            name: String::from("my_texture"),
+            ident: String::from("Self::my_texture"),
+            prop_id: my_texture().into()
+        },
+        &PropDef {
             name: String::from("my_attribute"),
             ident: String::from("Self::my_attribute"),
             prop_id: my_attribute().into()
@@ -78,6 +85,5 @@ fn test() {
             prop_id: my_instance().into()
         }
     ]).unwrap();
-    println!("{}", generate_metal::generate_vertex_shader(&shader));
-    println!("{}", generate_metal::generate_fragment_shader(&shader));
+    println!("{}", generate_metal::generate_shader(&shader));
 }
