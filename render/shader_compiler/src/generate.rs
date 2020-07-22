@@ -85,7 +85,10 @@ pub trait BackendWriter {
                 self.write_ty_lit(string, TyLit::Mat4);
                 write!(string, " {}", ident).unwrap();
             },
-            Ty::Texture2d => panic!(),
+            Ty::Texture2D => {
+                self.write_ty_lit(string, TyLit::Texture2D);
+                write!(string, " {}", ident).unwrap();
+            },
             Ty::Array { ref elem_ty, len } => {
                 self.write_ident_and_ty(string, ident, elem_ty);
                 write!(string, "[{}]", len).unwrap();
