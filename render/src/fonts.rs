@@ -73,7 +73,7 @@ impl TrapezoidText {
          
         sg.compose(shader!{"
             
-            attribute geom: Self::geom();
+            geometry geom: Self::geom();
             
             instance a_xs: Self::a_xs();
             instance a_ys: Self::a_ys();
