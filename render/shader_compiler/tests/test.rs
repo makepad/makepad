@@ -19,14 +19,15 @@ const SOURCE: &str = r#"
         }
 
         fn bar(inout self) {
-            tTexture;
+            aPosition;
+            vColor;
             -self.pos;
         }
 
         fn qux(self, x: float) -> float {
             aPosition;
+            vColor;
             return 2.0 * x;
-            self.bar();
         }
 
         fn translate(inout self, x: float, y: float) -> vec2 {
