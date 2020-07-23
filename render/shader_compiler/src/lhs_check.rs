@@ -4,6 +4,7 @@ use {
         env::{
             Env,
             Sym,
+            VarKind,
         },
         error::Error,
         ident::Ident,
@@ -64,10 +65,10 @@ impl<'a> LhsChecker<'a> {
             } => self.lhs_check_call_expr(span, ident, arg_exprs),
             ExprKind::MacroCall {
                 span,
-                ident,
                 ref analysis,
+                ident,
                 ref arg_exprs,
-            } => self.lhs_check_macro_call_expr(span, ident, arg_exprs, analysis),
+            } => self.lhs_check_macro_call_expr(span, analysis, ident, arg_exprs),
             ExprKind::ConsCall {
                 span,
                 ty_lit,
@@ -75,8 +76,9 @@ impl<'a> LhsChecker<'a> {
             } => self.lhs_check_cons_call_expr(span, ty_lit, arg_exprs),
             ExprKind::Var {
                 span,
+                ref kind,
                 ident,
-            } => self.lhs_check_var_expr(span, ident),
+            } => self.lhs_check_var_expr(span, kind, ident),
             ExprKind::Lit {span, lit} => self.lhs_check_lit_expr(span, lit),
         }
     }
@@ -164,9 +166,9 @@ impl<'a> LhsChecker<'a> {
     fn lhs_check_macro_call_expr(
         &mut self,
         span: Span,
+        _analysis: &Cell<Option<MacroCallAnalysis>>,
         _ident: Ident,
         _arg_exprs: &[Expr],
-        _analysis: &Cell<Option<MacroCallAnalysis>>,
     ) -> Result<(), Error> {
         return Err(Error {
             span,
@@ -189,6 +191,7 @@ impl<'a> LhsChecker<'a> {
     fn lhs_check_var_expr(
         &mut self,
         span: Span,
+        _kind: &Cell<Option<VarKind>>,
         ident: Ident
     ) -> Result<(), Error> {
         match *self.env.find_sym(ident).unwrap() {
