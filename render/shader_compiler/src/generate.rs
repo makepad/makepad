@@ -475,6 +475,26 @@ impl<'a> ExprGenerator<'a> {
         kind: &Cell<Option<VarKind>>,
         ident: Ident,
     ) {
+        if let Some(decl) = self.decl {
+            let is_used_in_vertex_shader = decl.is_used_in_vertex_shader.get().unwrap();
+            let is_used_in_fragment_shader = decl.is_used_in_fragment_shader.get().unwrap();
+            if is_used_in_vertex_shader {
+                match kind.get().unwrap() {
+                    VarKind::Attribute => write!(self.string, "mpsc_attributes.").unwrap(),
+                    VarKind::Instance => write!(self.string, "mpsc_instances.").unwrap(),
+                    VarKind::Varying => write!(self.string, "mpsc_varyings.").unwrap(),
+                    _ => {}
+                }
+            }
+            if is_used_in_fragment_shader {
+                match kind.get().unwrap() {
+                    VarKind::Attribute
+                    | VarKind::Instance
+                    | VarKind::Varying => write!(self.string, "mpsc_varyings.").unwrap(),
+                    _ => {}
+                }
+            }
+        }
         write!(self.string, "{}", ident).unwrap()
     }
 
