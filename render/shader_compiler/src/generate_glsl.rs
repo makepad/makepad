@@ -63,17 +63,17 @@ impl<'a> ShaderGenerator<'a> {
     }
     
     fn generate_vertex_shader(&mut self) {
-        let packed_attributes_size = self.compute_packed_attributes_size();
+        let packed_geometries_size = self.compute_packed_geometries_size();
         let packed_instances_size = self.compute_packed_instances_size();
         let packed_varyings_size = self.compute_packed_varyings_size();
         self.generate_decls(
-            Some(packed_attributes_size),
+            Some(packed_geometries_size),
             Some(packed_instances_size),
             packed_varyings_size
         );
         for decl in &self.shader.decls {
             match decl {
-                Decl::Attribute(decl) => {
+                Decl::Geometry(decl) => {
                     self.write_var_decl(
                         false,
                         decl.ident,
@@ -108,15 +108,15 @@ impl<'a> ShaderGenerator<'a> {
         }
         self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("vertex")).unwrap());
         writeln!(self.string, "void main() {{").unwrap();
-        let mut attribute_unpacker = VarUnpacker::new(
-            "mpsc_packed_attribute",
-            packed_attributes_size,
+        let mut geometry_unpacker = VarUnpacker::new(
+            "mpsc_packed_geometry",
+            packed_geometries_size,
             &mut self.string
         );
         for decl in &self.shader.decls {
             match decl {
-                Decl::Attribute(decl) => {
-                    attribute_unpacker.unpack_var(
+                Decl::Geometry(decl) => {
+                    geometry_unpacker.unpack_var(
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
@@ -148,7 +148,7 @@ impl<'a> ShaderGenerator<'a> {
         );
         for decl in &self.shader.decls {
             match decl {
-                Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                Decl::Geometry(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
                     varying_packer.pack_var(
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap(),
@@ -177,7 +177,7 @@ impl<'a> ShaderGenerator<'a> {
         self.generate_decls(None, None, packed_varyings_size);
         for decl in &self.shader.decls {
             match decl {
-                Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                Decl::Geometry(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
                     self.write_var_decl(
                         false,
                         decl.ident,
@@ -219,7 +219,7 @@ impl<'a> ShaderGenerator<'a> {
         );
         for decl in &self.shader.decls {
             match decl {
-                Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                Decl::Geometry(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
                     varying_unpacker.unpack_var(
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap(),
@@ -281,7 +281,7 @@ impl<'a> ShaderGenerator<'a> {
         if let Some(packed_attributes_size) = packed_attributes_size {
             self.generate_packed_var_decls(
                 "attribute",
-                "mpsc_packed_attribute",
+                "mpsc_packed_geometry",
                 packed_attributes_size
             );
         }
@@ -350,11 +350,11 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, ";").unwrap();
     }
 
-    fn compute_packed_attributes_size(&self) -> usize {
+    fn compute_packed_geometries_size(&self) -> usize {
         let mut packed_attributes_size = 0;
         for decl in &self.shader.decls {
             packed_attributes_size += match decl {
-                Decl::Attribute(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
+                Decl::Geometry(decl) => decl.ty_expr.ty.borrow().as_ref().unwrap().size(),
                 _ => 0,
             }
         }
@@ -376,7 +376,7 @@ impl<'a> ShaderGenerator<'a> {
         let mut packed_varyings_size = 0;
         for decl in &self.shader.decls {
             packed_varyings_size += match decl {
-                Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                Decl::Geometry(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
                     decl.ty_expr.ty.borrow().as_ref().unwrap().size()
                 },
                 Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {

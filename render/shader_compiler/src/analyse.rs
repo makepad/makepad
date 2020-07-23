@@ -81,7 +81,7 @@ impl<'a> ShaderAnalyser<'a> {
         self.env.pop_scope();
         for decl in &self.shader.decls {
             match decl {
-                Decl::Attribute(decl) => {
+                Decl::Geometry(decl) => {
                     decl.is_used_in_fragment_shader.set(Some(false));
                 },
                 Decl::Instance(decl) => {
@@ -117,7 +117,7 @@ impl<'a> ShaderAnalyser<'a> {
         )?;
         for &attribute_dep in fragment_decl.attribute_deps.borrow().as_ref().unwrap() {
             self.shader
-                .find_attribute_decl(attribute_dep)
+                .find_geometry_decl(attribute_dep)
                 .unwrap()
                 .is_used_in_fragment_shader
                 .set(Some(true));
@@ -134,7 +134,7 @@ impl<'a> ShaderAnalyser<'a> {
 
     fn analyse_decl(&mut self, decl: &Decl) -> Result<(), Error> {
         match decl {
-            Decl::Attribute(decl) => self.analyse_attribute_decl(decl),
+            Decl::Geometry(decl) => self.analyse_geometry_decl(decl),
             Decl::Const(decl) => self.analyse_const_decl(decl),
             Decl::Fn(decl) => self.analyse_fn_decl(decl),
             Decl::Instance(decl) => self.analyse_instance_decl(decl),
@@ -145,7 +145,7 @@ impl<'a> ShaderAnalyser<'a> {
         }
     }
 
-    fn analyse_attribute_decl(&mut self, decl: &AttributeDecl) -> Result<(), Error> {
+    fn analyse_geometry_decl(&mut self, decl: &GeometryDecl) -> Result<(), Error> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         match ty {
             Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {}

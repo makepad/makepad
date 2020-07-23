@@ -263,7 +263,7 @@ where
                 string.push(self.read_char());
                 self.read_chars_while(&mut string, |ch| ch.is_ascii_alphanumeric() || ch == '_');
                 match string.as_str() {
-                    "attribute" => Token::Attribute,
+                    "geometry" => Token::Geometry,
                     "bool" => Token::TyLit(TyLit::Bool),
                     "break" => Token::Break,
                     "bvec2" => Token::TyLit(TyLit::Bvec2),

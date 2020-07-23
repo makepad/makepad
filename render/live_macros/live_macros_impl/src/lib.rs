@@ -73,10 +73,10 @@ pub fn shader(input: TokenStream) -> TokenStream {
             tb.add("( ) . into ( )");
             tb.add("} ,");
         }
-        tb.add("attributes : vec ! [");
+        tb.add("geometries : vec ! [");
         for decl in &shader.decls {
             match decl {
-                Decl::Attribute(decl) => {
+                Decl::Geometry(decl) => {
                     match decl.ty_expr.kind {
                         TyExprKind::Var {ident, ..} => {
                             prop_def(&mut tb, decl.ident.to_string(), ident.to_string(), None);
