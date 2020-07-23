@@ -4,7 +4,6 @@ use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
 use crate::span::Span;
 use crate::ty::Ty;
-use std::cell::Cell;
 
 #[derive(Clone, Debug)]
 pub struct DepAnalyser<'a> {
@@ -66,11 +65,9 @@ impl<'a> DepAnalyser<'a> {
             } => self.dep_analyse_cons_call_expr(span, ty_lit, arg_exprs),
             ExprKind::Var {
                 span,
-                ref is_lvalue,
-                ref kind,
                 ident,
                 ..
-            } => self.dep_analyse_var_expr(span, is_lvalue, kind, ident),
+            } => self.dep_analyse_var_expr(span, ident),
             ExprKind::Lit { span, lit } => self.dep_analyse_lit_expr(span, lit),
         }
     }
@@ -174,8 +171,6 @@ impl<'a> DepAnalyser<'a> {
     fn dep_analyse_var_expr(
         &mut self,
         _span: Span,
-        _is_lvalue: &Cell<Option<bool>>,
-        _kind: &Cell<Option<VarKind>>,
         ident: Ident,
     ) {
         match self.env.find_sym(ident).unwrap() {

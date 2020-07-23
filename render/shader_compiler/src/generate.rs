@@ -1,7 +1,6 @@
 use {
     crate::{
         ast::*,
-        env::VarKind,
         ident::Ident,
         lit::{
             Lit,
@@ -354,10 +353,8 @@ impl<'a> ExprGenerator<'a> {
             } => self.generate_cons_call_expr(span, ty_lit, arg_exprs),
             ExprKind::Var {
                 span,
-                ref is_lvalue,
-                ref kind,
                 ident,
-            } => self.generate_var_expr(span, is_lvalue, kind, ident),
+            } => self.generate_var_expr(span, ident),
             ExprKind::Lit {
                 span,
                 lit
@@ -544,8 +541,6 @@ impl<'a> ExprGenerator<'a> {
     fn generate_var_expr(
         &mut self,
         _span: Span,
-        _is_lvalue: &Cell<Option<bool>>,
-        _kind: &Cell<Option<VarKind>>,
         ident: Ident,
     ) {
         write!(self.string, "{}", ident).unwrap()

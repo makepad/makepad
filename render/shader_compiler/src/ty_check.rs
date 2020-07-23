@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::builtin::Builtin;
-use crate::env::{Env, Sym, VarKind};
+use crate::env::{Env, Sym};
 use crate::error::Error;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
@@ -152,10 +152,8 @@ impl<'a> TyChecker<'a> {
             } => self.ty_check_cons_call_expr(span, ty_lit, arg_exprs),
             ExprKind::Var {
                 span,
-                ref is_lvalue,
-                ref kind,
                 ident,
-            } => self.ty_check_var_expr(span, is_lvalue, kind, ident),
+            } => self.ty_check_var_expr(span, ident),
             ExprKind::Lit {span, lit} => self.ty_check_lit_expr(span, lit),
         } ?;
         *expr.ty.borrow_mut() = Some(ty.clone());
@@ -802,8 +800,6 @@ impl<'a> TyChecker<'a> {
     fn ty_check_var_expr(
         &mut self,
         span: Span,
-        is_lvalue: &Cell<Option<bool>>,
-        kind: &Cell<Option<VarKind>>,
         ident: Ident,
     ) -> Result<Ty, Error> {
         match *self
@@ -817,7 +813,7 @@ impl<'a> TyChecker<'a> {
             Sym::Var {
                 is_mut,
                 ref ty,
-                kind: new_kind,
+                ..
             } => {
                 if self.is_lvalue && !is_mut {
                     return Err(Error {
@@ -825,8 +821,6 @@ impl<'a> TyChecker<'a> {
                         message: format!("can't assign to variable `{}`", ident).into()
                     });
                 }
-                is_lvalue.set(Some(self.is_lvalue));
-                kind.set(Some(new_kind));
                 Ok(ty.clone())
             }
             _ => Err(Error {
