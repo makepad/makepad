@@ -4,6 +4,7 @@ use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
 use crate::span::Span;
 use crate::ty::Ty;
+use std::cell::Cell;
 
 #[derive(Clone, Debug)]
 pub struct DepAnalyser<'a> {
@@ -54,10 +55,10 @@ impl<'a> DepAnalyser<'a> {
             } => self.dep_analyse_call_expr(span, ident, arg_exprs),
             ExprKind::MacroCall {
                 span,
+                ref analysis,
                 ident,
                 ref arg_exprs,
-                ..
-            } => self.dep_analyse_macro_call_expr(span, ident, arg_exprs),
+            } => self.dep_analyse_macro_call_expr(span, analysis, ident, arg_exprs),
             ExprKind::ConsCall {
                 span,
                 ty_lit,
@@ -65,10 +66,13 @@ impl<'a> DepAnalyser<'a> {
             } => self.dep_analyse_cons_call_expr(span, ty_lit, arg_exprs),
             ExprKind::Var {
                 span,
+                ref kind,
                 ident,
-                ..
-            } => self.dep_analyse_var_expr(span, ident),
-            ExprKind::Lit { span, lit } => self.dep_analyse_lit_expr(span, lit),
+            } => self.dep_analyse_var_expr(span, kind, ident),
+            ExprKind::Lit {
+                span,
+                lit
+            } => self.dep_analyse_lit_expr(span, lit),
         }
     }
 
@@ -152,8 +156,13 @@ impl<'a> DepAnalyser<'a> {
     }
     
     
-    fn dep_analyse_macro_call_expr(&mut self, _span: Span, _ident: Ident, _arg_exprs: &[Expr]) {
-    }
+    fn dep_analyse_macro_call_expr(
+        &mut self,
+        _span: Span,
+        _analysis: &Cell<Option<MacroCallAnalysis>>,
+        _ident: Ident,
+        _arg_exprs: &[Expr]
+    ) {}
 
     fn dep_analyse_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {
         for arg_expr in arg_exprs {
@@ -171,49 +180,47 @@ impl<'a> DepAnalyser<'a> {
     fn dep_analyse_var_expr(
         &mut self,
         _span: Span,
+        kind: &Cell<Option<VarKind>>,
         ident: Ident,
     ) {
-        match self.env.find_sym(ident).unwrap() {
-            Sym::Var { kind, .. } => match kind {
-                VarKind::Attribute => {
-                    self.decl
-                        .attribute_deps
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .insert(ident);
-                }
-                VarKind::Instance => {
-                    self.decl
-                        .instance_deps
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .insert(ident);
-                }
-                VarKind::Texture => {
-                    self.decl.has_texture_deps.set(Some(true));
-                }
-                VarKind::Uniform => {
-                    self.decl
-                        .uniform_block_deps
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .insert(
-                            self.shader
-                                .find_uniform_decl(ident)
-                                .unwrap()
-                                .block_ident
-                                .unwrap_or(Ident::new("default")),
-                        );
-                }
-                VarKind::Varying => {
-                    self.decl.has_varying_deps.set(Some(true));
-                }
-                _ => {}
-            },
-            _ => panic!(),
+        match kind.get().unwrap() {
+            VarKind::Attribute => {
+                self.decl
+                    .attribute_deps
+                    .borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .insert(ident);
+            }
+            VarKind::Instance => {
+                self.decl
+                    .instance_deps
+                    .borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .insert(ident);
+            }
+            VarKind::Texture => {
+                self.decl.has_texture_deps.set(Some(true));
+            }
+            VarKind::Uniform => {
+                self.decl
+                    .uniform_block_deps
+                    .borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .insert(
+                        self.shader
+                            .find_uniform_decl(ident)
+                            .unwrap()
+                            .block_ident
+                            .unwrap_or(Ident::new("default")),
+                    );
+            }
+            VarKind::Varying => {
+                self.decl.has_varying_deps.set(Some(true));
+            }
+            _ => {},
         }
     }
 

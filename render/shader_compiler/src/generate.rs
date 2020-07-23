@@ -1,6 +1,7 @@
 use {
     crate::{
         ast::*,
+        env::VarKind,
         ident::Ident,
         lit::{
             Lit,
@@ -26,6 +27,7 @@ pub trait BackendWriter {
 
 pub struct BlockGenerator<'a> {
     pub shader: &'a ShaderAst,
+    pub decl: &'a FnDecl,
     pub backend_writer: &'a dyn BackendWriter,
     pub use_hidden_params: bool,
     pub use_generated_cons_fns: bool,
@@ -193,6 +195,7 @@ impl<'a> BlockGenerator<'a> {
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             shader: self.shader,
+            decl: Some(self.decl),
             backend_writer: self.backend_writer,
             use_hidden_params: self.use_hidden_params,
             use_generated_cons_fns: self.use_generated_cons_fns,
@@ -219,6 +222,7 @@ impl<'a> BlockGenerator<'a> {
 
 pub struct ExprGenerator<'a> {
     pub shader: &'a ShaderAst,
+    pub decl: Option<&'a FnDecl>,
     pub backend_writer: &'a dyn BackendWriter,
     pub use_hidden_params: bool,
     pub use_generated_cons_fns: bool,
@@ -279,8 +283,9 @@ impl<'a> ExprGenerator<'a> {
             } => self.generate_cons_call_expr(span, ty_lit, arg_exprs),
             ExprKind::Var {
                 span,
+                ref kind,
                 ident,
-            } => self.generate_var_expr(span, ident),
+            } => self.generate_var_expr(span, kind, ident),
             ExprKind::Lit {
                 span,
                 lit
@@ -467,6 +472,7 @@ impl<'a> ExprGenerator<'a> {
     fn generate_var_expr(
         &mut self,
         _span: Span,
+        kind: &Cell<Option<VarKind>>,
         ident: Ident,
     ) {
         write!(self.string, "{}", ident).unwrap()
