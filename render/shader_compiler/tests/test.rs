@@ -38,8 +38,8 @@ const SOURCE: &str = r#"
 
     texture tTexture: Self::my_texture();
 
-    attribute aPosition: Self::my_attribute();
-    attribute aColor: Self::my_attribute();
+    geometry aPosition: Self::my_geometry();
+    geometry aColor: Self::my_geometry();
 
     instance iRotation: Self::my_instance();
 
@@ -64,7 +64,7 @@ const SOURCE: &str = r#"
 #[test]
 fn test() {
     fn my_texture() -> Texture2dId { uid!() }
-    fn my_attribute() -> Vec3Id { uid!() }
+    fn my_geometry() -> Vec3Id { uid!() }
     fn my_instance() -> Vec3Id { uid!() }
 
     let mut shader = ShaderAst::new();
@@ -83,9 +83,9 @@ fn test() {
             block: None,
         },
         &PropDef {
-            name: String::from("my_attribute"),
-            ident: String::from("Self::my_attribute"),
-            prop_id: my_attribute().into(),
+            name: String::from("my_geometry"),
+            ident: String::from("Self::my_geometry"),
+            prop_id: my_geometry().into(),
             block: None,
         },
         &PropDef {
