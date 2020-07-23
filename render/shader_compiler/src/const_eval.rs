@@ -9,7 +9,7 @@ use crate::val::Val;
 
 #[derive(Clone, Debug)]
 pub struct ConstEvaluator<'a> {
-    pub shader_ast: &'a ShaderAst,
+    pub shader: &'a ShaderAst,
     pub env: &'a Env,
 }
 
@@ -283,7 +283,7 @@ impl<'a> ConstEvaluator<'a> {
                 ..
             } => match kind {
                 VarKind::Const => Ok(self
-                    .shader_ast
+                    .shader
                     .find_const_decl(ident)
                     .unwrap()
                     .expr
