@@ -1,4 +1,3 @@
-use crate::env::VarKind;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
 use crate::span::Span;
@@ -326,7 +325,6 @@ pub enum ExprKind {
     },
     Var {
         span: Span,
-        kind: Cell<Option<VarKind>>,
         ident: Ident,
     },
     Lit {
