@@ -43,6 +43,7 @@ impl<'a> BlockGenerator<'a> {
                 self.generate_stmt(stmt);
             }
             self.indent_level -= 1;
+            self.write_indent();
         }
         write!(self.string, "}}").unwrap()
     }
