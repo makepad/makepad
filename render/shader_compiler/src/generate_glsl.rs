@@ -41,8 +41,6 @@ struct ShaderGenerator<'a> {
 }
  
 impl<'a> ShaderGenerator<'a> {
-    
-        
     fn write_ty_init(&mut self, ty: &Ty) {
         write!(self.string, "{}", match ty {
             Ty::Bool => "false",
@@ -76,7 +74,8 @@ impl<'a> ShaderGenerator<'a> {
         for decl in &self.shader.decls {
             match decl {
                 Decl::Attribute(decl) => {
-                    self.write_ident_and_ty(
+                    self.write_var_decl(
+                        false,
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
@@ -85,7 +84,8 @@ impl<'a> ShaderGenerator<'a> {
                     writeln!(self.string, ";").unwrap();
                 },
                 Decl::Instance(decl) => {
-                    self.write_ident_and_ty(
+                    self.write_var_decl(
+                        false,
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
@@ -94,7 +94,8 @@ impl<'a> ShaderGenerator<'a> {
                     writeln!(self.string, ";").unwrap();
                 },
                 Decl::Varying(decl) => {
-                    self.write_ident_and_ty(
+                    self.write_var_decl(
+                        false,
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
@@ -181,7 +182,8 @@ impl<'a> ShaderGenerator<'a> {
         for decl in &self.shader.decls {
             match decl {
                 Decl::Attribute(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    self.write_ident_and_ty(
+                    self.write_var_decl(
+                        false,
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
@@ -190,7 +192,8 @@ impl<'a> ShaderGenerator<'a> {
                     writeln!(self.string, ";").unwrap();
                 }
                 Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    self.write_ident_and_ty(
+                    self.write_var_decl(
+                        false,
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
@@ -199,7 +202,8 @@ impl<'a> ShaderGenerator<'a> {
                     writeln!(self.string, ";").unwrap();
                 }
                 Decl::Varying(decl) => {
-                    self.write_ident_and_ty(
+                    self.write_var_decl(
+                        false,
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
@@ -311,7 +315,8 @@ impl<'a> ShaderGenerator<'a> {
             writeln!(self.string).unwrap();
             for field in &decl.fields {
                 write!(self.string, "    ").unwrap();
-                self.write_ident_and_ty(
+                self.write_var_decl(
+                    false,
                     field.ident,
                     field.ty_expr.ty.borrow().as_ref().unwrap(),
                 );
@@ -323,7 +328,8 @@ impl<'a> ShaderGenerator<'a> {
 
     fn generate_const_decl(&mut self, decl: &ConstDecl) {
         write!(self.string, "const ").unwrap();
-        self.write_ident_and_ty(
+        self.write_var_decl(
+            false,
             decl.ident,
             decl.ty_expr.ty.borrow().as_ref().unwrap(),
         );
@@ -334,7 +340,8 @@ impl<'a> ShaderGenerator<'a> {
 
     fn generate_uniform_decl(&mut self, decl: &UniformDecl) {
         write!(self.string, "uniform ").unwrap();
-        self.write_ident_and_ty(
+        self.write_var_decl(
+            false,
             decl.ident,
             decl.ty_expr.ty.borrow().as_ref().unwrap(),
         );
@@ -343,7 +350,8 @@ impl<'a> ShaderGenerator<'a> {
 
     fn generate_texture_decl(&mut self, decl: &TextureDecl) {
         write!(self.string, "uniform ").unwrap();
-        self.write_ident_and_ty(
+        self.write_var_decl(
+            false,
             decl.ident,
             decl.ty_expr.ty.borrow().as_ref().unwrap(),
         );
@@ -426,7 +434,8 @@ impl<'a> ShaderGenerator<'a> {
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
             self.generate_fn_decl(self.shader.find_fn_decl(callee).unwrap(), visited);
         }
-        self.write_ident_and_ty(
+        self.write_var_decl(
+            false,
             decl.ident,
             decl.return_ty.borrow().as_ref().unwrap(),
         );
@@ -434,10 +443,8 @@ impl<'a> ShaderGenerator<'a> {
         let mut sep = "";
         for param in &decl.params {
             write!(self.string, "{}", sep).unwrap();
-            if param.is_inout {
-                write!(self.string, "inout ").unwrap();
-            }
-            self.write_ident_and_ty(
+            self.write_var_decl(
+                param.is_inout,
                 param.ident,
                 param.ty_expr.ty.borrow().as_ref().unwrap(),
             );
@@ -472,9 +479,10 @@ impl<'a> ShaderGenerator<'a> {
         .generate_expr(expr)
     }
 
-    fn write_ident_and_ty(&mut self, ident: Ident, ty: &Ty) {
-        GlslBackendWriter.write_ident_and_ty(
+    fn write_var_decl(&mut self, is_inout: bool, ident: Ident, ty: &Ty) {
+        GlslBackendWriter.write_var_decl(
             &mut self.string,
+            is_inout,
             ident,
             ty
         );
@@ -623,6 +631,88 @@ impl<'a> VarUnpacker<'a> {
 struct GlslBackendWriter;
 
 impl BackendWriter for GlslBackendWriter {
+    fn write_var_decl(&self, string: &mut String, is_inout: bool, ident: Ident, ty: &Ty) {
+        if is_inout {
+            write!(string, "inout ").unwrap();
+        }
+        match *ty {
+            Ty::Void => write!(string, "void {}", ident).unwrap(),
+            Ty::Bool => {
+                self.write_ty_lit(string, TyLit::Bool);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Int => {
+                self.write_ty_lit(string, TyLit::Int);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Float => {
+                self.write_ty_lit(string, TyLit::Float);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Bvec2 => {
+                self.write_ty_lit(string, TyLit::Bvec2);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Bvec3 => {
+                self.write_ty_lit(string, TyLit::Bvec3);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Bvec4 => {
+                self.write_ty_lit(string, TyLit::Bvec4);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Ivec2 => {
+                self.write_ty_lit(string, TyLit::Ivec2);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Ivec3 => {
+                self.write_ty_lit(string, TyLit::Ivec3);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Ivec4 => {
+                self.write_ty_lit(string, TyLit::Ivec4);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Vec2 => {
+                self.write_ty_lit(string, TyLit::Vec2);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Vec3 => {
+                self.write_ty_lit(string, TyLit::Vec3);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Vec4 => {
+                self.write_ty_lit(string, TyLit::Vec4);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Mat2 => {
+                self.write_ty_lit(string, TyLit::Mat2);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Mat3 => {
+                self.write_ty_lit(string, TyLit::Mat3);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Mat4 => {
+                self.write_ty_lit(string, TyLit::Mat4);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Texture2D => {
+                self.write_ty_lit(string, TyLit::Texture2D);
+                write!(string, " {}", ident).unwrap();
+            },
+            Ty::Array { ref elem_ty, len } => {
+                self.write_var_decl(string, is_inout, ident, elem_ty);
+                write!(string, "[{}]", len).unwrap();
+            }
+            Ty::Struct {
+                ident: struct_ident,
+            } => {
+                write!(string, "{} {}", struct_ident, ident).unwrap();
+            }
+        }   
+    }
+
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit) {
         write!(string, "{}", match ty_lit {
             TyLit::Bool => "bool",
@@ -643,5 +733,4 @@ impl BackendWriter for GlslBackendWriter {
             TyLit::Texture2D => "sampler2D",
         }).unwrap();
     }
-
 }
