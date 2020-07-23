@@ -73,7 +73,9 @@ impl<'a> ShaderGenerator<'a> {
             }
         }
         writeln!(self.string, ") {{").unwrap();
-        write!(self.string, "    {}(", ty_lit).unwrap();
+        write!(self.string, "    return ").unwrap();
+        self.write_ty_lit(ty_lit);
+        write!(self.string, "(").unwrap();
         let ty = ty_lit.to_ty();
         if param_tys.len() == 1 {
             let param_ty = &param_tys[0];
@@ -139,7 +141,7 @@ impl<'a> ShaderGenerator<'a> {
                 }
             }
         }
-        writeln!(self.string, ")").unwrap();
+        writeln!(self.string, ");").unwrap();
         writeln!(self.string, "}}").unwrap();
     }
 
