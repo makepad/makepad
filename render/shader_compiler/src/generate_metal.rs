@@ -144,64 +144,11 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn generate_fn_decl(&mut self, decl: &FnDecl) {
-        for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
-            self.generate_fn_decl(self.shader.find_fn_decl(callee).unwrap());
-        }
-        self.write_var_decl(
-            false,
-            decl.ident,
-            decl.return_ty.borrow().as_ref().unwrap(),
-        );
-        write!(self.string, "(").unwrap();
-        let mut sep = "";
-        for param in &decl.params {
-            write!(self.string, "{}", sep).unwrap();
-            self.write_var_decl(
-                param.is_inout,
-                param.ident,
-                param.ty_expr.ty.borrow().as_ref().unwrap(),
-            );
-            sep = ", ";
-        }
-        for &ident in decl.uniform_block_deps.borrow().as_ref().unwrap() {
-            write!(self.string, "{}_mpsc_{1}_Uniforms mpsc_{1}_uniforms", sep, ident).unwrap();
-            sep = ", ";
-        }
-        if decl.has_texture_deps.get().unwrap() {
-            write!(self.string, "{}_mpsc_Textures mpsc_textures", sep).unwrap();
-            sep = ", ";
-        }
-        let is_used_in_vertex_shader = decl.is_used_in_vertex_shader.get().unwrap();
-        let is_used_in_fragment_shader = decl.is_used_in_fragment_shader.get().unwrap();
-        let has_attribute_deps = !decl.attribute_deps.borrow().as_ref().unwrap().is_empty();
-        let has_instance_deps = !decl.instance_deps.borrow().as_ref().unwrap().is_empty();
-        let has_varying_deps = decl.has_varying_deps.get().unwrap();
-        if is_used_in_vertex_shader && is_used_in_fragment_shader {
-            assert!(!has_attribute_deps);
-            assert!(!has_instance_deps);
-            assert!(!has_varying_deps);
-        } else if is_used_in_vertex_shader {
-            assert!(!is_used_in_fragment_shader);
-            if has_attribute_deps {
-                write!(self.string, "{}_mpsc_Attributes mpsc_attributes", sep).unwrap();
-                sep = ", ";
-            }
-            if has_instance_deps {
-                write!(self.string, "{}_mpsc_Instances mpsc_instances", sep).unwrap();
-                sep = ", ";
-            }
-            if has_varying_deps {
-                write!(self.string, "{}_mpsc_Varyings mpsc_varyings", sep).unwrap();
-            }
-        } else {
-            assert!(!is_used_in_vertex_shader);
-            if has_attribute_deps || has_instance_deps || has_varying_deps {       
-                write!(self.string, "{}_mpsc_Varyings mpsc_varyings", sep).unwrap();
-            }
-        }
-        write!(self.string, ") ").unwrap();
-        self.generate_block(&decl.block);
-        writeln!(self.string).unwrap();
+        FnDeclGenerator {
+            shader: self.shader,
+            decl,
+            string: self.string,
+        }.generate_fn_decl()
     }
 
     fn generate_block(&mut self, block: &Block) {
@@ -241,6 +188,100 @@ impl<'a> ShaderGenerator<'a> {
             &mut self.string,
             ty_lit,
         );  
+    }
+}
+
+struct FnDeclGenerator<'a> {
+    shader: &'a ShaderAst,
+    decl: &'a FnDecl,
+    string: &'a mut String,
+}
+
+impl<'a> FnDeclGenerator<'a> {
+    fn generate_fn_decl(&mut self) {
+        for &callee in self.decl.callees.borrow().as_ref().unwrap().iter() {
+            FnDeclGenerator {
+                shader: self.shader,
+                decl: self.shader.find_fn_decl(callee).unwrap(),
+                string: self.string,
+            }.generate_fn_decl()
+        }
+        self.write_var_decl(
+            false,
+            self.decl.ident,
+            self.decl.return_ty.borrow().as_ref().unwrap(),
+        );
+        write!(self.string, "(").unwrap();
+        let mut sep = "";
+        for param in &self.decl.params {
+            write!(self.string, "{}", sep).unwrap();
+            self.write_var_decl(
+                param.is_inout,
+                param.ident,
+                param.ty_expr.ty.borrow().as_ref().unwrap(),
+            );
+            sep = ", ";
+        }
+        for &ident in self.decl.uniform_block_deps.borrow().as_ref().unwrap() {
+            write!(self.string, "{}_mpsc_{1}_Uniforms mpsc_{1}_uniforms", sep, ident).unwrap();
+            sep = ", ";
+        }
+        if self.decl.has_texture_deps.get().unwrap() {
+            write!(self.string, "{}_mpsc_Textures mpsc_textures", sep).unwrap();
+            sep = ", ";
+        }
+        let is_used_in_vertex_shader = self.decl.is_used_in_vertex_shader.get().unwrap();
+        let is_used_in_fragment_shader = self.decl.is_used_in_fragment_shader.get().unwrap();
+        let has_attribute_deps = !self.decl.attribute_deps.borrow().as_ref().unwrap().is_empty();
+        let has_instance_deps = !self.decl.instance_deps.borrow().as_ref().unwrap().is_empty();
+        let has_varying_deps = self.decl.has_varying_deps.get().unwrap();
+        if is_used_in_vertex_shader && is_used_in_fragment_shader {
+            assert!(!has_attribute_deps);
+            assert!(!has_instance_deps);
+            assert!(!has_varying_deps);
+        } else if is_used_in_vertex_shader {
+            assert!(!is_used_in_fragment_shader);
+            if has_attribute_deps {
+                write!(self.string, "{}_mpsc_Attributes mpsc_attributes", sep).unwrap();
+                sep = ", ";
+            }
+            if has_instance_deps {
+                write!(self.string, "{}_mpsc_Instances mpsc_instances", sep).unwrap();
+                sep = ", ";
+            }
+            if has_varying_deps {
+                write!(self.string, "{}_mpsc_Varyings mpsc_varyings", sep).unwrap();
+            }
+        } else {
+            assert!(!is_used_in_vertex_shader);
+            if has_attribute_deps || has_instance_deps || has_varying_deps {       
+                write!(self.string, "{}_mpsc_Varyings mpsc_varyings", sep).unwrap();
+            }
+        }
+        write!(self.string, ") ").unwrap();
+        self.generate_block(&self.decl.block);
+        writeln!(self.string).unwrap();
+    }
+
+    fn generate_block(&mut self, block: &Block) {
+        BlockGenerator {
+            shader: self.shader,
+            backend_writer: &MetalBackendWriter,
+            use_hidden_params: true,
+            use_generated_cons_fns: true,
+            indent_level: 0,
+            string: self.string
+        }
+        .generate_block(block)
+    }
+
+    fn write_var_decl(&mut self, is_inout: bool, ident: Ident, ty: &Ty) {
+        MetalBackendWriter.write_var_decl(
+            &mut self.string,
+            is_inout,
+            ident,
+            ty
+        );
     }
 }
 
