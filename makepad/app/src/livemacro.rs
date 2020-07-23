@@ -28,10 +28,13 @@ impl LiveMacros {
                     if tp.eat("shader") &&
                     tp.eat("!") &&
                     tp.eat("{") {
+                        println!("HERE!");
                         // ok now we are at ", hopefully
                         // get matching pair
                         if tp.cur_type() == TokenType::ParenOpen {
-                            //let start = tp.next_index;
+                            // let start = tp.next_index;
+                            // we find the right slot in the shader
+                            // 
                             /*
                             let end = tp.cur_pair_token();
                             

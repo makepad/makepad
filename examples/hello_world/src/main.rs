@@ -198,7 +198,7 @@ impl HelloWorldApp {
     fn draw_app(&mut self, cx: &mut Cx) {
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
-        self.pass.set_window_clear_color(cx, color("grey"));
+        self.pass.set_window_clear_color(cx, color!(#5).get(cx));
         if self.view.begin_view(cx, Layout::default()).is_ok() {
             let mut quad = Quad::new(cx);
             quad.shader = Self::shader().get(cx);
