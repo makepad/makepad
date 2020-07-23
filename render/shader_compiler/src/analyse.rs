@@ -49,7 +49,6 @@ impl<'a> ShaderAnalyser<'a> {
             builtins: &self.builtins,
             shader: self.shader,
             env: &self.env,
-            is_lvalue: false,
         }
     }
 
@@ -453,7 +452,6 @@ impl<'a> FnDefAnalyser<'a> {
             builtins: self.builtins,
             shader: self.shader,
             env: &self.env,
-            is_lvalue: false,
         }
     }
 
