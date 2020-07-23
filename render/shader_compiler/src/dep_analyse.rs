@@ -7,7 +7,7 @@ use crate::ty::Ty;
 
 #[derive(Clone, Debug)]
 pub struct DepAnalyser<'a> {
-    pub shader_ast: &'a ShaderAst,
+    pub shader: &'a ShaderAst,
     pub decl: &'a FnDecl,
     pub env: &'a Env,
 }
@@ -201,7 +201,7 @@ impl<'a> DepAnalyser<'a> {
                         .as_mut()
                         .unwrap()
                         .insert(
-                            self.shader_ast
+                            self.shader
                                 .find_uniform_decl(ident)
                                 .unwrap()
                                 .block_ident
