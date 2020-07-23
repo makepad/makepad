@@ -858,7 +858,7 @@ impl FromWasm {
         self.add_string(fragment);
         self.add_string(vertex);
         self.fit(2);
-        self.mu32(mapping.attribute_props.total_slots as u32);
+        self.mu32(mapping.geometry_props.total_slots as u32);
         self.mu32(mapping.instance_props.total_slots as u32);
         self.add_propdefvec(&mapping.pass_uniforms);
         self.add_propdefvec(&mapping.view_uniforms);

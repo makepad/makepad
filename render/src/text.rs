@@ -84,7 +84,7 @@ impl Text {
         sg.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
         sg.geometry_indices = vec![0, 1, 2, 0, 3, 2];
         sg.compose(shader!{" 
-            attribute geom: Self::geom();
+            geometry geom: Self::geom();
             texture texturez: Self::texturez();
             
             instance font_tc: Self::font_tc();

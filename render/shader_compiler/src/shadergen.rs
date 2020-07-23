@@ -28,7 +28,7 @@ pub struct PropDef{
 pub struct ShaderSub{
     pub loc:LiveLoc,
     pub code:String,
-    pub attributes:Vec<PropDef>,
+    pub geometries:Vec<PropDef>,
     pub instances:Vec<PropDef>,
     pub uniforms:Vec<PropDef>, 
     pub textures:Vec<PropDef>
@@ -99,7 +99,7 @@ impl ShaderGen{
                 return Err(Self::shader_gen_error(&err, sub));
             }
             // lets add our instance_props
-            inputs.extend(sub.attributes.iter());
+            inputs.extend(sub.geometries.iter());
             inputs.extend(sub.instances.iter());
             inputs.extend(sub.uniforms.iter());
             inputs.extend(sub.textures.iter());
