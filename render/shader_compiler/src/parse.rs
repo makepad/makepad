@@ -741,7 +741,6 @@ impl<'a> Parser<'a> {
                     val: RefCell::new(None),
                     kind: span.end(self, |span| ExprKind::Var {
                         span,
-                        is_lvalue: Cell::new(None),
                         kind: Cell::new(None),
                         ident: Ident::new("self"),
                     })
@@ -787,7 +786,6 @@ impl<'a> Parser<'a> {
                             _ => {
                                 span.end(self, |span| ExprKind::Var {
                                     span,
-                                    is_lvalue: Cell::new(None),
                                     kind: Cell::new(None),
                                     ident,
                                 })
