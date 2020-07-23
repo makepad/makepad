@@ -26,9 +26,10 @@ impl Cx{
         else{
             &mut self.style_base
         }
-    }
+    } 
 
-} 
+}  
+
 
 // floats
 
