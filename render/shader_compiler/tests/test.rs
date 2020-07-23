@@ -1,7 +1,7 @@
 use makepad_shader_compiler::analyse;
 use makepad_shader_compiler::ast::ShaderAst;
 use makepad_shader_compiler::generate_glsl;
-// use makepad_shader_compiler::generate_metal;
+use makepad_shader_compiler::generate_metal;
 use makepad_shader_compiler::lex;
 use makepad_shader_compiler::parse;
 use makepad_shader_compiler::shadergen::*;
@@ -94,7 +94,10 @@ fn test() {
             block: None,
         }
     ]).unwrap();
+    println!("GLSL VERTEX");
     println!("{}", generate_glsl::generate_vertex_shader(&shader));
+    println!("GLSL FRAGMENT");
     println!("{}", generate_glsl::generate_fragment_shader(&shader));
-    // println!("{}", generate_metal::generate_shader(&shader));
+    println!("METAL");
+    println!("{}", generate_metal::generate_shader(&shader));
 }

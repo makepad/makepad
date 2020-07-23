@@ -52,18 +52,20 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn generate_cons_fn(&mut self, ty_lit: TyLit, param_tys: &[Ty]) {
-        write!(self.string, "{0} mpsc_{0}", ty_lit).unwrap();
+        self.write_ty_lit(ty_lit);
+        write!(self.string, " mpsc_{}", ty_lit).unwrap();
         for param_ty in param_tys {
             write!(self.string, "_{}", param_ty).unwrap();
         }
         write!(self.string, "(").unwrap();
         let mut sep = "";
         if param_tys.len() == 1 {
-            self.write_ident_and_ty(Ident::new("x"), &param_tys[0])
+            self.write_var_decl(false, Ident::new("x"), &param_tys[0])
         } else {
             for (index, param_ty) in param_tys.iter().enumerate() {
                 write!(self.string, "{}", sep).unwrap();
-                self.write_ident_and_ty(
+                self.write_var_decl(
+                    false,
                     Ident::new(format!("x{}", index)),
                     param_ty,
                 );
@@ -145,16 +147,18 @@ impl<'a> ShaderGenerator<'a> {
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
             self.generate_fn_decl(self.shader.find_fn_decl(callee).unwrap());
         }
-        self.write_ident_and_ty(
+        self.write_var_decl(
+            false,
             decl.ident,
             decl.return_ty.borrow().as_ref().unwrap(),
         );
         write!(self.string, "(").unwrap();
         let mut sep = "";
+        println!("FAK {:?} {:?}", decl.ident, decl.params);
         for param in &decl.params {
             write!(self.string, "{}", sep).unwrap();
-            // TODO: inout parameters
-            self.write_ident_and_ty(
+            self.write_var_decl(
+                param.is_inout,
                 param.ident,
                 param.ty_expr.ty.borrow().as_ref().unwrap(),
             );
@@ -217,18 +221,110 @@ impl<'a> ShaderGenerator<'a> {
         .generate_expr(expr)
     }
 
-    fn write_ident_and_ty(&mut self, ident: Ident, ty: &Ty) {
-        MetalBackendWriter.write_ident_and_ty(
+    fn write_var_decl(&mut self, is_inout: bool, ident: Ident, ty: &Ty) {
+        MetalBackendWriter.write_var_decl(
             &mut self.string,
+            is_inout,
             ident,
             ty
         );
+    }
+
+    fn write_ty_lit(&mut self, ty_lit: TyLit) {
+        MetalBackendWriter.write_ty_lit(
+            &mut self.string,
+            ty_lit,
+        );  
     }
 }
 
 struct MetalBackendWriter;
 
 impl BackendWriter for MetalBackendWriter {
+    fn write_var_decl(&self, string: &mut String, is_inout: bool, ident: Ident, ty: &Ty) {
+        let qualifier = if is_inout {
+            "&"
+        } else {
+            ""
+        };
+        match *ty {
+            Ty::Void => write!(string, "void {}", ident).unwrap(),
+            Ty::Bool => {
+                self.write_ty_lit(string, TyLit::Bool);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Int => {
+                self.write_ty_lit(string, TyLit::Int);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Float => {
+                self.write_ty_lit(string, TyLit::Float);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Bvec2 => {
+                self.write_ty_lit(string, TyLit::Bvec2);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Bvec3 => {
+                self.write_ty_lit(string, TyLit::Bvec3);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Bvec4 => {
+                self.write_ty_lit(string, TyLit::Bvec4);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Ivec2 => {
+                self.write_ty_lit(string, TyLit::Ivec2);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Ivec3 => {
+                self.write_ty_lit(string, TyLit::Ivec3);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Ivec4 => {
+                self.write_ty_lit(string, TyLit::Ivec4);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Vec2 => {
+                self.write_ty_lit(string, TyLit::Vec2);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Vec3 => {
+                self.write_ty_lit(string, TyLit::Vec3);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Vec4 => {
+                self.write_ty_lit(string, TyLit::Vec4);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Mat2 => {
+                self.write_ty_lit(string, TyLit::Mat2);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Mat3 => {
+                self.write_ty_lit(string, TyLit::Mat3);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Mat4 => {
+                self.write_ty_lit(string, TyLit::Mat4);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Texture2D => {
+                self.write_ty_lit(string, TyLit::Texture2D);
+                write!(string, " {}{}", qualifier, ident).unwrap();
+            },
+            Ty::Array { ref elem_ty, len } => {
+                self.write_var_decl(string, is_inout, ident, elem_ty);
+                write!(string, "[{}]", len).unwrap();
+            }
+            Ty::Struct {
+                ident: struct_ident,
+            } => {
+                write!(string, "{} {}{}", struct_ident, qualifier, ident).unwrap();
+            }
+        }   
+    }
+
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit) {
         write!(string, "{}", match ty_lit {
             TyLit::Bool => "bool",

@@ -19,86 +19,9 @@ use {
 };
 
 pub trait BackendWriter {
-    fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
+    fn write_var_decl(&self, string: &mut String, is_inout: bool, ident: Ident, ty: &Ty);
 
-    fn write_ident_and_ty(&self, string: &mut String, ident: Ident, ty: &Ty) {
-        match *ty {
-            Ty::Void => write!(string, "void {}", ident).unwrap(),
-            Ty::Bool => {
-                self.write_ty_lit(string, TyLit::Bool);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Int => {
-                self.write_ty_lit(string, TyLit::Int);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Float => {
-                self.write_ty_lit(string, TyLit::Float);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Bvec2 => {
-                self.write_ty_lit(string, TyLit::Bvec2);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Bvec3 => {
-                self.write_ty_lit(string, TyLit::Bvec3);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Bvec4 => {
-                self.write_ty_lit(string, TyLit::Bvec4);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Ivec2 => {
-                self.write_ty_lit(string, TyLit::Ivec2);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Ivec3 => {
-                self.write_ty_lit(string, TyLit::Ivec3);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Ivec4 => {
-                self.write_ty_lit(string, TyLit::Ivec4);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Vec2 => {
-                self.write_ty_lit(string, TyLit::Vec2);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Vec3 => {
-                self.write_ty_lit(string, TyLit::Vec3);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Vec4 => {
-                self.write_ty_lit(string, TyLit::Vec4);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Mat2 => {
-                self.write_ty_lit(string, TyLit::Mat2);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Mat3 => {
-                self.write_ty_lit(string, TyLit::Mat3);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Mat4 => {
-                self.write_ty_lit(string, TyLit::Mat4);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Texture2D => {
-                self.write_ty_lit(string, TyLit::Texture2D);
-                write!(string, " {}", ident).unwrap();
-            },
-            Ty::Array { ref elem_ty, len } => {
-                self.write_ident_and_ty(string, ident, elem_ty);
-                write!(string, "[{}]", len).unwrap();
-            }
-            Ty::Struct {
-                ident: struct_ident,
-            } => {
-                write!(string, "{} {}", struct_ident, ident).unwrap();
-            }
-        }   
-    }
+    fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
 }
 
 pub struct BlockGenerator<'a> {
@@ -235,7 +158,8 @@ impl<'a> BlockGenerator<'a> {
         _ty_expr: &Option<TyExpr>,
         expr: &Option<Expr>,
     ) {
-        self.write_ident_and_ty(
+        self.write_var_decl(
+            false,
             ident,
             ty.borrow().as_ref().unwrap()
         );
@@ -282,9 +206,10 @@ impl<'a> BlockGenerator<'a> {
         }
     }
 
-    fn write_ident_and_ty(&mut self, ident: Ident, ty: &Ty) {
-        self.backend_writer.write_ident_and_ty(
+    fn write_var_decl(&mut self, is_inout: bool, ident: Ident, ty: &Ty) {
+        self.backend_writer.write_var_decl(
             &mut self.string,
+            is_inout,
             ident,
             ty
         );
