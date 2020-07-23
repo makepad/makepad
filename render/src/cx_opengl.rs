@@ -611,7 +611,7 @@ impl Cx {
             gl::DeleteShader(vs);
             gl::DeleteShader(fs);
             
-            let attributes = Self::opengl_get_attributes(program, "mpsc_packed_attribute_", mapping.attribute_props.total_slots);
+            let geometries = Self::opengl_get_attributes(program, "mpsc_packed_geometry_", mapping.geometry_props.total_slots);
             let instances = Self::opengl_get_attributes(program, "mpsc_packed_instance_", mapping.instance_props.total_slots);
             
             // lets fetch the uniform positions for our uniforms
@@ -627,7 +627,7 @@ impl Cx {
                     buf.update_with_f32_data(opengl_cx, &sh.shader_gen.geometry_vertices);
                     buf
                 },
-                attributes,
+                geometries,
                 instances,
                 pass_uniforms: Self::opengl_get_uniforms(program,  &mapping.pass_uniforms),
                 view_uniforms: Self::opengl_get_uniforms(program, &mapping.view_uniforms),
@@ -975,7 +975,7 @@ pub struct CxPlatformShader {
     pub program: u32,
     pub geom_vbuf: OpenglBuffer,
     pub geom_ibuf: OpenglBuffer,
-    pub attributes: Vec<OpenglAttribute>,
+    pub geometries: Vec<OpenglAttribute>,
     pub instances: Vec<OpenglAttribute>,
     pub pass_uniforms: Vec<OpenglUniform>,
     pub view_uniforms: Vec<OpenglUniform>,
@@ -1075,7 +1075,7 @@ impl CxPlatformDrawCall {
                 
                 // bind the vertex and indexbuffers
                 gl::BindBuffer(gl::ARRAY_BUFFER, shp.geom_vbuf.gl_buffer.unwrap());
-                for attr in &shp.attributes {
+                for attr in &shp.geometries {
                     gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
                     gl::EnableVertexAttribArray(attr.loc);
                 }
