@@ -1,3 +1,4 @@
+use crate::env::VarKind;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
 use crate::span::Span;
@@ -313,8 +314,8 @@ pub enum ExprKind {
         arg_exprs: Vec<Expr>,
     },
     MacroCall {
-        analysis: Cell<Option<MacroCallAnalysis>>,
         span: Span,
+        analysis: Cell<Option<MacroCallAnalysis>>,
         ident: Ident,
         arg_exprs: Vec<Expr>,
     },
@@ -325,6 +326,7 @@ pub enum ExprKind {
     },
     Var {
         span: Span,
+        kind: Cell<Option<VarKind>>,
         ident: Ident,
     },
     Lit {

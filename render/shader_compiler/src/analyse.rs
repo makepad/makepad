@@ -55,7 +55,6 @@ impl<'a> ShaderAnalyser<'a> {
     fn const_evaluator(&self) -> ConstEvaluator {
         ConstEvaluator {
             shader: self.shader,
-            env: &self.env,
         }
     }
 
@@ -458,7 +457,6 @@ impl<'a> FnDefAnalyser<'a> {
     fn const_evaluator(&self) -> ConstEvaluator {
         ConstEvaluator {
             shader: self.shader,
-            env: &self.env,
         }
     }
 
