@@ -171,29 +171,31 @@ impl<'a> ShaderGenerator<'a> {
             write!(self.string, "{}_mpsc_Textures mpsc_textures", sep).unwrap();
             sep = ", ";
         }
-        if decl.is_used_in_vertex_shader.get().unwrap() && decl.is_used_in_fragment_shader.get().unwrap() {
-            assert!(decl.attribute_deps.borrow().as_ref().unwrap().is_empty());
-            assert!(decl.instance_deps.borrow().as_ref().unwrap().is_empty());
-            assert!(!decl.has_varying_deps.get().unwrap());
-        } else if decl.is_used_in_vertex_shader.get().unwrap() {
-            assert!(!decl.is_used_in_fragment_shader.get().unwrap());
-            if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty() {
+        let is_used_in_vertex_shader = decl.is_used_in_vertex_shader.get().unwrap();
+        let is_used_in_fragment_shader = decl.is_used_in_fragment_shader.get().unwrap();
+        let has_attribute_deps = !decl.attribute_deps.borrow().as_ref().unwrap().is_empty();
+        let has_instance_deps = !decl.instance_deps.borrow().as_ref().unwrap().is_empty();
+        let has_varying_deps = decl.has_varying_deps.get().unwrap();
+        if is_used_in_vertex_shader && is_used_in_fragment_shader {
+            assert!(!has_attribute_deps);
+            assert!(!has_instance_deps);
+            assert!(!has_varying_deps);
+        } else if is_used_in_vertex_shader {
+            assert!(!is_used_in_fragment_shader);
+            if has_attribute_deps {
                 write!(self.string, "{}_mpsc_Attributes mpsc_attributes", sep).unwrap();
                 sep = ", ";
             }
-            if !decl.instance_deps.borrow().as_ref().unwrap().is_empty() {
+            if has_instance_deps {
                 write!(self.string, "{}_mpsc_Instances mpsc_instances", sep).unwrap();
                 sep = ", ";
             }
-            if decl.has_varying_deps.get().unwrap() {
+            if has_varying_deps {
                 write!(self.string, "{}_mpsc_Varyings mpsc_varyings", sep).unwrap();
             }
         } else {
-            assert!(decl.is_used_in_fragment_shader.get().unwrap());
-            if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty()
-                || decl.instance_deps.borrow().as_ref().unwrap().is_empty()
-                || decl.has_varying_deps.get().unwrap()
-            {
+            assert!(!is_used_in_vertex_shader);
+            if has_attribute_deps || has_instance_deps || has_varying_deps {       
                 write!(self.string, "{}_mpsc_Varyings mpsc_varyings", sep).unwrap();
             }
         }
