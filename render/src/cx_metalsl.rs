@@ -3,9 +3,9 @@
 use crate::cx::*;
 use crate::cx_apple::*;
 
-se makepad_shader_compiler::ast::{ShaderAst, Decl, TyExprKind};
-use makepad_shader_compiler::colors::Color;
-use makepad_shader_compiler::{generate};
+//use makepad_shader_compiler::ast::{ShaderAst, Decl, TyExprKind};
+//use makepad_shader_compiler::colors::Color;
+//use makepad_shader_compiler::{generate};
 
 
 #[derive(Clone)]
@@ -109,6 +109,7 @@ impl Cx {
     
     pub fn mtl_assemble_shader(sg: &ShaderGen) -> Result<(String, CxShaderMapping), SlErr> {
         // ok lets parse everything. this should never give errors
+        /*
         let mut shader = ShaderAst::new();
         let mut input_props = Vec::new();
         for (index,sub) in sg.subs.iter().enumerate() {
@@ -140,7 +141,7 @@ impl Cx {
             println!("Shader analyse error {}:{} col:{} - {}", sub.loc.file, start.0 + sub.loc.line, start.1 + 1, err);
         }
         //println!("{}", generate(&shader));
-        
+        */
         return Err(SlErr {msg: "".to_string()});
         
         /*
