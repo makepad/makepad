@@ -428,6 +428,35 @@ impl Cx {
         }; 
     }
     
+    pub fn opengl_get_info_log(compile: bool,shader: usize, source: &str) -> String {
+        unsafe{
+            let mut length = 0;
+            if compile { 
+                gl::GetShaderiv(shader as u32, gl::INFO_LOG_LENGTH, &mut length);
+            } else { 
+                gl::GetProgramiv(shader as u32, gl::INFO_LOG_LENGTH, &mut length);
+            }
+            let mut log = Vec::with_capacity(length as usize);
+            if compile {
+                gl::GetShaderInfoLog(shader as u32, length, ptr::null_mut(), log.as_mut_ptr());
+            } else {
+                gl::GetProgramInfoLog(shader as u32, length, ptr::null_mut(), log.as_mut_ptr());
+            }
+            log.set_len(length as usize);
+            let mut r = "".to_string();
+            r.push_str(CStr::from_ptr(log.as_ptr()).to_str().unwrap());
+            r.push_str("\n");
+            let split = source.split("\n");
+            for (line, chunk) in split.enumerate() {
+                r.push_str(&(line + 1).to_string());
+                r.push_str(":");
+                r.push_str(chunk);
+                r.push_str("\n");
+            }
+            r
+        }
+    }
+    
     pub fn opengl_has_shader_error(compile: bool, shader: usize, source: &str) -> Option<String> {
         //None
         unsafe {
@@ -442,35 +471,20 @@ impl Cx {
             };
             
             if success != i32::from(gl::TRUE) {
-                let mut length = 0;
-                if compile { 
-                    gl::GetShaderiv(shader as u32, gl::INFO_LOG_LENGTH, &mut length);
-                } else {
-                    gl::GetProgramiv(shader as u32, gl::INFO_LOG_LENGTH, &mut length);
-                }
-                let mut log = Vec::with_capacity(length as usize);
-                if compile {
-                    gl::GetShaderInfoLog(shader as u32, length, ptr::null_mut(), log.as_mut_ptr());
-                } else {
-                    gl::GetProgramInfoLog(shader as u32, length, ptr::null_mut(), log.as_mut_ptr());
-                }
-                log.set_len(length as usize);
-                let mut r = "".to_string();
-                r.push_str(CStr::from_ptr(log.as_ptr()).to_str().unwrap());
-                r.push_str("\n");
-                let split = source.split("\n");
-                for (line, chunk) in split.enumerate() {
-                    r.push_str(&(line + 1).to_string());
-                    r.push_str(":");
-                    r.push_str(chunk);
-                    r.push_str("\n");
-                }
-                Some(r)
+                Some(Self::opengl_get_info_log(compile, shader, source))
             }
             else {
                 None
             }
         }
+    }
+    
+    pub fn ceil_div4(base: usize) -> usize {
+        let r = base >> 2;
+        if base & 3 != 0 {
+            return r + 1 
+        }
+        r
     }
     
     pub fn opengl_get_attributes(program: u32, prefix: &str, slots: usize) -> Vec<OpenglAttribute> {
@@ -569,21 +583,23 @@ impl Cx {
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             {}\0", fragment);
-        //println!("{} {}", sh.name, fragment);  
+        //println!("{} {} {}", sh.name, vertex, fragment);  
         unsafe { 
+
             let vs = gl::CreateShader(gl::VERTEX_SHADER);
             gl::ShaderSource(vs, 1, [vertex.as_ptr() as *const _].as_ptr(), ptr::null());
             gl::CompileShader(vs);
+            //println!("{}", Self::opengl_get_info_log(true, vs as usize, &vertex));
             if let Some(error) = Self::opengl_has_shader_error(true, vs as usize, &vertex) {
                 return Err(format!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error))
             }
-            
             let fs = gl::CreateShader(gl::FRAGMENT_SHADER);
             gl::ShaderSource(fs, 1, [fragment.as_ptr() as *const _].as_ptr(), ptr::null());
             gl::CompileShader(fs);
+            //println!("{}", Self::opengl_get_info_log(true, fs as usize, &fragment));
             if let Some(error) = Self::opengl_has_shader_error(true, fs as usize, &fragment) {
                 return Err(format!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error))
-            } 
+            }  
             
             let program = gl::CreateProgram();
             gl::AttachShader(program, vs);
