@@ -12,7 +12,7 @@ use crate::ty_check::TyChecker;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-pub fn analyse(shader_ast: &ShaderAst, input_props: &[&PropDef]) -> Result<(), Error>{
+pub fn analyse(shader: &ShaderAst, input_props: &[&PropDef]) -> Result<(), Error>{
     let builtins = builtin::generate_builtins();
     let mut env = Env::new();
     env.push_scope();
@@ -30,7 +30,7 @@ pub fn analyse(shader_ast: &ShaderAst, input_props: &[&PropDef]) -> Result<(), E
     env.push_scope();
     ShaderAnalyser {
         builtins,
-        shader_ast,
+        shader,
         env,
     }
     .analyse_shader()
@@ -39,7 +39,7 @@ pub fn analyse(shader_ast: &ShaderAst, input_props: &[&PropDef]) -> Result<(), E
 #[derive(Debug)]
 struct ShaderAnalyser<'a> {
     builtins: HashMap<Ident, Builtin>,
-    shader_ast: &'a ShaderAst,
+    shader: &'a ShaderAst,
     env: Env,
 }
 
@@ -47,7 +47,7 @@ impl<'a> ShaderAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
             builtins: &self.builtins,
-            shader_ast: self.shader_ast,
+            shader: self.shader,
             env: &self.env,
             is_lvalue: false,
         }
@@ -55,22 +55,22 @@ impl<'a> ShaderAnalyser<'a> {
 
     fn const_evaluator(&self) -> ConstEvaluator {
         ConstEvaluator {
-            shader_ast: self.shader_ast,
+            shader: self.shader,
             env: &self.env,
         }
     }
 
     fn analyse_shader(&mut self) -> Result<(), Error> {
         self.env.push_scope();
-        for decl in &self.shader_ast.decls {
+        for decl in &self.shader.decls {
             self.analyse_decl(decl)?;
         }
-        for decl in &self.shader_ast.decls {
+        for decl in &self.shader.decls {
             match decl {
                 Decl::Fn(decl) => {
                     FnDefAnalyser {
                         builtins: &self.builtins,
-                        shader_ast: self.shader_ast,
+                        shader: self.shader,
                         decl,
                         env: &mut self.env,
                         is_inside_loop: false,
@@ -81,7 +81,7 @@ impl<'a> ShaderAnalyser<'a> {
             }
         }
         self.env.pop_scope();
-        for decl in &self.shader_ast.decls {
+        for decl in &self.shader.decls {
             match decl {
                 Decl::Attribute(decl) => {
                     decl.is_used_in_fragment_shader.set(Some(false));
@@ -99,33 +99,33 @@ impl<'a> ShaderAnalyser<'a> {
         self.analyse_call_tree(
             ShaderKind::Vertex,
             &mut Vec::new(),
-            self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap(),
+            self.shader.find_fn_decl(Ident::new("vertex")).unwrap(),
         )?;
         self.analyse_call_tree(
             ShaderKind::Fragment,
             &mut Vec::new(),
-            self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap(),
+            self.shader.find_fn_decl(Ident::new("pixel")).unwrap(),
         )?;
         let mut visited = HashSet::new();
-        let vertex_decl = self.shader_ast.find_fn_decl(Ident::new("vertex")).unwrap();
+        let vertex_decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
         self.propagate_deps(
             &mut visited,
             vertex_decl,
         )?;
-        let fragment_decl = self.shader_ast.find_fn_decl(Ident::new("pixel")).unwrap();
+        let fragment_decl = self.shader.find_fn_decl(Ident::new("pixel")).unwrap();
         self.propagate_deps(
             &mut visited,
             fragment_decl,
         )?;
         for &attribute_dep in fragment_decl.attribute_deps.borrow().as_ref().unwrap() {
-            self.shader_ast
+            self.shader
                 .find_attribute_decl(attribute_dep)
                 .unwrap()
                 .is_used_in_fragment_shader
                 .set(Some(true));
         }
         for &instance_dep in fragment_decl.instance_deps.borrow().as_ref().unwrap() {
-            self.shader_ast
+            self.shader
                 .find_instance_decl(instance_dep)
                 .unwrap()
                 .is_used_in_fragment_shader
@@ -324,7 +324,7 @@ impl<'a> ShaderAnalyser<'a> {
     ) -> Result<(), Error> {
         call_stack.push(decl.ident);
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
-            let callee_decl = self.shader_ast.find_fn_decl(callee).unwrap();
+            let callee_decl = self.shader.find_fn_decl(callee).unwrap();
             if match kind {
                 ShaderKind::Vertex => callee_decl.is_used_in_vertex_shader.get().unwrap(),
                 ShaderKind::Fragment => callee_decl.is_used_in_fragment_shader.get().unwrap(),
@@ -360,7 +360,7 @@ impl<'a> ShaderAnalyser<'a> {
             return Ok(());
         }
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
-            let callee_decl = self.shader_ast.find_fn_decl(callee).unwrap();
+            let callee_decl = self.shader.find_fn_decl(callee).unwrap();
             self.propagate_deps(visited, callee_decl)?;
             decl.uniform_block_deps
                 .borrow_mut()
@@ -441,7 +441,7 @@ impl<'a> ShaderAnalyser<'a> {
 #[derive(Debug)]
 struct FnDefAnalyser<'a> {
     builtins: &'a HashMap<Ident, Builtin>,
-    shader_ast: &'a ShaderAst,
+    shader: &'a ShaderAst,
     decl: &'a FnDecl,
     env: &'a mut Env,
     is_inside_loop: bool,
@@ -451,7 +451,7 @@ impl<'a> FnDefAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
             builtins: self.builtins,
-            shader_ast: self.shader_ast,
+            shader: self.shader,
             env: &self.env,
             is_lvalue: false,
         }
@@ -459,14 +459,14 @@ impl<'a> FnDefAnalyser<'a> {
 
     fn const_evaluator(&self) -> ConstEvaluator {
         ConstEvaluator {
-            shader_ast: self.shader_ast,
+            shader: self.shader,
             env: &self.env,
         }
     }
 
     fn dep_analyser(&self) -> DepAnalyser {
         DepAnalyser {
-            shader_ast: self.shader_ast,
+            shader: self.shader,
             decl: self.decl,
             env: &self.env,
         }
