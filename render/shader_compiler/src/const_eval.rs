@@ -1,16 +1,16 @@
 use crate::ast::*;
-use crate::env::VarKind;
+use crate::env::{Env, Sym, VarKind};
 use crate::error::Error;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
 use crate::span::Span;
 use crate::ty::Ty;
 use crate::val::Val;
-use std::cell::Cell;
 
 #[derive(Clone, Debug)]
 pub struct ConstEvaluator<'a> {
     pub shader_ast: &'a ShaderAst,
+    pub env: &'a Env,
 }
 
 impl<'a> ConstEvaluator<'a> {
@@ -66,10 +66,8 @@ impl<'a> ConstEvaluator<'a> {
             } => self.const_eval_cons_call_expr(span, ty_lit, arg_exprs),
             ExprKind::Var {
                 span,
-                ref is_lvalue,
-                ref kind,
                 ident,
-            } => self.const_eval_var_expr(span, is_lvalue, kind, ident),
+            } => self.const_eval_var_expr(span, ident),
             ExprKind::Lit { span, lit } => self.const_eval_lit_expr(span, lit),
         }?;
         *expr.val.borrow_mut() = Some(val.clone());
@@ -250,7 +248,6 @@ impl<'a> ConstEvaluator<'a> {
         })
     }
     
-    
     fn const_eval_macro_call_expr(
         &self,
         span: Span,
@@ -262,7 +259,6 @@ impl<'a> ConstEvaluator<'a> {
             message: String::from("expression is not const")
         })
     }
-    
 
     fn const_eval_cons_call_expr(
         &self,
@@ -279,25 +275,29 @@ impl<'a> ConstEvaluator<'a> {
     fn const_eval_var_expr(
         &self,
         span: Span,
-        _is_lvalue: &Cell<Option<bool>>,
-        kind: &Cell<Option<VarKind>>,
         ident: Ident,
     ) -> Result<Val, Error> {
-        match kind.get().unwrap() {
-            VarKind::Const => Ok(self
-                .shader_ast
-                .find_const_decl(ident)
-                .unwrap()
-                .expr
-                .val
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .clone()),
-            _ => Err(Error {
-                span,
-                message: String::from("expression is not const")
-            }),
+        match self.env.find_sym(ident).unwrap() {
+            Sym::Var {
+                kind,
+                ..
+            } => match kind {
+                VarKind::Const => Ok(self
+                    .shader_ast
+                    .find_const_decl(ident)
+                    .unwrap()
+                    .expr
+                    .val
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .clone()),
+                _ => Err(Error {
+                    span,
+                    message: String::from("expression is not const")
+                }),
+            },
+            _ => panic!(),
         }
     }
 
