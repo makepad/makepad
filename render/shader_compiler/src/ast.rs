@@ -327,7 +327,6 @@ pub enum ExprKind {
     Var {
         span: Span,
         kind: Cell<Option<VarKind>>,
-        is_lvalue: Cell<Option<bool>>,
         ident: Ident,
     },
     Lit {
