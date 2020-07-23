@@ -154,7 +154,6 @@ impl<'a> ShaderGenerator<'a> {
         );
         write!(self.string, "(").unwrap();
         let mut sep = "";
-        println!("FAK {:?} {:?}", decl.ident, decl.params);
         for param in &decl.params {
             write!(self.string, "{}", sep).unwrap();
             self.write_var_decl(
@@ -172,7 +171,12 @@ impl<'a> ShaderGenerator<'a> {
             write!(self.string, "{}_mpsc_Textures mpsc_textures", sep).unwrap();
             sep = ", ";
         }
-        if decl.is_used_in_vertex_shader.get().unwrap() {
+        if decl.is_used_in_vertex_shader.get().unwrap() && decl.is_used_in_fragment_shader.get().unwrap() {
+            assert!(decl.attribute_deps.borrow().as_ref().unwrap().is_empty());
+            assert!(decl.instance_deps.borrow().as_ref().unwrap().is_empty());
+            assert!(!decl.has_varying_deps.get().unwrap());
+        } else if decl.is_used_in_vertex_shader.get().unwrap() {
+            assert!(!decl.is_used_in_fragment_shader.get().unwrap());
             if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty() {
                 write!(self.string, "{}_mpsc_Attributes mpsc_attributes", sep).unwrap();
                 sep = ", ";
