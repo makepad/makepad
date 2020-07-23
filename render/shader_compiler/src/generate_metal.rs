@@ -224,12 +224,7 @@ impl<'a> FnDeclGenerator<'a> {
         let has_attribute_deps = !self.decl.attribute_deps.borrow().as_ref().unwrap().is_empty();
         let has_instance_deps = !self.decl.instance_deps.borrow().as_ref().unwrap().is_empty();
         let has_varying_deps = self.decl.has_varying_deps.get().unwrap();
-        if is_used_in_vertex_shader && is_used_in_fragment_shader {
-            assert!(!has_attribute_deps);
-            assert!(!has_instance_deps);
-            assert!(!has_varying_deps);
-        } else if is_used_in_vertex_shader {
-            assert!(!is_used_in_fragment_shader);
+        if is_used_in_vertex_shader {
             if has_attribute_deps {
                 write!(self.string, "{}_mpsc_Attributes mpsc_attributes", sep).unwrap();
                 sep = ", ";
@@ -241,8 +236,8 @@ impl<'a> FnDeclGenerator<'a> {
             if has_varying_deps {
                 write!(self.string, "{}_mpsc_Varyings mpsc_varyings", sep).unwrap();
             }
-        } else {
-            assert!(!is_used_in_vertex_shader);
+        }
+        if is_used_in_fragment_shader {
             if has_attribute_deps || has_instance_deps || has_varying_deps {       
                 write!(self.string, "{}_mpsc_Varyings mpsc_varyings", sep).unwrap();
             }
