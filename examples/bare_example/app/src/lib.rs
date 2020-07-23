@@ -31,7 +31,7 @@ impl BareExampleApp {
                 //return color!(red);
                 let df = Df::viewport(pos * vec2(w, h));
                 df.circle(0.5 * w, 0.5 * h, 0.5 * w);
-                return df.fill(color!(white));//mix(color!(green), color!(blue), abs(sin(counter))));
+                return df.fill(mix(color, color!(blue), abs(sin(counter))));
             }  
         "}));
         
@@ -45,6 +45,7 @@ impl BareExampleApp {
         }
     }
     
+    
     pub fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
@@ -54,7 +55,7 @@ impl BareExampleApp {
                 self.count = fm.abs.x * 0.01;
             },
             _ => ()
-        }
+        } 
     }
     
     pub fn draw_app(&mut self, cx: &mut Cx) {
@@ -64,6 +65,7 @@ impl BareExampleApp {
         if self.main_view.begin_view(cx, Layout::default()).is_ok() {
             
             self.quad.shader = Self::bg().get(cx);
+            self.quad.color = color!(orange).get(cx);
             let k = self.quad.draw_quad_abs(cx, Rect {x: 100., y: 100., w: 200., h: 200.});
             k.push_float(cx, 10.);
             
