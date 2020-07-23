@@ -106,11 +106,7 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
-        let mut visited = HashSet::new();
-        self.generate_fn_decl(
-            self.shader.find_fn_decl(Ident::new("vertex")).unwrap(),
-            &mut visited
-        );
+        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("vertex")).unwrap());
         writeln!(self.string, "void main() {{").unwrap();
         let mut attribute_unpacker = VarUnpacker::new(
             "mpsc_packed_attribute",
@@ -214,11 +210,7 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
-        let mut visited = HashSet::new();
-        self.generate_fn_decl(
-            self.shader.find_fn_decl(Ident::new("pixel")).unwrap(),
-            &mut visited
-        );
+        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("pixel")).unwrap());
         writeln!(self.string, "void main() {{").unwrap();
         let mut varying_unpacker = VarUnpacker::new(
             "mpsc_packed_varying",
@@ -427,33 +419,13 @@ impl<'a> ShaderGenerator<'a> {
         }
     }
 
-    fn generate_fn_decl(&mut self, decl: &FnDecl, visited: &mut HashSet<Ident>) {
-        if visited.contains(&decl.ident) {
-            return;
-        }
-        for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
-            self.generate_fn_decl(self.shader.find_fn_decl(callee).unwrap(), visited);
-        }
-        self.write_var_decl(
-            false,
-            decl.ident,
-            decl.return_ty.borrow().as_ref().unwrap(),
-        );
-        write!(self.string, "(").unwrap();
-        let mut sep = "";
-        for param in &decl.params {
-            write!(self.string, "{}", sep).unwrap();
-            self.write_var_decl(
-                param.is_inout,
-                param.ident,
-                param.ty_expr.ty.borrow().as_ref().unwrap(),
-            );
-            sep = ", ";
-        }
-        write!(self.string, ") ").unwrap();
-        self.generate_block(&decl.block);
-        writeln!(self.string).unwrap();
-        visited.insert(decl.ident);
+    fn generate_fn_decl(&mut self, decl: &FnDecl) {
+        FnDeclGenerator {
+            shader: self.shader,
+            decl,
+            visited: &mut HashSet::new(),
+            string: self.string,
+        }.generate_fn_decl()
     }
 
     fn generate_block(&mut self, block: &Block) {
@@ -477,6 +449,70 @@ impl<'a> ShaderGenerator<'a> {
             string: self.string,
         }
         .generate_expr(expr)
+    }
+
+    fn write_var_decl(&mut self, is_inout: bool, ident: Ident, ty: &Ty) {
+        GlslBackendWriter.write_var_decl(
+            &mut self.string,
+            is_inout,
+            ident,
+            ty
+        );
+    }
+}
+
+struct FnDeclGenerator<'a> {
+    shader: &'a ShaderAst,
+    decl: &'a FnDecl,
+    visited: &'a mut HashSet<Ident>,
+    string: &'a mut String,
+}
+
+impl<'a> FnDeclGenerator<'a> {
+    fn generate_fn_decl(&mut self) {
+        if self.visited.contains(&self.decl.ident) {
+            return;
+        }
+        for &callee in self.decl.callees.borrow().as_ref().unwrap().iter() {
+            FnDeclGenerator {
+                shader: self.shader,
+                decl: self.shader.find_fn_decl(callee).unwrap(),
+                visited: self.visited,
+                string: self.string,
+            }.generate_fn_decl()
+        }
+        self.write_var_decl(
+            false,
+            self.decl.ident,
+            self.decl.return_ty.borrow().as_ref().unwrap(),
+        );
+        write!(self.string, "(").unwrap();
+        let mut sep = "";
+        for param in &self.decl.params {
+            write!(self.string, "{}", sep).unwrap();
+            self.write_var_decl(
+                param.is_inout,
+                param.ident,
+                param.ty_expr.ty.borrow().as_ref().unwrap(),
+            );
+            sep = ", ";
+        }
+        write!(self.string, ") ").unwrap();
+        self.generate_block(&self.decl.block);
+        writeln!(self.string).unwrap();
+        self.visited.insert(self.decl.ident);
+    }
+    
+    fn generate_block(&mut self, block: &Block) {
+        BlockGenerator {
+            shader: self.shader,
+            backend_writer: &GlslBackendWriter,
+            use_hidden_params: false,
+            use_generated_cons_fns: false,
+            indent_level: 0,
+            string: self.string
+        }
+        .generate_block(block)
     }
 
     fn write_var_decl(&mut self, is_inout: bool, ident: Ident, ty: &Ty) {
