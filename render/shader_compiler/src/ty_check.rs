@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::builtin::Builtin;
-use crate::env::{Env, Sym};
+use crate::env::{Env, Sym, VarKind};
 use crate::error::Error;
 use crate::ident::Ident;
 use crate::lhs_check::LhsChecker;
@@ -10,7 +10,6 @@ use crate::swizzle::Swizzle;
 use crate::ty::Ty;
 use crate::util::CommaSep;
 use crate::colors::Color;
-
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -147,10 +146,10 @@ impl<'a> TyChecker<'a> {
             } => self.ty_check_call_expr(span, ident, arg_exprs),
             ExprKind::MacroCall {
                 span,
-                ident,
                 ref analysis,
+                ident,
                 ref arg_exprs,
-            } => self.ty_check_macro_call_expr(span, ident, arg_exprs, analysis),
+            } => self.ty_check_macro_call_expr(span, analysis, ident, arg_exprs),
             ExprKind::ConsCall {
                 span,
                 ty_lit,
@@ -158,8 +157,9 @@ impl<'a> TyChecker<'a> {
             } => self.ty_check_cons_call_expr(span, ty_lit, arg_exprs),
             ExprKind::Var {
                 span,
+                ref kind,
                 ident,
-            } => self.ty_check_var_expr(span, ident),
+            } => self.ty_check_var_expr(span, kind, ident),
             ExprKind::Lit {span, lit} => self.ty_check_lit_expr(span, lit),
         } ?;
         *expr.ty.borrow_mut() = Some(ty.clone());
@@ -608,9 +608,9 @@ impl<'a> TyChecker<'a> {
     fn ty_check_macro_call_expr(
         &mut self,
         span: Span,
+        analysis: &Cell<Option<MacroCallAnalysis>>,
         ident: Ident,
         arg_exprs: &[Expr],
-        analysis: &Cell<Option<MacroCallAnalysis>>,
     ) -> Result<Ty, Error> {
         fn parse_color_channel(arg: &Expr, span: Span) -> Result<f32, Error> {
             match arg.kind {
@@ -769,6 +769,7 @@ impl<'a> TyChecker<'a> {
     fn ty_check_var_expr(
         &mut self,
         span: Span,
+        kind: &Cell<Option<VarKind>>,
         ident: Ident,
     ) -> Result<Ty, Error> {
         match *self
@@ -781,8 +782,10 @@ impl<'a> TyChecker<'a> {
         {
             Sym::Var {
                 ref ty,
+                kind: new_kind,
                 ..
             } => {
+                kind.set(Some(new_kind));
                 Ok(ty.clone())
             }
             _ => Err(Error {

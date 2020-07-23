@@ -151,21 +151,10 @@ impl<'a> ShaderGenerator<'a> {
         }.generate_fn_decl()
     }
 
-    fn generate_block(&mut self, block: &Block) {
-        BlockGenerator {
-            shader: self.shader,
-            backend_writer: &MetalBackendWriter,
-            use_hidden_params: true,
-            use_generated_cons_fns: true,
-            indent_level: 0,
-            string: self.string
-        }
-        .generate_block(block)
-    }
-
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             shader: self.shader,
+            decl: None,
             backend_writer: &MetalBackendWriter,
             use_hidden_params: true,
             use_generated_cons_fns: true,
@@ -266,6 +255,7 @@ impl<'a> FnDeclGenerator<'a> {
     fn generate_block(&mut self, block: &Block) {
         BlockGenerator {
             shader: self.shader,
+            decl: self.decl,
             backend_writer: &MetalBackendWriter,
             use_hidden_params: true,
             use_generated_cons_fns: true,
