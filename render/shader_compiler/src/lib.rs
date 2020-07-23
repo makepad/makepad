@@ -12,6 +12,7 @@ pub mod generate_glsl;
 pub mod generate_metal;
 pub mod ident;
 pub mod lex;
+pub mod lhs_check;
 pub mod lit;
 pub mod parse;
 pub mod span;
