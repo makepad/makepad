@@ -421,12 +421,14 @@ impl Cx {
             glx_sys::glXMakeCurrent(opengl_cx.display, opengl_cx.hidden_window, opengl_cx.context);
         }
         for sh in &mut self.shaders {
-            let openglsh = Self::opengl_compile_shader(sh, opengl_cx);
-            if let Err(err) = openglsh {
-                panic!("Shader compile error {}", err);
+            let result = Self::opengl_compile_shader(sh, opengl_cx);
+            if let Err(err) = result {
+                panic!("{}", err);
             } 
         }; 
     }
+    
+    
     
     pub fn opengl_get_info_log(compile: bool,shader: usize, source: &str) -> String {
         unsafe{

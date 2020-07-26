@@ -1,5 +1,7 @@
+use makepad_render::*;
 use makepad_widget::*;
 use crate::mprstokenizer::*;
+use crate::appstorage::*;
 
 pub struct LiveMacroPick {
     _token: usize,
@@ -19,22 +21,42 @@ pub struct LiveMacros {
     _macros: Vec<LiveMacro>
 }
 
-impl LiveMacros {
-    pub fn parse(&mut self, text_buffer: &TextBuffer) {
-        let mut tp = TokenParser::new(&text_buffer.flat_text, &text_buffer.token_chunks);
+impl AppTextBuffer {
+    pub fn parse_live_macros(&mut self, cx: &mut Cx) {
+        let mut tp = TokenParser::new(&self.text_buffer.flat_text, &self.text_buffer.token_chunks);
         while tp.advance() {
             match tp.cur_type() {
                 TokenType::Macro => {
                     if tp.eat("shader") &&
                     tp.eat("!") &&
                     tp.eat("{") {
-                        println!("HERE!");
-                        // ok now we are at ", hopefully
-                        // get matching pair
                         if tp.cur_type() == TokenType::ParenOpen {
+                            
+                            // lets get the filename, the line
+                            // lets slice out the whole shader
+                            // then we hand it to the render backend
+                            // to diff it
+                            // lets fetch a range
+                            // lets get the linenr
+                            
+                            if let Some(shader) = tp.cur_pair_as_string() {
+                                let lc = tp.cur_line_col();
+                                
+                                cx.recompile_shader_sub(
+                                    &self.full_path["main/makepad/".len()..],
+                                    lc.0 + 1,
+                                    lc.1 - 8,
+                                    shader
+                                );
+                                //println!("{} {}:{}",self.full_path, lc.0, lc.1);
+                            }
+                            
+                            tp.jump_to_pair();
+                            // ok now we are at ", hopefully
+                            // get matching pair
                             // let start = tp.next_index;
                             // we find the right slot in the shader
-                            // 
+                            //
                             /*
                             let end = tp.cur_pair_token();
                             
@@ -66,9 +88,6 @@ impl LiveMacros {
                 _ => ()
             }
         }
-        //let new_tok = &text_buffer.token_chunks[new_index];
-        //let new_tok_slice = &text_buffer.flat_text[new_tok.offset..new_tok.offset + new_tok.len];
-        //let old_tok = &text_buffer.old_token_chunks[old_index];
-        //let old_tok_slice = &text_buffer.flat_text[old_tok.offset..old_tok.offset + old_tok.len];
     }
 }
+
