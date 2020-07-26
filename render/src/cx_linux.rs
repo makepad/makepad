@@ -230,16 +230,13 @@ impl Cx {
                     xlib_app.terminate_event_loop();
                 }
             }
-            
-            // lets check our recompile queue
-            for shader_index in &self.shader_recompiles {
-                let shader = &mut self.shaders[*shader_index];
-                let result = Self::opengl_compile_shader(shader, &opengl_cx);
-                if let Err(err) = result {
-                    println!("{}", err);
-                }
+    
+            let mut shader_results = Vec::new();
+            for shader_id in &self.shader_recompiles {
+                shader_results.push(Self::opengl_compile_shader(*shader_id, &mut self.shaders[*shader_id], &opengl_cx));
             }
             self.shader_recompiles.truncate(0);
+            self.call_shader_recompile_event(shader_results, &mut event_handler);
             
             if !paint_dirty && self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
                 true

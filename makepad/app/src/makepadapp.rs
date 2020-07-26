@@ -277,6 +277,9 @@ impl MakepadApp {
                     }
                 }
             },
+            Event::ShaderRecompile(re) => {
+                self.build_manager.handle_shader_recompile_event(cx, re);
+            },
             Event::FileRead(fr) => {
                 // lets see which file we loaded
                 if let Some(utf8_data) = self.storage.file_tree_file_read.resolve_utf8(fr) {
@@ -285,7 +288,7 @@ impl MakepadApp {
                             for window in &mut self.windows {
                                 let mut paths = Vec::new();
                                 window.file_panel.file_tree.root_node = hub_to_tree(&tree, "", &mut paths);
-                                if let FileNode::Folder {folder, state, name, ..} = &mut window.file_panel.file_tree.root_node {
+                                if let FileNode::Folder {folder, state, ..} = &mut window.file_panel.file_tree.root_node {
                                     //*name = "".to_string();
                                     *state = NodeState::Open;
                                     for node in folder.iter_mut() {
