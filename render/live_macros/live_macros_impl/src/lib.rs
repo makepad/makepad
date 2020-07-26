@@ -38,8 +38,7 @@ pub fn shader(input: TokenStream) -> TokenStream {
             return error_span(&format!("Shader lex error relative line:{} col:{} len:{} - {}", start.0, start.1 + 1, err.span.end - err.span.start, err), lit.span());
         }
         let tokens = tokens.unwrap();
-        
-
+         
         let mut shader = ShaderAst::new();
         if let Err(err) = parse::parse(&tokens, &mut shader) {
             // lets find the span info

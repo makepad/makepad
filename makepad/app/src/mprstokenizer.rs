@@ -76,12 +76,44 @@ impl <'a>TokenParser<'a> {
         }
     }
     
+    pub fn cur_pair_as_string(&self) -> Option<String>{
+        let pair_token = self.tokens[self.index].pair_token;
+        if pair_token < self.index || pair_token >= self.tokens.len(){
+            return None
+        }
+        let mut out_str = String::new();
+        for i in self.cur_offset()+1.. self.cur_pair_offset(){
+            out_str.push(self.flat_text[i]);
+        }
+        Some(out_str)
+    }
+    
     pub fn cur_type(&self) -> TokenType {
         self.tokens[self.index].token_type
     }
     
+    pub fn cur_line_col(&self) -> (usize, usize){
+        let off = self.cur_offset();
+        let mut line = 0;
+        let mut lc = 0;
+        for i in 0..off{
+            if self.flat_text[i] == '\n'{
+                line = line +1;
+                lc = i;
+            }
+        }
+        return (line, off - lc);
+    }
+    
     pub fn cur_offset(&self) -> usize{
         self.tokens[self.index].offset
+    }
+
+    pub fn jump_to_pair(&mut self) {
+        let pair_token = self.tokens[self.index].pair_token;
+        if pair_token > self.index && pair_token < self.tokens.len(){
+            self.index = pair_token;
+        }
     }
 
     pub fn cur_pair_offset(&self) -> usize {
@@ -96,7 +128,7 @@ impl <'a>TokenParser<'a> {
         else {
             TokenType::Unexpected
         }
-    }
+    } 
     
     pub fn prev_char(&self) -> char {
         if self.index > 0 {

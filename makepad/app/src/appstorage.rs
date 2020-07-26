@@ -260,7 +260,7 @@ impl AppStorage {
                 self.text_buffer_path_to_id.insert(path.to_string(), tb_id);
                 self.text_buffer_id_to_path.insert(tb_id, path.to_string());
                 self.text_buffers.push(AppTextBuffer {
-                    file_read: cx.file_read(path),
+                    file_read: cx.file_read(&path["main/makepad/".len()..]),
                     read_msg: None,
                     full_path: path.to_string(),
                     text_buffer_id: tb_id,
@@ -475,7 +475,7 @@ impl AppStorage {
                                     if let Ok(utf8_data) = std::str::from_utf8(data) {
                                         atb.text_buffer.load_from_utf8(&utf8_data);
                                         atb.text_buffer.send_textbuffer_loaded_signal(cx);
-                                        FileEditor::update_token_chunks(&path, atb, &mut build_manager.search_index);
+                                        FileEditor::update_token_chunks(cx, &path, atb, &mut build_manager.search_index);
                                     }
                                 }
                                 else {
