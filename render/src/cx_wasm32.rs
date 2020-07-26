@@ -435,6 +435,13 @@ impl Cx {
             self.platform.from_wasm.request_animation_frame();
         }
         
+        // lets check our recompile queue
+        for shader_id in &self.shader_recompiles {
+            let shader = &mut self.shaders[*shader_id];
+            let _ = Self::webgl_compile_shader(*shader_id, shader, &mut self.platform);
+        }
+        self.shader_recompiles.truncate(0);
+        
         // mark the end of the message
         self.platform.from_wasm.end();
         
