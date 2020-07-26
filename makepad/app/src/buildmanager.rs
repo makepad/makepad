@@ -207,6 +207,12 @@ impl BuildManager {
             _ => ()
         }
     }
+
+    pub fn handle_shader_recompile_event(&mut self, _cx:&mut Cx, _re:&ShaderRecompileEvent){
+        // we are running in loopback mode
+        // lets use the log list as an error list for loopback shadercoding.
+        
+    }
     
     pub fn run_all_artifacts(&mut self, storage: &mut AppStorage) {
         let hub_ui = storage.hub_ui.as_mut().unwrap();

@@ -802,6 +802,17 @@ impl Cx {
         }
     }
     
+    pub fn call_shader_recompile_event<F>(&mut self, results:Vec<ShaderCompileResult>, mut event_handler: F)
+    where F: FnMut(&mut Cx, &mut Event)
+    {
+        self.shader_recompiles.truncate(0);
+        if results.len()>0{
+            self.call_event_handler(&mut event_handler, &mut Event::ShaderRecompile(ShaderRecompileEvent {
+                results: results
+            }));
+        }
+    }
+    
     pub fn status_http_send_ok() -> StatusId {uid!()}
     pub fn status_http_send_fail() -> StatusId {uid!()}
     
