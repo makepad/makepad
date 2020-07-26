@@ -286,11 +286,16 @@ impl MakepadApp {
                                 let mut paths = Vec::new();
                                 window.file_panel.file_tree.root_node = hub_to_tree(&tree, "", &mut paths);
                                 if let FileNode::Folder {folder, state, name, ..} = &mut window.file_panel.file_tree.root_node {
-                                    *name = "".to_string();
+                                    //*name = "".to_string();
                                     *state = NodeState::Open;
                                     for node in folder.iter_mut() {
-                                        if let FileNode::Folder {state, ..} = node {
-                                            *state = NodeState::Open
+                                        if let FileNode::Folder {folder, state, ..} = node {
+                                            *state = NodeState::Open;
+                                            for node in folder.iter_mut() {
+                                                if let FileNode::Folder {state, ..} = node {
+                                                    *state = NodeState::Open
+                                                }
+                                            }
                                         }
                                     }
                                 }

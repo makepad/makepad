@@ -205,7 +205,7 @@ impl HubBuilder {
             println!("example: cargo run -p builder -- list edit_repo");
             println!("");
             println!("Build index.ron");
-            println!("cargo run -p builder -- index <path>");
+            println!("cargo run -p builder -- index <path> <mountname>");
             println!("example: cargo run -p workspace -- index edit_repo");
         }
         
@@ -213,7 +213,7 @@ impl HubBuilder {
             return print_help();
         }
         
-        let (message, path) = match args[1].as_ref() {
+        let (message, path, mount) = match args[1].as_ref() {
 
             "connect" => {
                 if args.len() != 5 {
@@ -234,7 +234,7 @@ impl HubBuilder {
                 }
                 (HubMsg::ListPackagesRequest {
                     uid: HubUid::zero()
-                }, args[2].clone())
+                }, args[2].clone(), None)
             },
             "build" => {
                 if args.len() != 5 {
@@ -245,16 +245,16 @@ impl HubBuilder {
                     workspace: "main".to_string(),
                     package: args[3].clone(),
                     config: args[4].clone()
-                }, args[2].clone())
+                }, args[2].clone(), None)
             },
             "index" => {
-                if args.len() != 3 {
+                if args.len() != 4 {
                     return print_help();
                 }
                 (HubMsg::BuilderFileTreeRequest {
                     uid: HubUid::zero(),
                     create_digest: false,
-                }, args[2].clone())
+                }, args[2].clone(), Some(args[3].clone()))
             },
             _ => {
                 return print_help();
@@ -295,7 +295,28 @@ impl HubBuilder {
                     HubMsg::BuilderFileTreeResponse {tree, ..} => {
                         //write index.ron
                         if let BuilderFileTreeNode::Folder {folder, ..} = tree {
-                            let ron = folder[0].serialize_ron();//ron::ser::to_string_pretty(&folder[0], ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
+                            let ron = BuilderFileTreeNode::Folder{
+                                name:"".into(),
+                                digest:None,
+                                folder:vec![
+                                    BuilderFileTreeNode::Folder{
+                                        name:"main".into(),
+                                        digest:None,
+                                        folder:vec![
+                                            BuilderFileTreeNode::Folder{
+                                                name:mount.unwrap(),
+                                                digest:None,
+                                                folder:if let BuilderFileTreeNode::Folder{folder,..} = &folder[0]{
+                                                    folder.clone()
+                                                }
+                                                else{
+                                                    vec![]
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }.serialize_ron();
                             fs::write("index.ron", ron).expect("cannot write index.ron");
                             println!("Written index.ron")
                         }
