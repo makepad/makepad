@@ -7,6 +7,7 @@ use crate::lex;
 use crate::parse;
 use crate::analyse;
 use crate::error::Error;
+use std::fmt;
 
 #[derive(Clone, Copy, Hash, PartialEq, Debug)]
 pub struct LiveLoc{
@@ -43,7 +44,7 @@ pub struct ShaderGen {
 
 impl Eq for ShaderGen {}
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ShaderGenError{
     pub file:String,
     pub line:usize,
@@ -51,6 +52,13 @@ pub struct ShaderGenError{
     pub msg:String
 }
 
+
+impl fmt::Display for ShaderGenError {
+    // This trait requires `fmt` with this exact signature.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}: {} {} - {}", self.file, self.line, self.col, self.msg)
+    }
+}
 
 impl ShaderGen{
     pub fn new() -> Self {
