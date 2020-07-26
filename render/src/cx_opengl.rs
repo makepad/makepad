@@ -420,9 +420,9 @@ impl Cx {
         unsafe {
             glx_sys::glXMakeCurrent(opengl_cx.display, opengl_cx.hidden_window, opengl_cx.context);
         }
-        for sh in &mut self.shaders {
-            let result = Self::opengl_compile_shader(sh, opengl_cx);
-            if let Err(err) = result {
+        for (index, sh) in self.shaders.iter_mut().enumerate() {
+            let result = Self::opengl_compile_shader(index, sh, opengl_cx);
+            if let ShaderCompileResult::Fail{err, ..} = result {
                 panic!("{}", err);
             } 
         }; 
@@ -557,13 +557,13 @@ impl Cx {
         gl_texture_slots
     }
     
-    pub fn opengl_compile_shader(sh: &mut CxShader, opengl_cx: &OpenglCx) -> Result<(), String> {
+    pub fn opengl_compile_shader(shader_id:usize, sh: &mut CxShader, opengl_cx: &OpenglCx) -> ShaderCompileResult {
         
         // lets compile.
         let shader_ast = sh.shader_gen.lex_parse_analyse();
         
         if let Err(err) = shader_ast{
-            return Err(format!("Got shader error: {}:{} {}", err.file, err.line, err.msg));
+            return ShaderCompileResult::Fail{id:shader_id, err:err}
         } 
         let shader_ast = shader_ast.unwrap();
         
@@ -593,14 +593,14 @@ impl Cx {
             gl::CompileShader(vs);
             //println!("{}", Self::opengl_get_info_log(true, vs as usize, &vertex));
             if let Some(error) = Self::opengl_has_shader_error(true, vs as usize, &vertex) {
-                return Err(format!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error))
+                panic!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error);
             }
             let fs = gl::CreateShader(gl::FRAGMENT_SHADER);
             gl::ShaderSource(fs, 1, [fragment.as_ptr() as *const _].as_ptr(), ptr::null());
             gl::CompileShader(fs);
             //println!("{}", Self::opengl_get_info_log(true, fs as usize, &fragment));
             if let Some(error) = Self::opengl_has_shader_error(true, fs as usize, &fragment) {
-                return Err(format!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error))
+                panic!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error);
             }  
             
             let program = gl::CreateProgram();
@@ -608,7 +608,7 @@ impl Cx {
             gl::AttachShader(program, fs);
             gl::LinkProgram(program);
             if let Some(error) = Self::opengl_has_shader_error(false, program as usize, "") {
-                return Err(format!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error))
+                panic!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error);
             }
             gl::DeleteShader(vs);
             gl::DeleteShader(fs);
@@ -637,7 +637,7 @@ impl Cx {
                 uniforms: Self::opengl_get_uniforms(program, &mapping.uniforms),
             });
             sh.mapping = mapping;
-            return Ok(());
+            return ShaderCompileResult::Ok{id:shader_id};
             
         }
     }

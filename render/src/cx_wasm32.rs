@@ -436,11 +436,11 @@ impl Cx {
         }
         
         // lets check our recompile queue
+        let mut shader_results = Vec::new();
         for shader_id in &self.shader_recompiles {
-            let shader = &mut self.shaders[*shader_id];
-            let _ = Self::webgl_compile_shader(*shader_id, shader, &mut self.platform);
+            shader_results.push(Self::webgl_compile_shader(*shader_id, &mut self.shaders[*shader_id], &mut self.platform));
         }
-        self.shader_recompiles.truncate(0);
+        self.call_shader_recompile_event(shader_results, &mut event_handler);
         
         // mark the end of the message
         self.platform.from_wasm.end();
