@@ -820,7 +820,7 @@ impl Cx {
         for (shader_index, shader) in self.shaders.iter_mut().enumerate() {
             // ok so lets enumerate our subs
             for sub in &mut shader.shader_gen.subs {
-                if file == sub.loc.file && line == sub.loc.line && col == sub.loc.column{
+                if file == sub.loc.path && line == sub.loc.line && col == sub.loc.column{
                     if code != sub.code{
                         sub.code = code.clone();
                         // we need to recompile some shader..
