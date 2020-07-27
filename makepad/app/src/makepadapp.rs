@@ -167,7 +167,6 @@ impl MakepadApp {
                                 current: 0,
                                 previous: 0,
                                 tabs: vec![
-                                    
                                     DockTab {
                                         closeable: false,
                                         title: "Log".to_string(),
@@ -278,7 +277,7 @@ impl MakepadApp {
                 }
             },
             Event::ShaderRecompile(re) => {
-                self.build_manager.handle_shader_recompile_event(cx, re);
+                self.build_manager.handle_shader_recompile_event(cx, re, &mut self.storage);
             },
             Event::FileRead(fr) => {
                 // lets see which file we loaded

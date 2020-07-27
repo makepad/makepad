@@ -11,7 +11,7 @@ use std::fmt;
 
 #[derive(Clone, Copy, Hash, PartialEq, Debug)]
 pub struct LiveLoc{
-    pub file:&'static str,
+    pub path:&'static str,
     pub line:usize,
     pub column:usize
 }
@@ -46,17 +46,17 @@ impl Eq for ShaderGen {}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShaderGenError{
-    pub file:String,
+    pub path:String,
     pub line:usize,
     pub col:usize,
+    pub len: usize,
     pub msg:String
 }
-
 
 impl fmt::Display for ShaderGenError {
     // This trait requires `fmt` with this exact signature.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}: {} {} - {}", self.file, self.line, self.col, self.msg)
+        write!(f, "{}: {} {} - {}", self.path, self.line, self.col, self.msg)
     }
 }
 
@@ -81,9 +81,10 @@ impl ShaderGen{
         // lets find the span info
         let start = ShaderGen::byte_to_row_col(err.span.start, &sub.code);
         ShaderGenError{
-            file: sub.loc.file.to_string(), 
+            path: sub.loc.path.to_string(), 
             line: start.0 + sub.loc.line, 
             col: start.1 + 1, 
+            len: err.span.end - err.span.start,
             msg: err.to_string()
         }
     }
