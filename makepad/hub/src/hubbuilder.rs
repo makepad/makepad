@@ -534,7 +534,7 @@ impl HubBuilder {
             }
             
             let mut path = None;
-            let mut row = 0;
+            let mut line = 0;
             let mut rendered = Vec::new();
             if panic_stack.len()>0 {rendered.push(panic_stack[0].clone())};
             let mut last_fn_name = String::new();
@@ -546,12 +546,12 @@ impl HubBuilder {
                     && !panic_line.starts_with("at src/libpanic_unwind/") {
                     if let Some(end) = panic_line.find(":") {
                         let proc_path = format!("{}/{}/{}", builder, workspace, panic_line.get(3..end).unwrap().to_string());
-                        let proc_row = panic_line.get((end + 1)..(panic_line.len() - 1)).unwrap().parse::<usize>().unwrap();
+                        let proc_line = panic_line.get((end + 1)..(panic_line.len() - 1)).unwrap().parse::<usize>().unwrap();
                         
-                        rendered.push(format!("{}:{} - {}", proc_path, proc_row, last_fn_name));
+                        rendered.push(format!("{}:{} - {}", proc_path, proc_line, last_fn_name));
                         if path.is_none() {
                             path = Some(proc_path);
-                            row = proc_row
+                            line = proc_line
                         }
                     }
                 }
@@ -573,7 +573,7 @@ impl HubBuilder {
                     uid: uid,
                     item: HubLogItem::LocPanic(LocMessage {
                         path: if let Some(path) = path {path}else {"".to_string()},
-                        row: row,
+                        line: line,
                         col: 1,
                         range: None,
                         body: rendered[0].clone(),
@@ -716,7 +716,7 @@ impl HubBuilder {
                                 msg = msg.replace("\n", "");
                                 // lets try to pull path out of rendered, this fixes some rust bugs
                                 let mut path = span.file_name;
-                                let row = span.line_start as usize;
+                                let line = span.line_start as usize;
                                 let col = span.column_start as usize;
                                 if let Some(rendered) = &message.rendered {
                                     let lines: Vec<&str> = rendered.split('\n').collect();
@@ -732,7 +732,7 @@ impl HubBuilder {
                                 }
                                 let loc_message = LocMessage {
                                     path: format!("{}/{}/{}", builder, workspace, de_relativize_path(&path)).replace("\\", "/"),
-                                    row: row,
+                                    line: line,
                                     col: col,
                                     range: Some((span.byte_start as usize, span.byte_end as usize)),
                                     body: msg,

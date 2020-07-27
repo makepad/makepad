@@ -260,7 +260,14 @@ impl AppStorage {
                 self.text_buffer_path_to_id.insert(path.to_string(), tb_id);
                 self.text_buffer_id_to_path.insert(tb_id, path.to_string());
                 self.text_buffers.push(AppTextBuffer {
-                    file_read: cx.file_read(&path["main/makepad/".len()..]),
+                    file_read: cx.file_read(
+                        if path.starts_with("main/makepad/"){
+                            &path["main/makepad/".len()..]
+                        }
+                        else{
+                            path
+                        }
+                    ),
                     read_msg: None,
                     full_path: path.to_string(),
                     text_buffer_id: tb_id,

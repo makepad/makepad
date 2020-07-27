@@ -1,3 +1,4 @@
+extern crate proc_macro; 
 use proc_macro_hack::proc_macro_hack;
 use proc_macro::{TokenTree, TokenStream, Span};
 use makepad_shader_compiler::lex;
@@ -13,7 +14,7 @@ use crate::macro_lib::*;
 
 fn live_loc(tb:&mut TokenBuilder, span:Span){
     tb.add("LiveLoc {");
-    tb.add("file :").ident_with_span("file", span).add("! ( )").add(",");
+    tb.add("path :").ident_with_span("file", span).add("! ( )").add(",");
     tb.add("line :").ident_with_span("line", span).add("! ( ) as usize").add(",");
     tb.add("column : ").ident_with_span("column", span).add("! ( ) as usize").add("}");
 }
