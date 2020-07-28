@@ -50,13 +50,10 @@ impl Cx {
         } 
         let shader_ast = shader_ast.unwrap();
         
-        //lets do it.
-        println!("METAL");
-        println!("{}", generate_metal::generate_shader(&shader_ast));
+        let mtlsl =  generate_metal::generate_shader(&shader_ast);
+        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen);
         
-        return ShaderCompileResult::Ok{id:shader_id}; 
-/*        
-        let (mtlsl, mapping) = Self::mtl_assemble_shader(&sh.shader_gen) ?;
+        println!("{}", mtlsl);
         
         let options: id = unsafe {msg_send![class!(MTLCompileOptions), new]};
         let ns_mtlsl: id = str_to_nsstring(&mtlsl);
@@ -70,7 +67,8 @@ impl Cx {
         
         if library == nil {
             let err_str: id = unsafe {msg_send![err, localizedDescription]};
-            return Err(SlErr {msg: nsstring_to_string(err_str)})
+            panic!("{}", nsstring_to_string(err_str));
+            //return Err(SlErr {msg: nsstring_to_string(err_str)})
         }
         
         sh.mapping = mapping;
@@ -119,8 +117,7 @@ impl Cx {
                 geom_vbuf
             }
         });
-        return Ok(());
-        */
+        return ShaderCompileResult::Ok{id:shader_id};
     }
     
     pub fn mtl_assemble_shader(sg: &ShaderGen) -> Result<(String, CxShaderMapping), SlErr> {

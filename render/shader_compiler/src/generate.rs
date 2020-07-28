@@ -29,15 +29,7 @@ pub trait BackendWriter {
         ty: &Ty
     );
 
-    fn write_ident(&self, string: &mut String, ident: Ident) {
-        ident.with(|ident_string| {
-            if ident_string.contains("::") {
-                write!(string, "mpsc_{}", ident_string.replace("::", "_")).unwrap()
-            } else {
-                write!(string, "{}", ident_string).unwrap()
-            }
-        })
-    }
+    fn write_ident(&self, string: &mut String, ident: Ident); 
 
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
 }
@@ -479,7 +471,8 @@ impl<'a> ExprGenerator<'a> {
     ) {
         if self.use_generated_cons_fns {
             write!(self.string, "mpsc_").unwrap();
-            self.write_ty_lit(ty_lit);
+            write!(self.string, "{}", ty_lit).unwrap();
+            //self.write_ty_lit(ty_lit);
             for arg_expr in arg_exprs {
                 write!(self.string, "_{}", arg_expr.ty.borrow().as_ref().unwrap()).unwrap();
             }
