@@ -788,4 +788,14 @@ impl BackendWriter for GlslBackendWriter {
             TyLit::Texture2D => "sampler2D",
         }).unwrap();
     }
+    
+        fn write_ident(&self, string: &mut String, ident: Ident) {
+        ident.with(|ident_string| {
+            if ident_string.contains("::") {
+                write!(string, "mpsc_{}", ident_string.replace("::", "_")).unwrap()
+            } else {
+                write!(string, "{}", ident_string).unwrap()
+            }
+        })
+    }
 }
