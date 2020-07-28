@@ -22,7 +22,7 @@ impl RustEditor {
         let ce = self.text_editor.handle_text_editor(cx, event, &mut atb.text_buffer);
         match ce {
             TextEditorEvent::Change => {
-                Self::update_token_chunks(atb, search_index);
+                Self::update_token_chunks(cx, atb, search_index);
             },
             TextEditorEvent::AutoFormat => {
                 let formatted = MprsTokenizer::auto_format(&atb.text_buffer.flat_text, &atb.text_buffer.token_chunks, false).out_lines;
@@ -35,7 +35,7 @@ impl RustEditor {
     }
     
     pub fn draw_rust_editor(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, search_index: Option<&mut SearchIndex>) {
-        Self::update_token_chunks(atb, search_index);
+        Self::update_token_chunks(cx, atb, search_index);
         
         if self.text_editor.begin_text_editor(cx, &mut atb.text_buffer).is_err() {return}
         
@@ -46,7 +46,7 @@ impl RustEditor {
         self.text_editor.end_text_editor(cx, &mut atb.text_buffer);
     }
 
-    pub fn update_token_chunks(atb: &mut AppTextBuffer, mut search_index: Option<&mut SearchIndex>) {
+    pub fn update_token_chunks(cx:&mut Cx, atb: &mut AppTextBuffer, mut search_index: Option<&mut SearchIndex>) {
         
 
         if atb.text_buffer.needs_token_chunks() && atb.text_buffer.lines.len() >0 {
@@ -72,7 +72,7 @@ impl RustEditor {
             }
             
             // lets parse and generate our live macro set
-            atb.live_macros.parse(&atb.text_buffer);
+            atb.parse_live_macros(cx);
             
             // ok now lets write a diff with the previous one
             /*

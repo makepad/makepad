@@ -420,13 +420,15 @@ impl Cx {
         unsafe {
             glx_sys::glXMakeCurrent(opengl_cx.display, opengl_cx.hidden_window, opengl_cx.context);
         }
-        for sh in &mut self.shaders {
-            let openglsh = Self::opengl_compile_shader(sh, opengl_cx);
-            if let Err(err) = openglsh {
-                panic!("Shader compile error {}", err);
+        for (index, sh) in self.shaders.iter_mut().enumerate() {
+            let result = Self::opengl_compile_shader(index, sh, opengl_cx);
+            if let ShaderCompileResult::Fail{err, ..} = result {
+                panic!("{}", err);
             } 
         }; 
     }
+    
+    
     
     pub fn opengl_get_info_log(compile: bool,shader: usize, source: &str) -> String {
         unsafe{
@@ -555,13 +557,13 @@ impl Cx {
         gl_texture_slots
     }
     
-    pub fn opengl_compile_shader(sh: &mut CxShader, opengl_cx: &OpenglCx) -> Result<(), String> {
+    pub fn opengl_compile_shader(shader_id:usize, sh: &mut CxShader, opengl_cx: &OpenglCx) -> ShaderCompileResult {
         
         // lets compile.
         let shader_ast = sh.shader_gen.lex_parse_analyse();
         
         if let Err(err) = shader_ast{
-            return Err(format!("Got shader error: {}:{} {}", err.file, err.line, err.msg));
+            return ShaderCompileResult::Fail{id:shader_id, err:err}
         } 
         let shader_ast = shader_ast.unwrap();
         
@@ -591,14 +593,14 @@ impl Cx {
             gl::CompileShader(vs);
             //println!("{}", Self::opengl_get_info_log(true, vs as usize, &vertex));
             if let Some(error) = Self::opengl_has_shader_error(true, vs as usize, &vertex) {
-                return Err(format!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error))
+                panic!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error);
             }
             let fs = gl::CreateShader(gl::FRAGMENT_SHADER);
             gl::ShaderSource(fs, 1, [fragment.as_ptr() as *const _].as_ptr(), ptr::null());
             gl::CompileShader(fs);
             //println!("{}", Self::opengl_get_info_log(true, fs as usize, &fragment));
             if let Some(error) = Self::opengl_has_shader_error(true, fs as usize, &fragment) {
-                return Err(format!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error))
+                panic!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error);
             }  
             
             let program = gl::CreateProgram();
@@ -606,12 +608,12 @@ impl Cx {
             gl::AttachShader(program, fs);
             gl::LinkProgram(program);
             if let Some(error) = Self::opengl_has_shader_error(false, program as usize, "") {
-                return Err(format!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error))
+                panic!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error);
             }
             gl::DeleteShader(vs);
             gl::DeleteShader(fs);
             
-            let attributes = Self::opengl_get_attributes(program, "mpsc_packed_attribute_", mapping.attribute_props.total_slots);
+            let geometries = Self::opengl_get_attributes(program, "mpsc_packed_geometry_", mapping.geometry_props.total_slots);
             let instances = Self::opengl_get_attributes(program, "mpsc_packed_instance_", mapping.instance_props.total_slots);
             
             // lets fetch the uniform positions for our uniforms
@@ -627,7 +629,7 @@ impl Cx {
                     buf.update_with_f32_data(opengl_cx, &sh.shader_gen.geometry_vertices);
                     buf
                 },
-                attributes,
+                geometries,
                 instances,
                 pass_uniforms: Self::opengl_get_uniforms(program,  &mapping.pass_uniforms),
                 view_uniforms: Self::opengl_get_uniforms(program, &mapping.view_uniforms),
@@ -635,7 +637,7 @@ impl Cx {
                 uniforms: Self::opengl_get_uniforms(program, &mapping.uniforms),
             });
             sh.mapping = mapping;
-            return Ok(());
+            return ShaderCompileResult::Ok{id:shader_id};
             
         }
     }
@@ -975,7 +977,7 @@ pub struct CxPlatformShader {
     pub program: u32,
     pub geom_vbuf: OpenglBuffer,
     pub geom_ibuf: OpenglBuffer,
-    pub attributes: Vec<OpenglAttribute>,
+    pub geometries: Vec<OpenglAttribute>,
     pub instances: Vec<OpenglAttribute>,
     pub pass_uniforms: Vec<OpenglUniform>,
     pub view_uniforms: Vec<OpenglUniform>,
@@ -1075,7 +1077,7 @@ impl CxPlatformDrawCall {
                 
                 // bind the vertex and indexbuffers
                 gl::BindBuffer(gl::ARRAY_BUFFER, shp.geom_vbuf.gl_buffer.unwrap());
-                for attr in &shp.attributes {
+                for attr in &shp.geometries {
                     gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
                     gl::EnableVertexAttribArray(attr.loc);
                 }

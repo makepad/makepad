@@ -155,6 +155,7 @@ impl<'a> BlockGenerator<'a> {
         write!(self.string, " ").unwrap();
         self.generate_block(block_if_true);
         if let Some(block_if_false) = block_if_false {
+            write!(self.string, "else").unwrap();
             self.generate_block(block_if_false);
         }
         writeln!(self.string).unwrap();
