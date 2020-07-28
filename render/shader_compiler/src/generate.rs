@@ -20,7 +20,14 @@ use {
 };
 
 pub trait BackendWriter {
-    fn write_var_decl(&self, string: &mut String, is_inout: bool, ident: Ident, ty: &Ty);
+    fn write_var_decl(
+        &self,
+        string: &mut String,
+        is_inout: bool,
+        is_packed: bool,
+        ident: Ident,
+        ty: &Ty
+    );
 
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
 }
@@ -163,6 +170,7 @@ impl<'a> BlockGenerator<'a> {
     ) {
         self.write_var_decl(
             false,
+            false,
             ident,
             ty.borrow().as_ref().unwrap()
         );
@@ -210,10 +218,17 @@ impl<'a> BlockGenerator<'a> {
         }
     }
 
-    fn write_var_decl(&mut self, is_inout: bool, ident: Ident, ty: &Ty) {
+    fn write_var_decl(
+        &mut self,
+        is_inout: bool,
+        is_packed: bool,
+        ident: Ident,
+        ty: &Ty
+    ) {
         self.backend_writer.write_var_decl(
             &mut self.string,
             is_inout,
+            is_packed,
             ident,
             ty
         );
