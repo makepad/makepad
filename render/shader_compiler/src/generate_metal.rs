@@ -56,6 +56,8 @@ impl<'a> ShaderGenerator<'a> {
         }
         self.generate_fn_decl(vertex_decl);
         self.generate_fn_decl(fragment_decl);
+        self.generate_vertex_main();
+        self.generate_fragment_main();
     }
 
     fn generate_uniform_structs(&mut self) {
@@ -268,6 +270,14 @@ impl<'a> ShaderGenerator<'a> {
             decl,
             string: self.string,
         }.generate_fn_decl()
+    }
+
+    fn generate_vertex_main(&mut self) {
+        // TODO
+    }
+
+    fn generate_fragment_main(&mut self) {
+        // TODO
     }
 
     fn generate_expr(&mut self, expr: &Expr) {
