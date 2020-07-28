@@ -444,6 +444,7 @@ impl<'a> ShaderGenerator<'a> {
         GlslBackendWriter.write_var_decl(
             &mut self.string,
             is_inout,
+            false,
             ident,
             ty
         );
@@ -509,6 +510,7 @@ impl<'a> FnDeclGenerator<'a> {
         GlslBackendWriter.write_var_decl(
             &mut self.string,
             is_inout,
+            false,
             ident,
             ty
         );
@@ -657,7 +659,14 @@ impl<'a> VarUnpacker<'a> {
 struct GlslBackendWriter;
 
 impl BackendWriter for GlslBackendWriter {
-    fn write_var_decl(&self, string: &mut String, is_inout: bool, ident: Ident, ty: &Ty) {
+    fn write_var_decl(
+        &self,
+        string: &mut String,
+        is_inout: bool,
+        is_packed: bool,
+        ident: Ident,
+        ty: &Ty
+    ) {
         if is_inout {
             write!(string, "inout ").unwrap();
         }
@@ -728,7 +737,7 @@ impl BackendWriter for GlslBackendWriter {
                 write!(string, " {}", ident).unwrap();
             },
             Ty::Array { ref elem_ty, len } => {
-                self.write_var_decl(string, is_inout, ident, elem_ty);
+                self.write_var_decl(string, is_inout, is_packed, ident, elem_ty);
                 write!(string, "[{}]", len).unwrap();
             }
             Ty::Struct {
