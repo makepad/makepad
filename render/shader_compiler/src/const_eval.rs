@@ -206,7 +206,7 @@ impl<'a> ConstEvaluator<'a> {
             Ty::Struct { ident: struct_ident } => {
                 self.const_eval_call_expr(
                     span,
-                    Ident::new(format!("mpsc_{}_{}", struct_ident, ident)),
+                    Ident::new(format!("{}::{}", struct_ident, ident)),
                     arg_exprs
                 )
             },
