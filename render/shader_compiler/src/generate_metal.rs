@@ -11,7 +11,10 @@ use {
         ty::Ty,
     },
     std::{
-        collections::HashMap,
+        collections::{
+            HashMap,
+            HashSet,
+        },
         fmt::Write,
     }
 };
@@ -54,8 +57,9 @@ impl<'a> ShaderGenerator<'a> {
         {
             self.generate_cons_fn(ty_lit, param_tys);
         }
-        self.generate_fn_decl(vertex_decl);
-        self.generate_fn_decl(fragment_decl);
+        let mut visited = HashSet::new();
+        self.generate_fn_decl(vertex_decl, &mut visited);
+        self.generate_fn_decl(fragment_decl, &mut visited);
         self.generate_vertex_main();
         self.generate_fragment_main();
     }
@@ -264,10 +268,11 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, "}}").unwrap();
     }
 
-    fn generate_fn_decl(&mut self, decl: &FnDecl) {
+    fn generate_fn_decl(&mut self, decl: &FnDecl, visited: &mut HashSet<Ident>) {
         FnDeclGenerator {
             shader: self.shader,
             decl,
+            visited,
             string: self.string,
         }.generate_fn_decl()
     }
@@ -401,15 +406,20 @@ impl<'a> ShaderGenerator<'a> {
 struct FnDeclGenerator<'a> {
     shader: &'a ShaderAst,
     decl: &'a FnDecl,
+    visited: &'a mut HashSet<Ident>,
     string: &'a mut String,
 }
 
 impl<'a> FnDeclGenerator<'a> {
     fn generate_fn_decl(&mut self) {
+        if self.visited.contains(&self.decl.ident) {
+            return;
+        }
         for &callee in self.decl.callees.borrow().as_ref().unwrap().iter() {
             FnDeclGenerator {
                 shader: self.shader,
                 decl: self.shader.find_fn_decl(callee).unwrap(),
+                visited: self.visited,
                 string: self.string,
             }.generate_fn_decl()
         }
@@ -465,6 +475,7 @@ impl<'a> FnDeclGenerator<'a> {
         write!(self.string, ") ").unwrap();
         self.generate_block(&self.decl.block);
         writeln!(self.string).unwrap();
+        self.visited.insert(self.decl.ident);
     }
 
     fn generate_block(&mut self, block: &Block) {
