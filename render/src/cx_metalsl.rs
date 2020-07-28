@@ -6,6 +6,7 @@ use crate::cx_apple::*;
 //use makepad_shader_compiler::ast::{ShaderAst, Decl, TyExprKind};
 //use makepad_shader_compiler::colors::Color;
 //use makepad_shader_compiler::{generate};
+use makepad_shader_compiler::generate_metal;
 
 
 #[derive(Clone)]
@@ -32,15 +33,29 @@ pub struct SlErr {
 impl Cx {
     
     pub fn mtl_compile_all_shaders(&mut self, metal_cx: &MetalCx) {
-        for sh in &mut self.shaders {
-            let mtlsh = Self::mtl_compile_shader(sh, metal_cx);
-            if let Err(_err) = mtlsh {
-                //panic!("Got metal shader compile error: {}", err.msg);
-            }
+        for (index, sh) in &mut self.shaders.iter_mut().enumerate() {
+            let result = Self::mtl_compile_shader(index, sh, metal_cx);
+            if let ShaderCompileResult::Fail{err, ..} = result {
+                panic!("{}", err);
+            } 
         };
     }
     
-    pub fn mtl_compile_shader(sh: &mut CxShader, metal_cx: &MetalCx) -> Result<(), SlErr> {
+    pub fn mtl_compile_shader(shader_id:usize, sh: &mut CxShader, metal_cx: &MetalCx) -> ShaderCompileResult {
+        
+        let shader_ast = sh.shader_gen.lex_parse_analyse();
+        
+        if let Err(err) = shader_ast{
+            return ShaderCompileResult::Fail{id:shader_id, err:err}
+        } 
+        let shader_ast = shader_ast.unwrap();
+        
+        //lets do it.
+        println!("METAL");
+        println!("{}", generate_metal::generate_shader(&shader_ast));
+        
+        return ShaderCompileResult::Ok{id:shader_id}; 
+/*        
         let (mtlsl, mapping) = Self::mtl_assemble_shader(&sh.shader_gen) ?;
         
         let options: id = unsafe {msg_send![class!(MTLCompileOptions), new]};
@@ -105,6 +120,7 @@ impl Cx {
             }
         });
         return Ok(());
+        */
     }
     
     pub fn mtl_assemble_shader(sg: &ShaderGen) -> Result<(String, CxShaderMapping), SlErr> {
@@ -183,7 +199,7 @@ impl Cx {
             defargs_call: "".to_string(),
             call_prefix: "_".to_string(),
             shader_gen: sg,
-            scope: Vec::new(),
+            scope: Vec::new(), 
             fn_deps: Vec::new(),
             fn_done: Vec::new(),
             auto_vary: Vec::new()
@@ -349,7 +365,6 @@ impl Cx {
                     out.push_str(";\n");
                 }
             }
-            
         };
         out.push_str("};\n\n");
         out
