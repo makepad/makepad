@@ -36,6 +36,8 @@ const SOURCE: &str = r#"
         }
     }
 
+    const FOO: float = 1.0;
+
     uniform uUniform1: Self::my_uniform();
     uniform uUniform2: Self::my_uniform() in draw;
 
