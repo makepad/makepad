@@ -430,8 +430,8 @@ pub struct CxShaderMapping {
     pub instance_props: InstanceProps,
     pub instances: Vec<PropDef>,
     //pub instance_slots: usize,
-    pub attribute_props: InstanceProps,
-    pub attributes: Vec<PropDef>,
+    pub geometry_props: InstanceProps,
+    pub geometries: Vec<PropDef>,
     pub draw_uniforms: Vec<PropDef>,
     pub view_uniforms: Vec<PropDef>,
     pub pass_uniforms: Vec<PropDef>,
@@ -443,7 +443,7 @@ impl CxShaderMapping{
     pub fn from_shader_gen(gen:&ShaderGen)->Self{
         
         let mut instances = Vec::new();
-        let mut attributes = Vec::new();
+        let mut geometries = Vec::new();
         let mut uniforms = Vec::new();
         let mut draw_uniforms = Vec::new();
         let mut view_uniforms = Vec::new();
@@ -451,7 +451,7 @@ impl CxShaderMapping{
         let mut textures = Vec::new();
         for sub in &gen.subs{
             instances.extend(sub.instances.clone());
-            attributes.extend(sub.attributes.clone());
+            geometries.extend(sub.geometries.clone());
             textures.extend(sub.textures.clone());
             for uni in &sub.uniforms{
                 if let Some(block) = &uni.block{
@@ -471,9 +471,9 @@ impl CxShaderMapping{
             rect_instance_props: RectInstanceProps::construct(&instances),
             uniform_props: UniformProps::construct(&uniforms),
             instance_props: InstanceProps::construct(&instances),
-            attribute_props: InstanceProps::construct(&attributes),
+            geometry_props: InstanceProps::construct(&geometries),
             instances: instances,
-            attributes: attributes,
+            geometries: geometries,
             draw_uniforms: draw_uniforms,
             view_uniforms: view_uniforms,
             pass_uniforms: pass_uniforms,

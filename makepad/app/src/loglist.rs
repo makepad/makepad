@@ -99,24 +99,24 @@ impl LogItemDraw {
             HubLogItem::LocPanic(loc_msg) => {
                 self.code_icon.draw_icon(cx, CodeIconType::Panic);
                 cx.turtle_align_y();
-                self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
+                self.draw_log_path(cx, &loc_msg.path, loc_msg.line);
                 self.draw_log_body(cx, &loc_msg.body);
                 
             },
             HubLogItem::LocError(loc_msg) => {
                 self.code_icon.draw_icon(cx, CodeIconType::Error);
                 cx.turtle_align_y();
-                self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
+                self.draw_log_path(cx, &loc_msg.path, loc_msg.line);
                 self.draw_log_body(cx, &loc_msg.body);
             },
             HubLogItem::LocWarning(loc_msg) => {
                 self.code_icon.draw_icon(cx, CodeIconType::Warning);
                 cx.turtle_align_y();
-                self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
+                self.draw_log_path(cx, &loc_msg.path, loc_msg.line);
                 self.draw_log_body(cx, &loc_msg.body);
             },
             HubLogItem::LocMessage(loc_msg) => {
-                self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
+                self.draw_log_path(cx, &loc_msg.path, loc_msg.line);
                 self.draw_log_body(cx, &loc_msg.body);
             },
             HubLogItem::Error(msg) => {
@@ -325,7 +325,7 @@ impl LogList {
                         }
                     }
                     else {
-                        text_buffer.text_pos_to_offset(TextPos {row: loc_message.row.max(1) - 1, col: loc_message.col.max(1) - 1})
+                        text_buffer.text_pos_to_offset(TextPos {row: loc_message.line.max(1) - 1, col: loc_message.col.max(1) - 1})
                     };
                     
                     LogListEvent::SelectLocMessage {

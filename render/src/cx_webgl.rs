@@ -198,18 +198,18 @@ impl Cx {
     pub fn webgl_compile_all_shaders(&mut self) {
         for (shader_id, sh) in self.shaders.iter_mut().enumerate() {
             let glsh = Self::webgl_compile_shader(shader_id, sh, &mut self.platform);
-            if let Err(err) = glsh {
+            if let ShaderCompileResult::Fail{err,..} = glsh {
                 self.platform.from_wasm.log(&format!("Got GLSL shader compile error: {}", err))
             }
         }
     }
     
-    pub fn webgl_compile_shader(shader_id: usize, sh: &mut CxShader, platform: &mut CxPlatform) -> Result<(), String> {
+    pub fn webgl_compile_shader(shader_id: usize, sh: &mut CxShader, platform: &mut CxPlatform) -> ShaderCompileResult{
         
         let shader_ast = sh.shader_gen.lex_parse_analyse();
         
         if let Err(err) = shader_ast{
-            return Err(format!("Got shader error: {}:{} {}", err.file, err.line, err.msg));
+            return ShaderCompileResult::Fail{id:shader_id, err:err}
         } 
         let shader_ast = shader_ast.unwrap();
         
@@ -255,7 +255,7 @@ impl Cx {
             fragment: fragment
         });
         
-        Ok(())
+        ShaderCompileResult::Ok{id:shader_id}
     }
     
 }

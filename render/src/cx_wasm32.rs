@@ -435,6 +435,13 @@ impl Cx {
             self.platform.from_wasm.request_animation_frame();
         }
         
+        // lets check our recompile queue
+        let mut shader_results = Vec::new();
+        for shader_id in &self.shader_recompiles {
+            shader_results.push(Self::webgl_compile_shader(*shader_id, &mut self.shaders[*shader_id], &mut self.platform));
+        }
+        self.call_shader_recompile_event(shader_results, &mut event_handler);
+        
         // mark the end of the message
         self.platform.from_wasm.end();
         
@@ -858,7 +865,7 @@ impl FromWasm {
         self.add_string(fragment);
         self.add_string(vertex);
         self.fit(2);
-        self.mu32(mapping.attribute_props.total_slots as u32);
+        self.mu32(mapping.geometry_props.total_slots as u32);
         self.mu32(mapping.instance_props.total_slots as u32);
         self.add_propdefvec(&mapping.pass_uniforms);
         self.add_propdefvec(&mapping.view_uniforms);

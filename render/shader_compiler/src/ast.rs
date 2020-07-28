@@ -20,10 +20,10 @@ impl ShaderAst {
         }
     }
 
-    pub fn find_attribute_decl(&self, ident: Ident) -> Option<&AttributeDecl> {
+    pub fn find_geometry_decl(&self, ident: Ident) -> Option<&GeometryDecl> {
         self.decls.iter().find_map(|decl| {
             match decl {
-                Decl::Attribute(decl) => Some(decl),
+                Decl::Geometry(decl) => Some(decl),
                 _ => None,
             }
             .filter(|decl| decl.ident == ident)
@@ -93,7 +93,7 @@ impl ShaderAst {
 
 #[derive(Clone, Debug)]
 pub enum Decl {
-    Attribute(AttributeDecl),
+    Geometry(GeometryDecl),
     Const(ConstDecl),
     Fn(FnDecl),
     Instance(InstanceDecl),
@@ -104,7 +104,7 @@ pub enum Decl {
 }
 
 #[derive(Clone, Debug)]
-pub struct AttributeDecl {
+pub struct GeometryDecl {
     pub is_used_in_fragment_shader: Cell<Option<bool>>,
     pub span: Span,
     pub ident: Ident,
