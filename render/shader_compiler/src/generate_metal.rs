@@ -184,6 +184,7 @@ impl<'a> ShaderGenerator<'a> {
 
     fn generate_varying_struct(&mut self) {
         writeln!(self.string, "struct mpsc_Varyings {{").unwrap();
+        writeln!(self.string, "    vec4 mpsc_position [[position]];").unwrap();
         for decl in &self.shader.decls {
             match decl {
                 Decl::Geometry(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
@@ -348,29 +349,21 @@ impl<'a> ShaderGenerator<'a> {
 
     fn generate_vertex_main(&mut self) {
         let decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
-        write!(self.string, "void vertex_main(").unwrap();
-        let mut sep = "";
-        for &ident in decl.uniform_block_deps.borrow().as_ref().unwrap() {
-            write!(self.string, "{}mpsc_{1}_Uniforms mpsc_{1}_uniforms", sep, ident).unwrap();
-            sep = ", ";
-        }
-        if decl.has_texture_deps.get().unwrap() {
-            write!(self.string, "{}mpsc_Textures mpsc_textures", sep).unwrap();
-            sep = ", ";
-        }
-        if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty() {
-            write!(self.string, "{}mpsc_Attributes mpsc_attributes", sep).unwrap();
-            sep = ", ";
-        }
-        if !decl.instance_deps.borrow().as_ref().unwrap().is_empty() {
-            write!(self.string, "{}mpsc_Instances mpsc_instances", sep).unwrap();
-            sep = ", ";
-        }
-        if decl.has_varying_deps.get().unwrap() {
-            write!(self.string, "{}mpsc_Varyings mpsc_varyings", sep).unwrap();
-        }
+        write!(self.string, "vertex _mpsc_Varyings vertex_main(").unwrap();
+        write!(self.string, "device mpsc_pass_Uniforms &mpsc_pass_uniforms [[buffer(2)]]").unwrap();
+        write!(self.string, ", device mpsc_view_Uniforms &mpsc_view_uniforms [[buffer(3)]]").unwrap();
+        write!(self.string, ", device mpsc_draw_Uniforms &mpsc_draw_uniforms [[buffer(4)]]").unwrap();
+        write!(self.string, ", device mpsc_default_Uniforms &mpsc_default_uniforms [[buffer(5)]]").unwrap();
+        write!(self.string, ", mpsc_Textures mpsc_textures").unwrap();
+        write!(self.string, ", device mpsc_Attributes *mpsc_attributes [[buffer(0)]]").unwrap();
+        write!(self.string, ", device mpsc_Instances *mpsc_instances [[buffer(1)]]").unwrap();
+        write!(self.string, ", uint vtx_id [[vertex_id]])").unwrap();
+        write!(self.string, ", uint inst_id [[instance_id]])").unwrap();
         writeln!(self.string, ") {{").unwrap();
-        write!(self.string, "    return ").unwrap();
+        writeln!(self.string, "    mpsc_Attributes &mpsc_attribute = &mpsc_attributes[vtx_index];").unwrap();
+        writeln!(self.string, "    mpsc_Instances &mpsc_instance = &mpsc_instances[inst_index];").unwrap();
+        writeln!(self.string, "    mpsc_Varyings mpsc_varyings;").unwrap();
+        write!(self.string, "    mpsc_varyings.mpsc_position = ").unwrap();
         self.write_ident(decl.ident);
         write!(self.string, "(").unwrap();
         let mut sep = "";
@@ -383,17 +376,29 @@ impl<'a> ShaderGenerator<'a> {
             sep = ", ";
         }
         if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty() {
-            write!(self.string, "{}mpsc_attributes", sep).unwrap();
+            write!(self.string, "{}mpsc_attribute", sep).unwrap();
             sep = ", ";
         }
         if !decl.instance_deps.borrow().as_ref().unwrap().is_empty() {
-            write!(self.string, "{}mpsc_instances", sep).unwrap();
+            write!(self.string, "{}mpsc_instance", sep).unwrap();
             sep = ", ";
         }
         if decl.has_varying_deps.get().unwrap() {
             write!(self.string, "{}mpsc_varyings", sep).unwrap();
         }
         writeln!(self.string, ");").unwrap();
+        for decl in &self.shader.decls {
+            match decl {
+                Decl::Geometry(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                    writeln!(self.string, "    mpsc_varyings.{0} = mpsc_geometry.{0};", decl.ident).unwrap();
+                },
+                Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                    writeln!(self.string, "    mpsc_varyings.{0} = mpsc_instance.{0};", decl.ident).unwrap();
+                }
+                _ => {},
+            }
+        }
+        writeln!(self.string, "    return mpsc_varyings;").unwrap();
         writeln!(self.string, "}}").unwrap();
     }
 
