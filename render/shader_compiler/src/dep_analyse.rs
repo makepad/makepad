@@ -184,9 +184,9 @@ impl<'a> DepAnalyser<'a> {
         ident: Ident,
     ) {
         match kind.get().unwrap() {
-            VarKind::Attribute => {
+            VarKind::Geometry => {
                 self.decl
-                    .attribute_deps
+                    .geometry_deps
                     .borrow_mut()
                     .as_mut()
                     .unwrap()

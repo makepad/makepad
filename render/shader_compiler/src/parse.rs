@@ -168,7 +168,7 @@ impl<'a> Parser<'a> {
             callees: RefCell::new(None),
             uniform_block_deps: RefCell::new(None),
             has_texture_deps: Cell::new(None),
-            attribute_deps: RefCell::new(None),
+            geometry_deps: RefCell::new(None),
             instance_deps: RefCell::new(None),
             has_varying_deps: Cell::new(None),
             builtin_deps: RefCell::new(None),

@@ -128,7 +128,7 @@ pub struct FnDecl {
     pub callees: RefCell<Option<HashSet<Ident>>>,
     pub uniform_block_deps: RefCell<Option<HashSet<Ident>>>,
     pub has_texture_deps: Cell<Option<bool>>,
-    pub attribute_deps: RefCell<Option<HashSet<Ident>>>,
+    pub geometry_deps: RefCell<Option<HashSet<Ident>>>,
     pub instance_deps: RefCell<Option<HashSet<Ident>>>,
     pub has_varying_deps: Cell<Option<bool>>,
     pub builtin_deps: RefCell<Option<HashSet<Ident>>>,

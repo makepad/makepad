@@ -39,7 +39,7 @@ impl<'a> ShaderGenerator<'a> {
         self.generate_struct_decls();
         self.generate_uniform_structs();
         self.generate_texture_struct();
-        self.generate_attribute_struct();
+        self.generate_geometry_struct();
         self.generate_instance_struct();
         self.generate_varying_struct();
         self.generate_const_decls();
@@ -142,8 +142,8 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, "}};").unwrap();
     }
 
-    fn generate_attribute_struct(&mut self) {
-        writeln!(self.string, "struct mpsc_Attributes {{").unwrap();
+    fn generate_geometry_struct(&mut self) {
+        writeln!(self.string, "struct mpsc_Geometries {{").unwrap();
         for decl in &self.shader.decls {
             match decl {
                 Decl::Geometry(decl) => {
@@ -191,7 +191,7 @@ impl<'a> ShaderGenerator<'a> {
                     write!(self.string, "    ").unwrap();
                     self.write_var_decl(
                         false,
-                        true,
+                        false,
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
@@ -201,7 +201,7 @@ impl<'a> ShaderGenerator<'a> {
                     write!(self.string, "    ").unwrap();
                     self.write_var_decl(
                         false,
-                        true,
+                        false,
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
@@ -211,7 +211,7 @@ impl<'a> ShaderGenerator<'a> {
                     write!(self.string, "    ").unwrap();
                     self.write_var_decl(
                         false,
-                        true,
+                        false,
                         decl.ident,
                         decl.ty_expr.ty.borrow().as_ref().unwrap()
                     );
@@ -355,7 +355,7 @@ impl<'a> ShaderGenerator<'a> {
         write!(self.string, ", device mpsc_draw_Uniforms &mpsc_draw_uniforms [[buffer(4)]]").unwrap();
         write!(self.string, ", device mpsc_default_Uniforms &mpsc_default_uniforms [[buffer(5)]]").unwrap();
         write!(self.string, ", mpsc_Textures mpsc_textures").unwrap();
-        write!(self.string, ", device mpsc_Attributes *mpsc_attributes [[buffer(0)]]").unwrap();
+        write!(self.string, ", device mpsc_Geometries *mpsc_geometries [[buffer(0)]]").unwrap();
         write!(self.string, ", device mpsc_Instances *mpsc_instances [[buffer(1)]]").unwrap();
         write!(self.string, ", uint vtx_id [[vertex_id]])").unwrap();
         write!(self.string, ", uint inst_id [[instance_id]])").unwrap();
@@ -372,11 +372,11 @@ impl<'a> ShaderGenerator<'a> {
             sep = ", ";
         }
         if decl.has_texture_deps.get().unwrap() {
-            write!(self.string, "{}mpsc_textures", sep).unwrap();
+            write!(self.string, "{}&mpsc_textures", sep).unwrap();
             sep = ", ";
         }
-        if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty() {
-            write!(self.string, "{}mpsc_attribute", sep).unwrap();
+        if !decl.geometry_deps.borrow().as_ref().unwrap().is_empty() {
+            write!(self.string, "{}mpsc_geometry", sep).unwrap();
             sep = ", ";
         }
         if !decl.instance_deps.borrow().as_ref().unwrap().is_empty() {
@@ -384,7 +384,7 @@ impl<'a> ShaderGenerator<'a> {
             sep = ", ";
         }
         if decl.has_varying_deps.get().unwrap() {
-            write!(self.string, "{}mpsc_varyings", sep).unwrap();
+            write!(self.string, "{}&mpsc_varyings", sep).unwrap();
         }
         writeln!(self.string, ");").unwrap();
         for decl in &self.shader.decls {
@@ -404,42 +404,34 @@ impl<'a> ShaderGenerator<'a> {
 
     fn generate_fragment_main(&mut self) {
         let decl = self.shader.find_fn_decl(Ident::new("pixel")).unwrap();
-        write!(self.string, "void fragment_main(").unwrap();
-        let mut sep = "";
-        for &ident in decl.uniform_block_deps.borrow().as_ref().unwrap() {
-            write!(self.string, "{}mpsc_{1}_Uniforms mpsc_{1}_uniforms", sep, ident).unwrap();
-            sep = ", ";
-        }
-        if decl.has_texture_deps.get().unwrap() {
-            write!(self.string, "{}mpsc_Textures mpsc_textures", sep).unwrap();
-            sep = ", ";
-        }
-        if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty()
-            || decl.instance_deps.borrow().as_ref().unwrap().is_empty()
-            || decl.has_varying_deps.get().unwrap()
-        {
-            write!(self.string, "{}mpsc_Varyings mpsc_varyings", sep).unwrap();
-        }
+        write!(self.string, "fragment float4 fragment_main(").unwrap();
+        write!(self.string, "mpsc_Varyings mpsc_varyings[[stage_in]]").unwrap();
+        write!(self.string, ", device mpsc_pass_Uniforms &mpsc_pass_uniforms [[buffer(0)]]").unwrap();
+        write!(self.string, ", device mpsc_view_Uniforms &mpsc_view_uniforms [[buffer(1)]]").unwrap();
+        write!(self.string, ", device mpsc_draw_Uniforms &mpsc_draw_uniforms [[buffer(2)]]").unwrap();
+        write!(self.string, ", device mpsc_default_Uniforms &mpsc_default_uniforms [[buffer(3)]]").unwrap();
+        write!(self.string, ", mpsc_Textures mpsc_textures").unwrap();
+
         writeln!(self.string, ") {{").unwrap();
+        
         write!(self.string, "    return ").unwrap();
         self.write_ident(decl.ident);
         write!(self.string, "(").unwrap();
         let mut sep = "";
         for &ident in decl.uniform_block_deps.borrow().as_ref().unwrap() {
-            write!(self.string, "{}mpsc_{1}_uniforms", sep, ident).unwrap();
+            write!(self.string, "{}mpsc_{}_uniforms", sep, ident).unwrap();
             sep = ", ";
         }
         if decl.has_texture_deps.get().unwrap() {
             write!(self.string, "{}mpsc_textures", sep).unwrap();
             sep = ", ";
         }
-        if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty()
-            || decl.instance_deps.borrow().as_ref().unwrap().is_empty()
-            || decl.has_varying_deps.get().unwrap()
-        {
-            write!(self.string, "{}mpsc_varyings", sep).unwrap();
+        if decl.has_varying_deps.get().unwrap() {
+            write!(self.string, "{}&mpsc_varyings", sep).unwrap();
         }
         writeln!(self.string, ");").unwrap();
+        
+        
         writeln!(self.string, "}}").unwrap();
     }
 
@@ -516,34 +508,34 @@ impl<'a> FnDeclGenerator<'a> {
             sep = ", ";
         }
         for &ident in self.decl.uniform_block_deps.borrow().as_ref().unwrap() {
-            write!(self.string, "{}_mpsc_{1}_Uniforms mpsc_{1}_uniforms", sep, ident).unwrap();
+            write!(self.string, "{}_mpsc_{1}_Uniforms &mpsc_{1}_uniforms", sep, ident).unwrap();
             sep = ", ";
         }
         if self.decl.has_texture_deps.get().unwrap() {
-            write!(self.string, "{}_mpsc_Textures mpsc_textures", sep).unwrap();
+            write!(self.string, "{}_mpsc_Textures &mpsc_textures", sep).unwrap();
             sep = ", ";
         }
         let is_used_in_vertex_shader = self.decl.is_used_in_vertex_shader.get().unwrap();
         let is_used_in_fragment_shader = self.decl.is_used_in_fragment_shader.get().unwrap();
-        let has_attribute_deps = !self.decl.attribute_deps.borrow().as_ref().unwrap().is_empty();
+        let has_geometry_deps = !self.decl.geometry_deps.borrow().as_ref().unwrap().is_empty();
         let has_instance_deps = !self.decl.instance_deps.borrow().as_ref().unwrap().is_empty();
         let has_varying_deps = self.decl.has_varying_deps.get().unwrap();
         if is_used_in_vertex_shader {
-            if has_attribute_deps {
-                write!(self.string, "{}_mpsc_Attributes mpsc_attributes", sep).unwrap();
+            if has_geometry_deps {
+                write!(self.string, "{}_mpsc_Geometries &mpsc_geometries", sep).unwrap();
                 sep = ", ";
             }
             if has_instance_deps {
-                write!(self.string, "{}_mpsc_Instances mpsc_instances", sep).unwrap();
+                write!(self.string, "{}_mpsc_Instances &mpsc_instances", sep).unwrap();
                 sep = ", ";
             }
             if has_varying_deps {
-                write!(self.string, "{}_mpsc_Varyings mpsc_varyings", sep).unwrap();
+                write!(self.string, "{}_mpsc_Varyings &mpsc_varyings", sep).unwrap();
             }
         }
         if is_used_in_fragment_shader {
-            if has_attribute_deps || has_instance_deps || has_varying_deps {       
-                write!(self.string, "{}_mpsc_Varyings mpsc_varyings", sep).unwrap();
+            if has_geometry_deps || has_instance_deps || has_varying_deps {       
+                write!(self.string, "{}_mpsc_Varyings &mpsc_varyings", sep).unwrap();
             }
         }
         write!(self.string, ") ").unwrap();

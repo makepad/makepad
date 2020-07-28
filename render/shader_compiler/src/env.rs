@@ -53,7 +53,7 @@ pub enum Sym {
 
 #[derive(Clone, Copy, Debug)]
 pub enum VarKind {
-    Attribute,
+    Geometry,
     Const,
     Instance,
     Local,
