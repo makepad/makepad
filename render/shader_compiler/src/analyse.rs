@@ -115,9 +115,9 @@ impl<'a> ShaderAnalyser<'a> {
             &mut visited,
             fragment_decl,
         )?;
-        for &attribute_dep in fragment_decl.attribute_deps.borrow().as_ref().unwrap() {
+        for &geometry_dep in fragment_decl.geometry_deps.borrow().as_ref().unwrap() {
             self.shader
-                .find_geometry_decl(attribute_dep)
+                .find_geometry_decl(geometry_dep)
                 .unwrap()
                 .is_used_in_fragment_shader
                 .set(Some(true));
@@ -160,7 +160,7 @@ impl<'a> ShaderAnalyser<'a> {
             Sym::Var {
                 is_mut: false,
                 ty,
-                kind: VarKind::Attribute,
+                kind: VarKind::Geometry,
             },
         )
     }
@@ -369,11 +369,11 @@ impl<'a> ShaderAnalyser<'a> {
                 decl.has_texture_deps.get().unwrap()
                     || callee_decl.has_texture_deps.get().unwrap(),
             ));
-            decl.attribute_deps
+            decl.geometry_deps
                 .borrow_mut()
                 .as_mut()
                 .unwrap()
-                .extend(callee_decl.attribute_deps.borrow().as_ref().unwrap());
+                .extend(callee_decl.geometry_deps.borrow().as_ref().unwrap());
             decl.instance_deps
                 .borrow_mut()
                 .as_mut()
@@ -403,11 +403,11 @@ impl<'a> ShaderAnalyser<'a> {
             );
         }
         if decl.is_used_in_vertex_shader.get().unwrap() && decl.is_used_in_fragment_shader.get().unwrap() {
-            if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty() {
+            if !decl.geometry_deps.borrow().as_ref().unwrap().is_empty() {
                 return Err(Error {
                     span: decl.span,
                     message: format!(
-                        "function `{}` can't access any attributes, since it's used in both the vertex and fragment shader",
+                        "function `{}` can't access any geometries, since it's used in both the vertex and fragment shader",
                         decl.ident
                     ),
                 });
@@ -491,7 +491,7 @@ impl<'a> FnDefAnalyser<'a> {
         *self.decl.callees.borrow_mut() = Some(HashSet::new());
         *self.decl.uniform_block_deps.borrow_mut() = Some(HashSet::new());
         self.decl.has_texture_deps.set(Some(false));
-        *self.decl.attribute_deps.borrow_mut() = Some(HashSet::new());
+        *self.decl.geometry_deps.borrow_mut() = Some(HashSet::new());
         *self.decl.instance_deps.borrow_mut() = Some(HashSet::new());
         self.decl.has_varying_deps.set(Some(false));
         *self.decl.builtin_deps.borrow_mut() = Some(HashSet::new());

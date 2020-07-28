@@ -424,7 +424,7 @@ impl<'a> ExprGenerator<'a> {
                     sep = ", ";
                 }
                 if decl.is_used_in_vertex_shader.get().unwrap() {
-                    if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty() {
+                    if !decl.geometry_deps.borrow().as_ref().unwrap().is_empty() {
                         write!(self.string, "{}mpsc_attributes", sep).unwrap();
                         sep = ", ";
                     }
@@ -437,7 +437,7 @@ impl<'a> ExprGenerator<'a> {
                     }
                 } else {
                     assert!(decl.is_used_in_fragment_shader.get().unwrap());
-                    if !decl.attribute_deps.borrow().as_ref().unwrap().is_empty()
+                    if !decl.geometry_deps.borrow().as_ref().unwrap().is_empty()
                         || decl.instance_deps.borrow().as_ref().unwrap().is_empty()
                         || decl.has_varying_deps.get().unwrap()
                     {
@@ -508,7 +508,7 @@ impl<'a> ExprGenerator<'a> {
                 let is_used_in_fragment_shader = decl.is_used_in_fragment_shader.get().unwrap();
                 if is_used_in_vertex_shader {
                     match kind.get().unwrap() {
-                        VarKind::Attribute => write!(self.string, "mpsc_attributes.").unwrap(),
+                        VarKind::Geometry => write!(self.string, "mpsc_geometries.").unwrap(),
                         VarKind::Instance => write!(self.string, "mpsc_instances.").unwrap(),
                         VarKind::Uniform => {
                             write!(
@@ -540,7 +540,7 @@ impl<'a> ExprGenerator<'a> {
                             ).unwrap();
                         }
                         VarKind::Texture => write!(self.string, "mpsc_textures.").unwrap(),
-                        VarKind::Attribute
+                        VarKind::Geometry
                         | VarKind::Instance
                         | VarKind::Varying => write!(self.string, "mpsc_varyings.").unwrap(),
                         _ => {}
