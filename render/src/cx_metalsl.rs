@@ -53,8 +53,6 @@ impl Cx {
         let mtlsl =  generate_metal::generate_shader(&shader_ast);
         let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen);
         
-        println!("{}", mtlsl);
-        
         let options: id = unsafe {msg_send![class!(MTLCompileOptions), new]};
         let ns_mtlsl: id = str_to_nsstring(&mtlsl);
         let mut err: id = nil;
@@ -72,10 +70,10 @@ impl Cx {
         }
         
         sh.mapping = mapping;
-        sh.platform = Some(CxPlatformShader {
+        sh.platform = Some(CxPlatformShader { 
             pipeline_state: unsafe {
-                let vert: id = msg_send![library, newFunctionWithName: str_to_nsstring("_vertex_shader")];
-                let frag: id = msg_send![library, newFunctionWithName: str_to_nsstring("_fragment_shader")];
+                let vert: id = msg_send![library, newFunctionWithName: str_to_nsstring("mpsc_vertex_main")];
+                let frag: id = msg_send![library, newFunctionWithName: str_to_nsstring("mpsc_fragment_main")];
                 let rpd: id = msg_send![class!(MTLRenderPipelineDescriptor), new];
                 
                 let () = msg_send![rpd, setVertexFunction: vert];
