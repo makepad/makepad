@@ -56,7 +56,7 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, "struct mpsc_Attributes {{").unwrap();
         for decl in &self.shader.decls {
             match decl {
-                Decl::Attribute(decl) => {
+                Decl::Geometry(decl) => {
                     write!(self.string, "    ").unwrap();
                     self.write_var_decl(
                         false,
