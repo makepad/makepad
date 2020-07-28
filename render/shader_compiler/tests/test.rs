@@ -27,6 +27,7 @@ const SOURCE: &str = r#"
         fn qux(self, x: float) -> float {
             aPosition;
             vColor;
+            tTexture;
             return 2.0 * x;
         }
 
