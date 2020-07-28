@@ -10,7 +10,10 @@ use {
         lit::TyLit,
         ty::Ty,
     },
-    std::fmt::Write,
+    std::{
+        collections::HashMap,
+        fmt::Write,
+    }
 };
 
 pub fn generate_shader(shader: &ShaderAst) -> String {
@@ -30,6 +33,7 @@ struct ShaderGenerator<'a> {
 
 impl<'a> ShaderGenerator<'a> {
     fn generate_shader(&mut self) {
+        self.generate_uniform_structs();
         self.generate_attribute_struct();
         self.generate_instance_struct();
         let vertex_decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
@@ -51,6 +55,35 @@ impl<'a> ShaderGenerator<'a> {
         }
         self.generate_fn_decl(vertex_decl);
         self.generate_fn_decl(fragment_decl);
+    }
+
+    fn generate_uniform_structs(&mut self) {
+        let mut uniform_blocks = HashMap::new();
+        for decl in &self.shader.decls {
+            match decl {
+                Decl::Uniform(decl) => {
+                    let uniform_block = uniform_blocks
+                        .entry(decl.block_ident.unwrap_or(Ident::new("default")))
+                        .or_insert(Vec::new());
+                    uniform_block.push(decl);
+                }
+                _ => {}
+            }
+        }
+        for (ident, decls) in uniform_blocks {
+            writeln!(self.string, "struct mpsc_{}_Uniforms {{", ident).unwrap();
+            for decl in decls {
+                write!(self.string, "    ").unwrap();
+                self.write_var_decl(
+                    false,
+                    false,
+                    decl.ident,
+                    decl.ty_expr.ty.borrow().as_ref().unwrap()
+                );
+                writeln!(self.string, ";").unwrap();
+            }
+            writeln!(self.string, "}};").unwrap();
+        }
     }
 
     fn generate_attribute_struct(&mut self) {

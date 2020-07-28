@@ -36,6 +36,9 @@ const SOURCE: &str = r#"
         }
     }
 
+    uniform uUniform1: Self::my_uniform();
+    uniform uUniform2: Self::my_uniform() in draw;
+
     texture tTexture: Self::my_texture();
 
     geometry aPosition: Self::my_geometry();
@@ -63,6 +66,7 @@ const SOURCE: &str = r#"
 
 #[test]
 fn test() {
+    fn my_uniform() -> Mat4Id { uid!() }
     fn my_texture() -> Texture2dId { uid!() }
     fn my_geometry() -> Vec3Id { uid!() }
     fn my_instance() -> Vec3Id { uid!() }
@@ -76,6 +80,12 @@ fn test() {
     )
     .unwrap();
     analyse::analyse(&mut shader, &[
+        &PropDef {
+            name: String::from("my_uniform"),
+            ident: String::from("Self::my_uniform"),
+            prop_id: my_uniform().into(),
+            block: None,
+        },
         &PropDef {
             name: String::from("my_texture"),
             ident: String::from("Self::my_texture"),
