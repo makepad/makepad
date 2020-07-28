@@ -36,6 +36,7 @@ impl<'a> ShaderGenerator<'a> {
         self.generate_uniform_structs();
         self.generate_attribute_struct();
         self.generate_instance_struct();
+        self.generate_varying_struct();
         let vertex_decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
         let fragment_decl = self.shader.find_fn_decl(Ident::new("pixel")).unwrap();
         for &(ty_lit, ref param_tys) in vertex_decl
@@ -111,6 +112,46 @@ impl<'a> ShaderGenerator<'a> {
         for decl in &self.shader.decls {
             match decl {
                 Decl::Instance(decl) => {
+                    write!(self.string, "    ").unwrap();
+                    self.write_var_decl(
+                        false,
+                        true,
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                    );
+                    writeln!(self.string, ";").unwrap();
+                }
+                _ => {}
+            }
+        }
+        writeln!(self.string, "}};").unwrap();
+    }
+
+    fn generate_varying_struct(&mut self) {
+        writeln!(self.string, "struct mpsc_Varyings {{").unwrap();
+        for decl in &self.shader.decls {
+            match decl {
+                Decl::Geometry(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                    write!(self.string, "    ").unwrap();
+                    self.write_var_decl(
+                        false,
+                        true,
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                    );
+                    writeln!(self.string, ";").unwrap();
+                }
+                Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
+                    write!(self.string, "    ").unwrap();
+                    self.write_var_decl(
+                        false,
+                        true,
+                        decl.ident,
+                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                    );
+                    writeln!(self.string, ";").unwrap();
+                }
+                Decl::Varying(decl) => {
                     write!(self.string, "    ").unwrap();
                     self.write_var_decl(
                         false,
