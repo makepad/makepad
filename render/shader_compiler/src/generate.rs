@@ -458,7 +458,8 @@ impl<'a> ExprGenerator<'a> {
         }
         match analysis.get().unwrap() {
             MacroCallAnalysis::Color { r, g, b, a } => {
-                write!(self.string, "vec4({}, {}, {}, {})", float_to_string(r), float_to_string(g), float_to_string(b), float_to_string(a)).unwrap();
+                self.backend_writer.write_ty_lit(self.string,TyLit::Vec4);
+                write!(self.string, "({}, {}, {}, {})", float_to_string(r), float_to_string(g), float_to_string(b), float_to_string(a)).unwrap();
             }
         }
     }
