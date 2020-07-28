@@ -36,6 +36,7 @@ struct ShaderGenerator<'a> {
 
 impl<'a> ShaderGenerator<'a> {
     fn generate_shader(&mut self) {
+        self.generate_struct_decls();
         self.generate_uniform_structs();
         self.generate_attribute_struct();
         self.generate_instance_struct();
@@ -62,6 +63,31 @@ impl<'a> ShaderGenerator<'a> {
         self.generate_fn_decl(fragment_decl, &mut visited);
         self.generate_vertex_main();
         self.generate_fragment_main();
+    }
+
+    fn generate_struct_decls(&mut self) {
+        for decl in &self.shader.decls {
+            match decl {
+                Decl::Struct(decl) => {
+                    write!(self.string, "struct {} {{", decl.ident).unwrap();
+                    if !decl.fields.is_empty() {
+                        writeln!(self.string).unwrap();
+                        for field in &decl.fields {
+                            write!(self.string, "    ").unwrap();
+                            self.write_var_decl(
+                                false,
+                                false,
+                                field.ident,
+                                field.ty_expr.ty.borrow().as_ref().unwrap(),
+                            );
+                            writeln!(self.string, ";").unwrap();
+                        }
+                    }
+                    writeln!(self.string, "}};").unwrap();
+                }
+                _ => {}
+            }
+        }
     }
 
     fn generate_uniform_structs(&mut self) {
