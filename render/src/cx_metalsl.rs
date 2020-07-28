@@ -39,7 +39,7 @@ impl Cx {
                 panic!("{}", err);
             } 
         };
-    }
+    } 
     
     pub fn mtl_compile_shader(shader_id:usize, sh: &mut CxShader, metal_cx: &MetalCx) -> ShaderCompileResult {
         
