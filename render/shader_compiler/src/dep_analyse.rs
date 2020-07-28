@@ -113,7 +113,7 @@ impl<'a> DepAnalyser<'a> {
             Ty::Struct { ident } => {
                 self.dep_analyse_call_expr(
                     span,
-                    Ident::new(format!("mpsc_{}_{}", ident, method_ident)),
+                    Ident::new(format!("{}::{}", ident, method_ident)),
                     arg_exprs
                 );
             },
