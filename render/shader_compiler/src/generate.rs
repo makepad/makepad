@@ -510,12 +510,36 @@ impl<'a> ExprGenerator<'a> {
                     match kind.get().unwrap() {
                         VarKind::Attribute => write!(self.string, "mpsc_attributes.").unwrap(),
                         VarKind::Instance => write!(self.string, "mpsc_instances.").unwrap(),
+                        VarKind::Uniform => {
+                            write!(
+                                self.string,
+                                "mpsc_{}_uniforms.",
+                                self.shader
+                                    .find_uniform_decl(ident)
+                                    .unwrap()
+                                    .block_ident
+                                    .unwrap_or(Ident::new("default")),
+                            ).unwrap();
+                        }
+                        VarKind::Texture => write!(self.string, "mpsc_textures.").unwrap(),
                         VarKind::Varying => write!(self.string, "mpsc_varyings.").unwrap(),
                         _ => {}
                     }
                 }
                 if is_used_in_fragment_shader {
                     match kind.get().unwrap() {
+                        VarKind::Uniform => {
+                            write!(
+                                self.string,
+                                "mpsc_{}_uniforms.",
+                                self.shader
+                                    .find_uniform_decl(ident)
+                                    .unwrap()
+                                    .block_ident
+                                    .unwrap_or(Ident::new("default")),
+                            ).unwrap();
+                        }
+                        VarKind::Texture => write!(self.string, "mpsc_textures.").unwrap(),
                         VarKind::Attribute
                         | VarKind::Instance
                         | VarKind::Varying => write!(self.string, "mpsc_varyings.").unwrap(),
