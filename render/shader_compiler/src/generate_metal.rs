@@ -38,6 +38,7 @@ impl<'a> ShaderGenerator<'a> {
     fn generate_shader(&mut self) {
         self.generate_struct_decls();
         self.generate_uniform_structs();
+        self.generate_texture_struct();
         self.generate_attribute_struct();
         self.generate_instance_struct();
         self.generate_varying_struct();
@@ -118,6 +119,27 @@ impl<'a> ShaderGenerator<'a> {
             }
             writeln!(self.string, "}};").unwrap();
         }
+    }
+
+    fn generate_texture_struct(&mut self) {
+        let mut index = 0;
+        writeln!(self.string, "struct mpsc_Textures {{").unwrap();
+        for decl in &self.shader.decls {
+            match decl {
+                Decl::Texture(decl) => {
+                    assert_eq!(*decl.ty_expr.ty.borrow().as_ref().unwrap(), Ty::Texture2D);
+                    writeln!(
+                        self.string,
+                        "    Texture2D<float> {} [[texture({})]]",
+                        decl.ident,
+                        index
+                    ).unwrap();
+                    index += 1;
+                }
+                _ => {}
+            }
+        }
+        writeln!(self.string, "}};").unwrap();
     }
 
     fn generate_attribute_struct(&mut self) {
