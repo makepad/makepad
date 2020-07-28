@@ -130,7 +130,7 @@ impl<'a> ShaderGenerator<'a> {
                     assert_eq!(*decl.ty_expr.ty.borrow().as_ref().unwrap(), Ty::Texture2D);
                     writeln!(
                         self.string,
-                        "    Texture2D<float> {} [[texture({})]]",
+                        "    texture2D<float> {} [[texture({})]];",
                         decl.ident,
                         index
                     ).unwrap();
