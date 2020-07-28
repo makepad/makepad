@@ -27,7 +27,7 @@ const SOURCE: &str = r#"
         fn qux(self, x: float) -> float {
             aPosition;
             vColor;
-            tTexture;
+            tTextureFoo;
             return 2.0 * x;
         }
 
@@ -42,7 +42,8 @@ const SOURCE: &str = r#"
     uniform uUniform1: Self::my_uniform();
     uniform uUniform2: Self::my_uniform() in draw;
 
-    texture tTexture: Self::my_texture();
+    texture tTextureFoo: Self::my_texture();
+    texture tTextureBar: Self::my_texture();
 
     geometry aPosition: Self::my_geometry();
     geometry aColor: Self::my_geometry();
