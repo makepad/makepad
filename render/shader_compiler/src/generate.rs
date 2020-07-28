@@ -430,7 +430,7 @@ impl<'a> ExprGenerator<'a> {
                 } else {
                     assert!(decl.is_used_in_fragment_shader.get().unwrap());
                     if !decl.geometry_deps.borrow().as_ref().unwrap().is_empty()
-                        || decl.instance_deps.borrow().as_ref().unwrap().is_empty()
+                        || !decl.instance_deps.borrow().as_ref().unwrap().is_empty()
                         || decl.has_varying_deps.get().unwrap()
                     {
                         write!(self.string, "{}mpsc_varyings", sep).unwrap();

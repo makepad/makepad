@@ -108,7 +108,11 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
+        let mut has_default = false;
         for (ident, decls) in uniform_blocks {
+            if ident == Ident::new("default"){
+                has_default = true;
+            }
             writeln!(self.string, "struct mpsc_{}_Uniforms {{", ident).unwrap();
             for decl in decls {
                 write!(self.string, "    ").unwrap();
@@ -121,6 +125,9 @@ impl<'a> ShaderGenerator<'a> {
                 writeln!(self.string, ";").unwrap();
             }
             writeln!(self.string, "}};").unwrap();
+        }
+        if !has_default{
+            writeln!(self.string, "struct mpsc_default_Uniforms{{}};").unwrap();
         }
     }
     
@@ -402,7 +409,7 @@ impl<'a> ShaderGenerator<'a> {
             }
         }
         writeln!(self.string, "    return mpsc_varyings;").unwrap();
-        writeln!(self.string, "}}").unwrap();
+        writeln!(self.string, "}};").unwrap();
     }
     
     fn generate_fragment_main(&mut self) {
@@ -430,12 +437,12 @@ impl<'a> ShaderGenerator<'a> {
             sep = ", ";
         }
         if decl.has_varying_deps.get().unwrap() {
-            write!(self.string, "{}&mpsc_varyings", sep).unwrap();
+            write!(self.string, "{}mpsc_varyings", sep).unwrap();
         }
         writeln!(self.string, ");").unwrap();
         
         
-        writeln!(self.string, "}}").unwrap();
+        writeln!(self.string, "}};").unwrap();
     }
     
     fn generate_expr(&mut self, expr: &Expr) {
@@ -583,7 +590,8 @@ impl BackendWriter for MetalBackendWriter {
         ty: &Ty
     ) {
         let ref_prefix = if is_inout {
-            "thread &"
+            write!(string, "thread ").unwrap();
+            "&"
         } else {
             ""
         };
