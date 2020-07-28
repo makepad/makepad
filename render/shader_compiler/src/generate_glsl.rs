@@ -444,6 +444,7 @@ impl<'a> ShaderGenerator<'a> {
         GlslBackendWriter.write_var_decl(
             &mut self.string,
             is_inout,
+            false,
             ident,
             ty
         );
@@ -509,6 +510,7 @@ impl<'a> FnDeclGenerator<'a> {
         GlslBackendWriter.write_var_decl(
             &mut self.string,
             is_inout,
+            false,
             ident,
             ty
         );
@@ -657,84 +659,111 @@ impl<'a> VarUnpacker<'a> {
 struct GlslBackendWriter;
 
 impl BackendWriter for GlslBackendWriter {
-    fn write_var_decl(&self, string: &mut String, is_inout: bool, ident: Ident, ty: &Ty) {
+    fn write_var_decl(
+        &self,
+        string: &mut String,
+        is_inout: bool,
+        is_packed: bool,
+        ident: Ident,
+        ty: &Ty
+    ) {
         if is_inout {
             write!(string, "inout ").unwrap();
         }
         match *ty {
-            Ty::Void => write!(string, "void {}", ident).unwrap(),
+            Ty::Void => {
+                write!(string, "void ").unwrap();
+                self.write_ident(string, ident);
+            },
             Ty::Bool => {
                 self.write_ty_lit(string, TyLit::Bool);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Int => {
                 self.write_ty_lit(string, TyLit::Int);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Float => {
                 self.write_ty_lit(string, TyLit::Float);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Bvec2 => {
                 self.write_ty_lit(string, TyLit::Bvec2);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Bvec3 => {
                 self.write_ty_lit(string, TyLit::Bvec3);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Bvec4 => {
                 self.write_ty_lit(string, TyLit::Bvec4);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Ivec2 => {
                 self.write_ty_lit(string, TyLit::Ivec2);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Ivec3 => {
                 self.write_ty_lit(string, TyLit::Ivec3);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Ivec4 => {
                 self.write_ty_lit(string, TyLit::Ivec4);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Vec2 => {
                 self.write_ty_lit(string, TyLit::Vec2);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Vec3 => {
                 self.write_ty_lit(string, TyLit::Vec3);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Vec4 => {
                 self.write_ty_lit(string, TyLit::Vec4);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Mat2 => {
                 self.write_ty_lit(string, TyLit::Mat2);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Mat3 => {
                 self.write_ty_lit(string, TyLit::Mat3);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Mat4 => {
                 self.write_ty_lit(string, TyLit::Mat4);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Texture2D => {
                 self.write_ty_lit(string, TyLit::Texture2D);
-                write!(string, " {}", ident).unwrap();
+                write!(string, " ").unwrap();
+                self.write_ident(string, ident);
             },
             Ty::Array { ref elem_ty, len } => {
-                self.write_var_decl(string, is_inout, ident, elem_ty);
+                self.write_var_decl(string, is_inout, is_packed, ident, elem_ty);
                 write!(string, "[{}]", len).unwrap();
             }
             Ty::Struct {
                 ident: struct_ident,
             } => {
-                write!(string, "{} {}", struct_ident, ident).unwrap();
+                write!(string, "{} ", struct_ident).unwrap();
+                self.write_ident(string, ident);
             }
         }   
     }
