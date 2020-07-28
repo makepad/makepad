@@ -39,7 +39,7 @@ impl Quad {
         
         sg.compose(shader!{"
             
-            attribute geom: Self::geom();
+            geometry geom: Self::geom();
             varying pos: vec2;
             
             instance x: Self::x();

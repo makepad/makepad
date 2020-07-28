@@ -27,9 +27,9 @@ impl<'a> Parser<'a> {
         while self.peek_token() != Token::Eof {
             let span = self.begin_span();
             match self.peek_token() {
-                Token::Attribute => {
-                    let decl = self.parse_attribute_decl() ?;
-                    self.shader.decls.push(Decl::Attribute(decl));
+                Token::Geometry => {
+                    let decl = self.parse_geometry_decl() ?;
+                    self.shader.decls.push(Decl::Geometry(decl));
                 },
                 Token::Const => {
                     let decl = self.parse_const_decl() ?;
@@ -76,14 +76,14 @@ impl<'a> Parser<'a> {
         Ok(())
     }
     
-    fn parse_attribute_decl(&mut self) -> Result<AttributeDecl, Error> {
+    fn parse_geometry_decl(&mut self) -> Result<GeometryDecl, Error> {
         let span = self.begin_span();
-        self.expect_token(Token::Attribute) ?;
+        self.expect_token(Token::Geometry) ?;
         let ident = self.parse_ident() ?;
         self.expect_token(Token::Colon) ?;
         let ty_expr = self.parse_ty_path() ?;
         self.expect_token(Token::Semi) ?;
-        Ok(span.end(&self, | span | AttributeDecl {
+        Ok(span.end(&self, | span | GeometryDecl {
             is_used_in_fragment_shader: Cell::new(None),
             span,
             ident,

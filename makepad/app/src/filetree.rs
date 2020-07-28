@@ -632,10 +632,10 @@ impl FileTree {
                         return FileTreeEvent::SelectFolder {
                             path: file_walker.current_path()
                         };
-                    }
+                    } 
                 }
             }
-        }
+        } 
         FileTreeEvent::None
     }
     
