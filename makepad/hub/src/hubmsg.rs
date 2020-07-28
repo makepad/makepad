@@ -220,7 +220,7 @@ pub struct HubBuilderConfig {
 #[derive(Debug, Clone, PartialEq, SerBin, DeBin)]
 pub struct LocMessage {
     pub path: String,
-    pub row: usize,
+    pub line: usize,
     pub col: usize,
     pub body: String,
     pub range: Option<(usize, usize)>,

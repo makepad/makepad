@@ -7,10 +7,11 @@ use crate::lex;
 use crate::parse;
 use crate::analyse;
 use crate::error::Error;
+use std::fmt;
 
 #[derive(Clone, Copy, Hash, PartialEq, Debug)]
 pub struct LiveLoc{
-    pub file:&'static str,
+    pub path:&'static str,
     pub line:usize,
     pub column:usize
 }
@@ -28,7 +29,7 @@ pub struct PropDef{
 pub struct ShaderSub{
     pub loc:LiveLoc,
     pub code:String,
-    pub attributes:Vec<PropDef>,
+    pub geometries:Vec<PropDef>,
     pub instances:Vec<PropDef>,
     pub uniforms:Vec<PropDef>, 
     pub textures:Vec<PropDef>
@@ -43,14 +44,21 @@ pub struct ShaderGen {
 
 impl Eq for ShaderGen {}
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ShaderGenError{
-    pub file:String,
+    pub path:String,
     pub line:usize,
     pub col:usize,
+    pub len: usize,
     pub msg:String
 }
 
+impl fmt::Display for ShaderGenError {
+    // This trait requires `fmt` with this exact signature.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}: {} {} - {}", self.path, self.line, self.col, self.msg)
+    }
+}
 
 impl ShaderGen{
     pub fn new() -> Self {
@@ -73,9 +81,10 @@ impl ShaderGen{
         // lets find the span info
         let start = ShaderGen::byte_to_row_col(err.span.start, &sub.code);
         ShaderGenError{
-            file: sub.loc.file.to_string(), 
+            path: sub.loc.path.to_string(), 
             line: start.0 + sub.loc.line, 
             col: start.1 + 1, 
+            len: err.span.end - err.span.start,
             msg: err.to_string()
         }
     }
@@ -99,7 +108,7 @@ impl ShaderGen{
                 return Err(Self::shader_gen_error(&err, sub));
             }
             // lets add our instance_props
-            inputs.extend(sub.attributes.iter());
+            inputs.extend(sub.geometries.iter());
             inputs.extend(sub.instances.iter());
             inputs.extend(sub.uniforms.iter());
             inputs.extend(sub.textures.iter());

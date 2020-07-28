@@ -46,7 +46,7 @@ impl Blit {
         
         sb.compose(shader!{"
             
-            attribute geom: Self::geom();
+            geometry geom: Self::geom();
             instance x: Self::x();
             instance y: Self::y();
             instance w: Self::w();

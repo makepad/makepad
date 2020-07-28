@@ -773,7 +773,7 @@
             
             // fetch all attribs and uniforms
             this.shaders[ash.shader_id] = {
-                geom_attribs: this.get_attrib_locations(program, "mpsc_packed_attribute_", ash.geometry_slots),
+                geom_attribs: this.get_attrib_locations(program, "mpsc_packed_geometry_", ash.geometry_slots),
                 inst_attribs: this.get_attrib_locations(program, "mpsc_packed_instance_", ash.instance_slots),
                 pass_uniforms: this.get_uniform_locations(program, ash.pass_uniforms),
                 view_uniforms: this.get_uniform_locations(program, ash.view_uniforms),

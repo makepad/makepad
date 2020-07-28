@@ -1,7 +1,7 @@
 use crate::cx_xlib::*;
 use crate::cx::*;
- 
-impl Cx{
+
+impl Cx {
     pub fn event_loop<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event),
     {
@@ -21,7 +21,7 @@ impl Cx{
         
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
-        self.redraw_child_area(Area::All); 
+        self.redraw_child_area(Area::All);
         
         let mut passes_todo = Vec::new();
         
@@ -40,7 +40,7 @@ impl Cx{
                             opengl_window.window_geom = re.new_geom.clone();
                             self.windows[re.window_id].window_geom = re.new_geom.clone();
                             // redraw just this windows root draw list
-                            if re.old_geom.inner_size != re.new_geom.inner_size{
+                            if re.old_geom.inner_size != re.new_geom.inner_size {
                                 if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
                                     self.redraw_pass_and_sub_passes(main_pass_id);
                                 }
@@ -166,7 +166,7 @@ impl Cx{
                                         // its a render window
                                         windows_need_repaint -= 1;
                                         for opengl_window in &mut opengl_windows {if opengl_window.window_id == window_id {
-                                            if opengl_window.xlib_window.window.is_none(){
+                                            if opengl_window.xlib_window.window.is_none() {
                                                 break;
                                             }
                                             let dpi_factor = opengl_window.window_geom.dpi_factor;
@@ -183,17 +183,17 @@ impl Cx{
                                                 opengl_window,
                                                 &opengl_cx,
                                                 false
-                                            ){
+                                            ) {
                                                 // paint it again a few times, apparently this is necessary
                                                 self.passes[*pass_id].paint_dirty = true;
                                                 paint_dirty = true;
                                             }
-                                            if opengl_window.first_draw{
+                                            if opengl_window.first_draw {
                                                 opengl_window.first_draw = false;
-                                                if dpi_factor != self.default_dpi_factor{
+                                                if dpi_factor != self.default_dpi_factor {
                                                     self.redraw_pass_and_sub_passes(*pass_id);
                                                 }
-
+                                                
                                             }
                                         }}
                                     }
@@ -216,7 +216,7 @@ impl Cx{
                             }
                         }
                     },
-                    Event::Signal{..}=>{
+                    Event::Signal {..} => {
                         self.call_event_handler(&mut event_handler, &mut event);
                         self.call_signals(&mut event_handler);
                     },
@@ -230,6 +230,14 @@ impl Cx{
                     xlib_app.terminate_event_loop();
                 }
             }
+    
+            let mut shader_results = Vec::new();
+            for shader_id in &self.shader_recompiles {
+                shader_results.push(Self::opengl_compile_shader(*shader_id, &mut self.shaders[*shader_id], &opengl_cx));
+            }
+            self.shader_recompiles.truncate(0);
+            self.call_shader_recompile_event(shader_results, &mut event_handler);
+            
             if !paint_dirty && self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
                 true
             } else {
@@ -270,8 +278,8 @@ impl Cx{
     pub fn post_signal(signal: Signal, status: StatusId) {
         XlibApp::post_signal(signal, status);
     }
-
-    pub fn update_menu(&mut self, _menu:&Menu){
+    
+    pub fn update_menu(&mut self, _menu: &Menu) {
     }
 }
 
