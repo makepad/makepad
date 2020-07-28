@@ -15,6 +15,7 @@ const SOURCE: &str = r#"
     impl Cx {
         fn foo() -> Cx {
             let cx: Cx;
+            uUniform1;
             return cx;
         }
 
