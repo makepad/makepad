@@ -21,7 +21,7 @@ impl Cx {
         opengl_cx: &OpenglCx,
         zbias: &mut f32,
         zbias_step: f32
-    ) { 
+    ) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;

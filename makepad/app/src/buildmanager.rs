@@ -228,7 +228,7 @@ impl BuildManager {
                         format!("Shader {} compiled OK", id)
                     ));
                 },
-                ShaderCompileResult::Fail{id, err}=>{
+                ShaderCompileResult::Fail{err, ..}=>{
                     // lets turn line+col+len into a range.
                     let path = format!("main/makepad/{}", err.path);
                     // find the textbuffer
