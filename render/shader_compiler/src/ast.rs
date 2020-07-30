@@ -10,15 +10,15 @@ use std::fmt;
 
 #[derive(Clone, Debug)]
 pub struct ShaderAst {
-    pub float_consts: RefCell<Option<Vec<f32>>>,
+    pub consts: RefCell<Option<Vec<f32>>>,
     pub decls: Vec<Decl>,
 }
 
 impl ShaderAst {
     pub fn new() -> ShaderAst {
         ShaderAst {
-            float_consts: RefCell::new(None),
-            decls: Vec::new()
+            consts: RefCell::new(None),
+            decls: Vec::new(),
         }
     }
 
@@ -274,6 +274,7 @@ pub struct Expr {
     pub span: Span,
     pub ty: RefCell<Option<Ty>>,
     pub const_val: RefCell<Option<Option<Val>>>,
+    pub const_index: Cell<Option<usize>>,
     pub kind: ExprKind,
 }
 

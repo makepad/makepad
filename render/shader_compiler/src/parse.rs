@@ -503,6 +503,7 @@ impl<'a> Parser<'a> {
                 span,
                 ty: RefCell::new(None),
                 const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Bin {
                     span,
                     op,
@@ -527,6 +528,7 @@ impl<'a> Parser<'a> {
                 span,
                 ty: RefCell::new(None),
                 const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Cond {
                     span,
                     expr,
@@ -550,6 +552,7 @@ impl<'a> Parser<'a> {
                 span,
                 ty: RefCell::new(None),
                 const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Bin {
                     span,
                     op,
@@ -572,6 +575,7 @@ impl<'a> Parser<'a> {
                 span,
                 ty: RefCell::new(None),
                 const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Bin {
                     span,
                     op,
@@ -594,6 +598,7 @@ impl<'a> Parser<'a> {
                 span,
                 ty: RefCell::new(None),
                 const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Bin {
                     span,
                     op,
@@ -616,6 +621,7 @@ impl<'a> Parser<'a> {
                 span,
                 ty: RefCell::new(None),
                 const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Bin {
                     span,
                     op,
@@ -638,6 +644,7 @@ impl<'a> Parser<'a> {
                 span,
                 ty: RefCell::new(None),
                 const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Bin {
                     span,
                     op,
@@ -660,6 +667,7 @@ impl<'a> Parser<'a> {
                 span,
                 ty: RefCell::new(None),
                 const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Bin {
                     span,
                     op,
@@ -680,6 +688,7 @@ impl<'a> Parser<'a> {
                 span,
                 ty: RefCell::new(None),
                 const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Un { span, op, expr },
             })
         } else {
@@ -710,11 +719,12 @@ impl<'a> Parser<'a> {
                             span,
                             ty: RefCell::new(None),
                             const_val: RefCell::new(None),
+                            const_index: Cell::new(None),
                             kind: ExprKind::MethodCall {
                                 span,
                                 ident,
                                 arg_exprs,
-                            }
+                            },
                         })
                     } else {
                         let expr = Box::new(acc);
@@ -722,11 +732,12 @@ impl<'a> Parser<'a> {
                             span,
                             ty: RefCell::new(None),
                             const_val: RefCell::new(None),
+                            const_index: Cell::new(None),
                             kind: ExprKind::Field {
                                 span,
                                 expr,
                                 field_ident: ident,
-                            }
+                            },
                         })
                     }
                 }
@@ -739,6 +750,7 @@ impl<'a> Parser<'a> {
                         span,
                         ty: RefCell::new(None),
                         const_val: RefCell::new(None),
+                        const_index: Cell::new(None),
                         kind: ExprKind::Index {
                             span,
                             expr,
@@ -761,6 +773,7 @@ impl<'a> Parser<'a> {
                     span,
                     ty: RefCell::new(None),
                     const_val: RefCell::new(None),
+                    const_index: Cell::new(None),
                     kind: ExprKind::Var {
                         span,
                         kind: Cell::new(None),
@@ -778,12 +791,13 @@ impl<'a> Parser<'a> {
                             span,
                             ty: RefCell::new(None),
                             const_val: RefCell::new(None),
+                            const_index: Cell::new(None),
                             kind: ExprKind::MacroCall {
                                 span,
                                 analysis: Cell::new(None),
                                 ident,
                                 arg_exprs,
-                            }
+                            },
                         })
                     }
                     Token::PathSep => {
@@ -794,11 +808,12 @@ impl<'a> Parser<'a> {
                             span,
                             ty: RefCell::new(None),
                             const_val: RefCell::new(None),
+                            const_index: Cell::new(None),
                             kind: ExprKind::Call {
                                 span,
                                 ident,
                                 arg_exprs,
-                            }
+                            },
                         })
                     }
                     Token::LeftParen => {
@@ -807,22 +822,24 @@ impl<'a> Parser<'a> {
                             span,
                             ty: RefCell::new(None),
                             const_val: RefCell::new(None),
+                            const_index: Cell::new(None),
                             kind: ExprKind::Call {
                                 span,
                                 ident,
                                 arg_exprs,
-                            }
+                            },
                         })
                     }
                     _ => span.end(self, |span| Expr {
                         span,
                         ty: RefCell::new(None),
                         const_val: RefCell::new(None),
+                        const_index: Cell::new(None),
                         kind: ExprKind::Var {
                             span,
                             kind: Cell::new(None),
                             ident,
-                        }
+                        },
                     }),
                 })
             }
@@ -832,6 +849,7 @@ impl<'a> Parser<'a> {
                     span,
                     ty: RefCell::new(None),
                     const_val: RefCell::new(None),
+                    const_index: Cell::new(None),
                     kind: ExprKind::Lit { span, lit },
                 }))
             }
@@ -852,6 +870,7 @@ impl<'a> Parser<'a> {
                     span,
                     ty: RefCell::new(None),
                     const_val: RefCell::new(None),
+                    const_index: Cell::new(None),
                     kind: ExprKind::ConsCall {
                         span,
                         ty_lit,
