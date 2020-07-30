@@ -341,7 +341,7 @@ impl<'a> ExprGenerator<'a> {
             } => {
                 self.generate_call_expr(
                     span,
-                    Ident::new(format!("mpsc_{}_{}", struct_ident, ident)),
+                    Ident::new(format!("{}::{}", struct_ident, ident)),
                     arg_exprs,
                 );
             }
