@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::builtin::{self, Builtin};
 use crate::const_eval::ConstEvaluator;
+use crate::const_gather::ConstGatherer;
 use crate::dep_analyse::DepAnalyser;
 use crate::env::{Env, Sym, VarKind};
 use crate::error::Error;
@@ -60,7 +61,14 @@ impl<'a> ShaderAnalyser<'a> {
         }
     }
 
+    fn const_gatherer(&self) -> ConstGatherer {
+        ConstGatherer {
+            shader: self.shader,
+        }
+    }
+
     fn analyse_shader(&mut self) -> Result<(), Error> {
+        *self.shader.float_consts.borrow_mut() = Some(Vec::new());
         self.env.push_scope();
         for decl in &self.shader.decls {
             self.analyse_decl(decl)?;
@@ -173,6 +181,7 @@ impl<'a> ShaderAnalyser<'a> {
             &expected_ty,
         )?;
         self.const_evaluator().const_eval_expr(&decl.expr)?;
+        self.const_gatherer().const_gather_expr(&decl.expr);
         self.env.insert_sym(
             decl.span,
             decl.ident,
@@ -468,6 +477,12 @@ impl<'a> FnDefAnalyser<'a> {
         }
     }
 
+    fn const_gatherer(&self) -> ConstGatherer {
+        ConstGatherer {
+            shader: self.shader,
+        }
+    }
+
     fn dep_analyser(&self) -> DepAnalyser {
         DepAnalyser {
             shader: self.shader,
@@ -585,6 +600,7 @@ impl<'a> FnDefAnalyser<'a> {
             .const_eval_expr(from_expr)?
             .to_int()
             .unwrap();
+        self.const_gatherer().const_gather_expr(from_expr);
         self.dep_analyser().dep_analyse_expr(from_expr);
         self.ty_checker()
             .ty_check_expr_with_expected_ty(span, to_expr, &Ty::Int)?;
@@ -592,7 +608,8 @@ impl<'a> FnDefAnalyser<'a> {
             .const_evaluator()
             .const_eval_expr(to_expr)?
             .to_int()
-            .unwrap();
+            .unwrap();   
+        self.const_gatherer().const_gather_expr(to_expr);
         self.dep_analyser().dep_analyse_expr(to_expr);
         if let Some(step_expr) = step_expr {
             self.ty_checker()
@@ -602,6 +619,7 @@ impl<'a> FnDefAnalyser<'a> {
                 .const_eval_expr(step_expr)?
                 .to_int()
                 .unwrap();
+            self.const_gatherer().const_gather_expr(step_expr);
             if step == 0 {
                 return Err(Error {
                     span,
@@ -653,6 +671,7 @@ impl<'a> FnDefAnalyser<'a> {
         self.ty_checker()
             .ty_check_expr_with_expected_ty(span, expr, &Ty::Bool)?;
         self.const_evaluator().try_const_eval_expr(expr);
+        self.const_gatherer().const_gather_expr(expr);
         self.dep_analyser().dep_analyse_expr(expr);
         self.env.push_scope();
         self.analyse_block(block_if_true)?;
@@ -687,6 +706,7 @@ impl<'a> FnDefAnalyser<'a> {
         } else if let Some(expr) = expr {
             let ty = self.ty_checker().ty_check_expr(expr)?;
             self.const_evaluator().try_const_eval_expr(expr);
+            self.const_gatherer().const_gather_expr(expr);
             self.dep_analyser().dep_analyse_expr(expr);
             ty
         } else {
@@ -714,6 +734,7 @@ impl<'a> FnDefAnalyser<'a> {
                 self.decl.return_ty.borrow().as_ref().unwrap(),
             )?;
             self.const_evaluator().try_const_eval_expr(expr);
+            self.const_gatherer().const_gather_expr(expr);
             self.dep_analyser().dep_analyse_expr(expr);
         } else if self.decl.return_ty.borrow().as_ref().unwrap() != &Ty::Void {
             return Err(Error {
@@ -735,6 +756,7 @@ impl<'a> FnDefAnalyser<'a> {
     fn analyse_expr_stmt(&mut self, _span: Span, expr: &Expr) -> Result<(), Error> {
         self.ty_checker().ty_check_expr(expr)?;
         self.const_evaluator().try_const_eval_expr(expr);
+        self.const_gatherer().const_gather_expr(expr);
         self.dep_analyser().dep_analyse_expr(expr);
         Ok(())
     }
