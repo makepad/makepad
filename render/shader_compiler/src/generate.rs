@@ -33,6 +33,7 @@ pub struct BlockGenerator<'a> {
     pub shader: &'a ShaderAst,
     pub decl: &'a FnDecl,
     pub backend_writer: &'a dyn BackendWriter,
+    pub use_const_table: bool,
     pub use_hidden_params: bool,
     pub use_generated_cons_fns: bool,
     pub indent_level: usize,
@@ -209,6 +210,7 @@ impl<'a> BlockGenerator<'a> {
             shader: self.shader,
             decl: Some(self.decl),
             backend_writer: self.backend_writer,
+            use_const_table: self.use_const_table,
             use_hidden_params: self.use_hidden_params,
             use_generated_cons_fns: self.use_generated_cons_fns,
             string: self.string,
@@ -232,6 +234,7 @@ pub struct ExprGenerator<'a> {
     pub shader: &'a ShaderAst,
     pub decl: Option<&'a FnDecl>,
     pub backend_writer: &'a dyn BackendWriter,
+    pub use_const_table: bool,
     pub use_hidden_params: bool,
     pub use_generated_cons_fns: bool,
     pub string: &'a mut String,
@@ -240,9 +243,8 @@ pub struct ExprGenerator<'a> {
 impl<'a> ExprGenerator<'a> {
     pub fn generate_expr(&mut self, expr: &Expr) {
         match expr.const_val.borrow().as_ref().unwrap() {
-            Some(Val::Float(_)) => {
-                // TODO: Obtain the constant
-                // write!(self.string, "{}", expr.const_index.get().unwrap()).unwrap();
+            Some(Val::Float(_)) if self.use_const_table => {
+                write!(self.string, "mpsc_consts[{}]", expr.const_index.get().unwrap()).unwrap();
             },
             Some(val) => {
                 write!(self.string, "{}", val).unwrap();
