@@ -43,14 +43,15 @@ impl Cx {
     
     pub fn mtl_compile_shader(shader_id:usize, sh: &mut CxShader, metal_cx: &MetalCx) -> ShaderCompileResult {
         let shader_ast = sh.shader_gen.lex_parse_analyse();
-        
         if let Err(err) = shader_ast{
             return ShaderCompileResult::Fail{id:shader_id, err:err}
         } 
         let shader_ast = shader_ast.unwrap();
         
-        let mtlsl =  generate_metal::generate_shader(&shader_ast, false);
+        let mtlsl =  generate_metal::generate_shader(&shader_ast, true);
         let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen);
+
+        println!("{}", mtlsl);
         
         let options: id = unsafe {msg_send![class!(MTLCompileOptions), new]};
         let ns_mtlsl: id = str_to_nsstring(&mtlsl);

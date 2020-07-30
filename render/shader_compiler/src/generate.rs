@@ -417,25 +417,19 @@ impl<'a> ExprGenerator<'a> {
         _ident: Ident,
         _arg_exprs: &[Expr],
     ) {
-        fn float_to_string(v: f32) -> String {
-            if v.abs().fract() < 0.00000001 {
-                format!("{}.0", v)
-            } else {
-                format!("{}", v)
-            }
-        }
+
         match analysis.get().unwrap() {
             MacroCallAnalysis::Color { r, g, b, a } => {
                 self.backend_writer.write_ty_lit(self.string, TyLit::Vec4);
-                write!(
-                    self.string,
-                    "({}, {}, {}, {})",
-                    float_to_string(r),
-                    float_to_string(g),
-                    float_to_string(b),
-                    float_to_string(a)
-                )
-                .unwrap();
+                write!(self.string, "(").unwrap();
+                write_float(&mut self.string, r); 
+                write!(self.string, ",").unwrap();
+                write_float(&mut self.string, g);
+                write!(self.string, ",").unwrap();
+                write_float(&mut self.string, b);
+                write!(self.string, ",").unwrap();
+                write_float(&mut self.string, a);
+                write!(self.string, ")").unwrap();
             }
         }
     }
@@ -523,5 +517,13 @@ impl<'a> ExprGenerator<'a> {
 
     fn write_ty_lit(&mut self, ty_lit: TyLit) {
         self.backend_writer.write_ty_lit(&mut self.string, ty_lit);
+    }
+}
+
+pub fn write_float(s:&mut String, v: f32) {
+    if v.abs().fract() < 0.00000001 {
+        write!(s, "{}.0", v).unwrap();
+    } else {
+        write!(s, "{}", v).unwrap();
     }
 }

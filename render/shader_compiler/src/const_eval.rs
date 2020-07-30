@@ -245,7 +245,7 @@ impl<'a> ConstEvaluator<'a> {
         _span: Span,
         _analysis: &Cell<Option<MacroCallAnalysis>>,
         _ident: Ident,
-        arg_exprs: &[Expr],
+        _arg_exprs: &[Expr],
     ) -> Option<Val> {
         //for arg_expr in arg_exprs {
         //    self.try_const_eval_expr(arg_expr);
