@@ -1,0 +1,186 @@
+use crate::ast::*;
+use crate::env::VarKind;
+use crate::ident::Ident;
+use crate::lit::{Lit, TyLit};
+use crate::span::Span;
+use crate::ty::Ty;
+use crate::val::Val;
+use std::cell::Cell;
+
+#[derive(Clone, Debug)]
+pub struct ConstGatherer<'a> {
+    pub shader: &'a ShaderAst,
+}
+
+impl<'a> ConstGatherer<'a> {
+    pub fn const_gather_expr(&self, expr: &Expr) {
+        match *expr.const_val.borrow().as_ref().unwrap() {
+            Some(Val::Float(val)) => {
+                self.shader.float_consts.borrow_mut().as_mut().unwrap().push(val);
+            },
+            Some(_) => {},
+            None => {
+                match expr.kind {
+                    ExprKind::Cond {
+                        span,
+                        ref expr,
+                        ref expr_if_true,
+                        ref expr_if_false,
+                    } => self.const_gather_cond_expr(span, expr, expr_if_true, expr_if_false),
+                    ExprKind::Bin {
+                        span,
+                        op,
+                        ref left_expr,
+                        ref right_expr,
+                    } => self.const_gather_bin_expr(span, op, left_expr, right_expr),
+                    ExprKind::Un { span, op, ref expr } => self.const_gather_un_expr(span, op, expr),
+                    ExprKind::MethodCall {
+                        span,
+                        ident,
+                        ref arg_exprs,
+                    } => self.const_gather_method_call_expr(span, ident, arg_exprs),
+                    ExprKind::Field {
+                        span,
+                        ref expr,
+                        field_ident,
+                    } => self.const_gather_field_expr(span, expr, field_ident),
+                    ExprKind::Index {
+                        span,
+                        ref expr,
+                        ref index_expr,
+                    } => self.const_gather_index_expr(span, expr, index_expr),
+                    ExprKind::Call {
+                        span,
+                        ident,
+                        ref arg_exprs,
+                    } => self.const_gather_call_expr(span, ident, arg_exprs),
+                    ExprKind::MacroCall {
+                        span,
+                        ref analysis,
+                        ident,
+                        ref arg_exprs,
+                        ..
+                    } => self.const_gather_macro_call_expr(span, analysis, ident, arg_exprs),
+                    ExprKind::ConsCall {
+                        span,
+                        ty_lit,
+                        ref arg_exprs,
+                    } => self.const_gather_cons_call_expr(span, ty_lit, arg_exprs),
+                    ExprKind::Var {
+                        span,
+                        ref kind,
+                        ident,
+                    } => self.const_gather_var_expr(span, kind, ident),
+                    ExprKind::Lit { span, lit } => self.const_gather_lit_expr(span, lit),
+                }
+            }
+        }
+    }
+
+    fn const_gather_cond_expr(
+        &self,
+        _span: Span,
+        expr: &Expr,
+        expr_if_true: &Expr,
+        expr_if_false: &Expr,
+    ) {
+        self.const_gather_expr(expr);
+        self.const_gather_expr(expr_if_true);
+        self.const_gather_expr(expr_if_false);
+    }
+
+    #[allow(clippy::float_cmp)]
+    fn const_gather_bin_expr(
+        &self,
+        _span: Span,
+        _op: BinOp,
+        left_expr: &Expr,
+        right_expr: &Expr,
+    ) {
+        self.const_gather_expr(left_expr);
+        self.const_gather_expr(right_expr);
+    }
+
+    fn const_gather_un_expr(&self, _span: Span, _op: UnOp, expr: &Expr) {
+        self.const_gather_expr(expr);
+    }
+
+    fn const_gather_method_call_expr(
+        &self,
+        span: Span,
+        ident: Ident,
+        arg_exprs: &[Expr],
+    ) {
+        match arg_exprs[0].ty.borrow().as_ref().unwrap() {
+            Ty::Struct {
+                ident: struct_ident,
+            } => self.const_gather_call_expr(
+                span,
+                Ident::new(format!("{}::{}", struct_ident, ident)),
+                arg_exprs,
+            ),
+            _ => panic!(),
+        }
+    }
+
+    fn const_gather_field_expr(
+        &self,
+        _span: Span,
+        expr: &Expr,
+        _field_ident: Ident,
+    ) {
+        self.const_gather_expr(expr);
+    }
+
+    fn const_gather_index_expr(
+        &self,
+        _span: Span,
+        expr: &Expr,
+        _index_expr: &Expr,
+    ) {
+        self.const_gather_expr(expr);
+    }
+
+    fn const_gather_call_expr(
+        &self,
+        _span: Span,
+        _ident: Ident,
+        arg_exprs: &[Expr],
+    ) {
+        for arg_expr in arg_exprs {
+            self.const_gather_expr(arg_expr);
+        }
+    }
+
+    fn const_gather_macro_call_expr(
+        &self,
+        _span: Span,
+        _analysis: &Cell<Option<MacroCallAnalysis>>,
+        _ident: Ident,
+        arg_exprs: &[Expr],
+    ) {
+        for arg_expr in arg_exprs {
+            self.const_gather_expr(arg_expr);
+        }
+    }
+
+    fn const_gather_cons_call_expr(
+        &self,
+        _span: Span,
+        _ty_lit: TyLit,
+        arg_exprs: &[Expr],
+    ) {
+        for arg_expr in arg_exprs {
+            self.const_gather_expr(arg_expr);
+        }
+    }
+
+    fn const_gather_var_expr(
+        &self,
+        _span: Span,
+        _kind: &Cell<Option<VarKind>>,
+        _ident: Ident,
+    ) {}
+
+    fn const_gather_lit_expr(&self, _span: Span, _lit: Lit) {}
+}
