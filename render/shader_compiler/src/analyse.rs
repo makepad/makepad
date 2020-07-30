@@ -652,6 +652,7 @@ impl<'a> FnDefAnalyser<'a> {
     ) -> Result<(), Error> {
         self.ty_checker()
             .ty_check_expr_with_expected_ty(span, expr, &Ty::Bool)?;
+        self.const_evaluator().try_const_eval_expr(expr);
         self.dep_analyser().dep_analyse_expr(expr);
         self.env.push_scope();
         self.analyse_block(block_if_true)?;
@@ -685,6 +686,7 @@ impl<'a> FnDefAnalyser<'a> {
             }
         } else if let Some(expr) = expr {
             let ty = self.ty_checker().ty_check_expr(expr)?;
+            self.const_evaluator().try_const_eval_expr(expr);
             self.dep_analyser().dep_analyse_expr(expr);
             ty
         } else {
@@ -711,6 +713,7 @@ impl<'a> FnDefAnalyser<'a> {
                 expr,
                 self.decl.return_ty.borrow().as_ref().unwrap(),
             )?;
+            self.const_evaluator().try_const_eval_expr(expr);
             self.dep_analyser().dep_analyse_expr(expr);
         } else if self.decl.return_ty.borrow().as_ref().unwrap() != &Ty::Void {
             return Err(Error {
@@ -731,6 +734,7 @@ impl<'a> FnDefAnalyser<'a> {
 
     fn analyse_expr_stmt(&mut self, _span: Span, expr: &Expr) -> Result<(), Error> {
         self.ty_checker().ty_check_expr(expr)?;
+        self.const_evaluator().try_const_eval_expr(expr);
         self.dep_analyser().dep_analyse_expr(expr);
         Ok(())
     }
