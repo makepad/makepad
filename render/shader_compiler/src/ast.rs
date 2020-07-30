@@ -15,9 +15,7 @@ pub struct ShaderAst {
 
 impl ShaderAst {
     pub fn new() -> ShaderAst {
-        ShaderAst {
-            decls: Vec::new()
-        }
+        ShaderAst { decls: Vec::new() }
     }
 
     pub fn find_geometry_decl(&self, ident: Ident) -> Option<&GeometryDecl> {
@@ -217,7 +215,7 @@ pub enum Stmt {
         step_expr: Option<Expr>,
         block: Box<Block>,
     },
-    If { 
+    If {
         span: Span,
         expr: Expr,
         block_if_true: Box<Block>,
@@ -255,22 +253,23 @@ pub enum TyExprKind {
     Array {
         span: Span,
         elem_ty_expr: Box<TyExpr>,
-        len: u32
+        len: u32,
     },
     Var {
         span: Span,
-        ident: Ident
+        ident: Ident,
     },
     Lit {
         span: Span,
-        ty_lit: TyLit
+        ty_lit: TyLit,
     },
 }
 
 #[derive(Clone, Debug)]
 pub struct Expr {
+    pub span: Span,
     pub ty: RefCell<Option<Ty>>,
-    pub val: RefCell<Option<Val>>,
+    pub const_val: RefCell<Option<Option<Val>>>,
     pub kind: ExprKind,
 }
 
@@ -336,8 +335,8 @@ pub enum ExprKind {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum MacroCallAnalysis{
-    Color{r:f32,g:f32,b:f32,a:f32}
+pub enum MacroCallAnalysis {
+    Color { r: f32, g: f32, b: f32, a: f32 },
 }
 
 #[derive(Clone, Copy, Debug)]
