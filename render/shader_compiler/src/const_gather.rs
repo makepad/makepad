@@ -17,8 +17,8 @@ impl<'a> ConstGatherer<'a> {
         match *expr.const_val.borrow().as_ref().unwrap() {
             Some(Val::Float(val)) => {
                 expr.const_index
-                    .set(Some(self.shader.consts.borrow().as_ref().unwrap().len()));
-                self.shader.consts.borrow_mut().as_mut().unwrap().push(val);
+                    .set(Some(self.shader.const_table.borrow().as_ref().unwrap().len()));
+                self.shader.const_table.borrow_mut().as_mut().unwrap().push(val);
             }
             Some(_) => {}
             None => match expr.kind {

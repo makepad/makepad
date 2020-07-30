@@ -244,7 +244,7 @@ impl<'a> ExprGenerator<'a> {
     pub fn generate_expr(&mut self, expr: &Expr) {
         match expr.const_val.borrow().as_ref().unwrap() {
             Some(Val::Float(_)) if self.use_const_table => {
-                write!(self.string, "mpsc_consts[{}]", expr.const_index.get().unwrap()).unwrap();
+                write!(self.string, "mpsc_const_table[{}]", expr.const_index.get().unwrap()).unwrap();
             },
             Some(val) => {
                 write!(self.string, "{}", val).unwrap();
@@ -372,6 +372,10 @@ impl<'a> ExprGenerator<'a> {
         }
         if self.use_hidden_params {
             if let Some(decl) = self.shader.find_fn_decl(ident) {
+                if self.use_const_table {
+                    write!(self.string, "{}mpsc_const_table", sep).unwrap();
+                    sep = ", ";
+                }
                 for &ident in decl.uniform_block_deps.borrow().as_ref().unwrap() {
                     write!(self.string, "{}mpsc_{}_uniforms", sep, ident).unwrap();
                     sep = ", ";
