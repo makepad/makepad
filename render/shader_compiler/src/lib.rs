@@ -4,6 +4,7 @@ pub mod analyse;
 pub mod ast;
 pub mod builtin;
 pub mod const_eval;
+pub mod const_gather;
 pub mod dep_analyse;
 pub mod env;
 pub mod error;
