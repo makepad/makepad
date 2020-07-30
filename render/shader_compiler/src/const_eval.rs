@@ -247,9 +247,9 @@ impl<'a> ConstEvaluator<'a> {
         _ident: Ident,
         arg_exprs: &[Expr],
     ) -> Option<Val> {
-        for arg_expr in arg_exprs {
-            self.try_const_eval_expr(arg_expr);
-        }
+        //for arg_expr in arg_exprs {
+        //    self.try_const_eval_expr(arg_expr);
+        //}
         None
     }
 
@@ -271,6 +271,7 @@ impl<'a> ConstEvaluator<'a> {
         kind: &Cell<Option<VarKind>>,
         ident: Ident,
     ) -> Option<Val> {
+        
         match kind.get().unwrap() {
             VarKind::Const => Some(
                 self.shader
