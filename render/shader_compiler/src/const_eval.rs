@@ -76,6 +76,7 @@ impl<'a> ConstEvaluator<'a> {
             ExprKind::Lit { span, lit } => self.try_const_eval_lit_expr(span, lit),
         };
         *expr.const_val.borrow_mut() = Some(const_val.clone());
+        expr.const_index.set(None);
         const_val
     }
 

@@ -68,7 +68,7 @@ impl<'a> ShaderAnalyser<'a> {
     }
 
     fn analyse_shader(&mut self) -> Result<(), Error> {
-        *self.shader.float_consts.borrow_mut() = Some(Vec::new());
+        *self.shader.consts.borrow_mut() = Some(Vec::new());
         self.env.push_scope();
         for decl in &self.shader.decls {
             self.analyse_decl(decl)?;
@@ -608,7 +608,7 @@ impl<'a> FnDefAnalyser<'a> {
             .const_evaluator()
             .const_eval_expr(to_expr)?
             .to_int()
-            .unwrap();   
+            .unwrap();
         self.const_gatherer().const_gather_expr(to_expr);
         self.dep_analyser().dep_analyse_expr(to_expr);
         if let Some(step_expr) = step_expr {
