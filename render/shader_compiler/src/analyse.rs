@@ -181,7 +181,6 @@ impl<'a> ShaderAnalyser<'a> {
             &expected_ty,
         )?;
         self.const_evaluator().const_eval_expr(&decl.expr)?;
-        self.const_gatherer().const_gather_expr(&decl.expr);
         self.env.insert_sym(
             decl.span,
             decl.ident,
@@ -600,7 +599,6 @@ impl<'a> FnDefAnalyser<'a> {
             .const_eval_expr(from_expr)?
             .to_int()
             .unwrap();
-        self.const_gatherer().const_gather_expr(from_expr);
         self.dep_analyser().dep_analyse_expr(from_expr);
         self.ty_checker()
             .ty_check_expr_with_expected_ty(span, to_expr, &Ty::Int)?;
@@ -609,7 +607,6 @@ impl<'a> FnDefAnalyser<'a> {
             .const_eval_expr(to_expr)?
             .to_int()
             .unwrap();
-        self.const_gatherer().const_gather_expr(to_expr);
         self.dep_analyser().dep_analyse_expr(to_expr);
         if let Some(step_expr) = step_expr {
             self.ty_checker()
@@ -619,7 +616,6 @@ impl<'a> FnDefAnalyser<'a> {
                 .const_eval_expr(step_expr)?
                 .to_int()
                 .unwrap();
-            self.const_gatherer().const_gather_expr(step_expr);
             if step == 0 {
                 return Err(Error {
                     span,
