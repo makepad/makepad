@@ -11,20 +11,22 @@ use {
     std::fmt::Write,
 };
 
-pub fn generate_vertex_shader(shader: &ShaderAst) -> String {
+pub fn generate_vertex_shader(shader: &ShaderAst, use_consts: bool) -> String {
     let mut string = String::new();
     ShaderGenerator {
         shader,
+        use_consts,
         string: &mut string,
     }
     .generate_vertex_shader();
     string
 }
 
-pub fn generate_fragment_shader(shader: &ShaderAst) -> String {
+pub fn generate_fragment_shader(shader: &ShaderAst, use_consts: bool) -> String {
     let mut string = String::new();
     ShaderGenerator {
         shader,
+        use_consts,
         string: &mut string,
     }
     .generate_fragment_shader();
@@ -33,6 +35,7 @@ pub fn generate_fragment_shader(shader: &ShaderAst) -> String {
 
 struct ShaderGenerator<'a> {
     shader: &'a ShaderAst,
+    use_consts: bool,
     string: &'a mut String,
 }
 

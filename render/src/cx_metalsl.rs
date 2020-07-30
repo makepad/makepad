@@ -50,7 +50,7 @@ impl Cx {
         } 
         let shader_ast = shader_ast.unwrap();
         
-        let mtlsl =  generate_metal::generate_shader(&shader_ast);
+        let mtlsl =  generate_metal::generate_shader(&shader_ast, false);
         let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen);
         
         let options: id = unsafe {msg_send![class!(MTLCompileOptions), new]};
