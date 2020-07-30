@@ -104,8 +104,10 @@ impl<'a> ConstEvaluator<'a> {
         left_expr: &Expr,
         right_expr: &Expr,
     ) -> Option<Val> {
-        let left_val = self.try_const_eval_expr(left_expr)?;
-        let right_val = self.try_const_eval_expr(right_expr)?;
+        let left_val = self.try_const_eval_expr(left_expr);
+        let right_val = self.try_const_eval_expr(right_expr);
+        let left_val = left_val?;
+        let right_val = right_val?;
         match op {
             BinOp::Or => match (&left_val, &right_val) {
                 (Val::Bool(x), Val::Bool(y)) => Some(Val::Bool(*x || *y)),
@@ -172,7 +174,8 @@ impl<'a> ConstEvaluator<'a> {
     }
 
     fn try_const_eval_un_expr(&self, _span: Span, op: UnOp, expr: &Expr) -> Option<Val> {
-        let val = self.try_const_eval_expr(expr)?;
+        let val = self.try_const_eval_expr(expr);
+        let val = val?;
         match op {
             UnOp::Not => match val {
                 Val::Bool(x) => Some(Val::Bool(!x)),
@@ -207,18 +210,20 @@ impl<'a> ConstEvaluator<'a> {
     fn try_const_eval_field_expr(
         &self,
         _span: Span,
-        _expr: &Expr,
+        expr: &Expr,
         _field_ident: Ident,
     ) -> Option<Val> {
+        self.try_const_eval_expr(expr);
         None
     }
 
     fn try_const_eval_index_expr(
         &self,
         _span: Span,
-        _expr: &Expr,
+        expr: &Expr,
         _index_expr: &Expr,
     ) -> Option<Val> {
+        self.try_const_eval_expr(expr);
         None
     }
 
@@ -226,8 +231,11 @@ impl<'a> ConstEvaluator<'a> {
         &self,
         _span: Span,
         _ident: Ident,
-        _arg_exprs: &[Expr],
+        arg_exprs: &[Expr],
     ) -> Option<Val> {
+        for arg_expr in arg_exprs {
+            self.try_const_eval_expr(arg_expr);
+        }
         None
     }
 
@@ -236,8 +244,11 @@ impl<'a> ConstEvaluator<'a> {
         _span: Span,
         _analysis: &Cell<Option<MacroCallAnalysis>>,
         _ident: Ident,
-        _arg_exprs: &[Expr],
+        arg_exprs: &[Expr],
     ) -> Option<Val> {
+        for arg_expr in arg_exprs {
+            self.try_const_eval_expr(arg_expr);
+        }
         None
     }
 
@@ -245,8 +256,11 @@ impl<'a> ConstEvaluator<'a> {
         &self,
         _span: Span,
         _ty_lit: TyLit,
-        _arg_exprs: &[Expr],
+        arg_exprs: &[Expr],
     ) -> Option<Val> {
+        for arg_expr in arg_exprs {
+            self.try_const_eval_expr(arg_expr);
+        }
         None
     }
 

@@ -64,7 +64,7 @@ const SOURCE: &str = r#"
 
     fn pixel() -> vec4 {
         let cx = Cx::foo();
-        cx.qux(10.0);
+        cx.qux(10.0 + 20.0);
         return vec4(1.0);
     }
 "#;

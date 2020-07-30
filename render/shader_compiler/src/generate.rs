@@ -238,58 +238,65 @@ pub struct ExprGenerator<'a> {
 
 impl<'a> ExprGenerator<'a> {
     pub fn generate_expr(&mut self, expr: &Expr) {
-        match expr.kind {
-            ExprKind::Cond {
-                span,
-                ref expr,
-                ref expr_if_true,
-                ref expr_if_false,
-            } => self.generate_cond_expr(span, expr, expr_if_true, expr_if_false),
-            ExprKind::Bin {
-                span,
-                op,
-                ref left_expr,
-                ref right_expr,
-            } => self.generate_bin_expr(span, op, left_expr, right_expr),
-            ExprKind::Un { span, op, ref expr } => self.generate_un_expr(span, op, expr),
-            ExprKind::MethodCall {
-                span,
-                ident,
-                ref arg_exprs,
-            } => self.generate_method_call_expr(span, ident, arg_exprs),
-            ExprKind::Field {
-                span,
-                ref expr,
-                field_ident,
-            } => self.generate_field_expr(span, expr, field_ident),
-            ExprKind::Index {
-                span,
-                ref expr,
-                ref index_expr,
-            } => self.generate_index_expr(span, expr, index_expr),
-            ExprKind::Call {
-                span,
-                ident,
-                ref arg_exprs,
-            } => self.generate_call_expr(span, ident, arg_exprs),
-            ExprKind::MacroCall {
-                ref analysis,
-                span,
-                ident,
-                ref arg_exprs,
-                ..
-            } => self.generate_macro_call_expr(analysis, span, ident, arg_exprs),
-            ExprKind::ConsCall {
-                span,
-                ty_lit,
-                ref arg_exprs,
-            } => self.generate_cons_call_expr(span, ty_lit, arg_exprs),
-            ExprKind::Var {
-                span,
-                ref kind,
-                ident,
-            } => self.generate_var_expr(span, kind, ident),
-            ExprKind::Lit { span, lit } => self.generate_lit_expr(span, lit),
+        match expr.const_val.borrow().as_ref().unwrap() {
+            Some(val) => {
+                write!(self.string, "{}", val).unwrap();
+            }
+            None => {
+                match expr.kind {
+                    ExprKind::Cond {
+                        span,
+                        ref expr,
+                        ref expr_if_true,
+                        ref expr_if_false,
+                    } => self.generate_cond_expr(span, expr, expr_if_true, expr_if_false),
+                    ExprKind::Bin {
+                        span,
+                        op,
+                        ref left_expr,
+                        ref right_expr,
+                    } => self.generate_bin_expr(span, op, left_expr, right_expr),
+                    ExprKind::Un { span, op, ref expr } => self.generate_un_expr(span, op, expr),
+                    ExprKind::MethodCall {
+                        span,
+                        ident,
+                        ref arg_exprs,
+                    } => self.generate_method_call_expr(span, ident, arg_exprs),
+                    ExprKind::Field {
+                        span,
+                        ref expr,
+                        field_ident,
+                    } => self.generate_field_expr(span, expr, field_ident),
+                    ExprKind::Index {
+                        span,
+                        ref expr,
+                        ref index_expr,
+                    } => self.generate_index_expr(span, expr, index_expr),
+                    ExprKind::Call {
+                        span,
+                        ident,
+                        ref arg_exprs,
+                    } => self.generate_call_expr(span, ident, arg_exprs),
+                    ExprKind::MacroCall {
+                        ref analysis,
+                        span,
+                        ident,
+                        ref arg_exprs,
+                        ..
+                    } => self.generate_macro_call_expr(analysis, span, ident, arg_exprs),
+                    ExprKind::ConsCall {
+                        span,
+                        ty_lit,
+                        ref arg_exprs,
+                    } => self.generate_cons_call_expr(span, ty_lit, arg_exprs),
+                    ExprKind::Var {
+                        span,
+                        ref kind,
+                        ident,
+                    } => self.generate_var_expr(span, kind, ident),
+                    ExprKind::Lit { span, lit } => self.generate_lit_expr(span, lit),
+                }
+            }
         }
     }
 
