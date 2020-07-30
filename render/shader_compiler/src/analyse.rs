@@ -727,12 +727,15 @@ impl<'a> FnDefAnalyser<'a> {
     }
 
     fn analyse_return_stmt(&mut self, span: Span, expr: &Option<Expr>) -> Result<(), Error> {
+        
+        
         if let Some(expr) = expr {
             self.ty_checker().ty_check_expr_with_expected_ty(
                 span,
                 expr,
                 self.decl.return_ty.borrow().as_ref().unwrap(),
             )?;
+
             self.const_evaluator().try_const_eval_expr(expr);
             self.const_gatherer().const_gather_expr(expr);
             self.dep_analyser().dep_analyse_expr(expr);
