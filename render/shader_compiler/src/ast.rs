@@ -10,12 +10,16 @@ use std::fmt;
 
 #[derive(Clone, Debug)]
 pub struct ShaderAst {
+    pub float_consts: RefCell<Option<Vec<f32>>>,
     pub decls: Vec<Decl>,
 }
 
 impl ShaderAst {
     pub fn new() -> ShaderAst {
-        ShaderAst { decls: Vec::new() }
+        ShaderAst {
+            float_consts: RefCell::new(None),
+            decls: Vec::new()
+        }
     }
 
     pub fn find_geometry_decl(&self, ident: Ident) -> Option<&GeometryDecl> {
