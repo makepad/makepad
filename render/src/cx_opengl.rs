@@ -568,8 +568,8 @@ impl Cx {
         let shader_ast = shader_ast.unwrap();
         
         // lets generate the vertexshader
-        let vertex = generate_vertex_shader(&shader_ast);
-        let fragment = generate_fragment_shader(&shader_ast);
+        let vertex = generate_vertex_shader(&shader_ast, false);
+        let fragment = generate_fragment_shader(&shader_ast, false);
         let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen);
     
         let vertex = format!("
