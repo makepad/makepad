@@ -131,7 +131,7 @@ impl<'a> ConstGatherer<'a> {
         _span: Span,
         _analysis: &Cell<Option<MacroCallAnalysis>>,
         _ident: Ident,
-        arg_exprs: &[Expr],
+        _arg_exprs: &[Expr],
     ) {
         /*
         for arg_expr in arg_exprs {
