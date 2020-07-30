@@ -133,9 +133,10 @@ impl<'a> ConstGatherer<'a> {
         _ident: Ident,
         arg_exprs: &[Expr],
     ) {
+        /*
         for arg_expr in arg_exprs {
             self.const_gather_expr(arg_expr);
-        }
+        }*/
     }
 
     fn const_gather_cons_call_expr(&self, _span: Span, _ty_lit: TyLit, arg_exprs: &[Expr]) {
