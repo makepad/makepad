@@ -1,11 +1,7 @@
 use {
     crate::{
         ast::*,
-        generate::{
-            BlockGenerator,
-            ExprGenerator,
-            BackendWriter,
-        },
+        generate::{BackendWriter, BlockGenerator, ExprGenerator},
         ident::Ident,
         lit::TyLit,
         swizzle::Swizzle,
@@ -39,29 +35,34 @@ struct ShaderGenerator<'a> {
     shader: &'a ShaderAst,
     string: &'a mut String,
 }
- 
+
 impl<'a> ShaderGenerator<'a> {
     fn write_ty_init(&mut self, ty: &Ty) {
-        write!(self.string, "{}", match ty {
-            Ty::Bool => "false",
-            Ty::Int => "0",
-            Ty::Float => "0.0",
-            Ty::Bvec2 => "bvec2(0)",
-            Ty::Bvec3 => "bvec3(0)",
-            Ty::Bvec4 => "bvec4(0)",
-            Ty::Ivec2 => "ivec2(0)",
-            Ty::Ivec3 => "ivec3(0)",
-            Ty::Ivec4 => "ivec4(0)",
-            Ty::Vec2 => "vec2(0.0)",
-            Ty::Vec3 => "vec3(0.0)",
-            Ty::Vec4 => "vec4(0.0)",
-            Ty::Mat2 => "mat2(0.0)",
-            Ty::Mat3 => "mat3(0.0)",
-            Ty::Mat4 => "mat4(0.0)",
-            _ => panic!("unexpected as initializeable type"),
-        }).unwrap()
+        write!(
+            self.string,
+            "{}",
+            match ty {
+                Ty::Bool => "false",
+                Ty::Int => "0",
+                Ty::Float => "0.0",
+                Ty::Bvec2 => "bvec2(0)",
+                Ty::Bvec3 => "bvec3(0)",
+                Ty::Bvec4 => "bvec4(0)",
+                Ty::Ivec2 => "ivec2(0)",
+                Ty::Ivec3 => "ivec3(0)",
+                Ty::Ivec4 => "ivec4(0)",
+                Ty::Vec2 => "vec2(0.0)",
+                Ty::Vec3 => "vec3(0.0)",
+                Ty::Vec4 => "vec4(0.0)",
+                Ty::Mat2 => "mat2(0.0)",
+                Ty::Mat3 => "mat3(0.0)",
+                Ty::Mat4 => "mat4(0.0)",
+                _ => panic!("unexpected as initializeable type"),
+            }
+        )
+        .unwrap()
     }
-    
+
     fn generate_vertex_shader(&mut self) {
         let packed_geometries_size = self.compute_packed_geometries_size();
         let packed_instances_size = self.compute_packed_instances_size();
@@ -69,7 +70,7 @@ impl<'a> ShaderGenerator<'a> {
         self.generate_decls(
             Some(packed_geometries_size),
             Some(packed_instances_size),
-            packed_varyings_size
+            packed_varyings_size,
         );
         for decl in &self.shader.decls {
             match decl {
@@ -77,32 +78,32 @@ impl<'a> ShaderGenerator<'a> {
                     self.write_var_decl(
                         false,
                         decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
                     write!(self.string, "=").unwrap();
                     self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());
                     writeln!(self.string, ";").unwrap();
-                },
+                }
                 Decl::Instance(decl) => {
                     self.write_var_decl(
                         false,
                         decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
                     write!(self.string, "=").unwrap();
                     self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());
                     writeln!(self.string, ";").unwrap();
-                },
+                }
                 Decl::Varying(decl) => {
                     self.write_var_decl(
                         false,
                         decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
                     write!(self.string, "=").unwrap();
                     self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());
                     writeln!(self.string, ";").unwrap();
-                },
+                }
                 _ => {}
             }
         }
@@ -111,32 +112,28 @@ impl<'a> ShaderGenerator<'a> {
         let mut geometry_unpacker = VarUnpacker::new(
             "mpsc_packed_geometry",
             packed_geometries_size,
-            &mut self.string
+            &mut self.string,
         );
         for decl in &self.shader.decls {
             match decl {
                 Decl::Geometry(decl) => {
-                    geometry_unpacker.unpack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                },
+                    geometry_unpacker
+                        .unpack_var(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
+                }
                 _ => {}
             }
         }
         let mut instance_unpacker = VarUnpacker::new(
             "mpsc_packed_instance",
             packed_instances_size,
-            &mut self.string
+            &mut self.string,
         );
         for decl in &self.shader.decls {
             match decl {
                 Decl::Instance(decl) => {
-                    instance_unpacker.unpack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                },
+                    instance_unpacker
+                        .unpack_var(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
+                }
                 _ => {}
             }
         }
@@ -144,28 +141,19 @@ impl<'a> ShaderGenerator<'a> {
         let mut varying_packer = VarPacker::new(
             "mpsc_packed_varying",
             packed_varyings_size,
-            &mut self.string
+            &mut self.string,
         );
         for decl in &self.shader.decls {
             match decl {
                 Decl::Geometry(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    varying_packer.pack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                },
+                    varying_packer.pack_var(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
+                }
                 Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    varying_packer.pack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
+                    varying_packer.pack_var(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
                 }
                 Decl::Varying(decl) => {
-                    varying_packer.pack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                },
+                    varying_packer.pack_var(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
+                }
                 _ => {}
             }
         }
@@ -181,32 +169,32 @@ impl<'a> ShaderGenerator<'a> {
                     self.write_var_decl(
                         false,
                         decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
                     write!(self.string, "=").unwrap();
-                    self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());                    
+                    self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());
                     writeln!(self.string, ";").unwrap();
                 }
                 Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
                     self.write_var_decl(
                         false,
                         decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
                     write!(self.string, "=").unwrap();
-                    self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());                    
+                    self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());
                     writeln!(self.string, ";").unwrap();
                 }
                 Decl::Varying(decl) => {
                     self.write_var_decl(
                         false,
                         decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap()
+                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
                     write!(self.string, "=").unwrap();
-                    self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());                    
+                    self.write_ty_init(decl.ty_expr.ty.borrow().as_ref().unwrap());
                     writeln!(self.string, ";").unwrap();
-                },
+                }
                 _ => {}
             }
         }
@@ -215,28 +203,22 @@ impl<'a> ShaderGenerator<'a> {
         let mut varying_unpacker = VarUnpacker::new(
             "mpsc_packed_varying",
             packed_varyings_size,
-            &mut self.string
+            &mut self.string,
         );
         for decl in &self.shader.decls {
             match decl {
                 Decl::Geometry(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    varying_unpacker.unpack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                },
+                    varying_unpacker
+                        .unpack_var(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
+                }
                 Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
-                    varying_unpacker.unpack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
+                    varying_unpacker
+                        .unpack_var(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
                 }
                 Decl::Varying(decl) => {
-                    varying_unpacker.unpack_var(
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                },
+                    varying_unpacker
+                        .unpack_var(decl.ident, decl.ty_expr.ty.borrow().as_ref().unwrap());
+                }
                 _ => {}
             }
         }
@@ -248,7 +230,7 @@ impl<'a> ShaderGenerator<'a> {
         &mut self,
         packed_attributes_size: Option<usize>,
         packed_instances_size: Option<usize>,
-        packed_varyings_size: usize
+        packed_varyings_size: usize,
     ) {
         for decl in &self.shader.decls {
             match decl {
@@ -282,7 +264,7 @@ impl<'a> ShaderGenerator<'a> {
             self.generate_packed_var_decls(
                 "attribute",
                 "mpsc_packed_geometry",
-                packed_attributes_size
+                packed_attributes_size,
             );
         }
 
@@ -290,15 +272,11 @@ impl<'a> ShaderGenerator<'a> {
             self.generate_packed_var_decls(
                 "attribute",
                 "mpsc_packed_instance",
-                packed_instances_size
+                packed_instances_size,
             );
         }
 
-        self.generate_packed_var_decls(
-            "varying",
-            "mpsc_packed_varying",
-            packed_varyings_size,
-        );
+        self.generate_packed_var_decls("varying", "mpsc_packed_varying", packed_varyings_size);
     }
 
     fn generate_struct_decl(&mut self, decl: &StructDecl) {
@@ -371,14 +349,14 @@ impl<'a> ShaderGenerator<'a> {
         }
         packed_instances_size
     }
-    
+
     fn compute_packed_varyings_size(&self) -> usize {
         let mut packed_varyings_size = 0;
         for decl in &self.shader.decls {
             packed_varyings_size += match decl {
                 Decl::Geometry(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
                     decl.ty_expr.ty.borrow().as_ref().unwrap().size()
-                },
+                }
                 Decl::Instance(decl) if decl.is_used_in_fragment_shader.get().unwrap() => {
                     decl.ty_expr.ty.borrow().as_ref().unwrap().size()
                 }
@@ -393,7 +371,7 @@ impl<'a> ShaderGenerator<'a> {
         &mut self,
         packed_var_qualifier: &'a str,
         packed_var_name: &'a str,
-        mut packed_vars_size: usize
+        mut packed_vars_size: usize,
     ) {
         let mut packed_var_index = 0;
         loop {
@@ -425,7 +403,8 @@ impl<'a> ShaderGenerator<'a> {
             decl,
             visited: &mut HashSet::new(),
             string: self.string,
-        }.generate_fn_decl()
+        }
+        .generate_fn_decl()
     }
 
     fn generate_expr(&mut self, expr: &Expr) {
@@ -441,13 +420,7 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn write_var_decl(&mut self, is_inout: bool, ident: Ident, ty: &Ty) {
-        GlslBackendWriter.write_var_decl(
-            &mut self.string,
-            is_inout,
-            false,
-            ident,
-            ty
-        );
+        GlslBackendWriter.write_var_decl(&mut self.string, is_inout, false, ident, ty);
     }
 }
 
@@ -469,7 +442,8 @@ impl<'a> FnDeclGenerator<'a> {
                 decl: self.shader.find_fn_decl(callee).unwrap(),
                 visited: self.visited,
                 string: self.string,
-            }.generate_fn_decl()
+            }
+            .generate_fn_decl()
         }
         self.write_var_decl(
             false,
@@ -492,7 +466,7 @@ impl<'a> FnDeclGenerator<'a> {
         writeln!(self.string).unwrap();
         self.visited.insert(self.decl.ident);
     }
-    
+
     fn generate_block(&mut self, block: &Block) {
         BlockGenerator {
             shader: self.shader,
@@ -501,19 +475,13 @@ impl<'a> FnDeclGenerator<'a> {
             use_hidden_params: false,
             use_generated_cons_fns: false,
             indent_level: 0,
-            string: self.string
+            string: self.string,
         }
         .generate_block(block)
     }
 
     fn write_var_decl(&mut self, is_inout: bool, ident: Ident, ty: &Ty) {
-        GlslBackendWriter.write_var_decl(
-            &mut self.string,
-            is_inout,
-            false,
-            ident,
-            ty
-        );
+        GlslBackendWriter.write_var_decl(&mut self.string, is_inout, false, ident, ty);
     }
 }
 
@@ -523,14 +491,14 @@ struct VarPacker<'a> {
     packed_var_index: usize,
     packed_var_size: usize,
     packed_var_offset: usize,
-    string: &'a mut String
+    string: &'a mut String,
 }
 
 impl<'a> VarPacker<'a> {
     fn new(
         packed_var_name: &'a str,
         packed_vars_size: usize,
-        string: &'a mut String
+        string: &'a mut String,
     ) -> VarPacker<'a> {
         VarPacker {
             packed_var_name,
@@ -549,15 +517,17 @@ impl<'a> VarPacker<'a> {
             let count = var_size - var_offset;
             let packed_count = self.packed_var_size - self.packed_var_offset;
             let min_count = count.min(packed_count);
-            write!(self.string, "    {}_{}", self.packed_var_name, self.packed_var_index).unwrap();
+            write!(
+                self.string,
+                "    {}_{}",
+                self.packed_var_name, self.packed_var_index
+            )
+            .unwrap();
             if self.packed_var_size > 1 {
                 write!(
                     self.string,
                     ".{}",
-                    Swizzle::from_range(
-                        self.packed_var_offset,
-                        self.packed_var_offset + min_count
-                    )
+                    Swizzle::from_range(self.packed_var_offset, self.packed_var_offset + min_count)
                 )
                 .unwrap();
             }
@@ -566,10 +536,7 @@ impl<'a> VarPacker<'a> {
                 write!(
                     self.string,
                     ".{}",
-                    Swizzle::from_range(
-                        var_offset,
-                        var_offset + min_count
-                    )
+                    Swizzle::from_range(var_offset, var_offset + min_count)
                 )
                 .unwrap();
             }
@@ -581,7 +548,7 @@ impl<'a> VarPacker<'a> {
                 self.packed_var_size = self.packed_vars_size.min(4);
                 self.packed_var_offset = 0;
             }
-            var_offset += min_count; 
+            var_offset += min_count;
         }
     }
 }
@@ -592,14 +559,14 @@ struct VarUnpacker<'a> {
     packed_var_index: usize,
     packed_var_size: usize,
     packed_var_offset: usize,
-    string: &'a mut String
+    string: &'a mut String,
 }
 
 impl<'a> VarUnpacker<'a> {
     fn new(
         packed_var_name: &'a str,
         packed_vars_size: usize,
-        string: &'a mut String
+        string: &'a mut String,
     ) -> VarUnpacker<'a> {
         VarUnpacker {
             packed_var_name,
@@ -620,26 +587,24 @@ impl<'a> VarUnpacker<'a> {
             let min_count = count.min(packed_count);
             write!(self.string, "    {}", ident).unwrap();
             if var_size > 1 {
-                
                 write!(
                     self.string,
                     ".{}",
-                    Swizzle::from_range(
-                        var_offset,
-                        var_offset + min_count
-                    )
+                    Swizzle::from_range(var_offset, var_offset + min_count)
                 )
                 .unwrap();
             }
-            write!(self.string, " = {}_{}", self.packed_var_name, self.packed_var_index).unwrap();
+            write!(
+                self.string,
+                " = {}_{}",
+                self.packed_var_name, self.packed_var_index
+            )
+            .unwrap();
             if self.packed_var_size > 1 {
                 write!(
                     self.string,
                     ".{}",
-                    Swizzle::from_range(
-                        self.packed_var_offset,
-                        self.packed_var_offset + min_count
-                    )
+                    Swizzle::from_range(self.packed_var_offset, self.packed_var_offset + min_count)
                 )
                 .unwrap();
             }
@@ -651,7 +616,7 @@ impl<'a> VarUnpacker<'a> {
                 self.packed_var_index += 1;
                 self.packed_var_size = self.packed_vars_size.min(4);
                 self.packed_var_offset = 0;
-            } 
+            }
         }
     }
 }
@@ -665,7 +630,7 @@ impl BackendWriter for GlslBackendWriter {
         is_inout: bool,
         is_packed: bool,
         ident: Ident,
-        ty: &Ty
+        ty: &Ty,
     ) {
         if is_inout {
             write!(string, "inout ").unwrap();
@@ -674,87 +639,87 @@ impl BackendWriter for GlslBackendWriter {
             Ty::Void => {
                 write!(string, "void ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Bool => {
                 self.write_ty_lit(string, TyLit::Bool);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Int => {
                 self.write_ty_lit(string, TyLit::Int);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Float => {
                 self.write_ty_lit(string, TyLit::Float);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Bvec2 => {
                 self.write_ty_lit(string, TyLit::Bvec2);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Bvec3 => {
                 self.write_ty_lit(string, TyLit::Bvec3);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Bvec4 => {
                 self.write_ty_lit(string, TyLit::Bvec4);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Ivec2 => {
                 self.write_ty_lit(string, TyLit::Ivec2);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Ivec3 => {
                 self.write_ty_lit(string, TyLit::Ivec3);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Ivec4 => {
                 self.write_ty_lit(string, TyLit::Ivec4);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Vec2 => {
                 self.write_ty_lit(string, TyLit::Vec2);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Vec3 => {
                 self.write_ty_lit(string, TyLit::Vec3);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Vec4 => {
                 self.write_ty_lit(string, TyLit::Vec4);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Mat2 => {
                 self.write_ty_lit(string, TyLit::Mat2);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Mat3 => {
                 self.write_ty_lit(string, TyLit::Mat3);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Mat4 => {
                 self.write_ty_lit(string, TyLit::Mat4);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Texture2D => {
                 self.write_ty_lit(string, TyLit::Texture2D);
                 write!(string, " ").unwrap();
                 self.write_ident(string, ident);
-            },
+            }
             Ty::Array { ref elem_ty, len } => {
                 self.write_var_decl(string, is_inout, is_packed, ident, elem_ty);
                 write!(string, "[{}]", len).unwrap();
@@ -765,31 +730,36 @@ impl BackendWriter for GlslBackendWriter {
                 write!(string, "{} ", struct_ident).unwrap();
                 self.write_ident(string, ident);
             }
-        }   
+        }
     }
 
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit) {
-        write!(string, "{}", match ty_lit {
-            TyLit::Bool => "bool",
-            TyLit::Int => "int",
-            TyLit::Float => "float",
-            TyLit::Bvec2 => "bvec2",
-            TyLit::Bvec3 => "bvec3",
-            TyLit::Bvec4 => "bvec4",
-            TyLit::Ivec2 => "ivec2",
-            TyLit::Ivec3 => "ivec3",
-            TyLit::Ivec4 => "ivec4",
-            TyLit::Vec2 => "vec2",
-            TyLit::Vec3 => "vec3",
-            TyLit::Vec4 => "vec4",
-            TyLit::Mat2 => "mat2",
-            TyLit::Mat3 => "mat3",
-            TyLit::Mat4 => "mat4",
-            TyLit::Texture2D => "sampler2D",
-        }).unwrap();
+        write!(
+            string,
+            "{}",
+            match ty_lit {
+                TyLit::Bool => "bool",
+                TyLit::Int => "int",
+                TyLit::Float => "float",
+                TyLit::Bvec2 => "bvec2",
+                TyLit::Bvec3 => "bvec3",
+                TyLit::Bvec4 => "bvec4",
+                TyLit::Ivec2 => "ivec2",
+                TyLit::Ivec3 => "ivec3",
+                TyLit::Ivec4 => "ivec4",
+                TyLit::Vec2 => "vec2",
+                TyLit::Vec3 => "vec3",
+                TyLit::Vec4 => "vec4",
+                TyLit::Mat2 => "mat2",
+                TyLit::Mat3 => "mat3",
+                TyLit::Mat4 => "mat4",
+                TyLit::Texture2D => "sampler2D",
+            }
+        )
+        .unwrap();
     }
-    
-        fn write_ident(&self, string: &mut String, ident: Ident) {
+
+    fn write_ident(&self, string: &mut String, ident: Ident) {
         ident.with(|ident_string| {
             if ident_string.contains("::") {
                 write!(string, "mpsc_{}", ident_string.replace("::", "_")).unwrap()

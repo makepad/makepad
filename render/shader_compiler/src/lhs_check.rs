@@ -1,17 +1,10 @@
 use {
     crate::{
         ast::*,
-        env::{
-            Env,
-            Sym,
-            VarKind,
-        },
+        env::{Env, Sym, VarKind},
         error::Error,
         ident::Ident,
-        lit::{
-            Lit,
-            TyLit,
-        },
+        lit::{Lit, TyLit},
         span::Span,
     },
     std::cell::Cell,
@@ -38,11 +31,7 @@ impl<'a> LhsChecker<'a> {
                 ref right_expr,
                 ..
             } => self.lhs_check_bin_expr(span, op, left_expr, right_expr),
-            ExprKind::Un {
-                span,
-                op,
-                ref expr
-            } => self.lhs_check_un_expr(span, op, expr),
+            ExprKind::Un { span, op, ref expr } => self.lhs_check_un_expr(span, op, expr),
             ExprKind::MethodCall {
                 span,
                 ident,
@@ -79,7 +68,7 @@ impl<'a> LhsChecker<'a> {
                 ref kind,
                 ident,
             } => self.lhs_check_var_expr(span, kind, ident),
-            ExprKind::Lit {span, lit} => self.lhs_check_lit_expr(span, lit),
+            ExprKind::Lit { span, lit } => self.lhs_check_lit_expr(span, lit),
         }
     }
 
@@ -92,7 +81,7 @@ impl<'a> LhsChecker<'a> {
     ) -> Result<(), Error> {
         return Err(Error {
             span,
-            message: String::from("expression is not a valid left hand side")
+            message: String::from("expression is not a valid left hand side"),
         });
     }
 
@@ -105,19 +94,14 @@ impl<'a> LhsChecker<'a> {
     ) -> Result<(), Error> {
         return Err(Error {
             span,
-            message: String::from("expression is not a valid left hand side")
+            message: String::from("expression is not a valid left hand side"),
         });
     }
 
-    fn lhs_check_un_expr(
-        &mut self,
-        span: Span,
-        _op: UnOp,
-        _expr: &Expr
-    ) -> Result<(), Error> {
+    fn lhs_check_un_expr(&mut self, span: Span, _op: UnOp, _expr: &Expr) -> Result<(), Error> {
         return Err(Error {
             span,
-            message: String::from("expression is not a valid left hand side")
+            message: String::from("expression is not a valid left hand side"),
         });
     }
 
@@ -125,11 +109,11 @@ impl<'a> LhsChecker<'a> {
         &mut self,
         span: Span,
         _ident: Ident,
-        _arg_exprs: &[Expr]
+        _arg_exprs: &[Expr],
     ) -> Result<(), Error> {
         return Err(Error {
             span,
-            message: String::from("expression is not a valid left hand side")
+            message: String::from("expression is not a valid left hand side"),
         });
     }
 
@@ -147,7 +131,7 @@ impl<'a> LhsChecker<'a> {
         _span: Span,
         expr: &Expr,
         _index_expr: &Expr,
-    ) ->  Result<(), Error> {
+    ) -> Result<(), Error> {
         self.lhs_check_expr(expr)
     }
 
@@ -159,7 +143,7 @@ impl<'a> LhsChecker<'a> {
     ) -> Result<(), Error> {
         return Err(Error {
             span,
-            message: String::from("expression is not a valid left hand side")
+            message: String::from("expression is not a valid left hand side"),
         });
     }
 
@@ -172,7 +156,7 @@ impl<'a> LhsChecker<'a> {
     ) -> Result<(), Error> {
         return Err(Error {
             span,
-            message: String::from("expression is not a valid left hand side")
+            message: String::from("expression is not a valid left hand side"),
         });
     }
 
@@ -184,25 +168,22 @@ impl<'a> LhsChecker<'a> {
     ) -> Result<(), Error> {
         return Err(Error {
             span,
-            message: String::from("expression is not a valid left hand side")
+            message: String::from("expression is not a valid left hand side"),
         });
     }
-    
+
     fn lhs_check_var_expr(
         &mut self,
         span: Span,
         _kind: &Cell<Option<VarKind>>,
-        ident: Ident
+        ident: Ident,
     ) -> Result<(), Error> {
         match *self.env.find_sym(ident).unwrap() {
-            Sym::Var {
-                is_mut,
-                ..
-            } => {
+            Sym::Var { is_mut, .. } => {
                 if !is_mut {
                     return Err(Error {
                         span,
-                        message: String::from("expression is not a valid left hand side")
+                        message: String::from("expression is not a valid left hand side"),
                     });
                 }
                 Ok(())
@@ -211,11 +192,7 @@ impl<'a> LhsChecker<'a> {
         }
     }
 
-    fn lhs_check_lit_expr(
-        &mut self,
-        _span: Span,
-        _lit: Lit,
-    ) -> Result<(), Error> {
+    fn lhs_check_lit_expr(&mut self, _span: Span, _lit: Lit) -> Result<(), Error> {
         Ok(())
     }
 }
