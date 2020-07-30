@@ -1,4 +1,3 @@
-use crate::shadergen::PropDef;
 use crate::ast::*;
 use crate::builtin::{self, Builtin};
 use crate::const_eval::ConstEvaluator;
@@ -6,13 +5,14 @@ use crate::dep_analyse::DepAnalyser;
 use crate::env::{Env, Sym, VarKind};
 use crate::error::Error;
 use crate::ident::Ident;
+use crate::shadergen::PropDef;
 use crate::span::Span;
 use crate::ty::Ty;
 use crate::ty_check::TyChecker;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-pub fn analyse(shader: &ShaderAst, input_props: &[&PropDef]) -> Result<(), Error>{
+pub fn analyse(shader: &ShaderAst, input_props: &[&PropDef]) -> Result<(), Error> {
     let builtins = builtin::generate_builtins();
     let mut env = Env::new();
     env.push_scope();
@@ -21,8 +21,10 @@ pub fn analyse(shader: &ShaderAst, input_props: &[&PropDef]) -> Result<(), Error
         env.insert_sym(
             Span::default(),
             Ident::new(&prop.ident),
-            Sym::TyVar{ty:prop.prop_id.shader_ty()}
-        ) ?;
+            Sym::TyVar {
+                ty: prop.prop_id.shader_ty(),
+            },
+        )?;
     }
     for &ident in builtins.keys() {
         env.insert_sym(Span::default(), ident, Sym::Builtin)?;
@@ -83,10 +85,10 @@ impl<'a> ShaderAnalyser<'a> {
             match decl {
                 Decl::Geometry(decl) => {
                     decl.is_used_in_fragment_shader.set(Some(false));
-                },
+                }
                 Decl::Instance(decl) => {
                     decl.is_used_in_fragment_shader.set(Some(false));
-                },
+                }
                 Decl::Fn(decl) => {
                     decl.is_used_in_vertex_shader.set(Some(false));
                     decl.is_used_in_fragment_shader.set(Some(false));
@@ -106,15 +108,9 @@ impl<'a> ShaderAnalyser<'a> {
         )?;
         let mut visited = HashSet::new();
         let vertex_decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
-        self.propagate_deps(
-            &mut visited,
-            vertex_decl,
-        )?;
+        self.propagate_deps(&mut visited, vertex_decl)?;
         let fragment_decl = self.shader.find_fn_decl(Ident::new("pixel")).unwrap();
-        self.propagate_deps(
-            &mut visited,
-            fragment_decl,
-        )?;
+        self.propagate_deps(&mut visited, fragment_decl)?;
         for &geometry_dep in fragment_decl.geometry_deps.borrow().as_ref().unwrap() {
             self.shader
                 .find_geometry_decl(geometry_dep)
@@ -149,10 +145,14 @@ impl<'a> ShaderAnalyser<'a> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         match ty {
             Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {}
-            _ => return Err(Error {
-                span: decl.span,
-                message: String::from("attribute must be either a floating-point scalar or vector"),
-            })
+            _ => {
+                return Err(Error {
+                    span: decl.span,
+                    message: String::from(
+                        "attribute must be either a floating-point scalar or vector",
+                    ),
+                })
+            }
         }
         self.env.insert_sym(
             decl.span,
@@ -167,13 +167,11 @@ impl<'a> ShaderAnalyser<'a> {
 
     fn analyse_const_decl(&mut self, decl: &ConstDecl) -> Result<(), Error> {
         let expected_ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
-        let actual_ty = self
-            .ty_checker()
-            .ty_check_expr_with_expected_ty(
-                decl.span,
-                &decl.expr,
-                &expected_ty
-            )?;
+        let actual_ty = self.ty_checker().ty_check_expr_with_expected_ty(
+            decl.span,
+            &decl.expr,
+            &expected_ty,
+        )?;
         self.const_evaluator().const_eval_expr(&decl.expr)?;
         self.env.insert_sym(
             decl.span,
@@ -199,34 +197,40 @@ impl<'a> ShaderAnalyser<'a> {
         if decl.ident == Ident::new("vertex") {
             match return_ty {
                 Ty::Vec4 => {}
-                _ => return Err(Error {
-                    span: decl.span,
-                    message: String::from("function `vertex` must return a value of type `vec4`"),
-                })
+                _ => {
+                    return Err(Error {
+                        span: decl.span,
+                        message: String::from(
+                            "function `vertex` must return a value of type `vec4`",
+                        ),
+                    })
+                }
             }
         } else if decl.ident == Ident::new("pixel") {
             match return_ty {
                 Ty::Vec4 => {}
-                _ => return Err(Error {
-                    span: decl.span,
-                    message: String::from("function `fragment` must return a value of type `vec4`"),
-                })
+                _ => {
+                    return Err(Error {
+                        span: decl.span,
+                        message: String::from(
+                            "function `fragment` must return a value of type `vec4`",
+                        ),
+                    })
+                }
             }
         } else {
             match return_ty {
-                Ty::Array { .. } => return Err(Error {
-                    span: decl.span,
-                    message: String::from("functions can't return arrays")
-                }),
+                Ty::Array { .. } => {
+                    return Err(Error {
+                        span: decl.span,
+                        message: String::from("functions can't return arrays"),
+                    })
+                }
                 _ => {}
             }
         }
         *decl.return_ty.borrow_mut() = Some(return_ty);
-        self.env.insert_sym(
-            decl.span,
-            decl.ident,
-            Sym::Fn
-        ).ok();
+        self.env.insert_sym(decl.span, decl.ident, Sym::Fn).ok();
         Ok(())
     }
 
@@ -234,10 +238,14 @@ impl<'a> ShaderAnalyser<'a> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         match ty {
             Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {}
-            _ => return Err(Error {
-                span: decl.span,
-                message: String::from("attribute must be either a floating-point scalar or vector"),
-            })
+            _ => {
+                return Err(Error {
+                    span: decl.span,
+                    message: String::from(
+                        "attribute must be either a floating-point scalar or vector",
+                    ),
+                })
+            }
         }
         self.env.insert_sym(
             decl.span,
@@ -257,7 +265,9 @@ impl<'a> ShaderAnalyser<'a> {
         self.env.insert_sym(
             decl.span,
             decl.ident,
-            Sym::TyVar { ty: Ty::Struct { ident: decl.ident } }
+            Sym::TyVar {
+                ty: Ty::Struct { ident: decl.ident },
+            },
         )
     }
 
@@ -265,10 +275,12 @@ impl<'a> ShaderAnalyser<'a> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         match ty {
             Ty::Texture2D => {}
-            _ => return Err(Error {
-                span: decl.span,
-                message: String::from("texture must be a texture2D"),
-            })
+            _ => {
+                return Err(Error {
+                    span: decl.span,
+                    message: String::from("texture must be a texture2D"),
+                })
+            }
         }
         self.env.insert_sym(
             decl.span,
@@ -298,10 +310,14 @@ impl<'a> ShaderAnalyser<'a> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         match ty {
             Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {}
-            _ => return Err(Error {
-                span: decl.span,
-                message: String::from("varying must be either a floating-point scalar or vector"),
-            })
+            _ => {
+                return Err(Error {
+                    span: decl.span,
+                    message: String::from(
+                        "varying must be either a floating-point scalar or vector",
+                    ),
+                })
+            }
         }
         self.env.insert_sym(
             decl.span,
@@ -332,11 +348,7 @@ impl<'a> ShaderAnalyser<'a> {
             if call_stack.contains(&callee) {
                 return Err(Error {
                     span: decl.span,
-                    message: format!(
-                        "function `{}` recursively calls `{}`",
-                        decl.ident,
-                        callee
-                    )
+                    message: format!("function `{}` recursively calls `{}`", decl.ident, callee),
                 });
             }
             self.analyse_call_tree(kind, call_stack, callee_decl)?;
@@ -349,11 +361,7 @@ impl<'a> ShaderAnalyser<'a> {
         Ok(())
     }
 
-    fn propagate_deps(
-        &mut self,
-        visited: &mut HashSet<Ident>,
-        decl: &FnDecl,
-    ) -> Result<(), Error> {
+    fn propagate_deps(&mut self, visited: &mut HashSet<Ident>, decl: &FnDecl) -> Result<(), Error> {
         if visited.contains(&decl.ident) {
             return Ok(());
         }
@@ -366,8 +374,7 @@ impl<'a> ShaderAnalyser<'a> {
                 .unwrap()
                 .extend(callee_decl.uniform_block_deps.borrow().as_ref().unwrap());
             decl.has_texture_deps.set(Some(
-                decl.has_texture_deps.get().unwrap()
-                    || callee_decl.has_texture_deps.get().unwrap(),
+                decl.has_texture_deps.get().unwrap() || callee_decl.has_texture_deps.get().unwrap(),
             ));
             decl.geometry_deps
                 .borrow_mut()
@@ -380,8 +387,7 @@ impl<'a> ShaderAnalyser<'a> {
                 .unwrap()
                 .extend(callee_decl.instance_deps.borrow().as_ref().unwrap());
             decl.has_varying_deps.set(Some(
-                decl.has_varying_deps.get().unwrap()
-                    || callee_decl.has_varying_deps.get().unwrap(),
+                decl.has_varying_deps.get().unwrap() || callee_decl.has_varying_deps.get().unwrap(),
             ));
             decl.builtin_deps.borrow_mut().as_mut().unwrap().extend(
                 callee_decl
@@ -402,7 +408,9 @@ impl<'a> ShaderAnalyser<'a> {
                     .cloned(),
             );
         }
-        if decl.is_used_in_vertex_shader.get().unwrap() && decl.is_used_in_fragment_shader.get().unwrap() {
+        if decl.is_used_in_vertex_shader.get().unwrap()
+            && decl.is_used_in_fragment_shader.get().unwrap()
+        {
             if !decl.geometry_deps.borrow().as_ref().unwrap().is_empty() {
                 return Err(Error {
                     span: decl.span,
@@ -510,12 +518,8 @@ impl<'a> FnDefAnalyser<'a> {
 
     fn analyse_stmt(&mut self, stmt: &Stmt) -> Result<(), Error> {
         match *stmt {
-            Stmt::Break {
-                span
-            } => self.analyse_break_stmt(span),
-            Stmt::Continue {
-                span
-            } => self.analyse_continue_stmt(span),
+            Stmt::Break { span } => self.analyse_break_stmt(span),
+            Stmt::Continue { span } => self.analyse_continue_stmt(span),
             Stmt::For {
                 span,
                 ident,
@@ -537,18 +541,9 @@ impl<'a> FnDefAnalyser<'a> {
                 ref ty_expr,
                 ref expr,
             } => self.analyse_let_stmt(span, ty, ident, ty_expr, expr),
-            Stmt::Return {
-                span,
-                ref expr
-            } => self.analyse_return_stmt(span, expr),
-            Stmt::Block {
-                span,
-                ref block
-            } => self.analyse_block_stmt(span, block),
-            Stmt::Expr {
-                span,
-                ref expr
-            } => self.analyse_expr_stmt(span, expr),
+            Stmt::Return { span, ref expr } => self.analyse_return_stmt(span, expr),
+            Stmt::Block { span, ref block } => self.analyse_block_stmt(span, block),
+            Stmt::Expr { span, ref expr } => self.analyse_expr_stmt(span, expr),
         }
     }
 
@@ -557,7 +552,8 @@ impl<'a> FnDefAnalyser<'a> {
             return Err(Error {
                 span,
                 message: String::from("break outside loop"),
-            }.into());
+            }
+            .into());
         }
         Ok(())
     }
@@ -567,7 +563,8 @@ impl<'a> FnDefAnalyser<'a> {
             return Err(Error {
                 span,
                 message: String::from("continue outside loop"),
-            }.into());
+            }
+            .into());
         }
         Ok(())
     }
@@ -582,11 +579,7 @@ impl<'a> FnDefAnalyser<'a> {
         block: &Block,
     ) -> Result<(), Error> {
         self.ty_checker()
-            .ty_check_expr_with_expected_ty(
-                span,
-                from_expr,
-                &Ty::Int
-            )?;
+            .ty_check_expr_with_expected_ty(span, from_expr, &Ty::Int)?;
         let from = self
             .const_evaluator()
             .const_eval_expr(from_expr)?
@@ -594,11 +587,7 @@ impl<'a> FnDefAnalyser<'a> {
             .unwrap();
         self.dep_analyser().dep_analyse_expr(from_expr);
         self.ty_checker()
-            .ty_check_expr_with_expected_ty(
-                span,
-                to_expr,
-                &Ty::Int
-            )?;
+            .ty_check_expr_with_expected_ty(span, to_expr, &Ty::Int)?;
         let to = self
             .const_evaluator()
             .const_eval_expr(to_expr)?
@@ -607,11 +596,7 @@ impl<'a> FnDefAnalyser<'a> {
         self.dep_analyser().dep_analyse_expr(to_expr);
         if let Some(step_expr) = step_expr {
             self.ty_checker()
-                .ty_check_expr_with_expected_ty(
-                    span,
-                    step_expr,
-                    &Ty::Int
-                )?;
+                .ty_check_expr_with_expected_ty(span, step_expr, &Ty::Int)?;
             let step = self
                 .const_evaluator()
                 .const_eval_expr(step_expr)?
@@ -621,19 +606,22 @@ impl<'a> FnDefAnalyser<'a> {
                 return Err(Error {
                     span,
                     message: String::from("step must not be zero"),
-                }.into());
+                }
+                .into());
             }
             if from < to && step < 0 {
                 return Err(Error {
                     span,
                     message: String::from("step must not be positive"),
-                }.into());
+                }
+                .into());
             }
             if from > to && step > 0 {
                 return Err(Error {
                     span,
                     message: String::from("step must not be negative"),
-                }.into());
+                }
+                .into());
             }
             self.dep_analyser().dep_analyse_expr(step_expr);
         }
@@ -663,11 +651,7 @@ impl<'a> FnDefAnalyser<'a> {
         block_if_false: &Option<Box<Block>>,
     ) -> Result<(), Error> {
         self.ty_checker()
-            .ty_check_expr_with_expected_ty(
-                span,
-                expr,
-                &Ty::Bool
-            )?;
+            .ty_check_expr_with_expected_ty(span, expr, &Ty::Bool)?;
         self.dep_analyser().dep_analyse_expr(expr);
         self.env.push_scope();
         self.analyse_block(block_if_true)?;
@@ -691,13 +675,9 @@ impl<'a> FnDefAnalyser<'a> {
         *ty.borrow_mut() = Some(if let Some(ty_expr) = ty_expr {
             let expected_ty = self.ty_checker().ty_check_ty_expr(ty_expr)?;
             if let Some(expr) = expr {
-                let actual_ty = self
-                    .ty_checker()
-                    .ty_check_expr_with_expected_ty(
-                        span,
-                        expr,
-                        &expected_ty
-                    )?;
+                let actual_ty =
+                    self.ty_checker()
+                        .ty_check_expr_with_expected_ty(span, expr, &expected_ty)?;
                 self.dep_analyser().dep_analyse_expr(expr);
                 actual_ty
             } else {
@@ -724,11 +704,7 @@ impl<'a> FnDefAnalyser<'a> {
         )
     }
 
-    fn analyse_return_stmt(
-        &mut self,
-        span: Span,
-        expr: &Option<Expr>
-    ) -> Result<(), Error> {
+    fn analyse_return_stmt(&mut self, span: Span, expr: &Option<Expr>) -> Result<(), Error> {
         if let Some(expr) = expr {
             self.ty_checker().ty_check_expr_with_expected_ty(
                 span,
@@ -740,27 +716,20 @@ impl<'a> FnDefAnalyser<'a> {
             return Err(Error {
                 span,
                 message: String::from("missing return expression"),
-            }.into());
+            }
+            .into());
         }
         Ok(())
     }
 
-    fn analyse_block_stmt(
-        &mut self,
-        _span: Span,
-        block: &Block
-    ) -> Result<(), Error> {
+    fn analyse_block_stmt(&mut self, _span: Span, block: &Block) -> Result<(), Error> {
         self.env.push_scope();
         self.analyse_block(block)?;
         self.env.pop_scope();
         Ok(())
     }
 
-    fn analyse_expr_stmt(
-        &mut self,
-        _span: Span,
-        expr: &Expr
-    ) -> Result<(), Error> {
+    fn analyse_expr_stmt(&mut self, _span: Span, expr: &Expr) -> Result<(), Error> {
         self.ty_checker().ty_check_expr(expr)?;
         self.dep_analyser().dep_analyse_expr(expr);
         Ok(())

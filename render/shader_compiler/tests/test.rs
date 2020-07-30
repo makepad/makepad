@@ -71,10 +71,18 @@ const SOURCE: &str = r#"
 
 #[test]
 fn test() {
-    fn my_uniform() -> Mat4Id { uid!() }
-    fn my_texture() -> Texture2dId { uid!() }
-    fn my_geometry() -> Vec3Id { uid!() }
-    fn my_instance() -> Vec3Id { uid!() }
+    fn my_uniform() -> Mat4Id {
+        uid!()
+    }
+    fn my_texture() -> Texture2dId {
+        uid!()
+    }
+    fn my_geometry() -> Vec3Id {
+        uid!()
+    }
+    fn my_instance() -> Vec3Id {
+        uid!()
+    }
 
     let mut shader = ShaderAst::new();
     parse::parse(
@@ -84,32 +92,36 @@ fn test() {
         &mut shader,
     )
     .unwrap();
-    analyse::analyse(&mut shader, &[
-        &PropDef {
-            name: String::from("my_uniform"),
-            ident: String::from("Self::my_uniform"),
-            prop_id: my_uniform().into(),
-            block: None,
-        },
-        &PropDef {
-            name: String::from("my_texture"),
-            ident: String::from("Self::my_texture"),
-            prop_id: my_texture().into(),
-            block: None,
-        },
-        &PropDef {
-            name: String::from("my_geometry"),
-            ident: String::from("Self::my_geometry"),
-            prop_id: my_geometry().into(),
-            block: None,
-        },
-        &PropDef {
-            name: String::from("my_instance"),
-            ident: String::from("Self::my_instance"),
-            prop_id: my_instance().into(),
-            block: None,
-        }
-    ]).unwrap();
+    analyse::analyse(
+        &mut shader,
+        &[
+            &PropDef {
+                name: String::from("my_uniform"),
+                ident: String::from("Self::my_uniform"),
+                prop_id: my_uniform().into(),
+                block: None,
+            },
+            &PropDef {
+                name: String::from("my_texture"),
+                ident: String::from("Self::my_texture"),
+                prop_id: my_texture().into(),
+                block: None,
+            },
+            &PropDef {
+                name: String::from("my_geometry"),
+                ident: String::from("Self::my_geometry"),
+                prop_id: my_geometry().into(),
+                block: None,
+            },
+            &PropDef {
+                name: String::from("my_instance"),
+                ident: String::from("Self::my_instance"),
+                prop_id: my_instance().into(),
+                block: None,
+            },
+        ],
+    )
+    .unwrap();
     println!("GLSL VERTEX");
     println!("{}", generate_glsl::generate_vertex_shader(&shader));
     println!("GLSL FRAGMENT");

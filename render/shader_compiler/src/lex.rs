@@ -391,7 +391,7 @@ where
     fn begin_span(&mut self) -> SpanTracker {
         SpanTracker {
             loc_id: self.loc_id,
-            start: self.index
+            start: self.index,
         }
     }
 }
@@ -435,7 +435,7 @@ where
 
 struct SpanTracker {
     loc_id: usize,
-    start: usize
+    start: usize,
 }
 
 impl SpanTracker {

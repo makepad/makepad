@@ -28,11 +28,7 @@ impl<'a> DepAnalyser<'a> {
                 ref left_expr,
                 ref right_expr,
             } => self.dep_analyse_bin_expr(span, op, left_expr, right_expr),
-            ExprKind::Un {
-                span,
-                op,
-                ref expr
-            } => self.dep_analyse_un_expr(span, op, expr),
+            ExprKind::Un { span, op, ref expr } => self.dep_analyse_un_expr(span, op, expr),
             ExprKind::MethodCall {
                 span,
                 ident,
@@ -69,10 +65,7 @@ impl<'a> DepAnalyser<'a> {
                 ref kind,
                 ident,
             } => self.dep_analyse_var_expr(span, kind, ident),
-            ExprKind::Lit {
-                span,
-                lit
-            } => self.dep_analyse_lit_expr(span, lit),
+            ExprKind::Lit { span, lit } => self.dep_analyse_lit_expr(span, lit),
         }
     }
 
@@ -81,7 +74,7 @@ impl<'a> DepAnalyser<'a> {
         _span: Span,
         expr: &Expr,
         expr_if_true: &Expr,
-        expr_if_false: &Expr
+        expr_if_false: &Expr,
     ) {
         self.dep_analyse_expr(expr);
         self.dep_analyse_expr(expr_if_true);
@@ -93,7 +86,7 @@ impl<'a> DepAnalyser<'a> {
         _span: Span,
         _op: BinOp,
         left_expr: &Expr,
-        right_expr: &Expr
+        right_expr: &Expr,
     ) {
         self.dep_analyse_expr(left_expr);
         self.dep_analyse_expr(right_expr);
@@ -107,17 +100,17 @@ impl<'a> DepAnalyser<'a> {
         &mut self,
         span: Span,
         method_ident: Ident,
-        arg_exprs: &[Expr]
+        arg_exprs: &[Expr],
     ) {
         match arg_exprs[0].ty.borrow().as_ref().unwrap() {
             Ty::Struct { ident } => {
                 self.dep_analyse_call_expr(
                     span,
                     Ident::new(format!("{}::{}", ident, method_ident)),
-                    arg_exprs
+                    arg_exprs,
                 );
-            },
-            _ => panic!()
+            }
+            _ => panic!(),
         }
     }
 
@@ -154,35 +147,35 @@ impl<'a> DepAnalyser<'a> {
             _ => panic!(),
         }
     }
-    
-    
+
     fn dep_analyse_macro_call_expr(
         &mut self,
         _span: Span,
         _analysis: &Cell<Option<MacroCallAnalysis>>,
         _ident: Ident,
-        _arg_exprs: &[Expr]
-    ) {}
+        _arg_exprs: &[Expr],
+    ) {
+    }
 
     fn dep_analyse_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {
         for arg_expr in arg_exprs {
             self.dep_analyse_expr(arg_expr);
         }
-        self.decl.cons_fn_deps.borrow_mut().as_mut().unwrap().insert((
-            ty_lit,
-            arg_exprs
-                .iter()
-                .map(|arg_expr| arg_expr.ty.borrow().as_ref().unwrap().clone())
-                .collect::<Vec<_>>(),
-        ));
+        self.decl
+            .cons_fn_deps
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .insert((
+                ty_lit,
+                arg_exprs
+                    .iter()
+                    .map(|arg_expr| arg_expr.ty.borrow().as_ref().unwrap().clone())
+                    .collect::<Vec<_>>(),
+            ));
     }
 
-    fn dep_analyse_var_expr(
-        &mut self,
-        _span: Span,
-        kind: &Cell<Option<VarKind>>,
-        ident: Ident,
-    ) {
+    fn dep_analyse_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind>>, ident: Ident) {
         match kind.get().unwrap() {
             VarKind::Geometry => {
                 self.decl
@@ -220,7 +213,7 @@ impl<'a> DepAnalyser<'a> {
             VarKind::Varying => {
                 self.decl.has_varying_deps.set(Some(true));
             }
-            _ => {},
+            _ => {}
         }
     }
 

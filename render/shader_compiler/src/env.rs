@@ -33,12 +33,10 @@ impl Env {
                 entry.insert(sym);
                 Ok(())
             }
-            Entry::Occupied(_) => {
-                Err(Error {
-                    span,
-                    message: format!("`{}` is already defined in this scope", ident),
-                })
-            }
+            Entry::Occupied(_) => Err(Error {
+                span,
+                message: format!("`{}` is already defined in this scope", ident),
+            }),
         }
     }
 }
