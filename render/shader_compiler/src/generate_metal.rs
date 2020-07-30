@@ -371,6 +371,13 @@ impl<'a> ShaderGenerator<'a> {
             ", device mpsc_default_Uniforms &mpsc_default_uniforms [[buffer(5)]]"
         )
         .unwrap();
+        if self.use_const_table {
+            write!(
+                self.string,
+                ", device const float *mpsc_const_table [[buffer(6)]]"
+            )
+            .unwrap();
+        }
         write!(self.string, ", uint vtx_id [[vertex_id]]").unwrap();
         write!(self.string, ", uint inst_id [[instance_id]]").unwrap();
         writeln!(self.string, ") {{").unwrap();
@@ -389,6 +396,10 @@ impl<'a> ShaderGenerator<'a> {
         self.write_ident(decl.ident);
         write!(self.string, "(").unwrap();
         let mut sep = "";
+        if self.use_const_table {
+            write!(self.string, "mpsc_const_table").unwrap();
+            sep = ", ";
+        }
         for &ident in decl.uniform_block_deps.borrow().as_ref().unwrap() {
             write!(self.string, "{}mpsc_{}_uniforms", sep, ident).unwrap();
             sep = ", ";
@@ -458,6 +469,13 @@ impl<'a> ShaderGenerator<'a> {
             ", device mpsc_default_Uniforms &mpsc_default_uniforms [[buffer(3)]]"
         )
         .unwrap();
+        if self.use_const_table {
+            write!(
+                self.string,
+                ", device const float *mpsc_const_table [[buffer(6)]]"
+            )
+            .unwrap();
+        }
         write!(self.string, ", mpsc_Textures mpsc_textures").unwrap();
 
         writeln!(self.string, ") {{").unwrap();
@@ -466,6 +484,10 @@ impl<'a> ShaderGenerator<'a> {
         self.write_ident(decl.ident);
         write!(self.string, "(").unwrap();
         let mut sep = "";
+        if self.use_const_table {
+            write!(self.string, "mpsc_const_table").unwrap();
+            sep = ", ";
+        }
         for &ident in decl.uniform_block_deps.borrow().as_ref().unwrap() {
             write!(self.string, "{}mpsc_{}_uniforms", sep, ident).unwrap();
             sep = ", ";
@@ -550,6 +572,10 @@ impl<'a> FnDeclGenerator<'a> {
                 param.ident,
                 param.ty_expr.ty.borrow().as_ref().unwrap(),
             );
+            sep = ", ";
+        }
+        if self.use_const_table {
+            write!(self.string, "{}device const float *mpsc_const_table", sep).unwrap();
             sep = ", ";
         }
         for &ident in self.decl.uniform_block_deps.borrow().as_ref().unwrap() {
