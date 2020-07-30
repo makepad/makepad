@@ -249,7 +249,7 @@ impl<'a> ExprGenerator<'a> {
             Some(Some(val)) => {
                 write!(self.string, "{}", val).unwrap();
             }
-            None | Some(None) => match expr.kind {
+            Some(None) | None => match expr.kind {
                 ExprKind::Cond {
                     span,
                     ref expr,
