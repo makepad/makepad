@@ -68,7 +68,7 @@ impl<'a> ShaderAnalyser<'a> {
     }
 
     fn analyse_shader(&mut self) -> Result<(), Error> {
-        *self.shader.consts.borrow_mut() = Some(Vec::new());
+        *self.shader.const_table.borrow_mut() = Some(Vec::new());
         self.env.push_scope();
         for decl in &self.shader.decls {
             self.analyse_decl(decl)?;

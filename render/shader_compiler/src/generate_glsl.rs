@@ -252,8 +252,8 @@ impl<'a> ShaderGenerator<'a> {
         if self.use_const_table {
             writeln!(
                 self.string,
-                "uniform float mpsc_consts[{}];",
-                self.shader.consts.borrow().as_ref().unwrap().len()
+                "uniform float mpsc_const_table[{}];",
+                self.shader.const_table.borrow().as_ref().unwrap().len()
             ).unwrap();
         }
 
