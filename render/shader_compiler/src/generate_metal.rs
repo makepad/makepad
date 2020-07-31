@@ -472,7 +472,7 @@ impl<'a> ShaderGenerator<'a> {
         if self.use_const_table {
             write!(
                 self.string,
-                ", device const float *mpsc_const_table [[buffer(6)]]"
+                ", device const float *mpsc_const_table [[buffer(4)]]"
             )
             .unwrap();
         }
