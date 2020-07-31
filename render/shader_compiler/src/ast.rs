@@ -6,6 +6,7 @@ use crate::ty::Ty;
 use crate::val::Val;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fmt;
 
 #[derive(Clone, Debug)]
@@ -127,14 +128,14 @@ pub struct FnDecl {
     pub return_ty: RefCell<Option<Ty>>,
     pub is_used_in_vertex_shader: Cell<Option<bool>>,
     pub is_used_in_fragment_shader: Cell<Option<bool>>,
-    pub callees: RefCell<Option<HashSet<Ident>>>,
-    pub uniform_block_deps: RefCell<Option<HashSet<Ident>>>,
+    pub callees: RefCell<Option<BTreeSet<Ident>>>,
+    pub uniform_block_deps: RefCell<Option<BTreeSet<Ident>>>,
     pub has_texture_deps: Cell<Option<bool>>,
-    pub geometry_deps: RefCell<Option<HashSet<Ident>>>,
-    pub instance_deps: RefCell<Option<HashSet<Ident>>>,
+    pub geometry_deps: RefCell<Option<BTreeSet<Ident>>>,
+    pub instance_deps: RefCell<Option<BTreeSet<Ident>>>,
     pub has_varying_deps: Cell<Option<bool>>,
-    pub builtin_deps: RefCell<Option<HashSet<Ident>>>,
-    pub cons_fn_deps: RefCell<Option<HashSet<(TyLit, Vec<Ty>)>>>,
+    pub builtin_deps: RefCell<Option<BTreeSet<Ident>>>,
+    pub cons_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>)>>>,
     pub ident: Ident,
     pub params: Vec<Param>,
     pub return_ty_expr: Option<TyExpr>,
