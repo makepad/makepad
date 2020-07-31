@@ -49,9 +49,7 @@ impl Cx {
         let shader_ast = shader_ast.unwrap();
         
         let mtlsl =  generate_metal::generate_shader(&shader_ast, true);
-        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen);
-
-        println!("{}", mtlsl);
+        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, shader_ast.const_table.borrow_mut().take());
         
         let options: id = unsafe {msg_send![class!(MTLCompileOptions), new]};
         let ns_mtlsl: id = str_to_nsstring(&mtlsl);
