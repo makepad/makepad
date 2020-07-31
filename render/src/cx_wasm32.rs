@@ -438,7 +438,7 @@ impl Cx {
         // lets check our recompile queue
         let mut shader_results = Vec::new();
         for shader_id in &self.shader_recompiles {
-            shader_results.push(Self::webgl_compile_shader(*shader_id, &mut self.shaders[*shader_id], &mut self.platform));
+            shader_results.push(Self::webgl_compile_shader(*shader_id, true, &mut self.shaders[*shader_id], &mut self.platform));
         }
         self.call_shader_recompile_event(shader_results, &mut event_handler);
         
@@ -908,9 +908,10 @@ impl FromWasm {
         uniforms_dl: &[f32],
         uniforms_dr: &[f32],
         uniforms: &[f32],
-        textures: &Vec<u32>
+        textures: &Vec<u32>,
+        const_table: &Option<Vec<f32>>
     ) {
-        self.fit(8);
+        self.fit(10);
         self.mu32(6);
         self.mu32(shader_id as u32);
         self.mu32(vao_id as u32);
@@ -919,6 +920,14 @@ impl FromWasm {
         self.mu32(uniforms_dr.as_ptr() as u32);
         self.mu32(uniforms.as_ptr() as u32);
         self.mu32(textures.as_ptr() as u32);
+        if let Some(const_table) = const_table{
+            self.mu32(const_table.as_ptr() as u32);
+            self.mu32(const_table.len() as u32);
+        }
+        else{
+            self.mu32(0);
+            self.mu32(0);
+        }
     }
     
     pub fn clear(&mut self, r: f32, g: f32, b: f32, a: f32) {

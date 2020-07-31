@@ -423,7 +423,7 @@ impl Cx {
             glx_sys::glXMakeCurrent(opengl_cx.display, opengl_cx.hidden_window, opengl_cx.context);
         }
         for (index, sh) in self.shaders.iter_mut().enumerate() {
-            let result = Self::opengl_compile_shader(index, sh, opengl_cx);
+            let result = Self::opengl_compile_shader(index, false, sh, opengl_cx);
             if let ShaderCompileResult::Fail{err, ..} = result {
                 panic!("{}", err);
             } 
@@ -565,7 +565,7 @@ impl Cx {
         gl_texture_slots
     }
     
-    pub fn opengl_compile_shader(shader_id:usize, sh: &mut CxShader, opengl_cx: &OpenglCx) -> ShaderCompileResult {
+    pub fn opengl_compile_shader(shader_id:usize, bool:use_const_table, sh: &mut CxShader, opengl_cx: &OpenglCx) -> ShaderCompileResult {
         
         // lets compile.
         let shader_ast = sh.shader_gen.lex_parse_analyse();
@@ -576,8 +576,8 @@ impl Cx {
         let shader_ast = shader_ast.unwrap();
         
         // lets generate the vertexshader
-        let vertex = generate_vertex_shader(&shader_ast, true);
-        let fragment = generate_fragment_shader(&shader_ast, true);
+        let vertex = generate_vertex_shader(&shader_ast, use_const_table);
+        let fragment = generate_fragment_shader(&shader_ast, use_const_table);
         let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, shader_ast.const_table.borrow_mut().take());
     
         let vertex = format!("
@@ -593,6 +593,13 @@ impl Cx {
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             {}\0", fragment);
+
+        if let Some(sh_platform) = &sh.platform{
+            if sh_platform.vertex == vertex && sh_platform.fragment == fragment{
+                return ShaderCompileResult::Nop{id:shader_id}
+            }
+        } 
+
         //println!("{} {} {}", sh.name, vertex, fragment);  
         unsafe { 
 
