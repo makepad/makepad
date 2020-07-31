@@ -437,10 +437,11 @@ pub struct CxShaderMapping {
     pub pass_uniforms: Vec<PropDef>,
     pub uniforms: Vec<PropDef>,
     pub textures: Vec<PropDef>,
+    pub const_table: Option<Vec<f32>>
 }
 
 impl CxShaderMapping{
-    pub fn from_shader_gen(gen:&ShaderGen)->Self{
+    pub fn from_shader_gen(gen:&ShaderGen, const_table:Option<Vec<f32>>)->Self{
         
         let mut instances = Vec::new();
         let mut geometries = Vec::new();
@@ -479,6 +480,7 @@ impl CxShaderMapping{
             pass_uniforms: pass_uniforms,
             uniforms: uniforms,
             textures: textures,
+            const_table: const_table
         }
     }
 }
