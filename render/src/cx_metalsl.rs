@@ -12,6 +12,7 @@ use makepad_shader_compiler::generate_metal;
 #[derive(Clone)]
 pub struct CxPlatformShader {
     pub library: id,
+    pub metal_shader: String,
     pub pipeline_state: id,
     pub geom_vbuf: MetalBuffer,
     pub geom_ibuf: MetalBuffer,
@@ -34,22 +35,29 @@ impl Cx {
     
     pub fn mtl_compile_all_shaders(&mut self, metal_cx: &MetalCx) {
         for (index, sh) in &mut self.shaders.iter_mut().enumerate() {
-            let result = Self::mtl_compile_shader(index, sh, metal_cx);
+            let result = Self::mtl_compile_shader(index, false, sh, metal_cx);
             if let ShaderCompileResult::Fail{err, ..} = result {
                 panic!("{}", err);
             } 
         };
     } 
     
-    pub fn mtl_compile_shader(shader_id:usize, sh: &mut CxShader, metal_cx: &MetalCx) -> ShaderCompileResult {
+    pub fn mtl_compile_shader(shader_id:usize, use_const_table:bool, sh: &mut CxShader, metal_cx: &MetalCx) -> ShaderCompileResult {
         let shader_ast = sh.shader_gen.lex_parse_analyse();
         if let Err(err) = shader_ast{
             return ShaderCompileResult::Fail{id:shader_id, err:err}
         } 
         let shader_ast = shader_ast.unwrap();
         
-        let mtlsl =  generate_metal::generate_shader(&shader_ast, true);
+        let mtlsl =  generate_metal::generate_shader(&shader_ast, use_const_table);
         let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, shader_ast.const_table.borrow_mut().take());
+        
+        if let Some(sh_platform) = &sh.platform{
+            println!("{}, {}", sh_platform.metal_shader, mtlsl);
+            if sh_platform.metal_shader == mtlsl{
+                return ShaderCompileResult::Nop{id:shader_id}
+            }
+        } 
         
         let options: id = unsafe {msg_send![class!(MTLCompileOptions), new]};
         let ns_mtlsl: id = str_to_nsstring(&mtlsl);
@@ -69,6 +77,7 @@ impl Cx {
         
         sh.mapping = mapping;
         sh.platform = Some(CxPlatformShader { 
+            metal_shader: mtlsl, 
             pipeline_state: unsafe {
                 let vert: id = msg_send![library, newFunctionWithName: str_to_nsstring("mpsc_vertex_main")];
                 let frag: id = msg_send![library, newFunctionWithName: str_to_nsstring("mpsc_fragment_main")];
