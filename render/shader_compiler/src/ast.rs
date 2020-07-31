@@ -128,7 +128,7 @@ pub struct FnDecl {
     pub return_ty: RefCell<Option<Ty>>,
     pub is_used_in_vertex_shader: Cell<Option<bool>>,
     pub is_used_in_fragment_shader: Cell<Option<bool>>,
-    pub callees: RefCell<Option<BTreeSet<Ident>>>,
+    pub callees: RefCell<Option<BTreeSet<Ident>>>, 
     pub uniform_block_deps: RefCell<Option<BTreeSet<Ident>>>,
     pub has_texture_deps: Cell<Option<bool>>,
     pub geometry_deps: RefCell<Option<BTreeSet<Ident>>>,
