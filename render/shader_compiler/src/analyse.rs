@@ -11,7 +11,7 @@ use crate::span::Span;
 use crate::ty::Ty;
 use crate::ty_check::TyChecker;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, BTreeSet};
 
 pub fn analyse(shader: &ShaderAst, input_props: &[&PropDef]) -> Result<(), Error> {
     let builtins = builtin::generate_builtins();
@@ -510,14 +510,14 @@ impl<'a> FnDefAnalyser<'a> {
                 .map(|return_ty_expr| return_ty_expr.ty.borrow().as_ref().unwrap().clone())
                 .unwrap_or(Ty::Void),
         );
-        *self.decl.callees.borrow_mut() = Some(HashSet::new());
-        *self.decl.uniform_block_deps.borrow_mut() = Some(HashSet::new());
+        *self.decl.callees.borrow_mut() = Some(BTreeSet::new());
+        *self.decl.uniform_block_deps.borrow_mut() = Some(BTreeSet::new());
         self.decl.has_texture_deps.set(Some(false));
-        *self.decl.geometry_deps.borrow_mut() = Some(HashSet::new());
-        *self.decl.instance_deps.borrow_mut() = Some(HashSet::new());
+        *self.decl.geometry_deps.borrow_mut() = Some(BTreeSet::new());
+        *self.decl.instance_deps.borrow_mut() = Some(BTreeSet::new());
         self.decl.has_varying_deps.set(Some(false));
-        *self.decl.builtin_deps.borrow_mut() = Some(HashSet::new());
-        *self.decl.cons_fn_deps.borrow_mut() = Some(HashSet::new());
+        *self.decl.builtin_deps.borrow_mut() = Some(BTreeSet::new());
+        *self.decl.cons_fn_deps.borrow_mut() = Some(BTreeSet::new());
         self.analyse_block(&self.decl.block)?;
         self.env.pop_scope();
         Ok(())

@@ -161,7 +161,8 @@ pub struct ShaderRecompileEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ShaderCompileResult{
     Ok{id:usize},
-    Fail{id:usize, err:ShaderGenError}
+    Nop{id:usize},
+    Fail{id:usize, err:ShaderGenError},
 }
 
 
