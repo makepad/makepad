@@ -265,11 +265,11 @@ impl FileTreeItemDraw {
                     return df.stroke(color*0.5, 1.);
                 }
                 else { // its a folder
-                    df.box(0. * w, .35 * h, 0.87 * w, 0.39 * h, 0.75);
+                    df.box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
                     df.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
                     df.union(); 
                     // ok so.
-                    return df.fill(color);
+                    return df.fill(color!(#f01));
                 }
             }
         "}));

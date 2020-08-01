@@ -596,6 +596,7 @@ impl Cx {
 
         if let Some(sh_platform) = &sh.platform{
             if sh_platform.vertex == vertex && sh_platform.fragment == fragment{
+                sh.mapping = mapping;
                 return ShaderCompileResult::Nop{id:shader_id}
             }
         } 
