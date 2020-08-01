@@ -233,6 +233,7 @@ impl Cx {
         // lets check if we need to recompile the shader at all
         if let Some(sh_platform) = &sh.platform{
             if sh_platform.vertex == vertex && sh_platform.fragment == fragment{
+                sh.mapping = mapping;
                 return ShaderCompileResult::Nop{id:shader_id}
             }
         } 

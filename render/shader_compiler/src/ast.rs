@@ -5,7 +5,6 @@ use crate::span::Span;
 use crate::ty::Ty;
 use crate::val::Val;
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
 use std::collections::BTreeSet;
 use std::fmt;
 
