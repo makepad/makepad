@@ -54,6 +54,7 @@ impl Cx {
         
         if let Some(sh_platform) = &sh.platform{
             if sh_platform.metal_shader == mtlsl{
+                sh.mapping = mapping;
                 return ShaderCompileResult::Nop{id:shader_id}
             }
         } 
@@ -75,7 +76,7 @@ impl Cx {
         }
         
         sh.mapping = mapping;
-        sh.platform = Some(CxPlatformShader { 
+        sh.platform = Some(CxPlatformShader {
             metal_shader: mtlsl, 
             pipeline_state: unsafe {
                 let vert: id = msg_send![library, newFunctionWithName: str_to_nsstring("mpsc_vertex_main")];
