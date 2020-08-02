@@ -243,13 +243,24 @@ pub struct ExprGenerator<'a> {
 impl<'a> ExprGenerator<'a> {
     pub fn generate_expr(&mut self, expr: &Expr) {
         match expr.const_val.borrow().as_ref() {
+            Some(Some(Val::Vec4(_))) if self.use_const_table => {
+                write!(self.string, "vec4(").unwrap();
+                let mut sep = "";
+                let mut const_index = expr.const_index.get().unwrap();
+                for _ in 0..4 {
+                    write!(self.string, "{}mpsc_const_table[{}]", sep, const_index).unwrap();
+                    sep = ", ";
+                    const_index += 1;
+                }
+                write!(self.string, ")").unwrap();
+            },
             Some(Some(Val::Float(_))) if self.use_const_table => {
                 write!(self.string, "mpsc_const_table[{}]", expr.const_index.get().unwrap()).unwrap();
             },
             Some(Some(val)) => {
                 write!(self.string, "{}", val).unwrap();
             }
-            None | Some(None) => match expr.kind {
+            _ => match expr.kind {
                 ExprKind::Cond {
                     span,
                     ref expr,
