@@ -244,7 +244,8 @@ impl<'a> ExprGenerator<'a> {
     pub fn generate_expr(&mut self, expr: &Expr) {
         match (expr.const_val.borrow().as_ref(), expr.const_index.get()) {
             (Some(Some(Val::Vec4(_))), Some(mut index)) if self.use_const_table => {
-                write!(self.string, "vec4(").unwrap();
+                self.write_ty_lit(TyLit::Vec4);
+                write!(self.string, "(").unwrap();
                 let mut sep = "";
                 for _ in 0..4 {
                     write!(self.string, "{}mpsc_const_table[{}]", sep, index).unwrap();
