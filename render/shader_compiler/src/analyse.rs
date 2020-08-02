@@ -11,7 +11,7 @@ use crate::span::Span;
 use crate::ty::Ty;
 use crate::ty_check::TyChecker;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, BTreeSet};
 
 pub fn analyse(shader: &ShaderAst, input_props: &[&PropDef]) -> Result<(), Error> {
     let builtins = builtin::generate_builtins();
@@ -181,7 +181,6 @@ impl<'a> ShaderAnalyser<'a> {
             &expected_ty,
         )?;
         self.const_evaluator().const_eval_expr(&decl.expr)?;
-        self.const_gatherer().const_gather_expr(&decl.expr);
         self.env.insert_sym(
             decl.span,
             decl.ident,
@@ -511,14 +510,14 @@ impl<'a> FnDefAnalyser<'a> {
                 .map(|return_ty_expr| return_ty_expr.ty.borrow().as_ref().unwrap().clone())
                 .unwrap_or(Ty::Void),
         );
-        *self.decl.callees.borrow_mut() = Some(HashSet::new());
-        *self.decl.uniform_block_deps.borrow_mut() = Some(HashSet::new());
+        *self.decl.callees.borrow_mut() = Some(BTreeSet::new());
+        *self.decl.uniform_block_deps.borrow_mut() = Some(BTreeSet::new());
         self.decl.has_texture_deps.set(Some(false));
-        *self.decl.geometry_deps.borrow_mut() = Some(HashSet::new());
-        *self.decl.instance_deps.borrow_mut() = Some(HashSet::new());
+        *self.decl.geometry_deps.borrow_mut() = Some(BTreeSet::new());
+        *self.decl.instance_deps.borrow_mut() = Some(BTreeSet::new());
         self.decl.has_varying_deps.set(Some(false));
-        *self.decl.builtin_deps.borrow_mut() = Some(HashSet::new());
-        *self.decl.cons_fn_deps.borrow_mut() = Some(HashSet::new());
+        *self.decl.builtin_deps.borrow_mut() = Some(BTreeSet::new());
+        *self.decl.cons_fn_deps.borrow_mut() = Some(BTreeSet::new());
         self.analyse_block(&self.decl.block)?;
         self.env.pop_scope();
         Ok(())
@@ -600,7 +599,6 @@ impl<'a> FnDefAnalyser<'a> {
             .const_eval_expr(from_expr)?
             .to_int()
             .unwrap();
-        self.const_gatherer().const_gather_expr(from_expr);
         self.dep_analyser().dep_analyse_expr(from_expr);
         self.ty_checker()
             .ty_check_expr_with_expected_ty(span, to_expr, &Ty::Int)?;
@@ -609,7 +607,6 @@ impl<'a> FnDefAnalyser<'a> {
             .const_eval_expr(to_expr)?
             .to_int()
             .unwrap();
-        self.const_gatherer().const_gather_expr(to_expr);
         self.dep_analyser().dep_analyse_expr(to_expr);
         if let Some(step_expr) = step_expr {
             self.ty_checker()
@@ -619,7 +616,6 @@ impl<'a> FnDefAnalyser<'a> {
                 .const_eval_expr(step_expr)?
                 .to_int()
                 .unwrap();
-            self.const_gatherer().const_gather_expr(step_expr);
             if step == 0 {
                 return Err(Error {
                     span,
