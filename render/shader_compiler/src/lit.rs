@@ -43,7 +43,7 @@ impl fmt::Display for Lit {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum TyLit {
     Bool,
     Int,

@@ -223,6 +223,11 @@ impl BuildManager {
         self.log_items.truncate(0);
         for item in &re.results{
             match item{
+                ShaderCompileResult::Nop{id}=>{
+                    self.log_items.push(HubLogItem::Message(
+                        format!("Shader {} compiled OK - no change", id)
+                    ));
+                },
                 ShaderCompileResult::Ok{id}=>{
                     self.log_items.push(HubLogItem::Message(
                         format!("Shader {} compiled OK", id)

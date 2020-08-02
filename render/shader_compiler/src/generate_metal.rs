@@ -7,7 +7,7 @@ use {
         ty::Ty,
     },
     std::{
-        collections::{HashMap, HashSet},
+        collections::{BTreeMap, HashSet},
         fmt::Write,
     },
 };
@@ -85,7 +85,7 @@ impl<'a> ShaderGenerator<'a> {
     }
 
     fn generate_uniform_structs(&mut self) {
-        let mut uniform_blocks = HashMap::new();
+        let mut uniform_blocks = BTreeMap::new();
         for decl in &self.shader.decls {
             match decl {
                 Decl::Uniform(decl) => {
@@ -472,7 +472,7 @@ impl<'a> ShaderGenerator<'a> {
         if self.use_const_table {
             write!(
                 self.string,
-                ", device const float *mpsc_const_table [[buffer(6)]]"
+                ", device const float *mpsc_const_table [[buffer(4)]]"
             )
             .unwrap();
         }

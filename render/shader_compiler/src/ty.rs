@@ -2,7 +2,7 @@ use crate::ident::Ident;
 use std::fmt;
 use std::rc::Rc;
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum Ty {
     Void,
     Bool,
