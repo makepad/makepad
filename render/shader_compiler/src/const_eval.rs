@@ -250,7 +250,7 @@ impl<'a> ConstEvaluator<'a> {
     ) -> Option<Val> {
         match analysis.get().unwrap() {
             MacroCallAnalysis::Color { r, g, b, a } => {
-                Some(Val::Vec4(Vec4 { x: r, y: g, z: a, w: b }))
+                Some(Val::Vec4(Vec4 { x: r, y: g, z: b, w: a }))
             }
         }
     }
