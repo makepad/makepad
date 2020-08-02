@@ -54,6 +54,7 @@ const SOURCE: &str = r#"
     varying vColor: vec3;
 
     fn vertex() -> vec4 {
+        color!(red);
         let cx = Cx::foo();
         cx.bar();
         for i from 0 to 10 step 2 {

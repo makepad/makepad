@@ -1,3 +1,4 @@
+use crate::math::Vec4;
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -5,6 +6,7 @@ pub enum Val {
     Bool(bool),
     Int(i32),
     Float(f32),
+    Vec4(Vec4),
 }
 
 impl Val {
@@ -29,6 +31,7 @@ impl fmt::Display for Val {
             Val::Bool(val) => write!(f, "{}", val),
             Val::Int(val) => write!(f, "{}", val),
             Val::Float(val) => write!(f, "{}", val),
+            Val::Vec4(val) => write!(f, "{}", val),
         }
     }
 }

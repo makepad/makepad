@@ -3,6 +3,7 @@ use crate::env::VarKind;
 use crate::error::Error;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
+use crate::math::Vec4;
 use crate::span::Span;
 use crate::ty::Ty;
 use crate::val::Val;
@@ -243,14 +244,15 @@ impl<'a> ConstEvaluator<'a> {
     fn try_const_eval_macro_call_expr(
         &self,
         _span: Span,
-        _analysis: &Cell<Option<MacroCallAnalysis>>,
+        analysis: &Cell<Option<MacroCallAnalysis>>,
         _ident: Ident,
-        arg_exprs: &[Expr],
+        _arg_exprs: &[Expr],
     ) -> Option<Val> {
-        //for arg_expr in arg_exprs {
-        //    self.try_const_eval_expr(arg_expr);
-        //}
-        None
+        match analysis.get().unwrap() {
+            MacroCallAnalysis::Color { r, g, b, a } => {
+                Some(Val::Vec4(Vec4 { x: r, y: g, z: a, w: b }))
+            }
+        }
     }
 
     fn try_const_eval_cons_call_expr(
