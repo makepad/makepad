@@ -128,5 +128,5 @@ fn test() {
     println!("GLSL FRAGMENT");
     println!("{}", generate_glsl::generate_fragment_shader(&shader, true));
     println!("METAL");
-    println!("{}", generate_metal::generate_shader(&shader, true));
+    println!("{}", generate_metal::generate_shader(&shader, false));
 }
