@@ -1,6 +1,5 @@
 use crate::math::Vec4;
 use std::fmt;
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum Val {
     Bool(bool),
@@ -30,7 +29,13 @@ impl fmt::Display for Val {
         match self {
             Val::Bool(val) => write!(f, "{}", val),
             Val::Int(val) => write!(f, "{}", val),
-            Val::Float(val) => write!(f, "{}", val),
+            Val::Float(v) => {
+                if v.abs().fract() < 0.00000001 {
+                    write!(f, "{}.0", v)
+                } else {
+                    write!(f, "{}", v)
+                }
+            }
             Val::Vec4(val) => write!(f, "{}", val),
         }
     }

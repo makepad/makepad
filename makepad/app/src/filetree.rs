@@ -269,7 +269,7 @@ impl FileTreeItemDraw {
                     df.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
                     df.union(); 
                     // ok so.
-                    return df.fill(color);
+                    return df.fill(color!(#f01));
                 }
             }
         "}));

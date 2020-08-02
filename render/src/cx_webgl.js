@@ -770,7 +770,6 @@
                     add_line_numbers_to_string(ash.fragment)
                 )
             }
-            
             // fetch all attribs and uniforms
             this.shaders[ash.shader_id] = {
                 geom_attribs: this.get_attrib_locations(program, "mpsc_packed_geometry_", ash.geometry_slots),
@@ -781,6 +780,7 @@
                 uniforms: this.get_uniform_locations(program, ash.uniforms),
                 texture_slots: this.get_uniform_locations(program, ash.texture_slots),
                 instance_slots: ash.instance_slots,
+                const_table_uniform: gl.getUniformLocation(program, "mpsc_const_table"),
                 program: program,
                 ash: ash
             };
@@ -1336,7 +1336,9 @@
             view_uniforms_ptr,
             draw_uniforms_ptr,
             uniforms_ptr,
-            textures_ptr
+            textures_ptr,
+            const_table_ptr,
+            const_table_len
         ) {
             var gl = this.gl;
             
@@ -1388,7 +1390,10 @@
                 let uni = uniforms[i];
                 uni.fn(this, uni.loc, uni.offset + uniforms_ptr);
             }
-            
+            if(const_table_ptr !== 0){
+                gl.uniform1fv(shader.const_table_uniform, 
+                    new Float32Array(this.memory.buffer, const_table_ptr, const_table_len));
+            }         
             let texture_slots = shader.texture_slots;
             for (let i = 0; i < texture_slots.length; i ++) {
                 let tex_slot = texture_slots[i];
@@ -1669,6 +1674,8 @@
             let uniforms_dr_ptr = self.mu32[self.parse ++];
             let uniforms_ptr = self.mu32[self.parse ++];
             let textures = self.mu32[self.parse ++];
+            let const_table_ptr = self.mu32[self.parse ++];
+            let const_table_len = self.mu32[self.parse ++];
             self.draw_call(
                 shader_id,
                 vao_id,
@@ -1676,7 +1683,9 @@
                 uniforms_dl_ptr,
                 uniforms_dr_ptr,
                 uniforms_ptr,
-                textures
+                textures,
+                const_table_ptr,
+                const_table_len
             );
         },
         function clear_7(self) {
