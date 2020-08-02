@@ -6,6 +6,7 @@ use {
         lit::{Lit, TyLit},
         span::Span,
         ty::Ty,
+        util::PrettyPrintedFloat,
         val::Val,
     },
     std::{
@@ -257,6 +258,21 @@ impl<'a> ExprGenerator<'a> {
             (Some(Some(Val::Float(_))), Some(index)) if self.use_const_table => {
                 write!(self.string, "mpsc_const_table[{}]", index).unwrap();
             }
+            // TODO: Extract the next three cases into a write_val function
+            (Some(Some(Val::Vec4(val))), _) => {
+                self.write_ty_lit(TyLit::Vec4);
+                write!(
+                    self.string,
+                    "({}, {}, {}, {})",
+                    PrettyPrintedFloat(val.x),
+                    PrettyPrintedFloat(val.y),
+                    PrettyPrintedFloat(val.z),
+                    PrettyPrintedFloat(val.w),
+                ).unwrap();
+            }
+            (Some(Some(Val::Float(val))), _) => {
+                write!(self.string, "{}", PrettyPrintedFloat(*val)).unwrap();
+            },
             (Some(Some(val)), _) => {
                 write!(self.string, "{}", val).unwrap();
             },
