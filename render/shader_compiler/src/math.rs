@@ -1,3 +1,4 @@
+use crate::util::PrettyPrintedFloat;
 use makepad_microserde::*;
 use std::fmt;
 
@@ -71,7 +72,14 @@ pub struct Vec4{
 
 impl fmt::Display for Vec4 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "vec4({}, {}, {}, {})", self.x, self.y, self.z, self.w)
+        write!(
+            f,
+            "vec4({}, {}, {}, {})",
+            PrettyPrintedFloat(self.x),
+            PrettyPrintedFloat(self.y),
+            PrettyPrintedFloat(self.z),
+            PrettyPrintedFloat(self.w),
+        )
     }
 }
 
