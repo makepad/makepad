@@ -84,7 +84,9 @@ impl Cx {
                     opengl_cx.set_uniform_buffer(&shp.view_uniforms, view_uniforms);
                     opengl_cx.set_uniform_buffer(&shp.draw_uniforms, draw_uniforms);
                     opengl_cx.set_uniform_buffer(&shp.uniforms, &draw_call.uniforms);
-                    
+                    if let Some(ct) = &sh.mapping.const_table{
+                        opengl_cx.set_uniform_array(&shp.const_table_uniform, ct);
+                    }
                     // lets set our textures
                     for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
                         let cxtexture = &mut self.textures[*texture_id as usize];
@@ -421,7 +423,7 @@ impl Cx {
             glx_sys::glXMakeCurrent(opengl_cx.display, opengl_cx.hidden_window, opengl_cx.context);
         }
         for (index, sh) in self.shaders.iter_mut().enumerate() {
-            let result = Self::opengl_compile_shader(index, sh, opengl_cx);
+            let result = Self::opengl_compile_shader(index, false, sh, opengl_cx);
             if let ShaderCompileResult::Fail{err, ..} = result {
                 panic!("{}", err);
             } 
@@ -522,21 +524,27 @@ impl Cx {
     
     pub fn opengl_get_uniforms(program: u32, unis: &Vec<PropDef>) -> Vec<OpenglUniform> {
         let mut gl_uni = Vec::new();
-        
         for uni in unis {
-            let mut name0 = "".to_string();
-            name0.push_str(&uni.name);
-            name0.push_str("\0");
-            unsafe {
-                gl_uni.push(OpenglUniform {
-                    loc:gl::GetUniformLocation(program, name0.as_ptr() as *const _),
-                    name: uni.name.clone(),
-                    size: uni.prop_id.shader_ty().size()
-                })
-            }
+            gl_uni.push(
+                Self::opengl_get_uniform(program, &uni.name, uni.prop_id.shader_ty().size())
+            );
         }
         gl_uni
     }
+    
+    pub fn opengl_get_uniform(program: u32, name:&str, size:usize) -> OpenglUniform {
+        let mut name0 = String::new();
+        name0.push_str(name);
+        name0.push_str("\0");
+        unsafe {
+            OpenglUniform {
+                loc:gl::GetUniformLocation(program, name0.as_ptr() as *const _),
+                name: name.to_string(),
+                size: size
+            }
+        }
+    }
+    
     
     pub fn opengl_get_texture_slots(program: u32, texture_slots: &Vec<PropDef>) -> Vec<OpenglUniform> {
         let mut gl_texture_slots = Vec::new();
@@ -557,7 +565,7 @@ impl Cx {
         gl_texture_slots
     }
     
-    pub fn opengl_compile_shader(shader_id:usize, sh: &mut CxShader, opengl_cx: &OpenglCx) -> ShaderCompileResult {
+    pub fn opengl_compile_shader(shader_id:usize, bool:use_const_table, sh: &mut CxShader, opengl_cx: &OpenglCx) -> ShaderCompileResult {
         
         // lets compile.
         let shader_ast = sh.shader_gen.lex_parse_analyse();
@@ -568,9 +576,9 @@ impl Cx {
         let shader_ast = shader_ast.unwrap();
         
         // lets generate the vertexshader
-        let vertex = generate_vertex_shader(&shader_ast, false);
-        let fragment = generate_fragment_shader(&shader_ast, false);
-        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen);
+        let vertex = generate_vertex_shader(&shader_ast, use_const_table);
+        let fragment = generate_fragment_shader(&shader_ast, use_const_table);
+        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, shader_ast.const_table.borrow_mut().take());
     
         let vertex = format!("
             #version 100
@@ -585,6 +593,14 @@ impl Cx {
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             {}\0", fragment);
+
+        if let Some(sh_platform) = &sh.platform{
+            if sh_platform.vertex == vertex && sh_platform.fragment == fragment{
+                sh.mapping = mapping;
+                return ShaderCompileResult::Nop{id:shader_id}
+            }
+        } 
+
         //println!("{} {} {}", sh.name, vertex, fragment);  
         unsafe { 
 
@@ -634,6 +650,7 @@ impl Cx {
                 pass_uniforms: Self::opengl_get_uniforms(program,  &mapping.pass_uniforms),
                 view_uniforms: Self::opengl_get_uniforms(program, &mapping.view_uniforms),
                 draw_uniforms: Self::opengl_get_uniforms(program, &mapping.draw_uniforms),
+                const_table_uniform: Self::opengl_get_uniform(program, "mpsc_const_table", 1),
                 uniforms: Self::opengl_get_uniforms(program, &mapping.uniforms),
             });
             sh.mapping = mapping;
@@ -842,6 +859,12 @@ impl OpenglCx {
         }
     }
     
+    pub fn set_uniform_array(&self, loc: &OpenglUniform, array: &[f32]) {
+        unsafe{
+            gl::Uniform1fv(loc.loc as i32, array.len() as i32, array.as_ptr());
+        }
+    }
+    
     pub fn set_uniform_buffer(&self, locs: &Vec<OpenglUniform>, uni: &[f32]) {
         
         let mut o = 0;
@@ -854,7 +877,6 @@ impl OpenglCx {
             }
             if loc.loc >= 0 {
                 unsafe {
-                    
                     match loc.size {
                         1 => {
                             gl::Uniform1f(loc.loc as i32, uni[o]);
@@ -982,6 +1004,7 @@ pub struct CxPlatformShader {
     pub pass_uniforms: Vec<OpenglUniform>,
     pub view_uniforms: Vec<OpenglUniform>,
     pub draw_uniforms: Vec<OpenglUniform>,
+    pub const_table_uniform: OpenglUniform,
     pub uniforms: Vec<OpenglUniform>
 }
 

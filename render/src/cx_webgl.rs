@@ -81,7 +81,8 @@ impl Cx {
                     view_uniforms,
                     draw_uniforms,
                     &draw_call.uniforms,
-                    &draw_call.textures_2d
+                    &draw_call.textures_2d,
+                    &sh.mapping.const_table
                 );
             }
         }
@@ -197,14 +198,14 @@ impl Cx {
     
     pub fn webgl_compile_all_shaders(&mut self) {
         for (shader_id, sh) in self.shaders.iter_mut().enumerate() {
-            let glsh = Self::webgl_compile_shader(shader_id, sh, &mut self.platform);
+            let glsh = Self::webgl_compile_shader(shader_id, false, sh, &mut self.platform);
             if let ShaderCompileResult::Fail{err,..} = glsh {
                 self.platform.from_wasm.log(&format!("Got GLSL shader compile error: {}", err))
             }
         }
     }
     
-    pub fn webgl_compile_shader(shader_id: usize, sh: &mut CxShader, platform: &mut CxPlatform) -> ShaderCompileResult{
+    pub fn webgl_compile_shader(shader_id: usize, use_const_table: bool, sh: &mut CxShader, platform: &mut CxPlatform) -> ShaderCompileResult{
         
         let shader_ast = sh.shader_gen.lex_parse_analyse();
         
@@ -213,9 +214,9 @@ impl Cx {
         } 
         let shader_ast = shader_ast.unwrap();
         
-        let vertex = generate_vertex_shader(&shader_ast);
-        let fragment = generate_fragment_shader(&shader_ast);
-        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen);
+        let vertex = generate_vertex_shader(&shader_ast,use_const_table);
+        let fragment = generate_fragment_shader(&shader_ast,use_const_table);
+        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, shader_ast.const_table.borrow_mut().take());
     
         let vertex = format!("
             precision highp float;
@@ -228,7 +229,14 @@ impl Cx {
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             {}\0", fragment);
-            
+             
+        // lets check if we need to recompile the shader at all
+        if let Some(sh_platform) = &sh.platform{
+            if sh_platform.vertex == vertex && sh_platform.fragment == fragment{
+                sh.mapping = mapping;
+                return ShaderCompileResult::Nop{id:shader_id}
+            }
+        } 
         //let shader_id = self.compiled_shaders.len();
         platform.from_wasm.compile_webgl_shader(shader_id, &vertex, &fragment, &mapping);
         

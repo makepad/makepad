@@ -242,24 +242,23 @@ pub struct ExprGenerator<'a> {
 
 impl<'a> ExprGenerator<'a> {
     pub fn generate_expr(&mut self, expr: &Expr) {
-        match expr.const_val.borrow().as_ref() {
-            Some(Some(Val::Vec4(_))) if self.use_const_table => {
+        match (expr.const_val.borrow().as_ref(), expr.const_index.get()) {
+            (Some(Some(Val::Vec4(_))), Some(mut index)) if self.use_const_table => {
                 write!(self.string, "vec4(").unwrap();
                 let mut sep = "";
-                let mut const_index = expr.const_index.get().unwrap();
                 for _ in 0..4 {
-                    write!(self.string, "{}mpsc_const_table[{}]", sep, const_index).unwrap();
+                    write!(self.string, "{}mpsc_const_table[{}]", sep, index).unwrap();
                     sep = ", ";
-                    const_index += 1;
+                    index += 1;
                 }
                 write!(self.string, ")").unwrap();
             },
-            Some(Some(Val::Float(_))) if self.use_const_table => {
-                write!(self.string, "mpsc_const_table[{}]", expr.const_index.get().unwrap()).unwrap();
-            },
-            Some(Some(val)) => {
-                write!(self.string, "{}", val).unwrap();
+            (Some(Some(Val::Float(_))), Some(index)) if self.use_const_table => {
+                write!(self.string, "mpsc_const_table[{}]", index).unwrap();
             }
+            (Some(Some(val)), _) => {
+                write!(self.string, "{}", val).unwrap();
+            },
             _ => match expr.kind {
                 ExprKind::Cond {
                     span,
@@ -352,7 +351,7 @@ impl<'a> ExprGenerator<'a> {
             } => {
                 self.generate_call_expr(
                     span,
-                    Ident::new(format!("mpsc_{}_{}", struct_ident, ident)),
+                    Ident::new(format!("{}::{}", struct_ident, ident)),
                     arg_exprs,
                 );
             }
@@ -428,25 +427,19 @@ impl<'a> ExprGenerator<'a> {
         _ident: Ident,
         _arg_exprs: &[Expr],
     ) {
-        fn float_to_string(v: f32) -> String {
-            if v.abs().fract() < 0.00000001 {
-                format!("{}.0", v)
-            } else {
-                format!("{}", v)
-            }
-        }
+
         match analysis.get().unwrap() {
             MacroCallAnalysis::Color { r, g, b, a } => {
                 self.backend_writer.write_ty_lit(self.string, TyLit::Vec4);
-                write!(
-                    self.string,
-                    "({}, {}, {}, {})",
-                    float_to_string(r),
-                    float_to_string(g),
-                    float_to_string(b),
-                    float_to_string(a)
-                )
-                .unwrap();
+                write!(self.string, "(").unwrap();
+                write_float(&mut self.string, r); 
+                write!(self.string, ",").unwrap();
+                write_float(&mut self.string, g);
+                write!(self.string, ",").unwrap();
+                write_float(&mut self.string, b);
+                write!(self.string, ",").unwrap();
+                write_float(&mut self.string, a);
+                write!(self.string, ")").unwrap();
             }
         }
     }
@@ -534,5 +527,13 @@ impl<'a> ExprGenerator<'a> {
 
     fn write_ty_lit(&mut self, ty_lit: TyLit) {
         self.backend_writer.write_ty_lit(&mut self.string, ty_lit);
+    }
+}
+
+pub fn write_float(s:&mut String, v: f32) {
+    if v.abs().fract() < 0.00000001 {
+        write!(s, "{}.0", v).unwrap();
+    } else {
+        write!(s, "{}", v).unwrap();
     }
 }
