@@ -15,6 +15,7 @@ pub mod ident;
 pub mod lex;
 pub mod lhs_check;
 pub mod lit;
+pub mod math;
 pub mod parse;
 pub mod span;
 pub mod swizzle;
