@@ -49,7 +49,6 @@ impl ShaderView {
                 cx.redraw_child_area(self.area);
            },
             Event::FingerDown(_fd) =>{
-                println!("{:?}", cx.captured_fingers);
                 self.finger_down = 1.0;
                 cx.redraw_child_area(self.area);
             },
