@@ -4,21 +4,27 @@ use makepad_render::*;
 pub struct ShaderView {
     quad: Quad,
     main_view: View,
-    mouse_xy: Vec2
+    finger_hover: Vec2,
+    finger_move: Vec2,
+    finger_down: f32
 }
 
 impl ShaderView {
     pub fn bg() -> ShaderId {uid!()}
-    pub fn mouse_xy() -> Vec2Id {uid!()}
+    pub fn finger_hover() -> Vec2Id {uid!()}
+    pub fn finger_move() -> Vec2Id {uid!()}
+    pub fn finger_down() -> FloatId {uid!()}
     pub fn new(cx: &mut Cx) -> Self {
         Self::bg().set(cx, Quad::def_quad_shader().compose(shader!{"
             
-            instance mouse_xy: Self::mouse_xy();
+            instance finger_hover: Self::finger_hover();
+            instance finger_move: Self::finger_move();
+            instance finger_down: Self::finger_down();
             
             fn pixel() -> vec4 {
                 let df = Df::viewport(pos * vec2(w, h));
-                df.circle(0.5 * w, 0.5 * h, 0.5 * w);
-                return df.fill(color!(red));
+                df.circle(finger_hover.x, finger_hover.y, 100.);
+                return df.fill(mix(color!(blue),color!(red), finger_down)); 
             }
             
         "}));
@@ -26,14 +32,30 @@ impl ShaderView {
         Self {
             quad: Quad::new(cx),
             main_view: View::new(cx),
-            mouse_xy: Vec2::default()
+            finger_hover: Vec2::default(),
+            finger_move: Vec2::default(),
+            finger_down: 0.0
         }
     }
     
     pub fn handle_shader_view(&mut self, cx: &mut Cx, event: &mut Event) {
-        match event {
+        match event.hits(cx, self.main_view.get_view_area(cx), HitOpt::default()) {
             Event::FingerMove(fm) => {
-                self.mouse_xy = fm.rel;
+                self.finger_move = fm.rel;
+                self.main_view.redraw_view_area(cx);
+            },
+            Event::FingerHover(fm) => {
+                self.finger_hover = fm.rel;
+                self.main_view.redraw_view_area(cx);
+            },
+            Event::FingerDown(_fd) =>{
+                println!("FINGER DOWN");
+                self.finger_down = 1.0;
+                self.main_view.redraw_view_area(cx);
+            },
+            Event::FingerUp(_fu)=>{
+                println!("FINGER UP");
+                self.finger_down = 0.0;
                 self.main_view.redraw_view_area(cx);
             },
             _ => ()
@@ -45,7 +67,9 @@ impl ShaderView {
             
             self.quad.shader = Self::bg().get(cx);
             let k = self.quad.draw_quad_abs(cx, cx.get_turtle_rect());
-            k.push_vec2(cx, self.mouse_xy);
+            k.push_vec2(cx, self.finger_hover);
+            k.push_vec2(cx, self.finger_move);
+            k.push_float(cx, self.finger_down);
             self.main_view.end_view(cx);
         }
     }
