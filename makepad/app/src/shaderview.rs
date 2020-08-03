@@ -3,7 +3,7 @@ use makepad_render::*;
 #[derive(Clone)]
 pub struct ShaderView {
     quad: Quad,
-    main_view: View,
+    area: Area,
     finger_hover: Vec2,
     finger_move: Vec2,
     finger_down: f32
@@ -31,7 +31,7 @@ impl ShaderView {
         
         Self {
             quad: Quad::new(cx),
-            main_view: View::new(cx),
+            area: Area::default(),
             finger_hover: Vec2::default(),
             finger_move: Vec2::default(),
             finger_down: 0.0
@@ -39,39 +39,37 @@ impl ShaderView {
     }
     
     pub fn handle_shader_view(&mut self, cx: &mut Cx, event: &mut Event) {
-        match event.hits(cx, self.main_view.get_view_area(cx), HitOpt::default()) {
+        match event.hits(cx, self.area, HitOpt::default()) {
             Event::FingerMove(fm) => {
                 self.finger_move = fm.rel;
-                self.main_view.redraw_view_area(cx);
+                cx.redraw_child_area(self.area);
             },
             Event::FingerHover(fm) => {
                 self.finger_hover = fm.rel;
-                self.main_view.redraw_view_area(cx);
-            },
+                cx.redraw_child_area(self.area);
+           },
             Event::FingerDown(_fd) =>{
-                println!("FINGER DOWN");
+                println!("{:?}", cx.captured_fingers);
                 self.finger_down = 1.0;
-                self.main_view.redraw_view_area(cx);
+                cx.redraw_child_area(self.area);
             },
             Event::FingerUp(_fu)=>{
-                println!("FINGER UP");
                 self.finger_down = 0.0;
-                self.main_view.redraw_view_area(cx);
+                cx.redraw_child_area(self.area);
             },
             _ => ()
         }
     }
     
     pub fn draw_shader_view(&mut self, cx: &mut Cx) {
-        if self.main_view.begin_view(cx, Layout::default()).is_ok() {
-            
-            self.quad.shader = Self::bg().get(cx);
-            let k = self.quad.draw_quad_abs(cx, cx.get_turtle_rect());
-            k.push_vec2(cx, self.finger_hover);
-            k.push_vec2(cx, self.finger_move);
-            k.push_float(cx, self.finger_down);
-            self.main_view.end_view(cx);
-        }
+        self.quad.shader = Self::bg().get(cx);
+        let k = self.quad.draw_quad_abs(cx, cx.get_turtle_rect());
+        k.push_vec2(cx, self.finger_hover);
+        k.push_vec2(cx, self.finger_move);
+        k.push_float(cx, self.finger_down);
+        let area = k.into();
+        cx.update_area_refs(self.area, area);
+        self.area = k.into();
     }
 }
 
