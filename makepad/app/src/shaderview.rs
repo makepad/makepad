@@ -3,17 +3,99 @@ use makepad_render::*;
 // Shader code itself
 
 fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
+    const EPSILON: float = 1E-3;
+    const T_MAX: float = 10.0;
+    
+    struct Sdf {
+        position: vec3,
+        orientation: mat3,
+        scale: float,
+        stack_0: float,
+        stack_1: float
+    }
+   
     impl Sdf {
-        fn sphere(p: vec3, r: float) -> float {
-            return length(p) - r;
+        fn new() -> Sdf {
+            let sdf: Sdf;
+            sdf.position = vec3(0.0);
+            sdf.orientation = mat3(1.0);
+            sdf.scale = 1.0;
+            sdf.stack_0 = 0.0;
+            sdf.stack_1 = 0.0;
+            return sdf;
         }
+        
+        fn cube(inout self, p: vec3) {
+            p = (self.matrix() * vec4(p, 1.0)).xyz;
+            let q = abs(p) - 1.0;
+            self.stack_0 = self.stack_1;
+            self.stack_1 = min(max(q.x, max(q.y, q.z)), 0.0) + length(max(q, 0.0));
+            self.stack_1 *= self.scale;
+        }
+        
+        fn difference(inout self) {
+            self.stack_1 = max(-self.stack_0, self.stack_1);
+        }
+        
+        fn intersection(inout self) {
+            self.stack_1 = max(self.stack_0, self.stack_1);
+        }
+        
+        fn matrix(inout self) -> mat4 {
+            let inverse_scale = 1.0 / self.scale;
+            let inverse_orientation = mat3(
+                self.orientation[0][0], self.orientation[1][0], self.orientation[2][0],
+                self.orientation[0][1], self.orientation[1][1], self.orientation[2][1],
+                self.orientation[0][2], self.orientation[1][2], self.orientation[2][2]
+            );
+            let inverse_position = -self.position;
+            return mat4(
+                inverse_scale * inverse_orientation[0], 0.0,
+                inverse_scale * inverse_orientation[1], 0.0,
+                inverse_scale * inverse_orientation[2], 0.0,
+                inverse_scale * inverse_orientation * inverse_position, 1.0
+            );
+        }
+        
+        fn set_position(inout self, position: vec3) {
+            self.position = position;
+        }
+        
+        fn set_scale(inout self, scale: float) {
+            self.scale = scale;
+        }
+        
+        fn sphere(inout self, p: vec3) {
+            p = (self.matrix() * vec4(p, 1.0)).xyz;
+            self.stack_0 = self.stack_1;
+            self.stack_1 = length(p) - 1.0;
+            self.stack_1 *= self.scale;
+        }
+        
+        fn union(inout self) {
+            self.stack_1 = min(self.stack_0, self.stack_1);
+        }
+        fn finish(self) -> float {
+            return self.stack_1;
+        }
+    }
+    
+    fn sdf(p: vec3) -> float {
+        let sdf = Sdf::new();
+        sdf.set_scale(0.40);
+        sdf.set_position(vec3(0.5, 0.0, 0.0));
+        sdf.cube(p);
+        sdf.set_position(vec3(0.0));
+        sdf.sphere(p);
+        sdf.intersection();
+        return sdf.finish();    
     }
     
     fn march_ray(p: vec3, v: vec3, t_min: float, t_max: float) -> float {
         let t = t_min;
         for i from 0 to 10 {
-            let d = Sdf::sphere(p + t * v, 1.0);
-            if d <= 1E-3 {
+            let d = sdf(p + t * v);
+            if d <= EPSILON {
                 return t;
             }
             t += d;
@@ -26,9 +108,9 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     
     fn pixel() -> vec4 {
         let p = 2.0 * pos - 1.0;
-        let t = march_ray(vec3(p, 1.0), vec3(0.0, 0.0, -1.0), 0.0, 10.0);
-        if t < 10.0 {
-            return vec4(1.0);        
+        let t = march_ray(vec3(p, 1.0), vec3(0.0, 0.0, -1.0), 0.0, T_MAX);
+        if t < T_MAX {
+            return vec4(1.0);
         } else {
             return vec4(0.0);
         }

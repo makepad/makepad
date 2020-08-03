@@ -686,8 +686,17 @@ impl<'a> TyChecker<'a> {
         match (&ty, arg_tys.as_slice()) {
             (ty, [arg_ty]) if ty.is_scalar() && arg_ty.is_scalar() => Ok(ty.clone()),
             (ty, [arg_ty]) if ty.is_vector() && arg_ty.is_scalar() => Ok(ty.clone()),
+            (ty, [arg_ty]) if ty.is_matrix() && arg_ty.is_scalar() || arg_ty.is_matrix() => {
+                Ok(ty.clone())
+            }
             (ty, arg_tys)
                 if ty.is_vector()
+                    && (|| {
+                        arg_tys.iter().all(|arg_ty| {
+                            arg_ty.is_scalar() || arg_ty.is_vector() || arg_ty.is_matrix()
+                        })
+                    })()
+                || ty.is_matrix()
                     && (|| {
                         arg_tys.iter().all(|arg_ty| {
                             arg_ty.is_scalar() || arg_ty.is_vector() || arg_ty.is_matrix()
@@ -718,9 +727,6 @@ impl<'a> TyChecker<'a> {
                         .into(),
                     });
                 }
-                Ok(ty.clone())
-            }
-            (ty, [arg_ty]) if ty.is_matrix() && arg_ty.is_scalar() || arg_ty.is_matrix() => {
                 Ok(ty.clone())
             }
             _ => Err(Error {
