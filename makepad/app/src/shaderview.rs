@@ -2,14 +2,14 @@ use makepad_render::*;
 
 // Shader code itself
 
-fn shader()->ShaderGen{Quad::def_quad_shader().compose(shader!{"
+fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     
     fn pixel() -> vec4 {
         let df = Df::viewport(pos * vec2(w, h));
         df.circle(finger_hover.x, finger_hover.y, 100.);
-        return df.fill(mix(color!(blue),color!(red), finger_down)); 
+        return df.fill(mix(color!(blue), color!(red), finger_down));
     }
-        
+    
 "})}
 
 // Makepad UI structure to render shader
@@ -30,12 +30,12 @@ impl ShaderView {
     pub fn finger_down() -> FloatId {uid!()}
     pub fn new(cx: &mut Cx) -> Self {
         
-        Self::bg().set(cx, shader().compose(shader!{
+        Self::bg().set(cx, shader().compose(shader!{"
             instance finger_hover: ShaderView::finger_hover();
             instance finger_move: ShaderView::finger_move();
             instance finger_down: ShaderView::finger_down();
-
-        }));
+            
+        "}));
         
         Self {
             quad: Quad::new(cx),
@@ -56,11 +56,11 @@ impl ShaderView {
                 self.finger_hover = fm.rel;
                 cx.redraw_child_area(self.area);
             },
-            Event::FingerDown(_fd) =>{
+            Event::FingerDown(_fd) => {
                 self.finger_down = 1.0;
                 cx.redraw_child_area(self.area);
             },
-            Event::FingerUp(_fu)=>{
+            Event::FingerUp(_fu) => {
                 self.finger_down = 0.0;
                 cx.redraw_child_area(self.area);
             },
