@@ -74,6 +74,10 @@ impl<'a> Parser<'a> {
                     let decl = self.parse_varying_decl()?;
                     self.shader.decls.push(Decl::Varying(decl));
                 }
+                Token::Ident(ident) if ident == Ident::new("debug") => {
+					self.skip_token();
+                    self.shader.debug = true;
+                }
                 token => {
                     return Err(span.error(self, format!("unexpected token `{}`", token).into()))
                 }
