@@ -616,7 +616,7 @@ impl Cx {
             if let Some(error) = Self::opengl_has_shader_error(true, vs as usize, &vertex) {
                 if use_const_table{
                     println!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error);
-                    return ShaderCompileResult::Nop
+                    return ShaderCompileResult::Nop{id:shader_id}
                 }
                 panic!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error);
             }
@@ -627,7 +627,7 @@ impl Cx {
             if let Some(error) = Self::opengl_has_shader_error(true, fs as usize, &fragment) {
                 if use_const_table{
                     println!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error);
-                    return ShaderCompileResult::Nop
+                    return ShaderCompileResult::Nop{id:shader_id}
                 }
                 panic!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error);
             }  
@@ -639,7 +639,7 @@ impl Cx {
             if let Some(error) = Self::opengl_has_shader_error(false, program as usize, "") {
                 if use_const_table{
                     println!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error);
-                    return ShaderCompileResult::Nop
+                    return ShaderCompileResult::Nop{id:shader_id}
                 }
                 panic!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error);
             }
