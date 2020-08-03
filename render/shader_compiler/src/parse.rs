@@ -989,8 +989,8 @@ impl Token {
 
     fn to_rel_op(self) -> Option<BinOp> {
         match self {
-            Token::Lt => Some(BinOp::Le),
-            Token::LtEq => Some(BinOp::Lt),
+            Token::Lt => Some(BinOp::Lt),
+            Token::LtEq => Some(BinOp::Le),
             Token::Gt => Some(BinOp::Gt),
             Token::GtEq => Some(BinOp::Ge),
             _ => None,
