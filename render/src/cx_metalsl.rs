@@ -37,6 +37,7 @@ impl Cx {
         for (index, sh) in &mut self.shaders.iter_mut().enumerate() {
             let result = Self::mtl_compile_shader(index, false, sh, metal_cx);
             if let ShaderCompileResult::Fail{err, ..} = result {
+                eprintln!("{}", err);
                 panic!("{}", err);
             } 
         };
