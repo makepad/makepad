@@ -160,10 +160,7 @@ impl Animator {
     }
     
     pub fn set_area(&mut self, cx: &mut Cx, area: Area) {
-        if self.area != Area::Empty {
-            cx.update_area_refs(self.area, area.clone());
-        }
-        self.area = area.clone();
+        self.area = cx.update_area_refs(self.area, area.clone());
     }
     
     
