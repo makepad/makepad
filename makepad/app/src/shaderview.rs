@@ -1,5 +1,19 @@
 use makepad_render::*;
 
+// Shader code itself
+
+fn shader()->ShaderGen{Quad::def_quad_shader().compose(shader!{"
+    
+    fn pixel() -> vec4 {
+        let df = Df::viewport(pos * vec2(w, h));
+        df.circle(finger_hover.x, finger_hover.y, 100.);
+        return df.fill(mix(color!(blue),color!(red), finger_down)); 
+    }
+        
+"})}
+
+// Makepad UI structure to render shader
+
 #[derive(Clone)]
 pub struct ShaderView {
     quad: Quad,
@@ -15,19 +29,13 @@ impl ShaderView {
     pub fn finger_move() -> Vec2Id {uid!()}
     pub fn finger_down() -> FloatId {uid!()}
     pub fn new(cx: &mut Cx) -> Self {
-        Self::bg().set(cx, Quad::def_quad_shader().compose(shader!{"
-            
-            instance finger_hover: Self::finger_hover();
-            instance finger_move: Self::finger_move();
-            instance finger_down: Self::finger_down();
-            
-            fn pixel() -> vec4 {
-                let df = Df::viewport(pos * vec2(w, h));
-                df.circle(finger_hover.x, finger_hover.y, 100.);
-                return df.fill(mix(color!(blue),color!(red), finger_down)); 
-            }
-            
-        "}));
+        
+        Self::bg().set(cx, shader().compose(shader!{
+            instance finger_hover: ShaderView::finger_hover();
+            instance finger_move: ShaderView::finger_move();
+            instance finger_down: ShaderView::finger_down();
+
+        }));
         
         Self {
             quad: Quad::new(cx),
