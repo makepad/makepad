@@ -152,10 +152,7 @@ impl View {
         let new_area = Area::View(ViewArea {view_id: view_id, redraw_id: cx.redraw_id});
         cx.update_area_refs(old_area, new_area);
 
-        cx.begin_turtle(override_layout, Area::View(ViewArea {
-            view_id: view_id,
-            redraw_id: cx.redraw_id
-        }));
+        cx.begin_turtle(override_layout, new_area);
         
         if is_root_for_pass {
             cx.passes[pass_id].paint_dirty = true;
