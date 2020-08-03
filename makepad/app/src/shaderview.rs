@@ -3,8 +3,6 @@ use makepad_render::*;
 // Shader code itself
 
 fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
-    debug
-    
     impl Sdf {
         fn sphere(p: vec3, r: float) -> float {
             return length(p) - r;
@@ -25,13 +23,12 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         }
         return t_max;
     }
-
     
     fn pixel() -> vec4 {
         let p = 2.0 * pos - 1.0;
         let t = march_ray(vec3(p, 1.0), vec3(0.0, 0.0, -1.0), 0.0, 10.0);
-        if t < 9.0 {
-            return vec4(1.0, 1.0, 0.0, 1.0);        
+        if t < 10.0 {
+            return vec4(1.0);        
         } else {
             return vec4(0.0);
         }
