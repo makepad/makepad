@@ -565,7 +565,7 @@ impl Cx {
         gl_texture_slots
     }
     
-    pub fn opengl_compile_shader(shader_id:usize, bool:use_const_table, sh: &mut CxShader, opengl_cx: &OpenglCx) -> ShaderCompileResult {
+    pub fn opengl_compile_shader(shader_id:usize, use_const_table:bool, sh: &mut CxShader, opengl_cx: &OpenglCx) -> ShaderCompileResult {
         
         // lets compile.
         let shader_ast = sh.shader_gen.lex_parse_analyse();
