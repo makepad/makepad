@@ -1232,7 +1232,6 @@ impl TextEditor {
         else {
             //let bg_area = bg_inst.into_area();
             let view_area = self.view.get_view_area(cx);
-            cx.update_area_refs(self._view_area, view_area);
             //self._bg_area = bg_area;
             self._view_area = view_area;
             if self._set_key_focus_on_load {
