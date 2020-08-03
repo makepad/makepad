@@ -211,15 +211,13 @@ impl<'a> Parser<'a> {
         let ident = self.parse_ident()?;
         self.expect_token(Token::LeftBrace)?;
         let mut fields = Vec::new();
-        if !self.accept_token(Token::RightBrace) {
-            loop {
-                fields.push(self.parse_field()?);
-                if !self.accept_token(Token::Comma) {
-                    break;
-                }
+        loop {
+            fields.push(self.parse_field()?);
+            if !self.accept_token(Token::Comma) {
+                break;
             }
-            self.expect_token(Token::RightBrace)?;
         }
+        self.expect_token(Token::RightBrace)?;
         Ok(span.end(&self, |span| StructDecl {
             span,
             ident,
@@ -666,7 +664,7 @@ impl<'a> Parser<'a> {
         while let Some(op) = self.peek_token().to_mul_op() {
             self.skip_token();
             let left_expr = Box::new(acc);
-            let right_expr = Box::new(self.parse_postfix_expr()?);
+            let right_expr = Box::new(self.parse_un_expr()?);
             acc = span.end(self, |span| Expr {
                 span,
                 ty: RefCell::new(None),
