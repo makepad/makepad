@@ -271,7 +271,7 @@ impl AppStorage {
                     read_msg: None,
                     full_path: path.to_string(),
                     text_buffer_id: tb_id,
-                    live_macros: LiveMacros::default(),
+                    live_macros: LiveMacros::new(cx),
                     // write_msg: None,
                     text_buffer: TextBuffer {
                         signal: cx.new_signal(),
@@ -308,7 +308,7 @@ impl AppStorage {
                     read_msg: Some(msg),
                     full_path: path.to_string(),
                     text_buffer_id: tb_id,
-                    live_macros: LiveMacros::default(),
+                    live_macros: LiveMacros::new(cx),
                     // write_msg: None,
                     text_buffer: TextBuffer {
                         signal: cx.new_signal(),
