@@ -67,9 +67,9 @@ impl ShaderView {
         k.push_vec2(cx, self.finger_hover);
         k.push_vec2(cx, self.finger_move);
         k.push_float(cx, self.finger_down);
-        let area = k.into();
-        cx.update_area_refs(self.area, area);
-        self.area = k.into();
+        let new_area = k.into();
+        cx.update_area_refs(self.area, new_area);
+        self.area = new_area;
     }
 }
 
