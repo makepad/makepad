@@ -47,7 +47,7 @@ impl ShaderView {
             Event::FingerHover(fm) => {
                 self.finger_hover = fm.rel;
                 cx.redraw_child_area(self.area);
-           },
+            },
             Event::FingerDown(_fd) =>{
                 self.finger_down = 1.0;
                 cx.redraw_child_area(self.area);
@@ -66,7 +66,9 @@ impl ShaderView {
         k.push_vec2(cx, self.finger_hover);
         k.push_vec2(cx, self.finger_move);
         k.push_float(cx, self.finger_down);
+        let new_area = k.into();
         self.area = cx.update_area_refs(self.area, k.into());
+        self.area = new_area;
     }
 }
 
