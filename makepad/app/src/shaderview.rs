@@ -7,7 +7,11 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     fn pixel() -> vec4 {
         let df = Df::viewport(pos * vec2(w, h));
         df.circle(finger_hover.x, finger_hover.y, 100.);
-        return df.fill(mix(color!(blue), color!(red), finger_down));
+        return df.fill(mix(
+            color!(blue),
+            color!(red),
+            finger_down
+        ));
     }
     
 "})}
