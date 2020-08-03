@@ -188,6 +188,11 @@ impl MakepadApp {
                                         title: "Keyboard".to_string(),
                                         item: Panel::Keyboard
                                     },
+                                    DockTab {
+                                        closeable: false,
+                                        title: "ShaderView".to_string(),
+                                        item: Panel::ShaderView
+                                    },
                                 ]
                             })
                         })
