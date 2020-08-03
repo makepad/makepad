@@ -10,6 +10,7 @@ use std::fmt;
 
 #[derive(Clone, Debug)]
 pub struct ShaderAst {
+    pub debug: bool,
     pub const_table: RefCell<Option<Vec<f32>>>,
     pub decls: Vec<Decl>,
 }
@@ -17,6 +18,7 @@ pub struct ShaderAst {
 impl ShaderAst {
     pub fn new() -> ShaderAst {
         ShaderAst {
+            debug: false,
             const_table: RefCell::new(None),
             decls: Vec::new(),
         }

@@ -3,17 +3,39 @@ use makepad_render::*;
 // Shader code itself
 
 fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
+    debug
     
-    fn pixel() -> vec4 {
-        let df = Df::viewport(pos * vec2(w, h));
-        df.circle(0.5*w,0.5*h, 200.);
-        return df.fill(mix(
-            color!(#60f),
-            color!(red),
-            finger_down
-        ));
+    impl Sdf {
+        fn sphere(p: vec3, r: float) -> float {
+            return length(p) - r;
+        }
     }
     
+    fn march_ray(p: vec3, v: vec3, t_min: float, t_max: float) -> float {
+        let t = t_min;
+        for i from 0 to 10 {
+            let d = Sdf::sphere(p + t * v, 1.0);
+            if d <= 1E-3 {
+                return t;
+            }
+            t += d;
+            if t >= t_max {
+                break;   
+            }
+        }
+        return t_max;
+    }
+
+    
+    fn pixel() -> vec4 {
+        let p = 2.0 * pos - 1.0;
+        let t = march_ray(vec3(p, 1.0), vec3(0.0, 0.0, -1.0), 0.0, 10.0);
+        if t < 9.0 {
+            return vec4(1.0, 1.0, 0.0, 1.0);        
+        } else {
+            return vec4(0.0);
+        }
+    }
 "})}
 
 // Makepad UI structure to render shader
