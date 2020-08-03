@@ -68,7 +68,6 @@ impl Quad {
             }
             
             fn pixel() -> vec4 {
-                return vec4(color.rgb, 1.0);
                 return vec4(color.rgb * color.a, color.a);
             }
             

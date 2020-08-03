@@ -52,6 +52,11 @@ impl Cx {
         
         let mtlsl =  generate_metal::generate_shader(&shader_ast, use_const_table);
         let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, shader_ast.const_table.borrow_mut().take());
+
+        if shader_ast.debug{
+            println!("--------------- Shader {} --------------- \n{}\n---------------\n", shader_id, mtlsl);
+        }
+
         
         if let Some(sh_platform) = &sh.platform{
             if sh_platform.metal_shader == mtlsl{
