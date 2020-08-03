@@ -647,6 +647,8 @@ impl Cx {
                 },
                 geometries,
                 instances,
+                vertex,
+                fragment,
                 pass_uniforms: Self::opengl_get_uniforms(program,  &mapping.pass_uniforms),
                 view_uniforms: Self::opengl_get_uniforms(program, &mapping.view_uniforms),
                 draw_uniforms: Self::opengl_get_uniforms(program, &mapping.draw_uniforms),
@@ -997,6 +999,8 @@ impl OpenglCx {
 #[derive(Clone)]
 pub struct CxPlatformShader {
     pub program: u32,
+    pub vertex: String,
+    pub fragment: String,
     pub geom_vbuf: OpenglBuffer,
     pub geom_ibuf: OpenglBuffer,
     pub geometries: Vec<OpenglAttribute>,
