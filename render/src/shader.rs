@@ -76,7 +76,7 @@ impl CxShader {
                     let p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
                     return vec4(c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y), c.w);
                 }
-                /*
+                
                 fn rgb2hsv(c: vec4) -> vec4 {
                     let K: vec4 = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
                     let p: vec4 = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
@@ -85,7 +85,7 @@ impl CxShader {
                     let d: float = q.x - min(q.w, q.y);
                     let e: float = 1.0e-10;
                     return vec4(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x, c.w);
-                }*/
+                }
             }
             
             impl Df {
