@@ -142,11 +142,16 @@ impl View {
         let cxview = &mut cx.views[view_id];
         
         // update drawlist ids
+        let last_redraw_id = cxview.redraw_id;
         cxview.redraw_id = cx.redraw_id;
         cxview.draw_calls_len = 0;
         
         cx.view_stack.push(view_id);
         
+        let old_area = Area::View(ViewArea {view_id: view_id, redraw_id: last_redraw_id});
+        let new_area = Area::View(ViewArea {view_id: view_id, redraw_id: cx.redraw_id});
+        cx.update_area_refs(old_area, new_area);
+
         cx.begin_turtle(override_layout, Area::View(ViewArea {
             view_id: view_id,
             redraw_id: cx.redraw_id
