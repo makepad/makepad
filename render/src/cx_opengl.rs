@@ -593,7 +593,12 @@ impl Cx {
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             {}\0", fragment);
-
+        
+        if shader_ast.debug{
+            println!("--------------- Vertex shader {} --------------- \n{}\n---------------\n", shader_id, vertex);
+            println!("--------------- Fragment shader {} --------------- \n{}\n---------------\n", shader_id, fragment);
+        }
+        
         if let Some(sh_platform) = &sh.platform{
             if sh_platform.vertex == vertex && sh_platform.fragment == fragment{
                 sh.mapping = mapping;
