@@ -617,9 +617,9 @@ impl Cx {
         }
     }
     
-    pub fn update_area_refs(&mut self, old_area: Area, new_area: Area) {
+    pub fn update_area_refs(&mut self, old_area: Area, new_area: Area)->Area{
         if old_area == Area::Empty || old_area == Area::All {
-            return
+            return new_area
         }
         
         if let Some(anim_anim) = self.playing_anim_areas.iter_mut().find( | v | v.area == old_area) {
@@ -648,6 +648,7 @@ impl Cx {
         if let Some(next_frame) = self.frame_callbacks.iter_mut().find( | v | **v == old_area) {
             *next_frame = new_area.clone()
         }
+        new_area
     }
     
     pub fn set_key_focus(&mut self, focus_area: Area) {
