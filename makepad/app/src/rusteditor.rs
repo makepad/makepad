@@ -3,15 +3,25 @@ use makepad_widget::*;
 use crate::searchindex::*;
 use crate::appstorage::*;
 use crate::mprstokenizer::*;
+use crate::livemacro::*;
 
 #[derive(Clone)]
 pub struct RustEditor {
+    pub view: View,
+    pub live_macros: LiveMacroView,
+    pub splitter: Splitter,
     pub text_editor: TextEditor,
 }
 
 impl RustEditor {
     pub fn new(cx: &mut Cx) -> Self {
         let editor = Self {
+            view: View::new(cx),
+            live_macros: LiveMacroView::new(cx),
+            splitter: Splitter{
+                pos:10.0,
+                ..Splitter::new(cx)
+            },
             text_editor: TextEditor::new(cx),
         };
         //tab.animator.default = tab.anim_default(cx);
@@ -19,6 +29,14 @@ impl RustEditor {
     }
     
     pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, search_index: Option<&mut SearchIndex>) -> TextEditorEvent {
+        
+        match self.splitter.handle_splitter(cx, event){
+            SplitterEvent::Moving{..}=>{
+                self.view.redraw_view_parent_area(cx);
+            },
+            _=>()
+        }
+        
         let ce = self.text_editor.handle_text_editor(cx, event, &mut atb.text_buffer);
         match ce {
             TextEditorEvent::Change => {
@@ -35,15 +53,30 @@ impl RustEditor {
     }
     
     pub fn draw_rust_editor(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, search_index: Option<&mut SearchIndex>) {
+        
+        if self.view.begin_view(cx, Layout::default()).is_err(){
+            return
+        };
+        
+        self.splitter.begin_splitter(cx);
+        
+        self.live_macros.draw_live_macros(cx, atb);
+        
+        self.splitter.mid_splitter(cx);
+        
         Self::update_token_chunks(cx, atb, search_index);
         
-        if self.text_editor.begin_text_editor(cx, &mut atb.text_buffer).is_err() {return}
-        
-        for (index, token_chunk) in atb.text_buffer.token_chunks.iter_mut().enumerate() {
-            self.text_editor.draw_chunk(cx, index, &atb.text_buffer.flat_text, token_chunk, &atb.text_buffer.markers);
+        if self.text_editor.begin_text_editor(cx, &mut atb.text_buffer).is_ok() {
+            for (index, token_chunk) in atb.text_buffer.token_chunks.iter_mut().enumerate() {
+                self.text_editor.draw_chunk(cx, index, &atb.text_buffer.flat_text, token_chunk, &atb.text_buffer.markers);
+            }
+            
+            self.text_editor.end_text_editor(cx, &mut atb.text_buffer);
         }
         
-        self.text_editor.end_text_editor(cx, &mut atb.text_buffer);
+        self.splitter.end_splitter(cx);
+        
+        self.view.end_view(cx);
     }
 
     pub fn update_token_chunks(cx:&mut Cx, atb: &mut AppTextBuffer, mut search_index: Option<&mut SearchIndex>) {

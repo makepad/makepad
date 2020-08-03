@@ -3,6 +3,11 @@ use makepad_widget::*;
 use crate::mprstokenizer::*;
 use crate::appstorage::*;
 
+#[derive(Clone)]
+pub struct LiveMacroView{
+    pub scroll_view: ScrollView,
+}
+
 pub struct LiveMacroPick {
     _token: usize,
 }
@@ -16,10 +21,40 @@ pub enum LiveMacro {
     Shader(LiveMacroShader)
 }
 
-#[derive(Default)]
 pub struct LiveMacros {
-    _macros: Vec<LiveMacro>
+    changed: Signal,
+    macros: Vec<LiveMacro>
 }
+
+impl LiveMacros{
+    pub fn new(cx: &mut Cx)->Self{
+        Self{
+            changed: cx.new_signal(),
+            macros: Vec::new()
+        }
+    }
+}
+
+pub enum LiveMacroViewEvent{
+    None
+}
+
+impl LiveMacroView {
+    pub fn new(cx: &mut Cx) -> Self {
+        Self {
+            scroll_view: ScrollView::new(cx),
+        }
+    }
+    
+    pub fn handle_live_macros(&mut self, _cx: &mut Cx, _event: &mut Event, _atb: &mut AppTextBuffer) -> LiveMacroViewEvent {
+        LiveMacroViewEvent::None
+    }
+    
+    pub fn draw_live_macros(&mut self, _cx: &mut Cx, _atb: &mut AppTextBuffer) {
+        // 
+    }
+}
+      
 
 impl AppTextBuffer {
     pub fn parse_live_macros(&mut self, cx: &mut Cx) {
@@ -27,18 +62,14 @@ impl AppTextBuffer {
         while tp.advance() {
             match tp.cur_type() {
                 TokenType::Macro => {
-                    if tp.eat("shader") &&
-                    tp.eat("!") &&
-                    tp.eat("{") {
+                    if tp.eat("color") && tp.eat("!") && tp.eat("("){
+                       // lets add this thing to our macro widget list
+                       // we also have to parse whats in it. AGAIN. ahwell
+                       // lets parse it, 
+                       // lets add the control
+                    }
+                    else if tp.eat("shader") && tp.eat("!") && tp.eat("{") {
                         if tp.cur_type() == TokenType::ParenOpen {
-                            
-                            // lets get the filename, the line
-                            // lets slice out the whole shader
-                            // then we hand it to the render backend
-                            // to diff it
-                            // lets fetch a range
-                            // lets get the linenr
-                            
                             if let Some(shader) = tp.cur_pair_as_string() {
                                 let lc = tp.cur_line_col();
                                 
@@ -51,37 +82,7 @@ impl AppTextBuffer {
                                 //println!("{} {}:{}",self.full_path, lc.0, lc.1);
                             }
                             
-                            tp.jump_to_pair();
-                            // ok now we are at ", hopefully
-                            // get matching pair
-                            // let start = tp.next_index;
-                            // we find the right slot in the shader
-                            //
-                            /*
-                            let end = tp.cur_pair_token();
-                            
-                            // don't jump, there might be actual value macros
-                            // in the shader itself
-                            
-                            if let Err(ref error) = ( || -> Result<(), Box<dyn Error>> {
-                                let tokens = lex::lex(
-                                    tp.flat_text[start..end].iter().cloned()
-                                ).collect::<Result<Vec<_>, _>>()?;
-                                let mut shader = Shader::new();
-                                parse::parse(&tokens, &mut shader)?;
-                                analyse::analyse(&shader)?;
-                                let vertex_string = generate::generate(ShaderKind::Vertex, &shader);
-                                let fragment_string = generate::generate(ShaderKind::Fragment, &shader);
-                                println!("VERTEX SHADER:");
-                                println!("{}", vertex_string);
-                                println!("FRAGMENT SHADER:");
-                                println!("{}", fragment_string);
-                                Ok(())
-                            })() { 
-                                println!("{}", error);
-                            }
-                            */
-                            
+                            //tp.jump_to_pair();
                         }
                     }
                 },
