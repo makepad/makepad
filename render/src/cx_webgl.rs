@@ -229,6 +229,13 @@ impl Cx {
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             {}\0", fragment);
+
+        if shader_ast.debug{
+            platform.from_wasm.log(&format!(
+                "--------------- Vertex shader {} --------------- \n{}\n---------------\n--------------- Fragment shader {} --------------- \n{}\n---------------\n", shader_id, vertex, shader_id, fragment
+            ));
+        }
+
              
         // lets check if we need to recompile the shader at all
         if let Some(sh_platform) = &sh.platform{
