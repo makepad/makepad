@@ -22,15 +22,15 @@ pub enum LiveMacro {
 }
 
 pub struct LiveMacros {
-    changed: Signal,
-    macros: Vec<LiveMacro>
+    _changed: Signal,
+    _macros: Vec<LiveMacro>
 }
 
 impl LiveMacros{
     pub fn new(cx: &mut Cx)->Self{
         Self{
-            changed: cx.new_signal(),
-            macros: Vec::new()
+            _changed: cx.new_signal(),
+            _macros: Vec::new()
         }
     }
 }
