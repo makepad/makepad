@@ -15,6 +15,14 @@ pub struct Color {
 }
 
 impl Color {
+    pub fn white()->Color{
+        Self{
+            r:1.0,
+            g:1.0,
+            b:1.0,
+            a:1.0,
+        }
+    }
     pub fn mix(a: Color, b: Color, f: f32) -> Color {
         let nf = 1.0 - f;
         return Color {
@@ -42,6 +50,23 @@ impl Color {
             a: a as f32 / 255.,
         }
     }
+/*
+    fn from_hsv() -> Color { //http://gamedev.stackexchange.com/questions/59797/glsl-shader-change-hue-saturation-brightness
+        
+        let K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+        let p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+        return vec4(c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y), c.w);
+    }
+    
+    fn to_hsv(&self) -> vec4 {
+        let K: vec4 = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+        let p: vec4 = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+        let q: vec4 = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+        
+        let d: float = q.x - min(q.w, q.y);
+        let e: float = 1.0e-10;
+        return vec4(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x, c.w);
+    }*/
 
     pub fn from_u32(val: u32) -> Color {
         Color {
