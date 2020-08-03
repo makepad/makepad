@@ -83,7 +83,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     fn sdf(p: vec3) -> float {
         let sdf = Sdf::new();
         sdf.set_scale(0.40);
-        sdf.set_position(vec3(0.5, 0.0, 0.0));
+        sdf.set_position(vec3(0.5*sin(frame*0.1), 0.0, 0.0));
         sdf.cube(p);
         sdf.set_position(vec3(0.0));
         sdf.sphere(p);
@@ -125,7 +125,8 @@ pub struct ShaderView {
     area: Area,
     finger_hover: Vec2,
     finger_move: Vec2,
-    finger_down: f32
+    finger_down: f32,
+    frame: f32
 }
 
 impl ShaderView {
@@ -133,13 +134,14 @@ impl ShaderView {
     pub fn finger_hover() -> Vec2Id {uid!()}
     pub fn finger_move() -> Vec2Id {uid!()}
     pub fn finger_down() -> FloatId {uid!()}
+    pub fn frame() -> FloatId {uid!()}
     pub fn new(cx: &mut Cx) -> Self {
         
         Self::bg().set(cx, shader().compose(shader!{"
             instance finger_hover: ShaderView::finger_hover();
             instance finger_move: ShaderView::finger_move();
             instance finger_down: ShaderView::finger_down();
-            
+            instance frame: ShaderView::frame();
         "}));
         
         Self {
@@ -147,7 +149,8 @@ impl ShaderView {
             area: Area::default(),
             finger_hover: Vec2::default(),
             finger_move: Vec2::default(),
-            finger_down: 0.0
+            finger_down: 0.0,
+            frame: 0.0
         }
     }
     
@@ -179,7 +182,10 @@ impl ShaderView {
         k.push_vec2(cx, self.finger_hover);
         k.push_vec2(cx, self.finger_move);
         k.push_float(cx, self.finger_down);
+        k.push_float(cx, self.frame);
+        self.frame += 1.0;
         self.area = cx.update_area_refs(self.area, k.into());
+        cx.redraw_child_area(self.area);
     }
 }
 

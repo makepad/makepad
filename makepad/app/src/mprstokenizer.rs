@@ -88,6 +88,15 @@ impl <'a>TokenParser<'a> {
         Some(out_str)
     }
     
+    pub fn cur_as_string(&self) -> String{
+         let mut out_str = String::new();
+         let tok = &self.tokens[self.index];
+         for i in tok.offset..tok.offset+tok.len{
+            out_str.push(self.flat_text[i]);
+        }
+        return out_str
+    }
+    
     pub fn cur_type(&self) -> TokenType {
         self.tokens[self.index].token_type
     }
@@ -119,7 +128,6 @@ impl <'a>TokenParser<'a> {
     pub fn cur_pair_offset(&self) -> usize {
         self.tokens[self.tokens[self.index].pair_token].offset
     }
-
     
     pub fn next_type(&self) -> TokenType {
         if self.index < self.tokens.len() - 1 {
