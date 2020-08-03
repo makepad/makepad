@@ -614,6 +614,10 @@ impl Cx {
             gl::CompileShader(vs);
             //println!("{}", Self::opengl_get_info_log(true, vs as usize, &vertex));
             if let Some(error) = Self::opengl_has_shader_error(true, vs as usize, &vertex) {
+                if use_const_table{
+                    println!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error);
+                    return ShaderCompileResult::Nop
+                }
                 panic!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error);
             }
             let fs = gl::CreateShader(gl::FRAGMENT_SHADER);
@@ -621,6 +625,10 @@ impl Cx {
             gl::CompileShader(fs);
             //println!("{}", Self::opengl_get_info_log(true, fs as usize, &fragment));
             if let Some(error) = Self::opengl_has_shader_error(true, fs as usize, &fragment) {
+                if use_const_table{
+                    println!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error);
+                    return ShaderCompileResult::Nop
+                }
                 panic!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error);
             }  
             
@@ -629,6 +637,10 @@ impl Cx {
             gl::AttachShader(program, fs);
             gl::LinkProgram(program);
             if let Some(error) = Self::opengl_has_shader_error(false, program as usize, "") {
+                if use_const_table{
+                    println!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error);
+                    return ShaderCompileResult::Nop
+                }
                 panic!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error);
             }
             gl::DeleteShader(vs);
