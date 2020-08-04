@@ -127,7 +127,8 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         if t < T_MAX {
             let p = p0 + t * v;
             let n = estimate_normal(p);
-            return vec4((n + 1.0) / 2.0, 1.0);
+            let k = 0.5 + 0.5 * vec4(dot(n, vec3(0.0, 0.0, -1.0)));
+            return k * color!(red);
         } else {
             return vec4(0.0);
         }
