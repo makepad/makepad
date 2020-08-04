@@ -7,9 +7,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     const T_MAX: float = 10.0;
     
     struct Sdf {
-        position: vec3,
-        orientation: mat3,
-        scale: float,
+        rotation: mat3,
         stack_0: float,
         stack_1: float
     }
@@ -17,20 +15,17 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     impl Sdf {
         fn new() -> Sdf {
             let sdf: Sdf;
-            sdf.position = vec3(0.0);
-            sdf.orientation = mat3(1.0);
-            sdf.scale = 1.0;
+            sdf.rotation = mat3(1.0);
             sdf.stack_0 = 0.0;
             sdf.stack_1 = 0.0;
             return sdf;
         }
         
         fn cube(inout self, p: vec3) {
-            p = (self.matrix() * vec4(p, 1.0)).xyz;
-            let q = abs(p) - 1.0;
+            p = transpose_mat3(self.rotation) * p;
+            let q = abs(p) - 0.5;
             self.stack_0 = self.stack_1;
             self.stack_1 = min(max(q.x, max(q.y, q.z)), 0.0) + length(max(q, 0.0));
-            self.stack_1 *= self.scale;
         }
         
         fn difference(inout self) {
@@ -41,59 +36,64 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             self.stack_1 = max(self.stack_0, self.stack_1);
         }
         
-        fn matrix(inout self) -> mat4 {
-            let inverse_scale = 1.0 / self.scale;
-            let inverse_orientation = mat3(
-                self.orientation[0][0], self.orientation[1][0], self.orientation[2][0],
-                self.orientation[0][1], self.orientation[1][1], self.orientation[2][1],
-                self.orientation[0][2], self.orientation[1][2], self.orientation[2][2]
-            );
-            let inverse_position = -self.position;
-            return mat4(
-                inverse_scale * inverse_orientation[0], 0.0,
-                inverse_scale * inverse_orientation[1], 0.0,
-                inverse_scale * inverse_orientation[2], 0.0,
-                inverse_scale * inverse_orientation * inverse_position, 1.0
-            );
-        }
-        
-        fn set_position(inout self, position: vec3) {
-            self.position = position;
-        }
-        
-        fn set_scale(inout self, scale: float) {
-            self.scale = scale;
+        fn rotate(inout self, axis: vec3, angle: float) {
+            let u = normalize(axis);
+            let s = sin(angle);
+            let c = cos(angle);
+            self.rotation = mat3(
+                c + u.x * u.x * (1.0 - c),
+                u.y * u.x * (1.0 - c) + u.z * s,
+                u.z * u.x * (1.0 - c) - u.y * s,
+                u.x * u.y * (1.0 - c) - u.z * s,
+                c + u.y * u.y * (1.0 - c),
+                u.z * u.y * (1.0 - c) + u.x * s,
+                u.x * u.z * (1.0 - c) + u.y * s,
+                u.y * u.z * (1.0 - c) - u.x * s,
+                c + u.z * u.z * (1.0 - c)
+            ) * self.rotation;
         }
         
         fn sphere(inout self, p: vec3) {
-            p = (self.matrix() * vec4(p, 1.0)).xyz;
+            p = transpose_mat3(self.rotation) * p;
             self.stack_0 = self.stack_1;
-            self.stack_1 = length(p) - 1.0;
-            self.stack_1 *= self.scale;
+            self.stack_1 = length(p) - 0.5;
         }
         
         fn union(inout self) {
             self.stack_1 = min(self.stack_0, self.stack_1);
         }
+        
         fn finish(self) -> float {
             return self.stack_1;
         }
     }
+
+    fn transpose_mat3(m: mat3) -> mat3 {
+        return mat3(
+            m[0][0], m[1][0], m[2][0],
+            m[0][1], m[1][1], m[2][1],
+            m[0][2], m[1][2], m[2][2]
+        );
+    }
     
     fn sdf(p: vec3) -> float {
         let sdf = Sdf::new();
-        sdf.set_scale(0.40);
-        sdf.set_position(vec3(0.5*sin(frame*0.1), 0.0, 0.0));
+        sdf.rotate(vec3(1.0, 1.0, 1.0), 0.01 * frame);
         sdf.cube(p);
-        sdf.set_position(vec3(0.0));
-        sdf.sphere(p);
-        sdf.intersection();
         return sdf.finish();    
+    }
+    
+    fn estimate_normal(p: vec3) -> vec3 {
+        return normalize(vec3(
+            sdf(vec3(p.x + EPSILON, p.y, p.z)) - sdf(vec3(p.x - EPSILON, p.y, p.z)),
+            sdf(vec3(p.x, p.y + EPSILON, p.z)) - sdf(vec3(p.x, p.y - EPSILON, p.z)),
+            sdf(vec3(p.x, p.y, p.z + EPSILON)) - sdf(vec3(p.x, p.y, p.z - EPSILON))
+        ));
     }
     
     fn march_ray(p: vec3, v: vec3, t_min: float, t_max: float) -> float {
         let t = t_min;
-        for i from 0 to 10 {
+        for i from 0 to 100 {
             let d = sdf(p + t * v);
             if d <= EPSILON {
                 return t;
@@ -107,10 +107,11 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     }
     
     fn pixel() -> vec4 {
-        let p = 2.0 * pos - 1.0;
-        let t = march_ray(vec3(p, 1.0), vec3(0.0, 0.0, -1.0), 0.0, T_MAX);
+        let p = vec3(2.0 * pos - 1.0, 2.0);
+        let t = march_ray(p, vec3(0.0, 0.0, -1.0), 0.0, T_MAX);
         if t < T_MAX {
-            return vec4(1.0);
+            let n = estimate_normal(p);
+            return vec4((n + 1.0) / 2.0, 1.0);
         } else {
             return vec4(0.0);
         }
