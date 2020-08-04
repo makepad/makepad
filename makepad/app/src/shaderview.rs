@@ -88,7 +88,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     }
     
     fn sdf(p: vec3) -> float {
-        return difference(
+        return union(
             intersection(cube(p), sphere(p)),
             union(union(cylinder_x(p), cylinder_y(p)), cylinder_z(p))
         );
@@ -104,7 +104,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     
     fn march_ray(p0: vec3, v: vec3) -> float {
         let t = 0.0;
-        for i from 0 to 50 {
+        for i from 0 to 100 {
             let d = sdf(p0 + t * v);
             if d <= EPSILON {
                 return t;
@@ -127,8 +127,8 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         if t < T_MAX {
             let p = p0 + t * v;
             let n = estimate_normal(p);
-            let k = 0.5 + 0.5 * vec4(dot(n, vec3(0.0, 0.0, -1.0)));
-            return k * color!(red);
+            let k = 0.1 + 0.5 * vec4(abs(dot(n, vec3(0.0, 0.0, -1.0))));
+            return k * color!(green);
         } else {
             return vec4(0.0);
         }
