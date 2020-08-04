@@ -1,4 +1,5 @@
 use crate::shadergen::LiveLoc;
+use crate::math::*;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LiveColor {
@@ -15,12 +16,12 @@ pub struct Color {
 }
 
 impl Color {
-    pub fn white()->Color{
-        Self{
-            r:1.0,
-            g:1.0,
-            b:1.0,
-            a:1.0,
+    pub fn white() -> Color {
+        Self {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
         }
     }
     pub fn mix(a: Color, b: Color, f: f32) -> Color {
@@ -32,7 +33,7 @@ impl Color {
             a: nf * a.a + f * b.a,
         };
     }
-
+    
     pub fn rgb(r: i32, g: i32, b: i32) -> Color {
         Color {
             r: r as f32 / 255.,
@@ -41,7 +42,7 @@ impl Color {
             a: 1.,
         }
     }
-
+    
     pub fn rgba(r: i32, g: i32, b: i32, a: i32) -> Color {
         Color {
             r: r as f32 / 255.,
@@ -50,24 +51,53 @@ impl Color {
             a: a as f32 / 255.,
         }
     }
-/*
-    fn from_hsv() -> Color { //http://gamedev.stackexchange.com/questions/59797/glsl-shader-change-hue-saturation-brightness
+    
+    fn from_hsv(hsv: Vec4) -> Color {
+        fn mix(x: f32, y: f32, t: f32) -> f32 {x + (y - x) * t}
+        fn clamp(x: f32, mi: f32, ma: f32) -> f32 {if x < mi {mi} else if x > ma {ma} else {x}}
+        fn fract(x: f32) -> f32 {x.fract()}
+        fn abs(x: f32) -> f32 {x.abs()}
+        Color {
+            r: hsv.z * mix(1.0, clamp(abs(fract(hsv.x + 1.0) * 6.0 - 3.0) - 1.0, 0.0, 1.0), hsv.y),
+            g: hsv.z * mix(1.0, clamp(abs(fract(hsv.x + 2.0 / 3.0) * 6.0 - 3.0) - 1.0, 0.0, 1.0), hsv.y),
+            b: hsv.z * mix(1.0, clamp(abs(fract(hsv.x + 1.0 / 3.0) * 6.0 - 3.0) - 1.0, 0.0, 1.0), hsv.y),
+            a: 1.0
+        }
+    }
+    /*
+    	hsv2rgbJS(c) { // simply devectorized
+    		return [
+    			c[2] * mix(1, clamp(abs(fract(c[0] + 1) * 6. - 3) - 1, 0., 1.), c[1]),
+    			c[2] * mix(1, clamp(abs(fract(c[0] + 2/3.) * 6. - 3) - 1, 0., 1.), c[1]),
+    			c[2] * mix(1, clamp(abs(fract(c[0] + 1/3.) * 6. - 3) - 1, 0., 1.), c[1]),
+    			c[3]
+    		]
+    	}
+    */
+    fn to_hsv(&self) -> Vec4 {
+        let pc = self.g < self.b; //step(c[2],c[1])
+        let p0 = if pc {self.b} else {self.g}; //mix(c[2],c[1],pc)
+        let p1 = if pc {self.g} else {self.b}; //mix(c[1],c[2],pc)
+        let p2 = if pc {-1.0} else {0.0}; //mix(-1,0,pc)
+        let p3 = if pc {2.0 / 3.0} else {-1.0 / 3.0}; //mix(2/3,-1/3,pc)
         
-        let K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-        let p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-        return vec4(c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y), c.w);
+        let qc = self.r < p0; //step(p0, c[0])
+        let q0 = if qc {p0} else {self.r}; //mix(p0, c[0], qc)
+        let q1 = p1;
+        let q2 = if qc {p3} else {p2}; //mix(p3, p2, qc)
+        let q3 = if qc {self.r} else {p0}; //mix(c[0], p0, qc)
+        
+        let d = q0 - q3.min(q1);
+        let e = 1.0e-10;
+        return Vec4 {
+            x: (q2 + (q3 - q1) / (6.0 * d + e)).abs(),
+            y: d / (q0 + e),
+            z: q0,
+            w: self.a
+        }
     }
     
-    fn to_hsv(&self) -> vec4 {
-        let K: vec4 = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
-        let p: vec4 = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
-        let q: vec4 = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
-        
-        let d: float = q.x - min(q.w, q.y);
-        let e: float = 1.0e-10;
-        return vec4(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x, c.w);
-    }*/
-
+    
     pub fn from_u32(val: u32) -> Color {
         Color {
             r: ((val >> 24) & 0xff) as f32 / 255.0,
@@ -76,10 +106,10 @@ impl Color {
             a: ((val >> 0) & 0xff) as f32 / 255.0,
         }
     }
-
+    
     pub fn parse_hex(hex: &str) -> Result<Color, ()> {
         let bytes = hex.as_bytes();
-
+        
         fn hex_to_int(c: u32) -> Result<u32, ()> {
             if c >= 48 && c <= 57 {
                 return Ok(c - 48);
@@ -92,11 +122,11 @@ impl Color {
             }
             return Err(());
         }
-
+        
         match bytes.len() {
             1 => {
                 // #w
-                let val = hex_to_int(bytes[0] as u32)? as f32 / 15.0;
+                let val = hex_to_int(bytes[0] as u32) ? as f32 / 15.0;
                 return Ok(Color {
                     r: val,
                     g: val,
@@ -106,9 +136,9 @@ impl Color {
             }
             3 => {
                 // #rgb
-                let r = hex_to_int(bytes[0] as u32)? as f32 / 15.0;
-                let g = hex_to_int(bytes[1] as u32)? as f32 / 15.0;
-                let b = hex_to_int(bytes[2] as u32)? as f32 / 15.0;
+                let r = hex_to_int(bytes[0] as u32) ? as f32 / 15.0;
+                let g = hex_to_int(bytes[1] as u32) ? as f32 / 15.0;
+                let b = hex_to_int(bytes[2] as u32) ? as f32 / 15.0;
                 return Ok(Color {
                     r: r,
                     g: g,
@@ -118,10 +148,10 @@ impl Color {
             }
             4 => {
                 // #rgba
-                let r = hex_to_int(bytes[0] as u32)? as f32 / 15.0;
-                let g = hex_to_int(bytes[1] as u32)? as f32 / 15.0;
-                let b = hex_to_int(bytes[2] as u32)? as f32 / 15.0;
-                let a = hex_to_int(bytes[3] as u32)? as f32 / 15.0;
+                let r = hex_to_int(bytes[0] as u32) ? as f32 / 15.0;
+                let g = hex_to_int(bytes[1] as u32) ? as f32 / 15.0;
+                let b = hex_to_int(bytes[2] as u32) ? as f32 / 15.0;
+                let a = hex_to_int(bytes[3] as u32) ? as f32 / 15.0;
                 return Ok(Color {
                     r: r,
                     g: g,
@@ -131,11 +161,11 @@ impl Color {
             }
             6 => {
                 // #rrggbb
-                let r = ((hex_to_int(bytes[0] as u32)? << 4) + hex_to_int(bytes[1] as u32)?) as f32
+                let r = ((hex_to_int(bytes[0] as u32) ? << 4) + hex_to_int(bytes[1] as u32) ?) as f32
                     / 255.0;
-                let g = ((hex_to_int(bytes[2] as u32)? << 4) + hex_to_int(bytes[3] as u32)?) as f32
+                let g = ((hex_to_int(bytes[2] as u32) ? << 4) + hex_to_int(bytes[3] as u32) ?) as f32
                     / 255.0;
-                let b = ((hex_to_int(bytes[4] as u32)? << 4) + hex_to_int(bytes[5] as u32)?) as f32
+                let b = ((hex_to_int(bytes[4] as u32) ? << 4) + hex_to_int(bytes[5] as u32) ?) as f32
                     / 255.0;
                 return Ok(Color {
                     r: r,
@@ -146,13 +176,13 @@ impl Color {
             }
             8 => {
                 // #rrggbbaa
-                let r = ((hex_to_int(bytes[0] as u32)? << 4) + hex_to_int(bytes[1] as u32)?) as f32
+                let r = ((hex_to_int(bytes[0] as u32) ? << 4) + hex_to_int(bytes[1] as u32) ?) as f32
                     / 255.0;
-                let g = ((hex_to_int(bytes[2] as u32)? << 4) + hex_to_int(bytes[3] as u32)?) as f32
+                let g = ((hex_to_int(bytes[2] as u32) ? << 4) + hex_to_int(bytes[3] as u32) ?) as f32
                     / 255.0;
-                let b = ((hex_to_int(bytes[4] as u32)? << 4) + hex_to_int(bytes[5] as u32)?) as f32
+                let b = ((hex_to_int(bytes[4] as u32) ? << 4) + hex_to_int(bytes[5] as u32) ?) as f32
                     / 255.0;
-                let a = ((hex_to_int(bytes[6] as u32)? << 4) + hex_to_int(bytes[7] as u32)?) as f32
+                let a = ((hex_to_int(bytes[6] as u32) ? << 4) + hex_to_int(bytes[7] as u32) ?) as f32
                     / 255.0;
                 return Ok(Color {
                     r: r,
@@ -165,7 +195,7 @@ impl Color {
         }
         return Err(());
     }
-
+    
     pub fn parse_name(name: &str) -> Result<Color, ()> {
         Ok(match name.to_lowercase().as_ref() {
             "aliceblue" => Color {
