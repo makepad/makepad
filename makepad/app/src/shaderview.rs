@@ -28,13 +28,12 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             self.stack_1 = min(max(q.x, max(q.y, q.z)), 0.0) + length(max(q, 0.0));
         }
         
-        /*
         fn cylinder(inout self, p: vec3) {
             p = transpose_mat3(self.rotation) * p;
-            vec2 d = abs(vec2(length(p.xz),p.y)) - vec2(h,r);
-            return min(max(d.x,d.y),0.0) + length(max(d,0.0));
+            let d = abs(vec2(length(p.xz), p.y)) - vec2(0.5, 0.5);
+            self.stack_0 = self.stack_1;
+            self.stack_1 = min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
         }
-        */
         
         fn difference(inout self) {
             self.stack_1 = max(-self.stack_0, self.stack_1);
@@ -87,7 +86,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     fn sdf(p: vec3) -> float {
         let sdf = Sdf::new();
         sdf.rotate(vec3(1.0, 1.0, 1.0), 0.01 * frame);
-        sdf.cube(p);
+        sdf.cylinder(p);
         return sdf.finish();    
     }
     
@@ -101,7 +100,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     
     fn march_ray(p: vec3, v: vec3, t_min: float, t_max: float) -> float {
         let t = t_min;
-        for i from 0 to 100 {
+        for i from 0 to 50 {
             let d = sdf(p + t * v);
             if d <= EPSILON {
                 return t;
