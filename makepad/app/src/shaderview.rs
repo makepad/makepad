@@ -28,6 +28,14 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             self.stack_1 = min(max(q.x, max(q.y, q.z)), 0.0) + length(max(q, 0.0));
         }
         
+        /*
+        fn cylinder(inout self, p: vec3) {
+            p = transpose_mat3(self.rotation) * p;
+            vec2 d = abs(vec2(length(p.xz),p.y)) - vec2(h,r);
+            return min(max(d.x,d.y),0.0) + length(max(d,0.0));
+        }
+        */
+        
         fn difference(inout self) {
             self.stack_1 = max(-self.stack_0, self.stack_1);
         }
@@ -108,9 +116,10 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     
     fn pixel() -> vec4 {
         let p = vec3(2.0 * pos - 1.0, 2.0);
-        let t = march_ray(p, vec3(0.0, 0.0, -1.0), 0.0, T_MAX);
+        let v = vec3(0.0, 0.0, -1.0);
+        let t = march_ray(p, v, 0.0, T_MAX);
         if t < T_MAX {
-            let n = estimate_normal(p);
+            let n = estimate_normal(p + t * v);
             return vec4((n + 1.0) / 2.0, 1.0);
         } else {
             return vec4(0.0);
