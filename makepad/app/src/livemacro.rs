@@ -57,7 +57,7 @@ impl AppTextBuffer {
         while tp.advance() {
             match tp.cur_type() {
                 TokenType::Macro => {
-                    if tp.eat("color") && tp.eat("!") && tp.eat("(") {
+                    if tp.eat("color") && tp.eat("!") && tp.eat("(") { 
                         let _in_shader = tp.cur_offset() < shader_end;
                         // ok so now we need to parse the color, and turn it to HSV
                         let _color = if tp.cur_type() == TokenType::Hash { // its a #color
@@ -69,7 +69,6 @@ impl AppTextBuffer {
                             let color = Color::parse_name(&tp.cur_as_string());
                             if let Ok(color) = color {color}else {Color::white()}
                         };
-                        println!("{:?}", tp.cur_type());
                     }
                     else if tp.eat("shader") && tp.eat("!") && tp.eat("{") {
                         if tp.cur_type() == TokenType::ParenOpen {
