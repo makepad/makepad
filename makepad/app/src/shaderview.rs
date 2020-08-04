@@ -15,7 +15,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     impl Sdf {
         fn new() -> Sdf {
             let sdf: Sdf;
-            sdf.rotation = mat3(1.0);
+            sdf.rotation = mat3(1.0,0.,0.,0.,1.,0.,0.,0.,1.);
             sdf.stack_0 = 0.0;
             sdf.stack_1 = 0.0;
             return sdf;
@@ -27,7 +27,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             self.stack_0 = self.stack_1;
             self.stack_1 = min(max(q.x, max(q.y, q.z)), 0.0) + length(max(q, 0.0));
         }
-        
+            
         fn cylinder(inout self, p: vec3, r: float, h: float) {
             p = transpose_mat3(self.rotation) * p;
             let d = abs(vec2(length(p.xz), p.y)) - vec2(r, h);
@@ -37,17 +37,18 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         
         fn difference(inout self) {
             self.stack_1 = max(-self.stack_0, self.stack_1);
-        }
+        } 
         
         fn intersection(inout self) {
             self.stack_1 = max(self.stack_0, self.stack_1);
         }
         
+        
         fn rotate(inout self, axis: vec3, angle: float) {
             let u = normalize(axis);
-            let s = sin(angle);
-            let c = cos(angle);
-            self.rotation *= mat3(
+            let s = sin(angle); 
+            let c = cos(angle); 
+            self.rotation = self.rotation*mat3(
                 c + u.x * u.x * (1.0 - c),
                 u.y * u.x * (1.0 - c) + u.z * s,
                 u.z * u.x * (1.0 - c) - u.y * s,
