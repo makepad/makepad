@@ -52,7 +52,7 @@ impl Color {
         }
     }
     
-    fn from_hsv(hsv: Vec4) -> Color {
+    pub fn from_hsv(hsv: Vec4) -> Color {
         fn mix(x: f32, y: f32, t: f32) -> f32 {x + (y - x) * t}
         fn clamp(x: f32, mi: f32, ma: f32) -> f32 {if x < mi {mi} else if x > ma {ma} else {x}}
         fn fract(x: f32) -> f32 {x.fract()}
@@ -74,7 +74,7 @@ impl Color {
     		]
     	}
     */
-    fn to_hsv(&self) -> Vec4 {
+    pub fn to_hsv(&self) -> Vec4 {
         let pc = self.g < self.b; //step(c[2],c[1])
         let p0 = if pc {self.b} else {self.g}; //mix(c[2],c[1],pc)
         let p1 = if pc {self.g} else {self.b}; //mix(c[1],c[2],pc)

@@ -28,6 +28,8 @@ pub trait BackendWriter {
     fn write_ident(&self, string: &mut String, ident: Ident);
 
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
+    
+    fn write_call_ident(&self, string: &mut String, ident:Ident, arg_exprs:&[Expr]);
 }
 
 pub struct BlockGenerator<'a> {
@@ -389,12 +391,16 @@ impl<'a> ExprGenerator<'a> {
     }
 
     fn generate_call_expr(&mut self, _span: Span, ident: Ident, arg_exprs: &[Expr]) {
-        self.write_ident(ident);
+        //TODO add built-in check
+        self.backend_writer.write_call_ident(&mut self.string, ident, arg_exprs);
+        
         write!(self.string, "(").unwrap();
         let mut sep = "";
         for arg_expr in arg_exprs {
             write!(self.string, "{}", sep).unwrap();
+            
             self.generate_expr(arg_expr);
+            
             sep = ", ";
         }
         if self.use_hidden_params {
