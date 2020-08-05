@@ -38,10 +38,7 @@ impl TextBuffer {
     pub fn status_keyboard_update() -> StatusId {uid!()}
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
-pub struct LiveMacro{
-    pub token:usize,
-}
+
 
 #[derive(Clone, Default)]
 pub struct TextBufferKeyboard {

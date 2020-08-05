@@ -806,6 +806,20 @@ impl BackendWriter for MetalBackendWriter {
         )
         .unwrap();
     }
+    
+    fn write_call_ident(&self, string: &mut String, ident:Ident, arg_exprs:&[Expr]){
+        if ident == Ident::new("atan"){
+            if arg_exprs.len() == 2{
+                write!(string, "atan2").unwrap();
+            }
+            else{
+                write!(string, "atan").unwrap();
+            }
+        }
+        else{
+            self.write_ident(string, ident);
+        }
+    }
 
     fn write_ident(&self, string: &mut String, ident: Ident) {
         ident.with(|ident_string| {
@@ -824,6 +838,7 @@ impl BackendWriter for MetalBackendWriter {
                         "dfdx" => "mpsc_dfdx",
                         "dfdy" => "mpsc_dfdy",
                         "using" => "mpsc_using",
+                        "union" => "mpsc_union",
                         "namespace" => "mpsc_namespace",
                         "sampler" => "mpsc_sampler",
                         "coord" => "mpsc_coord",
