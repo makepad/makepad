@@ -3,6 +3,7 @@ use std::cell::RefCell;
 
 pub use makepad_shader_compiler::shadergen::*;
 pub use makepad_shader_compiler::colors::*;
+pub use makepad_shader_compiler::math::*;
 pub use makepad_shader_compiler::uid;
 pub use makepad_live_macros::*;
 
@@ -15,9 +16,8 @@ pub use crate::pass::*;
 pub use crate::texture::*;
 pub use crate::text::*;
 
-pub use crate::math::*;
 pub use crate::events::*;
-pub use crate::elements::*;
+//pub use crate::elements::*;
 pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::menu::*;

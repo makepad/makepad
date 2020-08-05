@@ -90,8 +90,8 @@ impl CxShader {
             
             impl Df {
                 fn viewport(pos: vec2) -> Df {
-                    let df:Df;
-                    df.pos=  pos;
+                    let df: Df;
+                    df.pos = pos;
                     df.result = vec4(0., 0., 0., 0.);
                     df.old_shape = 1e+20;
                     df.shape = 1e+20;
@@ -130,7 +130,7 @@ impl CxShader {
                     self.result = vec4(color.rgb * color.a + self.result.rgb * (1.0 - color.a), color.a);
                 }
                 
-                fn calc_blur(inout self,  w: float) -> float {
+                fn calc_blur(inout self, w: float) -> float {
                     let wa = clamp(-w * self.aa, 0.0, 1.0);
                     let wb = 1.0;
                     if self.blur > 0.001 {
@@ -236,6 +236,14 @@ impl CxShader {
                     self.shape = min(self.shape, self.field);
                 }
                 
+                fn hexagon(inout self, x: float, y: float, r: float) {
+                    let dx = abs(x - self.pos.x) * 1.15;
+                    let dy = abs(y - self.pos.y);
+                    self.field = max(dy + cos(60.0 * TORAD) * dx - r, dx - r);
+                    self.old_shape = self.shape;
+                    self.shape = min(self.shape, self.field);
+                }
+                
                 fn move_to(inout self, x: float, y: float) {
                     self.last_pos =
                     self.start_pos = vec2(x, y);
@@ -266,7 +274,7 @@ impl CxShader {
 }
 
 
-#[derive(Debug,Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct RectInstanceProps {
     pub x: Option<usize>,
     pub y: Option<usize>,
@@ -299,7 +307,7 @@ impl RectInstanceProps {
     }
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct InstanceProp {
     pub name: String,
     pub prop_id: PropId,
@@ -307,13 +315,13 @@ pub struct InstanceProp {
     pub slots: usize
 }
 
-#[derive(Debug,Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct InstanceProps {
     pub props: Vec<InstanceProp>,
     pub total_slots: usize,
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct UniformProp {
     pub name: String,
     pub prop_id: PropId,
@@ -321,20 +329,20 @@ pub struct UniformProp {
     pub slots: usize
 }
 
-#[derive(Debug,Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct UniformProps {
     pub props: Vec<UniformProp>,
     pub total_slots: usize,
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct NamedProp {
     pub name: String,
     pub offset: usize,
     pub slots: usize
 }
 
-#[derive(Debug,Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct NamedProps {
     pub props: Vec<NamedProp>,
     pub total_slots: usize,
@@ -440,8 +448,8 @@ pub struct CxShaderMapping {
     pub const_table: Option<Vec<f32>>
 }
 
-impl CxShaderMapping{
-    pub fn from_shader_gen(gen:&ShaderGen, const_table:Option<Vec<f32>>)->Self{
+impl CxShaderMapping {
+    pub fn from_shader_gen(gen: &ShaderGen, const_table: Option<Vec<f32>>) -> Self {
         
         let mut instances = Vec::new();
         let mut geometries = Vec::new();
@@ -450,25 +458,25 @@ impl CxShaderMapping{
         let mut view_uniforms = Vec::new();
         let mut pass_uniforms = Vec::new();
         let mut textures = Vec::new();
-        for sub in &gen.subs{
+        for sub in &gen.subs {
             instances.extend(sub.instances.clone());
             geometries.extend(sub.geometries.clone());
             textures.extend(sub.textures.clone());
-            for uni in &sub.uniforms{
-                if let Some(block) = &uni.block{
-                    match block.as_ref(){
-                        "draw"=>draw_uniforms.push(uni.clone()),
-                        "view"=>view_uniforms.push(uni.clone()),
-                        "pass"=>pass_uniforms.push(uni.clone()),
-                        _=>()
+            for uni in &sub.uniforms {
+                if let Some(block) = &uni.block {
+                    match block.as_ref() {
+                        "draw" => draw_uniforms.push(uni.clone()),
+                        "view" => view_uniforms.push(uni.clone()),
+                        "pass" => pass_uniforms.push(uni.clone()),
+                        _ => ()
                     }
                 }
-                else{
+                else {
                     uniforms.push(uni.clone());
                 }
             }
         }
-        CxShaderMapping{
+        CxShaderMapping {
             rect_instance_props: RectInstanceProps::construct(&instances),
             uniform_props: UniformProps::construct(&uniforms),
             instance_props: InstanceProps::construct(&instances),
