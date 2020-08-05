@@ -128,7 +128,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             let p = p0 + t * v;
             let n = estimate_normal(p);
             let k = 0.1 + 0.5 * vec4(abs(dot(n, vec3(0.0, 0.0, -1.0))));
-            return k * color!(green);
+            return k * color!(#5ff);
         } else {
             return vec4(0.0);
         }
@@ -203,7 +203,6 @@ impl ShaderView {
         k.push_float(cx, self.frame);
         self.frame += 1.0;
         self.area = cx.update_area_refs(self.area, k.into());
-        cx.redraw_child_area(self.area);
     }
 }
 

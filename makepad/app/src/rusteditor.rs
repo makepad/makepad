@@ -8,7 +8,7 @@ use crate::livemacro::*;
 #[derive(Clone)]
 pub struct RustEditor {
     pub view: View,
-    pub live_macros: LiveMacroView,
+    pub live_macros_view: LiveMacrosView,
     pub splitter: Splitter,
     pub text_editor: TextEditor,
 }
@@ -17,9 +17,9 @@ impl RustEditor {
     pub fn new(cx: &mut Cx) -> Self {
         let editor = Self {
             view: View::new(cx),
-            live_macros: LiveMacroView::new(cx),
+            live_macros_view: LiveMacrosView::new(cx),
             splitter: Splitter{
-                pos:10.0,
+                pos:150.0,
                 ..Splitter::new(cx)
             },
             text_editor: TextEditor::new(cx),
@@ -29,6 +29,8 @@ impl RustEditor {
     }
     
     pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, search_index: Option<&mut SearchIndex>) -> TextEditorEvent {
+        
+        self.live_macros_view.handle_live_macros(cx, event, atb);
         
         match self.splitter.handle_splitter(cx, event){
             SplitterEvent::Moving{..}=>{
@@ -60,7 +62,7 @@ impl RustEditor {
         
         self.splitter.begin_splitter(cx);
         
-        self.live_macros.draw_live_macros(cx, atb);
+        self.live_macros_view.draw_live_macros(cx, atb);
         
         self.splitter.mid_splitter(cx);
         

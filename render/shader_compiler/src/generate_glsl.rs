@@ -774,13 +774,25 @@ impl BackendWriter for GlslBackendWriter {
         )
         .unwrap();
     }
-
+    
+    fn write_call_ident(&self, string: &mut String, ident:Ident, _arg_exprs:&[Expr]){
+        self.write_ident(string, ident);
+    }
+    
     fn write_ident(&self, string: &mut String, ident: Ident) {
         ident.with(|ident_string| {
             if ident_string.contains("::") {
                 write!(string, "mpsc_{}", ident_string.replace("::", "_")).unwrap()
             } else {
-                write!(string, "{}", ident_string).unwrap()
+                write!(
+                    string,
+                    "{}",
+                    match ident_string.as_ref() {
+                        "union" => "mpsc_union",
+                        _ => ident_string,
+                    }
+                )
+                .unwrap()
             }
         })
     }
