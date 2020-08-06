@@ -58,7 +58,7 @@ impl RustEditor {
         
         if self.view.begin_view(cx, Layout::default()).is_err() {
             return
-        };
+        }; 
         
         self.splitter.begin_splitter(cx);
         
