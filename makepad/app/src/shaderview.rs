@@ -57,17 +57,17 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     }
     
     fn cylinder_x(p: vec3) -> float {
-        let d = abs(vec2(length(p.yz), p.x)) - vec2(0.25, 1.0);
+        let d = abs(vec2(length(p.yz), p.x)) - vec2(0.25, 0.75);
         return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
     }
     
     fn cylinder_y(p: vec3) -> float {
-        let d = abs(vec2(length(p.xz), p.y)) - vec2(0.25, 1.0);
+        let d = abs(vec2(length(p.xz), p.y)) - vec2(0.25, 0.75);
         return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
     }
     
     fn cylinder_z(p: vec3) -> float {
-        let d = abs(vec2(length(p.xy), p.z)) - vec2(0.25, 1.0);
+        let d = abs(vec2(length(p.xy), p.z)) - vec2(0.25, 0.75);
         return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
     }
     
@@ -131,21 +131,36 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         if t < T_MAX {
             let p = p0 + t * v;
             let n = estimate_normal(p);
-            let c = color!(#FFFFFF);
+
+            let c = vec4(0.0);
+            let d = displace(p, intersection(cube(p), sphere(p)));
+            if d <= EPSILON {
+                c += color!(#FFFFFF);
+            }
             let dx = displace(p, cylinder_x(p));
             if dx <= EPSILON {
-                c = mix(c, color!(#FF0010), 0.5);
+                c += color!(#FF0000);
             }
             let dy = displace(p, cylinder_y(p));
             if dy <= EPSILON {
-                c = mix(c, color!(#00FF02), 0.5);
+                c += color!(#00FF00);
             }
             let dz = displace(p, cylinder_z(p));
             if dz <= EPSILON {
-                c = mix(c, color!(blue), 0.5);
+                c += color!(#0000FF);
             }
-            let k = 0.1 + 0.5 * vec4(abs(dot(n, vec3(0.0, 0.0, -1.0))));
-            return k * c;
+            
+            let ld = normalize(vec3(0.0, 0.0, 1.0));
+            let ls = normalize(vec3(0.0, 0.0, 1.0));
+            let v = normalize(p0);
+            let r = 2.0 * dot(n, ls) * n - ls;
+            
+            let ia = 0.2;
+            let id = 0.3 * max(0.0, dot(ld, n));
+            let is = 0.5 * pow(max(0.0, dot(v, r)), 2.0);
+            let i = ia + id + is;
+            
+            return i * c;
         } else {
             return vec4(0.0);
         }
