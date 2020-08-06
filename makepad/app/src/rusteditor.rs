@@ -19,7 +19,7 @@ impl RustEditor {
             view: View::new(cx),
             live_macros_view: LiveMacrosView::new(cx),
             splitter: Splitter {
-                pos: 150.0,
+                pos: 100.0,
                 ..Splitter::new(cx)
             },
             text_editor: TextEditor::new(cx),
