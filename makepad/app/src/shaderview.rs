@@ -71,6 +71,10 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
     }
     
+    fn displace(p: vec3, d: float) -> float {
+        return 0.05 * sin(20.0* p.x) * sin(20.0 * p.y) * sin(20.0* p.z) + d;
+    }
+    
     fn difference(d1: float, d2: float) -> float {
         return max(d1, -d2);
     }
@@ -88,14 +92,10 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     }
     
     fn sdf(p: vec3) -> float {
-        return union(
+        return displace(p, union(
             intersection(cube(p), sphere(p)),
             union(union(cylinder_x(p), cylinder_y(p)), cylinder_z(p))
-        );
-    }
-    
-    fn compute_color(p: vec3) -> vec3 {
-        
+        ));
     }
     
     fn estimate_normal(p: vec3) -> vec3 {
@@ -120,7 +120,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         }
         return T_MAX;
     }
-    
+
     fn pixel() -> vec4 {
         let p0 = vec3(2.0 * pos - 1.0, 2.0);
         let v = vec3(0.0, 0.0, -1.0);
@@ -131,16 +131,16 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         if t < T_MAX {
             let p = p0 + t * v;
             let n = estimate_normal(p);
-            let c = color!(white);
-            let dx = cylinder_x(p);
+            let c = vec4(1.0);
+            let dx = displace(p, cylinder_x(p));
             if dx <= EPSILON {
                 c = mix(c, color!(red), 0.5);
             }
-            let dy = cylinder_y(p);
+            let dy = displace(p, cylinder_y(p));
             if dy <= EPSILON {
                 c = mix(c, color!(green), 0.5);
             }
-            let dz = cylinder_z(p);
+            let dz = displace(p, cylinder_z(p));
             if dz <= EPSILON {
                 c = mix(c, color!(blue), 0.5);
             }
