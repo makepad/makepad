@@ -66,6 +66,12 @@ impl Cx {
         } 
         
         let options: id = unsafe {msg_send![class!(MTLCompileOptions), new]};
+        
+        let _:id = unsafe{msg_send![
+            options, 
+            setFastMathEnabled: true
+        ]};
+        
         let ns_mtlsl: id = str_to_nsstring(&mtlsl);
         let mut err: id = nil;
         let library: id = unsafe {msg_send![
