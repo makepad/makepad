@@ -135,15 +135,15 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             let c = vec4(0.0);
             let d = displace(p, intersection(cube(p), sphere(p)));
             if d <= EPSILON {
-                c += color!(#FFFFFF);
+                c += color!(#7C316F);
             }
             let dx = displace(p, cylinder_x(p));
             if dx <= EPSILON {
-                c += color!(#FF0000);
+                c += color!(#FFD200);
             }
             let dy = displace(p, cylinder_y(p));
             if dy <= EPSILON {
-                c += color!(#00FF00);
+                c += color!(#AFCA00);
             }
             let dz = displace(p, cylinder_z(p));
             if dz <= EPSILON {

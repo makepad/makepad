@@ -39,19 +39,21 @@ impl LiveMacrosView {
         }
     }
     
-    pub fn handle_live_macros(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, text_editor: &mut TextEditor) {
+    pub fn handle_live_macros(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, text_editor: &mut TextEditor){
         self.scroll_view.handle_scroll_view(cx, event);
         for (index, color_picker) in self.color_pickers.enumerate() {
             match color_picker.handle_color_picker(cx, event) {
                 ColorPickerEvent::Change {hsva} => {
                     
                     // ok now what. now we serialize out hsva into the textbuffer
-                    if let LiveMacro::Color{range,..} = &atb.live_macros.macros[*index]{
+                    if let LiveMacro::Color{range,..} = &mut atb.live_macros.macros[*index]{
                         // and let the things work out
                         let color = Color::from_hsva(hsva);
                         // we have a range, now lets set the cursors to that range
                         // and replace shit.
-                        text_editor.handle_live_replace(cx, *range, &format!("#{}",color.to_hex()), &mut atb.text_buffer, 0);
+                        let new_string = format!("#{}",color.to_hex());
+                        text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, 0);
+                        *range = (range.0, range.0 + new_string.len());
                     }
                 },
                 _ => ()
