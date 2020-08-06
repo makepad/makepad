@@ -269,14 +269,18 @@ impl ColorPicker {
                 
                 let rect_puk = vec2(cx + sat * 2. * rsize - rsize, cy + (1. - val) * 2. * rsize - rsize);
                 
-                df.circle(rect_puk.x, rect_puk.y, 10.);
-                df.fill(color!(#D59E60));
-                df.circle(rect_puk.x, rect_puk.y, 9.);
+                df.circle(rect_puk.x, rect_puk.y, 8.);
+                df.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
+                df.intersect();
+                df.fill(color!(white));
+                df.circle(rect_puk.x, rect_puk.y, 7.);
+                df.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
+                df.intersect();
                 df.fill(rgbv);
                 
-                df.circle(circle_puk.x, circle_puk.y, 14.);
+                df.circle(circle_puk.x, circle_puk.y, 11.);
                 df.fill(color!(white));
-                df.circle(circle_puk.x, circle_puk.y, 13.);
+                df.circle(circle_puk.x, circle_puk.y, 10.);
                 df.fill(rgbv);
                 
                 return df.result;
