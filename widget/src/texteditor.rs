@@ -1604,6 +1604,7 @@ impl TextEditor {
                     }*/
                     self.colors.theme_name
                 },
+                TokenType::Color => self.colors.string,
                 TokenType::Regex => self.colors.string,
                 TokenType::String => self.colors.string,
                 TokenType::Number => self.colors.number,
