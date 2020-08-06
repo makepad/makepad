@@ -40,6 +40,7 @@ impl LiveMacrosView {
     }
     
     pub fn handle_live_macros(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, text_editor: &mut TextEditor) {
+        self.scroll_view.handle_scroll_view(cx, event);
         for (index, color_picker) in self.color_pickers.enumerate() {
             match color_picker.handle_color_picker(cx, event) {
                 ColorPickerEvent::Change {hsva} => {
@@ -61,14 +62,20 @@ impl LiveMacrosView {
     pub fn draw_live_macros(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, _text_editor: &mut TextEditor) {
         // alright so we have a list of macros..
         // now we have to draw them.
-        for (index, m) in atb.live_macros.macros.iter_mut().enumerate() {
-            match m {
-                LiveMacro::Color {hsva, ..} => {
-                    self.color_pickers.get_draw(cx, index, | _, t | t.clone()).draw_color_picker(cx, *hsva);
-                },
-                _ => ()
+        if self.scroll_view.begin_view(cx, Layout{
+            direction:Direction::Down,
+            ..Layout::default()
+        }).is_ok(){
+            for (index, m) in atb.live_macros.macros.iter_mut().enumerate() {
+                match m {
+                    LiveMacro::Color {hsva, ..} => {
+                        self.color_pickers.get_draw(cx, index, | _, t | t.clone()).draw_color_picker(cx, *hsva);
+                    },
+                    _ => ()
+                }
+                
             }
-            
+            self.scroll_view.end_view(cx);
         }
     }
 }
@@ -205,6 +212,7 @@ impl ColorPicker {
         k.push_float(cx, self.hue);
         k.push_float(cx, self.sat);
         k.push_float(cx, self.val);
+        
         self.wheel_area = cx.update_area_refs(self.wheel_area, k.into());
     }
     
@@ -291,9 +299,8 @@ impl AppTextBuffer {
                             tp.advance();
                             let in_shader = tp.cur_offset() < shader_end;
                             // ok so now we need to parse the color, and turn it to HSV
-                            let color = if tp.cur_type() == TokenType::Hash { // its a #color
-                                tp.advance();
-                                let color = Color::parse_hex(&tp.cur_as_string());
+                            let color = if tp.cur_type() == TokenType::Color { // its a #color
+                                let color = Color::parse_hex(&tp.cur_as_string()[1..]);
                                 if let Ok(color) = color {color}else {Color::white()}
                             }
                             else { // its a named color
