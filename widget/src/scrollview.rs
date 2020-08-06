@@ -37,7 +37,7 @@ impl ScrollView{
         self.view.view_will_redraw(cx)
     }
     
-    pub fn handle_scroll_bars(&mut self, cx: &mut Cx, event: &mut Event) -> bool {
+    pub fn handle_scroll_view(&mut self, cx: &mut Cx, event: &mut Event) -> bool {
         let mut ret_h = ScrollBarEvent::None;
         let mut ret_v = ScrollBarEvent::None;
         
