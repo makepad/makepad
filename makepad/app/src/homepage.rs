@@ -129,7 +129,7 @@ impl HomePage {
             text_input.handle_text_input(cx, event);
         }
         
-        self.view.handle_scroll_bars(cx, event);
+        self.view.handle_scroll_view(cx, event);
     }
     
     pub fn draw_home_page(&mut self, cx: &mut Cx) {

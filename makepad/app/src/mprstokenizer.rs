@@ -591,7 +591,21 @@ impl MprsTokenizer {
                 },
                 '#' => {
                     chunk.push(state.cur);
-                    return TokenType::Hash;
+                    // if followed by 0-9A-Fa-f parse untill not one of those
+                    if state.next >= '0' && state.next <= '9' 
+                    || state.next >= 'a' && state.next <= 'f'
+                    || state.next >= 'A' && state.next <= 'F' { // parse a hex number
+                        chunk.push(state.next);
+                        state.advance();
+                        while state.next_is_hex() {
+                            chunk.push(state.next);
+                            state.advance();
+                        }
+                        return TokenType::Color;
+                    }
+                    else{
+                        return TokenType::Hash;
+                    }
                 },
                 '_' => {
                     chunk.push(state.cur);
@@ -1305,7 +1319,7 @@ impl MprsTokenizer {
                     out.extend(tp.cur_chunk());
                 },
                 // these are followeable by non unary operators
-                TokenType::Macro | TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number |
+                TokenType::Macro | TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number | TokenType::Color |
                 TokenType::Bool | TokenType::Unexpected | TokenType::Error | TokenType::Warning | TokenType::Defocus => {
                     is_unary_operator = false;
                     paren_stack.last_mut().unwrap().angle_counter = 0;

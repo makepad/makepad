@@ -483,7 +483,7 @@ impl FileTree {
         // alright. someone clicking on the tree items.
         let mut file_walker = FileWalker::new(&mut self.root_node);
         let mut counter = 0;
-        self.view.handle_scroll_bars(cx, event);
+        self.view.handle_scroll_view(cx, event);
         // todo, optimize this so events are not passed through 'all' of our tree elements
         // but filtered out somewhat based on a bounding rect
         let mut unmark_nodes = false;
