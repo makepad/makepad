@@ -486,8 +486,11 @@ impl TextCursorSet {
         })
     }
     
-    pub fn replace_text(&mut self, text: &str, text_buffer: &mut TextBuffer) {
-        let grouping = if text.len() == 1 {
+    pub fn replace_text(&mut self, text: &str, text_buffer: &mut TextBuffer, override_group:Option<TextUndoGrouping>) {
+        let grouping = if let Some(override_group) = override_group{
+            override_group
+        }
+        else if text.len() == 1 {
             // check if we are space
             let ch = text.chars().next().unwrap();
             if ch == ' ' {

@@ -52,7 +52,7 @@ impl Color {
         }
     }
     
-    pub fn from_hsv(hsv: Vec4) -> Color {
+    pub fn from_hsva(hsv: Vec4) -> Color {
         fn mix(x: f32, y: f32, t: f32) -> f32 {x + (y - x) * t}
         fn clamp(x: f32, mi: f32, ma: f32) -> f32 {if x < mi {mi} else if x > ma {ma} else {x}}
         fn fract(x: f32) -> f32 {x.fract()}
@@ -105,6 +105,27 @@ impl Color {
             b: ((val >> 8) & 0xff) as f32 / 255.0,
             a: ((val >> 0) & 0xff) as f32 / 255.0,
         }
+    }
+    
+    pub fn to_hex(&self)->String{
+        fn int_to_hex(d: u8) -> char {
+            if d >= 10{
+                return (d + 55) as char;
+            }
+            return (d + 48) as char;
+        }
+        
+        let r = (self.r * 255.0) as u8;
+        let g = (self.g * 255.0) as u8;
+        let b = (self.b * 255.0) as u8;
+        let mut out = String::new();
+        out.push(int_to_hex((r>>4)&0xf));
+        out.push(int_to_hex((r)&0xf));
+        out.push(int_to_hex((g>>4)&0xf));
+        out.push(int_to_hex((g)&0xf));
+        out.push(int_to_hex((b>>4)&0xf));
+        out.push(int_to_hex((b)&0xf));
+        return out
     }
     
     pub fn parse_hex(hex: &str) -> Result<Color, ()> {
