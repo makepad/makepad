@@ -128,7 +128,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             let p = p0 + t * v;
             let n = estimate_normal(p);
             let k = 0.1 + 0.5 * vec4(abs(dot(n, vec3(0.0, 0.0, -1.0))));
-            return k * color!(#5ff);
+            return k * color!(#FD007A);
         } else {
             return vec4(0.0);
         }

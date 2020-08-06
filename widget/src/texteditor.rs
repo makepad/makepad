@@ -862,7 +862,7 @@ impl TextEditor {
             },
             KeyCode::KeyX => { // cut, the actual copy comes from the TextCopy event from the platform layer
                 if !self.read_only && (ke.modifiers.logo || ke.modifiers.control) { // cut
-                    self.cursors.replace_text("", text_buffer);
+                    self.cursors.replace_text("", text_buffer, None);
                     true
                 }
                 else {
@@ -951,7 +951,7 @@ impl TextEditor {
                     self.cursors.overwrite_if_exists_or_deindent("}", 4, text_buffer);
                 },
                 _ => {
-                    self.cursors.replace_text(&te.input, text_buffer);
+                    self.cursors.replace_text(&te.input, text_buffer, None);
                 }
             }
             // lets insert a newline
@@ -959,10 +959,10 @@ impl TextEditor {
         else {
             if !self.multiline {
                 let replaced = te.input.replace("\n", "");
-                self.cursors.replace_text(&replaced, text_buffer);
+                self.cursors.replace_text(&replaced, text_buffer, None);
             }
             else {
-                self.cursors.replace_text(&te.input, text_buffer);
+                self.cursors.replace_text(&te.input, text_buffer, None);
             }
         }
         //self.update_highlight(cx, text_buffer);
@@ -972,6 +972,15 @@ impl TextEditor {
         
         cx.send_signal(text_buffer.signal, TextBuffer::status_data_update());
         
+    }
+    
+    pub fn handle_live_replace(&mut self, cx: &mut Cx, range:(usize, usize), what:&str, text_buffer: &mut TextBuffer, group:u64){
+        // let set the cursor selection
+        self.cursors.clear_and_set_last_cursor_head_and_tail(range.1, range.0, text_buffer);
+        self.cursors.replace_text(what, text_buffer, Some(TextUndoGrouping::LiveEdit(group)));
+        self.scroll_last_cursor_visible(cx, text_buffer, 0.);
+        self.view.redraw_view_area(cx);
+        self.reset_cursor_blinker(cx);
     }
     
     pub fn handle_text_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {

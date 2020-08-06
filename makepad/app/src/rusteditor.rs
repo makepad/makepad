@@ -18,8 +18,8 @@ impl RustEditor {
         let editor = Self {
             view: View::new(cx),
             live_macros_view: LiveMacrosView::new(cx),
-            splitter: Splitter{
-                pos:150.0,
+            splitter: Splitter {
+                pos: 150.0,
                 ..Splitter::new(cx)
             },
             text_editor: TextEditor::new(cx),
@@ -30,13 +30,13 @@ impl RustEditor {
     
     pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, search_index: Option<&mut SearchIndex>) -> TextEditorEvent {
         
-        self.live_macros_view.handle_live_macros(cx, event, atb);
+        self.live_macros_view.handle_live_macros(cx, event, atb, &mut self.text_editor);
         
-        match self.splitter.handle_splitter(cx, event){
-            SplitterEvent::Moving{..}=>{
+        match self.splitter.handle_splitter(cx, event) {
+            SplitterEvent::Moving {..} => {
                 self.view.redraw_view_parent_area(cx);
             },
-            _=>()
+            _ => ()
         }
         
         let ce = self.text_editor.handle_text_editor(cx, event, &mut atb.text_buffer);
@@ -56,13 +56,13 @@ impl RustEditor {
     
     pub fn draw_rust_editor(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, search_index: Option<&mut SearchIndex>) {
         
-        if self.view.begin_view(cx, Layout::default()).is_err(){
+        if self.view.begin_view(cx, Layout::default()).is_err() {
             return
         };
         
         self.splitter.begin_splitter(cx);
         
-        self.live_macros_view.draw_live_macros(cx, atb);
+        self.live_macros_view.draw_live_macros(cx, atb, &mut self.text_editor);
         
         self.splitter.mid_splitter(cx);
         
@@ -80,10 +80,10 @@ impl RustEditor {
         
         self.view.end_view(cx);
     }
-
-    pub fn update_token_chunks(cx:&mut Cx, atb: &mut AppTextBuffer, mut search_index: Option<&mut SearchIndex>) {
+    
+    pub fn update_token_chunks(cx: &mut Cx, atb: &mut AppTextBuffer, mut search_index: Option<&mut SearchIndex>) {
         
-
+        
         if atb.text_buffer.needs_token_chunks() && atb.text_buffer.lines.len() >0 {
             let mut state = TokenizerState::new(&atb.text_buffer.lines);
             let mut tokenizer = MprsTokenizer::new();
@@ -107,7 +107,16 @@ impl RustEditor {
             }
             
             // lets parse and generate our live macro set
-            atb.parse_live_macros(cx);
+            // check if our last undo entry isnt LiveEdit
+            //let parse_live = if atb.text_buffer.undo_stack.len() != 0 {
+            //    if let TextUndoGrouping::LiveEdit(_) = atb.text_buffer.undo_stack.last().unwrap().grouping {false} else {true}
+            //}else {true};
+            //if parse_live{
+            //    if atb.text_buffer.undo_stack.len() != 0{
+            //        println!("PARSE LIVE {:?}", atb.text_buffer.undo_stack.last().unwrap().grouping);
+            //    }
+                atb.parse_live_macros(cx);
+            //}
             
             // ok now lets write a diff with the previous one
             /*
