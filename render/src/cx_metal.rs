@@ -323,6 +323,7 @@ impl Cx {
             let () = unsafe {msg_send![encoder, endEncoding]};
             let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
             let () = unsafe {msg_send![command_buffer, commit]};
+            //let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
             //command_buffer.wait_until_scheduled();
         }
         let () = unsafe {msg_send![pool, release]};
@@ -376,6 +377,7 @@ pub struct MetalCx {
 impl MetalCx {
     
     pub fn new() -> MetalCx {
+        /*
         let devices = get_all_metal_devices();
         for device in devices {
             let is_low_power: BOOL = unsafe {msg_send![device, isLowPower]};
@@ -386,7 +388,7 @@ impl MetalCx {
                     device: device
                 }
             }
-        }
+        }*/
         let device = get_default_metal_device().expect("Cannot get default metal device");
         MetalCx {
             command_queue: unsafe {msg_send![device, newCommandQueue]},

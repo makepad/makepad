@@ -92,6 +92,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     }
     
     fn sdf(p: vec3) -> float {
+        //return cylinder_x(p);
         return displace(p, union(
             intersection(cube(p), sphere(p)),
             union(union(cylinder_x(p), cylinder_y(p)), cylinder_z(p))
@@ -122,6 +123,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     }
 
     fn pixel() -> vec4 {
+        //return mix(color!(red), color!(white),abs(sin(frame)));
         let p0 = vec3(2.0 * pos - 1.0, 2.0);
         let v = vec3(0.0, 0.0, -1.0);
         let m = identity() * rotation(vec3(1.0, 1.0, 1.0), 0.01 * frame);
@@ -135,15 +137,15 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             let c = vec4(0.0);
             let d = displace(p, intersection(cube(p), sphere(p)));
             if d <= EPSILON {
-                c += color!(#FF003F);
+                c += color!(#CC0023);
             }
             let dx = displace(p, cylinder_x(p));
             if dx <= EPSILON {
-                c += color!(#A477AD);
+                c += color!(#EC00FF);
             }
             let dy = displace(p, cylinder_y(p));
             if dy <= EPSILON {
-                c += color!(#FFFFFF);
+                c += color!(#00FF00);
             }
             let dz = displace(p, cylinder_z(p));
             if dz <= EPSILON {
@@ -173,6 +175,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
 pub struct ShaderView {
     quad: Quad,
     area: Area,
+    animator: Animator,
     finger_hover: Vec2,
     finger_move: Vec2,
     finger_down: f32,
@@ -197,6 +200,7 @@ impl ShaderView {
         Self {
             quad: Quad::new(cx),
             area: Area::default(),
+            animator: Animator::default(),
             finger_hover: Vec2::default(),
             finger_move: Vec2::default(),
             finger_down: 0.0,
@@ -206,21 +210,26 @@ impl ShaderView {
     
     pub fn handle_shader_view(&mut self, cx: &mut Cx, event: &mut Event) {
         match event.hits(cx, self.area, HitOpt::default()) {
+            Event::Frame(_ae)=>{
+                self.frame += 1.0;
+                self.area.write_float(cx, Self::frame(), self.frame);
+                cx.next_frame(self.area);
+            },
             Event::FingerMove(fm) => {
                 self.finger_move = fm.rel;
-                cx.redraw_child_area(self.area);
+                self.area.write_vec2(cx, Self::finger_move(), self.finger_move);
             },
             Event::FingerHover(fm) => {
                 self.finger_hover = fm.rel;
-                cx.redraw_child_area(self.area);
+                self.area.write_vec2(cx, Self::finger_hover(), self.finger_hover);
             },
             Event::FingerDown(_fd) => {
                 self.finger_down = 1.0;
-                cx.redraw_child_area(self.area);
+                self.area.write_float(cx, Self::finger_down(), self.finger_down);
             },
             Event::FingerUp(_fu) => {
                 self.finger_down = 0.0;
-                cx.redraw_child_area(self.area);
+                self.area.write_float(cx, Self::finger_down(), self.finger_down);
             },
             _ => ()
         }
@@ -233,9 +242,8 @@ impl ShaderView {
         k.push_vec2(cx, self.finger_move);
         k.push_float(cx, self.finger_down);
         k.push_float(cx, self.frame);
-        self.frame += 1.0;
         self.area = cx.update_area_refs(self.area, k.into());
-        cx.redraw_child_area(self.area);
+        cx.next_frame(self.area);
     }
 }
 

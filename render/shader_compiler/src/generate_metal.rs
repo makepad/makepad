@@ -343,38 +343,38 @@ impl<'a> ShaderGenerator<'a> {
         write!(self.string, "mpsc_Textures mpsc_textures").unwrap();
         write!(
             self.string,
-            ", device mpsc_Geometries *in_geometries [[buffer(0)]]"
+            ", const device mpsc_Geometries *in_geometries [[buffer(0)]]"
         )
         .unwrap();
         write!(
             self.string,
-            ", device mpsc_Instances *in_instances [[buffer(1)]]"
+            ", const device mpsc_Instances *in_instances [[buffer(1)]]"
         )
         .unwrap();
         write!(
             self.string,
-            ", device mpsc_pass_Uniforms &mpsc_pass_uniforms [[buffer(2)]]"
+            ", constant mpsc_pass_Uniforms &mpsc_pass_uniforms [[buffer(2)]]"
         )
         .unwrap();
         write!(
             self.string,
-            ", device mpsc_view_Uniforms &mpsc_view_uniforms [[buffer(3)]]"
+            ", constant mpsc_view_Uniforms &mpsc_view_uniforms [[buffer(3)]]"
         )
         .unwrap();
         write!(
             self.string,
-            ", device mpsc_draw_Uniforms &mpsc_draw_uniforms [[buffer(4)]]"
+            ", constant mpsc_draw_Uniforms &mpsc_draw_uniforms [[buffer(4)]]"
         )
         .unwrap();
         write!(
             self.string,
-            ", device mpsc_default_Uniforms &mpsc_default_uniforms [[buffer(5)]]"
+            ", constant mpsc_default_Uniforms &mpsc_default_uniforms [[buffer(5)]]"
         )
         .unwrap();
         if self.use_const_table {
             write!(
                 self.string,
-                ", device const float *mpsc_const_table [[buffer(6)]]"
+                ", constant const float *mpsc_const_table [[buffer(6)]]"
             )
             .unwrap();
         }
@@ -451,28 +451,28 @@ impl<'a> ShaderGenerator<'a> {
         write!(self.string, "mpsc_Varyings mpsc_varyings[[stage_in]]").unwrap();
         write!(
             self.string,
-            ", device mpsc_pass_Uniforms &mpsc_pass_uniforms [[buffer(0)]]"
+            ", constant mpsc_pass_Uniforms &mpsc_pass_uniforms [[buffer(0)]]"
         )
         .unwrap();
         write!(
             self.string,
-            ", device mpsc_view_Uniforms &mpsc_view_uniforms [[buffer(1)]]"
+            ", constant mpsc_view_Uniforms &mpsc_view_uniforms [[buffer(1)]]"
         )
         .unwrap();
         write!(
             self.string,
-            ", device mpsc_draw_Uniforms &mpsc_draw_uniforms [[buffer(2)]]"
+            ", constant mpsc_draw_Uniforms &mpsc_draw_uniforms [[buffer(2)]]"
         )
         .unwrap();
         write!(
             self.string,
-            ", device mpsc_default_Uniforms &mpsc_default_uniforms [[buffer(3)]]"
+            ", constant mpsc_default_Uniforms &mpsc_default_uniforms [[buffer(3)]]"
         )
         .unwrap();
         if self.use_const_table {
             write!(
                 self.string,
-                ", device const float *mpsc_const_table [[buffer(4)]]"
+                ", constant const float *mpsc_const_table [[buffer(4)]]"
             )
             .unwrap();
         }
@@ -514,7 +514,7 @@ impl<'a> ShaderGenerator<'a> {
             backend_writer: &MetalBackendWriter,
             use_const_table: self.use_const_table,
             use_hidden_params: true,
-            use_generated_cons_fns: true,
+            use_generated_cons_fns: false,
             string: self.string,
         }
         .generate_expr(expr)
@@ -575,13 +575,13 @@ impl<'a> FnDeclGenerator<'a> {
             sep = ", ";
         }
         if self.use_const_table {
-            write!(self.string, "{}device const float *mpsc_const_table", sep).unwrap();
+            write!(self.string, "{}constant float *mpsc_const_table", sep).unwrap();
             sep = ", ";
         }
         for &ident in self.decl.uniform_block_deps.borrow().as_ref().unwrap() {
             write!(
                 self.string,
-                "{}device mpsc_{1}_Uniforms &mpsc_{1}_uniforms",
+                "{}constant mpsc_{1}_Uniforms &mpsc_{1}_uniforms",
                 sep, ident
             )
             .unwrap();
@@ -644,7 +644,7 @@ impl<'a> FnDeclGenerator<'a> {
             backend_writer: &MetalBackendWriter,
             use_const_table: self.use_const_table,
             use_hidden_params: true,
-            use_generated_cons_fns: true,
+            use_generated_cons_fns: false,
             indent_level: 0,
             string: self.string,
         }

@@ -558,7 +558,7 @@ impl FileTree {
                         self.drag_view.redraw_view_area(cx);
                     }
                     drag_nodes = true;
-                },
+                },  
                 Event::FingerHover(fe) => {
                     cx.set_hover_mouse_cursor(MouseCursor::Hand);
                     match fe.hover_state {
