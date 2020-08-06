@@ -984,7 +984,7 @@ impl TextEditor {
     }
     
     pub fn handle_text_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
-        if self.view.handle_scroll_bars(cx, event) {
+        if self.view.handle_scroll_view(cx, event) {
             if let Some(last_finger_move) = self._last_finger_move {
                 if let Some(grid_select_corner) = self._grid_select_corner {
                     let pos = self.compute_grid_text_pos_from_abs(cx, last_finger_move);

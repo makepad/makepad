@@ -78,7 +78,7 @@ impl ListLogic {
     
     pub fn handle_list_scroll_bars(&mut self, cx: &mut Cx, event: &mut Event, view: &mut ScrollView)
         -> bool {
-        if view.handle_scroll_bars(cx, event) {
+        if view.handle_scroll_view(cx, event) {
             view.redraw_view_area(cx);
             match &event {
                 Event::FingerScroll {..} => {
