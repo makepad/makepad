@@ -39,151 +39,160 @@ impl LiveMacrosView {
         }
     }
     
-    pub fn handle_live_macros(&mut self, cx: &mut Cx, event: &mut Event, _atb: &mut AppTextBuffer) {
-        for (_index, color_picker) in self.color_pickers.enumerate() {
-            color_picker.handle_color_picker(cx, event);
+    pub fn handle_live_macros(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, text_editor: &mut TextEditor) {
+        for (index, color_picker) in self.color_pickers.enumerate() {
+            match color_picker.handle_color_picker(cx, event) {
+                ColorPickerEvent::Change {hsva} => {
+                    
+                    // ok now what. now we serialize out hsva into the textbuffer
+                    if let LiveMacro::Color{range,..} = &atb.live_macros.macros[*index]{
+                        // and let the things work out
+                        let color = Color::from_hsva(hsva);
+                        // we have a range, now lets set the cursors to that range
+                        // and replace shit.
+                        text_editor.handle_live_replace(cx, *range, &format!("#{}",color.to_hex()), &mut atb.text_buffer, 0);
+                    }
+                },
+                _ => ()
+            }
         }
     }
     
-    pub fn draw_live_macros(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer) {
+    pub fn draw_live_macros(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, _text_editor: &mut TextEditor) {
         // alright so we have a list of macros..
         // now we have to draw them.
-        for (index, _m) in atb.live_macros.macros.iter_mut().enumerate() {
-            self.color_pickers.get_draw(cx, index, | _, t | t.clone()).draw_color_picker(cx);
+        for (index, m) in atb.live_macros.macros.iter_mut().enumerate() {
+            match m {
+                LiveMacro::Color {hsva, ..} => {
+                    self.color_pickers.get_draw(cx, index, | _, t | t.clone()).draw_color_picker(cx, *hsva);
+                },
+                _ => ()
+            }
+            
         }
     }
 }
 
 
 pub enum ColorPickerEvent {
+    Change {hsva: Vec4},
     None
 }
 
 #[derive(Clone)]
 pub struct ColorPicker {
     pub size: f32,
-    pub hue:f32,
-    pub sat:f32,
-    pub val:f32,
+    pub hue: f32,
+    pub sat: f32,
+    pub val: f32,
     pub wheel: Quad,
-    pub animator: Animator,
     pub wheel_area: Area,
     pub drag_mode: ColorPickerDragMode
 }
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ColorPickerDragMode {
     Wheel,
     Rect,
     None
 }
-const TORAD:f32 = 0.017453292519943295;
 impl ColorPicker {
     
     pub fn wheel() -> ShaderId {uid!()}
     
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            hue:0.0,
-            sat:0.0,
-            val:0.0,
+            hue: 0.0,
+            sat: 0.0,
+            val: 0.0,
             size: 0.0,
             wheel: Quad::new(cx),
-            animator: Animator::default(),
             wheel_area: Area::Empty,
             drag_mode: ColorPickerDragMode::None
         }
     }
     
+    pub fn handle_finger(&mut self, cx: &mut Cx, rel: Vec2) -> ColorPickerEvent {
+        fn clamp(x: f32, mi: f32, ma: f32) -> f32 {if x < mi {mi} else if x > ma {ma} else {x}};
+        let vx = rel.x - 0.5 * self.size;
+        let vy = rel.y - 0.5 * self.size;
+        let rsize = (self.size * 0.28) / 2.0f32.sqrt();
+        let last_hue = self.hue;
+        let last_sat = self.sat;
+        let last_val = self.val;
+        match self.drag_mode {
+            ColorPickerDragMode::Rect => {
+                self.sat = clamp((vx + rsize) / (2.0 * rsize), 0.0, 1.0);
+                self.val = 1.0 - clamp((vy + rsize) / (2.0 * rsize), 0.0, 1.0);
+            },
+            ColorPickerDragMode::Wheel => {
+                self.hue = vx.atan2(vy) / std::f32::consts::PI * 0.5 + 0.5;
+            },
+            _ => ()
+        }
+        // lets update hue sat val directly
+        let mut changed = false;
+        if last_hue != self.hue {
+            self.wheel_area.write_float(cx, Self::hue(), self.hue);
+            changed = true;
+        }
+        if last_sat != self.sat {
+            self.wheel_area.write_float(cx, Self::sat(), self.sat);
+            changed = true;
+        }
+        if last_val != self.val {
+            self.wheel_area.write_float(cx, Self::val(), self.val);
+            changed = true;
+        }
+        if changed {
+            ColorPickerEvent::Change {hsva: Vec4 {x: self.hue, y: self.sat, z: self.val, w: 1.0}}
+        }
+        else {
+            ColorPickerEvent::None
+        }
+    }
+    
     pub fn handle_color_picker(&mut self, cx: &mut Cx, event: &mut Event) -> ColorPickerEvent {
         match event.hits(cx, self.wheel_area, HitOpt::default()) {
-            Event::FingerHover(_fe)=>{
+            Event::FingerHover(_fe) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Arrow);
             },
             Event::FingerDown(fe) => {
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
                 let rsize = (self.size * 0.28) / 2.0f32.sqrt();
-                let cx = fe.rel.x - 0.5 * self.size;
-                let cy = fe.rel.y - 0.5 * self.size;
-                if cx >= -rsize && cx <= rsize && cy >= -rsize && cy <= rsize {
+                let vx = fe.rel.x - 0.5 * self.size;
+                let vy = fe.rel.y - 0.5 * self.size;
+                if vx >= -rsize && vx <= rsize && vy >= -rsize && vy <= rsize {
                     self.drag_mode = ColorPickerDragMode::Rect;
                 }
-                else if cx >= -0.5 * self.size && cx <= 0.5 * self.size && cy >= -0.5 * self.size && cy <= 0.5 * self.size {
+                else if vx >= -0.5 * self.size && vx <= 0.5 * self.size && vy >= -0.5 * self.size && vy <= 0.5 * self.size {
                     self.drag_mode = ColorPickerDragMode::Wheel;
                 }
                 else {
                     self.drag_mode = ColorPickerDragMode::None;
                 }
-                
+                return self.handle_finger(cx, fe.rel);
                 // lets check where we clicked!
             },
+            Event::FingerUp(_fe)=>{
+                self.drag_mode = ColorPickerDragMode::None;
+            }
             Event::FingerMove(fe) => {
-                fn clamp(x:f32, mi:f32, ma:f32)->f32{ if x < mi{mi} else if x > ma{ma} else {x}};
-                let vx = fe.rel.x - 0.5 * self.size;
-                let vy = fe.rel.y - 0.5 * self.size;
-                let rsize = (self.size * 0.28) / 2.0f32.sqrt();
-                match self.drag_mode {
-                    ColorPickerDragMode::Rect => {
-                        self.sat = clamp((vx + rsize) / (2.0 * rsize), 0.0, 1.0);
-                        self.val = 1.0 - clamp((vy + rsize) / (2.0 * rsize), 0.0, 1.0);
-                    },
-                    ColorPickerDragMode::Wheel => {
-                        fn hexagon_side(x: f32, y: f32, r: f32) -> f32 {
-                            let dx = x.abs() * 1.15;
-                            let dy = y.abs();
-                            if (dy + (60.0 * TORAD).cos() * dx - r).max(dx - r) < 0.0 {
-                                return -1.0;
-                            }
-                            // alright check if we are either
-                            let t1 = dy + 0.5 * r - 1.5 * (dx - r) - r;
-                            let t2 = dy - 1.5 * (dx) - r;
-                            let t3 = dy + 0.5 * r - r;
-                            if t1 > 0.0 && t2 < 0.0 {return -1.0;}
-                            if t3 < 0.0 {return -1.0;}
-                            if t2 > 0.0 {
-                                if y < 0.0 {return 1.0;}
-                                else {return 0.5;}
-                            }
-                            if x > 0.0{
-                                if y > 0.0{
-                                    return 4.0/6.0;
-                                }
-                                else {
-                                    return 5.0/6.0;
-                                }
-                            }
-                            else{
-                                if y > 0.0{
-                                    return 2.0/6.0
-                                }
-                                else{
-                                    return 1.0/6.0
-                                }
-                            }
-                        }
-                        
-                        let side = hexagon_side(vx, vy, self.size * 0.5);
-                        if side < 0.0 {
-                            self.hue = vx.atan2(vy) / std::f32::consts::PI * 0.5 + 0.5;
-                        }
-                        else {
-                            self.hue = side
-                        }
-                    },
-                    _ => ()
-                }
-                // lets update hue sat val directly
-                self.wheel_area.write_float(cx, Self::hue(), self.hue);
-                self.wheel_area.write_float(cx, Self::sat(), self.sat);
-                self.wheel_area.write_float(cx, Self::val(), self.val);
+                return self.handle_finger(cx, fe.rel)
+                
             },
             _ => ()
         }
         ColorPickerEvent::None
     }
     
-    pub fn draw_color_picker(&mut self, cx: &mut Cx) {
+    pub fn draw_color_picker(&mut self, cx: &mut Cx, hsva: Vec4) {
+        if self.drag_mode == ColorPickerDragMode::None{
+            self.hue = hsva.x;
+            self.sat = hsva.y;
+            self.val = hsva.z;
+        }
         self.wheel.shader = Self::wheel().get(cx);
         // i wanna draw a wheel with 'width' set but height a fixed height.
         self.size = cx.get_turtle_rect().w;
@@ -196,7 +205,7 @@ impl ColorPicker {
         k.push_float(cx, self.hue);
         k.push_float(cx, self.sat);
         k.push_float(cx, self.val);
-        self.wheel_area = k.into();
+        self.wheel_area = cx.update_area_refs(self.wheel_area, k.into());
     }
     
     pub fn hue() -> FloatId {uid!()}
@@ -251,7 +260,7 @@ impl ColorPicker {
                 let rect_puk = vec2(cx + sat * 2. * rsize - rsize, cy + (1. - val) * 2. * rsize - rsize);
                 
                 df.circle(rect_puk.x, rect_puk.y, 10.);
-                df.fill(color!(white));
+                df.fill(color!(#D59E60));
                 df.circle(rect_puk.x, rect_puk.y, 9.);
                 df.fill(rgbv);
                 
@@ -294,7 +303,7 @@ impl AppTextBuffer {
                             // ok lets turn color into HSV and store it in data
                             self.live_macros.macros.push(LiveMacro::Color {
                                 in_shader,
-                                range,
+                                range: (range.0+1,range.1),
                                 hsva: color.to_hsv()
                             })
                         }
