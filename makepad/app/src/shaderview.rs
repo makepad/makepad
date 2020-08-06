@@ -145,11 +145,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
                 c = mix(c, color!(blue), 0.5);
             }
             let k = 0.1 + 0.5 * vec4(abs(dot(n, vec3(0.0, 0.0, -1.0))));
-<<<<<<< HEAD
-            return k * color!(#ABD2B3);
-=======
             return k * c;
->>>>>>> 6d2073c6629be9896b1ef3d54069fa1b91776460
         } else {
             return vec4(0.0);
         }
