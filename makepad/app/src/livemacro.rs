@@ -205,6 +205,7 @@ impl ColorPicker {
         k.push_float(cx, self.hue);
         k.push_float(cx, self.sat);
         k.push_float(cx, self.val);
+        
         self.wheel_area = cx.update_area_refs(self.wheel_area, k.into());
     }
     
@@ -291,9 +292,8 @@ impl AppTextBuffer {
                             tp.advance();
                             let in_shader = tp.cur_offset() < shader_end;
                             // ok so now we need to parse the color, and turn it to HSV
-                            let color = if tp.cur_type() == TokenType::Hash { // its a #color
-                                tp.advance();
-                                let color = Color::parse_hex(&tp.cur_as_string());
+                            let color = if tp.cur_type() == TokenType::Color { // its a #color
+                                let color = Color::parse_hex(&tp.cur_as_string()[1..]);
                                 if let Ok(color) = color {color}else {Color::white()}
                             }
                             else { // its a named color
