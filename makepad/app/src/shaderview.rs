@@ -131,14 +131,14 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         if t < T_MAX {
             let p = p0 + t * v;
             let n = estimate_normal(p);
-            let c = color!(white);
+            let c = color!(#FFFFFF);
             let dx = cylinder_x(p);
             if dx <= EPSILON {
-                c = mix(c, color!(red), 0.5);
+                c = mix(c, color!(#FF0010), 0.5);
             }
             let dy = cylinder_y(p);
             if dy <= EPSILON {
-                c = mix(c, color!(green), 0.5);
+                c = mix(c, color!(#00FF02), 0.5);
             }
             let dz = cylinder_z(p);
             if dz <= EPSILON {
@@ -220,6 +220,7 @@ impl ShaderView {
         k.push_float(cx, self.frame);
         self.frame += 1.0;
         self.area = cx.update_area_refs(self.area, k.into());
+        cx.redraw_child_area(self.area);
     }
 }
 
