@@ -94,6 +94,10 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         );
     }
     
+    fn compute_color(p: vec3) -> vec3 {
+        
+    }
+    
     fn estimate_normal(p: vec3) -> vec3 {
         return normalize(vec3(
             sdf(vec3(p.x + EPSILON, p.y, p.z)) - sdf(vec3(p.x - EPSILON, p.y, p.z)),
@@ -127,8 +131,25 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         if t < T_MAX {
             let p = p0 + t * v;
             let n = estimate_normal(p);
+            let c = color!(white);
+            let dx = cylinder_x(p);
+            if dx <= EPSILON {
+                c = mix(c, color!(red), 0.5);
+            }
+            let dy = cylinder_y(p);
+            if dy <= EPSILON {
+                c = mix(c, color!(green), 0.5);
+            }
+            let dz = cylinder_z(p);
+            if dz <= EPSILON {
+                c = mix(c, color!(blue), 0.5);
+            }
             let k = 0.1 + 0.5 * vec4(abs(dot(n, vec3(0.0, 0.0, -1.0))));
+<<<<<<< HEAD
             return k * color!(#ABD2B3);
+=======
+            return k * c;
+>>>>>>> 6d2073c6629be9896b1ef3d54069fa1b91776460
         } else {
             return vec4(0.0);
         }
