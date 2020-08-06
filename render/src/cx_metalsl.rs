@@ -87,6 +87,10 @@ impl Cx {
             //return Err(SlErr {msg: nsstring_to_string(err_str)})
         }
         
+            //let err_str: id = unsafe {msg_send![err, localizedDescription]};
+            //println!("{}", nsstring_to_string(err_str));
+        
+        
         sh.mapping = mapping;
         sh.platform = Some(CxPlatformShader {
             metal_shader: mtlsl, 
