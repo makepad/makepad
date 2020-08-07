@@ -2,10 +2,11 @@ use makepad_render::*;
 use makepad_widget::*;
 use crate::mprstokenizer::*;
 use crate::appstorage::*;
+use makepad_render::PrettyPrintedFloat;
 
 pub enum LiveMacro {
     Pick {range: (usize, usize), hsva: Vec4, in_shader: bool},
-    Slide {range: (usize, usize), value: f32, min:f32, max:f32, step:f32, in_shader: bool},
+    Slide {range: (usize, usize), value: f32, min: f32, max: f32, step: f32, in_shader: bool},
     Shader
 }
 
@@ -42,19 +43,19 @@ impl LiveMacrosView {
         }
     }
     
-    pub fn handle_live_macros(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, text_editor: &mut TextEditor){
+    pub fn handle_live_macros(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, text_editor: &mut TextEditor) {
         self.scroll_view.handle_scroll_view(cx, event);
         for (index, color_picker) in self.color_pickers.enumerate() {
             match color_picker.handle_color_picker(cx, event) {
                 ColorPickerEvent::Change {hsva} => {
                     
                     // ok now what. now we serialize out hsva into the textbuffer
-                    if let LiveMacro::Pick{range,..} = &mut atb.live_macros.macros[*index]{
+                    if let LiveMacro::Pick {range, ..} = &mut atb.live_macros.macros[*index] {
                         // and let the things work out
                         let color = Color::from_hsva(hsva);
                         // we have a range, now lets set the cursors to that range
                         // and replace shit.
-                        let new_string = format!("#{}",color.to_hex());
+                        let new_string = format!("#{}", color.to_hex());
                         text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, 0);
                         *range = (range.0, range.0 + new_string.len());
                     }
@@ -64,19 +65,15 @@ impl LiveMacrosView {
         }
         for (index, float_slider) in self.float_sliders.enumerate() {
             match float_slider.handle_float_slider(cx, event) {
-                FloatSliderEvent::Change {..} => {
+                FloatSliderEvent::Change {scaled_value} => {
                     
                     // ok now what. now we serialize out hsva into the textbuffer
-                    if let LiveMacro::Slide{..} = &mut atb.live_macros.macros[*index]{
+                    if let LiveMacro::Slide {range,..} = &mut atb.live_macros.macros[*index] {
                         // and let the things work out
-                        /*
-                        let color = Color::from_hsva(hsva);
-                        // we have a range, now lets set the cursors to that range
-                        // and replace shit.
-                        let new_string = format!("#{}",color.to_hex());
+                        let new_string = format!("{}",PrettyPrintedFloat(scaled_value));
                         text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, 0);
                         *range = (range.0, range.0 + new_string.len());
-                        */
+                        
                     }
                 },
                 _ => ()
@@ -88,17 +85,18 @@ impl LiveMacrosView {
     pub fn draw_live_macros(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, _text_editor: &mut TextEditor) {
         // alright so we have a list of macros..
         // now we have to draw them.
-        if self.scroll_view.begin_view(cx, Layout{
-            direction:Direction::Down,
+        if self.scroll_view.begin_view(cx, Layout {
+            direction: Direction::Down,
             ..Layout::default()
-        }).is_ok(){
+        }).is_ok() {
             for (index, m) in atb.live_macros.macros.iter_mut().enumerate() {
                 match m {
                     LiveMacro::Pick {hsva, ..} => {
                         self.color_pickers.get_draw(cx, index, | _, t | t.clone()).draw_color_picker(cx, *hsva);
                     },
-                    LiveMacro::Slide{value,..}=>{
-                        self.float_sliders.get_draw(cx, index, | _, t | t.clone()).draw_float_slider(cx, *value);
+                    LiveMacro::Slide {value, min, max, step, ..} => {
+                        self.float_sliders.get_draw(cx, index, | _, t | t.clone())
+                            .draw_float_slider(cx, *value, *min, *max, *step);
                     }
                     _ => ()
                 }
@@ -109,16 +107,18 @@ impl LiveMacrosView {
 }
 
 pub enum FloatSliderEvent {
-    Change {value: f32},
+    Change {scaled_value: f32},
     None
 }
 
 #[derive(Clone)]
 pub struct FloatSlider {
-    pub value: f32,
+    pub scaled_value: f32,
+    pub norm_value: f32,
     pub min: f32,
     pub max: f32,
     pub step: f32,
+    pub size: f32,
     pub slider: Quad,
     pub slider_area: Area,
     pub dragging: bool
@@ -130,29 +130,33 @@ impl FloatSlider {
     
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            value: 0.0,
+            norm_value: 0.0,
+            scaled_value: 0.0,
             min: 0.0,
             max: 1.0,
             step: 0.0,
+            size: 0.0,
             slider: Quad::new(cx),
             slider_area: Area::Empty,
             dragging: false
         }
     }
     
-    pub fn handle_finger(&mut self, cx: &mut Cx, _rel: Vec2) -> FloatSliderEvent {
-        let value = 0.0;//self.value;
-        if self.dragging{
-            //self.hue = vx.atan2(vy) / std::f32::consts::PI * 0.5 + 0.5;
+    pub fn handle_finger(&mut self, cx: &mut Cx, rel: Vec2) -> FloatSliderEvent {
+        let norm_value = (rel.x / self.size).max(0.0).min(1.0);
+        let mut scaled_value = norm_value * (self.max-self.min) + self.min;
+        if self.step > 0.0{
+            scaled_value = (scaled_value / self.step).round() * self.step;
         }
-        // lets update hue sat val directly
         let mut changed = false;
-        if value != self.value {
-            self.slider_area.write_float(cx, Self::value(), self.value);
+        if scaled_value != self.scaled_value {
+            self.scaled_value = scaled_value;
+            self.norm_value = norm_value;
+            self.slider_area.write_float(cx, Self::norm_value(), self.norm_value);
             changed = true;
         }
         if changed {
-            FloatSliderEvent::Change {value}
+            FloatSliderEvent::Change {scaled_value}
         }
         else {
             FloatSliderEvent::None
@@ -170,7 +174,7 @@ impl FloatSlider {
                 return self.handle_finger(cx, fe.rel);
                 // lets check where we clicked!
             },
-            Event::FingerUp(_fe)=>{
+            Event::FingerUp(_fe) => {
                 self.dragging = false;
             }
             Event::FingerMove(fe) => {
@@ -182,38 +186,56 @@ impl FloatSlider {
         FloatSliderEvent::None
     }
     
-    pub fn draw_float_slider(&mut self, cx: &mut Cx, value:f32) {
-        if !self.dragging{
-            self.value = value;
+    pub fn draw_float_slider(&mut self, cx: &mut Cx, scaled_value: f32, min:f32, max:f32, step:f32) {
+        if !self.dragging {
+            self.scaled_value = scaled_value;
+            self.min = min;
+            self.max = max;
+            self.step = step;
+            self.norm_value = (scaled_value - min) / (max-min);
         }
         
         self.slider.shader = Self::slider().get(cx);
         // i wanna draw a wheel with 'width' set but height a fixed height.
-        //self.size = cx.get_turtle_rect().w;
+        
+        let pad = 10.;
+        
+        self.size = cx.get_turtle_rect().w - 2.*pad;
         let k = self.slider.draw_quad(cx, Walk {
-            margin: Margin::zero(),
-            width: Width::Fill,
+            margin: Margin::left(pad),
+            width: Width::FillPad(pad),
             height: Height::Fix(20.0)
         });
         // lets put a hsv int here
-        k.push_float(cx, self.value);
+        k.push_float(cx, self.norm_value);
         
         self.slider_area = cx.update_area_refs(self.slider_area, k.into());
     }
     
-    pub fn value() -> FloatId {uid!()}
+    pub fn norm_value() -> FloatId {uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         Self::slider().set(cx, Quad::def_quad_shader().compose(shader!{"
             
-            instance value: Self::value();
+            instance norm_value: Self::norm_value();
             
             fn pixel() -> vec4 {
                 let df = Df::viewport(pos * vec2(w, h));
                 
-                df.rect(0.,0.,w,h);
+                let cy = h * 0.5;
+                let height = 5.;
+                df.box(4., cy - 0.5 * height, w - 10., height, 1.);
                 
-                return df.fill(pick!(red));
+                df.fill(pick!(#4));
+                
+                let bheight = 15.;
+                let bwidth = 10.;
+                
+                df.box((w - bwidth)*norm_value, cy - 0.5 * bheight, bwidth, bheight, 2.);
+                
+                df.fill(pick!(#6));
+                
+                return df.result;
             }
         "}))
     }
@@ -321,7 +343,7 @@ impl ColorPicker {
                 return self.handle_finger(cx, fe.rel);
                 // lets check where we clicked!
             },
-            Event::FingerUp(_fe)=>{
+            Event::FingerUp(_fe) => {
                 self.drag_mode = ColorPickerDragMode::None;
             }
             Event::FingerMove(fe) => {
@@ -334,7 +356,7 @@ impl ColorPicker {
     }
     
     pub fn draw_color_picker(&mut self, cx: &mut Cx, hsva: Vec4) {
-        if self.drag_mode == ColorPickerDragMode::None{
+        if self.drag_mode == ColorPickerDragMode::None {
             self.hue = hsva.x;
             self.sat = hsva.y;
             self.val = hsva.z;
@@ -456,12 +478,12 @@ impl AppTextBuffer {
                             // ok lets turn color into HSV and store it in data
                             self.live_macros.macros.push(LiveMacro::Pick {
                                 in_shader,
-                                range: (range.0+1,range.1),
+                                range: (range.0 + 1, range.1),
                                 hsva: color.to_hsv()
                             })
                         }
                     }
-                    else if tp.eat("slide") && tp.eat("!"){
+                    else if tp.eat("slide") && tp.eat("!") {
                         if tp.cur_type() == TokenType::ParenOpen {
                             let in_shader = tp.cur_offset() < shader_end;
                             // now i just want the first number
@@ -472,29 +494,34 @@ impl AppTextBuffer {
                             let mut max = 1.0;
                             let mut step = 0.0;
                             let range;
-                            if tp.cur_type() == TokenType::Number{
+                            if tp.cur_type() == TokenType::Number {
                                 // it could be followed by a min, max and step
-                                value = if let Ok(v) = tp.cur_as_string().parse(){v}else{1.0};
+                                value = if let Ok(v) = tp.cur_as_string().parse() {v}else {1.0};
                                 range = tp.cur_range();
                                 tp.advance();
-                                if tp.eat(",") && tp.cur_type() == TokenType::Number{
-                                    min = if let Ok(v) = tp.cur_as_string().parse(){v}else{0.0};
+                                if tp.eat(",") && tp.cur_type() == TokenType::Number {
+                                    min = if let Ok(v) = tp.cur_as_string().parse() {v}else {0.0};
                                     tp.advance();
-                                    if tp.eat(",") && tp.cur_type() == TokenType::Number{
-                                        max = if let Ok(v) = tp.cur_as_string().parse(){v}else{1.0};
+                                    if tp.eat(",") && tp.cur_type() == TokenType::Number {
+                                        max = if let Ok(v) = tp.cur_as_string().parse() {v}else {1.0};
                                         tp.advance();
-                                         if tp.eat(",") && tp.cur_type() == TokenType::Number{
-                                            step = if let Ok(v) = tp.cur_as_string().parse(){v}else{0.0};
+                                        if tp.eat(",") && tp.cur_type() == TokenType::Number {
+                                            step = if let Ok(v) = tp.cur_as_string().parse() {v}else {0.0};
                                             tp.advance();
                                         }
                                     }
                                 }
                             }
-                            else{
+                            else {
                                 range = (paren_range.0 + 1, paren_range.1);
                             }
                             self.live_macros.macros.push(LiveMacro::Slide {
-                                in_shader,value, min, max, range, step
+                                in_shader,
+                                value,
+                                min,
+                                max,
+                                range,
+                                step
                             })
                         }
                     }
