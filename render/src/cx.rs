@@ -3,6 +3,7 @@ use std::cell::RefCell;
 
 pub use makepad_shader_compiler::shadergen::*;
 pub use makepad_shader_compiler::colors::*;
+pub use makepad_shader_compiler::util::PrettyPrintedFloat;
 pub use makepad_shader_compiler::math::*;
 pub use makepad_shader_compiler::uid;
 pub use makepad_live_macros::*;

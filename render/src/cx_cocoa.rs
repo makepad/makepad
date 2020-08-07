@@ -538,7 +538,6 @@ impl CocoaApp {
     
     pub fn do_callback(&mut self, events: &mut Vec<Event>) {
         unsafe {
-            let start = self.time_now();
             if self.event_callback.is_none() || self.event_recur_block {
                 return
             };
@@ -546,18 +545,6 @@ impl CocoaApp {
             let callback = self.event_callback.unwrap();
             self.loop_block = (*callback)(self, events);
             self.event_recur_block = false;
-            let end = self.time_now();
-            
-            if end - start > 0.1 {
-                
-                unsafe {
-                    
-                    //if !active{
-                    //    let () = msg_send![ns_app, activateIgnoringOtherApps:true];
-                    // }
-                }
-                
-            }
         }
     }
     
