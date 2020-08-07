@@ -43,7 +43,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             
             let ia = 0.2;
             let id = 0.3 * max(0.0, dot(ld, n));
-            let is = 0.5 * pow(max(0.0, dot(v, r)), 2.0);
+            let is = 0.5 * pow(max(0.0, dot(v, r)), slide!(1.0)*2.0);
             let i = ia + id + is;
             
             return i * c; 

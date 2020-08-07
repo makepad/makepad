@@ -24,12 +24,12 @@ pub trait BackendWriter {
         ident: Ident,
         ty: &Ty,
     );
-
+    
     fn write_ident(&self, string: &mut String, ident: Ident);
-
+    
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
     
-    fn write_call_ident(&self, string: &mut String, ident:Ident, arg_exprs:&[Expr]);
+    fn write_call_ident(&self, string: &mut String, ident: Ident, arg_exprs: &[Expr]);
 }
 
 pub struct BlockGenerator<'a> {
@@ -57,12 +57,12 @@ impl<'a> BlockGenerator<'a> {
         }
         write!(self.string, "}}").unwrap()
     }
-
+    
     fn generate_stmt(&mut self, stmt: &Stmt) {
         self.write_indent();
         match *stmt {
-            Stmt::Break { span } => self.generate_break_stmt(span),
-            Stmt::Continue { span } => self.generate_continue_stmt(span),
+            Stmt::Break {span} => self.generate_break_stmt(span),
+            Stmt::Continue {span} => self.generate_continue_stmt(span),
             Stmt::For {
                 span,
                 ident,
@@ -84,20 +84,20 @@ impl<'a> BlockGenerator<'a> {
                 ref ty_expr,
                 ref expr,
             } => self.generate_let_stmt(span, ty, ident, ty_expr, expr),
-            Stmt::Return { span, ref expr } => self.generate_return_stmt(span, expr),
-            Stmt::Block { span, ref block } => self.generate_block_stmt(span, block),
-            Stmt::Expr { span, ref expr } => self.generate_expr_stmt(span, expr),
+            Stmt::Return {span, ref expr} => self.generate_return_stmt(span, expr),
+            Stmt::Block {span, ref block} => self.generate_block_stmt(span, block),
+            Stmt::Expr {span, ref expr} => self.generate_expr_stmt(span, expr),
         }
     }
-
+    
     fn generate_break_stmt(&mut self, _span: Span) {
         writeln!(self.string, "break;").unwrap();
     }
-
+    
     fn generate_continue_stmt(&mut self, _span: Span) {
         writeln!(self.string, "continue;").unwrap();
     }
-
+    
     fn generate_for_stmt(
         &mut self,
         _span: Span,
@@ -144,17 +144,17 @@ impl<'a> BlockGenerator<'a> {
             self.string,
             "for (int {0} = {1}; {0} {2} {3}; {0} {4} {5}) ",
             ident,
-            if from <= to { from } else { from - 1 },
-            if from <= to { "<" } else { ">=" },
+            if from <= to {from} else {from - 1},
+            if from <= to {"<"} else {">="},
             to,
-            if step > 0 { "+=" } else { "-=" },
+            if step > 0 {"+="} else {"-="},
             step.abs()
         )
-        .unwrap();
+            .unwrap();
         self.generate_block(block);
         writeln!(self.string).unwrap();
     }
-
+    
     fn generate_if_stmt(
         &mut self,
         _span: Span,
@@ -172,7 +172,7 @@ impl<'a> BlockGenerator<'a> {
         }
         writeln!(self.string).unwrap();
     }
-
+    
     fn generate_let_stmt(
         &mut self,
         _span: Span,
@@ -188,7 +188,7 @@ impl<'a> BlockGenerator<'a> {
         }
         writeln!(self.string, ";").unwrap();
     }
-
+    
     fn generate_return_stmt(&mut self, _span: Span, expr: &Option<Expr>) {
         write!(self.string, "return").unwrap();
         if let Some(expr) = expr {
@@ -197,17 +197,17 @@ impl<'a> BlockGenerator<'a> {
         }
         writeln!(self.string, ";").unwrap();
     }
-
+    
     fn generate_block_stmt(&mut self, _span: Span, block: &Block) {
         self.generate_block(block);
         writeln!(self.string).unwrap();
     }
-
+    
     fn generate_expr_stmt(&mut self, _span: Span, expr: &Expr) {
         self.generate_expr(expr);
         writeln!(self.string, ";").unwrap();
     }
-
+    
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             shader: self.shader,
@@ -220,13 +220,13 @@ impl<'a> BlockGenerator<'a> {
         }
         .generate_expr(expr)
     }
-
+    
     fn write_indent(&mut self) {
         for _ in 0..self.indent_level {
             write!(self.string, "    ").unwrap();
         }
     }
-
+    
     fn write_var_decl(&mut self, is_inout: bool, is_packed: bool, ident: Ident, ty: &Ty) {
         self.backend_writer
             .write_var_decl(&mut self.string, is_inout, is_packed, ident, ty);
@@ -291,7 +291,7 @@ impl<'a> ExprGenerator<'a> {
                     ref left_expr,
                     ref right_expr,
                 } => self.generate_bin_expr(span, op, left_expr, right_expr),
-                ExprKind::Un { span, op, ref expr } => self.generate_un_expr(span, op, expr),
+                ExprKind::Un {span, op, ref expr} => self.generate_un_expr(span, op, expr),
                 ExprKind::MethodCall {
                     span,
                     ident,
@@ -329,11 +329,11 @@ impl<'a> ExprGenerator<'a> {
                     ref kind,
                     ident,
                 } => self.generate_var_expr(span, kind, ident),
-                ExprKind::Lit { span, lit } => self.generate_lit_expr(span, lit),
+                ExprKind::Lit {span, lit} => self.generate_lit_expr(span, lit),
             },
         }
     }
-
+    
     fn generate_cond_expr(
         &mut self,
         _span: Span,
@@ -349,7 +349,7 @@ impl<'a> ExprGenerator<'a> {
         self.generate_expr(expr_if_false);
         write!(self.string, ")").unwrap();
     }
-
+    
     fn generate_bin_expr(&mut self, _span: Span, op: BinOp, left_expr: &Expr, right_expr: &Expr) {
         write!(self.string, "(").unwrap();
         self.generate_expr(left_expr);
@@ -357,12 +357,12 @@ impl<'a> ExprGenerator<'a> {
         self.generate_expr(right_expr);
         write!(self.string, ")").unwrap();
     }
-
+    
     fn generate_un_expr(&mut self, _span: Span, op: UnOp, expr: &Expr) {
         write!(self.string, "{}", op).unwrap();
         self.generate_expr(expr);
     }
-
+    
     fn generate_method_call_expr(&mut self, span: Span, ident: Ident, arg_exprs: &[Expr]) {
         match arg_exprs[0].ty.borrow().as_ref().unwrap() {
             Ty::Struct {
@@ -377,19 +377,19 @@ impl<'a> ExprGenerator<'a> {
             _ => panic!(),
         }
     }
-
+    
     fn generate_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident) {
         self.generate_expr(expr);
         write!(self.string, ".{}", field_ident).unwrap();
     }
-
+    
     fn generate_index_expr(&mut self, _span: Span, expr: &Expr, index_expr: &Expr) {
         self.generate_expr(expr);
         write!(self.string, "[").unwrap();
         self.generate_expr(index_expr);
         write!(self.string, "]").unwrap();
     }
-
+    
     fn generate_call_expr(&mut self, _span: Span, ident: Ident, arg_exprs: &[Expr]) {
         //TODO add built-in check
         self.backend_writer.write_call_ident(&mut self.string, ident, arg_exprs);
@@ -442,7 +442,7 @@ impl<'a> ExprGenerator<'a> {
         }
         write!(self.string, ")").unwrap();
     }
-
+    
     fn generate_macro_call_expr(
         &mut self,
         analysis: &Cell<Option<MacroCallAnalysis>>,
@@ -450,26 +450,31 @@ impl<'a> ExprGenerator<'a> {
         _ident: Ident,
         _arg_exprs: &[Expr],
     ) {
-
+        
         match analysis.get().unwrap() {
-            MacroCallAnalysis::Pick { r, g, b, a } => {
+            MacroCallAnalysis::Pick {r, g, b, a} => {
                 self.backend_writer.write_ty_lit(self.string, TyLit::Vec4);
-                write!(self.string, "(").unwrap();
-                write_float(&mut self.string, r); 
-                write!(self.string, ",").unwrap();
-                write_float(&mut self.string, g);
-                write!(self.string, ",").unwrap();
-                write_float(&mut self.string, b);
-                write!(self.string, ",").unwrap();
-                write_float(&mut self.string, a);
-                write!(self.string, ")").unwrap();
+                
+                write!(
+                    self.string,
+                    "({},{},{},{})",
+                    PrettyPrintedFloat(r),
+                    PrettyPrintedFloat(g),
+                    PrettyPrintedFloat(b),
+                    PrettyPrintedFloat(a)
+                ).unwrap();
+                
             },
-            MacroCallAnalysis::Slide {v} =>{
-                write_float(&mut self.string, v); 
+            MacroCallAnalysis::Slide {v} => {
+                write!(
+                    self.string,
+                    "{}",
+                    PrettyPrintedFloat(v),
+                ).unwrap();
             }
         }
     }
-
+    
     fn generate_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {
         if self.use_generated_cons_fns {
             write!(self.string, "mpsc_").unwrap();
@@ -490,7 +495,7 @@ impl<'a> ExprGenerator<'a> {
         }
         write!(self.string, ")").unwrap();
     }
-
+    
     fn generate_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind>>, ident: Ident) {
         if self.use_hidden_params {
             if let Some(decl) = self.decl {
@@ -510,7 +515,7 @@ impl<'a> ExprGenerator<'a> {
                                     .block_ident
                                     .unwrap_or(Ident::new("default")),
                             )
-                            .unwrap();
+                                .unwrap();
                         }
                         VarKind::Texture => write!(self.string, "mpsc_textures.").unwrap(),
                         VarKind::Varying => write!(self.string, "mpsc_varyings.").unwrap(),
@@ -529,7 +534,7 @@ impl<'a> ExprGenerator<'a> {
                                     .block_ident
                                     .unwrap_or(Ident::new("default")),
                             )
-                            .unwrap();
+                                .unwrap();
                         }
                         VarKind::Texture => write!(self.string, "mpsc_textures.").unwrap(),
                         VarKind::Geometry | VarKind::Instance | VarKind::Varying => {
@@ -542,24 +547,16 @@ impl<'a> ExprGenerator<'a> {
         }
         write!(self.string, "{}", ident).unwrap()
     }
-
+    
     fn generate_lit_expr(&mut self, _span: Span, lit: Lit) {
         write!(self.string, "{}", lit).unwrap();
     }
-
+    
     fn write_ident(&mut self, ident: Ident) {
         self.backend_writer.write_ident(&mut self.string, ident);
     }
-
+    
     fn write_ty_lit(&mut self, ty_lit: TyLit) {
         self.backend_writer.write_ty_lit(&mut self.string, ty_lit);
-    }
-}
-
-pub fn write_float(s:&mut String, v: f32) {
-    if v.abs().fract() < 0.00000001 {
-        write!(s, "{}.0", v).unwrap();
-    } else {
-        write!(s, "{}", v).unwrap();
     }
 }

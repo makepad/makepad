@@ -70,6 +70,23 @@ impl Margin {
     pub fn all(v: f32) -> Margin {
         Margin {l: v, t: v, r: v, b: v}
     }
+    
+    pub fn left(v:f32)->Margin{
+        Margin {l: v, t: 0.0, r: 0.0, b: 0.0}
+    }
+
+    pub fn top(v:f32)->Margin{
+        Margin {l: 0.0, t: v, r: 0.0, b: 0.0}
+    }
+
+    pub fn right(v:f32)->Margin{
+        Margin {l: 0.0, t: 0.0, r: v, b: 0.0}
+    }
+
+    pub fn bottom(v:f32)->Margin{
+        Margin {l: 0.0, t: 0.0, r: 0.0, b: v}
+    }
+    
 }
 
 #[derive(Clone, Copy, Default, Debug)]
