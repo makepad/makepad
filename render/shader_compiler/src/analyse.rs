@@ -701,6 +701,12 @@ impl<'a> FnDefAnalyser<'a> {
             }
         } else if let Some(expr) = expr {
             let ty = self.ty_checker().ty_check_expr(expr)?;
+			if ty == Ty::Void {
+				return Err(Error {
+					span,
+					message: String::from("init expression cannot be void")
+				});
+			}
             self.const_evaluator().try_const_eval_expr(expr);
             self.const_gatherer().const_gather_expr(expr);
             self.dep_analyser().dep_analyse_expr(expr);
