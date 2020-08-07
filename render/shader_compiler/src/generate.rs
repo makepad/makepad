@@ -452,7 +452,7 @@ impl<'a> ExprGenerator<'a> {
     ) {
 
         match analysis.get().unwrap() {
-            MacroCallAnalysis::Color { r, g, b, a } => {
+            MacroCallAnalysis::Pick { r, g, b, a } => {
                 self.backend_writer.write_ty_lit(self.string, TyLit::Vec4);
                 write!(self.string, "(").unwrap();
                 write_float(&mut self.string, r); 
@@ -463,6 +463,9 @@ impl<'a> ExprGenerator<'a> {
                 write!(self.string, ",").unwrap();
                 write_float(&mut self.string, a);
                 write!(self.string, ")").unwrap();
+            },
+            MacroCallAnalysis::Slide {v} =>{
+                write_float(&mut self.string, v); 
             }
         }
     }

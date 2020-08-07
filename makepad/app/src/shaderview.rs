@@ -3,6 +3,61 @@ use makepad_render::*;
 // Shader code itself
 
 fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
+
+    fn pixel() -> vec4 {
+        //return mix(pick!(red), pick!(white),mod(time, 0.5));
+        let p0 = vec3(2.0 * pos - 1.0, 2.0); 
+        let v = vec3(0.0, 0.0, -1.0);
+        let m = identity() * rotation(vec3(1.0, 1.0, 1.0), time);
+        p0 = (m * vec4(p0, 1.0)).xyz;
+        v = (m * vec4(v, 0.0)).xyz;
+        let t = march_ray(p0, v);
+        if t < T_MAX {
+            let p = p0 + t * v;
+            let n = estimate_normal(p);
+
+            let c = vec4(0.0);
+            let d = displace(p, intersection(cube(p), sphere(p)));
+            if d <= EPSILON {
+                c += pick!(#F6005D);
+            }
+            let dx = displace(p, cylinder_x(p));
+            if dx <= EPSILON {
+                c += pick!(#EC00FF);
+            }
+            let dy = displace(p, cylinder_y(p));
+            if dy <= EPSILON {
+                c += pick!(#00FF00); 
+            }
+            let dz = displace(p, cylinder_z(p));
+            if dz <= EPSILON {
+                c += pick!(#0000FF);
+            }
+            
+            let ld = normalize(vec3(0.0, 0.0, 1.0));
+            let ls = normalize(vec3(0.0, 0.0, 1.0));
+            let v = normalize(p0);
+            let r = 2.0 * dot(n, ls) * n - ls;
+            
+            let ia = 0.2;
+            let id = 0.3 * max(0.0, dot(ld, n));
+            let is = 0.5 * pow(max(0.0, dot(v, r)), 2.0);
+            let i = ia + id + is;
+            
+            return i * c; 
+        } else {
+            return vec4(0.0);  
+        }
+    }
+
+    fn sdf(p: vec3) -> float {
+        //return cylinder_x(p);
+        return displace(p, union(
+            intersection(cube(p), sphere(p)),
+            union(union(cylinder_x(p), cylinder_y(p)), cylinder_z(p))
+        ));
+    }
+
     const EPSILON: float = 1E-3;
     const T_MAX: float = 10.0;
     
@@ -91,14 +146,6 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         return min(d1, d2);
     }
     
-    fn sdf(p: vec3) -> float {
-        //return cylinder_x(p);
-        return displace(p, union(
-            intersection(cube(p), sphere(p)),
-            union(union(cylinder_x(p), cylinder_y(p)), cylinder_z(p))
-        ));
-    }
-    
     fn estimate_normal(p: vec3) -> vec3 {
         return normalize(vec3(
             sdf(vec3(p.x + EPSILON, p.y, p.z)) - sdf(vec3(p.x - EPSILON, p.y, p.z)),
@@ -114,7 +161,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             if d <= EPSILON {
                 return t;
             }
-            t += d;
+            t += d*0.5; 
             if t >= T_MAX {
                 break;
             }
@@ -122,51 +169,6 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         return T_MAX;
     }
 
-    fn pixel() -> vec4 {
-        //return mix(color!(red), color!(white),abs(sin(frame)));
-        let p0 = vec3(2.0 * pos - 1.0, 2.0);
-        let v = vec3(0.0, 0.0, -1.0);
-        let m = identity() * rotation(vec3(1.0, 1.0, 1.0), 0.01 * frame);
-        p0 = (m * vec4(p0, 1.0)).xyz;
-        v = (m * vec4(v, 0.0)).xyz;
-        let t = march_ray(p0, v);
-        if t < T_MAX {
-            let p = p0 + t * v;
-            let n = estimate_normal(p);
-
-            let c = vec4(0.0);
-            let d = displace(p, intersection(cube(p), sphere(p)));
-            if d <= EPSILON {
-                c += color!(#F6005D);
-            }
-            let dx = displace(p, cylinder_x(p));
-            if dx <= EPSILON {
-                c += color!(#EC00FF);
-            }
-            let dy = displace(p, cylinder_y(p));
-            if dy <= EPSILON {
-                c += color!(#00FF00);
-            }
-            let dz = displace(p, cylinder_z(p));
-            if dz <= EPSILON {
-                c += color!(#0000FF);
-            }
-            
-            let ld = normalize(vec3(0.0, 0.0, 1.0));
-            let ls = normalize(vec3(0.0, 0.0, 1.0));
-            let v = normalize(p0);
-            let r = 2.0 * dot(n, ls) * n - ls;
-            
-            let ia = 0.2;
-            let id = 0.3 * max(0.0, dot(ld, n));
-            let is = 0.5 * pow(max(0.0, dot(v, r)), 2.0);
-            let i = ia + id + is;
-            
-            return i * c;
-        } else {
-            return vec4(0.0);
-        }
-    }
 "})}
 
 // Makepad UI structure to render shader
@@ -179,7 +181,7 @@ pub struct ShaderView {
     finger_hover: Vec2,
     finger_move: Vec2,
     finger_down: f32,
-    frame: f32
+    time: f32
 }
 
 impl ShaderView {
@@ -187,16 +189,16 @@ impl ShaderView {
     pub fn finger_hover() -> Vec2Id {uid!()}
     pub fn finger_move() -> Vec2Id {uid!()}
     pub fn finger_down() -> FloatId {uid!()}
-    pub fn frame() -> FloatId {uid!()}
+    pub fn time() -> FloatId {uid!()}
     pub fn new(cx: &mut Cx) -> Self {
         
         Self::bg().set(cx, shader().compose(shader!{"
             instance finger_hover: ShaderView::finger_hover();
             instance finger_move: ShaderView::finger_move();
             instance finger_down: ShaderView::finger_down();
-            instance frame: ShaderView::frame();
+            instance time: ShaderView::time();
         "}));
-        
+         
         Self {
             quad: Quad::new(cx),
             area: Area::default(),
@@ -204,15 +206,15 @@ impl ShaderView {
             finger_hover: Vec2::default(),
             finger_move: Vec2::default(),
             finger_down: 0.0,
-            frame: 0.0
+            time: 0.0
         }
     }
     
     pub fn handle_shader_view(&mut self, cx: &mut Cx, event: &mut Event) {
         match event.hits(cx, self.area, HitOpt::default()) {
             Event::Frame(_ae)=>{
-                self.frame += 1.0;
-                self.area.write_float(cx, Self::frame(), self.frame);
+                self.time += 1.0/60.0;
+                self.area.write_float(cx, Self::time(), self.time);
                 cx.next_frame(self.area);
             },
             Event::FingerMove(fm) => {
@@ -241,7 +243,7 @@ impl ShaderView {
         k.push_vec2(cx, self.finger_hover);
         k.push_vec2(cx, self.finger_move);
         k.push_float(cx, self.finger_down);
-        k.push_float(cx, self.frame);
+        k.push_float(cx, self.time);
         self.area = cx.update_area_refs(self.area, k.into());
         cx.next_frame(self.area);
     }

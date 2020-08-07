@@ -52,19 +52,19 @@ impl NormalButton {
         Self::anim_default().set(cx,Anim::new(Play::Cut {duration: 0.1}, vec![
             Track::float(Self::hover(), Ease::Lin, vec![(1., 0.)]),
             Track::float(Self::down(), Ease::Lin, vec![(1.0, 0.)]),
-            Track::color(Text::color(), Ease::Lin, vec![(1., color!(#9).get(cx))]),
+            Track::color(Text::color(), Ease::Lin, vec![(1., pick!(#9).get(cx))]),
         ]));
         
         Self::anim_over().set(cx, Anim::new(Play::Cut {duration: 0.1}, vec![
             Track::float(Self::down(), Ease::Lin, vec![(0., 0.)]),
             Track::float(Self::hover(), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
-            Track::color(Text::color(), Ease::Lin, vec![(0., color!(#f).get(cx))]),
+            Track::color(Text::color(), Ease::Lin, vec![(0., pick!(#f).get(cx))]),
         ]));
         
         Self::anim_down().set(cx,Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::float(Self::down(), Ease::OutExp, vec![(0.0, 1.0), (1.0, 1.0)]),
             Track::float(Self::hover(), Ease::Lin, vec![(1.0, 1.0)]),
-            Track::color(Text::color(), Ease::Lin, vec![(0., color!(#c).get(cx))]),
+            Track::color(Text::color(), Ease::Lin, vec![(0., pick!(#c).get(cx))]),
         ]));
         
         // lets define the shader
@@ -78,10 +78,10 @@ impl NormalButton {
                 let cx = Df::viewport(pos * vec2(w, h));
                 cx.box(shadow, shadow, w - shadow*(1.+down), h- shadow*(1.+down), border_radius);
                 cx.blur = 6.0;
-                cx.fill(mix(color!(#0007), color!(#0), hover));
+                cx.fill(mix(pick!(#0007), pick!(#0), hover));
                 cx.blur = 0.001;
                 cx.box(shadow, shadow, w - shadow*2., h - shadow*2., border_radius);
-                return cx.fill(mix(mix(color!(#3),color!(#4),hover), color!(#2a), down));
+                return cx.fill(mix(mix(pick!(#3),pick!(#4),hover), pick!(#2a), down));
             }
         "}));
     }
