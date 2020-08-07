@@ -365,7 +365,7 @@ impl ColorPicker {
         // i wanna draw a wheel with 'width' set but height a fixed height.
         self.size = cx.get_turtle_rect().w;
         let k = self.wheel.draw_quad(cx, Walk {
-            margin: Margin::zero(),
+            margin: Margin::bottom(10.),
             width: Width::Fill,
             height: Height::Fix(self.size * 1.0)
         });
@@ -489,7 +489,7 @@ impl AppTextBuffer {
                             // now i just want the first number
                             let paren_range = tp.cur_pair_range();
                             tp.advance();
-                            let mut value = 0.0;
+                            let mut value = 1.0;
                             let mut min = 0.0;
                             let mut max = 1.0;
                             let mut step = 0.0;
