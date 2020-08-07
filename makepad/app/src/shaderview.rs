@@ -21,11 +21,11 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             let c = vec4(0.0);
             let d = displace(p, intersection(cube(p), sphere(p)));
             if d <= EPSILON {
-                c += pick!(#FF0000);
+                c += pick!(#633851);
             }
             let dx = displace(p, cylinder_x(p));
             if dx <= EPSILON {
-                c += pick!(#EC00FF);
+                c += pick!(#AE4452);
             }
             let dy = displace(p, cylinder_y(p));
             if dy <= EPSILON {
@@ -43,7 +43,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             
             let ia = 0.2;
             let id = 0.3 * max(0.0, dot(ld, n));
-            let is = 0.5 * pow(max(0.0, dot(v, r)), slide!(0.54961103)*2.0);
+            let is = 0.5 * pow(max(0.0, dot(v, r)), slide!(0.4732422)*2.0);
             let i = ia + id + is;
             
             return i * c; 
