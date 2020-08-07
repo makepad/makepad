@@ -249,8 +249,11 @@ impl<'a> ConstEvaluator<'a> {
         _arg_exprs: &[Expr],
     ) -> Option<Val> {
         match analysis.get().unwrap() {
-            MacroCallAnalysis::Color { r, g, b, a } => {
+            MacroCallAnalysis::Pick { r, g, b, a } => {
                 Some(Val::Vec4(Vec4 { x: r, y: g, z: b, w: a }))
+            },
+            MacroCallAnalysis::Slide {v} =>{
+                Some(Val::Float(v))
             }
         }
     }

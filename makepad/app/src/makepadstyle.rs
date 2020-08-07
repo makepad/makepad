@@ -16,4 +16,5 @@ pub fn set_makepad_style(cx: &mut Cx, opt:&StyleOptions) {
     SearchResults::style(cx, opt);
     ItemDisplay::style(cx, opt);
     ColorPicker::style(cx, opt);
+    FloatSlider::style(cx, opt);
 }

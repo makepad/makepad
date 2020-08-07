@@ -79,45 +79,45 @@ impl DesktopButton {
                 let c = vec2(w, h) * vec2(0.5, 0.5);
                 // WindowsMin
                 if abs(button_type - 1.) < 0.1 {
-                    df.clear(mix(color!(#3), mix(color!(#6), color!(#9), down), hover));
+                    df.clear(mix(pick!(#3), mix(pick!(#6), pick!(#9), down), hover));
                     df.move_to(c.x - sz, c.y);
                     df.line_to(c.x + sz, c.y);
-                    df.stroke(color!(white), 0.5 + 0.5 * dpi_dilate);
+                    df.stroke(pick!(white), 0.5 + 0.5 * dpi_dilate);
                     return df.result;
                 }
                 // WindowsMax
                 if abs(button_type - 2.) < 0.1 {
-                    df.clear(mix(color!(#3), mix(color!(#6), color!(#9), down), hover));
+                    df.clear(mix(pick!(#3), mix(pick!(#6), pick!(#9), down), hover));
                     df.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
-                    df.stroke(color!(white), 0.5 + 0.5 * dpi_dilate);
+                    df.stroke(pick!(white), 0.5 + 0.5 * dpi_dilate);
                     return df.result;
                 }
                 // WindowsMaxToggled
                 if abs(button_type - 3.) < 0.1 {
-                    let clear = mix(color!(#3), mix(color!(#6), color!(#9), down), hover);
+                    let clear = mix(pick!(#3), mix(pick!(#6), pick!(#9), down), hover);
                     df.clear(clear);
                     let sz = 3.5;
                     df.rect(c.x - sz + 1., c.y - sz - 1., 2. * sz, 2. * sz);
-                    df.stroke(color!(white), 0.5 + 0.5 * dpi_dilate);
+                    df.stroke(pick!(white), 0.5 + 0.5 * dpi_dilate);
                     df.rect(c.x - sz - 1., c.y - sz + 1., 2. * sz, 2. * sz);
                     df.fill_keep(clear);
-                    df.stroke(color!(white), 0.5 + 0.5 * dpi_dilate);
+                    df.stroke(pick!(white), 0.5 + 0.5 * dpi_dilate);
                     
                     return df.result;
                 }
                 // WindowsClose
                 if abs(button_type - 4.) < 0.1 {
-                    df.clear(mix(color!(#3), mix(color!(#e00), color!(#c00), down), hover));
+                    df.clear(mix(pick!(#3), mix(pick!(#e00), pick!(#c00), down), hover));
                     df.move_to(c.x - sz, c.y - sz);
                     df.line_to(c.x + sz, c.y + sz);
                     df.move_to(c.x - sz, c.y + sz);
                     df.line_to(c.x + sz, c.y - sz);
-                    df.stroke(color!(white), 0.5 + 0.5 * dpi_dilate);
+                    df.stroke(pick!(white), 0.5 + 0.5 * dpi_dilate);
                     return df.result;
                 }
                 // VRMode
                 if abs(button_type - 5.) < 0.1 {
-                    df.clear(mix(color!(#3), mix(color!(#0aa), color!(#077), down), hover));
+                    df.clear(mix(pick!(#3), mix(pick!(#0aa), pick!(#077), down), hover));
                     let w = 12.;
                     let h = 8.;
                     df.box(c.x - w, c.y - h, 2. * w, 2. * h, 2.);
@@ -128,11 +128,11 @@ impl DesktopButton {
                     df.subtract();
                     df.circle(c.x, c.y + h-0.75,2.5);
                     df.subtract();
-                    df.fill(color!(#8));
+                    df.fill(pick!(#8));
                     
                     return df.result;
                 }
-                return color!(red);/*
+                return pick!(red);/*
                 df_viewport(pos * vec2(w, h));
                 df_box(0., 0., w, h, border_radius);
                 df_shape += 3.;
