@@ -46,7 +46,7 @@ pub struct AppWindow {
     pub dock: Dock<Panel>,
 }
 
-#[derive(Clone, SerRon, DeRon)]
+#[derive(Clone, SerRon, DeRon)] 
 pub struct AppWindowState {
     pub open_folders: Vec<String>,
     pub window_position: Vec2,

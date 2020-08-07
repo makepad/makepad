@@ -46,6 +46,16 @@ impl LiveMacrosView {
     }
     
     pub fn handle_live_macros(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, text_editor: &mut TextEditor) {
+        match event{
+             Event::Signal(se) => {
+                // process network messages for hub_ui
+                if let Some(_) = se.signals.get(&atb.live_macros.changed) {
+                    self.scroll_view.redraw_view_area(cx);
+                }
+            },
+            _=>()
+        }
+        
         self.scroll_view.handle_scroll_view(cx, event);
         for (index, color_picker) in self.color_pickers.enumerate() {
             match color_picker.handle_color_picker(cx, event) {
@@ -429,7 +439,7 @@ impl ColorPicker {
                         self.animator.play_anim(cx, Self::anim_default().get(cx));
                     }
                 }
-                else {
+                else { 
                     self.animator.play_anim(cx, Self::anim_default().get(cx));
                 }
                 self.drag_mode = ColorPickerDragMode::None;
