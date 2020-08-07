@@ -447,9 +447,9 @@ impl<'a> TyChecker<'a> {
                 .ty
                 .borrow()
                 .as_ref()
-                .unwrap()
+                .unwrap() 
                 .clone()),
-            _ => Err(Error {
+            _ => Err(Error { 
                 span,
                 message: format!("can't access field on value of type `{}`", ty).into(),
             }),
@@ -636,7 +636,7 @@ impl<'a> TyChecker<'a> {
                 if let Err(span) = color {
                     return Err(Error {
                         span,
-                        message: "color argument invalid!".into(),
+                        message: "pick argument invalid!".into(),
                     });
                 }
                 let color = color.unwrap();
@@ -702,7 +702,7 @@ impl<'a> TyChecker<'a> {
         }
         return Err(Error {
             span,
-            message: "color requires 1, 3 or 4 arguments!".into(),
+            message: "macro not found!".into(),
         });
     }
 
