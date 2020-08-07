@@ -20,16 +20,16 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
 
             let c = vec4(0.0);
             if t.y == 0.0 || t.y == 1.0 {
-                c += pick!(#00E539);
+                c += pick!(#FFFFFF);
             }
             if t.y == 2.0 {
                 c += pick!(#DE0F21);
             }
             if t.y == 3.0 {
-                c += pick!(#FFFFFF); 
+                c += pick!(#D86262); 
             }
             if t.y == 4.0 {
-                c += pick!(#FF23F8);
+                c += pick!(#22FFAD);
             }
             
             let ld = normalize(vec3(0.0, 0.0, 1.0));
