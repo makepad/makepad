@@ -68,9 +68,9 @@ impl LiveMacrosView {
                 FloatSliderEvent::Change {scaled_value} => {
                     
                     // ok now what. now we serialize out hsva into the textbuffer
-                    if let LiveMacro::Slide {range,..} = &mut atb.live_macros.macros[*index] {
+                    if let LiveMacro::Slide {range, ..} = &mut atb.live_macros.macros[*index] {
                         // and let the things work out
-                        let new_string = format!("{}",PrettyPrintedFloat(scaled_value));
+                        let new_string = format!("{}", PrettyPrintedFloat(scaled_value));
                         text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, 0);
                         *range = (range.0, range.0 + new_string.len());
                         
@@ -115,12 +115,12 @@ pub enum FloatSliderEvent {
 pub struct FloatSlider {
     pub scaled_value: f32,
     pub norm_value: f32,
+    pub animator: Animator,
     pub min: f32,
     pub max: f32,
     pub step: f32,
     pub size: f32,
     pub slider: Quad,
-    pub slider_area: Area,
     pub dragging: bool
 }
 
@@ -132,27 +132,27 @@ impl FloatSlider {
         Self {
             norm_value: 0.0,
             scaled_value: 0.0,
+            animator: Animator::default(),
             min: 0.0,
             max: 1.0,
             step: 0.0,
             size: 0.0,
             slider: Quad::new(cx),
-            slider_area: Area::Empty,
             dragging: false
         }
     }
     
     pub fn handle_finger(&mut self, cx: &mut Cx, rel: Vec2) -> FloatSliderEvent {
         let norm_value = (rel.x / self.size).max(0.0).min(1.0);
-        let mut scaled_value = norm_value * (self.max-self.min) + self.min;
-        if self.step > 0.0{
+        let mut scaled_value = norm_value * (self.max - self.min) + self.min;
+        if self.step > 0.0 {
             scaled_value = (scaled_value / self.step).round() * self.step;
         }
         let mut changed = false;
         if scaled_value != self.scaled_value {
             self.scaled_value = scaled_value;
             self.norm_value = norm_value;
-            self.slider_area.write_float(cx, Self::norm_value(), self.norm_value);
+            self.animator.area.write_float(cx, Self::norm_value(), self.norm_value);
             changed = true;
         }
         if changed {
@@ -164,17 +164,42 @@ impl FloatSlider {
     }
     
     pub fn handle_float_slider(&mut self, cx: &mut Cx, event: &mut Event) -> FloatSliderEvent {
-        match event.hits(cx, self.slider_area, HitOpt::default()) {
-            Event::FingerHover(_fe) => {
+        match event.hits(cx, self.animator.area, HitOpt::default()) {
+            Event::Animate(ae) => {
+                self.animator.calc_area(cx, self.animator.area, ae.time);
+            },
+            Event::AnimEnded(_) => self.animator.end(),
+            Event::FingerHover(fe) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Arrow);
+                match fe.hover_state {
+                    HoverState::In => {
+                        self.animator.play_anim(cx, Self::anim_hover().get(cx));
+                    },
+                    HoverState::Out => {
+                        self.animator.play_anim(cx, Self::anim_default().get(cx));
+                    },
+                    _ => ()
+                }
             },
             Event::FingerDown(fe) => {
+                self.animator.play_anim(cx, Self::anim_down().get(cx));
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
                 self.dragging = true;
                 return self.handle_finger(cx, fe.rel);
                 // lets check where we clicked!
             },
-            Event::FingerUp(_fe) => {
+            Event::FingerUp(fe) => {
+                if fe.is_over {
+                    if !fe.is_touch {
+                        self.animator.play_anim(cx, Self::anim_hover().get(cx));
+                    }
+                    else {
+                        self.animator.play_anim(cx, Self::anim_default().get(cx));
+                    }
+                }
+                else {
+                    self.animator.play_anim(cx, Self::anim_default().get(cx));
+                }
                 self.dragging = false;
             }
             Event::FingerMove(fe) => {
@@ -186,13 +211,14 @@ impl FloatSlider {
         FloatSliderEvent::None
     }
     
-    pub fn draw_float_slider(&mut self, cx: &mut Cx, scaled_value: f32, min:f32, max:f32, step:f32) {
+    pub fn draw_float_slider(&mut self, cx: &mut Cx, scaled_value: f32, min: f32, max: f32, step: f32) {
+        self.animator.init(cx, | cx | Self::anim_default().get(cx));
         if !self.dragging {
             self.scaled_value = scaled_value;
             self.min = min;
             self.max = max;
             self.step = step;
-            self.norm_value = (scaled_value - min) / (max-min);
+            self.norm_value = (scaled_value - min) / (max - min);
         }
         
         self.slider.shader = Self::slider().get(cx);
@@ -200,7 +226,7 @@ impl FloatSlider {
         
         let pad = 10.;
         
-        self.size = cx.get_turtle_rect().w - 2.*pad;
+        self.size = cx.get_turtle_rect().w - 2. * pad;
         let k = self.slider.draw_quad(cx, Walk {
             margin: Margin::left(pad),
             width: Width::FillPad(pad),
@@ -208,16 +234,40 @@ impl FloatSlider {
         });
         // lets put a hsv int here
         k.push_float(cx, self.norm_value);
-        
-        self.slider_area = cx.update_area_refs(self.slider_area, k.into());
+        k.push_last_float(cx, &self.animator, Self::down());
+        k.push_last_float(cx, &self.animator, Self::hover());
+        self.animator.set_area(cx, k.into());
     }
     
     pub fn norm_value() -> FloatId {uid!()}
+    pub fn hover() -> FloatId {uid!()}
+    pub fn down() -> FloatId {uid!()}
+    
+    pub fn anim_default() -> AnimId {uid!()}
+    pub fn anim_hover() -> AnimId {uid!()}
+    pub fn anim_down() -> AnimId {uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+        Self::anim_default().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
+            Track::float(Self::hover(), Ease::Lin, vec![(1.0, 0.)]),
+            Track::float(Self::down(), Ease::Lin, vec![(1.0, 0.)]),
+        ]));
+        
+        Self::anim_hover().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
+            Track::float(Self::down(), Ease::Lin, vec![(1.0, 0.)]),
+            Track::float(Self::hover(), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
+        ]));
+        
+        Self::anim_down().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
+            Track::float(Self::down(), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
+            Track::float(Self::hover(), Ease::Lin, vec![(1.0, 1.0)]),
+        ]));
+        
         Self::slider().set(cx, Quad::def_quad_shader().compose(shader!{"
             
             instance norm_value: Self::norm_value();
+            instance hover: Self::hover();
+            instance down: Self::down();
             
             fn pixel() -> vec4 {
                 let df = Df::viewport(pos * vec2(w, h));
@@ -231,9 +281,10 @@ impl FloatSlider {
                 let bheight = 15.;
                 let bwidth = 10.;
                 
-                df.box((w - bwidth)*norm_value, cy - 0.5 * bheight, bwidth, bheight, 2.);
+                df.box((w - bwidth) * norm_value, cy - 0.5 * bheight, bwidth, bheight, 2.);
                 
-                df.fill(pick!(#6));
+                let color = mix(mix(pick!(#5), pick!(#B),hover),pick!(#F),down);
+                df.fill(color);
                 
                 return df.result;
             }
@@ -254,7 +305,7 @@ pub struct ColorPicker {
     pub sat: f32,
     pub val: f32,
     pub wheel: Quad,
-    pub wheel_area: Area,
+    pub animator: Animator,
     pub drag_mode: ColorPickerDragMode
 }
 
@@ -275,8 +326,8 @@ impl ColorPicker {
             sat: 0.0,
             val: 0.0,
             size: 0.0,
+            animator: Animator::default(),
             wheel: Quad::new(cx),
-            wheel_area: Area::Empty,
             drag_mode: ColorPickerDragMode::None
         }
     }
@@ -302,15 +353,15 @@ impl ColorPicker {
         // lets update hue sat val directly
         let mut changed = false;
         if last_hue != self.hue {
-            self.wheel_area.write_float(cx, Self::hue(), self.hue);
+            self.animator.area.write_float(cx, Self::hue(), self.hue);
             changed = true;
         }
         if last_sat != self.sat {
-            self.wheel_area.write_float(cx, Self::sat(), self.sat);
+            self.animator.area.write_float(cx, Self::sat(), self.sat);
             changed = true;
         }
         if last_val != self.val {
-            self.wheel_area.write_float(cx, Self::val(), self.val);
+            self.animator.area.write_float(cx, Self::val(), self.val);
             changed = true;
         }
         if changed {
@@ -322,11 +373,26 @@ impl ColorPicker {
     }
     
     pub fn handle_color_picker(&mut self, cx: &mut Cx, event: &mut Event) -> ColorPickerEvent {
-        match event.hits(cx, self.wheel_area, HitOpt::default()) {
-            Event::FingerHover(_fe) => {
+        match event.hits(cx, self.animator.area, HitOpt::default()) {
+            Event::Animate(ae) => {
+                self.animator.calc_area(cx, self.animator.area, ae.time);
+            },
+            Event::AnimEnded(_) => self.animator.end(),
+            Event::FingerHover(fe) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Arrow);
+                
+                match fe.hover_state {
+                    HoverState::In => {
+                        self.animator.play_anim(cx, Self::anim_hover().get(cx));
+                    },
+                    HoverState::Out => {
+                        self.animator.play_anim(cx, Self::anim_default().get(cx));
+                    },
+                    _ => ()
+                }
             },
             Event::FingerDown(fe) => {
+                self.animator.play_anim(cx, Self::anim_down().get(cx));
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
                 let rsize = (self.size * 0.28) / 2.0f32.sqrt();
                 let vx = fe.rel.x - 0.5 * self.size;
@@ -343,7 +409,18 @@ impl ColorPicker {
                 return self.handle_finger(cx, fe.rel);
                 // lets check where we clicked!
             },
-            Event::FingerUp(_fe) => {
+            Event::FingerUp(fe) => {
+                if fe.is_over {
+                    if !fe.is_touch {
+                        self.animator.play_anim(cx, Self::anim_hover().get(cx));
+                    }
+                    else {
+                        self.animator.play_anim(cx, Self::anim_default().get(cx));
+                    }
+                }
+                else {
+                    self.animator.play_anim(cx, Self::anim_default().get(cx));
+                }
                 self.drag_mode = ColorPickerDragMode::None;
             }
             Event::FingerMove(fe) => {
@@ -356,6 +433,7 @@ impl ColorPicker {
     }
     
     pub fn draw_color_picker(&mut self, cx: &mut Cx, hsva: Vec4) {
+        self.animator.init(cx, | cx | Self::anim_default().get(cx));
         if self.drag_mode == ColorPickerDragMode::None {
             self.hue = hsva.x;
             self.sat = hsva.y;
@@ -373,20 +451,46 @@ impl ColorPicker {
         k.push_float(cx, self.hue);
         k.push_float(cx, self.sat);
         k.push_float(cx, self.val);
+
+        k.push_last_float(cx, &self.animator, Self::down());
+        k.push_last_float(cx, &self.animator, Self::hover());
         
-        self.wheel_area = cx.update_area_refs(self.wheel_area, k.into());
+        self.animator.set_area(cx, k.into());
     }
     
     pub fn hue() -> FloatId {uid!()}
     pub fn sat() -> FloatId {uid!()}
     pub fn val() -> FloatId {uid!()}
+    pub fn hover() -> FloatId {uid!()}
+    pub fn down() -> FloatId {uid!()}
+    
+    pub fn anim_default() -> AnimId {uid!()}
+    pub fn anim_hover() -> AnimId {uid!()}
+    pub fn anim_down() -> AnimId {uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+        Self::anim_default().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
+            Track::float(Self::hover(), Ease::Lin, vec![(1.0, 0.)]),
+            Track::float(Self::down(), Ease::Lin, vec![(1.0, 0.)]),
+        ]));
+        
+        Self::anim_hover().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
+            Track::float(Self::down(), Ease::Lin, vec![(1.0, 0.)]),
+            Track::float(Self::hover(), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
+        ]));
+        
+        Self::anim_down().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
+            Track::float(Self::down(), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
+            Track::float(Self::hover(), Ease::Lin, vec![(1.0, 1.0)]),
+        ]));
+        
         Self::wheel().set(cx, Quad::def_quad_shader().compose(shader!{"
             
             instance hue: Self::hue();
             instance sat: Self::sat();
             instance val: Self::val();
+            instance hover: Self::hover();
+            instance down: Self::down();
             
             fn circ_to_rect(u: float, v: float) -> vec2 {
                 let u2 = u * u;
@@ -428,18 +532,19 @@ impl ColorPicker {
                 
                 let rect_puk = vec2(cx + sat * 2. * rsize - rsize, cy + (1. - val) * 2. * rsize - rsize);
                 
+                let color = mix(mix(pick!(#3),pick!(#E),hover),pick!(#F),down);
                 df.circle(rect_puk.x, rect_puk.y, 8.);
                 df.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
                 df.intersect();
-                df.fill(pick!(#FFFFFF));
-                df.circle(rect_puk.x, rect_puk.y, 7.);
+                df.fill(color);
+                df.circle(rect_puk.x, rect_puk.y, 7.-2.*hover + down);
                 df.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
                 df.intersect();
                 df.fill(rgbv);
                 
                 df.circle(circle_puk.x, circle_puk.y, 11.);
-                df.fill(pick!(#FFFFFF));
-                df.circle(circle_puk.x, circle_puk.y, 10.);
+                df.fill(color);
+                df.circle(circle_puk.x, circle_puk.y, 10.-2.*hover + down);
                 df.fill(rgbv);
                 
                 return df.result;
