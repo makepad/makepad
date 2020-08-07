@@ -14,26 +14,22 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         p0 = (m * vec4(p0, 1.0)).xyz;
         v = (m * vec4(v, 0.0)).xyz;
         let t = march_ray(p0, v);
-        if t < T_MAX {
-            let p = p0 + t * v;
+        if t.x < T_MAX {
+            let p = p0 + t.x * v;
             let n = estimate_normal(p);
 
             let c = vec4(0.0);
-            let d = displace(p, intersection(cube(p), sphere(p)));
-            if d <= EPSILON {
-                c += pick!(#FF0000);
+            if t.y == 0.0 || t.y == 1.0 {
+                c += pick!(#002FFF);
             }
-            let dx = displace(p, cylinder_x(p));
-            if dx <= EPSILON {
-                c += pick!(#EC00FF);
+            if t.y == 2.0 {
+                c += pick!(#D500FF);
             }
-            let dy = displace(p, cylinder_y(p));
-            if dy <= EPSILON {
-                c += pick!(#FFFFFF); 
+            if t.y == 3.0 {
+                c += pick!(#0070FF); 
             }
-            let dz = displace(p, cylinder_z(p));
-            if dz <= EPSILON {
-                c += pick!(#0000FF);
+            if t.y == 4.0 {
+                c += pick!(#FF0032);
             }
             
             let ld = normalize(vec3(0.0, 0.0, 1.0));
@@ -43,7 +39,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             
             let ia = 0.2;
             let id = 0.3 * max(0.0, dot(ld, n));
-            let is = 0.5 * pow(max(0.0, dot(v, r)), slide!(0.54961103)*2.0);
+            let is = 0.5 * pow(max(0.0, dot(v, r)), slide!(0.52863437)*2.0);
             let i = ia + id + is;
             
             return i * c; 
@@ -52,7 +48,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         }
     }
 
-    fn sdf(p: vec3) -> float {
+    fn sdf(p: vec3) -> vec2 {
         return displace(p, union(
             intersection(cube(p), sphere(p)),
             union(union(cylinder_x(p), cylinder_y(p)), cylinder_z(p))
@@ -107,67 +103,67 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
         );
     }
     
-    fn cube(p: vec3) -> float {
+    fn cube(p: vec3) -> vec2 {
         let q = abs(p) - 0.4;
-        return min(max(q.x, max(q.y, q.z)), 0.0) + length(max(q, 0.0));
+        return vec2(min(max(q.x, max(q.y, q.z)), 0.0) + length(max(q, 0.0)), 0.0);
     }
     
-    fn cylinder_x(p: vec3) -> float {
+    fn cylinder_x(p: vec3) -> vec2 {
         let d = abs(vec2(length(p.yz), p.x)) - vec2(0.25, 0.75);
-        return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
+        return vec2(min(max(d.x, d.y), 0.0) + length(max(d, 0.0)), 2.0);
     }
     
-    fn cylinder_y(p: vec3) -> float {
+    fn cylinder_y(p: vec3) -> vec2 {
         let d = abs(vec2(length(p.xz), p.y)) - vec2(0.25, 0.75);
-        return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
+        return vec2(min(max(d.x, d.y), 0.0) + length(max(d, 0.0)), 3.0);
     }
     
-    fn cylinder_z(p: vec3) -> float {
+    fn cylinder_z(p: vec3) -> vec2 {
         let d = abs(vec2(length(p.xy), p.z)) - vec2(0.25, 0.75);
-        return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
+        return vec2(min(max(d.x, d.y), 0.0) + length(max(d, 0.0)), 4.0);
     }
     
-    fn displace(p: vec3, d: float) -> float {
-        return 0.05 * sin(10.0* p.x) * sin(10.0 * p.y) * sin(10.0* p.z) + d;
+    fn displace(p: vec3, d: vec2) -> vec2 {
+        return vec2(0.05 * sin(10.0* p.x) * sin(10.0 * p.y) * sin(10.0* p.z) + d.x, d.y);
     }
     
-    fn difference(d1: float, d2: float) -> float {
-        return max(d1, -d2);
+    fn difference(d1: vec2, d2: vec2) -> vec2 {
+        return vec2(max(d1.x, -d2.x), mix(d1.y, d2.y, float(d1.x < -d2.x)));
     }
     
-    fn intersection(d1: float, d2: float) -> float {
-        return max(d1, d2);
+    fn intersection(d1: vec2, d2: vec2) -> vec2 {
+        return vec2(max(d1.x, d2.x), mix(d1.y, d2.y, float(d1.x < d2.x)));
     }
     
-    fn sphere(p: vec3) -> float {
-        return length(p) - 0.5;
+    fn sphere(p: vec3) -> vec2 {
+        return vec2(length(p) - 0.5, 1.0);
     }
     
-    fn union(d1: float, d2: float) -> float {
-        return min(d1, d2);
+    fn union(d1: vec2, d2: vec2) -> vec2 {
+        return vec2(min(d1.x, d2.x), mix(d2.y, d1.y, float(d1.x < d2.x)));
     }
     
     fn estimate_normal(p: vec3) -> vec3 {
         return normalize(vec3(
-            sdf(vec3(p.x + EPSILON, p.y, p.z)) - sdf(vec3(p.x - EPSILON, p.y, p.z)),
-            sdf(vec3(p.x, p.y + EPSILON, p.z)) - sdf(vec3(p.x, p.y - EPSILON, p.z)),
-            sdf(vec3(p.x, p.y, p.z + EPSILON)) - sdf(vec3(p.x, p.y, p.z - EPSILON))
+            sdf(vec3(p.x + EPSILON, p.y, p.z)).x - sdf(vec3(p.x - EPSILON, p.y, p.z)).x,
+            sdf(vec3(p.x, p.y + EPSILON, p.z)).x - sdf(vec3(p.x, p.y - EPSILON, p.z)).x,
+            sdf(vec3(p.x, p.y, p.z + EPSILON)).x - sdf(vec3(p.x, p.y, p.z - EPSILON)).x
         ));
     }
     
-    fn march_ray(p0: vec3, v: vec3) -> float {
+    fn march_ray(p0: vec3, v: vec3) -> vec2 {
         let t = 0.0;
         for i from 0 to 100 {
             let d = sdf(p0 + t * v);
-            if d <= EPSILON {
-                return t;
+            if d.x <= EPSILON {
+                return vec2(t, d.y);
             }
-            t += d*0.5; 
+            t += d.x * 0.5; 
             if t >= T_MAX {
                 break;
             }
         }
-        return T_MAX;
+        return vec2(T_MAX, 0.0);
     }
 
 "})}
