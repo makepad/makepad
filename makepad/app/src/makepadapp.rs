@@ -148,16 +148,38 @@ impl MakepadApp {
                         axis: Axis::Horizontal,
                         align: SplitterAlign::Last,
                         pos: 150.0,
-                        first: Box::new(DockItem::TabControl {
-                            current: 0,
-                            previous: 0,
-                            tabs: vec![
-                                DockTab {
-                                    closeable: false,
-                                    title: "Edit".to_string(),
-                                    item: Panel::FileEditorTarget
-                                },
-                            ],
+                        first: Box::new(DockItem::Splitter {
+                            axis: Axis::Vertical,
+                            align: SplitterAlign::Last,
+                            pos: 250.0, 
+                            first: Box::new(DockItem::TabControl {
+                                current: 1,
+                                previous: 0,
+                                tabs: vec![
+                                    DockTab {
+                                        closeable: false,
+                                        title: "Edit".to_string(),
+                                        item: Panel::FileEditorTarget
+                                    },
+                                    DockTab {
+                                        closeable: false,
+                                        title: "shaderview.rs".to_string(),
+                                        item: Panel::FileEditor {path: "main/makepad/makepad/app/src/shaderview.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
+                                    },
+                                    
+                                ],
+                            }),
+                            last: Box::new(DockItem::TabControl {
+                                current: 0,
+                                previous: 0,
+                                tabs: vec![
+                                    DockTab {
+                                        closeable: false,
+                                        title: "ShaderView".to_string(),
+                                        item: Panel::ShaderView
+                                    },
+                                ],
+                            }),
                         }),
                         last: Box::new(DockItem::Splitter {
                             axis: Axis::Vertical,
@@ -188,11 +210,7 @@ impl MakepadApp {
                                         title: "Keyboard".to_string(),
                                         item: Panel::Keyboard
                                     },
-                                    DockTab {
-                                        closeable: false,
-                                        title: "ShaderView".to_string(),
-                                        item: Panel::ShaderView
-                                    },
+                                    
                                 ]
                             })
                         })
