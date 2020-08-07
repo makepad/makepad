@@ -4,8 +4,10 @@ use makepad_render::*;
 
 fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     fn pixel() -> vec4 {
-        //return mix(pick!(red), pick!(white),mod(time, 0.5));
-        let ratio = max(w, h) / min(w, h);
+        let ratio = vec2(
+            mix(w / h, 1.0, float(w <= h)),
+            mix(1.0, h / w, float(w <= h))
+        );
         let p0 = vec3((2.0 * pos - 1.0) * ratio, 2.0); 
         let v = vec3(0.0, 0.0, -1.0);
         let m = identity() * rotation(vec3(1.0, 1.0, 1.0), time);
