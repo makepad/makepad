@@ -612,7 +612,7 @@ impl<'a> TyChecker<'a> {
             }
         }
 
-        if ident == Ident::new("color") {
+        if ident == Ident::new("pick") {
             if arg_exprs.len() == 1 {
                 let color = match arg_exprs[0].kind {
                     ExprKind::Var { span, ident, .. } => {
@@ -640,7 +640,7 @@ impl<'a> TyChecker<'a> {
                     });
                 }
                 let color = color.unwrap();
-                analysis.set(Some(MacroCallAnalysis::Color {
+                analysis.set(Some(MacroCallAnalysis::Pick {
                     r: color.r,
                     g: color.g,
                     b: color.b,
@@ -648,7 +648,7 @@ impl<'a> TyChecker<'a> {
                 }));
                 return Ok(Ty::Vec4);
             } else if arg_exprs.len() == 3 {
-                analysis.set(Some(MacroCallAnalysis::Color {
+                analysis.set(Some(MacroCallAnalysis::Pick {
                     r: parse_color_channel(&arg_exprs[0], span)?,
                     g: parse_color_channel(&arg_exprs[1], span)?,
                     b: parse_color_channel(&arg_exprs[2], span)?,
@@ -656,7 +656,7 @@ impl<'a> TyChecker<'a> {
                 }));
                 return Ok(Ty::Vec4);
             } else if arg_exprs.len() == 4 {
-                analysis.set(Some(MacroCallAnalysis::Color {
+                analysis.set(Some(MacroCallAnalysis::Pick {
                     r: parse_color_channel(&arg_exprs[0], span)?,
                     g: parse_color_channel(&arg_exprs[1], span)?,
                     b: parse_color_channel(&arg_exprs[2], span)?,
@@ -664,6 +664,41 @@ impl<'a> TyChecker<'a> {
                 }));
                 return Ok(Ty::Vec4);
             }
+        }
+        else if ident == Ident::new("slide"){
+            if arg_exprs.len() == 0 {
+                analysis.set(Some(MacroCallAnalysis::Slide {
+                    v: 1.0
+                }));
+                // its 1.0
+            }
+            else if arg_exprs.len() >= 1{
+                // only use the first one
+                let value = match arg_exprs[0].kind {
+                    ExprKind::Lit { span, lit } => {
+                        if let Lit::Int(val) = lit {
+                            Ok(val as f32)
+                        } 
+                        else if let Lit::Float(val) = lit {
+                            Ok(val)
+                        }
+                        else {
+                            Err(span)
+                        }
+                    }
+                    _ => Err(span),
+                };
+                if let Err(span) = value {
+                    return Err(Error {
+                        span,
+                        message: "slide argument invalid!".into(),
+                    });
+                }
+                analysis.set(Some(MacroCallAnalysis::Slide {
+                    v: value.unwrap()
+                }));
+            }
+            return Ok(Ty::Float);
         }
         return Err(Error {
             span,

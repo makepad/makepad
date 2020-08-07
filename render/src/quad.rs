@@ -19,8 +19,8 @@ impl Quad {
         Self {
             shader: cx.add_shader(Self::def_quad_shader(), "Quad"),
             z: 0.0,
-            color: color!(green).get(cx)
-        }
+            color: pick!(green).get(cx)
+        } 
     }
     
     pub fn geom()->Vec2Id{uid!()}

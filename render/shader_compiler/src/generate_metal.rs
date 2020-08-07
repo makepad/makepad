@@ -816,6 +816,9 @@ impl BackendWriter for MetalBackendWriter {
                 write!(string, "atan").unwrap();
             }
         }
+        else if ident == Ident::new("mod"){
+            write!(string, "fmod").unwrap();
+        }
         else{
             self.write_ident(string, ident);
         }
