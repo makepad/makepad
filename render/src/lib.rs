@@ -20,8 +20,6 @@ mod cx_linux;
 #[cfg(all(not(feature="ipc"),target_os = "macos"))]
 mod cx_metal;
 #[cfg(all(not(feature="ipc"),target_os = "macos"))]
-mod cx_metalsl;
-#[cfg(all(not(feature="ipc"),target_os = "macos"))]
 mod cx_cocoa;
 #[cfg(all(not(feature="ipc"),any(target_os = "macos")))]
 mod cx_macos;

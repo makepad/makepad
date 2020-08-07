@@ -160,8 +160,8 @@ pub fn shader(input: TokenStream) -> TokenStream {
 }
 
 // The actual macro
-#[proc_macro_hack]
-pub fn color(input: TokenStream) -> TokenStream {
+#[proc_macro_hack] 
+pub fn pick(input: TokenStream) -> TokenStream {
 
     fn parse_color_channel(tt:&TokenTree)->Result<f32, Span>{
         if let TokenTree::Literal(c) = tt{
@@ -251,16 +251,15 @@ pub fn color(input: TokenStream) -> TokenStream {
     
     let items = input.into_iter().collect::<Vec<TokenTree>>();
     if items.len() == 0{
-        return error("color macro argument error");
+        return error("pick macro argument error");
     }
     let result = parse_color_args(&items);
     if let Err(span) = result{
-        return error_span("cannot parse color macro arguments", span);
+        return error_span("cannot parse pick macro arguments", span);
     }
     let color = result.unwrap();
-    
     let mut tb = TokenBuilder::new();
-    tb.add("LiveColor {");
+    tb.add("LivePick {");
     tb.add("loc :");
     live_loc(&mut tb, items[0].span());
     // now the color

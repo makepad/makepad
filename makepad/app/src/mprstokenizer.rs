@@ -136,6 +136,13 @@ impl <'a>TokenParser<'a> {
         )
     }
     
+    pub fn cur_range(&self) -> (usize, usize) {
+        (
+            self.tokens[self.index].offset,
+            self.tokens[self.index].offset + self.tokens[self.index].len
+        )
+    }
+    
     pub fn next_type(&self) -> TokenType {
         if self.index < self.tokens.len() - 1 {
             self.tokens[self.index + 1].token_type

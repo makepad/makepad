@@ -343,7 +343,8 @@ pub enum ExprKind {
 
 #[derive(Clone, Copy, Debug)]
 pub enum MacroCallAnalysis {
-    Color { r: f32, g: f32, b: f32, a: f32 },
+    Pick { r: f32, g: f32, b: f32, a: f32 },
+    Slide { v: f32 }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -366,7 +367,7 @@ pub enum BinOp {
     Mul,
     Div,
 }
-
+ 
 impl fmt::Display for BinOp {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(

@@ -75,7 +75,7 @@ impl HomePage {
             ..Theme::text_style_normal().get(cx)
         });
         
-        Self::text_color().set(cx, color!(#b).get(cx));
+        Self::text_color().set(cx, pick!(#b).get(cx));
         Self::layout_main().set(cx, Layout {
             padding: Padding {l: 10., t: 10., r: 10., b: 10.},
             new_line_padding: 15.,

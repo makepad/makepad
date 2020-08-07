@@ -34,8 +34,6 @@ pub use crate::cx_opengl::*;
 pub use crate::cx_macos::*;
 #[cfg(all(not(feature = "ipc"), target_os = "macos"))]
 pub use crate::cx_metal::*;
-#[cfg(all(not(feature = "ipc"), target_os = "macos"))]
-pub use crate::cx_metalsl::*;
 
 #[cfg(all(not(feature = "ipc"), target_os = "windows"))]
 pub use crate::cx_windows::*;
@@ -163,7 +161,7 @@ pub struct Cx {
     pub panic_now: bool,
     pub panic_redraw: bool,
     
-    pub live_client: Option<LiveClient>,
+    //pub live_client: Option<LiveClient>,
     
     pub platform: CxPlatform,
 }
@@ -218,7 +216,7 @@ impl Default for Cx {
             platform_type: PlatformType::Windows,
             running: true,
             
-            live_client: LiveClient::connect_to_live_server(None),
+            //live_client: LiveClient::connect_to_live_server(None),
             
             windows: Vec::new(),
             windows_free: Vec::new(),
