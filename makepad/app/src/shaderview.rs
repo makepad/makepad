@@ -8,7 +8,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             mix(w / h, 1.0, float(w <= h)),
             mix(1.0, h / w, float(w <= h))
         );
-        let p0 = vec3((2.0 * pos - 1.0) * ratio, 2.0); 
+        let p0 = vec3((2.0 * pos - 1.0) *  ratio, 2.0); 
         let v = vec3(0.0, 0.0, -1.0);
         let m = identity() * rotation(vec3(1.0, 1.0, 1.0), time);
         p0 = (m * vec4(p0, 1.0)).xyz;
@@ -29,7 +29,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             }
             let dy = displace(p, cylinder_y(p));
             if dy <= EPSILON {
-                c += pick!(#00FF00); 
+                c += pick!(#FFFFFF); 
             }
             let dz = displace(p, cylinder_z(p));
             if dz <= EPSILON {
@@ -43,7 +43,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             
             let ia = 0.2;
             let id = 0.3 * max(0.0, dot(ld, n));
-            let is = 0.5 * pow(max(0.0, dot(v, r)), slide!(1.0)*2.0);
+            let is = 0.5 * pow(max(0.0, dot(v, r)), slide!(0.54961103)*2.0);
             let i = ia + id + is;
             
             return i * c; 
