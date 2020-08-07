@@ -27,6 +27,7 @@ impl LiveMacros {
 #[derive(Clone)]
 pub struct LiveMacrosView {
     pub scroll_view: ScrollView,
+    pub undo_id: u64,
     pub color_pickers: Elements<usize, ColorPicker, ColorPicker>,
     pub float_sliders: Elements<usize, FloatSlider, FloatSlider>
 }
@@ -38,6 +39,7 @@ impl LiveMacrosView {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             scroll_view: ScrollView::new(cx),
+            undo_id: 0,
             color_pickers: Elements::new(ColorPicker::new(cx)),
             float_sliders: Elements::new(FloatSlider::new(cx))
         }
@@ -56,9 +58,12 @@ impl LiveMacrosView {
                         // we have a range, now lets set the cursors to that range
                         // and replace shit.
                         let new_string = format!("#{}", color.to_hex());
-                        text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, 0);
+                        text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, self.undo_id);
                         *range = (range.0, range.0 + new_string.len());
                     }
+                },
+                ColorPickerEvent::DoneChanging=>{
+                    self.undo_id += 1;
                 },
                 _ => ()
             }
@@ -71,10 +76,13 @@ impl LiveMacrosView {
                     if let LiveMacro::Slide {range, ..} = &mut atb.live_macros.macros[*index] {
                         // and let the things work out
                         let new_string = format!("{}", PrettyPrintedFloat(scaled_value));
-                        text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, 0);
+                        text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, self.undo_id);
                         *range = (range.0, range.0 + new_string.len());
                         
                     }
+                },
+                FloatSliderEvent::DoneChanging=>{
+                    self.undo_id += 1;
                 },
                 _ => ()
             }
@@ -108,6 +116,7 @@ impl LiveMacrosView {
 
 pub enum FloatSliderEvent {
     Change {scaled_value: f32},
+    DoneChanging,
     None
 }
 
@@ -201,6 +210,7 @@ impl FloatSlider {
                     self.animator.play_anim(cx, Self::anim_default().get(cx));
                 }
                 self.dragging = false;
+                return FloatSliderEvent::DoneChanging;
             }
             Event::FingerMove(fe) => {
                 return self.handle_finger(cx, fe.rel)
@@ -295,6 +305,7 @@ impl FloatSlider {
 
 pub enum ColorPickerEvent {
     Change {hsva: Vec4},
+    DoneChanging,
     None
 }
 
@@ -422,6 +433,7 @@ impl ColorPicker {
                     self.animator.play_anim(cx, Self::anim_default().get(cx));
                 }
                 self.drag_mode = ColorPickerDragMode::None;
+                return ColorPickerEvent::DoneChanging;
             }
             Event::FingerMove(fe) => {
                 return self.handle_finger(cx, fe.rel)

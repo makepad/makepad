@@ -20,16 +20,16 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
 
             let c = vec4(0.0);
             if t.y == 0.0 || t.y == 1.0 {
-                c += pick!(#002FFF);
+                c += pick!(#00E539);
             }
             if t.y == 2.0 {
-                c += pick!(#D500FF);
+                c += pick!(#DE0F21);
             }
             if t.y == 3.0 {
-                c += pick!(#0070FF); 
+                c += pick!(#FFFFFF); 
             }
             if t.y == 4.0 {
-                c += pick!(#FF0032);
+                c += pick!(#FF23F8);
             }
             
             let ld = normalize(vec3(0.0, 0.0, 1.0));
@@ -39,7 +39,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             
             let ia = 0.2;
             let id = 0.3 * max(0.0, dot(ld, n));
-            let is = 0.5 * pow(max(0.0, dot(v, r)), slide!(0.52863437)*2.0);
+            let is = 0.5 * pow(max(0.0, dot(v, r)), slide!(1.0)*2.0);
             let i = ia + id + is;
             
             return i * c; 
@@ -50,6 +50,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
 
     fn sdf(p: vec3) -> vec2 {
         return displace(p, union(
+            //cube(p),
             intersection(cube(p), sphere(p)),
             union(union(cylinder_x(p), cylinder_y(p)), cylinder_z(p))
         ));
