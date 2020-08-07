@@ -3,10 +3,10 @@ use makepad_render::*;
 // Shader code itself
 
 fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
-
     fn pixel() -> vec4 {
         //return mix(pick!(red), pick!(white),mod(time, 0.5));
-        let p0 = vec3(2.0 * pos - 1.0, 2.0); 
+        let ratio = max(w, h) / min(w, h);
+        let p0 = vec3((2.0 * pos - 1.0) * ratio, 2.0); 
         let v = vec3(0.0, 0.0, -1.0);
         let m = identity() * rotation(vec3(1.0, 1.0, 1.0), time);
         p0 = (m * vec4(p0, 1.0)).xyz;
@@ -19,7 +19,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
             let c = vec4(0.0);
             let d = displace(p, intersection(cube(p), sphere(p)));
             if d <= EPSILON {
-                c += pick!(#F6005D);
+                c += pick!(#FF0000);
             }
             let dx = displace(p, cylinder_x(p));
             if dx <= EPSILON {
@@ -51,7 +51,6 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     }
 
     fn sdf(p: vec3) -> float {
-        //return cylinder_x(p);
         return displace(p, union(
             intersection(cube(p), sphere(p)),
             union(union(cylinder_x(p), cylinder_y(p)), cylinder_z(p))
