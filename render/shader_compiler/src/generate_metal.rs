@@ -714,7 +714,6 @@ impl BackendWriter for MetalBackendWriter {
             }
             Ty::Ivec2 => {
                 write!(string, "{}", packed_prefix).unwrap();
-                write!(string, "{}", packed_prefix).unwrap();
                 self.write_ty_lit(string, TyLit::Ivec2);
                 write!(string, " {}", ref_prefix).unwrap();
                 self.write_ident(string, ident);
@@ -768,7 +767,6 @@ impl BackendWriter for MetalBackendWriter {
             }
             Ty::Texture2D => panic!(), // TODO
             Ty::Array { ref elem_ty, len } => {
-                write!(string, "{}", packed_prefix).unwrap();
                 self.write_var_decl(string, is_inout, is_packed, ident, elem_ty);
                 write!(string, "[{}]", len).unwrap();
             }

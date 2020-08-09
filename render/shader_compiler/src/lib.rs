@@ -11,6 +11,7 @@ pub mod error;
 pub mod generate;
 pub mod generate_glsl;
 pub mod generate_metal;
+pub mod generate_hlsl;
 pub mod ident;
 pub mod lex;
 pub mod lhs_check;

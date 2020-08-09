@@ -1,6 +1,6 @@
-use crate::ast::*;
+use crate::ast::*;  
 use crate::builtin::Builtin;
-use crate::colors::Color;
+use crate::colors::Color; 
 use crate::env::{Env, Sym, VarKind};
 use crate::error::Error;
 use crate::ident::Ident;
@@ -13,7 +13,7 @@ use crate::util::CommaSep;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::rc::Rc;
+use std::rc::Rc; 
 
 #[derive(Clone, Debug)]
 pub struct TyChecker<'a> {
