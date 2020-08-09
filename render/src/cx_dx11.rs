@@ -289,7 +289,7 @@ impl Cx {
         }
     }
     pub fn hlsl_compile_shader(shader_id: usize, use_const_table: bool, sh: &mut CxShader, d3d11_cx: &D3d11Cx) -> ShaderCompileResult {
-        let shader_ast = sh.shader_gen.lex_parse_analyse();
+        let shader_ast = sh.shader_gen.lex_parse_analyse(true);
         
         if let Err(err) = shader_ast {
             return ShaderCompileResult::Fail {id: shader_id, err: err}
@@ -297,7 +297,7 @@ impl Cx {
         let shader_ast = shader_ast.unwrap();
         
         let hlsl = generate_hlsl::generate_shader(&shader_ast, use_const_table);
-        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, shader_ast.const_table.borrow_mut().take());
+        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, if use_const_table{shader_ast.const_table.borrow_mut().take()} else {None});
 
         if let Some(sh_platform) = &mut sh.platform{
             if sh_platform.hlsl_shader == hlsl{

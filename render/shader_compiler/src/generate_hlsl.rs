@@ -696,8 +696,8 @@ impl BackendWriter for HlslBackendWriter {
     fn  const_table_is_vec4(&self) -> bool{
         true
     }
-    
-    fn write_var_decl(
+     
+    fn write_var_decl( 
         &self,
         string: &mut String,
         is_inout: bool,

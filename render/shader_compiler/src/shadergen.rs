@@ -96,7 +96,7 @@ impl ShaderGen {
         self
     }
 
-    pub fn lex_parse_analyse(&self) -> Result<ShaderAst, ShaderGenError> {
+    pub fn lex_parse_analyse(&self, gather_all_consts:bool) -> Result<ShaderAst, ShaderGenError> {
         let mut shader_ast = ShaderAst::new();
         let mut inputs = Vec::new();
         for (index, sub) in self.subs.iter().enumerate() {
@@ -120,7 +120,7 @@ impl ShaderGen {
         // set the third argument here to true if you want to gather all const
         // expressions into a table, and to false if you only want to gather
         // macro expressions. 
-        if let Err(err) = analyse::analyse(&mut shader_ast, &inputs, true) {
+        if let Err(err) = analyse::analyse(&mut shader_ast, &inputs, gather_all_consts) {
             let sub = &self.subs[err.span.loc_id];
             return Err(Self::shader_gen_error(&err, sub));
         }
