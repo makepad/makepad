@@ -4,3 +4,4 @@ use makepad_render::*;
 fn main(){
     main_app!(BareExampleApp);
 }
+
