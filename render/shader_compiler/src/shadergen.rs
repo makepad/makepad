@@ -8,9 +8,9 @@ use std::any::TypeId;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-#[derive(Clone, Copy, Hash, PartialEq, Debug)]
+#[derive(Clone, Hash, PartialEq, Debug)]
 pub struct LiveLoc {
-    pub path: &'static str,
+    pub path: String,
     pub line: usize,
     pub column: usize,
 }
@@ -120,7 +120,7 @@ impl ShaderGen {
         // set the third argument here to true if you want to gather all const
         // expressions into a table, and to false if you only want to gather
         // macro expressions. 
-        if let Err(err) = analyse::analyse(&mut shader_ast, &inputs, false) {
+        if let Err(err) = analyse::analyse(&mut shader_ast, &inputs, true) {
             let sub = &self.subs[err.span.loc_id];
             return Err(Self::shader_gen_error(&err, sub));
         }

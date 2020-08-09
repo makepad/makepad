@@ -33,7 +33,7 @@ pub struct LiveMacrosView {
 }
 
 
-impl LiveMacrosView {
+impl LiveMacrosView { 
     pub fn macro_changed() -> StatusId {uid!()}
     
     pub fn new(cx: &mut Cx) -> Self {
@@ -254,8 +254,8 @@ impl FloatSlider {
         });
         // lets put a hsv int here
         k.push_float(cx, self.norm_value);
-        k.push_last_float(cx, &self.animator, Self::down());
         k.push_last_float(cx, &self.animator, Self::hover());
+        k.push_last_float(cx, &self.animator, Self::down());
         self.animator.set_area(cx, k.into());
     }
     
@@ -474,8 +474,8 @@ impl ColorPicker {
         k.push_float(cx, self.sat);
         k.push_float(cx, self.val);
 
-        k.push_last_float(cx, &self.animator, Self::down());
         k.push_last_float(cx, &self.animator, Self::hover());
+        k.push_last_float(cx, &self.animator, Self::down());
         
         self.animator.set_area(cx, k.into());
     }
