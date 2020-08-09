@@ -6,7 +6,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_ulong, c_void};
 use std::ptr;
 use std::mem;
-use makepad_shader_compiler::generate_glsl::{generate_vertex_shader, generate_fragment_shader};
+use makepad_shader_compiler::generate_glsl;
 
 impl Cx {
     
@@ -576,8 +576,8 @@ impl Cx {
         let shader_ast = shader_ast.unwrap();
         
         // lets generate the vertexshader
-        let vertex = generate_vertex_shader(&shader_ast, use_const_table);
-        let fragment = generate_fragment_shader(&shader_ast, use_const_table);
+        let vertex = generate_glsl::generate_vertex_shader(&shader_ast, use_const_table);
+        let fragment = generate_glsl::generate_fragment_shader(&shader_ast, use_const_table);
         let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, shader_ast.const_table.borrow_mut().take());
     
         let vertex = format!("

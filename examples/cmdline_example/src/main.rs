@@ -120,6 +120,7 @@ fn main() {
                 block: None,
             },
         ],
+        true
     )
     .unwrap();
     //println!("GLSL VERTEX");

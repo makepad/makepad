@@ -1,6 +1,7 @@
 use {
     crate::{
         ast::*,
+        env::VarKind,
         generate::{BackendWriter, BlockGenerator, ExprGenerator},
         ident::Ident,
         lit::TyLit,
@@ -9,6 +10,7 @@ use {
     },
     std::collections::HashSet,
     std::fmt::Write,
+    std::cell::Cell,
 };
 
 pub fn generate_vertex_shader(shader: &ShaderAst, use_const_table: bool) -> String {
@@ -425,7 +427,6 @@ impl<'a> ShaderGenerator<'a> {
             decl: None,
             backend_writer: &GlslBackendWriter,
             use_const_table: self.use_const_table,
-            use_hidden_params: false,
             use_generated_cons_fns: false,
             string: self.string,
         }
@@ -488,7 +489,6 @@ impl<'a> FnDeclGenerator<'a> {
             decl: self.decl,
             backend_writer: &GlslBackendWriter,
             use_const_table: self.use_const_table,
-            use_hidden_params: false,
             use_generated_cons_fns: false,
             indent_level: 0,
             string: self.string,
@@ -640,6 +640,15 @@ impl<'a> VarUnpacker<'a> {
 struct GlslBackendWriter;
 
 impl BackendWriter for GlslBackendWriter {
+    fn write_call_expr_hidden_args(&self, _string: &mut String, _use_const_table: bool, _ident:Ident, _shader:&ShaderAst, _sep:&str){
+        
+    }
+    
+    fn generate_var_expr_prefix(&self, _string: &mut String, _ident: Ident, _kind: &Cell<Option<VarKind>>, _shader: &ShaderAst, _decl: &FnDecl){
+        
+    }
+
+    
     fn write_var_decl(
         &self,
         string: &mut String,

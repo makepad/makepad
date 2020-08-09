@@ -20,7 +20,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
 
             let c = vec4(0.0);
             if t.y == 0.0 || t.y == 1.0 {
-                c += pick!(#E900FF);
+                c += pick!(#856F37);
             }
             if t.y == 2.0 {
                 c += pick!(#11EF00);
