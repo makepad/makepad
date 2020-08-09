@@ -762,8 +762,8 @@ impl Cx {
     pub fn mtl_compile_shader(shader_id:usize, use_const_table:bool, sh: &mut CxShader, metal_cx: &MetalCx) -> ShaderCompileResult {
         
         //let now = std::time::Instant::now();
-
-        let shader_ast = sh.shader_gen.lex_parse_analyse();
+        
+        let shader_ast = sh.shader_gen.lex_parse_analyse(true);
 
         if let Err(err) = shader_ast{
             return ShaderCompileResult::Fail{id:shader_id, err:err}
@@ -772,7 +772,7 @@ impl Cx {
         
         let mtlsl =  generate_metal::generate_shader(&shader_ast, use_const_table);
         
-        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, shader_ast.const_table.borrow_mut().take());
+        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, if use_const_table{shader_ast.const_table.borrow_mut().take()} else {None});
     
         
         if shader_ast.debug{

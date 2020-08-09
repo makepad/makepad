@@ -78,12 +78,13 @@
         }
         
         init(info) {
-            let pos = this.fit(5);
+            let pos = this.fit(6);
             this.mu32[pos ++] = 3;
             this.mf32[pos ++] = info.width;
             this.mf32[pos ++] = info.height;
             this.mf32[pos ++] = info.dpi_factor;
             this.mu32[pos ++] = info.vr_can_present? 1: 0;
+            this.mu32[pos ++] = info.gpu_spec_is_low_on_uniforms? 1: 0;
         }
         
         resize(info) {
@@ -318,7 +319,8 @@
                     height: this.height,
                     dpi_factor: this.dpi_factor,
                     vr_can_present: this.vr_can_present,
-                    vr_is_presenting: false
+                    vr_is_presenting: false,
+                    gpu_spec_is_low_on_uniforms: this.gpu_spec_is_low_on_uniforms
                 })
                 this.do_wasm_block = false;
                 this.do_wasm_io();
@@ -683,6 +685,18 @@
             gl.OES_vertex_array_object = gl.getExtension('OES_vertex_array_object')
             gl.OES_element_index_uint = gl.getExtension("OES_element_index_uint")
             gl.ANGLE_instanced_arrays = gl.getExtension('ANGLE_instanced_arrays')
+            
+            // check uniform count
+            var max_vertex_uniforms = gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS);
+            var max_fragment_uniforms = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS);
+            if (max_vertex_uniforms < 512 || max_fragment_uniforms < 512){
+                this.gpu_spec_is_low_on_uniforms = true
+            }
+            else{
+                this.gpu_spec_is_low_on_uniforms = false
+            }
+                
+
             //gl.EXT_blend_minmax = gl.getExtension('EXT_blend_minmax')
             //gl.OES_texture_half_float_linear = gl.getExtension('OES_texture_half_float_linear')
             //gl.OES_texture_float_linear = gl.getExtension('OES_texture_float_linear')

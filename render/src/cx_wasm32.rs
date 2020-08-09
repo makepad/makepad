@@ -83,16 +83,17 @@ impl Cx {
                     };
                     self.default_dpi_factor = self.platform.window_geom.dpi_factor;
                     self.vr_can_present = to_wasm.mu32() > 0;
+                    self.platform.gpu_spec_is_low_on_uniforms = to_wasm.mu32() > 0;
                     
                     if self.windows.len() > 0 {
                         self.windows[0].window_geom = self.platform.window_geom.clone();
                     }
                     
                     self.call_event_handler(&mut event_handler, &mut Event::Construct);
-                    
+                     
                     self.redraw_child_area(Area::All);
-                },
-                4 => { // resize
+                }, 
+                4 => { // resize 
                     self.platform.window_geom = WindowGeom {
                         is_fullscreen: false,
                         is_topmost: false,
@@ -436,12 +437,13 @@ impl Cx {
         }
         
         // lets check our recompile queue
-        let mut shader_results = Vec::new();
-        for shader_id in &self.shader_recompiles {
-            shader_results.push(Self::webgl_compile_shader(*shader_id, true, &mut self.shaders[*shader_id], &mut self.platform));
+        if !is_animation_frame {
+            let mut shader_results = Vec::new();
+            for shader_id in &self.shader_recompiles {
+                shader_results.push(Self::webgl_compile_shader(*shader_id, !self.platform.gpu_spec_is_low_on_uniforms, true, &mut self.shaders[*shader_id], &mut self.platform));
+            }
+            self.call_shader_recompile_event(shader_results, &mut event_handler);
         }
-        self.call_shader_recompile_event(shader_results, &mut event_handler);
-        
         // mark the end of the message
         self.platform.from_wasm.end();
         
@@ -655,6 +657,7 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
 #[derive(Clone)]
 pub struct CxPlatform {
     pub is_initialized: bool,
+    pub gpu_spec_is_low_on_uniforms: bool,
     pub window_geom: WindowGeom,
     pub from_wasm: FromWasm,
     pub vertex_buffers: usize,
@@ -671,6 +674,7 @@ impl Default for CxPlatform {
     fn default() -> CxPlatform {
         CxPlatform {
             is_initialized: false,
+            gpu_spec_is_low_on_uniforms: false,
             window_geom: WindowGeom::default(),
             from_wasm: FromWasm::zero(),
             vertex_buffers: 1,

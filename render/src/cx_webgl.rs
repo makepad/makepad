@@ -198,25 +198,24 @@ impl Cx {
     
     pub fn webgl_compile_all_shaders(&mut self) {
         for (shader_id, sh) in self.shaders.iter_mut().enumerate() {
-            let glsh = Self::webgl_compile_shader(shader_id, false, sh, &mut self.platform);
+            let glsh = Self::webgl_compile_shader(shader_id, false, false, sh, &mut self.platform);
             if let ShaderCompileResult::Fail{err,..} = glsh {
                 self.platform.from_wasm.log(&format!("Got GLSL shader compile error: {}", err))
             }
         }
     }
     
-    pub fn webgl_compile_shader(shader_id: usize, use_const_table: bool, sh: &mut CxShader, platform: &mut CxPlatform) -> ShaderCompileResult{
+    pub fn webgl_compile_shader(shader_id: usize, gather_all_consts:bool, use_const_table: bool, sh: &mut CxShader, platform: &mut CxPlatform) -> ShaderCompileResult{
         
-        let shader_ast = sh.shader_gen.lex_parse_analyse();
+        let shader_ast = sh.shader_gen.lex_parse_analyse(gather_all_consts);
         
         if let Err(err) = shader_ast{
             return ShaderCompileResult::Fail{id:shader_id, err:err}
         } 
         let shader_ast = shader_ast.unwrap();
-        
         let vertex = generate_glsl::generate_vertex_shader(&shader_ast,use_const_table);
         let fragment = generate_glsl::generate_fragment_shader(&shader_ast,use_const_table);
-        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, shader_ast.const_table.borrow_mut().take());
+        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, if use_const_table{shader_ast.const_table.borrow_mut().take()} else {None});
     
         let vertex = format!("
             precision highp float;
@@ -239,6 +238,7 @@ impl Cx {
              
         // lets check if we need to recompile the shader at all
         if let Some(sh_platform) = &sh.platform{
+            platform.from_wasm.log(&format!("{} {}", sh_platform.vertex == vertex , sh_platform.fragment == fragment));
             if sh_platform.vertex == vertex && sh_platform.fragment == fragment{
                 sh.mapping = mapping;
                 return ShaderCompileResult::Nop{id:shader_id}
