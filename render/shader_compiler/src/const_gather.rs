@@ -15,80 +15,84 @@ pub struct ConstGatherer<'a> {
 
 impl<'a> ConstGatherer<'a> {
     pub fn const_gather_expr(&self, expr: &Expr) {
-        match (expr.const_val.borrow().as_ref().unwrap(), &expr.kind) {
-            (Some(Val::Vec4(val)), ExprKind::MacroCall { .. }) | (Some(Val::Vec4(val)), _)
-                if self.gather_all =>
-            {
-                expr.const_index.set(Some(
-                    self.shader.const_table.borrow().as_ref().unwrap().len(),
-                ));
-                self.write_f32(val.x);
-                self.write_f32(val.y);
-                self.write_f32(val.z);
-                self.write_f32(val.w);
+        let should_gather = match expr.kind {
+            ExprKind::MacroCall { .. } => true,
+            _ => self.gather_all,
+        };
+        if should_gather {
+            match expr.const_val.borrow().as_ref().unwrap() {
+                Some(Val::Vec4(val)) => {
+                    expr.const_index.set(Some(
+                        self.shader.const_table.borrow().as_ref().unwrap().len(),
+                    ));
+                    self.write_f32(val.x);
+                    self.write_f32(val.y);
+                    self.write_f32(val.z);
+                    self.write_f32(val.w);
+                    return;
+                }
+                Some(Val::Float(val)) => {
+                    expr.const_index.set(Some(
+                        self.shader.const_table.borrow().as_ref().unwrap().len(),
+                    ));
+                    self.write_f32(*val);
+                    return;
+                }
+                _ => {},
             }
-            (Some(Val::Float(val)), ExprKind::MacroCall { .. }) | (Some(Val::Float(val)), _)
-                if self.gather_all =>
-            {
-                expr.const_index.set(Some(
-                    self.shader.const_table.borrow().as_ref().unwrap().len(),
-                ));
-                self.write_f32(*val);
-            }
-            (Some(_), _) => {}
-            (None, _) => match expr.kind {
-                ExprKind::Cond {
-                    span,
-                    ref expr,
-                    ref expr_if_true,
-                    ref expr_if_false,
-                } => self.const_gather_cond_expr(span, expr, expr_if_true, expr_if_false),
-                ExprKind::Bin {
-                    span,
-                    op,
-                    ref left_expr,
-                    ref right_expr,
-                } => self.const_gather_bin_expr(span, op, left_expr, right_expr),
-                ExprKind::Un { span, op, ref expr } => self.const_gather_un_expr(span, op, expr),
-                ExprKind::MethodCall {
-                    span,
-                    ident,
-                    ref arg_exprs,
-                } => self.const_gather_method_call_expr(span, ident, arg_exprs),
-                ExprKind::Field {
-                    span,
-                    ref expr,
-                    field_ident,
-                } => self.const_gather_field_expr(span, expr, field_ident),
-                ExprKind::Index {
-                    span,
-                    ref expr,
-                    ref index_expr,
-                } => self.const_gather_index_expr(span, expr, index_expr),
-                ExprKind::Call {
-                    span,
-                    ident,
-                    ref arg_exprs,
-                } => self.const_gather_call_expr(span, ident, arg_exprs),
-                ExprKind::MacroCall {
-                    span,
-                    ref analysis,
-                    ident,
-                    ref arg_exprs,
-                    ..
-                } => self.const_gather_macro_call_expr(span, analysis, ident, arg_exprs),
-                ExprKind::ConsCall {
-                    span,
-                    ty_lit,
-                    ref arg_exprs,
-                } => self.const_gather_cons_call_expr(span, ty_lit, arg_exprs),
-                ExprKind::Var {
-                    span,
-                    ref kind,
-                    ident,
-                } => self.const_gather_var_expr(span, kind, ident),
-                ExprKind::Lit { span, lit } => self.const_gather_lit_expr(span, lit),
-            },
+        }
+        match expr.kind {
+            ExprKind::Cond {
+                span,
+                ref expr,
+                ref expr_if_true,
+                ref expr_if_false,
+            } => self.const_gather_cond_expr(span, expr, expr_if_true, expr_if_false),
+            ExprKind::Bin {
+                span,
+                op,
+                ref left_expr,
+                ref right_expr,
+            } => self.const_gather_bin_expr(span, op, left_expr, right_expr),
+            ExprKind::Un { span, op, ref expr } => self.const_gather_un_expr(span, op, expr),
+            ExprKind::MethodCall {
+                span,
+                ident,
+                ref arg_exprs,
+            } => self.const_gather_method_call_expr(span, ident, arg_exprs),
+            ExprKind::Field {
+                span,
+                ref expr,
+                field_ident,
+            } => self.const_gather_field_expr(span, expr, field_ident),
+            ExprKind::Index {
+                span,
+                ref expr,
+                ref index_expr,
+            } => self.const_gather_index_expr(span, expr, index_expr),
+            ExprKind::Call {
+                span,
+                ident,
+                ref arg_exprs,
+            } => self.const_gather_call_expr(span, ident, arg_exprs),
+            ExprKind::MacroCall {
+                span,
+                ref analysis,
+                ident,
+                ref arg_exprs,
+                ..
+            } => self.const_gather_macro_call_expr(span, analysis, ident, arg_exprs),
+            ExprKind::ConsCall {
+                span,
+                ty_lit,
+                ref arg_exprs,
+            } => self.const_gather_cons_call_expr(span, ty_lit, arg_exprs),
+            ExprKind::Var {
+                span,
+                ref kind,
+                ident,
+            } => self.const_gather_var_expr(span, kind, ident),
+            ExprKind::Lit { span, lit } => self.const_gather_lit_expr(span, lit),
         }
     }
 
