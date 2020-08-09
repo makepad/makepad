@@ -34,6 +34,8 @@ pub trait BackendWriter {
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
     
     fn write_call_ident(&self, string: &mut String, ident: Ident, arg_exprs: &[Expr]);
+    
+    fn needs_mul_fn_for_matrix_multiplication(&self)->bool;
 }
 
 pub struct BlockGenerator<'a> {
@@ -354,6 +356,27 @@ impl<'a> ExprGenerator<'a> {
     }
     
     fn generate_bin_expr(&mut self, _span: Span, op: BinOp, left_expr: &Expr, right_expr: &Expr) {
+        
+        // if left_expr or right_expr is a matrix, HLSL needs to use mul()
+        if self.backend_writer.needs_mul_fn_for_matrix_multiplication(){
+            let left_is_mat =  match left_expr.ty.borrow().as_ref().unwrap() {
+                Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => true,
+                _=>false
+            };
+            let right_is_mat =  match right_expr.ty.borrow().as_ref().unwrap() {
+                Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => true,
+                _=>false
+            };
+            if left_is_mat || right_is_mat{
+                write!(self.string, "mul(").unwrap();
+                self.generate_expr(left_expr);
+                write!(self.string, ", ").unwrap();
+                self.generate_expr(right_expr);
+                write!(self.string, ")").unwrap();
+                return
+            }
+        }
+        
         write!(self.string, "(").unwrap();
         self.generate_expr(left_expr);
         write!(self.string, " {} ", op).unwrap();
