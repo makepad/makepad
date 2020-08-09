@@ -19,6 +19,7 @@ pub mod jseditor;
 pub mod plaineditor;
 pub mod itemdisplay;
 pub mod livemacro;
+pub mod shaderview;
 //mod rustcompiler;
 //pub use crate::rustcompiler::*;
 pub use makepad_render::*;

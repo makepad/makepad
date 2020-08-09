@@ -31,36 +31,36 @@ impl <'a>TokenParser<'a> {
         return true;
     }
     
-    pub fn eat_should_ignore(&mut self)->bool{
-        while self.cur_type().should_ignore(){
-            if !self.advance(){
+    pub fn eat_should_ignore(&mut self) -> bool {
+        while self.cur_type().should_ignore() {
+            if !self.advance() {
                 return false
             }
         }
         return true
     }
     
-    pub fn eat(&mut self, what:&str)->bool{
+    pub fn eat(&mut self, what: &str) -> bool {
         // eat as many ignorable tokens
-        if !self.eat_should_ignore(){
+        if !self.eat_should_ignore() {
             return false
         }
         // then match what in our token
         let chunk = &self.tokens[self.index];
         let mut off = chunk.offset;
-        for c in what.chars(){
-            if off - chunk.offset > chunk.len{
+        for c in what.chars() {
+            if off - chunk.offset > chunk.len {
                 return false
             }
-            if self.flat_text[off] != c{
+            if self.flat_text[off] != c {
                 return false;
             }
             off += 1;
         }
-        if off - chunk.offset != chunk.len{
+        if off - chunk.offset != chunk.len {
             return false
         }
-        if !self.eat_should_ignore(){
+        if !self.eat_should_ignore() {
             return false
         }
         self.advance();
@@ -76,18 +76,72 @@ impl <'a>TokenParser<'a> {
         }
     }
     
+    pub fn cur_pair_as_string(&self) -> Option<String> {
+        let pair_token = self.tokens[self.index].pair_token;
+        if pair_token < self.index || pair_token >= self.tokens.len() {
+            return None
+        }
+        let mut out_str = String::new();
+        for i in self.cur_offset() + 1..self.cur_pair_offset() {
+            out_str.push(self.flat_text[i]);
+        }
+        Some(out_str)
+    }
+    
+    pub fn cur_as_string(&self) -> String {
+        let mut out_str = String::new();
+        let tok = &self.tokens[self.index];
+        for i in tok.offset..tok.offset + tok.len {
+            out_str.push(self.flat_text[i]);
+        }
+        return out_str
+    }
+    
     pub fn cur_type(&self) -> TokenType {
         self.tokens[self.index].token_type
     }
     
-    pub fn cur_offset(&self) -> usize{
+    pub fn cur_line_col(&self) -> (usize, usize) {
+        let off = self.cur_offset();
+        let mut line = 0;
+        let mut lc = 0;
+        for i in 0..off {
+            if self.flat_text[i] == '\n' {
+                line = line + 1;
+                lc = i;
+            }
+        }
+        return (line, off - lc);
+    }
+    
+    pub fn cur_offset(&self) -> usize {
         self.tokens[self.index].offset
     }
-
+    
+    pub fn jump_to_pair(&mut self) {
+        let pair_token = self.tokens[self.index].pair_token;
+        if pair_token > self.index && pair_token < self.tokens.len() {
+            self.index = pair_token;
+        }
+    }
+    
     pub fn cur_pair_offset(&self) -> usize {
         self.tokens[self.tokens[self.index].pair_token].offset
     }
-
+    
+    pub fn cur_pair_range(&self) -> (usize, usize) {
+        (
+            self.tokens[self.index].offset,
+            self.tokens[self.tokens[self.index].pair_token].offset
+        )
+    }
+    
+    pub fn cur_range(&self) -> (usize, usize) {
+        (
+            self.tokens[self.index].offset,
+            self.tokens[self.index].offset + self.tokens[self.index].len
+        )
+    }
     
     pub fn next_type(&self) -> TokenType {
         if self.index < self.tokens.len() - 1 {
@@ -193,7 +247,7 @@ pub struct MprsTokenizer {
 }
 
 impl MprsTokenizer {
-
+    
     pub fn new() -> MprsTokenizer {
         MprsTokenizer {
             comment_single: false,
@@ -376,19 +430,19 @@ impl MprsTokenizer {
                     // we have to scan back, skip all whitespacey things
                     // see if we find a shader!(
                     // we have to backparse.
-                        
+                    
                     
                     chunk.push(state.cur);
-
-                    if chunk.len()>2 && chunk[chunk.len()-3] == '!' && chunk[chunk.len()-2] == '{'{
+                    
+                    if chunk.len()>2 && chunk[chunk.len() - 3] == '!' && chunk[chunk.len() - 2] == '{' {
                         self.in_string_code = true;
                         return TokenType::ParenOpen;
-                    } 
-                    if state.next == '}' && self.in_string_code{
+                    }
+                    if state.next == '}' && self.in_string_code {
                         self.in_string_code = false;
                         return TokenType::ParenClose;
                     }
-
+                    
                     state.prev = '\0';
                     while state.next != '\0' && state.next != '\n' {
                         if state.next != '"' || state.prev != '\\' && state.cur == '\\' && state.next == '"' {
@@ -544,7 +598,21 @@ impl MprsTokenizer {
                 },
                 '#' => {
                     chunk.push(state.cur);
-                    return TokenType::Hash;
+                    // if followed by 0-9A-Fa-f parse untill not one of those
+                    if state.next >= '0' && state.next <= '9' 
+                    || state.next >= 'a' && state.next <= 'f'
+                    || state.next >= 'A' && state.next <= 'F' { // parse a hex number
+                        chunk.push(state.next);
+                        state.advance();
+                        while state.next_is_hex() {
+                            chunk.push(state.next);
+                            state.advance();
+                        }
+                        return TokenType::Color;
+                    }
+                    else{
+                        return TokenType::Hash;
+                    }
                 },
                 '_' => {
                     chunk.push(state.cur);
@@ -947,7 +1015,7 @@ impl MprsTokenizer {
     }
     
     // because rustfmt is such an insane shitpile to compile or use as a library, here is a stupid version.
-    pub fn auto_format(flat_text:&Vec<char>, token_chunks:&Vec<TokenChunk>, force_newlines: bool) -> FormatOutput {
+    pub fn auto_format(flat_text: &Vec<char>, token_chunks: &Vec<TokenChunk>, force_newlines: bool) -> FormatOutput {
         
         // extra spacey setting that rustfmt seems to do, but i don't like
         let extra_spacey = false;
@@ -1040,7 +1108,7 @@ impl MprsTokenizer {
                     }
                     if pre_spacey && is_curly && !first_on_line && tp.prev_type() != TokenType::Namespace {
                         if tp.prev_char() != ' ' && tp.prev_char() != '{'
-                            && tp.prev_char() != '[' && tp.prev_char() != '(' && tp.prev_char() != ':' && tp.prev_char() != '!'{
+                            && tp.prev_char() != '[' && tp.prev_char() != '(' && tp.prev_char() != ':' && tp.prev_char() != '!' {
                             out.add_space();
                         }
                     }
@@ -1258,7 +1326,7 @@ impl MprsTokenizer {
                     out.extend(tp.cur_chunk());
                 },
                 // these are followeable by non unary operators
-                TokenType::Macro | TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number |
+                TokenType::Macro | TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number | TokenType::Color |
                 TokenType::Bool | TokenType::Unexpected | TokenType::Error | TokenType::Warning | TokenType::Defocus => {
                     is_unary_operator = false;
                     paren_stack.last_mut().unwrap().angle_counter = 0;

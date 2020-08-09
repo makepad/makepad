@@ -27,14 +27,6 @@ impl SearchIndex {
         let chunk_id = atb.text_buffer.token_chunks.len() - 2;
         // lets figure out if its a decl, an impl or a use
         match atb.text_buffer.token_chunks[chunk_id].token_type {
-            TokenType::Operator =>{ // check if its an !
-                // check if the previous one is one of our live macros
-                // pick, bezier, whatnot
-                // how do we maintain an incremental datastructure?
-                // that we can copy on build, but also diff for changes?
-                // how do we detect a change thats NOT a live change?
-                
-            },
             TokenType::Identifier | TokenType::Call | TokenType::TypeName => {
                 let prev_tt = {
                     let mut i = if chunk_id > 0 {chunk_id - 1} else {0};

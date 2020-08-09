@@ -1,7 +1,7 @@
 //use syn::Type;
 use makepad_render::*;
 use makepad_widget::*;
-use makepad_tinyserde::*;
+use makepad_microserde::*;
 use std::collections::HashMap;
 
 use crate::appstorage::*;
@@ -17,13 +17,15 @@ use crate::searchresults::*;
 use crate::rusteditor::*;
 use crate::jseditor::*;
 use crate::plaineditor::*;
+use crate::shaderview::*;
 
-#[derive(Debug, Clone, SerRon, DeRon)]
+#[derive(Debug, Clone, SerRon, DeRon)] 
 pub enum Panel {
-    LogList,
+    LogList,  
     SearchResults,
     ItemDisplay,
-    Keyboard,
+    Keyboard, 
+    ShaderView,
     FileTree,
     FileEditorTarget,
     FileEditor {path: String, scroll_pos: Vec2, editor_id: u64}
@@ -37,12 +39,14 @@ pub struct AppWindow {
     pub item_display: ItemDisplay,
     pub log_list: LogList,
     pub search_results: SearchResults,
+    pub shader_view: ShaderView,
+    
     pub keyboard: Keyboard,
     pub file_editors: FileEditors,
     pub dock: Dock<Panel>,
 }
 
-#[derive(Clone, SerRon, DeRon)]
+#[derive(Clone, SerRon, DeRon)] 
 pub struct AppWindowState {
     pub open_folders: Vec<String>,
     pub window_position: Vec2,
@@ -69,6 +73,7 @@ impl AppWindow {
                 plain_editor: PlainEditor::new(cx),
                 editors: HashMap::new(),
             },
+            shader_view: ShaderView::new(cx),
             home_page: HomePage::new(cx),
             keyboard: Keyboard::new(cx),
             item_display: ItemDisplay::new(cx),
@@ -158,6 +163,9 @@ impl AppWindow {
                         _ => ()
                     }
                 }
+                Panel::ShaderView =>{
+                    self.shader_view.handle_shader_view(cx, event)
+                },
                 Panel::ItemDisplay => {
                     self.item_display.handle_item_display(cx, event);
                 }
@@ -357,6 +365,9 @@ impl AppWindow {
             }
         }) {
             match item {
+                Panel::ShaderView =>{
+                    self.shader_view.draw_shader_view(cx);
+                },
                 Panel::LogList => {
                     self.log_list.draw_log_list(cx, build_manager);
                 }

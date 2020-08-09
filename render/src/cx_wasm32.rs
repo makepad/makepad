@@ -2,6 +2,7 @@ use std::mem;
 use std::ptr;
 use std::alloc;
 use crate::cx::*;
+use makepad_shader_compiler::ty::Ty;
 
 impl Cx {
     
@@ -82,16 +83,17 @@ impl Cx {
                     };
                     self.default_dpi_factor = self.platform.window_geom.dpi_factor;
                     self.vr_can_present = to_wasm.mu32() > 0;
+                    self.platform.gpu_spec_is_low_on_uniforms = to_wasm.mu32() > 0;
                     
                     if self.windows.len() > 0 {
                         self.windows[0].window_geom = self.platform.window_geom.clone();
                     }
                     
                     self.call_event_handler(&mut event_handler, &mut Event::Construct);
-                    
+                     
                     self.redraw_child_area(Area::All);
-                },
-                4 => { // resize
+                }, 
+                4 => { // resize 
                     self.platform.window_geom = WindowGeom {
                         is_fullscreen: false,
                         is_topmost: false,
@@ -434,6 +436,14 @@ impl Cx {
             self.platform.from_wasm.request_animation_frame();
         }
         
+        // lets check our recompile queue
+        if !is_animation_frame {
+            let mut shader_results = Vec::new();
+            for shader_id in &self.shader_recompiles {
+                shader_results.push(Self::webgl_compile_shader(*shader_id, !self.platform.gpu_spec_is_low_on_uniforms, true, &mut self.shaders[*shader_id], &mut self.platform));
+            }
+            self.call_shader_recompile_event(shader_results, &mut event_handler);
+        }
         // mark the end of the message
         self.platform.from_wasm.end();
         
@@ -647,6 +657,7 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
 #[derive(Clone)]
 pub struct CxPlatform {
     pub is_initialized: bool,
+    pub gpu_spec_is_low_on_uniforms: bool,
     pub window_geom: WindowGeom,
     pub from_wasm: FromWasm,
     pub vertex_buffers: usize,
@@ -663,6 +674,7 @@ impl Default for CxPlatform {
     fn default() -> CxPlatform {
         CxPlatform {
             is_initialized: false,
+            gpu_spec_is_low_on_uniforms: false,
             window_geom: WindowGeom::default(),
             from_wasm: FromWasm::zero(),
             vertex_buffers: 1,
@@ -826,11 +838,19 @@ impl FromWasm {
         self.mu32 as u32
     }
     
-    fn add_shvarvec(&mut self, shvars: &Vec<ShVar>) {
+    fn add_propdefvec(&mut self, shvars: &Vec<PropDef>) {
         self.fit(1);
         self.mu32(shvars.len() as u32);
         for shvar in shvars {
-            self.add_string(&shvar.ty);
+            self.add_string(match shvar.prop_id.shader_ty(){
+                Ty::Vec4=>"vec4",
+                Ty::Vec3=>"vec3",
+                Ty::Vec2=>"vec2",
+                Ty::Float=>"float",
+                Ty::Mat4=>"mat4",
+                Ty::Texture2D=>"sampler2D",
+                _=>panic!("unexpected type in add_propdefvec")
+            });
             self.add_string(&shvar.name);
         }
     }
@@ -849,13 +869,13 @@ impl FromWasm {
         self.add_string(fragment);
         self.add_string(vertex);
         self.fit(2);
-        self.mu32(mapping.geometry_slots as u32);
-        self.mu32(mapping.instance_slots as u32);
-        self.add_shvarvec(&mapping.pass_uniforms);
-        self.add_shvarvec(&mapping.view_uniforms);
-        self.add_shvarvec(&mapping.draw_uniforms);
-        self.add_shvarvec(&mapping.uniforms);
-        self.add_shvarvec(&mapping.texture_slots);
+        self.mu32(mapping.geometry_props.total_slots as u32);
+        self.mu32(mapping.instance_props.total_slots as u32);
+        self.add_propdefvec(&mapping.pass_uniforms);
+        self.add_propdefvec(&mapping.view_uniforms);
+        self.add_propdefvec(&mapping.draw_uniforms);
+        self.add_propdefvec(&mapping.uniforms);
+        self.add_propdefvec(&mapping.textures);
     }
     
     pub fn alloc_array_buffer(&mut self, buffer_id: usize, len: usize, data: *const f32) {
@@ -892,9 +912,10 @@ impl FromWasm {
         uniforms_dl: &[f32],
         uniforms_dr: &[f32],
         uniforms: &[f32],
-        textures: &Vec<u32>
+        textures: &Vec<u32>,
+        const_table: &Option<Vec<f32>>
     ) {
-        self.fit(8);
+        self.fit(10);
         self.mu32(6);
         self.mu32(shader_id as u32);
         self.mu32(vao_id as u32);
@@ -903,6 +924,14 @@ impl FromWasm {
         self.mu32(uniforms_dr.as_ptr() as u32);
         self.mu32(uniforms.as_ptr() as u32);
         self.mu32(textures.as_ptr() as u32);
+        if let Some(const_table) = const_table{
+            self.mu32(const_table.as_ptr() as u32);
+            self.mu32(const_table.len() as u32);
+        }
+        else{
+            self.mu32(0);
+            self.mu32(0);
+        }
     }
     
     pub fn clear(&mut self, r: f32, g: f32, b: f32, a: f32) {

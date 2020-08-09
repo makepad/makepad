@@ -1,7 +1,13 @@
 use std::collections::HashMap;
 use std::cell::RefCell;
 
-pub use crate::shadergen::*;
+pub use makepad_shader_compiler::shadergen::*;
+pub use makepad_shader_compiler::colors::*;
+pub use makepad_shader_compiler::util::PrettyPrintedFloat;
+pub use makepad_shader_compiler::math::*;
+pub use makepad_shader_compiler::uid;
+pub use makepad_live_macros::*;
+
 pub use crate::fonts::*;
 pub use crate::turtle::*;
 pub use crate::cursor::*;
@@ -10,19 +16,17 @@ pub use crate::view::*;
 pub use crate::pass::*;
 pub use crate::texture::*;
 pub use crate::text::*;
-pub use crate::shader::*;
 
-pub use crate::math::*;
 pub use crate::events::*;
-pub use crate::colors::*;
-pub use crate::elements::*; 
+//pub use crate::elements::*;
 pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::menu::*;
 pub use crate::styling::*;
 pub use crate::liveclient::*;
+pub use crate::shader::*;
 
-#[cfg(all(not(feature = "ipc"), target_os = "linux"))] 
+#[cfg(all(not(feature = "ipc"), target_os = "linux"))]
 pub use crate::cx_linux::*;
 #[cfg(all(not(feature = "ipc"), target_os = "linux"))]
 pub use crate::cx_opengl::*;
@@ -31,21 +35,14 @@ pub use crate::cx_opengl::*;
 pub use crate::cx_macos::*;
 #[cfg(all(not(feature = "ipc"), target_os = "macos"))]
 pub use crate::cx_metal::*;
-#[cfg(all(not(feature = "ipc"), target_os = "macos"))]
-pub use crate::cx_metalsl::*;
 
 #[cfg(all(not(feature = "ipc"), target_os = "windows"))]
 pub use crate::cx_windows::*;
 #[cfg(all(not(feature = "ipc"), target_os = "windows"))]
 pub use crate::cx_dx11::*;
-#[cfg(all(not(feature = "ipc"), target_os = "windows"))]
-pub use crate::cx_hlsl::*;
-
+ 
 #[cfg(all(not(feature = "ipc"), target_arch = "wasm32"))]
 pub use crate::cx_webgl::*;
-
-#[cfg(all(not(feature = "ipc"), any(target_arch = "wasm32", target_os = "linux")))]
-pub use crate::cx_glsl::*;
 
 #[cfg(all(not(feature = "ipc"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub use crate::cx_desktop::*;
@@ -100,8 +97,11 @@ pub struct Cx {
     pub textures: Vec<CxTexture>,
     pub textures_free: Vec<usize>,
     pub shaders: Vec<CxShader>,
+    pub shader_recompiles:Vec<usize>,
     pub shader_map: HashMap<ShaderGen, usize>,
     pub shader_instance_id: usize,
+    
+    pub live_macros_on_self: bool,
     
     pub str_to_id: RefCell<HashMap<String, usize>>,
     pub id_to_str: RefCell<HashMap<usize, String>>,
@@ -162,7 +162,7 @@ pub struct Cx {
     pub panic_now: bool,
     pub panic_redraw: bool,
     
-    pub live_client: Option<LiveClient>,
+    //pub live_client: Option<LiveClient>,
     
     pub platform: CxPlatform,
 }
@@ -176,13 +176,13 @@ pub struct CxCommandSetting {
 
 #[derive(Default)]
 pub struct CxStyle {
+    pub floats: HashMap<FloatId, f32>,
     pub colors: HashMap<ColorId, Color>,
     pub text_styles: HashMap<TextStyleId, TextStyle>,
     pub layouts: HashMap<LayoutId, Layout>,
     pub walks: HashMap<WalkId, Walk>,
     pub anims: HashMap<AnimId, Anim>,
     pub shaders: HashMap<ShaderId, Shader>,
-    pub floats: HashMap<FloatId, f32>,
 }
 
 pub const NUM_FINGERS: usize = 10;
@@ -217,7 +217,7 @@ impl Default for Cx {
             platform_type: PlatformType::Windows,
             running: true,
             
-            live_client: LiveClient::connect_to_live_server(None),
+            //live_client: LiveClient::connect_to_live_server(None),
             
             windows: Vec::new(),
             windows_free: Vec::new(),
@@ -231,7 +231,11 @@ impl Default for Cx {
             textures: textures,
             textures_free: Vec::new(),
             shaders: Vec::new(),
+            shader_recompiles: Vec::new(),
             shader_map: HashMap::new(),
+            
+            live_macros_on_self: true,
+            
             id_to_str: RefCell::new(HashMap::new()),
             str_to_id: RefCell::new(HashMap::new()),
             
@@ -299,6 +303,13 @@ impl Default for Cx {
 
 
 impl Cx {
+    
+    pub fn shader_defs(sg: ShaderGen) -> ShaderGen {
+        let sg = CxShader::def_df(sg);
+        let sg = CxPass::def_uniforms(sg);
+        let sg = CxView::def_uniforms(sg);
+        sg
+    }
     
     pub fn add_shader(&mut self, sg: ShaderGen, name: &str) -> Shader {
         let inst_id = self.shader_instance_id;
@@ -608,9 +619,9 @@ impl Cx {
         }
     }
     
-    pub fn update_area_refs(&mut self, old_area: Area, new_area: Area) {
+    pub fn update_area_refs(&mut self, old_area: Area, new_area: Area)->Area{
         if old_area == Area::Empty || old_area == Area::All {
-            return
+            return new_area
         }
         
         if let Some(anim_anim) = self.playing_anim_areas.iter_mut().find( | v | v.area == old_area) {
@@ -631,7 +642,7 @@ impl Cx {
         }
         if self.next_key_focus == old_area {
             self.next_key_focus = new_area.clone()
-        }        
+        }
         if self._finger_over_last_area == old_area {
             self._finger_over_last_area = new_area.clone()
         }
@@ -639,12 +650,13 @@ impl Cx {
         if let Some(next_frame) = self.frame_callbacks.iter_mut().find( | v | **v == old_area) {
             *next_frame = new_area.clone()
         }
+        new_area
     }
     
     pub fn set_key_focus(&mut self, focus_area: Area) {
         self.next_key_focus = focus_area;
     }
-
+    
     pub fn revert_key_focus(&mut self) {
         self.next_key_focus = self.prev_key_focus;
     }
@@ -711,19 +723,19 @@ impl Cx {
         self.redraw_parent_areas.truncate(0);
         self.call_event_handler(&mut event_handler, &mut Event::Draw);
         self.is_in_redraw_cycle = false;
-        if self.style_stack.len()>0{
+        if self.style_stack.len()>0 {
             panic!("Style stack disaligned, forgot a cx.end_style()");
         }
-        if self.view_stack.len()>0{
+        if self.view_stack.len()>0 {
             panic!("View stack disaligned, forgot an end_view(cx)");
         }
-        if self.pass_stack.len()>0{
+        if self.pass_stack.len()>0 {
             panic!("Pass stack disaligned, forgot an end_pass(cx)");
         }
-        if self.window_stack.len()>0{
+        if self.window_stack.len()>0 {
             panic!("Window stack disaligned, forgot an end_window(cx)");
         }
-        if self.turtles.len()>0{
+        if self.turtles.len()>0 {
             panic!("Turtle stack disaligned, forgot an end_turtle()");
         }
         //self.profile();
@@ -760,15 +772,15 @@ impl Cx {
     }
     
     pub fn send_signal(&mut self, signal: Signal, status: StatusId) {
-        if signal.signal_id == 0{
+        if signal.signal_id == 0 {
             return
         }
-        if let Some(statusses) = self.signals.get_mut(&signal){
-            if statusses.iter().find(|s| **s == status).is_none(){
+        if let Some(statusses) = self.signals.get_mut(&signal) {
+            if statusses.iter().find( | s | **s == status).is_none() {
                 statusses.push(status);
             }
         }
-        else{
+        else {
             self.signals.insert(signal, vec![status]);
         }
     }
@@ -785,7 +797,7 @@ impl Cx {
             self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent {
                 signals: signals,
             }));
-
+            
             if counter > 100 {
                 println!("Signal feedback loop detected");
                 break
@@ -793,8 +805,44 @@ impl Cx {
         }
     }
     
+    pub fn call_shader_recompile_event<F>(&mut self, results:Vec<ShaderCompileResult>, mut event_handler: F)
+    where F: FnMut(&mut Cx, &mut Event)
+    {
+        self.shader_recompiles.truncate(0);
+        if results.len()>0{
+            self.call_event_handler(&mut event_handler, &mut Event::ShaderRecompile(ShaderRecompileEvent {
+                results: results
+            }));
+        }
+    }
+    
     pub fn status_http_send_ok() -> StatusId {uid!()}
     pub fn status_http_send_fail() -> StatusId {uid!()}
+    
+    pub fn recompile_shader_sub(&mut self, file: &str, line: usize, col: usize, code: String) {
+        if !self.live_macros_on_self{
+            return
+        }
+        
+        for (shader_index, shader) in self.shaders.iter_mut().enumerate() {
+            // ok so lets enumerate our subs
+            for sub in &mut shader.shader_gen.subs {
+                //println!("{} {}", file, sub.loc.path);
+                //i file == sub.loc.path{
+                // }
+
+                if file == sub.loc.path && line == sub.loc.line && col == sub.loc.column{
+                    if code != sub.code{
+                        sub.code = code.clone();
+                        // we need to recompile some shader..
+                        self.shader_recompiles.push(
+                            shader_index
+                        );
+                    }
+                }
+            }
+        }
+    }
     
     /*
     pub fn debug_draw_tree_recur(&mut self, draw_list_id: usize, depth:usize){
@@ -895,7 +943,7 @@ macro_rules!main_app {
 }
 
 #[macro_export]
-macro_rules!wasm_app{
+macro_rules!wasm_app {
     ( $ app: ident) => {
         #[export_name = "create_wasm_app"]
         pub extern "C" fn create_wasm_app() -> u32 {

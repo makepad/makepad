@@ -60,7 +60,7 @@ impl Keyboard {
     
     pub fn handle_keyboard(&mut self, cx: &mut Cx, event: &mut Event, app_storage: &mut AppStorage) -> KeyboardEvent {
         // do shit here
-        if self.view.handle_scroll_bars(cx, event) {
+        if self.view.handle_scroll_view(cx, event) {
         }
         let mut update_textbuffers = false;
         for (key_type, btn) in self.buttons.enumerate() {

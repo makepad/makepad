@@ -7,13 +7,13 @@ use proc_macro::token_stream::IntoIter;
 
 pub fn error_span(err: &str, span: Span) -> TokenStream {
     let mut tb = TokenBuilder::new();
-    tb.ident_with_span("compile_error", span).add("! (").string(err).add(")");
+    tb.ident_with_span("compile_error", span).add("! (").string(err).add(") ;");
     tb.end()
 }
 
 pub fn error(err: &str) -> TokenStream {
     let mut tb = TokenBuilder::new();
-    tb.add("compile_error ! (").string(err).add(")");
+    tb.add("compile_error ! (").string(err).add(") ;");
     tb.end()
 }
 
@@ -102,6 +102,7 @@ impl TokenBuilder {
     pub fn string(&mut self, val: &str) -> &mut Self {self.extend(TokenTree::from(Literal::string(val)))}
     pub fn unsuf_usize(&mut self, val: usize) -> &mut Self {self.extend(TokenTree::from(Literal::usize_unsuffixed(val)))}
     pub fn suf_u16(&mut self, val: u16) -> &mut Self {self.extend(TokenTree::from(Literal::u16_suffixed(val)))}
+    pub fn unsuf_f32(&mut self, val: f32) -> &mut Self {self.extend(TokenTree::from(Literal::f32_unsuffixed(val)))}
     pub fn chr(&mut self, val:char) -> &mut Self {self.extend(TokenTree::from(Literal::character(val)))}
     pub fn _lit(&mut self, lit: Literal) -> &mut Self {self.extend(TokenTree::from(lit))}
     

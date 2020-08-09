@@ -88,6 +88,55 @@ impl BuildManager {
         return false
     }
     
+    pub fn process_loc_message_for_textbuffers(&self, cx: &mut Cx, loc_message:&LocMessage, level: TextBufferMessageLevel, storage: &mut AppStorage){
+        let atb = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
+        let markers = &mut atb.text_buffer.markers;
+        markers.mutation_id = atb.text_buffer.mutation_id.max(1);
+        if markers.message_cursors.len() > 100000{ // crash saftey
+            return
+        }
+        if let Some((head, tail)) = loc_message.range {
+            let mut inserted = None;
+            if markers.message_cursors.len()>0 {
+                for i in (0..markers.message_cursors.len()).rev() {
+                    if head >= markers.message_cursors[i].head {
+                        break;
+                    }
+                    if head < markers.message_cursors[i].head && (i == 0 || head >= markers.message_cursors[i - 1].head) {
+                        markers.message_cursors.insert(i, TextCursor {
+                            head: head,
+                            tail: tail,
+                            max: 0
+                        });
+                        inserted = Some(i);
+                        break;
+                    }
+                }
+            }
+            if inserted.is_none() {
+                if let Some((head, tail)) = loc_message.range {
+                    markers.message_cursors.push(TextCursor {
+                        head: head,
+                        tail: tail,
+                        max: 0
+                    })
+                }
+            }
+            
+            let msg = TextBufferMessage {
+                body: loc_message.body.clone(),
+                level: level
+            };
+            if let Some(pos) = inserted {
+                atb.text_buffer.markers.message_bodies.insert(pos, msg);
+            }
+            else {
+                atb.text_buffer.markers.message_bodies.push(msg);
+            }
+            cx.send_signal(atb.text_buffer.signal, TextBuffer::status_message_update());
+        }        
+    }
+    
     pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &FromHubMsg) {
         //let hub_ui = storage.hub_ui.as_mut().unwrap();
         match &htc.msg {
@@ -113,60 +162,16 @@ impl BuildManager {
                 
                 self.log_items.push(item.clone());
                 if let Some(loc_message) = item.get_loc_message() {
-                    let atb = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
-                    let markers = &mut atb.text_buffer.markers;
-                    markers.mutation_id = atb.text_buffer.mutation_id.max(1);
-                    if markers.message_cursors.len() > 100000{ // crash saftey
-                        return
-                    }
-                    if let Some((head, tail)) = loc_message.range {
-                        let mut inserted = None;
-                        if markers.message_cursors.len()>0 {
-                            for i in (0..markers.message_cursors.len()).rev() {
-                                if head >= markers.message_cursors[i].head {
-                                    break;
-                                }
-                                if head < markers.message_cursors[i].head && (i == 0 || head >= markers.message_cursors[i - 1].head) {
-                                    markers.message_cursors.insert(i, TextCursor {
-                                        head: head,
-                                        tail: tail,
-                                        max: 0
-                                    });
-                                    inserted = Some(i);
-                                    break;
-                                }
-                            }
-                        }
-                        if inserted.is_none() {
-                            if let Some((head, tail)) = loc_message.range {
-                                markers.message_cursors.push(TextCursor {
-                                    head: head,
-                                    tail: tail,
-                                    max: 0
-                                })
-                            }
-                        }
-                        
-                        let msg = TextBufferMessage {
-                            body: loc_message.body.clone(),
-                            level: match item {
-                                HubLogItem::LocPanic(_) => TextBufferMessageLevel::Log,
-                                HubLogItem::LocError(_) => TextBufferMessageLevel::Error,
-                                HubLogItem::LocWarning(_) => TextBufferMessageLevel::Warning,
-                                HubLogItem::LocMessage(_) => TextBufferMessageLevel::Log,
-                                HubLogItem::Error(_) => TextBufferMessageLevel::Error,
-                                HubLogItem::Warning(_) => TextBufferMessageLevel::Warning,
-                                HubLogItem::Message(_) => TextBufferMessageLevel::Log,
-                            }
-                        };
-                        if let Some(pos) = inserted {
-                            atb.text_buffer.markers.message_bodies.insert(pos, msg);
-                        }
-                        else {
-                            atb.text_buffer.markers.message_bodies.push(msg);
-                        }
-                        cx.send_signal(atb.text_buffer.signal, TextBuffer::status_message_update());
-                    }
+                    let level = match item {
+                        HubLogItem::LocPanic(_) => TextBufferMessageLevel::Log,
+                        HubLogItem::LocError(_) => TextBufferMessageLevel::Error,
+                        HubLogItem::LocWarning(_) => TextBufferMessageLevel::Warning,
+                        HubLogItem::LocMessage(_) => TextBufferMessageLevel::Log,
+                        HubLogItem::Error(_) => TextBufferMessageLevel::Error,
+                        HubLogItem::Warning(_) => TextBufferMessageLevel::Warning,
+                        HubLogItem::Message(_) => TextBufferMessageLevel::Log,
+                    };
+                    self.process_loc_message_for_textbuffers(cx, loc_message, level, storage)
                 }
                 cx.send_signal(self.signal, BuildManager::status_new_log_item());
             },
@@ -205,6 +210,49 @@ impl BuildManager {
                 cx.send_signal(self.signal, BuildManager::status_program_end());
             },
             _ => ()
+        }
+    }
+
+    pub fn handle_shader_recompile_event(&mut self, cx:&mut Cx, re:&ShaderRecompileEvent, storage:&mut AppStorage){
+        // we are running in loopback mode
+        // lets use the log list as an error list for loopback shadercoding.
+        // first of all 
+        // the problem is our path is not fully resolved
+        // lets just map it to /main/makepad and worry later
+        self.clear_textbuffer_messages(cx, storage);
+        self.log_items.truncate(0);
+        for item in &re.results{
+            match item{
+                ShaderCompileResult::Nop{id}=>{
+                    self.log_items.push(HubLogItem::Message(
+                        format!("Shader {} compiled OK - no change", id)
+                    ));
+                },
+                ShaderCompileResult::Ok{id}=>{
+                    self.log_items.push(HubLogItem::Message(
+                        format!("Shader {} compiled OK", id)
+                    ));
+                },
+                ShaderCompileResult::Fail{err, ..}=>{
+                    // lets turn line+col+len into a range.
+                    let path = format!("main/makepad/{}", err.path);
+                    // find the textbuffer
+                    let atb = storage.text_buffer_from_path(cx, &path);
+                    // we should be able to mape line+col into byte offset
+                    let off = atb.text_buffer.text_pos_to_offset(TextPos{row:err.line - 1,col:err.col - 1});
+                    let msg = LocMessage{
+                        path:path,
+                        line: err.line,
+                        col: err.col,
+                        body: err.msg.clone(),
+                        range: Some((off, off+err.len)),
+                        rendered:None,
+                        explanation:None
+                    };
+                    self.process_loc_message_for_textbuffers(cx, &msg, TextBufferMessageLevel::Error, storage);
+                    self.log_items.push(HubLogItem::LocError(msg));
+                }
+            }
         }
     }
     

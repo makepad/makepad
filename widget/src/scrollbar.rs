@@ -65,9 +65,9 @@ impl ScrollBar {
     }
     
     pub fn bar_size() -> FloatId {uid!()}
-    pub fn instance_is_vertical() -> InstanceFloat {uid!()}
-    pub fn instance_norm_handle() -> InstanceFloat {uid!()}
-    pub fn instance_norm_scroll() -> InstanceFloat {uid!()}
+    pub fn is_vertical() -> FloatId {uid!()}
+    pub fn norm_handle() -> FloatId {uid!()}
+    pub fn norm_scroll() -> FloatId {uid!()}
     
     pub fn anim_default() -> AnimId {uid!()}
     pub fn anim_over() -> AnimId {uid!()}
@@ -78,36 +78,36 @@ impl ScrollBar {
         Self::bar_size().set(cx, 12. * opt.scale.powf(0.5));
         
         Self::anim_default().set(cx, Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_base().get(cx))])
+            Track::color(Quad::color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_base().get(cx))])
         ]));
         
         Self::anim_over().set(cx, Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_over().get(cx))])
+            Track::color(Quad::color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_over().get(cx))])
         ]));
         
         Self::anim_down().set(cx, Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_down().get(cx))])
+            Track::color(Quad::color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_down().get(cx))])
         ]));
         
-        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"
             
-            let is_vertical: Self::instance_is_vertical();
-            let norm_handle: Self::instance_norm_handle();
-            let norm_scroll: Self::instance_norm_scroll();
+            instance is_vertical: Self::is_vertical();
+            instance norm_handle: Self::norm_handle();
+            instance norm_scroll: Self::norm_scroll();
             
             const border_radius: float = 1.5;
             
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
+                let df = Df::viewport(pos * vec2(w, h));
                 if is_vertical > 0.5 {
-                    df_box(1., h * norm_scroll, w * 0.5, h * norm_handle, border_radius);
+                    df.box(1., h * norm_scroll, w * 0.5, h * norm_handle, border_radius);
                 }
                 else {
-                    df_box(w * norm_scroll, 1., w * norm_handle, h * 0.5, border_radius);
+                    df.box(w * norm_scroll, 1., w * norm_handle, h * 0.5, border_radius);
                 }
-                return df_fill_keep(color);
+                return df.fill_keep(color);
             }
-        })));
+        "}));
     }
     // reads back normalized scroll position info
     pub fn get_normalized_scroll_pos(&self) -> (f32, f32) {
@@ -144,7 +144,7 @@ impl ScrollBar {
     // writes the norm_scroll value into the shader
     pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
         let (norm_scroll, _) = self.get_normalized_scroll_pos();
-        self._bg_area.write_float(cx, Self::instance_norm_scroll(), norm_scroll);
+        self._bg_area.write_float(cx, Self::norm_scroll(), norm_scroll);
     }
     
     // turns scroll_pos into an event on this.event
@@ -369,7 +369,7 @@ impl ScrollBar {
     pub fn draw_scroll_bar(&mut self, cx: &mut Cx, axis: Axis, view_area: Area, view_rect: Rect, view_total: Vec2) -> f32 {
         self.animator.init(cx, | cx | Self::anim_default().get(cx));
         self.bg.shader = Self::shader_bg().get(cx);
-        self.bg.color = self.animator.last_color(cx, Quad::instance_color());
+        self.bg.color = self.animator.last_color(cx, Quad::color());
         self._bg_area = Area::Empty;
         self._view_area = view_area;
         self.axis = axis;

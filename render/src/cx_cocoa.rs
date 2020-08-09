@@ -11,12 +11,12 @@ use std::sync::{Mutex};
 static mut GLOBAL_COCOA_APP: *mut CocoaApp = 0 as *mut _;
 
 
-extern{
-    pub fn mach_absolute_time()->u64;
+extern {
+    pub fn mach_absolute_time() -> u64;
 }
 
-use crate::cx::*; 
- 
+use crate::cx::*;
+
 #[derive(Clone)]
 pub struct CocoaWindow {
     pub window_id: usize,
@@ -60,11 +60,11 @@ pub struct CocoaApp {
     pub cocoa_windows: Vec<(id, id)>,
     pub last_key_mod: KeyModifiers,
     pub pasteboard: id,
+    pub startup_focus_hack_ran: bool,
     pub event_callback: Option<*mut dyn FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool>,
     pub event_recur_block: bool,
     pub event_loop_running: bool,
     pub loop_block: bool,
-    pub init_app_after_first_window: bool,
     pub cursors: HashMap<MouseCursor, id>,
     pub current_cursor: MouseCursor,
     pub status_map: Mutex<CocoaStatusMap>
@@ -102,7 +102,7 @@ impl CocoaApp {
                     arrayWithObjects: const_attributes.as_ptr()
                     count: const_attributes.len()
                 ],
-                init_app_after_first_window: false,
+                startup_focus_hack_ran: false,
                 const_empty_string: str_to_nsstring(""),
                 pasteboard: msg_send![class!(NSPasteboard), generalPasteboard],
                 time_start: mach_absolute_time(),
@@ -222,8 +222,40 @@ impl CocoaApp {
         }
     }
     
-    pub fn init_app_after_first_window(&mut self) {
-        if self.init_app_after_first_window {
+    pub fn startup_focus_hack(&mut self){
+        unsafe{
+            if !self.startup_focus_hack_ran {
+                self.startup_focus_hack_ran = true;
+                let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+                let active: bool = msg_send![ns_app, isActive];
+                if !active {
+                    let dock_bundle_id: id = str_to_nsstring("com.apple.dock");
+                    let dock_array: id = msg_send![
+                        class!(NSRunningApplication),
+                        runningApplicationsWithBundleIdentifier: dock_bundle_id
+                    ];
+                    let dock_array_len: u64 = msg_send![dock_array, count];
+                    if dock_array_len == 0 {
+                        panic!("Dock not running");
+                    } else {
+                        let dock: id = msg_send![dock_array, objectAtIndex: 0];
+                        let _status: BOOL = msg_send![
+                            dock,
+                            activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps
+                        ];
+                        let ns_running_app: id = msg_send![class!(NSRunningApplication), currentApplication];
+                        let () = msg_send![
+                            ns_running_app,
+                            activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps
+                        ];
+                    }
+                }
+            }        
+        }       
+    }
+    
+    /*    pub fn init_app_after_first_window(&mut self) {
+        if self.init_application {
             return
         }
         self.init_app_after_first_window = true;
@@ -231,10 +263,13 @@ impl CocoaApp {
             let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
             let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
             let () = msg_send![ns_app, finishLaunching];
-            let current_app: id = msg_send![class!(NSRunningApplication), currentApplication];
-            let () = msg_send![current_app, activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps as u64];
+            let () = msg_send![ns_app, activateIgnoringOtherApps:true];
+            
+            //let current_app: id = msg_send![class!(NSRunningApplication), currentApplication];
+            //let () = msg_send![ns_app, activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps as u64];
+            
         }
-    }
+    }*/
     
     pub fn init(&mut self) {
         unsafe {
@@ -244,27 +279,27 @@ impl CocoaApp {
             (*self.menu_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
             (*self.app_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
             let () = msg_send![ns_app, setDelegate: self.app_delegate_instance];
+            let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
+            //let () = msg_send![ns_app, finishLaunching];
+            //let () = msg_send![ns_app, run];
+            //let () = msg_send![ns_app, activateIgnoringOtherApps:true];
         }
     }
     
     pub fn time_now(&self) -> f64 {
-        let time_now = unsafe{mach_absolute_time()};
+        let time_now = unsafe {mach_absolute_time()};
         (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
     
     unsafe fn process_ns_event(&mut self, ns_event: id) {
-        if ns_event == nil {
-            return;
-        }
-        
         let ev_type: NSEventType = msg_send![ns_event, type];
+        
+        let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+        let () = msg_send![ns_app, sendEvent: ns_event];
         
         if ev_type as u64 == 21 { // some missing event from cocoa-rs crate
             return;
         }
-        
-        let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
-        let () = msg_send![ns_app, sendEvent: ns_event];
         
         match ev_type {
             NSEventType::NSApplicationDefined => { // event loop unblocker
@@ -466,13 +501,14 @@ impl CocoaApp {
     where F: FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool,
     {
         unsafe {
+            let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+            let () = msg_send![ns_app, finishLaunching];
+            
             self.event_callback = Some(&mut event_handler as *const dyn FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool as *mut dyn FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool);
             
             while self.event_loop_running {
                 let pool: id = msg_send![class!(NSAutoreleasePool), new];
                 
-                // in here the event loop state is handled
-                let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
                 let ns_until: id = if self.loop_block {
                     msg_send![class!(NSDate), distantFuture]
                 }else {
@@ -695,7 +731,7 @@ impl CocoaWindow {
     // complete window initialization with pointers to self
     pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>) {
         unsafe {
-            (*self.cocoa_app).init_app_after_first_window();
+            //(*self.cocoa_app).init_app_after_first_window();
             self.fingers_down.resize(NUM_FINGERS, false);
             
             let pool: id = msg_send![class!(NSAutoreleasePool), new];
@@ -752,7 +788,6 @@ impl CocoaWindow {
             let () = msg_send![input_context, invalidateCharacterCoordinates];
             
             let () = msg_send![pool, drain];
-            
         }
     }
     
@@ -823,7 +858,7 @@ impl CocoaWindow {
     }
     
     pub fn time_now(&self) -> f64 {
-        let time_now = unsafe{mach_absolute_time()};
+        let time_now = unsafe {mach_absolute_time()};
         (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
     
@@ -979,6 +1014,9 @@ impl CocoaWindow {
     pub fn send_finger_hover_and_move(&mut self, pos: Vec2, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
         let mut events = Vec::new();
+        
+        unsafe{ (*self.cocoa_app).startup_focus_hack();}
+    
         for (digit, down) in self.fingers_down.iter().enumerate() {
             if *down {
                 events.push(Event::FingerMove(FingerMoveEvent {
@@ -1053,12 +1091,12 @@ fn get_event_char(event: id) -> char {
 }
 
 fn get_event_key_modifier(event: id) -> KeyModifiers {
-    let flags:u64 = unsafe {msg_send![event, modifierFlags]};
+    let flags: u64 = unsafe {msg_send![event, modifierFlags]};
     KeyModifiers {
         shift: flags & NSEventModifierFlags::NSShiftKeyMask as u64 != 0,
         control: flags & NSEventModifierFlags::NSControlKeyMask as u64 != 0,
         alt: flags & NSEventModifierFlags::NSAlternateKeyMask as u64 != 0,
-        logo: flags & NSEventModifierFlags::NSCommandKeyMask as u64!= 0,
+        logo: flags & NSEventModifierFlags::NSCommandKeyMask as u64 != 0,
     }
 }
 

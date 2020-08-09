@@ -596,6 +596,7 @@ impl XlibApp {
                                             _ => ()
                                         }
                                     }
+                                    
                                     let block_text = modifiers.control || modifiers.logo || modifiers.alt;
                                     self.do_callback(&mut vec![Event::KeyDown(KeyEvent {
                                         key_code: key_code,
@@ -878,6 +879,7 @@ impl XlibApp {
                 ptr::null_mut(),
             );
         }
+        println!("{:?}", keysym);
         match keysym as u32 {
             X11_sys::XK_a => KeyCode::KeyA,
             X11_sys::XK_A => KeyCode::KeyA,
@@ -963,7 +965,8 @@ impl XlibApp {
             X11_sys::XK_comma => KeyCode::Comma,
             X11_sys::XK_slash => KeyCode::Slash,
             X11_sys::XK_period => KeyCode::Period,
-            X11_sys::XK_Tab => KeyCode::Tab,
+            X11_sys::XK_Tab=> KeyCode::Tab,
+            X11_sys::XK_ISO_Left_Tab=> KeyCode::Tab,
             X11_sys::XK_space => KeyCode::Space,
             X11_sys::XK_BackSpace => KeyCode::Backspace,
             X11_sys::XK_Escape => KeyCode::Escape,
@@ -1571,15 +1574,15 @@ struct MwmHints {
     pub status: c_ulong,
 }
 
-const MWM_HINTS_FUNCTIONS: c_ulong = (1 << 0);
-const MWM_HINTS_DECORATIONS: c_ulong = (1 << 1);
+const MWM_HINTS_FUNCTIONS: c_ulong = 1 << 0;
+const MWM_HINTS_DECORATIONS: c_ulong = 1 << 1;
 
-const MWM_FUNC_ALL: c_ulong = (1 << 0);
-const MWM_FUNC_RESIZE: c_ulong = (1 << 1);
-const MWM_FUNC_MOVE: c_ulong = (1 << 2);
-const MWM_FUNC_MINIMIZE: c_ulong = (1 << 3);
-const MWM_FUNC_MAXIMIZE: c_ulong = (1 << 4);
-const MWM_FUNC_CLOSE: c_ulong = (1 << 5);
+const MWM_FUNC_ALL: c_ulong = 1 << 0;
+const MWM_FUNC_RESIZE: c_ulong = 1 << 1;
+const MWM_FUNC_MOVE: c_ulong = 1 << 2;
+const MWM_FUNC_MINIMIZE: c_ulong = 1 << 3;
+const MWM_FUNC_MAXIMIZE: c_ulong = 1 << 4;
+const MWM_FUNC_CLOSE: c_ulong = 1 << 5;
 const _NET_WM_MOVERESIZE_SIZE_TOPLEFT: c_long = 0;
 const _NET_WM_MOVERESIZE_SIZE_TOP: c_long = 1;
 const _NET_WM_MOVERESIZE_SIZE_TOPRIGHT: c_long = 2;
