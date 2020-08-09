@@ -298,19 +298,19 @@ impl FloatSlider {
                 
                 df.fill(pick!(#4));
                 
-                let bheight = 15.;
+                let bheight = 15.; 
                 let bwidth = 10.;
                 
                 df.box((w - bwidth) * norm_value, cy - 0.5 * bheight, bwidth, bheight, 2.);
-                
+                ////
                 let color = mix(mix(pick!(#5), pick!(#B),hover),pick!(#F),down);
                 df.fill(color);
                 
                 return df.result;
             }
-        "}))
+        "})) 
     }
-}
+} 
 
 
 pub enum ColorPickerEvent {
@@ -535,8 +535,8 @@ impl ColorPicker {
                 let radius = w * 0.37;
                 let inner = w * 0.28;
                 
-                df.hexagon(cx, cy, w * 0.5);
-                df.hexagon(cx, cy, w * 0.32);
+                df.hexagon(cx, cy, w * 0.45);
+                df.hexagon(cx, cy, w * 0.4);
                 df.subtract();
                 let ang = atan(pos.x * w - cx, 0.0001 + pos.y * h - cy) / PI * 0.5 + 0.5;
                 df.fill(Pal::hsv2rgb(vec4(ang, 1.0, 1.0, 1.0)));
