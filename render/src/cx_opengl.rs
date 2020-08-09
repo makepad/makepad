@@ -568,7 +568,7 @@ impl Cx {
     pub fn opengl_compile_shader(shader_id:usize, use_const_table:bool, sh: &mut CxShader, opengl_cx: &OpenglCx) -> ShaderCompileResult {
         
         // lets compile.
-        let shader_ast = sh.shader_gen.lex_parse_analyse();
+        let shader_ast = sh.shader_gen.lex_parse_analyse(true);
         
         if let Err(err) = shader_ast{
             return ShaderCompileResult::Fail{id:shader_id, err:err}
