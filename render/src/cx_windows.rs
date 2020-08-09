@@ -249,6 +249,14 @@ impl Cx {
                 }
                 self.process_desktop_post_event(event);
             }
+
+            let mut shader_results = Vec::new();
+            for shader_id in &self.shader_recompiles {
+                shader_results.push(Self::hlsl_compile_shader(*shader_id, true, &mut self.shaders[*shader_id], &d3d11_cx));
+            }
+            self.shader_recompiles.truncate(0);
+            self.call_shader_recompile_event(shader_results, &mut event_handler);
+
             if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
                 true
             } else {
