@@ -747,7 +747,11 @@ impl BackendWriter for MetalBackendWriter {
             }
         }
     }
-    
+
+    fn needs_mul_fn_for_matrix_multiplication(&self)->bool{
+        false
+    }
+
     fn write_var_decl(
         &self,
         string: &mut String,
