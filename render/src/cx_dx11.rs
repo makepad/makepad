@@ -10,6 +10,7 @@ use wio::com::ComPtr;
 use std::mem;
 use std::ptr;
 use std::ffi;
+use makepad_shader_compiler::generate_metal;
 //use std::ffi::c_void;
 //use std::sync::Mutex;
 
@@ -264,6 +265,99 @@ impl Cx {
             &mut zbias,
             zbias_step
         );
+    }
+    
+    
+   pub fn hlsl_compile_all_shaders(&mut self, d3d11_cx: &D3d11Cx) {
+        for (index, sh) in &mut self.shaders.iter_mut().enumerate() {
+            let result = Self::hlsl_compile_shader(index, false, sh, d3d11_cx);
+            if let ShaderCompileResult::Fail{err, ..} = result {
+                panic!("{}", err);
+            } 
+        };
+    }
+
+    
+    pub fn hlsl_compile_shader(shader_id:usize, use_const_table:bool, sh: &mut CxShader, d3d11_cx: &D3d11Cx) -> Result<(), SlErr> {
+        let shader_ast = sh.shader_gen.lex_parse_analyse();
+        
+        if let Err(err) = shader_ast{
+            return ShaderCompileResult::Fail{id:shader_id, err:err}
+        } 
+        let shader_ast = shader_ast.unwrap();
+        
+        let hlsl =  generate_hlsl::generate_shader(&shader_ast, use_const_table);
+        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, shader_ast.const_table.borrow_mut().take());
+    
+        let vs_blob = d3d11_cx.compile_shader("vs", "_vertex_shader".as_bytes(), hlsl.as_bytes()) ?;
+        let ps_blob = d3d11_cx.compile_shader("ps", "_pixel_shader".as_bytes(), hlsl.as_bytes()) ?;
+        
+        let vs = d3d11_cx.create_vertex_shader(&vs_blob) ?;
+        let ps = d3d11_cx.create_pixel_shader(&ps_blob) ?;
+        
+        let mut layout_desc = Vec::new();
+        let geom_named = NamedProps::construct(&sh.shader_gen, &mapping.geometries);
+        let inst_named = NamedProps::construct(&sh.shader_gen, &mapping.instances);
+        let mut strings = Vec::new();
+        fn slots_to_dxgi_format(slots: usize) -> u32 {
+            
+            match slots {
+                1 => dxgiformat::DXGI_FORMAT_R32_FLOAT,
+                2 => dxgiformat::DXGI_FORMAT_R32G32_FLOAT,
+                3 => dxgiformat::DXGI_FORMAT_R32G32B32_FLOAT,
+                4 => dxgiformat::DXGI_FORMAT_R32G32B32A32_FLOAT,
+                _ => panic!("slots_to_dxgi_format unsupported slotcount {}", slots)
+            }
+        }
+        
+        for (index, geom) in geom_named.props.iter().enumerate() {
+            strings.push(ffi::CString::new(format!("GEOM_}", index)).unwrap());//std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
+            layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
+                SemanticName: strings.last().unwrap().as_ptr() as *const _,
+                SemanticIndex: 0,
+                Format: Self::slots_to_dxgi_format(geom.slots),
+                InputSlot: 0,
+                AlignedByteOffset: (geom.offset * 4) as u32,
+                InputSlotClass: d3d11::D3D11_INPUT_PER_VERTEX_DATA,
+                InstanceDataStepRate: 0
+            })
+        }
+        
+        for (index, inst) in inst_named.props.iter().enumerate() {
+            strings.push(ffi::CString::new(format!("INST{}", index)).unwrap());//std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
+            layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
+                SemanticName: strings.last().unwrap().as_ptr() as *const _,
+                SemanticIndex: 0,
+                Format: Self::slots_to_dxgi_format(inst.slots),
+                InputSlot: 1,
+                AlignedByteOffset: (inst.offset * 4) as u32,
+                InputSlotClass: d3d11::D3D11_INPUT_PER_INSTANCE_DATA,
+                InstanceDataStepRate: 1
+            })
+        }
+        
+        let input_layout = d3d11_cx.create_input_layout(&vs_blob, &layout_desc) ?;
+        
+        sh.mapping = mapping;
+        sh.platform = Some(CxPlatformShader {
+            geom_ibuf: {
+                let mut geom_ibuf = D3d11Buffer {..Default::default()};
+                geom_ibuf.update_with_u32_index_data(d3d11_cx, &sh.shader_gen.geometry_indices);
+                geom_ibuf
+            },
+            geom_vbuf: {
+                let mut geom_vbuf = D3d11Buffer {..Default::default()};
+                geom_vbuf.update_with_f32_vertex_data(d3d11_cx, &sh.shader_gen.geometry_vertices);
+                geom_vbuf
+            },
+            vertex_shader: vs,
+            pixel_shader: ps,
+            vertex_shader_blob: vs_blob,
+            pixel_shader_blob: ps_blob,
+            input_layout: input_layout,
+        });
+        
+        Ok(())
     }
 }
 
