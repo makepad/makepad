@@ -1,7 +1,7 @@
 //use syn::Type;
 use makepad_render::*;
 use makepad_widget::*;
-use makepad_tinyserde::*;
+use makepad_microserde::*;
 use crate::appwindow::*;
 use crate::appstorage::*;
 use crate::filetree::*;
@@ -148,16 +148,38 @@ impl MakepadApp {
                         axis: Axis::Horizontal,
                         align: SplitterAlign::Last,
                         pos: 150.0,
-                        first: Box::new(DockItem::TabControl {
-                            current: 0,
-                            previous: 0,
-                            tabs: vec![
-                                DockTab {
-                                    closeable: false,
-                                    title: "Edit".to_string(),
-                                    item: Panel::FileEditorTarget
-                                },
-                            ],
+                        first: Box::new(DockItem::Splitter {
+                            axis: Axis::Vertical,
+                            align: SplitterAlign::Last,
+                            pos: 250.0, 
+                            first: Box::new(DockItem::TabControl {
+                                current: 1,
+                                previous: 0,
+                                tabs: vec![
+                                    DockTab {
+                                        closeable: false,
+                                        title: "Edit".to_string(),
+                                        item: Panel::FileEditorTarget
+                                    },
+                                    DockTab {
+                                        closeable: false,
+                                        title: "shaderview.rs".to_string(),
+                                        item: Panel::FileEditor {path: "main/makepad/makepad/app/src/shaderview.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
+                                    },
+                                    
+                                ],
+                            }),
+                            last: Box::new(DockItem::TabControl {
+                                current: 0,
+                                previous: 0,
+                                tabs: vec![
+                                    DockTab {
+                                        closeable: false,
+                                        title: "ShaderView".to_string(),
+                                        item: Panel::ShaderView
+                                    },
+                                ],
+                            }),
                         }),
                         last: Box::new(DockItem::Splitter {
                             axis: Axis::Vertical,
@@ -167,7 +189,6 @@ impl MakepadApp {
                                 current: 0,
                                 previous: 0,
                                 tabs: vec![
-                                    
                                     DockTab {
                                         closeable: false,
                                         title: "Log".to_string(),
@@ -189,6 +210,7 @@ impl MakepadApp {
                                         title: "Keyboard".to_string(),
                                         item: Panel::Keyboard
                                     },
+                                    
                                 ]
                             })
                         })
@@ -277,6 +299,9 @@ impl MakepadApp {
                     }
                 }
             },
+            Event::ShaderRecompile(re) => {
+                self.build_manager.handle_shader_recompile_event(cx, re, &mut self.storage);
+            },
             Event::FileRead(fr) => {
                 // lets see which file we loaded
                 if let Some(utf8_data) = self.storage.file_tree_file_read.resolve_utf8(fr) {
@@ -285,12 +310,17 @@ impl MakepadApp {
                             for window in &mut self.windows {
                                 let mut paths = Vec::new();
                                 window.file_panel.file_tree.root_node = hub_to_tree(&tree, "", &mut paths);
-                                if let FileNode::Folder {folder, state, name, ..} = &mut window.file_panel.file_tree.root_node {
-                                    *name = "".to_string();
+                                if let FileNode::Folder {folder, state, ..} = &mut window.file_panel.file_tree.root_node {
+                                    //*name = "".to_string();
                                     *state = NodeState::Open;
                                     for node in folder.iter_mut() {
-                                        if let FileNode::Folder {state, ..} = node {
-                                            *state = NodeState::Open
+                                        if let FileNode::Folder {folder, state, ..} = node {
+                                            *state = NodeState::Open;
+                                            for node in folder.iter_mut() {
+                                                if let FileNode::Folder {state, ..} = node {
+                                                    *state = NodeState::Open
+                                                }
+                                            }
                                         }
                                     }
                                 }

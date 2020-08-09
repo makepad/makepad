@@ -56,7 +56,7 @@ impl LogItemDraw {
     
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![
+            Track::color(Quad::color(), Ease::Lin, vec![
                 (1.0, if marked {Theme::color_bg_marked().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().get(cx)}else {Theme::color_bg_odd().get(cx)})
             ])
         ]) 
@@ -66,7 +66,7 @@ impl LogItemDraw {
     pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         let over_color = if marked {Theme::color_bg_marked_over().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected_over().get(cx)}else {Theme::color_bg_odd_over().get(cx)};
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![
+            Track::color(Quad::color(), Ease::Lin, vec![
                 (0., over_color),
             ])
         ])
@@ -91,7 +91,7 @@ impl LogItemDraw {
         
         list_item.animator.init(cx, | cx | Self::get_default_anim(cx, index, false));
         
-        self.item_bg.color = list_item.animator.last_color(cx, Quad::instance_color());
+        self.item_bg.color = list_item.animator.last_color(cx, Quad::color());
         
         let bg_inst = self.item_bg.begin_quad(cx, Self::layout_item().get(cx)); //&self.get_line_layout());
         
@@ -99,24 +99,24 @@ impl LogItemDraw {
             HubLogItem::LocPanic(loc_msg) => {
                 self.code_icon.draw_icon(cx, CodeIconType::Panic);
                 cx.turtle_align_y();
-                self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
+                self.draw_log_path(cx, &loc_msg.path, loc_msg.line);
                 self.draw_log_body(cx, &loc_msg.body);
                 
             },
             HubLogItem::LocError(loc_msg) => {
                 self.code_icon.draw_icon(cx, CodeIconType::Error);
                 cx.turtle_align_y();
-                self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
+                self.draw_log_path(cx, &loc_msg.path, loc_msg.line);
                 self.draw_log_body(cx, &loc_msg.body);
             },
             HubLogItem::LocWarning(loc_msg) => {
                 self.code_icon.draw_icon(cx, CodeIconType::Warning);
                 cx.turtle_align_y();
-                self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
+                self.draw_log_path(cx, &loc_msg.path, loc_msg.line);
                 self.draw_log_body(cx, &loc_msg.body);
             },
             HubLogItem::LocMessage(loc_msg) => {
-                self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
+                self.draw_log_path(cx, &loc_msg.path, loc_msg.line);
                 self.draw_log_body(cx, &loc_msg.body);
             },
             HubLogItem::Error(msg) => {
@@ -325,7 +325,7 @@ impl LogList {
                         }
                     }
                     else {
-                        text_buffer.text_pos_to_offset(TextPos {row: loc_message.row.max(1) - 1, col: loc_message.col.max(1) - 1})
+                        text_buffer.text_pos_to_offset(TextPos {row: loc_message.line.max(1) - 1, col: loc_message.col.max(1) - 1})
                     };
                     
                     LogListEvent::SelectLocMessage {

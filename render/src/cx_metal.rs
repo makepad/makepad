@@ -5,6 +5,7 @@
 //use core_graphics::color::CGColor;
 use makepad_objc_sys::{msg_send};
 use makepad_objc_sys::runtime::YES;
+use makepad_shader_compiler::generate_metal;
 //use metal::*;
 use crate::cx_apple::*;
 use crate::cx_cocoa::*;
@@ -70,7 +71,7 @@ impl Cx {
                 }
                 
                 // lets verify our instance_offset is not disaligned
-                let instances = (draw_call.instance.len() / sh.mapping.instance_slots) as u64;
+                let instances = (draw_call.instance.len() / sh.mapping.instance_props.total_slots) as u64;
                 if instances == 0 {
                     continue;
                 }
@@ -110,6 +111,10 @@ impl Cx {
                     let () = msg_send![encoder, setFragmentBytes: view_uniforms.as_ptr() as *const std::ffi::c_void length: (view_uniforms.len() * 4) as u64 atIndex: 1u64];
                     let () = msg_send![encoder, setFragmentBytes: draw_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_uniforms.len() * 4) as u64 atIndex: 2u64];
                     let () = msg_send![encoder, setFragmentBytes: draw_call.uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.uniforms.len() * 4) as u64 atIndex: 3u64];
+                    if let Some(ct) = &sh.mapping.const_table{
+                        let () = msg_send![encoder, setVertexBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 6u64];
+                        let () = msg_send![encoder, setFragmentBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 4u64];
+                    }
                 }
                 //encoder.set_vertex_bytes(2, (pass_uniforms.len() * 4) as u64, pass_uniforms.as_ptr() as *const std::ffi::c_void);
                 //encoder.set_vertex_bytes(3, (view_uniforms.len() * 4) as u64, view_uniforms.as_ptr() as *const std::ffi::c_void);
@@ -319,6 +324,7 @@ impl Cx {
             let () = unsafe {msg_send![encoder, endEncoding]};
             let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
             let () = unsafe {msg_send![command_buffer, commit]};
+            //let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
             //command_buffer.wait_until_scheduled();
         }
         let () = unsafe {msg_send![pool, release]};
@@ -372,6 +378,7 @@ pub struct MetalCx {
 impl MetalCx {
     
     pub fn new() -> MetalCx {
+        /*
         let devices = get_all_metal_devices();
         for device in devices {
             let is_low_power: BOOL = unsafe {msg_send![device, isLowPower]};
@@ -382,7 +389,7 @@ impl MetalCx {
                     device: device
                 }
             }
-        }
+        }*/
         let device = get_default_metal_device().expect("Cannot get default metal device");
         MetalCx {
             command_queue: unsafe {msg_send![device, newCommandQueue]},
@@ -713,5 +720,144 @@ impl MetalBuffer {
             }
         }
         elem.used = data.len()
+    }
+}
+
+
+
+#[derive(Clone)]
+pub struct CxPlatformShader {
+    pub library: id,
+    pub metal_shader: String,
+    pub pipeline_state: id,
+    pub geom_vbuf: MetalBuffer,
+    pub geom_ibuf: MetalBuffer,
+}
+
+impl PartialEq for CxPlatformShader {
+    fn eq(&self, _other: &Self) -> bool {false}
+}
+
+pub enum PackType {
+    Packed,
+    Unpacked
+}
+
+pub struct SlErr {
+    msg: String
+}
+
+impl Cx {
+    
+    pub fn mtl_compile_all_shaders(&mut self, metal_cx: &MetalCx) {
+        for (index, sh) in &mut self.shaders.iter_mut().enumerate() {
+            let result = Self::mtl_compile_shader(index, false, sh, metal_cx);
+            if let ShaderCompileResult::Fail{err, ..} = result {
+                eprintln!("{}", err);
+                panic!("{}", err);
+            } 
+        };
+    } 
+    
+    pub fn mtl_compile_shader(shader_id:usize, use_const_table:bool, sh: &mut CxShader, metal_cx: &MetalCx) -> ShaderCompileResult {
+        
+        //let now = std::time::Instant::now();
+        
+        let shader_ast = sh.shader_gen.lex_parse_analyse(true);
+
+        if let Err(err) = shader_ast{
+            return ShaderCompileResult::Fail{id:shader_id, err:err}
+        } 
+        let shader_ast = shader_ast.unwrap();
+        
+        let mtlsl =  generate_metal::generate_shader(&shader_ast, use_const_table);
+        
+        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, if use_const_table{shader_ast.const_table.borrow_mut().take()} else {None});
+    
+        
+        if shader_ast.debug{
+            println!("--------------- Shader {} --------------- \n{}\n---------------\n", shader_id, mtlsl);
+        }
+        
+        if let Some(sh_platform) = &sh.platform{
+            if sh_platform.metal_shader == mtlsl{
+                sh.mapping = mapping;
+                return ShaderCompileResult::Nop{id:shader_id}
+            }
+        } 
+        
+        let options: id = unsafe {msg_send![class!(MTLCompileOptions), new]};
+        
+        let _:id = unsafe{msg_send![
+            options, 
+            setFastMathEnabled: true
+        ]};
+        
+        let ns_mtlsl: id = str_to_nsstring(&mtlsl);
+        let mut err: id = nil;
+        let library: id = unsafe {msg_send![
+            metal_cx.device,
+            newLibraryWithSource: ns_mtlsl
+            options: options
+            error: &mut err 
+        ]};
+        
+        if library == nil {
+            let err_str: id = unsafe {msg_send![err, localizedDescription]};
+            panic!("{}", nsstring_to_string(err_str));
+            //return Err(SlErr {msg: nsstring_to_string(err_str)})
+        }
+        
+        //let err_str: id = unsafe {msg_send![err, localizedDescription]};
+        //println!("{}", nsstring_to_string(err_str));
+        
+        sh.mapping = mapping;
+        sh.platform = Some(CxPlatformShader {
+            metal_shader: mtlsl, 
+            pipeline_state: unsafe {
+                let vert: id = msg_send![library, newFunctionWithName: str_to_nsstring("mpsc_vertex_main")];
+                let frag: id = msg_send![library, newFunctionWithName: str_to_nsstring("mpsc_fragment_main")];
+                let rpd: id = msg_send![class!(MTLRenderPipelineDescriptor), new];
+                
+                let () = msg_send![rpd, setVertexFunction: vert];
+                let () = msg_send![rpd, setFragmentFunction: frag];
+                
+                let color_attachments: id = msg_send![rpd, colorAttachments];
+                
+                let ca: id = msg_send![color_attachments, objectAtIndexedSubscript: 0u64];
+                let () = msg_send![ca, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+                let () = msg_send![ca, setBlendingEnabled: YES];
+                let () = msg_send![ca, setSourceRGBBlendFactor: MTLBlendFactor::One];
+                let () = msg_send![ca, setDestinationRGBBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
+                let () = msg_send![ca, setSourceAlphaBlendFactor: MTLBlendFactor::One];
+                let () = msg_send![ca, setDestinationAlphaBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
+                let () = msg_send![ca, setRgbBlendOperation: MTLBlendOperation::Add];
+                let () = msg_send![ca, setAlphaBlendOperation: MTLBlendOperation::Add];
+                let () = msg_send![rpd, setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float_Stencil8];
+                
+                let mut err: id = nil;
+                let rps: id = msg_send![
+                    metal_cx.device,
+                    newRenderPipelineStateWithDescriptor: rpd
+                    error: &mut err
+                ];
+                if rps == nil {
+                    panic!("Could not create render pipeline state")
+                }
+                rps //.expect("Could not create render pipeline state")
+            },
+            library: library,
+            geom_ibuf: {
+                let mut geom_ibuf = MetalBuffer {..Default::default()};
+                geom_ibuf.update_with_u32_data(metal_cx, &sh.shader_gen.geometry_indices);
+                geom_ibuf
+            },
+            geom_vbuf: {
+                let mut geom_vbuf = MetalBuffer {..Default::default()};
+                geom_vbuf.update_with_f32_data(metal_cx, &sh.shader_gen.geometry_vertices);
+                geom_vbuf
+            }
+        });
+        return ShaderCompileResult::Ok{id:shader_id};
     }
 }

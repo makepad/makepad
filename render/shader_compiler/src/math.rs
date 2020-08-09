@@ -1,4 +1,6 @@
-use makepad_tinyserde::*;
+use crate::util::PrettyPrintedFloat;
+use makepad_microserde::*;
+use std::fmt;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, SerRon, DeRon)]
 pub struct Rect{
@@ -21,6 +23,113 @@ impl Rect{
             r.y > self.y + self.h ||
             r.y + r.h < self.y
         )
+    }
+    
+    pub fn contains_with_margin(&self, x: f32, y: f32, margin: &Option<Margin>) -> bool {
+        if let Some(margin) = margin {
+            return x >= self.x - margin.l && x <= self.x + self.w + margin.r &&
+            y >= self.y - margin.t && y <= self.y + self.h + margin.b;
+        }
+        else {
+            return self.contains(x, y);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Align {
+    pub fx: f32,
+    pub fy: f32
+}
+
+impl Align {
+    pub fn left_top() -> Align {Align {fx: 0., fy: 0.}}
+    pub fn center_top() -> Align {Align {fx: 0.5, fy: 0.0}}
+    pub fn right_top() -> Align {Align {fx: 1.0, fy: 0.0}}
+    pub fn left_center() -> Align {Align {fx: 0.0, fy: 0.5}}
+    pub fn center() -> Align {Align {fx: 0.5, fy: 0.5}}
+    pub fn right_center() -> Align {Align {fx: 1.0, fy: 0.5}}
+    pub fn left_bottom() -> Align {Align {fx: 0., fy: 1.0}}
+    pub fn center_bottom() -> Align {Align {fx: 0.5, fy: 1.0}}
+    pub fn right_bottom() -> Align {Align {fx: 1.0, fy: 1.0}}
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Margin {
+    pub l: f32,
+    pub t: f32,
+    pub r: f32,
+    pub b: f32
+}
+
+impl Margin {
+    pub fn zero() -> Margin {
+        Margin {l: 0.0, t: 0.0, r: 0.0, b: 0.0}
+    }
+    
+    pub fn all(v: f32) -> Margin {
+        Margin {l: v, t: v, r: v, b: v}
+    }
+    
+    pub fn left(v:f32)->Margin{
+        Margin {l: v, t: 0.0, r: 0.0, b: 0.0}
+    }
+
+    pub fn top(v:f32)->Margin{
+        Margin {l: 0.0, t: v, r: 0.0, b: 0.0}
+    }
+
+    pub fn right(v:f32)->Margin{
+        Margin {l: 0.0, t: 0.0, r: v, b: 0.0}
+    }
+
+    pub fn bottom(v:f32)->Margin{
+        Margin {l: 0.0, t: 0.0, r: 0.0, b: v}
+    }
+    
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Padding {
+    pub l: f32,
+    pub t: f32,
+    pub r: f32,
+    pub b: f32
+}
+
+impl Padding {
+    pub fn zero() -> Padding {
+        Padding {l: 0.0, t: 0.0, r: 0.0, b: 0.0}
+    }
+    pub fn all(v: f32) -> Padding {
+        Padding {l: v, t: v, r: v, b: v}
+    }
+}
+
+
+#[derive(Copy, Clone, Debug)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down
+}
+
+impl Default for Direction {
+    fn default() -> Self {
+        Direction::Right
+    }
+}
+
+#[derive(Copy, Clone, SerRon, DeRon)]
+pub enum Axis {
+    Horizontal,
+    Vertical
+}
+
+impl Default for Axis {
+    fn default() -> Self {
+        Axis::Horizontal
     }
 }
 
@@ -60,7 +169,7 @@ pub fn vec3(x:f32, y:f32, z:f32)->Vec3{
     Vec3{x:x, y:y, z:z}
 }*/
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Vec4{
     pub x: f32,
     pub y: f32,
@@ -68,22 +177,16 @@ pub struct Vec4{
     pub w: f32
 }
 
-
-#[derive(Clone, Copy, Default, Debug)]
-pub struct Color{
-    pub r: f32,
-    pub g: f32,
-    pub b: f32,
-    pub a: f32
-}
-
-pub fn mix(a:Color, b:Color, f:f32)->Color{
-    let nf = 1.0 - f;
-    return Color{
-        r: nf * a.r + f * b.r,
-        g: nf * a.g + f * b.g,
-        b: nf * a.b + f * b.b,
-        a: nf * a.a + f * b.a,
+impl fmt::Display for Vec4 {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "vec4({}, {}, {}, {})",
+            PrettyPrintedFloat(self.x),
+            PrettyPrintedFloat(self.y),
+            PrettyPrintedFloat(self.z),
+            PrettyPrintedFloat(self.w),
+        )
     }
 }
 

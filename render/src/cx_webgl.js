@@ -78,12 +78,13 @@
         }
         
         init(info) {
-            let pos = this.fit(5);
+            let pos = this.fit(6);
             this.mu32[pos ++] = 3;
             this.mf32[pos ++] = info.width;
             this.mf32[pos ++] = info.height;
             this.mf32[pos ++] = info.dpi_factor;
             this.mu32[pos ++] = info.vr_can_present? 1: 0;
+            this.mu32[pos ++] = info.gpu_spec_is_low_on_uniforms? 1: 0;
         }
         
         resize(info) {
@@ -318,7 +319,8 @@
                     height: this.height,
                     dpi_factor: this.dpi_factor,
                     vr_can_present: this.vr_can_present,
-                    vr_is_presenting: false
+                    vr_is_presenting: false,
+                    gpu_spec_is_low_on_uniforms: this.gpu_spec_is_low_on_uniforms
                 })
                 this.do_wasm_block = false;
                 this.do_wasm_io();
@@ -683,6 +685,18 @@
             gl.OES_vertex_array_object = gl.getExtension('OES_vertex_array_object')
             gl.OES_element_index_uint = gl.getExtension("OES_element_index_uint")
             gl.ANGLE_instanced_arrays = gl.getExtension('ANGLE_instanced_arrays')
+            
+            // check uniform count
+            var max_vertex_uniforms = gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS);
+            var max_fragment_uniforms = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS);
+            if (max_vertex_uniforms < 512 || max_fragment_uniforms < 512){
+                this.gpu_spec_is_low_on_uniforms = true
+            }
+            else{
+                this.gpu_spec_is_low_on_uniforms = false
+            }
+                
+
             //gl.EXT_blend_minmax = gl.getExtension('EXT_blend_minmax')
             //gl.OES_texture_half_float_linear = gl.getExtension('OES_texture_half_float_linear')
             //gl.OES_texture_float_linear = gl.getExtension('OES_texture_float_linear')
@@ -770,17 +784,17 @@
                     add_line_numbers_to_string(ash.fragment)
                 )
             }
-            
             // fetch all attribs and uniforms
             this.shaders[ash.shader_id] = {
-                geom_attribs: this.get_attrib_locations(program, "geomattr", ash.geometry_slots),
-                inst_attribs: this.get_attrib_locations(program, "instattr", ash.instance_slots),
+                geom_attribs: this.get_attrib_locations(program, "mpsc_packed_geometry_", ash.geometry_slots),
+                inst_attribs: this.get_attrib_locations(program, "mpsc_packed_instance_", ash.instance_slots),
                 pass_uniforms: this.get_uniform_locations(program, ash.pass_uniforms),
                 view_uniforms: this.get_uniform_locations(program, ash.view_uniforms),
                 draw_uniforms: this.get_uniform_locations(program, ash.draw_uniforms),
                 uniforms: this.get_uniform_locations(program, ash.uniforms),
                 texture_slots: this.get_uniform_locations(program, ash.texture_slots),
                 instance_slots: ash.instance_slots,
+                const_table_uniform: gl.getUniformLocation(program, "mpsc_const_table"),
                 program: program,
                 ash: ash
             };
@@ -1336,7 +1350,9 @@
             view_uniforms_ptr,
             draw_uniforms_ptr,
             uniforms_ptr,
-            textures_ptr
+            textures_ptr,
+            const_table_ptr,
+            const_table_len
         ) {
             var gl = this.gl;
             
@@ -1388,7 +1404,10 @@
                 let uni = uniforms[i];
                 uni.fn(this, uni.loc, uni.offset + uniforms_ptr);
             }
-            
+            if(const_table_ptr !== 0){
+                gl.uniform1fv(shader.const_table_uniform, 
+                    new Float32Array(this.memory.buffer, const_table_ptr, const_table_len));
+            }         
             let texture_slots = shader.texture_slots;
             for (let i = 0; i < texture_slots.length; i ++) {
                 let tex_slot = texture_slots[i];
@@ -1669,6 +1688,8 @@
             let uniforms_dr_ptr = self.mu32[self.parse ++];
             let uniforms_ptr = self.mu32[self.parse ++];
             let textures = self.mu32[self.parse ++];
+            let const_table_ptr = self.mu32[self.parse ++];
+            let const_table_len = self.mu32[self.parse ++];
             self.draw_call(
                 shader_id,
                 vao_id,
@@ -1676,7 +1697,9 @@
                 uniforms_dl_ptr,
                 uniforms_dr_ptr,
                 uniforms_ptr,
-                textures
+                textures,
+                const_table_ptr,
+                const_table_len
             );
         },
         function clear_7(self) {

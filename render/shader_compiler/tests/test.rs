@@ -1,73 +1,135 @@
 use makepad_shader_compiler::analyse;
-use makepad_shader_compiler::ast::Shader;
-use makepad_shader_compiler::generate::{self, ShaderKind};
+use makepad_shader_compiler::ast::ShaderAst;
+use makepad_shader_compiler::generate_glsl;
+use makepad_shader_compiler::generate_metal;
+use makepad_shader_compiler::generate_hlsl;
 use makepad_shader_compiler::lex;
 use makepad_shader_compiler::parse;
+use makepad_shader_compiler::shadergen::*;
+use makepad_shader_compiler::uid;
 
 const SOURCE: &str = r#"
-    struct Foo {
-        x: float,
-        y: float
+    struct Cx {
+        pos: vec2
     }
 
-    struct Bar {
-        foo: Foo
+    impl Cx {
+        fn foo() -> Cx {
+            let cx: Cx;
+            uUniform1;
+            return cx;
+        }
+
+        fn bar(inout self) {
+            aPosition;
+            vColor;
+            -self.pos;
+        }
+
+        fn qux(self, x: float) -> float {
+            aPosition;
+            vColor;
+            tTextureFoo;
+            return 2.0 * x;
+        }
+
+        fn translate(inout self, x: float, y: float) -> vec2 {
+            self.pos -= vec2(x, y);
+            return self.pos;
+        }
     }
 
-    const FOO: int = 10;
-    const BAR: int = FOO * 2;
-    
-    attribute aPosition: vec2;
-    attribute aBla: float;
-    attribute aColor: vec3;
+    const FOO: float = 1.0;
 
-    instance iDisplacement: vec4;
-    
+    uniform uUniform1: Self::my_uniform();
+    uniform uUniform2: Self::my_uniform() in draw;
+
+    texture tTextureFoo: Self::my_texture();
+    texture tTextureBar: Self::my_texture();
+
+    geometry aPosition: Self::my_geometry();
+    geometry aColor: Self::my_geometry();
+
+    instance iRotation: Self::my_instance();
+
     varying vColor: vec3;
 
-    uniform uModelViewMatrix: A::B::C() in draw;
-
     fn vertex() -> vec4 {
-        foo();
-        max(vec2(1.0), vec2(2.0));
+        pick!(red);
+        let cx = Cx::foo();
+        for i from 0 to 10 step 2 {
+            vec4(1.0, vec2(2.0, 3.0), 4.0);
+        }
+        return vec4(1.0);
     }
 
-    fn fragment() -> vec4 {
-        bar();
-        aBla;
-    }
-
-    fn foo() {
-        qux();
-        vColor = vec3(1.0);
-        vec4(vec2(1.0), 1.0, 2.0);
-    }
-
-    fn bar() {
-        qux();
-        aPosition;
-        mat4(mat3(1.0));
-    }
-
-    fn qux() {
-        aColor;
-        let x: float;
-        x = 42.0;
-        uModelViewMatrix * vec4(1.0);
+    fn pixel() -> vec4 {
+        let cx = Cx::foo();
+        cx.qux(10.0 + 20.0);
+        return vec4(1.0);
     }
 "#;
 
 #[test]
 fn test() {
-    let mut shader = Shader::new();
+    fn my_uniform() -> Mat4Id {
+        uid!()
+    }
+    fn my_texture() -> Texture2dId {
+        uid!()
+    }
+    fn my_geometry() -> Vec3Id {
+        uid!()
+    }
+    fn my_instance() -> Vec3Id {
+        uid!()
+    }
+
+    let mut shader = ShaderAst::new();
     parse::parse(
-        &lex::lex(SOURCE.chars())
+        &lex::lex(SOURCE.chars(), 0)
             .collect::<Result<Vec<_>, _>>()
             .unwrap(),
         &mut shader,
     )
     .unwrap();
-    analyse::analyse(&mut shader).unwrap();
-    println!("{}", generate::generate(ShaderKind::Vertex, &shader));
-    println!("{}", generate::generate(ShaderKind::Fragment, &shader));
+    analyse::analyse(
+        &mut shader,
+        &[
+            &PropDef {
+                name: String::from("my_uniform"),
+                ident: String::from("Self::my_uniform"),
+                prop_id: my_uniform().into(),
+                block: None,
+            },
+            &PropDef {
+                name: String::from("my_texture"),
+                ident: String::from("Self::my_texture"),
+                prop_id: my_texture().into(),
+                block: None,
+            },
+            &PropDef {
+                name: String::from("my_geometry"),
+                ident: String::from("Self::my_geometry"),
+                prop_id: my_geometry().into(),
+                block: None,
+            },
+            &PropDef {
+                name: String::from("my_instance"),
+                ident: String::from("Self::my_instance"),
+                prop_id: my_instance().into(),
+                block: None,
+            },
+        ],
+        false,
+    )
+    .unwrap();
+    //println!("GLSL VERTEX");
+    //println!("{}", generate_glsl::generate_vertex_shader(&shader, true));
+    //println!("GLSL FRAGMENT");
+    //println!("{}", generate_glsl::generate_fragment_shader(&shader, true));
+    //println!("METAL");
+    //println!("{}", generate_metal::generate_shader(&shader, false));
+    println!("HLSL");
+    println!("{}", generate_hlsl::generate_shader(&shader, false));
 }

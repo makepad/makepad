@@ -19,38 +19,39 @@ impl Quad {
         Self {
             shader: cx.add_shader(Self::def_quad_shader(), "Quad"),
             z: 0.0,
-            color: color("green")
-        }
+            color: pick!(green).get(cx)
+        } 
     }
     
-    pub fn instance_x() -> InstanceFloat {uid!()}
-    pub fn instance_y() -> InstanceFloat {uid!()}
-    pub fn instance_w() -> InstanceFloat {uid!()}
-    pub fn instance_h() -> InstanceFloat {uid!()}
-    pub fn instance_z() -> InstanceFloat {uid!()}
-    pub fn instance_color() -> InstanceColor {uid!()}
+    pub fn geom()->Vec2Id{uid!()}
+    pub fn x() -> FloatId {uid!()}
+    pub fn y() -> FloatId {uid!()}
+    pub fn w() -> FloatId {uid!()}
+    pub fn h() -> FloatId {uid!()}
+    pub fn z() -> FloatId {uid!()}
+    pub fn color() -> ColorId {uid!()}
     
     pub fn def_quad_shader() -> ShaderGen {
         // lets add the draw shader lib
-        let mut sg = ShaderGen::new(); 
+        let mut sg = Cx::shader_defs(ShaderGen::new()); 
         sg.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
         sg.geometry_indices = vec![0, 1, 2, 2, 3, 0];
         
-        sg.compose(shader_ast!({
+        sg.compose(shader!{"
             
-            let geom: vec2<Geometry>;
-            let pos: vec2<Varying>;
+            geometry geom: Self::geom();
+            varying pos: vec2;
             
-            let x: Self::instance_x();
-            let y: Self::instance_y();
-            let w: Self::instance_w();
-            let h: Self::instance_h();
-            let z: Self::instance_z();
-            let color: Self::instance_color();
+            instance x: Self::x();
+            instance y: Self::y();
+            instance w: Self::w();
+            instance h: Self::h();
+            instance z: Self::z();
+            instance color: Self::color();
             
             //let dpi_dilate: float<Uniform>;
-            fn scroll() -> vec2{
-                return draw_scroll.xy
+            fn scroll() -> vec2{ 
+                return draw_scroll.xy;
             }
             
             fn vertex() -> vec4 {
@@ -70,7 +71,7 @@ impl Quad {
                 return vec4(color.rgb * color.a, color.a);
             }
             
-        }))
+        "})
     }
     
     pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) -> InstanceArea {

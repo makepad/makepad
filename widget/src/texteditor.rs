@@ -337,15 +337,15 @@ impl TextEditor {
     pub fn shader_search_marker() -> ShaderId {uid!()}
     pub fn shader_message_marker() -> ShaderId {uid!()}
     
-    pub fn instance_indent_id() -> InstanceFloat {uid!()}
-    pub fn uniform_indent_sel() -> UniformFloat {uid!()}
-    pub fn uniform_cursor_blink() -> UniformFloat {uid!()}
-    pub fn instance_select_prev_x() -> InstanceFloat {uid!()}
-    pub fn instance_select_prev_w() -> InstanceFloat {uid!()}
-    pub fn instance_select_next_x() -> InstanceFloat {uid!()}
-    pub fn instance_select_next_w() -> InstanceFloat {uid!()}
-    pub fn uniform_highlight_visible() -> UniformFloat {uid!()}
-    pub fn instance_shadow_dir() -> InstanceFloat {uid!()}
+    pub fn indent_id() -> FloatId {uid!()}
+    pub fn indent_sel() -> FloatId {uid!()}
+    pub fn cursor_blink() -> FloatId {uid!()}
+    pub fn select_prev_x() -> FloatId {uid!()}
+    pub fn select_prev_w() -> FloatId {uid!()}
+    pub fn select_next_x() -> FloatId {uid!()}
+    pub fn select_next_w() -> FloatId {uid!()}
+    pub fn highlight_visible() -> FloatId {uid!()}
+    pub fn shadow_dir() -> FloatId {uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         Self::layout_bg().set(cx, Layout::default());
@@ -354,10 +354,10 @@ impl TextEditor {
         Self::padding_top().set(cx, 27.);
         Self::text_style_editor_text().set(cx, Theme::text_style_fixed().get(cx));
         
-        Self::shader_indent_lines().set(cx, Quad::def_quad_shader().compose(shader_ast !({
-            let indent_id: Self::instance_indent_id();
+        Self::shader_indent_lines().set(cx, Quad::def_quad_shader().compose(shader!{"
+            instance indent_id: Self::indent_id();
             // uniforms
-            let indent_sel: Self::uniform_indent_sel();
+            uniform indent_sel: Self::indent_sel();
             fn pixel() -> vec4 {
                 let col = color;
                 let thickness = 0.8 + dpi_dilate * 0.5;
@@ -368,30 +368,30 @@ impl TextEditor {
                 else {
                     col *= vec4(0.75, 0.75, 0.75, 0.75);
                 }
-                df_viewport(pos * vec2(w, h));
-                df_move_to(1., -1.);
-                df_line_to(1., h + 1.);
-                return df_stroke(col, thickness);
+                let cx = Df::viewport(pos * vec2(w, h));
+                cx.move_to(1., -1.);
+                cx.line_to(1., h + 1.);
+                return cx.stroke(col, thickness);
             }
-        })));
+        "}));
         
-        Self::shader_cursor().set(cx, Quad::def_quad_shader().compose(shader_ast !({
-            let blink: Self::uniform_cursor_blink();
+        Self::shader_cursor().set(cx, Quad::def_quad_shader().compose(shader !{"
+            uniform blink: Self::cursor_blink();
             fn pixel() -> vec4 {
                 if blink<0.5 {
-                    return vec4(color.rgb * color.a, color.a)
+                    return vec4(color.rgb * color.a, color.a);
                 }
                 else {
                     return vec4(0., 0., 0., 0.);
                 }
             }
-        })));
+        "}));
         
-        Self::shader_selection().set(cx, Quad::def_quad_shader().compose(shader_ast !({
-            let prev_x: Self::instance_select_prev_x();
-            let prev_w: Self::instance_select_prev_w();
-            let next_x: Self::instance_select_next_x();
-            let next_w: Self::instance_select_next_w();
+        Self::shader_selection().set(cx, Quad::def_quad_shader().compose(shader!{"
+            instance prev_x: Self::select_prev_x();
+            instance prev_w: Self::select_prev_w();
+            instance next_x: Self::select_next_x();
+            instance next_w: Self::select_next_w();
             const gloopiness: float = 8.;
             const border_radius: float = 2.;
             
@@ -407,40 +407,40 @@ impl TextEditor {
             }
             
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_box(0., 0., w, h, border_radius);
+                let cx = Df::viewport(pos * vec2(w, h));
+                cx.box(0., 0., w, h, border_radius);
                 if prev_w > 0. {
-                    df_box(prev_x, -h, prev_w, h, border_radius);
-                    df_gloop(gloopiness);
+                    cx.box(prev_x, -h, prev_w, h, border_radius);
+                    cx.gloop(gloopiness);
                 }
                 if next_w > 0. {
-                    df_box(next_x, h, next_w, h, border_radius);
-                    df_gloop(gloopiness);
+                    cx.box(next_x, h, next_w, h, border_radius);
+                    cx.gloop(gloopiness);
                 }
                 //df_shape *= cos(pos.x*8.)+cos(pos.y*16.);
-                return df_fill(color);
+                return cx.fill(color);
             }
-        })));
+        "}));
         
-        Self::shader_paren_pair().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_paren_pair().set(cx, Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
+                let cx = Df::viewport(pos * vec2(w, h));
                 //df_rect(0.,0.,w,h);
                 //df_rect(0.5,0.5,w-1.,h-1.);
                 //return df_stroke(color, 0.75 + dpi_dilate*0.75);
                 //df_rect(0.,h-1.-dpi_dilate,w,1.+dpi_dilate);
-                df_rect(0., h - 1.5 - dpi_dilate, w, 1.5 + dpi_dilate);
-                return df_fill(color);
+                cx.rect(0., h - 1.5 - dpi_dilate, w, 1.5 + dpi_dilate);
+                return cx.fill(color);
                 //df_rect(0.01,0.,w,h);
                 //return df_fill(color);
             }
-        })));
+        "}));
         
-        Self::shader_cursor_row().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_cursor_row().set(cx, Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_rect(0., 0., w, h);
-                return df_fill(color);
+                let cx = Df::viewport(pos * vec2(w, h));
+                cx.rect(0., 0., w, h);
+                return cx.fill(color);
                 /*
                 df_move_to(0.,0.5);
                 df_line_to(w,0.5);
@@ -448,7 +448,7 @@ impl TextEditor {
                 df_line_to(w,h-0.5);
                 returndf_stroke(color,0.75+dpi_dilate*0.75);*/
             }
-        })));
+        "}));
         /*
         Self::shader_select_highlight().set(cx,   Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
@@ -470,37 +470,37 @@ impl TextEditor {
             }
         })));*/
         
-        Self::shader_search_marker().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_search_marker().set(cx, Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
                 let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
-                df_viewport(pos2 * vec2(w, h));
+                let cx = Df::viewport(pos2 * vec2(w, h));
                 //df_rect(0.,0.,w,h);
-                df_move_to(0., h - 1.);
-                df_line_to(w, h - 1.);
-                return df_stroke(color("white"), 0.8);
+                cx.move_to(0., h - 1.);
+                cx.line_to(w, h - 1.);
+                return cx.stroke(pick!(white), 0.8);
                 /*
                 df_viewport(pos * vec2(w, h));
                 df_box(0.5, 0.5, w - 1., h - 1., 1.);
                 return df_fill(color);*/
             }
-        })));
+        "}));
         
-        Self::shader_message_marker().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_message_marker().set(cx, Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
                 let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
-                df_viewport(pos2 * vec2(w, h));
+                let cx = Df::viewport(pos2 * vec2(w, h));
                 //df_rect(0.,0.,w,h);
-                df_move_to(0., h - 1.);
-                df_line_to(w, h - 1.);
-                return df_stroke(color, 0.8);
+                cx.move_to(0., h - 1.);
+                cx.line_to(w, h - 1.);
+                return cx.stroke(color, 0.8);
             }
-        })));
+        "}));
         
-        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
                 return vec4(color.rgb * color.a, color.a);
             }
-        })));
+        "}));
     }
     
     pub fn apply_style(&mut self, cx: &mut Cx) {
@@ -575,7 +575,7 @@ impl TextEditor {
         cx.stop_timer(&mut self._cursor_blink_timer);
         self._cursor_blink_timer = cx.start_timer(self.cursor_blink_speed * 0.5, false);
         self._cursor_blink_flipflop = 0.;
-        self._cursor_area.write_uniform_float(cx, Self::uniform_cursor_blink(), self._cursor_blink_flipflop);
+        self._cursor_area.write_uniform_float(cx, Self::cursor_blink(), self._cursor_blink_flipflop);
     }
     
     fn handle_finger_down(&mut self, cx: &mut Cx, fe: &FingerDownEvent, text_buffer: &mut TextBuffer) {
@@ -862,7 +862,7 @@ impl TextEditor {
             },
             KeyCode::KeyX => { // cut, the actual copy comes from the TextCopy event from the platform layer
                 if !self.read_only && (ke.modifiers.logo || ke.modifiers.control) { // cut
-                    self.cursors.replace_text("", text_buffer);
+                    self.cursors.replace_text("", text_buffer, None);
                     true
                 }
                 else {
@@ -951,7 +951,7 @@ impl TextEditor {
                     self.cursors.overwrite_if_exists_or_deindent("}", 4, text_buffer);
                 },
                 _ => {
-                    self.cursors.replace_text(&te.input, text_buffer);
+                    self.cursors.replace_text(&te.input, text_buffer, None);
                 }
             }
             // lets insert a newline
@@ -959,10 +959,10 @@ impl TextEditor {
         else {
             if !self.multiline {
                 let replaced = te.input.replace("\n", "");
-                self.cursors.replace_text(&replaced, text_buffer);
+                self.cursors.replace_text(&replaced, text_buffer, None);
             }
             else {
-                self.cursors.replace_text(&te.input, text_buffer);
+                self.cursors.replace_text(&te.input, text_buffer, None);
             }
         }
         //self.update_highlight(cx, text_buffer);
@@ -974,8 +974,17 @@ impl TextEditor {
         
     }
     
+    pub fn handle_live_replace(&mut self, cx: &mut Cx, range:(usize, usize), what:&str, text_buffer: &mut TextBuffer, group:u64){
+        // let set the cursor selection
+        self.cursors.clear_and_set_last_cursor_head_and_tail(range.1, range.0, text_buffer);
+        self.cursors.replace_text(what, text_buffer, Some(TextUndoGrouping::LiveEdit(group)));
+        self.scroll_last_cursor_visible(cx, text_buffer, 0.);
+        self.view.redraw_view_area(cx);
+        self.reset_cursor_blinker(cx);
+    }
+    
     pub fn handle_text_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
-        if self.view.handle_scroll_bars(cx, event) {
+        if self.view.handle_scroll_view(cx, event) {
             if let Some(last_finger_move) = self._last_finger_move {
                 if let Some(grid_select_corner) = self._grid_select_corner {
                     let pos = self.compute_grid_text_pos_from_abs(cx, last_finger_move);
@@ -1002,9 +1011,9 @@ impl TextEditor {
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
                 self._undo_id += 1;
                 self._highlight_visibility = 1.0;
-                self._cursor_area.write_uniform_float(cx, Self::uniform_cursor_blink(), self._cursor_blink_flipflop);
+                self._cursor_area.write_uniform_float(cx, Self::cursor_blink(), self._cursor_blink_flipflop);
                 if self.highlight_area_on {
-                    self._highlight_area.write_uniform_float(cx, Self::uniform_highlight_visible(), self._highlight_visibility);
+                    self._highlight_area.write_uniform_float(cx, Self::highlight_visible(), self._highlight_visibility);
                 }
                 
                 // ok see if we changed.
@@ -1222,7 +1231,7 @@ impl TextEditor {
             //    align: Align::left_top(),
             //    ..self.bg_layout.clone()
             //});
-            self.text.color = color("#666");
+            self.text.color = pick!(#666).get(cx);
             self.text.draw_text(cx, "...");
             //self.bg.end_quad(cx, &bg_inst);
             //self._bg_area = bg_inst.into_area();
@@ -1232,7 +1241,6 @@ impl TextEditor {
         else {
             //let bg_area = bg_inst.into_area();
             let view_area = self.view.get_view_area(cx);
-            cx.update_area_refs(self._view_area, view_area);
             //self._bg_area = bg_area;
             self._view_area = view_area;
             if self._set_key_focus_on_load {
@@ -1596,6 +1604,7 @@ impl TextEditor {
                     }*/
                     self.colors.theme_name
                 },
+                TokenType::Color => self.colors.string,
                 TokenType::Regex => self.colors.string,
                 TokenType::String => self.colors.string,
                 TokenType::Number => self.colors.number,
@@ -2030,7 +2039,7 @@ impl TextEditor {
                 self._line_geometry[self._last_cursor_pos.row].indent_id
             }else {0.};
             let area: Area = indent_inst.clone().into();
-            area.write_uniform_float(cx, Self::uniform_indent_sel(), indent_id);
+            area.write_uniform_float(cx, Self::indent_sel(), indent_id);
         }
     }
     

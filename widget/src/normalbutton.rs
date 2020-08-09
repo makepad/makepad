@@ -30,8 +30,8 @@ impl NormalButton {
     pub fn anim_over() -> AnimId {uid!()}
     pub fn anim_down() -> AnimId {uid!()}
     pub fn shader_bg() -> ShaderId {uid!()}
-    pub fn instance_hover() -> InstanceFloat {uid!()}
-    pub fn instance_down() -> InstanceFloat {uid!()}
+    pub fn hover() -> FloatId {uid!()}
+    pub fn down() -> FloatId {uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         Self::layout_bg().set(cx, Layout {
@@ -50,40 +50,40 @@ impl NormalButton {
         });
         
         Self::anim_default().set(cx,Anim::new(Play::Cut {duration: 0.1}, vec![
-            Track::float(Self::instance_hover(), Ease::Lin, vec![(1., 0.)]),
-            Track::float(Self::instance_down(), Ease::Lin, vec![(1.0, 0.)]),
-            Track::color(Text::instance_color(), Ease::Lin, vec![(1., color("#9"))]),
+            Track::float(Self::hover(), Ease::Lin, vec![(1., 0.)]),
+            Track::float(Self::down(), Ease::Lin, vec![(1.0, 0.)]),
+            Track::color(Text::color(), Ease::Lin, vec![(1., pick!(#9).get(cx))]),
         ]));
         
         Self::anim_over().set(cx, Anim::new(Play::Cut {duration: 0.1}, vec![
-            Track::float(Self::instance_down(), Ease::Lin, vec![(0., 0.)]),
-            Track::float(Self::instance_hover(), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
-            Track::color(Text::instance_color(), Ease::Lin, vec![(0., color("#f"))]),
+            Track::float(Self::down(), Ease::Lin, vec![(0., 0.)]),
+            Track::float(Self::hover(), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
+            Track::color(Text::color(), Ease::Lin, vec![(0., pick!(#f).get(cx))]),
         ]));
         
         Self::anim_down().set(cx,Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::float(Self::instance_down(), Ease::OutExp, vec![(0.0, 1.0), (1.0, 1.0)]),
-            Track::float(Self::instance_hover(), Ease::Lin, vec![(1.0, 1.0)]),
-            Track::color(Text::instance_color(), Ease::Lin, vec![(0., color("#c"))]),
+            Track::float(Self::down(), Ease::OutExp, vec![(0.0, 1.0), (1.0, 1.0)]),
+            Track::float(Self::hover(), Ease::Lin, vec![(1.0, 1.0)]),
+            Track::color(Text::color(), Ease::Lin, vec![(0., pick!(#c).get(cx))]),
         ]));
         
         // lets define the shader
-        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"
             
-            let hover: Self::instance_hover();
-            let down: Self::instance_down();
+            instance hover: Self::hover();
+            instance down: Self::down();
             const shadow: float = 3.0;
             const border_radius: float = 2.5;
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_box(shadow, shadow, w - shadow*(1.+down), h- shadow*(1.+down), border_radius);
-                df_blur = 6.0;
-                df_fill(mix(color("#0007"), color("#0"), hover));
-                df_blur = 0.001;
-                df_box(shadow, shadow, w - shadow*2., h - shadow*2., border_radius);
-                return df_fill(mix(mix(color("#3"),color("#4"),hover), color("#2a2a2a"), down));
+                let cx = Df::viewport(pos * vec2(w, h));
+                cx.box(shadow, shadow, w - shadow*(1.+down), h- shadow*(1.+down), border_radius);
+                cx.blur = 6.0;
+                cx.fill(mix(pick!(#0007), pick!(#0), hover));
+                cx.blur = 0.001;
+                cx.box(shadow, shadow, w - shadow*2., h - shadow*2., border_radius);
+                return cx.fill(mix(mix(pick!(#3),pick!(#4),hover), pick!(#2a), down));
             }
-        })));
+        "}));
     }
     
     pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
@@ -107,15 +107,15 @@ impl NormalButton {
         
         self.animator.init(cx, | cx | Self::anim_default().get(cx));
         
-        self.bg.color = self.animator.last_color(cx, Quad::instance_color());
+        self.bg.color = self.animator.last_color(cx, Quad::color());
         
         let bg_inst = self.bg.begin_quad(cx, Self::layout_bg().get(cx));
         
-        bg_inst.push_last_float(cx, &self.animator, Self::instance_hover());
-        bg_inst.push_last_float(cx, &self.animator, Self::instance_down());
+        bg_inst.push_last_float(cx, &self.animator, Self::hover());
+        bg_inst.push_last_float(cx, &self.animator, Self::down());
         
         self.text.text_style = Self::text_style_label().get(cx);
-        self.text.color = self.animator.last_color(cx, Text::instance_color());
+        self.text.color = self.animator.last_color(cx, Text::color());
         
         self._text_area = self.text.draw_text(cx, label);
         

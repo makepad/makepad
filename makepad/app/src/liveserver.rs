@@ -38,8 +38,6 @@ struct LiveServer {
                     let tcp_stream = tcp_stream.expect("Incoming stream failure");
                     let peer_addr = tcp_stream.peer_addr().expect("No peer address");
                     
-                    
-                    
                 }
             })
         };

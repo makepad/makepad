@@ -59,8 +59,8 @@ impl Tab {
     
     pub fn layout_bg() -> LayoutId {uid!()}
     pub fn text_style_title() -> TextStyleId {uid!()}
-    pub fn instance_border_color() -> InstanceColor {uid!()}
-    pub fn tab_closing() -> InstanceFloat {uid!()}
+    pub fn border_color() -> ColorId {uid!()}
+    pub fn tab_closing() -> FloatId {uid!()}
     pub fn shader_bg() -> ShaderId {uid!()}
     
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
@@ -74,22 +74,22 @@ impl Tab {
         
         Self::text_style_title().set(cx, Theme::text_style_normal().get(cx));
         
-        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"
             
-            let border_color: Self::instance_border_color();
+            instance border_color: Self::border_color();
             const border_width: float = 1.0;
             
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_rect(-1., -1., w + 2., h + 2.);
-                df_fill(color);
-                df_move_to(w, 0.);
-                df_line_to(w, h);
-                df_move_to(0., 0.);
-                df_line_to(0., h);
-                return df_stroke(border_color, 1.);
+                let cx = Df::viewport(pos * vec2(w, h));
+                cx.rect(-1., -1., w + 2., h + 2.);
+                cx.fill(color);
+                cx.move_to(w, 0.);
+                cx.line_to(w, h);
+                cx.move_to(0., 0.);
+                cx.line_to(0., h);
+                return cx.stroke(border_color, 1.);
             }
-        })));
+        "}));
     }
     
     pub fn get_bg_color(&self, cx: &Cx) -> Color {
@@ -122,27 +122,27 @@ impl Tab {
     
     pub fn anim_default(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::color(Self::instance_border_color(), Ease::Lin, vec![(1.0, Theme::color_bg_selected().get(cx))]),
-            Track::color(Text::instance_color(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
+            Track::color(Quad::color(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
+            Track::color(Self::border_color(), Ease::Lin, vec![(1.0, Theme::color_bg_selected().get(cx))]),
+            Track::color(Text::color(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
             //Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
     
     pub fn anim_over(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::color(Self::instance_border_color(), Ease::Lin, vec![(1.0, Theme::color_bg_selected().get(cx))]),
-            Track::color(Text::instance_color(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
+            Track::color(Quad::color(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
+            Track::color(Self::border_color(), Ease::Lin, vec![(1.0, Theme::color_bg_selected().get(cx))]),
+            Track::color(Text::color(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
             //Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
     
     pub fn anim_down(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::color(Self::instance_border_color(), Ease::Lin, vec![(1.0, Theme::color_bg_selected().get(cx))]),
-            Track::color(Text::instance_color(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
+            Track::color(Quad::color(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
+            Track::color(Self::border_color(), Ease::Lin, vec![(1.0, Theme::color_bg_selected().get(cx))]),
+            Track::color(Text::color(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
             // Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
@@ -279,7 +279,7 @@ impl Tab {
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.shader = Self::shader_bg().get(cx);
         self.bg.z = self.z;
-        self.bg.color = self.animator.last_color(cx, Quad::instance_color());
+        self.bg.color = self.animator.last_color(cx, Quad::color());
         
         // check if we are closing
         if self.animator.term_anim_playing() {
@@ -291,7 +291,7 @@ impl Tab {
                     Height::Fix(self._close_anim_rect.h),
                 )
             );
-            bg_inst.push_last_color(cx, &self.animator, Self::instance_border_color());
+            bg_inst.push_last_color(cx, &self.animator, Self::border_color());
             self._bg_area = bg_inst.into();
             self.animator.set_area(cx, self._bg_area);
             return Err(())
@@ -304,7 +304,7 @@ impl Tab {
                 Self::layout_bg().get(cx)
             };
             let bg_inst = self.bg.begin_quad(cx, layout);
-            bg_inst.push_last_color(cx, &self.animator, Self::instance_border_color());
+            bg_inst.push_last_color(cx, &self.animator, Self::border_color());
             if self.is_closeable {
                 self.tab_close.draw_tab_close(cx);
                 cx.turtle_align_y();
@@ -312,7 +312,7 @@ impl Tab {
             // push the 2 vars we added to bg shader
             self.text.z = self.z;
             self.text.text_style = Self::text_style_title().get(cx);
-            self.text.color = self.animator.last_color(cx, Text::instance_color());
+            self.text.color = self.animator.last_color(cx, Text::color());
             self._text_area = self.text.draw_text(cx, &self.label);
             cx.turtle_align_y();
             self._bg_inst = Some(bg_inst);

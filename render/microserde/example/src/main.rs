@@ -4,7 +4,7 @@ use makepad_microserde::*;
 
 #[derive(SerBin, DeBin, SerJson, DeJson, SerRon, DeRon, PartialEq)]
 struct MyStruct<T> where T: Clone {
-    a: T,
+    pub a: T,
     b: u32,
     c: Option<Vec<u32>>,
     d: Option<Vec<u32>>,

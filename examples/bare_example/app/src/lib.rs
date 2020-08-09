@@ -11,7 +11,7 @@ pub struct BareExampleApp {
 
 impl BareExampleApp {
     pub fn bg() -> ShaderId {uid!()}
-    pub fn counter() -> InstanceFloat {uid!()}
+    pub fn counter() -> FloatId {uid!()}
     pub fn new(cx: &mut Cx) -> Self {
         /*
         shader!{"
@@ -24,15 +24,16 @@ impl BareExampleApp {
             }
         "};*/
         
-        Self::bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
-            let counter: Self::counter();
+        Self::bg().set(cx, Quad::def_quad_shader().compose(shader!{"
+            instance counter: Self::counter();
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_circle(0.5 * w, 0.5 * h, 0.5 * w);
-                //return df_fill(color("green"));
-                return df_fill(mix(color("green"), color("blue"), abs(sin(counter))));
-            }
-        })));
+                
+                //return color!(red);
+                let df = Df::viewport(pos * vec2(w, h));
+                df.circle(0.5 * w, 0.5 * h, 0.5 * w);
+                return df.fill(mix(color, color!(blue), abs(sin(counter))));
+            }  
+        "}));
         
         Self {
             window: Window::new(cx),
@@ -44,6 +45,7 @@ impl BareExampleApp {
         }
     }
     
+    
     pub fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
@@ -53,16 +55,17 @@ impl BareExampleApp {
                 self.count = fm.abs.x * 0.01;
             },
             _ => ()
-        }
+        } 
     }
     
     pub fn draw_app(&mut self, cx: &mut Cx) {
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
-        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(32, 0, 0)));
+        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(Color::rgb(32, 0, 0)));
         if self.main_view.begin_view(cx, Layout::default()).is_ok() {
             
             self.quad.shader = Self::bg().get(cx);
+            self.quad.color = color!(orange).get(cx);
             let k = self.quad.draw_quad_abs(cx, Rect {x: 100., y: 100., w: 200., h: 200.});
             k.push_float(cx, 10.);
             

@@ -75,7 +75,7 @@ impl HomePage {
             ..Theme::text_style_normal().get(cx)
         });
         
-        Self::text_color().set(cx, color("#b"));
+        Self::text_color().set(cx, pick!(#b).get(cx));
         Self::layout_main().set(cx, Layout {
             padding: Padding {l: 10., t: 10., r: 10., b: 10.},
             new_line_padding: 15.,
@@ -129,7 +129,7 @@ impl HomePage {
             text_input.handle_text_input(cx, event);
         }
         
-        self.view.handle_scroll_bars(cx, event);
+        self.view.handle_scroll_view(cx, event);
     }
     
     pub fn draw_home_page(&mut self, cx: &mut Cx) {

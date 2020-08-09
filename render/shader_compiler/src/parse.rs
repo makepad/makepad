@@ -9,55 +9,100 @@ use std::fmt::Write;
 use std::iter::Cloned;
 use std::slice::Iter;
 
-pub fn parse(tokens_with_span: &[TokenWithSpan], shader: &mut Shader) -> Result<(), Error> {
+pub fn parse(tokens_with_span: &[TokenWithSpan], shader: &mut ShaderAst) -> Result<(), Error> {
     let mut tokens_with_span = tokens_with_span.iter().cloned();
     let token_with_span = tokens_with_span.next().unwrap();
-    Parser { tokens_with_span, token_with_span, end: 0, shader }.parse()
+    Parser {
+        tokens_with_span,
+        token_with_span,
+        end: 0,
+        shader,
+    }
+    .parse()
 }
 
 struct Parser<'a> {
     tokens_with_span: Cloned<Iter<'a, TokenWithSpan>>,
     token_with_span: TokenWithSpan,
     end: usize,
-    shader: &'a mut Shader,
+    shader: &'a mut ShaderAst,
 }
 
 impl<'a> Parser<'a> {
     fn parse(&mut self) -> Result<(), Error> {
         while self.peek_token() != Token::Eof {
-            let decl = self.parse_decl()?;
-            self.shader.decls.push(decl);
+            let span = self.begin_span();
+            match self.peek_token() {
+                Token::Geometry => {
+                    let decl = self.parse_geometry_decl()?;
+                    self.shader.decls.push(Decl::Geometry(decl));
+                }
+                Token::Const => {
+                    let decl = self.parse_const_decl()?;
+                    self.shader.decls.push(Decl::Const(decl));
+                }
+                Token::Fn => {
+                    let decl = self.parse_fn_decl(None)?;
+                    self.shader.decls.push(Decl::Fn(decl));
+                }
+                Token::Impl => {
+                    self.expect_token(Token::Impl)?;
+                    let prefix = self.parse_ident()?;
+                    self.expect_token(Token::LeftBrace)?;
+                    while !self.accept_token(Token::RightBrace) {
+                        let decl = self.parse_fn_decl(Some(prefix))?;
+                        self.shader.decls.push(Decl::Fn(decl));
+                    }
+                }
+                Token::Instance => {
+                    let decl = self.parse_instance_decl()?;
+                    self.shader.decls.push(Decl::Instance(decl));
+                }
+                Token::Struct => {
+                    let decl = self.parse_struct_decl()?;
+                    self.shader.decls.push(Decl::Struct(decl));
+                }
+                Token::Texture => {
+                    let decl = self.parse_texture_decl()?;
+                    self.shader.decls.push(Decl::Texture(decl));
+                }
+                Token::Uniform => {
+                    let decl = self.parse_uniform_decl()?;
+                    self.shader.decls.push(Decl::Uniform(decl));
+                }
+                Token::Varying => {
+                    let decl = self.parse_varying_decl()?;
+                    self.shader.decls.push(Decl::Varying(decl));
+                }
+                Token::Ident(ident) if ident == Ident::new("debug") => {
+					self.skip_token();
+                    self.shader.debug = true;
+                }
+                token => {
+                    return Err(span.error(self, format!("unexpected token `{}`", token).into()))
+                }
+            }
         }
         Ok(())
     }
 
-    fn parse_decl(&mut self) -> Result<Decl, Error> {
+    fn parse_geometry_decl(&mut self) -> Result<GeometryDecl, Error> {
         let span = self.begin_span();
-        match self.peek_token() {
-            Token::Attribute => self.parse_attribute_decl(),
-            Token::Const => self.parse_const_decl(),
-            Token::Fn => self.parse_fn_decl(),
-            Token::Instance => self.parse_instance_decl(),
-            Token::Struct => self.parse_struct_decl(),
-            Token::Uniform => self.parse_uniform_decl(),
-            Token::Varying => self.parse_varying_decl(),
-            token => {
-                self.skip_token();
-                Err(span.error(self, format!("unexpected token `{}`", token).into()))
-            },
-        }
-    }
-
-    fn parse_attribute_decl(&mut self) -> Result<Decl, Error> {
-        self.expect_token(Token::Attribute)?;
+        self.expect_token(Token::Geometry)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
-        let ty_expr = self.parse_ty_expr()?;
+        let ty_expr = self.parse_ty_path()?;
         self.expect_token(Token::Semi)?;
-        Ok(Decl::Attribute(AttributeDecl { ident, ty_expr }))
+        Ok(span.end(&self, |span| GeometryDecl {
+            is_used_in_fragment_shader: Cell::new(None),
+            span,
+            ident,
+            ty_expr,
+        }))
     }
 
-    fn parse_const_decl(&mut self) -> Result<Decl, Error> {
+    fn parse_const_decl(&mut self) -> Result<ConstDecl, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Const)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
@@ -65,24 +110,57 @@ impl<'a> Parser<'a> {
         self.expect_token(Token::Eq)?;
         let expr = self.parse_expr()?;
         self.expect_token(Token::Semi)?;
-        Ok(Decl::Const(ConstDecl {
+        Ok(span.end(&self, |span| ConstDecl {
+            span,
             ident,
             ty_expr,
             expr,
         }))
     }
 
-    fn parse_fn_decl(&mut self) -> Result<Decl, Error> {
+    fn parse_fn_decl(&mut self, prefix: Option<Ident>) -> Result<FnDecl, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Fn)?;
-        let ident = self.parse_ident()?;
+        let ident = if let Some(prefix) = prefix {
+            Ident::new(format!("{}::{}", prefix, self.parse_ident()?))
+        } else {
+            self.parse_ident()?
+        };
         self.expect_token(Token::LeftParen)?;
         let mut params = Vec::new();
         if !self.accept_token(Token::RightParen) {
-            loop {
-                params.push(self.parse_param()?);
-                if !self.accept_token(Token::Comma) {
-                    break;
+            if let Some(prefix) = prefix {
+                let span = self.begin_span();
+                let is_inout = self.accept_token(Token::Inout);
+                if self.accept_token(Token::Self_) {
+                    params.push(span.end(self, |span| Param {
+                        span,
+                        is_inout,
+                        ident: Ident::new("self"),
+                        ty_expr: TyExpr {
+                            ty: RefCell::new(None),
+                            kind: TyExprKind::Var {
+                                span: Span::default(),
+                                ident: prefix,
+                            },
+                        },
+                    }))
+                } else {
+                    let ident = self.parse_ident()?;
+                    self.expect_token(Token::Colon)?;
+                    let ty_expr = self.parse_ty_expr()?;
+                    params.push(span.end(self, |span| Param {
+                        span,
+                        is_inout,
+                        ident,
+                        ty_expr,
+                    }));
                 }
+            } else {
+                params.push(self.parse_param()?);
+            }
+            while self.accept_token(Token::Comma) {
+                params.push(self.parse_param()?);
             }
             self.expect_token(Token::RightParen)?;
         }
@@ -92,17 +170,19 @@ impl<'a> Parser<'a> {
             None
         };
         let block = self.parse_block()?;
-        Ok(Decl::Fn(FnDecl {
+        Ok(span.end(&self, |span| FnDecl {
+            span,
             return_ty: RefCell::new(None),
             is_used_in_vertex_shader: Cell::new(None),
             is_used_in_fragment_shader: Cell::new(None),
             callees: RefCell::new(None),
             uniform_block_deps: RefCell::new(None),
-            attribute_deps: RefCell::new(None),
-            has_in_varying_deps: Cell::new(None),
-            has_out_varying_deps: Cell::new(None),
+            has_texture_deps: Cell::new(None),
+            geometry_deps: RefCell::new(None),
+            instance_deps: RefCell::new(None),
+            has_varying_deps: Cell::new(None),
             builtin_deps: RefCell::new(None),
-            cons_deps: RefCell::new(None),
+            cons_fn_deps: RefCell::new(None),
             ident,
             params,
             return_ty_expr,
@@ -110,100 +190,101 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    fn parse_instance_decl(&mut self) -> Result<Decl, Error> {
+    fn parse_instance_decl(&mut self) -> Result<InstanceDecl, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Instance)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
-        let span = self.begin_span();
-        let mut string = String::new();
-        write!(string, "{}", self.parse_ident()?).unwrap();
-        self.expect_token(Token::PathSep)?;
-        loop {
-            write!(string, "::{}", self.parse_ident()?).unwrap();
-            if !self.accept_token(Token::PathSep) {
-                break;
-            }
-        }
-        self.expect_token(Token::LeftParen)?;
-        self.expect_token(Token::RightParen)?;
+        let ty_expr = self.parse_ty_path()?;
         self.expect_token(Token::Semi)?;
-        let ty_expr = span.end(&self, |span| TyExpr {
-            ty: RefCell::new(None),
-            kind: TyExprKind::Var {
-                span,
-                ident: Ident::new(string)
-            }
-        });
-        Ok(Decl::Instance(InstanceDecl { ident, ty_expr }))
+        Ok(span.end(&self, |span| InstanceDecl {
+            is_used_in_fragment_shader: Cell::new(None),
+            span,
+            ident,
+            ty_expr,
+        }))
     }
 
-    fn parse_struct_decl(&mut self) -> Result<Decl, Error> {
+    fn parse_struct_decl(&mut self) -> Result<StructDecl, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Struct)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::LeftBrace)?;
         let mut fields = Vec::new();
-        if !self.accept_token(Token::RightBrace) {
-            loop {
-                fields.push(self.parse_field()?);
-                if !self.accept_token(Token::Comma) {
-                    break;
-                }
-            }
-            self.expect_token(Token::RightBrace)?;
-        }
-        Ok(Decl::Struct(StructDecl { ident, fields }))
-    }
-
-    fn parse_uniform_decl(&mut self) -> Result<Decl, Error> {
-        self.expect_token(Token::Uniform)?;
-        let ident = self.parse_ident()?;
-        self.expect_token(Token::Colon)?;
-        let span = self.begin_span();
-        let mut string = String::new();
-        write!(string, "{}", self.parse_ident()?).unwrap();
-        self.expect_token(Token::PathSep)?;
         loop {
-            write!(string, "::{}", self.parse_ident()?).unwrap();
-            if !self.accept_token(Token::PathSep) {
+            fields.push(self.parse_field()?);
+            if !self.accept_token(Token::Comma) {
                 break;
             }
         }
-        self.expect_token(Token::LeftParen)?;
-        self.expect_token(Token::RightParen)?;
-        let ty_expr = span.end(&self, |span| TyExpr {
-            ty: RefCell::new(None),
-            kind: TyExprKind::Var {
-                span,
-                ident: Ident::new(string)
-            }
-        });
+        self.expect_token(Token::RightBrace)?;
+        Ok(span.end(&self, |span| StructDecl {
+            span,
+            ident,
+            fields,
+        }))
+    }
+
+    fn parse_texture_decl(&mut self) -> Result<TextureDecl, Error> {
+        let span = self.begin_span();
+        self.expect_token(Token::Texture)?;
+        let ident = self.parse_ident()?;
+        self.expect_token(Token::Colon)?;
+        let ty_expr = self.parse_ty_path()?;
+        self.expect_token(Token::Semi)?;
+        Ok(span.end(&self, |span| TextureDecl {
+            span,
+            ident,
+            ty_expr,
+        }))
+    }
+
+    fn parse_uniform_decl(&mut self) -> Result<UniformDecl, Error> {
+        let span = self.begin_span();
+        self.expect_token(Token::Uniform)?;
+        let ident = self.parse_ident()?;
+        self.expect_token(Token::Colon)?;
+        let ty_expr = self.parse_ty_path()?;
         let block_ident = if self.accept_token(Token::In) {
             Some(self.parse_ident()?)
         } else {
             None
         };
         self.expect_token(Token::Semi)?;
-        Ok(Decl::Uniform(UniformDecl {
+        Ok(span.end(&self, |span| UniformDecl {
+            span,
             ident,
             ty_expr,
             block_ident,
         }))
     }
 
-    fn parse_varying_decl(&mut self) -> Result<Decl, Error> {
+    fn parse_varying_decl(&mut self) -> Result<VaryingDecl, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Varying)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
         let ty_expr = self.parse_ty_expr()?;
         self.expect_token(Token::Semi)?;
-        Ok(Decl::Varying(VaryingDecl { ident, ty_expr }))
+        Ok(span.end(&self, |span| VaryingDecl {
+            span,
+            ident,
+            ty_expr,
+        }))
     }
 
     fn parse_param(&mut self) -> Result<Param, Error> {
+        let span = self.begin_span();
+        let is_inout = self.accept_token(Token::Inout);
         let ident = self.parse_ident()?;
         self.expect_token(Token::Colon)?;
         let ty_expr = self.parse_ty_expr()?;
-        Ok(Param { ident, ty_expr })
+        Ok(span.end(self, |span| Param {
+            span,
+            is_inout,
+            ident,
+            ty_expr,
+        }))
     }
 
     fn parse_field(&mut self) -> Result<Field, Error> {
@@ -235,56 +316,69 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_break_stmt(&mut self) -> Result<Stmt, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Break)?;
         self.expect_token(Token::Semi)?;
-        Ok(Stmt::Break)
+        Ok(span.end(&self, |span| Stmt::Break { span }))
     }
 
     fn parse_continue_stmt(&mut self) -> Result<Stmt, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Continue)?;
         self.expect_token(Token::Semi)?;
-        Ok(Stmt::Continue)
+        Ok(span.end(&self, |span| Stmt::Continue { span }))
     }
 
     fn parse_for_stmt(&mut self) -> Result<Stmt, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::For)?;
         let ident = self.parse_ident()?;
         self.expect_token(Token::From)?;
         let from_expr = self.parse_expr()?;
         self.expect_token(Token::To)?;
         let to_expr = self.parse_expr()?;
-        let step_expr = if self.accept_token(Token::Step) {
+        let step_expr = if self.accept_token(Token::Ident(Ident::new("step"))) {
             Some(self.parse_expr()?)
         } else {
             None
         };
         let block = Box::new(self.parse_block()?);
-        Ok(Stmt::For {
+        Ok(span.end(&self, |span| Stmt::For {
+            span,
             ident,
             from_expr,
             to_expr,
             step_expr,
             block,
-        })
+        }))
     }
 
     fn parse_if_stmt(&mut self) -> Result<Stmt, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::If)?;
         let expr = self.parse_expr()?;
         let block_if_true = Box::new(self.parse_block()?);
         let block_if_false = if self.accept_token(Token::Else) {
-            Some(Box::new(self.parse_block()?))
+            if self.peek_token() == Token::If {
+                Some(Box::new(Block {
+                    stmts: vec![self.parse_if_stmt()?],
+                }))
+            } else {
+                Some(Box::new(self.parse_block()?))
+            }
         } else {
             None
         };
-        Ok(Stmt::If {
+        Ok(span.end(&self, |span| Stmt::If {
+            span,
             expr,
             block_if_true,
             block_if_false,
-        })
+        }))
     }
 
     fn parse_let_stmt(&mut self) -> Result<Stmt, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Let)?;
         let ident = self.parse_ident()?;
         let ty_expr = if self.accept_token(Token::Colon) {
@@ -298,15 +392,17 @@ impl<'a> Parser<'a> {
             None
         };
         self.expect_token(Token::Semi)?;
-        Ok(Stmt::Let {
+        Ok(span.end(&self, |span| Stmt::Let {
+            span,
             ty: RefCell::new(None),
             ident,
             ty_expr,
             expr,
-        })
+        }))
     }
 
     fn parse_return_stmt(&mut self) -> Result<Stmt, Error> {
+        let span = self.begin_span();
         self.expect_token(Token::Return)?;
         let expr = if !self.accept_token(Token::Semi) {
             let expr = self.parse_expr()?;
@@ -315,13 +411,36 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        Ok(Stmt::Return { expr })
+        Ok(span.end(&self, |span| Stmt::Return { span, expr }))
     }
 
     fn parse_expr_stmt(&mut self) -> Result<Stmt, Error> {
+        let span = self.begin_span();
         let expr = self.parse_expr()?;
         self.expect_token(Token::Semi)?;
-        Ok(Stmt::Expr { expr })
+        Ok(span.end(&self, |span| Stmt::Expr { span, expr }))
+    }
+
+    fn parse_ty_path(&mut self) -> Result<TyExpr, Error> {
+        let span = self.begin_span();
+        let mut string = String::new();
+        write!(string, "{}", self.parse_ident()?).unwrap();
+        self.expect_token(Token::PathSep)?;
+        loop {
+            write!(string, "::{}", self.parse_ident()?).unwrap();
+            if !self.accept_token(Token::PathSep) {
+                break;
+            }
+        }
+        self.expect_token(Token::LeftParen)?;
+        self.expect_token(Token::RightParen)?;
+        Ok(span.end(&self, |span| TyExpr {
+            ty: RefCell::new(None),
+            kind: TyExprKind::Var {
+                span,
+                ident: Ident::new(string),
+            },
+        }))
     }
 
     fn parse_ty_expr(&mut self) -> Result<TyExpr, Error> {
@@ -335,13 +454,16 @@ impl<'a> Parser<'a> {
                     self.expect_token(Token::RightBracket)?;
                     acc = span.end(&self, |span| TyExpr {
                         ty: RefCell::new(None),
-                        kind: TyExprKind::Array { span, elem_ty_expr, len },
+                        kind: TyExprKind::Array {
+                            span,
+                            elem_ty_expr,
+                            len,
+                        },
                     });
                 }
                 token => {
-                    self.skip_token();
                     return Err(span.error(self, format!("unexpected token `{}`", token).into()))
-                },
+                }
             }
         }
         Ok(acc)
@@ -364,10 +486,7 @@ impl<'a> Parser<'a> {
                     kind: TyExprKind::Lit { span, ty_lit },
                 }))
             }
-            token => {
-                self.skip_token();
-                Err(span.error(self, format!("unexpected token `{}`", token).into()))
-            },
+            token => Err(span.error(self, format!("unexpected token `{}`", token).into())),
         }
     }
 
@@ -383,8 +502,10 @@ impl<'a> Parser<'a> {
             let left_expr = Box::new(expr);
             let right_expr = Box::new(self.parse_assign_expr()?);
             span.end(self, |span| Expr {
+                span,
                 ty: RefCell::new(None),
-                val: RefCell::new(None),
+                const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Bin {
                     span,
                     op,
@@ -406,8 +527,10 @@ impl<'a> Parser<'a> {
             self.expect_token(Token::Colon)?;
             let expr_if_false = Box::new(self.parse_cond_expr()?);
             span.end(self, |span| Expr {
+                span,
                 ty: RefCell::new(None),
-                val: RefCell::new(None),
+                const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Cond {
                     span,
                     expr,
@@ -428,9 +551,11 @@ impl<'a> Parser<'a> {
             let left_expr = Box::new(acc);
             let right_expr = Box::new(self.parse_and_expr()?);
             acc = span.end(self, |span| Expr {
+                span,
                 ty: RefCell::new(None),
-                val: RefCell::new(None),
-                kind: ExprKind::Bin { 
+                const_val: RefCell::new(None),
+                const_index: Cell::new(None),
+                kind: ExprKind::Bin {
                     span,
                     op,
                     left_expr,
@@ -449,8 +574,10 @@ impl<'a> Parser<'a> {
             let left_expr = Box::new(acc);
             let right_expr = Box::new(self.parse_eq_expr()?);
             acc = span.end(self, |span| Expr {
+                span,
                 ty: RefCell::new(None),
-                val: RefCell::new(None),
+                const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Bin {
                     span,
                     op,
@@ -470,8 +597,10 @@ impl<'a> Parser<'a> {
             let left_expr = Box::new(acc);
             let right_expr = Box::new(self.parse_rel_expr()?);
             acc = span.end(self, |span| Expr {
+                span,
                 ty: RefCell::new(None),
-                val: RefCell::new(None),
+                const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Bin {
                     span,
                     op,
@@ -491,8 +620,10 @@ impl<'a> Parser<'a> {
             let left_expr = Box::new(acc);
             let right_expr = Box::new(self.parse_add_expr()?);
             acc = span.end(self, |span| Expr {
+                span,
                 ty: RefCell::new(None),
-                val: RefCell::new(None),
+                const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Bin {
                     span,
                     op,
@@ -512,8 +643,10 @@ impl<'a> Parser<'a> {
             let left_expr = Box::new(acc);
             let right_expr = Box::new(self.parse_mul_expr()?);
             acc = span.end(self, |span| Expr {
+                span,
                 ty: RefCell::new(None),
-                val: RefCell::new(None),
+                const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Bin {
                     span,
                     op,
@@ -527,14 +660,16 @@ impl<'a> Parser<'a> {
 
     fn parse_mul_expr(&mut self) -> Result<Expr, Error> {
         let span = self.begin_span();
-        let mut acc = self.parse_postfix_expr()?;
+        let mut acc = self.parse_un_expr()?;
         while let Some(op) = self.peek_token().to_mul_op() {
             self.skip_token();
             let left_expr = Box::new(acc);
-            let right_expr = Box::new(self.parse_postfix_expr()?);
+            let right_expr = Box::new(self.parse_un_expr()?);
             acc = span.end(self, |span| Expr {
+                span,
                 ty: RefCell::new(None),
-                val: RefCell::new(None),
+                const_val: RefCell::new(None),
+                const_index: Cell::new(None),
                 kind: ExprKind::Bin {
                     span,
                     op,
@@ -546,76 +681,33 @@ impl<'a> Parser<'a> {
         Ok(acc)
     }
 
-    fn parse_postfix_expr(&mut self) -> Result<Expr, Error> {
-        let span = self.begin_span();
-        let mut acc = self.parse_un_expr()?;
-        loop {
-            match self.peek_token() {
-                Token::Dot => {
-                    self.skip_token();
-                    let expr = Box::new(acc);
-                    let field_ident = self.parse_ident()?;
-                    acc = span.end(self, |span| Expr {
-                        ty: RefCell::new(None),
-                        val: RefCell::new(None),
-                        kind: ExprKind::Field {
-                            span,
-                            expr,
-                            field_ident
-                        },
-                    });
-                }
-                Token::LeftBracket => {
-                    self.skip_token();
-                    let expr = Box::new(acc);
-                    let index_expr = Box::new(self.parse_expr()?);
-                    self.expect_token(Token::RightBracket)?;
-                    acc = span.end(self, |span| Expr {
-                        ty: RefCell::new(None),
-                        val: RefCell::new(None),
-                        kind: ExprKind::Index {
-                            span,
-                            expr,
-                            index_expr
-                        },
-                    });
-                }
-                _ => break,
-            }
-        }
-        Ok(acc)
-    }
-
     fn parse_un_expr(&mut self) -> Result<Expr, Error> {
         let span = self.begin_span();
         Ok(if let Some(op) = self.peek_token().to_un_op() {
             self.skip_token();
             let expr = Box::new(self.parse_un_expr()?);
             span.end(self, |span| Expr {
+                span,
                 ty: RefCell::new(None),
-                val: RefCell::new(None),
-                kind: ExprKind::Un {
-                    span,
-                    op,
-                    expr
-                },
+                const_val: RefCell::new(None),
+                const_index: Cell::new(None),
+                kind: ExprKind::Un { span, op, expr },
             })
         } else {
-            self.parse_prim_expr()?
+            self.parse_postfix_expr()?
         })
     }
 
-    fn parse_prim_expr(&mut self) -> Result<Expr, Error> {
+    fn parse_postfix_expr(&mut self) -> Result<Expr, Error> {
         let span = self.begin_span();
-        match self.peek_token() {
-            Token::Ident(ident) => {
-                self.skip_token();
-                Ok(Expr {
-                    ty: RefCell::new(None),
-                    val: RefCell::new(None),
-                    kind: if self.accept_token(Token::LeftParen) {
-                        let ident = ident;
-                        let mut arg_exprs = Vec::new();
+        let mut acc = self.parse_prim_expr()?;
+        loop {
+            match self.peek_token() {
+                Token::Dot => {
+                    self.skip_token();
+                    let ident = self.parse_ident()?;
+                    acc = if self.accept_token(Token::LeftParen) {
+                        let mut arg_exprs = vec![acc];
                         if !self.accept_token(Token::RightParen) {
                             loop {
                                 arg_exprs.push(self.parse_expr()?);
@@ -625,30 +717,142 @@ impl<'a> Parser<'a> {
                             }
                             self.expect_token(Token::RightParen)?;
                         }
-                        span.end(self, |span| ExprKind::Call { 
+                        span.end(self, |span| Expr {
                             span,
-                            ident,
-                            arg_exprs
+                            ty: RefCell::new(None),
+                            const_val: RefCell::new(None),
+                            const_index: Cell::new(None),
+                            kind: ExprKind::MethodCall {
+                                span,
+                                ident,
+                                arg_exprs,
+                            },
                         })
                     } else {
-                        span.end(self, |span| ExprKind::Var {
+                        let expr = Box::new(acc);
+                        span.end(self, |span| Expr {
                             span,
-                            is_lvalue: Cell::new(None),
+                            ty: RefCell::new(None),
+                            const_val: RefCell::new(None),
+                            const_index: Cell::new(None),
+                            kind: ExprKind::Field {
+                                span,
+                                expr,
+                                field_ident: ident,
+                            },
+                        })
+                    }
+                }
+                Token::LeftBracket => {
+                    self.skip_token();
+                    let expr = Box::new(acc);
+                    let index_expr = Box::new(self.parse_expr()?);
+                    self.expect_token(Token::RightBracket)?;
+                    acc = span.end(self, |span| Expr {
+                        span,
+                        ty: RefCell::new(None),
+                        const_val: RefCell::new(None),
+                        const_index: Cell::new(None),
+                        kind: ExprKind::Index {
+                            span,
+                            expr,
+                            index_expr,
+                        },
+                    });
+                }
+                _ => break,
+            }
+        }
+        Ok(acc)
+    }
+
+    fn parse_prim_expr(&mut self) -> Result<Expr, Error> {
+        let span = self.begin_span();
+        match self.peek_token() {
+            Token::Self_ => {
+                self.skip_token();
+                Ok(span.end(self, |span| Expr {
+                    span,
+                    ty: RefCell::new(None),
+                    const_val: RefCell::new(None),
+                    const_index: Cell::new(None),
+                    kind: ExprKind::Var {
+                        span,
+                        kind: Cell::new(None),
+                        ident: Ident::new("self"),
+                    },
+                }))
+            }
+            Token::Ident(mut ident) => {
+                self.skip_token();
+                Ok(match self.peek_token() {
+                    Token::Not => {
+                        self.skip_token();
+                        let arg_exprs = self.parse_arg_exprs()?;
+                        span.end(self, |span| Expr {
+                            span,
+                            ty: RefCell::new(None),
+                            const_val: RefCell::new(None),
+                            const_index: Cell::new(None),
+                            kind: ExprKind::MacroCall {
+                                span,
+                                analysis: Cell::new(None),
+                                ident,
+                                arg_exprs,
+                            },
+                        })
+                    }
+                    Token::PathSep => {
+                        self.skip_token();
+                        ident = Ident::new(format!("{}::{}", ident, self.parse_ident()?));
+                        let arg_exprs = self.parse_arg_exprs()?;
+                        span.end(self, |span| Expr {
+                            span,
+                            ty: RefCell::new(None),
+                            const_val: RefCell::new(None),
+                            const_index: Cell::new(None),
+                            kind: ExprKind::Call {
+                                span,
+                                ident,
+                                arg_exprs,
+                            },
+                        })
+                    }
+                    Token::LeftParen => {
+                        let arg_exprs = self.parse_arg_exprs()?;
+                        span.end(self, |span| Expr {
+                            span,
+                            ty: RefCell::new(None),
+                            const_val: RefCell::new(None),
+                            const_index: Cell::new(None),
+                            kind: ExprKind::Call {
+                                span,
+                                ident,
+                                arg_exprs,
+                            },
+                        })
+                    }
+                    _ => span.end(self, |span| Expr {
+                        span,
+                        ty: RefCell::new(None),
+                        const_val: RefCell::new(None),
+                        const_index: Cell::new(None),
+                        kind: ExprKind::Var {
+                            span,
                             kind: Cell::new(None),
                             ident,
-                        })
-                    },
+                        },
+                    }),
                 })
             }
             Token::Lit(lit) => {
                 self.skip_token();
                 Ok(span.end(self, |span| Expr {
+                    span,
                     ty: RefCell::new(None),
-                    val: RefCell::new(None),
-                    kind: ExprKind::Lit {
-                        span,
-                        lit
-                    },
+                    const_val: RefCell::new(None),
+                    const_index: Cell::new(None),
+                    kind: ExprKind::Lit { span, lit },
                 }))
             }
             Token::TyLit(ty_lit) => {
@@ -665,12 +869,14 @@ impl<'a> Parser<'a> {
                     self.expect_token(Token::RightParen)?;
                 }
                 Ok(span.end(self, |span| Expr {
+                    span,
                     ty: RefCell::new(None),
-                    val: RefCell::new(None),
-                    kind: ExprKind::ConsCall { 
+                    const_val: RefCell::new(None),
+                    const_index: Cell::new(None),
+                    kind: ExprKind::ConsCall {
                         span,
                         ty_lit,
-                        arg_exprs
+                        arg_exprs,
                     },
                 }))
             }
@@ -680,10 +886,7 @@ impl<'a> Parser<'a> {
                 self.expect_token(Token::RightParen)?;
                 Ok(expr)
             }
-            token => {
-                self.skip_token();
-                Err(span.error(self, format!("unexpected token `{}`", token).into()))
-            },
+            token => Err(span.error(self, format!("unexpected token `{}`", token).into())),
         }
     }
 
@@ -694,11 +897,23 @@ impl<'a> Parser<'a> {
                 self.skip_token();
                 Ok(ident)
             }
-            token => {
-                self.skip_token();
-                Err(span.error(self, format!("unexpected token `{}`", token).into()))
-            },
+            token => Err(span.error(self, format!("unexpected token `{}`", token).into())),
         }
+    }
+
+    fn parse_arg_exprs(&mut self) -> Result<Vec<Expr>, Error> {
+        self.expect_token(Token::LeftParen)?;
+        let mut arg_exprs = Vec::new();
+        if !self.accept_token(Token::RightParen) {
+            loop {
+                arg_exprs.push(self.parse_expr()?);
+                if !self.accept_token(Token::Comma) {
+                    break;
+                }
+            }
+            self.expect_token(Token::RightParen)?;
+        }
+        Ok(arg_exprs)
     }
 
     fn accept_token(&mut self, token: Token) -> bool {
@@ -730,6 +945,7 @@ impl<'a> Parser<'a> {
 
     fn begin_span(&self) -> SpanTracker {
         SpanTracker {
+            loc_id: self.token_with_span.span.loc_id,
             start: self.token_with_span.span.start,
         }
     }
@@ -771,8 +987,8 @@ impl Token {
 
     fn to_rel_op(self) -> Option<BinOp> {
         match self {
-            Token::Lt => Some(BinOp::Le),
-            Token::LtEq => Some(BinOp::Lt),
+            Token::Lt => Some(BinOp::Lt),
+            Token::LtEq => Some(BinOp::Le),
             Token::Gt => Some(BinOp::Gt),
             Token::GtEq => Some(BinOp::Ge),
             _ => None,
@@ -805,15 +1021,17 @@ impl Token {
 }
 
 struct SpanTracker {
+    loc_id: usize,
     start: usize,
 }
 
 impl SpanTracker {
     fn end<F, R>(&self, parser: &Parser, f: F) -> R
     where
-        F: FnOnce(Span) -> R
+        F: FnOnce(Span) -> R,
     {
         f(Span {
+            loc_id: self.loc_id,
             start: self.start,
             end: parser.end,
         })
@@ -822,8 +1040,9 @@ impl SpanTracker {
     fn error(&self, parser: &Parser, message: String) -> Error {
         Error {
             span: Span {
+                loc_id: self.loc_id,
                 start: self.start,
-                end: parser.end,
+                end: parser.token_with_span.span.end,
             },
             message,
         }
