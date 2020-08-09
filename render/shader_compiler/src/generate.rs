@@ -36,6 +36,8 @@ pub trait BackendWriter {
     fn write_call_ident(&self, string: &mut String, ident: Ident, arg_exprs: &[Expr]);
     
     fn needs_mul_fn_for_matrix_multiplication(&self)->bool;
+    
+    fn  const_table_is_vec4(&self) -> bool;
 }
 
 pub struct BlockGenerator<'a> {
@@ -250,20 +252,42 @@ pub struct ExprGenerator<'a> {
 
 impl<'a> ExprGenerator<'a> {
     pub fn generate_expr(&mut self, expr: &Expr) {
+        fn const_table_index_to_vec4(string:&mut String, index:usize){
+            let base = index>>2;
+            let sub = index - (base<<2);
+            match sub{
+                0=>write!(string, "[{}].x", base).unwrap(),
+                1=>write!(string, "[{}].y", base).unwrap(),
+                2=>write!(string, "[{}].z", base).unwrap(),
+                _=>write!(string, "[{}].w", base).unwrap(),
+            }
+        }
         match (expr.const_val.borrow().as_ref(), expr.const_index.get()) {
             (Some(Some(Val::Vec4(_))), Some(mut index)) if self.use_const_table => {
                 self.write_ty_lit(TyLit::Vec4);
                 write!(self.string, "(").unwrap();
                 let mut sep = "";
                 for _ in 0..4 {
-                    write!(self.string, "{}mpsc_const_table[{}]", sep, index).unwrap();
+                    write!(self.string, "{}mpsc_const_table", sep).unwrap();
+                    if self.backend_writer.const_table_is_vec4(){
+                        const_table_index_to_vec4(self.string, index);
+                    }
+                    else{
+                        write!(self.string, "[{}]", index).unwrap();
+                    }
                     sep = ", ";
                     index += 1;
                 }
                 write!(self.string, ")").unwrap();
             },
             (Some(Some(Val::Float(_))), Some(index)) if self.use_const_table => {
-                write!(self.string, "mpsc_const_table[{}]", index).unwrap();
+                write!(self.string, "mpsc_const_table").unwrap();
+                if self.backend_writer.const_table_is_vec4(){
+                    const_table_index_to_vec4(self.string, index);
+                }
+                else{
+                    write!(self.string, "[{}]", index).unwrap();
+                }
             }
             // TODO: Extract the next three cases into a write_val function
             (Some(Some(Val::Vec4(val))), _) => {
@@ -391,7 +415,7 @@ impl<'a> ExprGenerator<'a> {
     
     fn generate_method_call_expr(&mut self, span: Span, ident: Ident, arg_exprs: &[Expr]) {
         match arg_exprs[0].ty.borrow().as_ref().unwrap() {
-            Ty::Struct {
+            Ty::Struct { 
                 ident: struct_ident,
             } => {
                 self.generate_call_expr(

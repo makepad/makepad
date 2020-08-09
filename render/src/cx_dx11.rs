@@ -105,7 +105,8 @@ impl Cx {
                     &self.passes[pass_id].platform.pass_uniforms,
                     &cxview.platform.view_uniforms,
                     &draw_call.platform.draw_uniforms,
-                    &draw_call.platform.uniforms
+                    &draw_call.platform.uniforms,
+                    &shp.const_table_uniforms
                 );
                 
                 for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
@@ -298,18 +299,24 @@ impl Cx {
         let hlsl = generate_hlsl::generate_shader(&shader_ast, use_const_table);
         let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, shader_ast.const_table.borrow_mut().take());
 
-        if let Some(sh_platform) = &sh.platform{
+        if let Some(sh_platform) = &mut sh.platform{
             if sh_platform.hlsl_shader == hlsl{
                 sh.mapping = mapping;
+                if let Some(const_table) = &sh.mapping.const_table{
+                    if const_table.len()>0{
+                        sh_platform.const_table_uniforms.update_with_f32_constant_data(d3d11_cx, const_table.as_slice());
+                    }
+                }
+                
                 return ShaderCompileResult::Nop{id:shader_id}
             }
         } 
-        
-        let vs_blob = d3d11_cx.compile_shader("vs", "mpsc_vertex_main".as_bytes(), hlsl.as_bytes());
-        
+
         if shader_ast.debug{
             println!("--------------- Shader {} --------------- \n{}\n", shader_id, hlsl);
         }
+        
+        let vs_blob = d3d11_cx.compile_shader("vs", "mpsc_vertex_main".as_bytes(), hlsl.as_bytes());
         
         fn split_source(src:&str)->String{
             let mut r = String::new();
@@ -347,7 +354,7 @@ impl Cx {
         
         
         for (index, geom) in geom_named.props.iter().enumerate() {
-            strings.push(ffi::CString::new(format!("GEOM{}", index)).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
+            strings.push(ffi::CString::new(format!("GEOM{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
             layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
                 SemanticName: strings.last().unwrap().as_ptr() as *const _,
                 SemanticIndex: 0,
@@ -360,7 +367,7 @@ impl Cx {
         }
         
         for (index, inst) in inst_named.props.iter().enumerate() {
-            strings.push(ffi::CString::new(format!("INST{}", index)).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
+            strings.push(ffi::CString::new(format!("INST{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
             layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
                 SemanticName: strings.last().unwrap().as_ptr() as *const _,
                 SemanticIndex: 0,
@@ -385,6 +392,15 @@ impl Cx {
                 let mut geom_vbuf = D3d11Buffer {..Default::default()};
                 geom_vbuf.update_with_f32_vertex_data(d3d11_cx, &sh.shader_gen.geometry_vertices);
                 geom_vbuf
+            },
+            const_table_uniforms:{
+                let mut buf = D3d11Buffer{..Default::default()};
+                if let Some(const_table) = &sh.mapping.const_table{
+                    if const_table.len()>0{
+                        buf.update_with_f32_constant_data(d3d11_cx, const_table.as_slice());
+                    }
+                }
+                buf
             },
             hlsl_shader: hlsl,
             vertex_shader: vs,
@@ -646,45 +662,28 @@ impl D3d11Cx {
         )};
     }
     
-    pub fn set_constant_buffers(&self, pass_uni: &D3d11Buffer, view_uni: &D3d11Buffer, draw_uni: &D3d11Buffer, uni: &D3d11Buffer) {
+    pub fn set_constant_buffers(&self, pass_uni: &D3d11Buffer, view_uni: &D3d11Buffer, draw_uni: &D3d11Buffer, uni: &D3d11Buffer, const_table: &D3d11Buffer) {
         let pass_uni = pass_uni.buffer.as_ref().unwrap();
         let view_uni = view_uni.buffer.as_ref().unwrap();
         let draw_uni = draw_uni.buffer.as_ref().unwrap();
-        if let Some(uni) = uni.buffer.as_ref() {
-            let buffers = [
-                pass_uni.as_raw() as *const std::ffi::c_void,
-                view_uni.as_raw() as *const std::ffi::c_void,
-                draw_uni.as_raw() as *const std::ffi::c_void,
-                uni.as_raw() as *const std::ffi::c_void,
-            ];
-            unsafe {self.context.VSSetConstantBuffers(
-                0,
-                4,
-                buffers.as_ptr() as *const *mut _,
-            )};
-            unsafe {self.context.PSSetConstantBuffers(
-                0,
-                4,
-                buffers.as_ptr() as *const *mut _,
-            )};
-        }
-        else {
-            let buffers = [
-                pass_uni.as_raw() as *const std::ffi::c_void,
-                view_uni.as_raw() as *const std::ffi::c_void,
-                draw_uni.as_raw() as *const std::ffi::c_void,
-            ];
-            unsafe {self.context.VSSetConstantBuffers(
-                0,
-                3,
-                buffers.as_ptr() as *const *mut _,
-            )};
-            unsafe {self.context.PSSetConstantBuffers(
-                0,
-                3,
-                buffers.as_ptr() as *const *mut _,
-            )};
-        }
+        
+        let buffers = [
+            pass_uni.as_raw() as *const std::ffi::c_void,
+            view_uni.as_raw() as *const std::ffi::c_void,
+            draw_uni.as_raw() as *const std::ffi::c_void,
+            if let Some(uni) = uni.buffer.as_ref(){uni.as_raw() as *const std::ffi::c_void}else{0 as *const std::ffi::c_void},
+            if let Some(const_table) = const_table.buffer.as_ref(){const_table.as_raw() as *const std::ffi::c_void}else{0 as *const std::ffi::c_void},
+        ];
+        unsafe {self.context.VSSetConstantBuffers(
+            0,
+            5,
+            buffers.as_ptr() as *const *mut _,
+        )};
+        unsafe {self.context.PSSetConstantBuffers(
+            0,
+            5,
+            buffers.as_ptr() as *const *mut _,
+        )};
     }
     
     pub fn draw_indexed_instanced(&self, num_vertices: usize, num_instances: usize) {
@@ -1582,6 +1581,7 @@ pub struct CxPlatformShader {
     pub hlsl_shader: String,
     pub geom_vbuf: D3d11Buffer,
     pub geom_ibuf: D3d11Buffer,
+    pub const_table_uniforms: D3d11Buffer,
     pub pixel_shader: ComPtr<d3d11::ID3D11PixelShader>,
     pub vertex_shader: ComPtr<d3d11::ID3D11VertexShader>,
     pub pixel_shader_blob: ComPtr<d3dcommon::ID3DBlob>,
