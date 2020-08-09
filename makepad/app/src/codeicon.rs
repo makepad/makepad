@@ -46,87 +46,87 @@ impl CodeIcon {
         })
     }
     
-    pub fn instance_icon_id()->InstanceFloat{uid!()}
+    pub fn icon_id()->FloatId{uid!()}
     
     pub fn def_code_icon_shader() -> ShaderGen {
-        Quad::def_quad_shader().compose(shader_ast!({
-            let icon_id: Self::instance_icon_id();
+        Quad::def_quad_shader().compose(shader!{"
+            instance icon_id: Self::icon_id();
             
             fn pixel() -> vec4 {
                 let col = color;
                 if abs(icon_id - 5.) < 0.1 { //Wait
-                    df_viewport(pos * vec2(10., 10.)); // * vec2(w, h));
-                    df_circle(5., 5., 4.);
-                    df_fill_keep(color("orange"));
-                    df_stroke(color("gray"), 0.5);
-                    df_move_to(3., 5.);
-                    df_line_to(3., 5.);
-                    df_move_to(5., 5.);
-                    df_line_to(5., 5.);
-                    df_move_to(7., 5.);
-                    df_line_to(7., 5.);
-                    df_stroke(color("black"), 0.8);
-                    return df_result;
+                    let df = Df::viewport(pos * vec2(10., 10.)); // * vec2(w, h));
+                    df.circle(5., 5., 4.);
+                    df.fill_keep(pick!(orange));
+                    df.stroke(pick!(gray), 0.5);
+                    df.move_to(3., 5.);
+                    df.line_to(3., 5.);
+                    df.move_to(5., 5.);
+                    df.line_to(5., 5.);
+                    df.move_to(7., 5.);
+                    df.line_to(7., 5.);
+                    df.stroke(pick!(black), 0.8);
+                    return df.result;
                 }
                 if abs(icon_id - 4.) < 0.1 { //OK
-                    df_viewport(pos * vec2(10., 10.)); // * vec2(w, h));
-                    df_circle(5., 5., 4.);
-                    df_fill_keep(color("#555"));
-                    df_stroke(color("#555"), 0.5);
+                    let df = Df::viewport(pos * vec2(10., 10.)); // * vec2(w, h));
+                    df.circle(5., 5., 4.);
+                    df.fill_keep(pick!(#555));
+                    df.stroke(pick!(#555), 0.5);
                     let sz = 1.;
-                    df_move_to(5., 5.);
-                    df_line_to(5., 5.);
-                    df_stroke(color("#aaa"), 0.8);
-                    return df_result;
+                    df.move_to(5., 5.);
+                    df.line_to(5., 5.);
+                    df.stroke(pick!(#aaa), 0.8);
+                    return df.result;
                 }
                 else if abs(icon_id - 3.) < 0.1 { // Error
-                    df_viewport(pos * vec2(10., 10.)); // * vec2(w, h));
-                    df_circle(5., 5., 4.);
-                    df_fill_keep(color("#c00"));
-                    df_stroke(color("gray"), 0.5);
+                    let df = Df::viewport(pos * vec2(10., 10.)); // * vec2(w, h));
+                    df.circle(5., 5., 4.);
+                    df.fill_keep(pick!(#c00));
+                    df.stroke(pick!(gray), 0.5);
                     let sz = 1.;
-                    df_move_to(5. - sz, 5. - sz);
-                    df_line_to(5. + sz, 5. + sz);
-                    df_move_to(5. - sz, 5. + sz);
-                    df_line_to(5. + sz, 5. - sz);
-                    df_stroke(color("black"), 0.8);
-                    return df_result;
+                    df.move_to(5. - sz, 5. - sz);
+                    df.line_to(5. + sz, 5. + sz);
+                    df.move_to(5. - sz, 5. + sz);
+                    df.line_to(5. + sz, 5. - sz);
+                    df.stroke(pick!(black), 0.8);
+                    return df.result;
                 }
                 else if abs(icon_id - 2.) < 0.1 { // Warning
-                    df_viewport(pos * vec2(10., 10.)); // * vec2(w, h));
-                    df_move_to(5., 1.);
-                    df_line_to(9., 9.);
-                    df_line_to(1., 9.);
-                    df_close_path();
-                    df_fill_keep(vec4(253.0 / 255.0, 205.0 / 255.0, 59.0 / 255.0, 1.0));
-                    df_stroke(color("gray"), 0.5);
-                    df_move_to(5., 3.5);
-                    df_line_to(5., 5.25);
-                    df_stroke(color("black"), 0.8);
-                    df_move_to(5., 7.25);
-                    df_line_to(5., 7.5);
-                    df_stroke(color("black"), 0.8);
-                    return df_result;
+                    let df = Df::viewport(pos * vec2(10., 10.)); // * vec2(w, h));
+                    df.move_to(5., 1.);
+                    df.line_to(9., 9.);
+                    df.line_to(1., 9.);
+                    df.close_path();
+                    df.fill_keep(vec4(253.0 / 255.0, 205.0 / 255.0, 59.0 / 255.0, 1.0));
+                    df.stroke(pick!(gray), 0.5);
+                    df.move_to(5., 3.5);
+                    df.line_to(5., 5.25);
+                    df.stroke(pick!(black), 0.8);
+                    df.move_to(5., 7.25);
+                    df.line_to(5., 7.5);
+                    df.stroke(pick!(black), 0.8);
+                    return df.result;
                 }
                 else { // Panic
-                    df_viewport(pos * vec2(10., 10.)); // * vec2(w, h));
-                    df_move_to(5., 1.);
-                    df_line_to(9., 9.);
-                    df_line_to(1., 9.);
-                    df_close_path();
-                    df_fill_keep(color("#c00"));
-                    df_stroke(color("gray"), 0.5);
+                    let df = Df::viewport(pos * vec2(10., 10.)); // * vec2(w, h));
+                    df.move_to(5., 1.);
+                    df.line_to(9., 9.);
+                    df.line_to(1., 9.);
+                    df.close_path();
+                    df.fill_keep(pick!(#c00));
+                    df.stroke(pick!(gray), 0.5);
                     let sz = 1.;
-                    df_move_to(5. - sz, 6.25 - sz);
-                    df_line_to(5. + sz, 6.25 + sz);
-                    df_move_to(5. - sz, 6.25 + sz);
-                    df_line_to(5. + sz, 6.25 - sz);
-                    df_stroke(color("white"), 0.8);
+                    df.move_to(5. - sz, 6.25 - sz);
+                    df.line_to(5. + sz, 6.25 + sz);
+                    df.move_to(5. - sz, 6.25 + sz);
+                    df.line_to(5. + sz, 6.25 - sz);
+                    df.stroke(pick!(white), 0.8);
 
-                    return df_result;
+                    return df.result;
                 }
             }
-        }))
+        "})
     }
     /*
     pub fn draw_icon_abs(&mut self, cx: &mut Cx, x: f32, y: f32, icon_type: CodeIconType) -> InstanceArea {

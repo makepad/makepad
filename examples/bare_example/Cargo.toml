@@ -6,6 +6,9 @@ edition = "2018"
 
 [dependencies]
 
-[dependencies.makepad-render]
-path="../../render"
-version="0.2"
+[dependencies.bare_example_app]
+path="./app"
+
+[dependencies.makepad-shader-compiler]
+path="../../render/shader_compiler"
+version="0.1"

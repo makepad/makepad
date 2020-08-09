@@ -1,16 +1,17 @@
 use makepad_render::*;
 use makepad_widget::*;
 
-struct App {
+struct WidgetExampleApp {
     desktop_window: DesktopWindow, 
     menu: Menu,
     button:NormalButton,
     buttons:ElementsCounted<NormalButton>
 }
 
-main_app!(App);
-
-impl App {
+fn main(){
+    main_app!(WidgetExampleApp);
+}
+impl WidgetExampleApp {
     pub fn new(cx: &mut Cx) -> Self {
         set_widget_style(cx, &StyleOptions{scale:0.5,..StyleOptions::default()});
         Self {

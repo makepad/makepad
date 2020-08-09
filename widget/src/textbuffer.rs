@@ -1,6 +1,7 @@
 use makepad_render::*;
 
 use crate::textcursor::*;
+use crate::tokentype::*;
 
 #[derive(Clone, Default)]
 pub struct TextBuffer {
@@ -37,10 +38,7 @@ impl TextBuffer {
     pub fn status_keyboard_update() -> StatusId {uid!()}
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
-pub struct LiveMacro{
-    pub token:usize,
-}
+
 
 #[derive(Clone, Default)]
 pub struct TextBufferKeyboard {
@@ -89,9 +87,10 @@ impl TextPos {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TextUndoGrouping {
     Space,
+    LiveEdit(u64),
     Newline,
     Character(u64),
     Backspace(u64),
@@ -113,6 +112,7 @@ impl TextUndoGrouping {
     fn wants_grouping(&self) -> bool {
         match self {
             TextUndoGrouping::Space => true,
+            TextUndoGrouping::LiveEdit(_)=>true,
             TextUndoGrouping::Newline => false,
             TextUndoGrouping::Character(_) => true,
             TextUndoGrouping::Backspace(_) => true,
@@ -558,6 +558,7 @@ impl TextBuffer {
             lines: lines
         }
     }
+    
     
     pub fn replace_line_with_string(&mut self, start: usize, row: usize, col: usize, len: usize, string: &str) -> TextOp {
         let rep_line: Vec<char> = string.chars().collect();

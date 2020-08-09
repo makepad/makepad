@@ -1,6 +1,6 @@
 use crate::hubmsg::*;
 use crate::hubrouter::*;
-use makepad_tinyserde::*;
+use makepad_microserde::*;
 
 use std::net::{TcpStream, SocketAddr, Shutdown};
 use std::io::prelude::*;
@@ -263,7 +263,7 @@ impl Digest {
     
     pub fn generate() -> Digest {
         let mut result = Digest::default();
-        for i in 0..25 {
+        for _ in 0..25 {
             //result.buf[i] ^= time::precise_time_ns();
             std::thread::sleep(std::time::Duration::from_millis(1));
             result.digest_cycle();

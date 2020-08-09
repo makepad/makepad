@@ -1,6 +1,7 @@
 use makepad_render::*;
 
 use crate::textbuffer::*;
+use crate::tokentype::*;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextCursor {
@@ -45,7 +46,7 @@ impl TextCursor {
     pub fn collapse(&mut self, start: usize, end: usize, new_len: usize) -> isize {
         self.head = start + new_len;
         self.tail = self.head;
-        ((new_len as isize) - (end - start) as isize)
+        (new_len as isize) - (end - start) as isize
     }
     
     
@@ -485,8 +486,11 @@ impl TextCursorSet {
         })
     }
     
-    pub fn replace_text(&mut self, text: &str, text_buffer: &mut TextBuffer) {
-        let grouping = if text.len() == 1 {
+    pub fn replace_text(&mut self, text: &str, text_buffer: &mut TextBuffer, override_group:Option<TextUndoGrouping>) {
+        let grouping = if let Some(override_group) = override_group{
+            override_group
+        }
+        else if text.len() == 1 {
             // check if we are space
             let ch = text.chars().next().unwrap();
             if ch == ' ' {

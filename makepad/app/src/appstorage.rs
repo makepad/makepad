@@ -2,18 +2,20 @@
 use makepad_render::*;
 use makepad_widget::*;
 use makepad_hub::*;
-use makepad_tinyserde::*;
+use makepad_microserde::*;
 use crate::appwindow::*;
 use crate::filetree::*;
 use crate::fileeditor::*;
 use crate::buildmanager::*;
 use std::collections::HashMap;
 use crate::builder;
+use crate::livemacro::*;
 
 #[derive(Debug, Clone, SerRon, DeRon)]
-pub struct AppSettings {
+pub struct AppSettings { 
     pub build_on_save: bool,
     pub exec_when_done: bool,
+    pub live_macros_on_self: bool,
     pub style_options: StyleOptions,
     pub hub_server: HubServerConfig,
     pub builders: HashMap<String, HubBuilderConfig>,
@@ -26,6 +28,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             exec_when_done: false,
+            live_macros_on_self: true,
             build_on_save: true,
             style_options: StyleOptions {scale: 1.0, dark: true},
             hub_server: HubServerConfig::Offline,
@@ -41,6 +44,7 @@ impl AppSettings {
         Self {
             exec_when_done: false,
             build_on_save: true,
+            live_macros_on_self: true,
             style_options: StyleOptions {scale: 1.0, dark: true},
             hub_server: HubServerConfig::Offline,
             builders: {
@@ -107,7 +111,7 @@ pub struct AppTextBuffer {
     pub full_path: String,
     pub text_buffer: TextBuffer,
     pub text_buffer_id: AppTextBufferId,
-    pub live_macros: Vec<LiveMacro>
+    pub live_macros: LiveMacros
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
@@ -176,7 +180,7 @@ impl AppStorage {
                 self.settings = settings;
                 self.settings.style_options.scale = self.settings.style_options.scale.min(3.0).max(0.3);
                 cx.send_signal(self.settings_changed, Self::status_settings_changed());
-                
+                cx.live_macros_on_self = self.settings.live_macros_on_self;
                 // so now, here we restart our hub_server if need be.
                 if cx.platform_type.is_desktop() {
                     if self.settings_old.hub_server != self.settings.hub_server {
@@ -259,11 +263,18 @@ impl AppStorage {
                 self.text_buffer_path_to_id.insert(path.to_string(), tb_id);
                 self.text_buffer_id_to_path.insert(tb_id, path.to_string());
                 self.text_buffers.push(AppTextBuffer {
-                    file_read: cx.file_read(path),
+                    file_read: cx.file_read(
+                        if path.starts_with("main/makepad/"){
+                            &path["main/makepad/".len()..]
+                        }
+                        else{
+                            path
+                        }
+                    ),
                     read_msg: None,
                     full_path: path.to_string(),
                     text_buffer_id: tb_id,
-                    live_macros: Vec::new(),
+                    live_macros: LiveMacros::new(cx),
                     // write_msg: None,
                     text_buffer: TextBuffer {
                         signal: cx.new_signal(),
@@ -300,7 +311,7 @@ impl AppStorage {
                     read_msg: Some(msg),
                     full_path: path.to_string(),
                     text_buffer_id: tb_id,
-                    live_macros: Vec::new(),
+                    live_macros: LiveMacros::new(cx),
                     // write_msg: None,
                     text_buffer: TextBuffer {
                         signal: cx.new_signal(),
@@ -474,7 +485,7 @@ impl AppStorage {
                                     if let Ok(utf8_data) = std::str::from_utf8(data) {
                                         atb.text_buffer.load_from_utf8(&utf8_data);
                                         atb.text_buffer.send_textbuffer_loaded_signal(cx);
-                                        FileEditor::update_token_chunks(&path, atb, &mut build_manager.search_index);
+                                        FileEditor::update_token_chunks(cx, &path, atb, &mut build_manager.search_index);
                                     }
                                 }
                                 else {

@@ -1,0 +1,14 @@
+[package]
+name = "cmykw_example"
+version = "0.1.0"
+authors = ["makepaddev"]
+edition = "2018"
+
+[dependencies]
+tiff = "0.5.0"
+
+[dependencies.makepad-render]
+path="../../render"
+
+[dependencies.makepad-widget]
+path="../../widget"
