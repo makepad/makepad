@@ -1,8 +1,9 @@
+use crate::error::Error;
 use crate::ident::Ident;
+use crate::span::Span;
 use crate::ty::Ty;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::error::Error;
 
 #[derive(Clone, Debug)]
 pub struct Env {
@@ -26,15 +27,16 @@ impl Env {
         self.scopes.pop().unwrap();
     }
 
-    pub fn insert_sym(&mut self, ident: Ident, sym: Sym) -> Result<(), Box<dyn Error>> {
+    pub fn insert_sym(&mut self, span: Span, ident: Ident, sym: Sym) -> Result<(), Error> {
         match self.scopes.last_mut().unwrap().entry(ident) {
             Entry::Vacant(entry) => {
                 entry.insert(sym);
                 Ok(())
             }
-            Entry::Occupied(_) => {
-                Err(format!("`{}` is already defined in this scope", ident).into())
-            }
+            Entry::Occupied(_) => Err(Error {
+                span,
+                message: format!("`{}` is already defined in this scope", ident),
+            }),
         }
     }
 }
@@ -49,9 +51,11 @@ pub enum Sym {
 
 #[derive(Clone, Copy, Debug)]
 pub enum VarKind {
-    Attribute,
+    Geometry,
     Const,
+    Instance,
     Local,
+    Texture,
     Uniform,
     Varying,
 }

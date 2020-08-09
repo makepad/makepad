@@ -6,5 +6,5 @@ edition = "2018"
 description = "Makepad hub"
 license = "MIT"
 
-[dependencies]
-makepad-tinyserde = {path = "../../render/tinyserde", version = "0.1"}
+[dependencies.makepad-microserde]
+path="../../render/microserde"

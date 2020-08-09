@@ -1,7 +1,7 @@
 use std::mem;
 
 use makepad_render::*;
-use makepad_tinyserde::*;
+use makepad_microserde::*;
 use crate::splitter::*;
 use crate::tabcontrol::*;
 use crate::widgetstyle::*;

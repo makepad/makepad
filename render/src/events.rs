@@ -1,6 +1,7 @@
 use crate::cx::*;
 use std::any::TypeId;
 use std::collections::HashMap;
+use makepad_shader_compiler::shadergen::ShaderGenError;
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct KeyModifiers {
@@ -153,6 +154,19 @@ pub struct FileWriteEvent {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ShaderRecompileEvent {
+    pub results: Vec<ShaderCompileResult>
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShaderCompileResult{
+    Ok{id:usize},
+    Nop{id:usize},
+    Fail{id:usize, err:ShaderGenError},
+}
+
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct KeyEvent {
     pub key_code: KeyCode,
     //pub key_char: char,
@@ -244,7 +258,8 @@ pub enum Event {
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
-    TextCopy(TextCopyEvent)
+    TextCopy(TextCopyEvent),
+    ShaderRecompile(ShaderRecompileEvent)
 }
 
 impl Default for Event {
@@ -484,12 +499,9 @@ impl Signal {
 #[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
 pub struct StatusId(pub TypeId);
 
-impl Into<StatusId> for UniqueId {
-    fn into(self) -> StatusId {StatusId(self.0)}
+impl Into<StatusId> for TypeId {
+    fn into(self) -> StatusId {StatusId(self)}
 }
-
-
-
 
 
 

@@ -3,6 +3,8 @@ use makepad_trapezoidator::Trapezoidator;
 use makepad_geometry::{AffineTransformation, Transform, Vector};
 use makepad_internal_iter::*;
 use makepad_path::PathIterator;
+//use makepad_shader_compiler::shader::*; 
+//use makepad_shader_macro::*;
 
 impl Cx {
     /*
@@ -14,7 +16,7 @@ impl Cx {
         for font in &mut self.fonts{
             font.atlas_pages.truncate(0);
         }
-        self.fonts_atlas.alloc_xpos = 0.;
+        self.fonts_atlas.alloc_xpos = 0.; 
         self.fonts_atlas.alloc_ypos = 0.;
         self.fonts_atlas.alloc_hmax = 0.;
         self.fonts_atlas.clear_buffer = true;
@@ -57,30 +59,31 @@ impl TrapezoidText {
             shader: cx.add_shader(Self::def_trapezoid_shader(), "TrapezoidShader"),
             trapezoidator: Trapezoidator::default(),
         }
-    }
+    } 
     
-    fn instance_a_xs()->InstanceVec2{uid!()}
-    fn instance_a_ys()->InstanceVec4{uid!()}
-    fn instance_chan()->InstanceFloat{uid!()}
+    fn geom()->Vec2Id{uid!()}
+    fn a_xs()->Vec2Id{uid!()}
+    fn a_ys()->Vec4Id{uid!()}
+    fn chan()->FloatId{uid!()}
     
     pub fn def_trapezoid_shader() -> ShaderGen { 
-        let mut sg = ShaderGen::new();
+        let mut sg = Cx::shader_defs(ShaderGen::new()); 
         sg.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
         sg.geometry_indices = vec![0, 1, 2, 2, 3, 0];
-        
-        sg.compose(shader_ast!({
+         
+        sg.compose(shader!{"
             
-            let geom: vec2<Geometry>;
+            geometry geom: Self::geom();
             
-            let a_xs: Self::instance_a_xs();
-            let a_ys: Self::instance_a_ys();
-            let chan: Self::instance_chan();
+            instance a_xs: Self::a_xs();
+            instance a_ys: Self::a_ys();
+            instance chan: Self::chan();
             
-            let v_p0: vec2<Varying>;
-            let v_p1: vec2<Varying>;
-            let v_p2: vec2<Varying>;
-            let v_p3: vec2<Varying>;
-            let v_pixel: vec2<Varying>;
+            varying v_p0: vec2;
+            varying v_p1: vec2;
+            varying v_p2: vec2;
+            varying v_p3: vec2;
+            varying v_pixel: vec2;
             
             fn intersect_line_segment_with_vertical_line(p0: vec2, p1: vec2, x: float) -> vec2 {
                 return vec2(
@@ -134,10 +137,6 @@ impl TrapezoidText {
             }
             
             fn pixel() -> vec4 {
-                //if fmod(v_pixel.x,2.0) > 1.0 && fmod(v_pixel.y,2.0) > 1.0{
-                //    return color("white")
-               // }
-               // return color("black");
                 let p_min = v_pixel.xy - 0.5;
                 let p_max = v_pixel.xy + 0.5;
                 let t_area = compute_clamped_trapezoid_area(p_min, p_max);
@@ -151,17 +150,6 @@ impl TrapezoidText {
                     return vec4(0., 0., t_area,0.);
                 }
                 return vec4(t_area, t_area, t_area,0.);
-                
-                //let b_minx = p_min.x + 1.0 / 3.0;
-                //let r_minx = p_min.x - 1.0 / 3.0;
-                //let b_maxx = p_max.x + 1.0 / 3.0;
-                //let r_maxx = p_max.x - 1.0 / 3.0;
-                //return vec4(
-                //    compute_clamped_trapezoid_area(vec2(r_minx, p_min.y), vec2(r_maxx, p_max.y)),
-                //    compute_clamped_trapezoid_area(p_min, p_max),
-                //    compute_clamped_trapezoid_area(vec2(b_minx, p_min.y), vec2(b_maxx, p_max.y)),
-                //    0.0
-                //);
             }
             
             fn vertex() -> vec4 {
@@ -175,10 +163,9 @@ impl TrapezoidText {
                 v_p2 = vec2(a_xs.x, a_ys.z);
                 v_p3 = vec2(a_xs.y, a_ys.w);
                 v_pixel = pos;
-                //return vec4(vec2(pos.x, 1.0-pos.y) * 2.0 / vec2(4096.,4096.) - 1.0, 0.0, 1.0);
                 return camera_projection * vec4(pos, 0.0, 1.0);
             }
-        }))
+        "})
     }
 
     // test api for directly drawing a glyph

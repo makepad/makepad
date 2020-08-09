@@ -48,13 +48,13 @@ impl TextInput {
         TextEditor::color_bg().set(cx, TextEditor::color_bg().get(cx));
         TextEditor::gutter_width().set(cx, 0.);
         TextEditor::padding_top().set(cx, 0.);
-        TextEditor::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        TextEditor::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_box(0., 0., w, h, 2.5);
-                return df_fill(color);
+                let cx = Df::viewport(pos * vec2(w, h));
+                cx.box(0., 0., w, h, 2.5);
+                return cx.fill(color);
             }
-        })));
+        "}));
         cx.end_style();
     }
     
@@ -107,7 +107,7 @@ impl TextInput {
         
         if text_buffer.is_empty() {
             let pos = cx.get_turtle_pos();
-            self.text_editor.text.color = color("#666");
+            self.text_editor.text.color = pick!(#666).get(cx);
             self.text_editor.text.draw_text(cx, &self.empty_message);
             cx.set_turtle_pos(pos);
         }

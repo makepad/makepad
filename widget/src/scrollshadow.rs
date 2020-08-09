@@ -16,22 +16,22 @@ impl ScrollShadow {
     }
     
     pub fn shadow_size() -> FloatId {uid!()}
-    pub fn shadow_top() -> InstanceFloat {uid!()}
+    pub fn shadow_top() -> FloatId {uid!()}
     pub fn shader_bg() -> ShaderId {uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         
         Self::shadow_size().set(cx, 4.0);
         
-        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast !({
-            let is_viz: float<Varying>;
-            let shadow_top: Self::shadow_top();
+        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"
+            varying is_viz: float;
+            instance shadow_top: Self::shadow_top();
             fn scroll() -> vec2 {
                 if shadow_top > 0.5 {
-                    is_viz = clamp(draw_scroll.w*0.1,0.,1.)
+                    is_viz = clamp(draw_scroll.w*0.1,0.,1.);
                 }
                 else {
-                    is_viz = clamp(draw_scroll.z*0.1,0.,1.)
+                    is_viz = clamp(draw_scroll.z*0.1,0.,1.);
                 }
                 return draw_scroll.xy;
             }
@@ -42,7 +42,7 @@ impl ScrollShadow {
                 }
                 return mix(vec4(0., 0., 0., is_viz), vec4(0., 0., 0., 0.), pow(geom.x, 0.5));
             }
-        })));
+        "}));
     }
     
     pub fn draw_shadow_top(&mut self, cx:&mut Cx){

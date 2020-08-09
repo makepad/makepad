@@ -142,15 +142,17 @@ impl View {
         let cxview = &mut cx.views[view_id];
         
         // update drawlist ids
+        let last_redraw_id = cxview.redraw_id;
         cxview.redraw_id = cx.redraw_id;
         cxview.draw_calls_len = 0;
         
         cx.view_stack.push(view_id);
         
-        cx.begin_turtle(override_layout, Area::View(ViewArea {
-            view_id: view_id,
-            redraw_id: cx.redraw_id
-        }));
+        let old_area = Area::View(ViewArea {view_id: view_id, redraw_id: last_redraw_id});
+        let new_area = Area::View(ViewArea {view_id: view_id, redraw_id: cx.redraw_id});
+        cx.update_area_refs(old_area, new_area);
+
+        cx.begin_turtle(override_layout, new_area);
         
         if is_root_for_pass {
             cx.passes[pass_id].paint_dirty = true;
@@ -269,7 +271,7 @@ impl Cx {
         dc.instance.truncate(0);
         dc.current_instance_offset = 0;
         dc.uniforms.truncate(0);
-        dc.textures_2d.truncate(0); 
+        dc.textures_2d.truncate(0);
         dc.instance_dirty = true;
         dc.uniforms_dirty = true;
         dc.do_h_scroll = true;
@@ -292,9 +294,9 @@ impl Cx {
                 if dc.sub_view_id == 0 && dc.shader_id == shader_id && dc.shader_instance_id == shader_instance_id {
                     // reuse this drawcmd and add an instance
                     dc.current_instance_offset = dc.instance.len();
-                    let slot_align = dc.instance.len() % sh.mapping.instance_slots;
+                    let slot_align = dc.instance.len() % sh.mapping.instance_props.total_slots;
                     if slot_align != 0 {
-                        panic!("Instance offset disaligned! shader: {} misalign: {} slots: {}", shader_id, slot_align, sh.mapping.instance_slots);
+                        panic!("Instance offset disaligned! shader: {} misalign: {} slots: {}", shader_id, slot_align, sh.mapping.instance_props.total_slots);
                     }
                     return dc.get_current_instance_area(instance_count);
                 }
@@ -415,7 +417,7 @@ impl DrawCall {
         self.draw_uniforms.draw_scroll_w = local_scroll.y;
     }
     
-    pub fn set_zbias(&mut self, zbias:f32){
+    pub fn set_zbias(&mut self, zbias: f32) {
         self.draw_uniforms.draw_zbias = zbias;
     }
     
@@ -479,28 +481,28 @@ pub struct CxView {
     pub clipped: bool
 }
 
-impl CxView { 
+impl CxView {
     pub fn initialize(&mut self, pass_id: usize, clipped: bool, redraw_id: u64) {
         self.clipped = clipped;
         self.redraw_id = redraw_id;
-        self.pass_id = pass_id; 
-    } 
+        self.pass_id = pass_id;
+    }
     
-    pub fn get_scrolled_rect(&self)->Rect{
-        Rect{
-            x:self.rect.x + self.parent_scroll.x,
-            y:self.rect.y + self.parent_scroll.y,
-            w:self.rect.w, 
-            h:self.rect.h ,
+    pub fn get_scrolled_rect(&self) -> Rect {
+        Rect {
+            x: self.rect.x + self.parent_scroll.x,
+            y: self.rect.y + self.parent_scroll.y,
+            w: self.rect.w,
+            h: self.rect.h,
         }
     }
-
-    pub fn get_inverse_scrolled_rect(&self)->Rect{
-        Rect{
-            x:self.rect.x - self.parent_scroll.x,
-            y:self.rect.y - self.parent_scroll.y,
-            w:self.rect.w, 
-            h:self.rect.h ,
+    
+    pub fn get_inverse_scrolled_rect(&self) -> Rect {
+        Rect {
+            x: self.rect.x - self.parent_scroll.x,
+            y: self.rect.y - self.parent_scroll.y,
+            w: self.rect.w,
+            h: self.rect.h,
         }
     }
     
@@ -539,13 +541,18 @@ impl CxView {
         Vec2 {x: xs, y: ys}
     }
     
+    fn view_transform() -> Mat4Id {uid!()}
+    fn draw_clip() -> Vec4Id {uid!()}
+    fn draw_scroll() -> Vec4Id {uid!()}
+    fn draw_zbias() -> FloatId {uid!()}
+    
     pub fn def_uniforms(sg: ShaderGen) -> ShaderGen {
-        sg.compose(shader_ast!({
-            let view_transform: mat4<ViewUniform>;
-            let draw_clip: vec4<DrawUniform>;
-            let draw_scroll: vec4<DrawUniform>;
-            let draw_zbias: float<DrawUniform>;
-        }))
+        sg.compose(shader!{"
+            uniform view_transform: Self::view_transform() in view;
+            uniform draw_clip: Self::draw_clip() in draw;
+            uniform draw_scroll: Self::draw_scroll() in draw;
+            uniform draw_zbias: Self::draw_zbias() in draw;
+        "})
     }
     
     pub fn uniform_view_transform(&mut self, v: &Mat4) {

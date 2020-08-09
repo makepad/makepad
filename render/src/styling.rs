@@ -26,22 +26,28 @@ impl Cx{
         else{
             &mut self.style_base
         }
-    }
+    } 
 
-}
+}  
+
 
 // floats
 
 
 #[derive(PartialEq, Copy, Clone, Hash, Eq)]
-pub struct FloatId(pub TypeId);
-
-impl FloatId {
-    pub fn set(&self, cx: &mut Cx, value: f32) {
+pub struct FloatStyleId(pub TypeId);
+ 
+pub trait FloatStyle{ 
+    fn set(&self, cx: &mut Cx, value: f32);
+    fn get(&self, cx: &Cx) -> f32;
+}
+ 
+impl FloatStyle for FloatId{
+    fn set(&self, cx: &mut Cx, value: f32) {
         cx.get_mut_style_top().floats.insert(*self, value);
     }
     
-    pub fn get(&self, cx: &Cx) -> f32 {
+    fn get(&self, cx: &Cx) -> f32 {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].floats.get(self){
                 return *value
@@ -51,24 +57,21 @@ impl FloatId {
     }
 }
 
-impl Into<FloatId> for UniqueId {
-    fn into(self) -> FloatId {FloatId(self.0)}
-}
-
-
 
 // Colors
 
 
-#[derive(PartialEq, Copy, Clone, Hash, Eq)]
-pub struct ColorId(pub TypeId);
+pub trait ColorStyle{
+    fn set(&self, cx: &mut Cx, value: Color);
+    fn get(&self, cx: &Cx) -> Color;
+}
 
-impl ColorId {
-    pub fn set(&self, cx: &mut Cx, value: Color) {
+impl ColorStyle for ColorId{
+    fn set(&self, cx: &mut Cx, value: Color) {
         cx.get_mut_style_top().colors.insert(*self, value);
     }
     
-    pub fn get(&self, cx: &Cx) -> Color {
+    fn get(&self, cx: &Cx) -> Color {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].colors.get(self){
                 return *value
@@ -76,10 +79,6 @@ impl ColorId {
         }
         *cx.style_base.colors.get(&*self).expect("Cannot find ColorId")
     }
-}
-
-impl Into<ColorId> for UniqueId {
-    fn into(self) -> ColorId {ColorId(self.0)}
 }
 
 
@@ -105,8 +104,8 @@ impl TextStyleId {
     }
 }
 
-impl Into<TextStyleId> for UniqueId {
-    fn into(self) -> TextStyleId {TextStyleId(self.0)}
+impl Into<TextStyleId> for TypeId {
+    fn into(self) -> TextStyleId {TextStyleId(self)}
 }
 
 
@@ -130,8 +129,8 @@ impl LayoutId {
     }
 }
 
-impl Into<LayoutId> for UniqueId {
-    fn into(self) -> LayoutId {LayoutId(self.0)}
+impl Into<LayoutId> for TypeId {
+    fn into(self) -> LayoutId {LayoutId(self)}
 }
 
 
@@ -157,8 +156,8 @@ impl WalkId {
 }
 
 
-impl Into<WalkId> for UniqueId {
-    fn into(self) -> WalkId {WalkId(self.0)}
+impl Into<WalkId> for TypeId {
+    fn into(self) -> WalkId {WalkId(self)}
 }
 
 
@@ -184,8 +183,8 @@ impl AnimId {
     }
 }
 
-impl Into<AnimId> for UniqueId {
-    fn into(self) -> AnimId {AnimId(self.0)}
+impl Into<AnimId> for TypeId {
+    fn into(self) -> AnimId {AnimId(self)}
 }
 
 
@@ -196,7 +195,7 @@ pub struct ShaderId(pub TypeId);
 
 impl ShaderId {
     pub fn set(&self, cx: &mut Cx, sg: ShaderGen) {
-        let shader = cx.add_shader(sg, &format!("{:?}", self.0));
+        let shader = cx.add_shader(sg, &format!("Style Shader {:?}", self.0));
         cx.get_mut_style_top().shaders.insert(*self, shader);
     }
     
@@ -211,8 +210,8 @@ impl ShaderId {
 }
 
 
-impl Into<ShaderId> for UniqueId {
-    fn into(self) -> ShaderId {ShaderId(self.0)}
+impl Into<ShaderId> for TypeId {
+    fn into(self) -> ShaderId {ShaderId(self)}
 }
 
 
@@ -222,8 +221,8 @@ impl Into<ShaderId> for UniqueId {
 #[derive(PartialEq, Copy, Clone, Hash, Eq)]
 pub struct StyleId(pub TypeId);
 
-impl Into<StyleId> for UniqueId {
-    fn into(self) -> StyleId {StyleId(self.0)}
+impl Into<StyleId> for TypeId {
+    fn into(self) -> StyleId {StyleId(self)}
 }
 
 

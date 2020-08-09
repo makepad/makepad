@@ -1,4 +1,3 @@
-
 use crate::error::Error;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
@@ -8,6 +7,7 @@ use crate::token::{Token, TokenWithSpan};
 #[derive(Clone, Debug)]
 pub struct Lex<C> {
     chars: C,
+    loc_id: usize,
     ch_0: char,
     ch_1: char,
     index: usize,
@@ -71,6 +71,62 @@ where
             ('!', _) => {
                 self.skip_char();
                 Token::Not
+            }
+            ('#', _) => {
+                self.skip_char();
+                let mut digits = Vec::new();
+                while let Some(ch) = self.read_char_if(|ch| ch.is_ascii_hexdigit()) {
+                    digits.push(ch.to_digit(16).unwrap());
+                }
+                let mut value = 0;
+                match digits.len() {
+                    1 => {
+                        for &digit in digits.iter().cycle().take(6) {
+                            value = value << 4 | digit;
+                        }
+                        for &digit in &[0xF, 0xF] {
+                            value = value << 4 | digit;
+                        }
+                    }
+                    2 => {
+                        for &digit in digits.iter().cycle().take(6) {
+                            value = value << 4 | digit;
+                        }
+                        for &digit in &[0xF, 0xF] {
+                            value = value << 4 | digit;
+                        }
+                    }
+                    3 => {
+                        for &digit in &digits {
+                            value = value << 4 | digit;
+                            value = value << 4 | digit;
+                        }
+                        for &digit in &[0xF, 0xF] {
+                            value = value << 4 | digit;
+                        }
+                    }
+                    4 => {
+                        for &digit in &digits {
+                            value = value << 4 | digit;
+                            value = value << 4 | digit;
+                        }
+                    }
+                    6 => {
+                        for &digit in &digits {
+                            value = value << 4 | digit;
+                        }
+                        for &digit in &[0xF, 0xF] {
+                            value = value << 4 | digit;
+                        }
+                    }
+                    8 => {
+                        for &digit in &digits {
+                            value = value << 4 | digit;
+                        }
+                    }
+                    _ => return Err(span.error(self, "invalid color literal".into())),
+                }
+                Token::Lit(Lit::Int(value))
             }
             ('&', '&') => {
                 self.skip_two_chars();
@@ -145,11 +201,9 @@ where
                 if has_frac_part || has_exp_part {
                     Token::Lit(Lit::Float(string.parse::<f32>().unwrap()))
                 } else {
-                    Token::Lit(Lit::Int(
-                        string
-                            .parse::<u32>()
-                            .map_err(|_| span.error(self, "overflowing integer literal".into()))?,
-                    ))
+                    Token::Lit(Lit::Int(string.parse::<u32>().map_err(|_| {
+                        span.error(self, "overflowing integer literal".into())
+                    })?))
                 }
             }
             ('.', _) => {
@@ -209,7 +263,7 @@ where
                 string.push(self.read_char());
                 self.read_chars_while(&mut string, |ch| ch.is_ascii_alphanumeric() || ch == '_');
                 match string.as_str() {
-                    "attribute" => Token::Attribute,
+                    "geometry" => Token::Geometry,
                     "bool" => Token::TyLit(TyLit::Bool),
                     "break" => Token::Break,
                     "bvec2" => Token::TyLit(TyLit::Bvec2),
@@ -224,7 +278,9 @@ where
                     "for" => Token::For,
                     "from" => Token::From,
                     "if" => Token::If,
+                    "impl" => Token::Impl,
                     "in" => Token::In,
+                    "inout" => Token::Inout,
                     "instance" => Token::Instance,
                     "int" => Token::TyLit(TyLit::Int),
                     "ivec2" => Token::TyLit(TyLit::Ivec2),
@@ -235,8 +291,9 @@ where
                     "mat3" => Token::TyLit(TyLit::Mat3),
                     "mat4" => Token::TyLit(TyLit::Mat4),
                     "return" => Token::Return,
-                    "step" => Token::Step,
+                    "self" => Token::Self_,
                     "struct" => Token::Struct,
+                    "texture" => Token::Texture,
                     "to" => Token::To,
                     "uniform" => Token::Uniform,
                     "varying" => Token::Varying,
@@ -267,7 +324,9 @@ where
                 self.skip_char();
                 Token::RightBrace
             }
-            _ => return Err(span.error(self, format!("unexpected character `{}`", self.ch_0).into())),
+            _ => {
+                return Err(span.error(self, format!("unexpected character `{}`", self.ch_0).into()))
+            }
         };
         Ok(span.token(self, token))
     }
@@ -331,7 +390,8 @@ where
 
     fn begin_span(&mut self) -> SpanTracker {
         SpanTracker {
-            start: self.index
+            loc_id: self.loc_id,
+            start: self.index,
         }
     }
 }
@@ -356,7 +416,7 @@ where
     }
 }
 
-pub fn lex<C>(chars: C) -> Lex<C::IntoIter>
+pub fn lex<C>(chars: C, loc_id: usize) -> Lex<C::IntoIter>
 where
     C: IntoIterator<Item = char>,
 {
@@ -367,19 +427,22 @@ where
         chars,
         ch_0,
         ch_1,
+        loc_id,
         index: 0,
         is_done: false,
     }
 }
 
 struct SpanTracker {
-    start: usize
+    loc_id: usize,
+    start: usize,
 }
 
 impl SpanTracker {
     fn token<C>(&self, lex: &Lex<C>, token: Token) -> TokenWithSpan {
         TokenWithSpan {
             span: Span {
+                loc_id: self.loc_id,
                 start: self.start,
                 end: lex.index,
             },
@@ -390,6 +453,7 @@ impl SpanTracker {
     fn error<C>(&self, lex: &Lex<C>, message: String) -> Error {
         Error {
             span: Span {
+                loc_id: self.loc_id,
                 start: self.start,
                 end: lex.index,
             },
