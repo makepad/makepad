@@ -93,16 +93,17 @@ impl CxShader {
                     
                     let df: Df;
                     df.pos = pos;
-                    df.result = vec4(0., 0., 0., 0.);
-                    df.old_shape = 1e+20;
+                    df.result = vec4(0.);
+                    df.last_pos = vec2(0.);
+                    df.start_pos = vec2(0.);
                     df.shape = 1e+20;
                     df.clip = -1e+20;
+                    df.has_clip = 0.0;
+                    df.old_shape = 1e+20;
                     df.blur = 0.00001;
                     df.aa = Df::antialias(pos);
                     df.scale = 1.0;
                     df.field = 0.0;
-                    df.clip = 0.0;
-                    df.has_clip = 0.0;
                     return df;
                 }
                 

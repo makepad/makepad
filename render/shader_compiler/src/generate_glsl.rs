@@ -652,6 +652,10 @@ impl BackendWriter for GlslBackendWriter {
         false
     }
 
+    fn  const_table_is_vec4(&self) -> bool{
+        false
+    }
+
     fn write_var_decl(
         &self,
         string: &mut String,
