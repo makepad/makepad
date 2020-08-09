@@ -25,6 +25,10 @@ pub trait BackendWriter {
         ty: &Ty,
     );
     
+    fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, ident:Ident, shader:&ShaderAst, sep:&str);
+
+    fn generate_var_expr_prefix(&self, string: &mut String, ident: Ident, kind: &Cell<Option<VarKind>>, shader: &ShaderAst, decl: &FnDecl);
+    
     fn write_ident(&self, string: &mut String, ident: Ident);
     
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
@@ -37,7 +41,6 @@ pub struct BlockGenerator<'a> {
     pub decl: &'a FnDecl,
     pub backend_writer: &'a dyn BackendWriter,
     pub use_const_table: bool,
-    pub use_hidden_params: bool,
     pub use_generated_cons_fns: bool,
     pub indent_level: usize,
     pub string: &'a mut String,
@@ -214,7 +217,7 @@ impl<'a> BlockGenerator<'a> {
             decl: Some(self.decl),
             backend_writer: self.backend_writer,
             use_const_table: self.use_const_table,
-            use_hidden_params: self.use_hidden_params,
+            //use_hidden_params: self.use_hidden_params,
             use_generated_cons_fns: self.use_generated_cons_fns,
             string: self.string,
         }
@@ -238,7 +241,7 @@ pub struct ExprGenerator<'a> {
     pub decl: Option<&'a FnDecl>,
     pub backend_writer: &'a dyn BackendWriter,
     pub use_const_table: bool,
-    pub use_hidden_params: bool,
+    //pub use_hidden_params2: bool,
     pub use_generated_cons_fns: bool,
     pub string: &'a mut String,
 }
@@ -403,43 +406,9 @@ impl<'a> ExprGenerator<'a> {
             
             sep = ", ";
         }
-        if self.use_hidden_params {
-            if let Some(decl) = self.shader.find_fn_decl(ident) {
-                if self.use_const_table {
-                    write!(self.string, "{}mpsc_const_table", sep).unwrap();
-                    sep = ", ";
-                }
-                for &ident in decl.uniform_block_deps.borrow().as_ref().unwrap() {
-                    write!(self.string, "{}mpsc_{}_uniforms", sep, ident).unwrap();
-                    sep = ", ";
-                }
-                if decl.has_texture_deps.get().unwrap() {
-                    write!(self.string, "{}mpsc_textures", sep).unwrap();
-                    sep = ", ";
-                }
-                if decl.is_used_in_vertex_shader.get().unwrap() {
-                    if !decl.geometry_deps.borrow().as_ref().unwrap().is_empty() {
-                        write!(self.string, "{}mpsc_attributes", sep).unwrap();
-                        sep = ", ";
-                    }
-                    if !decl.instance_deps.borrow().as_ref().unwrap().is_empty() {
-                        write!(self.string, "{}mpsc_instances", sep).unwrap();
-                        sep = ", ";
-                    }
-                    if decl.has_varying_deps.get().unwrap() {
-                        write!(self.string, "{}mpsc_varyings", sep).unwrap();
-                    }
-                } else {
-                    assert!(decl.is_used_in_fragment_shader.get().unwrap());
-                    if !decl.geometry_deps.borrow().as_ref().unwrap().is_empty()
-                        || !decl.instance_deps.borrow().as_ref().unwrap().is_empty()
-                        || decl.has_varying_deps.get().unwrap()
-                    {
-                        write!(self.string, "{}mpsc_varyings", sep).unwrap();
-                    }
-                }
-            }
-        }
+        
+        self.backend_writer.write_call_expr_hidden_args(&mut self.string, self.use_const_table, ident, &self.shader, &sep);
+        
         write!(self.string, ")").unwrap();
     }
     
@@ -497,53 +466,8 @@ impl<'a> ExprGenerator<'a> {
     }
     
     fn generate_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind>>, ident: Ident) {
-        if self.use_hidden_params {
-            if let Some(decl) = self.decl {
-                let is_used_in_vertex_shader = decl.is_used_in_vertex_shader.get().unwrap();
-                let is_used_in_fragment_shader = decl.is_used_in_fragment_shader.get().unwrap();
-                if is_used_in_vertex_shader {
-                    match kind.get().unwrap() {
-                        VarKind::Geometry => write!(self.string, "mpsc_geometries.").unwrap(),
-                        VarKind::Instance => write!(self.string, "mpsc_instances.").unwrap(),
-                        VarKind::Uniform => {
-                            write!(
-                                self.string,
-                                "mpsc_{}_uniforms.",
-                                self.shader
-                                    .find_uniform_decl(ident)
-                                    .unwrap()
-                                    .block_ident
-                                    .unwrap_or(Ident::new("default")),
-                            )
-                                .unwrap();
-                        }
-                        VarKind::Texture => write!(self.string, "mpsc_textures.").unwrap(),
-                        VarKind::Varying => write!(self.string, "mpsc_varyings.").unwrap(),
-                        _ => {}
-                    }
-                }
-                if is_used_in_fragment_shader {
-                    match kind.get().unwrap() {
-                        VarKind::Uniform => {
-                            write!(
-                                self.string,
-                                "mpsc_{}_uniforms.",
-                                self.shader
-                                    .find_uniform_decl(ident)
-                                    .unwrap()
-                                    .block_ident
-                                    .unwrap_or(Ident::new("default")),
-                            )
-                                .unwrap();
-                        }
-                        VarKind::Texture => write!(self.string, "mpsc_textures.").unwrap(),
-                        VarKind::Geometry | VarKind::Instance | VarKind::Varying => {
-                            write!(self.string, "mpsc_varyings.").unwrap()
-                        }
-                        _ => {}
-                    }
-                }
-            }
+        if let Some(decl) = self.decl {
+            self.backend_writer.generate_var_expr_prefix(&mut self.string, ident, kind, &self.shader, decl);
         }
         write!(self.string, "{}", ident).unwrap()
     }
