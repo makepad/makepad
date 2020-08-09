@@ -116,9 +116,11 @@ impl ShaderGen {
             inputs.extend(sub.textures.iter());
         }
 
-        // lets collect all our
         // ok now we have the shader, lets analyse
-        if let Err(err) = analyse::analyse(&mut shader_ast, &inputs) {
+        // set the third argument here to true if you want to gather all const
+        // expressions into a table, and to false if you only want to gather
+        // macro expressions. 
+        if let Err(err) = analyse::analyse(&mut shader_ast, &inputs, false) {
             let sub = &self.subs[err.span.loc_id];
             return Err(Self::shader_gen_error(&err, sub));
         }
