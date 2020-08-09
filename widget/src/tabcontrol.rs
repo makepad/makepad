@@ -56,7 +56,7 @@ impl TabControl {
                 ..View::new(cx)
             },
             hover: Quad {
-                color: color("purple"),
+                color: pick!(purple).get(cx),
                 ..Quad::new(cx)
             },
             //tab_fill_color: Color_bg_normal::id(),
@@ -73,7 +73,7 @@ impl TabControl {
     pub fn handle_tab_control(&mut self, cx: &mut Cx, event: &mut Event) -> TabControlEvent {
         let mut tab_control_event = TabControlEvent::None;
         
-        self.tabs_view.handle_scroll_bars(cx, event);
+        self.tabs_view.handle_scroll_view(cx, event);
         
         for (id, tab) in self.tabs.enumerate() {
             

@@ -1,5 +1,5 @@
 use makepad_render::*;
-use makepad_tinyserde::*;
+use makepad_microserde::*;
 use crate::widgetstyle::*;
 
 #[derive(Clone)]
@@ -68,28 +68,28 @@ impl Splitter {
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         
         Self::anim_default().set(cx, Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter().get(cx))]),
+            Track::color(Quad::color(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter().get(cx))]),
         ]));
         
         Self::anim_over().set(cx, Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter_over().get(cx))]),
+            Track::color(Quad::color(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter_over().get(cx))]),
         ]));
         
         Self::anim_down().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![
+            Track::color(Quad::color(), Ease::Lin, vec![
                 (0.0, Theme::color_bg_splitter_peak().get(cx)),
                 (1.0, Theme::color_bg_splitter_drag().get(cx))
             ]),
         ]));
         
-        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"
             
             fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_box(0., 0., w, h, 0.5);
-                return df_fill(color);
+                let df = Df::viewport(pos * vec2(w, h));
+                df.box(0., 0., w, h, 0.5);
+                return df.fill(color);
             }
-        })));
+        "}));
     }
     
     pub fn handle_splitter(&mut self, cx: &mut Cx, event: &mut Event) -> SplitterEvent {
@@ -271,7 +271,7 @@ impl Splitter {
         let rect = cx.get_turtle_rect();
         let origin = cx.get_turtle_origin();
         self.bg.shader = Self::shader_bg().get(cx);
-        self.bg.color = self.animator.last_color(cx, Quad::instance_color());
+        self.bg.color = self.animator.last_color(cx, Quad::color());
         match self.axis {
             Axis::Horizontal => {
                 cx.set_turtle_pos(Vec2 {x: origin.x, y: origin.y + self._calc_pos});

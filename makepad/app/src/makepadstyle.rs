@@ -6,6 +6,7 @@ use crate::homepage::*;
 use crate::codeicon::*;
 use crate::searchresults::*;
 use crate::itemdisplay::*;
+use crate::livemacro::*;
 
 pub fn set_makepad_style(cx: &mut Cx, opt:&StyleOptions) {
     CodeIcon::style(cx, opt);
@@ -14,4 +15,6 @@ pub fn set_makepad_style(cx: &mut Cx, opt:&StyleOptions) {
     LogList::style(cx, opt);
     SearchResults::style(cx, opt);
     ItemDisplay::style(cx, opt);
+    ColorPicker::style(cx, opt);
+    FloatSlider::style(cx, opt);
 }

@@ -5,25 +5,29 @@ use crate::span::Span;
 use crate::ty::Ty;
 use crate::val::Val;
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fmt;
 
 #[derive(Clone, Debug)]
-pub struct Shader {
+pub struct ShaderAst {
+    pub debug: bool,
+    pub const_table: RefCell<Option<Vec<f32>>>,
     pub decls: Vec<Decl>,
 }
 
-impl Shader {
-    pub fn new() -> Shader {
-        Shader {
-            decls: Vec::new()
+impl ShaderAst {
+    pub fn new() -> ShaderAst {
+        ShaderAst {
+            debug: false,
+            const_table: RefCell::new(None),
+            decls: Vec::new(),
         }
     }
 
-    pub fn find_attribute_decl(&self, ident: Ident) -> Option<&AttributeDecl> {
+    pub fn find_geometry_decl(&self, ident: Ident) -> Option<&GeometryDecl> {
         self.decls.iter().find_map(|decl| {
             match decl {
-                Decl::Attribute(decl) => Some(decl),
+                Decl::Geometry(decl) => Some(decl),
                 _ => None,
             }
             .filter(|decl| decl.ident == ident)
@@ -41,7 +45,7 @@ impl Shader {
     }
 
     pub fn find_fn_decl(&self, ident: Ident) -> Option<&FnDecl> {
-        self.decls.iter().find_map(|decl| {
+        self.decls.iter().rev().find_map(|decl| {
             match decl {
                 Decl::Fn(decl) => Some(decl),
                 _ => None,
@@ -93,23 +97,27 @@ impl Shader {
 
 #[derive(Clone, Debug)]
 pub enum Decl {
-    Attribute(AttributeDecl),
+    Geometry(GeometryDecl),
     Const(ConstDecl),
     Fn(FnDecl),
     Instance(InstanceDecl),
     Struct(StructDecl),
+    Texture(TextureDecl),
     Uniform(UniformDecl),
     Varying(VaryingDecl),
 }
 
 #[derive(Clone, Debug)]
-pub struct AttributeDecl {
+pub struct GeometryDecl {
+    pub is_used_in_fragment_shader: Cell<Option<bool>>,
+    pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
 }
 
 #[derive(Clone, Debug)]
 pub struct ConstDecl {
+    pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
     pub expr: Expr,
@@ -117,16 +125,18 @@ pub struct ConstDecl {
 
 #[derive(Clone, Debug)]
 pub struct FnDecl {
+    pub span: Span,
     pub return_ty: RefCell<Option<Ty>>,
     pub is_used_in_vertex_shader: Cell<Option<bool>>,
     pub is_used_in_fragment_shader: Cell<Option<bool>>,
-    pub callees: RefCell<Option<HashSet<Ident>>>,
-    pub uniform_block_deps: RefCell<Option<HashSet<Ident>>>,
-    pub attribute_deps: RefCell<Option<HashSet<Ident>>>,
-    pub has_in_varying_deps: Cell<Option<bool>>,
-    pub has_out_varying_deps: Cell<Option<bool>>,
-    pub builtin_deps: RefCell<Option<HashSet<Ident>>>,
-    pub cons_deps: RefCell<Option<HashSet<(TyLit, Vec<Ty>)>>>,
+    pub callees: RefCell<Option<BTreeSet<Ident>>>, 
+    pub uniform_block_deps: RefCell<Option<BTreeSet<Ident>>>,
+    pub has_texture_deps: Cell<Option<bool>>,
+    pub geometry_deps: RefCell<Option<BTreeSet<Ident>>>,
+    pub instance_deps: RefCell<Option<BTreeSet<Ident>>>,
+    pub has_varying_deps: Cell<Option<bool>>,
+    pub builtin_deps: RefCell<Option<BTreeSet<Ident>>>,
+    pub cons_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>)>>>,
     pub ident: Ident,
     pub params: Vec<Param>,
     pub return_ty_expr: Option<TyExpr>,
@@ -135,12 +145,15 @@ pub struct FnDecl {
 
 #[derive(Clone, Debug)]
 pub struct InstanceDecl {
+    pub is_used_in_fragment_shader: Cell<Option<bool>>,
+    pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
 }
 
 #[derive(Clone, Debug)]
 pub struct StructDecl {
+    pub span: Span,
     pub ident: Ident,
     pub fields: Vec<Field>,
 }
@@ -152,7 +165,15 @@ impl StructDecl {
 }
 
 #[derive(Clone, Debug)]
+pub struct TextureDecl {
+    pub span: Span,
+    pub ident: Ident,
+    pub ty_expr: TyExpr,
+}
+
+#[derive(Clone, Debug)]
 pub struct UniformDecl {
+    pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
     pub block_ident: Option<Ident>,
@@ -160,12 +181,15 @@ pub struct UniformDecl {
 
 #[derive(Clone, Debug)]
 pub struct VaryingDecl {
+    pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
 }
 
 #[derive(Clone, Debug)]
 pub struct Param {
+    pub span: Span,
+    pub is_inout: bool,
     pub ident: Ident,
     pub ty_expr: TyExpr,
 }
@@ -183,9 +207,14 @@ pub struct Block {
 
 #[derive(Clone, Debug)]
 pub enum Stmt {
-    Break,
-    Continue,
+    Break {
+        span: Span,
+    },
+    Continue {
+        span: Span,
+    },
     For {
+        span: Span,
         ident: Ident,
         from_expr: Expr,
         to_expr: Expr,
@@ -193,23 +222,28 @@ pub enum Stmt {
         block: Box<Block>,
     },
     If {
+        span: Span,
         expr: Expr,
         block_if_true: Box<Block>,
         block_if_false: Option<Box<Block>>,
     },
     Let {
+        span: Span,
         ty: RefCell<Option<Ty>>,
         ident: Ident,
         ty_expr: Option<TyExpr>,
         expr: Option<Expr>,
     },
     Return {
+        span: Span,
         expr: Option<Expr>,
     },
     Block {
+        span: Span,
         block: Box<Block>,
     },
     Expr {
+        span: Span,
         expr: Expr,
     },
 }
@@ -225,22 +259,24 @@ pub enum TyExprKind {
     Array {
         span: Span,
         elem_ty_expr: Box<TyExpr>,
-        len: u32
+        len: u32,
     },
     Var {
         span: Span,
-        ident: Ident
+        ident: Ident,
     },
     Lit {
         span: Span,
-        ty_lit: TyLit
+        ty_lit: TyLit,
     },
 }
 
 #[derive(Clone, Debug)]
 pub struct Expr {
+    pub span: Span,
     pub ty: RefCell<Option<Ty>>,
-    pub val: RefCell<Option<Val>>,
+    pub const_val: RefCell<Option<Option<Val>>>,
+    pub const_index: Cell<Option<usize>>,
     pub kind: ExprKind,
 }
 
@@ -263,6 +299,11 @@ pub enum ExprKind {
         op: UnOp,
         expr: Box<Expr>,
     },
+    MethodCall {
+        span: Span,
+        ident: Ident,
+        arg_exprs: Vec<Expr>,
+    },
     Field {
         span: Span,
         expr: Box<Expr>,
@@ -278,6 +319,12 @@ pub enum ExprKind {
         ident: Ident,
         arg_exprs: Vec<Expr>,
     },
+    MacroCall {
+        span: Span,
+        analysis: Cell<Option<MacroCallAnalysis>>,
+        ident: Ident,
+        arg_exprs: Vec<Expr>,
+    },
     ConsCall {
         span: Span,
         ty_lit: TyLit,
@@ -285,7 +332,6 @@ pub enum ExprKind {
     },
     Var {
         span: Span,
-        is_lvalue: Cell<Option<bool>>,
         kind: Cell<Option<VarKind>>,
         ident: Ident,
     },
@@ -293,6 +339,12 @@ pub enum ExprKind {
         span: Span,
         lit: Lit,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum MacroCallAnalysis {
+    Pick { r: f32, g: f32, b: f32, a: f32 },
+    Slide { v: f32 }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -315,7 +367,7 @@ pub enum BinOp {
     Mul,
     Div,
 }
-
+ 
 impl fmt::Display for BinOp {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(

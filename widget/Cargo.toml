@@ -9,9 +9,8 @@ license = "MIT"
 [dependencies]
 #serde = { version = "1.0", features = ["derive"] }
 
-
-[dependencies.makepad-tinyserde]
-path = "../render/tinyserde"
+[dependencies.makepad-microserde]
+path="../render/microserde"
 
 [dependencies.makepad-render]
 path = "../render"

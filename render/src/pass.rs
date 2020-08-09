@@ -203,13 +203,19 @@ pub enum CxPassDepOf {
 
 
 impl CxPass {
+    
+    fn camera_projection()->Mat4Id{uid!()}
+    fn camera_view()->Mat4Id{uid!()}
+    fn dpi_factor()->FloatId{uid!()}
+    fn dpi_dilate()->FloatId{uid!()}
+    
     pub fn def_uniforms(sg: ShaderGen) -> ShaderGen {
-        sg.compose(shader_ast!({
-            let camera_projection: mat4<PassUniform>;
-            let camera_view: mat4<PassUniform>;
-            let dpi_factor: float<PassUniform>;
-            let dpi_dilate: float<PassUniform>;
-        }))
+        sg.compose(shader!{"
+            uniform camera_projection: Self::camera_projection() in pass;
+            uniform camera_view: Self::camera_view() in pass;
+            uniform dpi_factor: Self::dpi_factor() in pass;
+            uniform dpi_dilate: Self::dpi_dilate() in pass;
+        "})
     }
     
     pub fn uniform_camera_projection(&mut self, v: &Mat4) {

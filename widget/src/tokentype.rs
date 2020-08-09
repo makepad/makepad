@@ -172,7 +172,7 @@ pub enum TokenType {
     ThemeName,
     BuiltinType,
     Hash,
-    
+    Color,
     Regex,
     String,
     Number,

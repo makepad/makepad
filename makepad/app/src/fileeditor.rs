@@ -84,10 +84,10 @@ impl FileEditor {
         }
     }
     
-    pub fn update_token_chunks(path: &str, atb: &mut AppTextBuffer, search_index: &mut SearchIndex) {
+    pub fn update_token_chunks(cx:&mut Cx, path: &str,  atb: &mut AppTextBuffer, search_index: &mut SearchIndex) {
         // check which file extension we have to spawn a new editor
         if path.ends_with(".rs") || path.ends_with(".toml") || path.ends_with(".ron") {
-            RustEditor::update_token_chunks(atb, Some(search_index));
+            RustEditor::update_token_chunks(cx, atb, Some(search_index));
         }
         else if path.ends_with(".js") || path.ends_with(".html") {
             JSTokenizer::update_token_chunks(atb, Some(search_index));
@@ -114,11 +114,11 @@ impl FileEditors {
         
         // check which file extension we have to spawn a new editor
         let is_new = !self.editors.contains_key(&editor_id);
-        if is_new {
+        if is_new { 
             let editor = if path.ends_with(".rs") || path.ends_with(".toml") || path.ends_with(".ron") {
                 FileEditor::Rust(RustEditor {
                     ..self.rust_editor.clone()
-                })
+                }) 
             }
             else if path.ends_with(".js") || path.ends_with(".html") {
                 FileEditor::JS(JSEditor {
