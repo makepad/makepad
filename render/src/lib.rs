@@ -29,8 +29,6 @@ mod cx_apple;
 #[cfg(all(not(feature="ipc"),target_os = "windows"))]
 mod cx_dx11;
 #[cfg(all(not(feature="ipc"),target_os = "windows"))]
-mod cx_hlsl;
-#[cfg(all(not(feature="ipc"),target_os = "windows"))]
 mod cx_win32;
 #[cfg(all(not(feature="ipc"),any(target_os = "windows")))]
 mod cx_windows;

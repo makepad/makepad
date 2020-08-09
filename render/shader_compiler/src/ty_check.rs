@@ -20,7 +20,7 @@ pub struct TyChecker<'a> {
     pub builtins: &'a HashMap<Ident, Builtin>,
     pub shader: &'a ShaderAst,
     pub env: &'a Env,
-}
+} 
 
 impl<'a> TyChecker<'a> {
     fn lhs_checker(&self) -> LhsChecker {

@@ -555,18 +555,19 @@ impl ColorPicker {
                 let rect_puk = vec2(cx + sat * 2. * rsize - rsize, cy + (1. - val) * 2. * rsize - rsize);
                 
                 let color = mix(mix(pick!(#3),pick!(#E),hover),pick!(#F),down);
-                df.circle(rect_puk.x, rect_puk.y, 8.);
+                let puck_size = 0.1*w;
+                df.circle(rect_puk.x, rect_puk.y, puck_size);
                 df.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
                 df.intersect();
                 df.fill(color);
-                df.circle(rect_puk.x, rect_puk.y, 7.-2.*hover + down);
+                df.circle(rect_puk.x, rect_puk.y, puck_size-1.-2.*hover + down);
                 df.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
                 df.intersect();
                 df.fill(rgbv);
                 
-                df.circle(circle_puk.x, circle_puk.y, 11.);
+                df.circle(circle_puk.x, circle_puk.y, puck_size);
                 df.fill(color);
-                df.circle(circle_puk.x, circle_puk.y, 10.-2.*hover + down);
+                df.circle(circle_puk.x, circle_puk.y, puck_size-1.-2.*hover + down);
                 df.fill(rgbv);
                 
                 return df.result;
