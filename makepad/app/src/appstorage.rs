@@ -15,6 +15,7 @@ use crate::livemacro::*;
 pub struct AppSettings { 
     pub build_on_save: bool,
     pub exec_when_done: bool,
+    pub live_macros_on_self: bool,
     pub style_options: StyleOptions,
     pub hub_server: HubServerConfig,
     pub builders: HashMap<String, HubBuilderConfig>,
@@ -27,6 +28,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             exec_when_done: false,
+            live_macros_on_self: true,
             build_on_save: true,
             style_options: StyleOptions {scale: 1.0, dark: true},
             hub_server: HubServerConfig::Offline,
@@ -42,6 +44,7 @@ impl AppSettings {
         Self {
             exec_when_done: false,
             build_on_save: true,
+            live_macros_on_self: true,
             style_options: StyleOptions {scale: 1.0, dark: true},
             hub_server: HubServerConfig::Offline,
             builders: {
@@ -177,7 +180,7 @@ impl AppStorage {
                 self.settings = settings;
                 self.settings.style_options.scale = self.settings.style_options.scale.min(3.0).max(0.3);
                 cx.send_signal(self.settings_changed, Self::status_settings_changed());
-                
+                cx.live_macros_on_self = self.settings.live_macros_on_self;
                 // so now, here we restart our hub_server if need be.
                 if cx.platform_type.is_desktop() {
                     if self.settings_old.hub_server != self.settings.hub_server {

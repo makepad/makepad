@@ -546,7 +546,8 @@ impl HubBuilder {
                     && !panic_line.starts_with("at src/libpanic_unwind/") {
                     if let Some(end) = panic_line.find(":") {
                         let proc_path = format!("{}/{}/{}", builder, workspace, panic_line.get(3..end).unwrap().to_string());
-                        let proc_line = panic_line.get((end + 1)..(panic_line.len() - 1)).unwrap().parse::<usize>().unwrap();
+                        
+                        let proc_line = if let Ok(pl) = panic_line.get((end + 1)..(panic_line.len() - 1)).unwrap().parse::<usize>(){pl}else{0};
                         
                         rendered.push(format!("{}:{} - {}", proc_path, proc_line, last_fn_name));
                         if path.is_none() {

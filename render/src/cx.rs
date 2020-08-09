@@ -40,9 +40,7 @@ pub use crate::cx_metal::*;
 pub use crate::cx_windows::*;
 #[cfg(all(not(feature = "ipc"), target_os = "windows"))]
 pub use crate::cx_dx11::*;
-#[cfg(all(not(feature = "ipc"), target_os = "windows"))]
-pub use crate::cx_hlsl::*;
-
+ 
 #[cfg(all(not(feature = "ipc"), target_arch = "wasm32"))]
 pub use crate::cx_webgl::*;
 
@@ -102,6 +100,8 @@ pub struct Cx {
     pub shader_recompiles:Vec<usize>,
     pub shader_map: HashMap<ShaderGen, usize>,
     pub shader_instance_id: usize,
+    
+    pub live_macros_on_self: bool,
     
     pub str_to_id: RefCell<HashMap<String, usize>>,
     pub id_to_str: RefCell<HashMap<usize, String>>,
@@ -233,6 +233,9 @@ impl Default for Cx {
             shaders: Vec::new(),
             shader_recompiles: Vec::new(),
             shader_map: HashMap::new(),
+            
+            live_macros_on_self: true,
+            
             id_to_str: RefCell::new(HashMap::new()),
             str_to_id: RefCell::new(HashMap::new()),
             
@@ -817,6 +820,10 @@ impl Cx {
     pub fn status_http_send_fail() -> StatusId {uid!()}
     
     pub fn recompile_shader_sub(&mut self, file: &str, line: usize, col: usize, code: String) {
+        if !self.live_macros_on_self{
+            return
+        }
+        
         for (shader_index, shader) in self.shaders.iter_mut().enumerate() {
             // ok so lets enumerate our subs
             for sub in &mut shader.shader_gen.subs {

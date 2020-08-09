@@ -290,9 +290,9 @@ pub struct CxPlatform {
     pub post_id: u64,
     pub set_ime_position: Option<Vec2>,
     pub start_timer: Vec<(u64, f64, bool)>,
-    pub stop_timer: Vec<(u64)>,
+    pub stop_timer: Vec<u64>,
     pub text_clipboard_response: Option<String>,
     pub desktop: CxDesktop,
     pub d3d11_cx: Option<*const D3d11Cx>
 }
-
+  
