@@ -13,7 +13,7 @@ use crate::ty_check::TyChecker;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, BTreeSet};
 
-pub fn analyse(shader: &ShaderAst, input_props: &[&PropDef]) -> Result<(), Error> {
+pub fn analyse(shader: &ShaderAst, input_props: &[&PropDef], gather_all: bool) -> Result<(), Error> {
     let builtins = builtin::generate_builtins();
     let mut env = Env::new();
     env.push_scope();
@@ -35,6 +35,7 @@ pub fn analyse(shader: &ShaderAst, input_props: &[&PropDef]) -> Result<(), Error
         builtins,
         shader,
         env,
+        gather_all,
     }
     .analyse_shader()
 }
@@ -44,6 +45,7 @@ struct ShaderAnalyser<'a> {
     builtins: HashMap<Ident, Builtin>,
     shader: &'a ShaderAst,
     env: Env,
+    gather_all: bool,
 }
 
 impl<'a> ShaderAnalyser<'a> {
@@ -64,6 +66,7 @@ impl<'a> ShaderAnalyser<'a> {
     fn const_gatherer(&self) -> ConstGatherer {
         ConstGatherer {
             shader: self.shader,
+            gather_all: self.gather_all,
         }
     }
 
@@ -81,6 +84,7 @@ impl<'a> ShaderAnalyser<'a> {
                         shader: self.shader,
                         decl,
                         env: &mut self.env,
+                        gather_all: self.gather_all,
                         is_inside_loop: false,
                     }
                     .analyse_fn_def()?;
@@ -458,6 +462,7 @@ struct FnDefAnalyser<'a> {
     shader: &'a ShaderAst,
     decl: &'a FnDecl,
     env: &'a mut Env,
+    gather_all: bool,
     is_inside_loop: bool,
 }
 
@@ -479,6 +484,7 @@ impl<'a> FnDefAnalyser<'a> {
     fn const_gatherer(&self) -> ConstGatherer {
         ConstGatherer {
             shader: self.shader,
+            gather_all: self.gather_all,
         }
     }
 
