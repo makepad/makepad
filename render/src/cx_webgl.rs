@@ -16,7 +16,7 @@ impl Cx {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
         if vr_is_presenting {
-            self.views[view_id].uniform_view_transform(&Mat4::scale_translate(0.0005, -0.0005, 0.001, -0.25, 0., -0.5));
+            self.views[view_id].uniform_view_transform(&Mat4::scale_translate(0.001, -0.001, 0.001, -0.5, 0.25, -0.5));
         }
         else {
             self.views[view_id].uniform_view_transform(&Mat4::identity());
