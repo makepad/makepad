@@ -16,7 +16,7 @@ impl Cx {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
         if vr_is_presenting {
-            self.views[view_id].uniform_view_transform(&Mat4::scale_translate(0.0005, -0.0005, 0.001, -0.3, 1.8, -0.4));
+            self.views[view_id].uniform_view_transform(&Mat4::scale_translate(0.0005, -0.0005, 0.001, -0.25, 0., -0.5));
         }
         else {
             self.views[view_id].uniform_view_transform(&Mat4::identity());
@@ -129,9 +129,7 @@ impl Cx {
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         
-        if vr_is_presenting {
-            self.platform.from_wasm.mark_vr_draw_eye();
-        } 
+        self.platform.from_wasm.mark_begin_canvas_render();
         self.render_view(
             pass_id,
             view_id,
@@ -141,9 +139,7 @@ impl Cx {
             &mut zbias,
             zbias_step
         );
-        if vr_is_presenting {
-            self.platform.from_wasm.loop_vr_draw_eye();
-        }
+        self.platform.from_wasm.mark_end_canvas_render();
     }
     
     pub fn draw_pass_to_texture(&mut self, pass_id: usize, dpi_factor: f32) {
@@ -238,7 +234,6 @@ impl Cx {
              
         // lets check if we need to recompile the shader at all
         if let Some(sh_platform) = &sh.platform{
-            platform.from_wasm.log(&format!("{} {}", sh_platform.vertex == vertex , sh_platform.fragment == fragment));
             if sh_platform.vertex == vertex && sh_platform.fragment == fragment{
                 sh.mapping = mapping;
                 return ShaderCompileResult::Nop{id:shader_id}
