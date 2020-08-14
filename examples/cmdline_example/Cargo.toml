@@ -8,5 +8,5 @@ edition = "2018"
 [dependencies.makepad-shader-compiler] 
 path="../../render/shader_compiler"
 
-[dependencies.image_formats]
-path="./image_formats"
+#[dependencies.image_formats]
+#path="./image_formats"
