@@ -1231,31 +1231,21 @@
                 
         mark_begin_canvas_render() {
             if (this.vr_is_presenting) {
-                // mark parse position for VR multiple eyes
-                this.vr_begin_parse = this.parse - 1;
-                // set up left or right eye
-                let xr_view = this.xr_pose.views[this.vr_eye_counter];
+
+                let left_view = this.xr_pose.views[0];
+                let right_view = this.xr_pose.views[1];
                 
-                let viewport = this.xr_layer.getViewport(xr_view);
+                this.vr_left_viewport =  this.xr_layer.getViewport(left_view);
+                this.vr_right_viewport =  this.xr_layer.getViewport(right_view);
                 
-                this.gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
-                
-                // set up matrices
-                this.vr_projection_matrix = xr_view.projectionMatrix;
-                this.vr_transform_matrix = xr_view.transform.inverse.matrix;
-                // set up the vr view matrix
+                this.vr_left_projection_matrix = left_view.projectionMatrix;
+                this.vr_left_transform_matrix = left_view.transform.inverse.matrix;
+                this.vr_right_projection_matrix = right_view.projectionMatrix;
+                this.vr_right_transform_matrix = right_view.transform.inverse.matrix;
             }
         }
         
         mark_end_canvas_render() {
-            // mark parse end position
-            if (this.vr_is_presenting && this.vr_eye_counter == 0) {
-                this.vr_eye_counter = 1;
-                this.parse = this.vr_begin_parse;
-                // set up the right eye
-                ///his.gl.viewport(this.canvas.width * 0.5, 0, this.canvas.width * 0.5, this.canvas.height);
-                // jump the parser back to begin_frame
-            }
         }
         
                 
@@ -1268,25 +1258,6 @@
                 let xr_webgllayer = this.xr_session.renderState.baseLayer;
                 this.gl.bindFramebuffer(gl.FRAMEBUFFER, xr_webgllayer.framebuffer);
                 gl.viewport(0, 0, xr_webgllayer.framebufferWidth, xr_webgllayer.framebufferHeight);
-                /*
-                // set the viewport to the whole thing
-                gl.viewport(0, 0, this.canvas.width * 0.5, this.canvas.height);
-              
-                this.vr_display.getFrameData(this.vr_frame_data);
-              
-                let inv = new Float32Array(16);
-                this.vr_left_view_matrix = new Float32Array(16);
-                this.vr_right_view_matrix = new Float32Array(16);
-                if (this.vr_display.stageParameters) {
-                    mat4_invert(inv, this.vr_display.stageParameters.sittingToStandingTransform);
-                }
-                else {
-                    mat4_translation(inv, [0, 1.65, 0]);
-                    mat4_invert(inv, inv);
-                }
-                mat4_multiply(this.vr_left_view_matrix, this.vr_frame_data.leftViewMatrix, inv);
-                mat4_multiply(this.vr_right_view_matrix, this.vr_frame_data.rightViewMatrix, inv);
-                */
             }
             else {
                 gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1466,9 +1437,6 @@
         }
         
         alloc_array_buffer(array_buffer_id, array) {
-            if (this.multipass_updated_buffers) {
-                return
-            }
             var gl = this.gl;
             let gl_buf = this.array_buffers[array_buffer_id] || gl.createBuffer()
             gl_buf.length = array.length;
@@ -1478,9 +1446,6 @@
         }
         
         alloc_index_buffer(index_buffer_id, array) {
-            if (this.multipass_updated_buffers) {
-                return
-            }
             var gl = this.gl;
             let gl_buf = this.index_buffers[index_buffer_id] || gl.createBuffer();
             gl_buf.length = array.length;
@@ -1490,9 +1455,6 @@
         }
         
         alloc_texture(texture_id, width, height, data_ptr) {
-            if (this.multipass_updated_buffers) {
-                return
-            }
             var gl = this.gl;
             var gl_tex = this.textures[texture_id] || gl.createTexture()
             
@@ -1509,9 +1471,6 @@
         }
         
         alloc_vao(shader_id, vao_id, geom_ib_id, geom_vb_id, inst_vb_id) {
-            if (this.multipass_updated_buffers) {
-                return
-            }
             let gl = this.gl;
             
             let shader = this.shaders[shader_id];
@@ -1582,22 +1541,7 @@
             // also possibly use webGL2 uniform buffers. For now this will suffice for webGL 1 compat
             let pass_uniforms = shader.pass_uniforms;
             // if vr_presenting
-            if (this.is_main_canvas && this.vr_is_presenting) {
-                // the first 2 matrices are project and view
-                gl.uniformMatrix4fv(pass_uniforms[0].loc, false, this.vr_projection_matrix);
-                
-                gl.uniformMatrix4fv(pass_uniforms[1].loc, false, this.vr_transform_matrix);
-                for (let i = 2; i < pass_uniforms.length; i ++) {
-                    let uni = pass_uniforms[i];
-                    uni.fn(this, uni.loc, uni.offset + pass_uniforms_ptr);
-                }
-            }
-            else {
-                for (let i = 0; i < pass_uniforms.length; i ++) {
-                    let uni = pass_uniforms[i];
-                    uni.fn(this, uni.loc, uni.offset + pass_uniforms_ptr);
-                }
-            }
+            
             let view_uniforms = shader.view_uniforms;
             for (let i = 0; i < view_uniforms.length; i ++) {
                 let uni = view_uniforms[i];
@@ -1628,7 +1572,33 @@
             let indices = index_buffer.length;
             let instances = instance_buffer.length / shader.instance_slots;
             // lets do a drawcall!
-            gl.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+            
+              
+            if (this.is_main_canvas && this.vr_is_presenting) {
+                for (let i = 2; i < pass_uniforms.length; i ++) {
+                    let uni = pass_uniforms[i];
+                    uni.fn(this, uni.loc, uni.offset + pass_uniforms_ptr);
+                }
+
+                // the first 2 matrices are project and view
+                let left_viewport = this.vr_left_viewport;
+                gl.viewport(left_viewport.x, left_viewport.y, left_viewport.width, left_viewport.height);
+                gl.uniformMatrix4fv(pass_uniforms[0].loc, false, this.vr_left_projection_matrix);
+                gl.uniformMatrix4fv(pass_uniforms[1].loc, false, this.vr_left_transform_matrix);
+                gl.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+                let right_viewport = this.vr_right_viewport;
+                gl.viewport(right_viewport.x, right_viewport.y, right_viewport.width, right_viewport.height);
+                gl.uniformMatrix4fv(pass_uniforms[0].loc, false, this.vr_right_projection_matrix);
+                gl.uniformMatrix4fv(pass_uniforms[1].loc, false, this.vr_right_transform_matrix);
+                gl.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+            }
+            else {
+                for (let i = 0; i < pass_uniforms.length; i ++) {
+                    let uni = pass_uniforms[i];
+                    uni.fn(this, uni.loc, uni.offset + pass_uniforms_ptr);
+                }
+                gl.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+            }
         }
 
 
