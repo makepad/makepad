@@ -570,9 +570,17 @@ impl MprsTokenizer {
                 },
                 '<' => {
                     chunk.push(state.cur);
-                    if state.next == '=' || state.next == '<' {
+                    if state.next == '=' {
                         chunk.push(state.next);
                         state.advance();
+                    }
+                    if state.next == '<' {
+                        chunk.push(state.next);
+                        state.advance();
+                        if state.next == '=' {
+                            chunk.push(state.next);
+                            state.advance();
+                        }
                     }
                     return TokenType::Operator;
                 },
@@ -581,6 +589,14 @@ impl MprsTokenizer {
                     if state.next == '=' {
                         chunk.push(state.next);
                         state.advance();
+                    }
+                    if state.next == '>' {
+                        chunk.push(state.next);
+                        state.advance();
+                        if state.next == '=' {
+                            chunk.push(state.next);
+                            state.advance();
+                        }
                     }
                     return TokenType::Operator;
                 },
