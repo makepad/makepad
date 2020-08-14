@@ -1057,12 +1057,12 @@ impl FromWasm {
         self.mu32(20);
     }
     
-    pub fn mark_vr_draw_eye(&mut self) {
+    pub fn mark_begin_canvas_render(&mut self) {
         self.fit(1);
         self.mu32(21);
     }
     
-    pub fn loop_vr_draw_eye(&mut self) {
+    pub fn mark_end_canvas_render(&mut self) {
         self.fit(1);
         self.mu32(22);
     }
