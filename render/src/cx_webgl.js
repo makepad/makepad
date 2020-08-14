@@ -234,12 +234,12 @@
             let pos = this.fit(1);
             this.mu32[pos ++] = 21;
         }
-
+        
         http_send_response(signal_id, success) {
             let pos = this.fit(3);
             this.mu32[pos ++] = 22;
             this.mu32[pos ++] = signal_id;
-            this.mu32[pos ++] = success?1:2;
+            this.mu32[pos ++] = success? 1: 2;
         }
         
         end() {
@@ -269,7 +269,7 @@
             this.req_anim_frame_id = 0;
             this.text_copy_response = "";
             this.init_webgl_context();
-            this.init_webvr_bindings();
+            this.run_async_webxr_check();
             this.bind_mouse_and_touch();
             this.bind_keyboard();
             
@@ -370,111 +370,6 @@
         }
         
         
-        request_animation_frame() {
-            if (this.vr_is_presenting || this.req_anim_frame_id) {
-                return;
-            }
-            this.req_anim_frame_id = window.requestAnimationFrame(time => {
-                this.req_anim_frame_id = 0;
-                if (this.vr_is_presenting) {
-                    return
-                }
-                this.to_wasm.animation_frame(time / 1000.0);
-                this.in_animation_frame = true;
-                this.do_wasm_io();
-                this.in_animation_frame = false;
-            })
-        }
-        
-        // i forgot how to do memcpy with typed arrays. so, we'll do this.
-        copy_to_wasm(input_buffer, output_ptr) {
-            let u8len = input_buffer.byteLength;
-            
-            if ((u8len & 3) != 0 || (output_ptr & 3) != 0) { // not u32 aligned, do a byte copy
-                var u8out = new Uint8Array(this.memory.buffer, output_ptr, u8len)
-                var u8in = new Uint8Array(input_buffer)
-                for (let i = 0; i < u8len; i ++) {
-                    u8out[i] = u8in[i];
-                }
-            }
-            else { // not f64 aligned, do a u32 copy
-                let u32len = u8len >> 2; //4 bytes at a time.
-                var u32out = new Uint32Array(this.memory.buffer, output_ptr, u32len)
-                var u32in = new Uint32Array(input_buffer)
-                for (let i = 0; i < u32len; i ++) {
-                    u32out[i] = u32in[i];
-                }
-            }
-        }
-        
-        on_screen_resize() {
-            var dpi_factor = window.devicePixelRatio;
-            var w,
-            h;
-            var canvas = this.canvas;
-            
-            if (this.vr_is_presenting) {
-                let vr_display = this.vr_display;
-                var left_eye = vr_display.getEyeParameters("left");
-                var right_eye = vr_display.getEyeParameters("right");
-                canvas.width = Math.max(left_eye.renderWidth, right_eye.renderWidth) * 2;
-                canvas.height = Math.max(left_eye.renderHeight, right_eye.renderHeight);
-                this.dpi_factor = 1.0;
-                this.width = canvas.width >> 1;
-                this.height = canvas.height;
-            }
-            else {
-                if (canvas.getAttribute("fullpage")) {
-                    if (is_add_to_homescreen_safari) { // extremely ugly. but whatever.
-                        if (window.orientation == 90 || window.orientation == -90) {
-                            h = screen.width;
-                            w = screen.height - 90;
-                        }
-                        else {
-                            w = screen.width;
-                            h = screen.height - 80;
-                        }
-                    }
-                    else {
-                        w = window.innerWidth;
-                        h = window.innerHeight;
-                    }
-                }
-                else {
-                    w = canvas.offsetWidth;
-                    h = canvas.offsetHeight;
-                }
-                var sw = canvas.width = w * dpi_factor;
-                var sh = canvas.height = h * dpi_factor;
-                
-                this.gl.viewport(0, 0, sw, sh);
-                
-                this.dpi_factor = dpi_factor;
-                this.width = canvas.offsetWidth;
-                this.height = canvas.offsetHeight;
-                // send the wasm a screenresize event
-            }
-            
-            if (this.to_wasm) {
-                // initialize the application
-                this.to_wasm.resize({
-                    width: this.width,
-                    height: this.height,
-                    dpi_factor: this.dpi_factor,
-                    vr_can_present: this.vr_can_present,
-                    vr_is_presenting: this.vr_is_presenting
-                })
-                this.request_animation_frame()
-            }
-        }
-        
-        load_deps(deps) {
-            for (var i = 0; i < deps.length; i ++) {
-                let file_path = deps[i];
-                this.resources.push(fetch_path(file_path))
-            }
-        }
-        
         parse_string() {
             var str = "";
             var len = this.mu32[this.parse ++];
@@ -485,35 +380,35 @@
             return str
         }
         
-        parse_u8slice(){
+        parse_u8slice() {
             var str = "";
             var u8_len = this.mu32[this.parse ++];
             let len = u8_len >> 2;
             let data = new Uint8Array(u8_len);
             let spare = u8_len & 3;
-            for(let i  = 0; i < len; i++){
-                let u8_pos = i<<2;
-                let u32 = this.mu32[this.parse++];
-                data[u8_pos + 0] = u32&0xff;
-                data[u8_pos + 1] = (u32>>8)&0xff;
-                data[u8_pos + 2] = (u32>>16)&0xff;
-                data[u8_pos + 3] = (u32>>24)&0xff;
-            } 
-            let u8_pos = len<<2;
-            if(spare == 1){
-                let u32 = this.mu32[this.parse++];
-                data[u8_pos + 0] = u32&0xff;
+            for (let i = 0; i < len; i ++) {
+                let u8_pos = i << 2;
+                let u32 = this.mu32[this.parse ++];
+                data[u8_pos + 0] = u32 & 0xff;
+                data[u8_pos + 1] = (u32 >> 8) & 0xff;
+                data[u8_pos + 2] = (u32 >> 16) & 0xff;
+                data[u8_pos + 3] = (u32 >> 24) & 0xff;
             }
-            else if(spare == 2){
-                let u32 = this.mu32[this.parse++];
-                data[u8_pos + 0] = u32&0xff;
-                data[u8_pos + 1] = (u32>>8)&0xff;
+            let u8_pos = len << 2;
+            if (spare == 1) {
+                let u32 = this.mu32[this.parse ++];
+                data[u8_pos + 0] = u32 & 0xff;
             }
-            else if(spare == 3){
-                let u32 = this.mu32[this.parse++];
-                data[u8_pos + 0] = u32&0xff;
-                data[u8_pos + 1] = (u32>>8)&0xff;
-                data[u8_pos + 2] = (u32>>16)&0xff;
+            else if (spare == 2) {
+                let u32 = this.mu32[this.parse ++];
+                data[u8_pos + 0] = u32 & 0xff;
+                data[u8_pos + 1] = (u32 >> 8) & 0xff;
+            }
+            else if (spare == 3) {
+                let u32 = this.mu32[this.parse ++];
+                data[u8_pos + 0] = u32 & 0xff;
+                data[u8_pos + 1] = (u32 >> 8) & 0xff;
+                data[u8_pos + 2] = (u32 >> 16) & 0xff;
             }
             console.log(data);
             return data
@@ -536,269 +431,35 @@
             }
             return vars
         }
-        
-        
-        // The UA may kick us out of VR present mode for any reason, so to
-        // ensure we always know when we begin/end presenting we need to
-        // listen for vrdisplaypresentchange events.
-        on_vr_display_present_change() {
-            this.vr_is_presenting = this.vr_display.isPresenting;
-            if (this.vr_is_presenting) { // we need to start the continuous repaintloop
-                let vr_on_request_animation_frame = time => {
-                    if (!this.vr_is_presenting) {
-                        return
-                    }
-                    this.vr_display.requestAnimationFrame(vr_on_request_animation_frame);
-                    
-                    
-                    // compute the view matrices taking into account the persons movement
-                    this.to_wasm.paint_dirty();
-                    this.to_wasm.vr_frame(time / 1000.0, this.vr_frame_data);
-                    this.in_animation_frame = true;
-                    this.do_wasm_io();
-                    this.in_animation_frame = false;
-                    this.vr_display.submitFrame();
-                };
-                this.vr_display.requestAnimationFrame(vr_on_request_animation_frame);
-            }
-            else { // lets return to normal
-                this.to_wasm.paint_dirty();
-                this.request_animation_frame();
-            }
-            this.on_screen_resize();
-        }
-        
-        on_vr_display_activate() {
-            var attributes = {depth: true, antialias: true, multiview: false};
-            this.vr_display.requestPresent([{source: this.canvas, attributes: attributes}]).then(_ => {
-            }, error => {
-                console.log("requestPresent failed", error)
-            });
-        }
-        
-        on_vr_display_deactivate() {
-            if (!this.vr_display.isPresenting) {
-                return;
-            }
-            this.vr_display.exitPresent().then(_ => {
-            }, error => {
-                console.log("exitPresent failed", error)
-            });
-        }
-        
-        init_webvr_bindings() {
-            this.vr_can_present = false;
-            this.vr_is_presenting = false;
-            // ok this changes a bunch in how the renderflow works.
-            // first thing we are going to do is get the vr displays.
-            if (navigator.getVRDisplays) {
-                this.vr_frame_data = new VRFrameData();
-                navigator.getVRDisplays().then(displays => {
-                    if (displays.length > 0) {
-                        this.vr_display = displays[0];
-                        // It's heighly reccommended that you set the near and far planes to
-                        // something appropriate for your scene so the projection matricies
-                        // WebVR produces have a well scaled depth buffer.
-                        this.vr_display.depthNear = 0.1;
-                        this.vr_display.depthFar = 250.0;
-                        // vrDisplay.resetPose();
-                        // Generally, you want to wait until VR support is confirmed and
-                        // you know the user has a VRDisplay capable of presenting connected
-                        // before adding UI that advertises VR features.
-                        if (this.vr_display.capabilities.canPresent) {
-                            this.vr_can_present = true;
-                            console.log("webVR available");
-                            window.addEventListener("vrdisplaypresentchange", this.on_vr_display_present_change.bind(this), false);
-                            window.addEventListener("vrdisplayactivate", this.on_vr_display_activate.bind(this), false);
-                            window.addEventListener("vrdisplaydeactivate", this.on_vr_display_deactivate.bind(this), false);
-                        }
-                    }
-                    else {
-                        console.log("No VR displays found")
-                    }
-                })
-            }
-            else {
-                console.log("No webVR support found")
-            }
-        }
-        
-        vr_start_presenting() {
-            if (this.vr_can_present) {
-                console.log("Starting webVR")
-                this.on_vr_display_activate();
-            }
-        }
-        
-        vr_stop_presenting() {
+        // i forgot how to do memcpy with typed arrays. so, we'll do this.
+        copy_to_wasm(input_buffer, output_ptr) {
+            let u8len = input_buffer.byteLength;
             
-        }
-        
-        init_webgl_context() {
-            
-            window.addEventListener('resize', _ => {
-                this.on_screen_resize()
-            })
-            
-            window.addEventListener('orientationchange', _ => {
-                this.on_screen_resize()
-            })
-            
-            let mqString = '(resolution: ' + window.devicePixelRatio + 'dppx)'
-            let mq = matchMedia(mqString);
-            if (mq && mq.addEventListener) {
-                mq.addEventListener("change", _ => {
-                    this.on_screen_resize()
-                });
-            }
-            else { // poll for it. yes. its terrible
-                window.setInterval(_ => {
-                    if (window.devicePixelRation != this.dpi_factor) {
-                        this.on_screen_resize()
-                    }
-                }, 1000);
-            }
-            
-            var canvas = this.canvas
-            var options = {
-                alpha: canvas.getAttribute("noalpha")? false: true,
-                depth: canvas.getAttribute("nodepth")? false: true,
-                stencil: canvas.getAttribute("nostencil")? false: true,
-                antialias: canvas.getAttribute("noantialias")? false: true,
-                premultipliedAlpha: canvas.getAttribute("premultipliedAlpha")? true: false,
-                preserveDrawingBuffer: canvas.getAttribute("preserveDrawingBuffer")? true: false,
-                preferLowPowerToHighPerformance: true
-            }
-            
-            var gl = this.gl = canvas.getContext('webgl', options)
-                || canvas.getContext('webgl-experimental', options)
-                || canvas.getContext('experimental-webgl', options)
-            
-            if (!gl) {
-                var span = document.createElement('span')
-                span.style.color = 'white'
-                canvas.parentNode.replaceChild(span, canvas)
-                span.innerHTML = "Sorry, makepad needs browser support for WebGL to run<br/>Please update your browser to a more modern one<br/>Update to atleast iOS 10, Safari 10, latest Chrome, Edge or Firefox<br/>Go and update and come back, your browser will be better, faster and more secure!<br/>If you are using chrome on OSX on a 2011/2012 mac please enable your GPU at: Override software rendering list:Enable (the top item) in: <a href='about://flags'>about://flags</a>. Or switch to Firefox or Safari."
-                return
-            }
-            gl.OES_standard_derivatives = gl.getExtension('OES_standard_derivatives')
-            gl.OES_vertex_array_object = gl.getExtension('OES_vertex_array_object')
-            gl.OES_element_index_uint = gl.getExtension("OES_element_index_uint")
-            gl.ANGLE_instanced_arrays = gl.getExtension('ANGLE_instanced_arrays')
-            
-            // check uniform count
-            var max_vertex_uniforms = gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS);
-            var max_fragment_uniforms = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS);
-            if (max_vertex_uniforms < 512 || max_fragment_uniforms < 512){
-                this.gpu_spec_is_low_on_uniforms = true
-            }
-            else{
-                this.gpu_spec_is_low_on_uniforms = false
-            }
-                
-
-            //gl.EXT_blend_minmax = gl.getExtension('EXT_blend_minmax')
-            //gl.OES_texture_half_float_linear = gl.getExtension('OES_texture_half_float_linear')
-            //gl.OES_texture_float_linear = gl.getExtension('OES_texture_float_linear')
-            //gl.OES_texture_half_float = gl.getExtension('OES_texture_half_float')
-            //gl.OES_texture_float = gl.getExtension('OES_texture_float')
-            //gl.WEBGL_depth_texture = gl.getExtension("WEBGL_depth_texture") || gl.getExtension("WEBKIT_WEBGL_depth_texture")
-            this.on_screen_resize()
-        }
-        
-        // new shader helpers
-        get_attrib_locations(program, base, slots) {
-            var gl = this.gl;
-            let attrib_locs = [];
-            let attribs = slots >> 2;
-            let stride = slots * 4;
-            if ((slots & 3) != 0) attribs ++;
-            for (let i = 0; i < attribs; i ++) {
-                let size = (slots - i * 4);
-                if (size > 4) size = 4;
-                attrib_locs.push({
-                    loc: gl.getAttribLocation(program, base + i),
-                    offset: i * 16,
-                    size: size,
-                    stride: slots * 4
-                });
-            }
-            return attrib_locs
-        }
-        
-        get_uniform_locations(program, uniforms) {
-            var gl = this.gl;
-            let uniform_locs = [];
-            let offset = 0;
-            for (let i = 0; i < uniforms.length; i ++) {
-                let uniform = uniforms[i];
-                // lets align the uniform
-                let slots = this.uniform_size_table[uniform.ty];
-                if ((offset & 3) != 0 && (offset & 3) + slots > 4) { // goes over the boundary
-                    offset += 4 - (offset & 3); // make jump to new slot
+            if ((u8len & 3) != 0 || (output_ptr & 3) != 0) { // not u32 aligned, do a byte copy
+                var u8out = new Uint8Array(this.memory.buffer, output_ptr, u8len)
+                var u8in = new Uint8Array(input_buffer)
+                for (let i = 0; i < u8len; i ++) {
+                    u8out[i] = u8in[i];
                 }
-                uniform_locs.push({
-                    name: uniform.name,
-                    offset: offset << 2,
-                    ty: uniform.ty,
-                    loc: gl.getUniformLocation(program, uniform.name),
-                    fn: this.uniform_fn_table[uniform.ty]
-                });
-                offset += slots
             }
-            return uniform_locs;
+            else { // do a u32 copy
+                let u32len = u8len >> 2; //4 bytes at a time.
+                var u32out = new Uint32Array(this.memory.buffer, output_ptr, u32len)
+                var u32in = new Uint32Array(input_buffer)
+                for (let i = 0; i < u32len; i ++) {
+                    u32out[i] = u32in[i];
+                }
+            }
         }
         
-        compile_webgl_shader(ash) {
-            var gl = this.gl
-            var vsh = gl.createShader(gl.VERTEX_SHADER)
-            
-            gl.shaderSource(vsh, ash.vertex)
-            gl.compileShader(vsh)
-            if (!gl.getShaderParameter(vsh, gl.COMPILE_STATUS)) {
-                return console.log(
-                    gl.getShaderInfoLog(vsh),
-                    add_line_numbers_to_string(ash.vertex)
-                )
+        load_deps(deps) {
+            for (var i = 0; i < deps.length; i ++) {
+                let file_path = deps[i];
+                this.resources.push(fetch_path(file_path))
             }
-            
-            // compile pixelshader
-            var fsh = gl.createShader(gl.FRAGMENT_SHADER)
-            gl.shaderSource(fsh, ash.fragment)
-            gl.compileShader(fsh)
-            if (!gl.getShaderParameter(fsh, gl.COMPILE_STATUS)) {
-                return console.log(
-                    gl.getShaderInfoLog(fsh),
-                    add_line_numbers_to_string(ash.fragment)
-                )
-            }
-            
-            var program = gl.createProgram()
-            gl.attachShader(program, vsh)
-            gl.attachShader(program, fsh)
-            gl.linkProgram(program)
-            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-                return console.log(
-                    gl.getProgramInfoLog(program),
-                    add_line_numbers_to_string(ash.vertex),
-                    add_line_numbers_to_string(ash.fragment)
-                )
-            }
-            // fetch all attribs and uniforms
-            this.shaders[ash.shader_id] = {
-                geom_attribs: this.get_attrib_locations(program, "mpsc_packed_geometry_", ash.geometry_slots),
-                inst_attribs: this.get_attrib_locations(program, "mpsc_packed_instance_", ash.instance_slots),
-                pass_uniforms: this.get_uniform_locations(program, ash.pass_uniforms),
-                view_uniforms: this.get_uniform_locations(program, ash.view_uniforms),
-                draw_uniforms: this.get_uniform_locations(program, ash.draw_uniforms),
-                uniforms: this.get_uniform_locations(program, ash.uniforms),
-                texture_slots: this.get_uniform_locations(program, ash.texture_slots),
-                instance_slots: ash.instance_slots,
-                const_table_uniform: gl.getUniformLocation(program, "mpsc_const_table"),
-                program: program,
-                ash: ash
-            };
         }
+        
+        
         
         set_document_title(title) {
             document.title = title
@@ -1257,6 +918,553 @@
         hide_text_ime() {
         }
         
+        
+        
+        set_mouse_cursor(id) {
+            document.body.style.cursor = this.cursor_map[id] || 'default'
+        }
+        
+        read_file(id, file_path) {
+            
+            fetch_path(file_path).then(result => {
+                let byte_len = result.buffer.byteLength
+                let output_ptr = this.exports.alloc_wasm_vec(byte_len);
+                this.copy_to_wasm(result.buffer, output_ptr);
+                this.to_wasm.read_file_data(id, output_ptr, byte_len)
+                this.do_wasm_io();
+            }, err => {
+                this.to_wasm.read_file_error(id)
+                this.do_wasm_io();
+            })
+        }
+        
+        start_timer(id, interval, repeats) {
+            for (let i = 0; i < this.timers.length; i ++) {
+                if (this.timers[i].id == id) {
+                    console.log("Timer ID collision!")
+                    return
+                }
+            }
+            var obj = {id: id, repeats: repeats};
+            if (repeats !== 0) {
+                obj.sys_id = window.setInterval(e => {
+                    this.to_wasm.timer(id);
+                    this.do_wasm_io();
+                }, interval * 1000.0);
+            }
+            else {
+                obj.sys_id = window.setTimeout(e => {
+                    for (let i = 0; i < this.timers.length; i ++) {
+                        let timer = this.timers[i];
+                        if (timer.id == id) {
+                            this.timers.splice(i, 1);
+                            break;
+                        }
+                    }
+                    this.to_wasm.timer(id);
+                    this.do_wasm_io();
+                }, interval * 1000.0);
+            }
+            this.timers.push(obj)
+        }
+        
+        stop_timer(id) {
+            for (let i = 0; i < this.timers.length; i ++) {
+                let timer = this.timers[i];
+                if (timer.id == id) {
+                    if (timer.repeats) {
+                        window.clearInterval(timer.sys_id);
+                    }
+                    else {
+                        window.clearTimeout(timer.sys_id);
+                    }
+                    this.timers.splice(i, 1);
+                    return
+                }
+            }
+            //console.log("Timer ID not found!")
+        }
+        
+        http_send(verb, path, proto, domain, port, content_type, body, signal_id) {
+            
+            var req = new XMLHttpRequest()
+            req.addEventListener("error", _ => {
+                // signal fail
+                this.to_wasm.http_send_response(signal_id, 2);
+                this.do_wasm_io();
+            })
+            req.addEventListener("load", _ => {
+                if (req.status !== 200) {
+                    // signal fail
+                    this.to_wasm.http_send_response(signal_id, 2);
+                }
+                else {
+                    //signal success
+                    this.to_wasm.http_send_response(signal_id, 1);
+                }
+                this.do_wasm_io();
+            })
+            req.open(verb, proto + "://" + domain + ":" + port + path, true);
+            console.log(verb, proto + "://" + domain + ":" + port + path, body);
+            req.send(body.buffer);
+        }
+        
+        on_screen_resize() {
+            var dpi_factor = window.devicePixelRatio;
+            var w,
+            h;
+            var canvas = this.canvas;
+            
+            if (this.vr_is_presenting) {
+                let xr_webgllayer = this.xr_session.renderState.baseLayer;
+                this.dpi_factor = 3.0;
+                this.width =  xr_webgllayer.framebufferWidth / this.dpi_factor;
+                this.height = xr_webgllayer.framebufferHeight / this.dpi_factor;
+            }
+            else {
+                if (canvas.getAttribute("fullpage")) {
+                    if (is_add_to_homescreen_safari) { // extremely ugly. but whatever.
+                        if (window.orientation == 90 || window.orientation == -90) {
+                            h = screen.width;
+                            w = screen.height - 90;
+                        }
+                        else {
+                            w = screen.width;
+                            h = screen.height - 80;
+                        }
+                    }
+                    else {
+                        w = window.innerWidth;
+                        h = window.innerHeight;
+                    }
+                }
+                else {
+                    w = canvas.offsetWidth;
+                    h = canvas.offsetHeight;
+                }
+                var sw = canvas.width = w * dpi_factor;
+                var sh = canvas.height = h * dpi_factor;
+                
+                this.gl.viewport(0, 0, sw, sh);
+                
+                this.dpi_factor = dpi_factor;
+                this.width = canvas.offsetWidth;
+                this.height = canvas.offsetHeight;
+                // send the wasm a screenresize event
+            }
+            
+            if (this.to_wasm) {
+                // initialize the application
+                this.to_wasm.resize({
+                    width: this.width,
+                    height: this.height,
+                    dpi_factor: this.dpi_factor,
+                    vr_can_present: this.vr_can_present,
+                    vr_is_presenting: this.vr_is_presenting
+                })
+                this.request_animation_frame()
+            }
+        }
+        
+        init_webgl_context() {
+            
+            window.addEventListener('resize', _ => {
+                this.on_screen_resize()
+            })
+            
+            window.addEventListener('orientationchange', _ => {
+                this.on_screen_resize()
+            })
+            
+            let mqString = '(resolution: ' + window.devicePixelRatio + 'dppx)'
+            let mq = matchMedia(mqString);
+            if (mq && mq.addEventListener) {
+                mq.addEventListener("change", _ => {
+                    this.on_screen_resize()
+                });
+            }
+            else { // poll for it. yes. its terrible
+                window.setInterval(_ => {
+                    if (window.devicePixelRation != this.dpi_factor) {
+                        this.on_screen_resize()
+                    }
+                }, 1000);
+            }
+            
+            var canvas = this.canvas
+            var options = {
+                alpha: canvas.getAttribute("noalpha")? false: true,
+                depth: canvas.getAttribute("nodepth")? false: true,
+                stencil: canvas.getAttribute("nostencil")? false: true,
+                antialias: canvas.getAttribute("noantialias")? false: true,
+                premultipliedAlpha: canvas.getAttribute("premultipliedAlpha")? true: false,
+                preserveDrawingBuffer: canvas.getAttribute("preserveDrawingBuffer")? true: false,
+                preferLowPowerToHighPerformance: true,
+                xrCompatible: true
+            }
+            
+            var gl = this.gl = canvas.getContext('webgl', options)
+                || canvas.getContext('webgl-experimental', options)
+                || canvas.getContext('experimental-webgl', options)
+            
+            if (!gl) {
+                var span = document.createElement('span')
+                span.style.color = 'white'
+                canvas.parentNode.replaceChild(span, canvas)
+                span.innerHTML = "Sorry, makepad needs browser support for WebGL to run<br/>Please update your browser to a more modern one<br/>Update to atleast iOS 10, Safari 10, latest Chrome, Edge or Firefox<br/>Go and update and come back, your browser will be better, faster and more secure!<br/>If you are using chrome on OSX on a 2011/2012 mac please enable your GPU at: Override software rendering list:Enable (the top item) in: <a href='about://flags'>about://flags</a>. Or switch to Firefox or Safari."
+                return
+            }
+            gl.OES_standard_derivatives = gl.getExtension('OES_standard_derivatives')
+            gl.OES_vertex_array_object = gl.getExtension('OES_vertex_array_object')
+            gl.OES_element_index_uint = gl.getExtension("OES_element_index_uint")
+            gl.ANGLE_instanced_arrays = gl.getExtension('ANGLE_instanced_arrays')
+            
+            // check uniform count
+            var max_vertex_uniforms = gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS);
+            var max_fragment_uniforms = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS);
+            if (max_vertex_uniforms < 512 || max_fragment_uniforms < 512) {
+                this.gpu_spec_is_low_on_uniforms = true
+            }
+            else {
+                this.gpu_spec_is_low_on_uniforms = false
+            }
+            
+            
+            //gl.EXT_blend_minmax = gl.getExtension('EXT_blend_minmax')
+            //gl.OES_texture_half_float_linear = gl.getExtension('OES_texture_half_float_linear')
+            //gl.OES_texture_float_linear = gl.getExtension('OES_texture_float_linear')
+            //gl.OES_texture_half_float = gl.getExtension('OES_texture_half_float')
+            //gl.OES_texture_float = gl.getExtension('OES_texture_float')
+            //gl.WEBGL_depth_texture = gl.getExtension("WEBGL_depth_texture") || gl.getExtension("WEBKIT_WEBGL_depth_texture")
+            this.on_screen_resize()
+        }
+        
+        request_animation_frame() {
+            if (this.vr_is_presenting || this.req_anim_frame_id) {
+                return;
+            }
+            this.req_anim_frame_id = window.requestAnimationFrame(time => {
+                this.req_anim_frame_id = 0;
+                if (this.vr_is_presenting) {
+                    return
+                }
+                this.to_wasm.animation_frame(time / 1000.0);
+                this.in_animation_frame = true;
+                this.do_wasm_io();
+                this.in_animation_frame = false;
+            })
+        }
+        
+        run_async_webxr_check() {
+            this.vr_can_present = false;
+            this.vr_is_presenting = false;
+            
+            // ok this changes a bunch in how the renderflow works.
+            // first thing we are going to do is get the vr displays.
+            let xr_system = navigator.xr;
+            if (xr_system) {
+                
+                navigator.xr.isSessionSupported('immersive-vr').then(supported => {
+                    
+                    if (supported) {
+                        this.vr_can_present = true;
+                    }
+                });
+            }
+            else {
+                console.log("No webVR support found")
+            }
+        }
+        
+        vr_start_presenting() {
+            
+            if (this.vr_can_present) {
+                navigator.xr.requestSession('immersive-vr').then(xr_session => {
+                    
+                    this.xr_layer = new XRWebGLLayer(xr_session, this.gl);
+                    xr_session.updateRenderState({baseLayer: this.xr_layer});
+                    
+                    xr_session.requestReferenceSpace("local").then(xr_reference_space=>{
+
+                        this.xr_reference_space = xr_reference_space;
+                        this.xr_session = xr_session;
+                        this.vr_is_presenting = true;
+
+                        console.log("Starting webXR")
+                        
+                        // lets start the loop
+                        let xr_on_request_animation_frame = (time, xr_frame) => {
+                            if (!this.vr_is_presenting) {
+                                return;
+                            }
+                            this.xr_session.requestAnimationFrame(xr_on_request_animation_frame);
+                            this.xr_pose = xr_frame.getViewerPose(this.xr_reference_space);
+                            if (!this.xr_pose) {
+                                return;
+                            }
+                            
+                            this.on_screen_resize();
+                            this.to_wasm.paint_dirty();
+                            this.to_wasm.vr_frame(time / 1000.0, this.vr_frame_data);
+                            this.in_animation_frame = true;
+                            this.do_wasm_io();
+                            this.in_animation_frame = false;
+                        }
+                        this.xr_session.requestAnimationFrame(xr_on_request_animation_frame);
+                        
+                        this.xr_session.addEventListener("end", () => {
+                            this.vr_is_presenting = false;
+                            this.on_screen_resize();
+                            this.to_wasm.paint_dirty();
+                            this.request_animation_frame();
+                        })
+                    })
+                })
+            }
+        }
+        
+        vr_stop_presenting() {
+            
+        }
+        
+        
+                
+        mark_begin_canvas_render() {
+            if (this.vr_is_presenting) {
+                // mark parse position for VR multiple eyes
+                this.vr_begin_parse = this.parse - 1;
+                // set up left or right eye
+                let xr_view = this.xr_pose.views[this.vr_eye_counter];
+                
+                let viewport = this.xr_layer.getViewport(xr_view);
+                
+                this.gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+                
+                // set up matrices
+                this.vr_projection_matrix = xr_view.projectionMatrix;
+                this.vr_transform_matrix = xr_view.transform.inverse.matrix;
+                // set up the vr view matrix
+            }
+        }
+        
+        mark_end_canvas_render() {
+            // mark parse end position
+            if (this.vr_is_presenting && this.vr_eye_counter == 0) {
+                this.vr_eye_counter = 1;
+                this.parse = this.vr_begin_parse;
+                // set up the right eye
+                ///his.gl.viewport(this.canvas.width * 0.5, 0, this.canvas.width * 0.5, this.canvas.height);
+                // jump the parser back to begin_frame
+            }
+        }
+        
+                
+        begin_main_canvas(r, g, b, a, depth) {
+            let gl = this.gl
+            this.is_main_canvas = true;
+            if (this.vr_is_presenting) { // set up the left eye
+                this.vr_eye_counter = 0;
+
+                let xr_webgllayer = this.xr_session.renderState.baseLayer;
+                this.gl.bindFramebuffer(gl.FRAMEBUFFER, xr_webgllayer.framebuffer);
+                gl.viewport(0, 0, xr_webgllayer.framebufferWidth, xr_webgllayer.framebufferHeight);
+                /*
+                // set the viewport to the whole thing
+                gl.viewport(0, 0, this.canvas.width * 0.5, this.canvas.height);
+              
+                this.vr_display.getFrameData(this.vr_frame_data);
+              
+                let inv = new Float32Array(16);
+                this.vr_left_view_matrix = new Float32Array(16);
+                this.vr_right_view_matrix = new Float32Array(16);
+                if (this.vr_display.stageParameters) {
+                    mat4_invert(inv, this.vr_display.stageParameters.sittingToStandingTransform);
+                }
+                else {
+                    mat4_translation(inv, [0, 1.65, 0]);
+                    mat4_invert(inv, inv);
+                }
+                mat4_multiply(this.vr_left_view_matrix, this.vr_frame_data.leftViewMatrix, inv);
+                mat4_multiply(this.vr_right_view_matrix, this.vr_frame_data.rightViewMatrix, inv);
+                */
+            }
+            else {
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+                gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+            }
+
+            gl.clearColor(r, g, b, a);
+            gl.clearDepth(depth);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        }
+        
+        
+        begin_render_targets(pass_id, width, height) {
+            let gl = this.gl
+            this.target_width = width;
+            this.target_height = height;
+            this.color_targets = 0;
+            this.clear_flags = 0;
+            this.is_main_canvas = false;
+            var gl_framebuffer = this.framebuffers[pass_id] || (this.framebuffers[pass_id] = gl.createFramebuffer());
+            gl.bindFramebuffer(gl.FRAMEBUFFER, gl_framebuffer);
+        }
+        
+        add_color_target(texture_id, init_only, r, g, b, a) {
+            // if use_default
+            this.clear_r = r;
+            this.clear_g = g;
+            this.clear_b = b;
+            this.clear_a = a;
+            var gl = this.gl;
+            
+            var gl_tex = this.textures[texture_id] || (this.textures[texture_id] = gl.createTexture());
+            
+            // resize or create texture
+            if (gl_tex.mp_width != this.target_width || gl_tex.mp_height != this.target_height) {
+                gl.bindTexture(gl.TEXTURE_2D, gl_tex)
+                this.clear_flags = gl.COLOR_BUFFER_BIT;
+                
+                gl_tex.mp_width = this.target_width
+                gl_tex.mp_height = this.target_height
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+                
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl_tex.mp_width, gl_tex.mp_height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            }
+            else if (!init_only) {
+                this.clear_flags = gl.COLOR_BUFFER_BIT;
+            }
+            
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, gl_tex, 0)
+            this.color_targets += 1;
+        }
+        
+        set_depth_target(texture_id, init_only, depth) {
+            this.clear_depth = depth;
+            console.log("IMPLEMENT DEPTH TEXTURE TARGETS ON WEBGL")
+        }
+        
+        end_render_targets() {
+            var gl = this.gl;
+            
+            // process the actual 'clear'
+            gl.viewport(0, 0, this.target_width, this.target_height);
+            
+            // check if we need to clear color, and depth
+            // clear it
+            if (this.clear_flags) {
+                gl.clearColor(this.clear_r, this.clear_g, this.clear_b, this.clear_a);
+                gl.clearDepth(this.clear_depth);
+                gl.clear(this.clear_flags);
+            }
+        }
+        
+        set_default_depth_and_blend_mode() {
+            let gl = this.gl
+            gl.enable(gl.DEPTH_TEST);
+            gl.depthFunc(gl.LEQUAL);
+            gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
+            gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+            gl.enable(gl.BLEND);
+        }
+        
+        // new shader helpers
+        get_attrib_locations(program, base, slots) {
+            var gl = this.gl;
+            let attrib_locs = [];
+            let attribs = slots >> 2;
+            let stride = slots * 4;
+            if ((slots & 3) != 0) attribs ++;
+            for (let i = 0; i < attribs; i ++) {
+                let size = (slots - i * 4);
+                if (size > 4) size = 4;
+                attrib_locs.push({
+                    loc: gl.getAttribLocation(program, base + i),
+                    offset: i * 16,
+                    size: size,
+                    stride: slots * 4
+                });
+            }
+            return attrib_locs
+        }
+        
+        get_uniform_locations(program, uniforms) {
+            var gl = this.gl;
+            let uniform_locs = [];
+            let offset = 0;
+            for (let i = 0; i < uniforms.length; i ++) {
+                let uniform = uniforms[i];
+                // lets align the uniform
+                let slots = this.uniform_size_table[uniform.ty];
+                if ((offset & 3) != 0 && (offset & 3) + slots > 4) { // goes over the boundary
+                    offset += 4 - (offset & 3); // make jump to new slot
+                }
+                uniform_locs.push({
+                    name: uniform.name,
+                    offset: offset << 2,
+                    ty: uniform.ty,
+                    loc: gl.getUniformLocation(program, uniform.name),
+                    fn: this.uniform_fn_table[uniform.ty]
+                });
+                offset += slots
+            }
+            return uniform_locs;
+        }
+        
+        compile_webgl_shader(ash) {
+            var gl = this.gl
+            var vsh = gl.createShader(gl.VERTEX_SHADER)
+            
+            gl.shaderSource(vsh, ash.vertex)
+            gl.compileShader(vsh)
+            if (!gl.getShaderParameter(vsh, gl.COMPILE_STATUS)) {
+                return console.log(
+                    gl.getShaderInfoLog(vsh),
+                    add_line_numbers_to_string(ash.vertex)
+                )
+            }
+            
+            // compile pixelshader
+            var fsh = gl.createShader(gl.FRAGMENT_SHADER)
+            gl.shaderSource(fsh, ash.fragment)
+            gl.compileShader(fsh)
+            if (!gl.getShaderParameter(fsh, gl.COMPILE_STATUS)) {
+                return console.log(
+                    gl.getShaderInfoLog(fsh),
+                    add_line_numbers_to_string(ash.fragment)
+                )
+            }
+            
+            var program = gl.createProgram()
+            gl.attachShader(program, vsh)
+            gl.attachShader(program, fsh)
+            gl.linkProgram(program)
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                return console.log(
+                    gl.getProgramInfoLog(program),
+                    add_line_numbers_to_string(ash.vertex),
+                    add_line_numbers_to_string(ash.fragment)
+                )
+            }
+            // fetch all attribs and uniforms
+            this.shaders[ash.shader_id] = {
+                geom_attribs: this.get_attrib_locations(program, "mpsc_packed_geometry_", ash.geometry_slots),
+                inst_attribs: this.get_attrib_locations(program, "mpsc_packed_instance_", ash.instance_slots),
+                pass_uniforms: this.get_uniform_locations(program, ash.pass_uniforms),
+                view_uniforms: this.get_uniform_locations(program, ash.view_uniforms),
+                draw_uniforms: this.get_uniform_locations(program, ash.draw_uniforms),
+                uniforms: this.get_uniform_locations(program, ash.uniforms),
+                texture_slots: this.get_uniform_locations(program, ash.texture_slots),
+                instance_slots: ash.instance_slots,
+                const_table_uniform: gl.getUniformLocation(program, "mpsc_const_table"),
+                program: program,
+                ash: ash
+            };
+        }
+        
         alloc_array_buffer(array_buffer_id, array) {
             if (this.multipass_updated_buffers) {
                 return
@@ -1325,6 +1533,9 @@
             
             for (let i = 0; i < shader.geom_attribs.length; i ++) {
                 let attr = shader.geom_attribs[i];
+                if (attr.loc < 0) {
+                    continue;
+                }
                 gl.vertexAttribPointer(attr.loc, attr.size, gl.FLOAT, false, attr.stride, attr.offset);
                 gl.enableVertexAttribArray(attr.loc);
                 gl.ANGLE_instanced_arrays.vertexAttribDivisorANGLE(attr.loc, 0);
@@ -1333,6 +1544,9 @@
             gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[inst_vb_id]);
             for (let i = 0; i < shader.inst_attribs.length; i ++) {
                 let attr = shader.inst_attribs[i];
+                if (attr.loc < 0) {
+                    continue;
+                }
                 gl.vertexAttribPointer(attr.loc, attr.size, gl.FLOAT, false, attr.stride, attr.offset);
                 gl.enableVertexAttribArray(attr.loc);
                 gl.ANGLE_instanced_arrays.vertexAttribDivisorANGLE(attr.loc, 1);
@@ -1370,14 +1584,9 @@
             // if vr_presenting
             if (this.is_main_canvas && this.vr_is_presenting) {
                 // the first 2 matrices are project and view
-                if (this.multipass_updated_buffers) {
-                    gl.uniformMatrix4fv(uniforms_cx[0].loc, false, this.vr_frame_data.rightProjectionMatrix)
-                    gl.uniformMatrix4fv(uniforms_cx[1].loc, false, this.vr_right_view_matrix)
-                }
-                else {
-                    gl.uniformMatrix4fv(uniforms_cx[0].loc, false, this.vr_frame_data.leftProjectionMatrix)
-                    gl.uniformMatrix4fv(uniforms_cx[1].loc, false, this.vr_left_view_matrix)
-                }
+                gl.uniformMatrix4fv(pass_uniforms[0].loc, false, this.vr_projection_matrix);
+                
+                gl.uniformMatrix4fv(pass_uniforms[1].loc, false, this.vr_transform_matrix);
                 for (let i = 2; i < pass_uniforms.length; i ++) {
                     let uni = pass_uniforms[i];
                     uni.fn(this, uni.loc, uni.offset + pass_uniforms_ptr);
@@ -1404,10 +1613,9 @@
                 let uni = uniforms[i];
                 uni.fn(this, uni.loc, uni.offset + uniforms_ptr);
             }
-            if(const_table_ptr !== 0){
-                gl.uniform1fv(shader.const_table_uniform, 
-                    new Float32Array(this.memory.buffer, const_table_ptr, const_table_len));
-            }         
+            if (const_table_ptr !== 0) {
+                gl.uniform1fv(shader.const_table_uniform, new Float32Array(this.memory.buffer, const_table_ptr, const_table_len));
+            }
             let texture_slots = shader.texture_slots;
             for (let i = 0; i < texture_slots.length; i ++) {
                 let tex_slot = texture_slots[i];
@@ -1422,217 +1630,8 @@
             // lets do a drawcall!
             gl.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
         }
-        
-        set_default_depth_and_blend_mode() {
-            let gl = this.gl
-            gl.enable(gl.DEPTH_TEST);
-            gl.depthFunc(gl.LEQUAL);
-            gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
-            gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-            gl.enable(gl.BLEND);
-        }
-        
-        begin_main_canvas(r, g, b, a, depth) {
-            let gl = this.gl
-            this.is_main_canvas = true;
-            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-            gl.clearColor(r, g, b, a);
-            gl.clearDepth(depth);
-            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-            
-            if (this.vr_is_presenting) { // set up the left eye
-                // set the viewport to the whole thing
-                gl.viewport(0, 0, this.canvas.width * 0.5, this.canvas.height);
-                
-                this.vr_display.getFrameData(this.vr_frame_data);
-                
-                let inv = new Float32Array(16);
-                this.vr_left_view_matrix = new Float32Array(16);
-                this.vr_right_view_matrix = new Float32Array(16);
-                if (this.vr_display.stageParameters) {
-                    mat4_invert(inv, this.vr_display.stageParameters.sittingToStandingTransform);
-                }
-                else {
-                    mat4_translation(inv, [0, 1.65, 0]);
-                    mat4_invert(inv, inv);
-                }
-                mat4_multiply(this.vr_left_view_matrix, this.vr_frame_data.leftViewMatrix, inv);
-                mat4_multiply(this.vr_right_view_matrix, this.vr_frame_data.rightViewMatrix, inv);
-            }
-            else {
-                gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-            }
-        }
-        
-        
-        begin_render_targets(pass_id, width, height) {
-            let gl = this.gl
-            this.target_width = width;
-            this.target_height = height;
-            this.color_targets = 0;
-            this.clear_flags = 0;
-            this.is_main_canvas = false;
-            var gl_framebuffer = this.framebuffers[pass_id] || (this.framebuffers[pass_id] = gl.createFramebuffer());
-            gl.bindFramebuffer(gl.FRAMEBUFFER, gl_framebuffer);
-        }
-        
-        add_color_target(texture_id, init_only, r, g, b, a) {
-            // if use_default
-            this.clear_r = r;
-            this.clear_g = g;
-            this.clear_b = b;
-            this.clear_a = a;
-            var gl = this.gl;
-            
-            var gl_tex = this.textures[texture_id] || (this.textures[texture_id] = gl.createTexture());
-            
-            // resize or create texture
-            if (gl_tex.mp_width != this.target_width || gl_tex.mp_height != this.target_height) {
-                gl.bindTexture(gl.TEXTURE_2D, gl_tex)
-                this.clear_flags = gl.COLOR_BUFFER_BIT;
-                
-                gl_tex.mp_width = this.target_width
-                gl_tex.mp_height = this.target_height
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-                
-                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl_tex.mp_width, gl_tex.mp_height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-            }
-            else if (!init_only) {
-                this.clear_flags = gl.COLOR_BUFFER_BIT;
-            }
-            
-            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, gl_tex, 0)
-            this.color_targets += 1;
-        }
-        
-        set_depth_target(texture_id, init_only, depth) {
-            this.clear_depth = depth;
-            console.log("IMPLEMENT DEPTH TEXTURE TARGETS ON WEBGL")
-        }
-        
-        end_render_targets() {
-            var gl = this.gl;
-            
-            // process the actual 'clear'
-            gl.viewport(0, 0, this.target_width, this.target_height);
-            
-            // check if we need to clear color, and depth
-            // clear it
-            if (this.clear_flags) {
-                gl.clearColor(this.clear_r, this.clear_g, this.clear_b, this.clear_a);
-                gl.clearDepth(this.clear_depth);
-                gl.clear(this.clear_flags);
-            }
-        }
-        
-        mark_vr_draw_eye() {
-            this.multipass_updated_buffers = false;
-            // mark parse position for VR multiple eyes
-            this.vr_begin_parse = this.parse;
-        }
-        
-        loop_vr_draw_eye() {
-            // mark parse end position
-            if (!this.multipass_updated_buffers) {
-                this.multipass_updated_buffers = true;
-                // set up the right eye
-                this.gl.viewport(this.canvas.width * 0.5, 0, this.canvas.width * 0.5, this.canvas.height);
-                // jump the parser back to begin_frame
-                this.parse = this.vr_begin_parse;
-            }
-        }
-        
-        set_mouse_cursor(id) {
-            document.body.style.cursor = this.cursor_map[id] || 'default'
-        }
-        
-        read_file(id, file_path) {
-            
-            fetch_path(file_path).then(result => {
-                let byte_len = result.buffer.byteLength
-                let output_ptr = this.exports.alloc_wasm_vec(byte_len);
-                this.copy_to_wasm(result.buffer, output_ptr);
-                this.to_wasm.read_file_data(id, output_ptr, byte_len)
-                this.do_wasm_io();
-            }, err => {
-                this.to_wasm.read_file_error(id)
-                this.do_wasm_io();
-            })
-        }
-        
-        start_timer(id, interval, repeats) {
-            for (let i = 0; i < this.timers.length; i ++) {
-                if (this.timers[i].id == id) {
-                    console.log("Timer ID collision!")
-                    return
-                }
-            }
-            var obj = {id: id, repeats: repeats};
-            if (repeats !== 0) {
-                obj.sys_id = window.setInterval(e => {
-                    this.to_wasm.timer(id);
-                    this.do_wasm_io();
-                }, interval * 1000.0);
-            }
-            else {
-                obj.sys_id = window.setTimeout(e => {
-                    for (let i = 0; i < this.timers.length; i ++) {
-                        let timer = this.timers[i];
-                        if (timer.id == id) {
-                            this.timers.splice(i, 1);
-                            break;
-                        }
-                    }
-                    this.to_wasm.timer(id);
-                    this.do_wasm_io();
-                }, interval * 1000.0);
-            }
-            this.timers.push(obj)
-        }
-        
-        stop_timer(id) {
-            for (let i = 0; i < this.timers.length; i ++) {
-                let timer = this.timers[i];
-                if (timer.id == id) {
-                    if (timer.repeats) {
-                        window.clearInterval(timer.sys_id);
-                    }
-                    else {
-                        window.clearTimeout(timer.sys_id);
-                    }
-                    this.timers.splice(i, 1);
-                    return
-                }
-            }
-            //console.log("Timer ID not found!")
-        }
-        
-        http_send(verb, path, proto, domain, port, content_type, body, signal_id){
 
-            var req = new XMLHttpRequest()
-            req.addEventListener("error", _=> {
-                // signal fail
-                this.to_wasm.http_send_response(signal_id, 2);
-                this.do_wasm_io();
-            })
-            req.addEventListener("load", _=> {
-                if (req.status !== 200) {
-                    // signal fail
-                    this.to_wasm.http_send_response(signal_id, 2);
-                }
-                else{
-                    //signal success
-                    this.to_wasm.http_send_response(signal_id, 1);
-                }
-                this.do_wasm_io();
-            })
-            req.open(verb, proto+"://"+domain+":"+port+path, true);
-            console.log(verb, proto+"://"+domain+":"+port+path, body);
-            req.send(body.buffer);
-        }
+
     }
     
     // array of function id's wasm can call on us, self is pointer to WasmApp
@@ -1761,11 +1760,11 @@
         function vr_stop_presenting_20(self) {
             self.vr_stop_presenting();
         },
-        function mark_vr_draw_eye_21(self) {
-            self.mark_vr_draw_eye();
+        function mark_begin_canvas_render_21(self) {
+            self.mark_begin_canvas_render();
         },
-        function loop_vr_draw_eye_22(self) {
-            self.loop_vr_draw_eye();
+        function mark_end_canvas_render_22(self) {
+            self.mark_end_canvas_render();
         },
         function begin_render_targets_23(self) {
             let pass_id = self.mu32[self.parse ++];
