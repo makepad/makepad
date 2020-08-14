@@ -189,7 +189,7 @@ impl HttpServer {
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                         }
                         else{
-                            write_bytes_to_tcp_stream_no_error(&mut tcp_stream, "HTTP/1.1 404 NotFound\r\n".as_bytes());
+                            write_bytes_to_tcp_stream_no_error(&mut tcp_stream, "HTTP/1.1 404 NotFound\r\n\r\n".as_bytes());
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                         }
                     });
