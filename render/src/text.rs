@@ -120,7 +120,7 @@ impl Text {
                 // basic hardcoded mipmapping so it stops 'swimming' in VR
                 // mipmaps are stored in red/green/blue channel
                 let s = 1.0;
-                if dx > 5.0 {
+                if dx > 7.0 {
                     s = 0.7;
                 }
                 else if dx > 2.75 {
