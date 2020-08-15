@@ -36,6 +36,25 @@ impl View {
         }
     }
     
+    pub fn set_view_transform(&self, cx:&mut Cx, mat:&Mat4){
+        
+        fn set_view_transform_recur(view_id:usize, cx:&mut Cx, mat:&Mat4){
+            cx.views[view_id].uniform_view_transform(mat);
+            let draw_calls_len = cx.views[view_id].draw_calls_len;
+            for draw_call_id in 0..draw_calls_len {
+                let sub_view_id = cx.views[view_id].draw_calls[draw_call_id].sub_view_id;
+                if sub_view_id != 0 {
+                    set_view_transform_recur(sub_view_id, cx, mat);
+                }
+            }
+        }
+        
+        if let Some(view_id) = &self.view_id { // we need a draw_list_id
+            set_view_transform_recur(*view_id, cx, mat);
+        }
+        
+    }
+    
     pub fn begin_view(&mut self, cx: &mut Cx, layout: Layout) -> ViewRedraw {
         
         if !cx.is_in_redraw_cycle {
@@ -486,6 +505,7 @@ impl CxView {
         self.clipped = clipped;
         self.redraw_id = redraw_id;
         self.pass_id = pass_id;
+        self.uniform_view_transform(&Mat4::identity());
     }
     
     pub fn get_scrolled_rect(&self) -> Rect {

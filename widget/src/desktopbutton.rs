@@ -15,7 +15,7 @@ pub enum DesktopButtonType {
     WindowsMax,
     WindowsMaxToggled,
     WindowsClose,
-    VRMode,
+    XRMode,
 }
 
 impl DesktopButtonType {
@@ -25,7 +25,7 @@ impl DesktopButtonType {
             DesktopButtonType::WindowsMax => 2.,
             DesktopButtonType::WindowsMaxToggled => 3.,
             DesktopButtonType::WindowsClose => 4.,
-            DesktopButtonType::VRMode => 5.,
+            DesktopButtonType::XRMode => 5.,
         }
     }
 }
@@ -164,7 +164,7 @@ impl DesktopButton {
             | DesktopButtonType::WindowsMax 
             | DesktopButtonType::WindowsMaxToggled 
             | DesktopButtonType::WindowsClose => (46.,29.),
-            DesktopButtonType::VRMode => (50.,36.),
+            DesktopButtonType::XRMode => (50.,36.),
         };
         self.bg.shader = Self::shader_bg().get(cx);
         let bg_inst = self.bg.draw_quad(cx, Walk::wh(Width::Fix(w), Height::Fix(h)));
