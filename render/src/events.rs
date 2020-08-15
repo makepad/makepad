@@ -226,6 +226,16 @@ pub struct WindowDragQueryEvent {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct XRUpdateEvent {
+    // alright what data are we stuffing in 
+    pub time: f64,
+    pub head_matrix: Option<Mat4>,
+    pub left_matrix: Option<Mat4>,
+    pub right_matrix: Option<Mat4>,
+}
+
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     None,
     Construct,
@@ -237,6 +247,7 @@ pub enum Event {
     AnimEnded(AnimateEvent),
     Animate(AnimateEvent),
     Frame(FrameEvent),
+    XRUpdate(XRUpdateEvent),
     WindowSetHoverCursor(MouseCursor),
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),

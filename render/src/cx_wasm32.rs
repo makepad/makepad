@@ -79,7 +79,7 @@ impl Cx {
                         dpi_factor: to_wasm.mf32(),
                         outer_size: Vec2 {x: 0., y: 0.},
                         position: Vec2 {x: 0., y: 0.},
-                        vr_is_presenting: false
+                        xr_is_presenting: false
                     };
                     self.default_dpi_factor = self.platform.window_geom.dpi_factor;
                     self.vr_can_present = to_wasm.mu32() > 0;
@@ -94,6 +94,7 @@ impl Cx {
                     self.redraw_child_area(Area::All);
                 }, 
                 4 => { // resize 
+                    let old_geom = self.platform.window_geom.clone();
                     self.platform.window_geom = WindowGeom {
                         is_fullscreen: false,
                         is_topmost: false,
@@ -101,12 +102,20 @@ impl Cx {
                         dpi_factor: to_wasm.mf32(),
                         outer_size: Vec2 {x: 0., y: 0.},
                         position: Vec2 {x: 0., y: 0.},
-                        vr_is_presenting: to_wasm.mu32() > 0
+                        xr_is_presenting: to_wasm.mu32() > 0
                     };
+                    let new_geom = self.platform.window_geom.clone();
                     self.vr_can_present = to_wasm.mu32() > 0;
                     
                     if self.windows.len()>0 {
                         self.windows[0].window_geom = self.platform.window_geom.clone();
+                    }
+                    if old_geom != new_geom{
+                        self.call_event_handler(&mut event_handler, &mut Event::WindowGeomChange(WindowGeomChangeEvent{
+                            window_id: 0,
+                            old_geom:old_geom,
+                            new_geom:new_geom
+                        }));
                     }
                     
                     // do our initial redraw and repaint
@@ -325,9 +334,22 @@ impl Cx {
                         self.call_event_handler(&mut event_handler, &mut Event::AppFocus);
                     }
                 },
-                20 => { // vr_frame, TODO add all the matrices / tracked hands / position IO'ed here
+                20 => { // xr_update, TODO add all the matrices / tracked hands / position IO'ed here
                     is_animation_frame = true;
                     let time = to_wasm.mf64();
+                    
+                    let head_matrix = to_wasm.parse_optional_mat4();
+                    let left_matrix = to_wasm.parse_optional_mat4();
+                    let right_matrix = to_wasm.parse_optional_mat4();
+                    
+                    // call the VRUpdate event
+                    self.call_event_handler(&mut event_handler, &mut Event::XRUpdate(XRUpdateEvent{
+                         time:time,
+                         head_matrix,
+                         left_matrix,
+                         right_matrix,
+                    }));
+                    
                     //log!(self, "{} o clock",time);
                     if self.playing_anim_areas.len() != 0 {
                         self.call_animation_event(&mut event_handler, time);
@@ -335,6 +357,9 @@ impl Cx {
                     if self.frame_callbacks.len() != 0 {
                         self.call_frame_event(&mut event_handler, time);
                     }
+                    // lets send an event with all the VR information into makepad
+                    
+                    
                 },
                 21 => { // paint_dirty, only set the passes of the main window to dirty
                     self.passes[self.windows[0].main_pass_id.unwrap()].paint_dirty = true;
@@ -378,12 +403,12 @@ impl Cx {
             };
             
             window.window_command = match &window.window_command {
-                CxWindowCmd::VrStartPresenting => {
-                    self.platform.from_wasm.vr_start_presenting();
+                CxWindowCmd::XrStartPresenting => {
+                    self.platform.from_wasm.xr_start_presenting();
                     CxWindowCmd::None
                 },
-                CxWindowCmd::VrStopPresenting => {
-                    self.platform.from_wasm.vr_stop_presenting();
+                CxWindowCmd::XrStopPresenting => {
+                    self.platform.from_wasm.xr_stop_presenting();
                     CxWindowCmd::None
                 },
                 _ => CxWindowCmd::None,
@@ -414,7 +439,7 @@ impl Cx {
                             // its a render window
                             windows_need_repaint -= 1;
                             let dpi_factor = self.platform.window_geom.dpi_factor;
-                            self.draw_pass_to_canvas(*pass_id, self.platform.window_geom.vr_is_presenting, dpi_factor);
+                            self.draw_pass_to_canvas(*pass_id, dpi_factor);
                         }
                         CxPassDepOf::Pass(parent_pass_id) => {
                             let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
@@ -1047,29 +1072,19 @@ impl FromWasm {
         self.add_f64(id as f64);
     }
     
-    pub fn vr_start_presenting(&mut self) {
+    pub fn xr_start_presenting(&mut self) {
         self.fit(1);
         self.mu32(19);
     }
     
-    pub fn vr_stop_presenting(&mut self) {
+    pub fn xr_stop_presenting(&mut self) {
         self.fit(1);
         self.mu32(20);
     }
     
-    pub fn mark_begin_canvas_render(&mut self) {
-        self.fit(1);
-        self.mu32(21);
-    }
-    
-    pub fn mark_end_canvas_render(&mut self) {
-        self.fit(1);
-        self.mu32(22);
-    }
-    
     pub fn begin_render_targets(&mut self, pass_id: usize, width: usize, height: usize) {
         self.fit(4);
-        self.mu32(23);
+        self.mu32(21);
         self.mu32(pass_id as u32);
         self.mu32(width as u32);
         self.mu32(height as u32);
@@ -1077,7 +1092,7 @@ impl FromWasm {
     
     pub fn add_color_target(&mut self, texture_id: usize, init_only: bool, color: Color) {
         self.fit(7);
-        self.mu32(24);
+        self.mu32(22);
         self.mu32(texture_id as u32);
         self.mu32(if init_only {1} else {0});
         self.mf32(color.r);
@@ -1088,7 +1103,7 @@ impl FromWasm {
     
     pub fn set_depth_target(&mut self, texture_id: usize, init_only: bool, depth: f32) {
         self.fit(4);
-        self.mu32(25);
+        self.mu32(23);
         self.mu32(texture_id as u32);
         self.mu32(if init_only {1} else {0});
         self.mf32(depth);
@@ -1096,17 +1111,17 @@ impl FromWasm {
     
     pub fn end_render_targets(&mut self) {
         self.fit(1);
-        self.mu32(26);
+        self.mu32(24);
     }
     
     pub fn set_default_depth_and_blend_mode(&mut self) {
         self.fit(1);
-        self.mu32(27);
+        self.mu32(25);
     }
     
     pub fn begin_main_canvas(&mut self, color: Color, depth: f32) {
         self.fit(6);
-        self.mu32(28);
+        self.mu32(26);
         self.mf32(color.r);
         self.mf32(color.g);
         self.mf32(color.b);
@@ -1229,6 +1244,18 @@ impl ToWasm {
             }
         }
         out
+    }
+    
+    fn parse_optional_mat4(&mut self) -> Option<Mat4>{
+        let has_mat = self.mu32();
+        if has_mat == 0{
+            return None;
+        }
+        let mut ret = Mat4::default();
+        for i in 0..16{
+            ret.v[i] = self.mf32();
+        }
+        return Some(ret);
     }
 }
 
