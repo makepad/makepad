@@ -19,12 +19,12 @@ use crate::jseditor::*;
 use crate::plaineditor::*;
 use crate::shaderview::*;
 
-#[derive(Debug, Clone, SerRon, DeRon)] 
+#[derive(Debug, Clone, SerRon, DeRon)]
 pub enum Panel {
-    LogList,  
+    LogList,
     SearchResults,
     ItemDisplay,
-    Keyboard, 
+    Keyboard,
     ShaderView,
     FileTree,
     FileEditorTarget,
@@ -40,13 +40,12 @@ pub struct AppWindow {
     pub log_list: LogList,
     pub search_results: SearchResults,
     pub shader_view: ShaderView,
-    
     pub keyboard: Keyboard,
     pub file_editors: FileEditors,
     pub dock: Dock<Panel>,
 }
 
-#[derive(Clone, SerRon, DeRon)] 
+#[derive(Clone, SerRon, DeRon)]
 pub struct AppWindowState {
     pub open_folders: Vec<String>,
     pub window_position: Vec2,
@@ -86,6 +85,7 @@ impl AppWindow {
     
     pub fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, state: &mut AppState, storage: &mut AppStorage, build_manager: &mut BuildManager) {
         
+        
         match self.desktop_window.handle_desktop_window(cx, event) {
             DesktopWindowEvent::EventForOtherWindow => {
                 return
@@ -105,6 +105,25 @@ impl AppWindow {
         }
         
         match event {
+            Event::WindowGeomChange(gc)=>{
+                if gc.old_geom.xr_is_presenting && !gc.new_geom.xr_is_presenting{
+                     self.desktop_window.inner_view.set_view_transform(cx, &Mat4::identity());
+                }
+            },
+            Event::XRUpdate(xu) => { // handle all VR updates here.
+                let view_rect = self.desktop_window.inner_view.get_rect(cx); 
+                let on_hand = Mat4::rotate_tsrt(
+                    Vec3{x:0.,y:-view_rect.h,z:0.0},  
+                    Vec3{x:0.0005, y:-0.0005, z:0.001},
+                    Vec3{x:-80.0,y:0.0,z:0.0},
+                    Vec3{x:-0.,y:0.,z:0.0}, 
+                ); 
+                
+                if let Some(left_matrix) = xu.left_matrix{
+                    let combined = Mat4::from_mul(&on_hand,&left_matrix);
+                    self.desktop_window.inner_view.set_view_transform(cx, &combined);
+                }
+            },
             Event::KeyDown(ke) => match ke.key_code {
                 KeyCode::Backtick => if ke.modifiers.logo || ke.modifiers.control {
                     if build_manager.active_builds.len() == 0 {
@@ -143,7 +162,7 @@ impl AppWindow {
         
         while let Some(item) = dock_walker.walk_handle_dock(cx, event) {
             match item {
-                Panel::LogList => {
+                Panel::LogList => { 
                     match self.log_list.handle_log_list(cx, event, storage, build_manager) {
                         LogListEvent::SelectLocMessage {loc_message, jump_to_offset} => {
                             // just make it open an editor
@@ -153,7 +172,7 @@ impl AppWindow {
                                 file_tree_event = FileTreeEvent::SelectFile {path: storage.remap_sync_path(&loc_message.path)};
                             }
                             self.item_display.display_message(cx, &loc_message);
-                            set_last_cursor = Some((jump_to_offset,jump_to_offset));
+                            set_last_cursor = Some((jump_to_offset, jump_to_offset));
                             show_item_display_tab = true;
                         },
                         LogListEvent::SelectMessages {items} => {
@@ -163,7 +182,7 @@ impl AppWindow {
                         _ => ()
                     }
                 }
-                Panel::ShaderView =>{
+                Panel::ShaderView => {
                     self.shader_view.handle_shader_view(cx, event)
                 },
                 Panel::ItemDisplay => {
@@ -225,7 +244,7 @@ impl AppWindow {
         }
         
         if let Some((search, first_tbid, focus, escape)) = do_search {
-
+            
             if let Some(search) = search {
                 self.search_results.set_search_input_value(cx, &search, first_tbid, focus);
             }
@@ -236,19 +255,19 @@ impl AppWindow {
             if focus {
                 self.show_search_tab(cx, window_index, state);
             }
-            else{
-                if let Some((tbid, cursor)) = first_result{
+            else {
+                if let Some((tbid, cursor)) = first_result {
                     set_last_cursor = Some(cursor);
                     do_display_rust_file = Some(tbid);
                 }
-            }            
+            }
         }
         
         if show_item_display_tab {
             self.show_item_display_tab(cx, window_index, state);
         }
         
-        if let Some(tbid) = do_display_rust_file{
+        if let Some(tbid) = do_display_rust_file {
             let path = storage.text_buffer_id_to_path.get(&tbid).unwrap();
             if self.open_preview_editor_tab(cx, window_index, state, &path, set_last_cursor) {
                 storage.save_state(cx, state);
@@ -335,6 +354,8 @@ impl AppWindow {
         storage: &mut AppStorage,
         build_manager: &mut BuildManager
     ) {
+
+        
         if self.desktop_window.begin_desktop_window(cx, Some(menu)).is_err() {return}
         
         self.dock.draw_dock(cx);
@@ -365,7 +386,7 @@ impl AppWindow {
             }
         }) {
             match item {
-                Panel::ShaderView =>{
+                Panel::ShaderView => {
                     self.shader_view.draw_shader_view(cx);
                 },
                 Panel::LogList => {
@@ -399,7 +420,7 @@ impl AppWindow {
         self.desktop_window.end_desktop_window(cx);
     }
     
-    pub fn ensure_unique_tab_title_for_file_editors(&mut self, cx:&mut Cx, window_index: usize, state: &mut AppState) {
+    pub fn ensure_unique_tab_title_for_file_editors(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState) {
         // we walk through the dock collecting tab titles, if we run into a collision
         // we need to find the shortest uniqueness
         let mut collisions: HashMap<String, Vec<(String, usize, usize)>> = HashMap::new();
@@ -476,14 +497,14 @@ impl AppWindow {
         cx.redraw_child_area(Area::All);
     }
     
-    pub fn new_file_editor_tab(&mut self, cx: &mut Cx, path: &str, set_last_cursor: Option<(usize, usize)>, at_top:bool, focus:bool) -> DockTab<Panel> {
+    pub fn new_file_editor_tab(&mut self, cx: &mut Cx, path: &str, set_last_cursor: Option<(usize, usize)>, at_top: bool, focus: bool) -> DockTab<Panel> {
         let editor_id = self.file_editors.highest_file_editor_id() + 1;
         let (file_editor, is_new) = self.file_editors.get_file_editor_for_path(path, editor_id);
         if is_new && focus {
             file_editor.set_key_focus(cx);
         }
         if let Some(cursor) = set_last_cursor {
-            file_editor.set_last_cursor(cx, cursor,at_top);
+            file_editor.set_last_cursor(cx, cursor, at_top);
         }
         DockTab {
             closeable: true,
@@ -569,13 +590,13 @@ impl AppWindow {
                 for (id, tab) in tabs.iter().enumerate() {
                     match &tab.item {
                         Panel::ItemDisplay => { // found the editor target
-                            item_ctrl_id = Some((ctrl_id,id));
+                            item_ctrl_id = Some((ctrl_id, id));
                         },
                         Panel::FileEditor {path, scroll_pos: _, editor_id} => {
                             if *path == file_path {
                                 // check if we aren't the preview..
-                                if let Some((item_ctrl_id, tab_id)) = item_ctrl_id{
-                                    if item_ctrl_id == ctrl_id && tab_id == id - 1{
+                                if let Some((item_ctrl_id, tab_id)) = item_ctrl_id {
+                                    if item_ctrl_id == ctrl_id && tab_id == id - 1 {
                                         continue
                                     }
                                 }
@@ -641,10 +662,10 @@ impl AppWindow {
                     if let DockItem::TabControl {current, tabs, ..} = dock_item {
                         // already contains the editor we need, or if we need a new one
                         // check what tab is right next to ItemDisplay
-                        if target_tab_after + 1 < tabs.len(){
+                        if target_tab_after + 1 < tabs.len() {
                             match &mut tabs[target_tab_after + 1].item {
                                 Panel::FileEditor {path, scroll_pos: _, editor_id} => {
-                                    if self.file_editors.does_path_match_editor_type(file_path, *editor_id){
+                                    if self.file_editors.does_path_match_editor_type(file_path, *editor_id) {
                                         *path = file_path.to_string();
                                         let (file_editor, _is_new) = self.file_editors.get_file_editor_for_path(path, *editor_id);
                                         if let Some(cursor) = set_last_cursor {
@@ -677,7 +698,7 @@ impl AppWindow {
                 }
             }
         }
-
+        
         return false
     }
 }

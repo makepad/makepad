@@ -63,6 +63,20 @@
                 this.mf64[pos >> 1] = value;
             }
         }
+
+        send_optional_mat4(matrix){
+            if(matrix == null){
+                let pos = this.fit(1);
+                this.mu32[pos++] = 0;
+            }
+            else{
+                let pos = this.fit(17);
+                this.mu32[pos++] = 1;
+                for(let i = 0; i < 16; i++){
+                    this.mf32[pos++] = matrix[i];
+                }
+            }
+        }
         
         deps_loaded(deps) {
             let pos = this.fit(2);
@@ -83,7 +97,7 @@
             this.mf32[pos ++] = info.width;
             this.mf32[pos ++] = info.height;
             this.mf32[pos ++] = info.dpi_factor;
-            this.mu32[pos ++] = info.vr_can_present? 1: 0;
+            this.mu32[pos ++] = info.xr_can_present? 1: 0;
             this.mu32[pos ++] = info.gpu_spec_is_low_on_uniforms? 1: 0;
         }
         
@@ -93,8 +107,8 @@
             this.mf32[pos ++] = info.width;
             this.mf32[pos ++] = info.height;
             this.mf32[pos ++] = info.dpi_factor;
-            this.mu32[pos ++] = info.vr_is_presenting? 1: 0;
-            this.mu32[pos ++] = info.vr_can_present? 1: 0;
+            this.mu32[pos ++] = info.xr_is_presenting? 1: 0;
+            this.mu32[pos ++] = info.xr_can_present? 1: 0;
         }
         
         animation_frame(time) {
@@ -224,10 +238,19 @@
             this.mu32[pos ++] = is_focus? 1: 0;
         }
         
-        vr_frame(time, frame_data) {
+
+        xr_update(
+            time,
+            head_matrix,
+            left_matrix,
+            right_matrix,
+        ) {
             let pos = this.fit(1);
             this.mu32[pos ++] = 20;
             this.send_f64(time);
+            this.send_optional_mat4(head_matrix);
+            this.send_optional_mat4(left_matrix);
+            this.send_optional_mat4(right_matrix);
         }
         
         paint_dirty(time, frame_data) {
@@ -258,7 +281,6 @@
             
             // local webgl resources
             this.shaders = [];
-            this.vr_mode = false;
             this.index_buffers = [];
             this.array_buffers = [];
             this.timers = [];
@@ -318,8 +340,8 @@
                     width: this.width,
                     height: this.height,
                     dpi_factor: this.dpi_factor,
-                    vr_can_present: this.vr_can_present,
-                    vr_is_presenting: false,
+                    xr_can_present: this.xr_can_present,
+                    xr_is_presenting: false,
                     gpu_spec_is_low_on_uniforms: this.gpu_spec_is_low_on_uniforms
                 })
                 this.do_wasm_block = false;
@@ -329,7 +351,7 @@
                 for (var i = 0; i < loaders.length; i ++) {
                     loaders[i].parentNode.removeChild(loaders[i])
                 }
-                
+
             })
         }
         
@@ -587,7 +609,9 @@
                 }
                 return f
             }
-            
+
+            var easy_xr_presenting_toggle = window.localStorage.getItem("xr_presenting") == "true"
+
             var mouse_buttons_down = [];
             this.mouse_down_handler = e => {
                 e.preventDefault();
@@ -642,6 +666,7 @@
             })
             canvas.addEventListener('touchstart', e => {
                 e.preventDefault()
+                
                 let fingers = touch_to_finger_alloc(e);
                 for (let i = 0; i < fingers.length; i ++) {
                     this.to_wasm.finger_down(fingers[i])
@@ -658,7 +683,13 @@
                 this.do_wasm_io();
                 return false
             }, {passive: false})
+            
             var end_cancel_leave = e => {
+                if (easy_xr_presenting_toggle){
+                    easy_xr_presenting_toggle = false;
+                    this.xr_start_presenting();
+                };
+
                 e.preventDefault();
                 var fingers = touch_to_finger_free(e);
                 for (let i = 0; i < fingers.length; i ++) {
@@ -667,6 +698,7 @@
                 this.do_wasm_io();
                 return false
             }
+            
             canvas.addEventListener('touchend', end_cancel_leave);
             canvas.addEventListener('touchcancel', end_cancel_leave);
             canvas.addEventListener('touchleave', end_cancel_leave);
@@ -1015,10 +1047,10 @@
             h;
             var canvas = this.canvas;
             
-            if (this.vr_is_presenting) {
+            if (this.xr_is_presenting) {
                 let xr_webgllayer = this.xr_session.renderState.baseLayer;
                 this.dpi_factor = 3.0;
-                this.width =  xr_webgllayer.framebufferWidth / this.dpi_factor;
+                this.width = xr_webgllayer.framebufferWidth / this.dpi_factor;
                 this.height = xr_webgllayer.framebufferHeight / this.dpi_factor;
             }
             else {
@@ -1059,8 +1091,8 @@
                     width: this.width,
                     height: this.height,
                     dpi_factor: this.dpi_factor,
-                    vr_can_present: this.vr_can_present,
-                    vr_is_presenting: this.vr_is_presenting
+                    xr_can_present: this.xr_can_present,
+                    xr_is_presenting: this.xr_is_presenting
                 })
                 this.request_animation_frame()
             }
@@ -1140,12 +1172,12 @@
         }
         
         request_animation_frame() {
-            if (this.vr_is_presenting || this.req_anim_frame_id) {
+            if (this.xr_is_presenting || this.req_anim_frame_id) {
                 return;
             }
             this.req_anim_frame_id = window.requestAnimationFrame(time => {
                 this.req_anim_frame_id = 0;
-                if (this.vr_is_presenting) {
+                if (this.xr_is_presenting) {
                     return
                 }
                 this.to_wasm.animation_frame(time / 1000.0);
@@ -1156,8 +1188,8 @@
         }
         
         run_async_webxr_check() {
-            this.vr_can_present = false;
-            this.vr_is_presenting = false;
+            this.xr_can_present = false;
+            this.xr_is_presenting = false;
             
             // ok this changes a bunch in how the renderflow works.
             // first thing we are going to do is get the vr displays.
@@ -1167,7 +1199,7 @@
                 navigator.xr.isSessionSupported('immersive-vr').then(supported => {
                     
                     if (supported) {
-                        this.vr_can_present = true;
+                        this.xr_can_present = true;
                     }
                 });
             }
@@ -1176,25 +1208,27 @@
             }
         }
         
-        vr_start_presenting() {
+        xr_start_presenting() {
             
-            if (this.vr_can_present) {
+            if (this.xr_can_present) {
                 navigator.xr.requestSession('immersive-vr').then(xr_session => {
                     
                     this.xr_layer = new XRWebGLLayer(xr_session, this.gl);
                     xr_session.updateRenderState({baseLayer: this.xr_layer});
                     
-                    xr_session.requestReferenceSpace("local").then(xr_reference_space=>{
-
+                    xr_session.requestReferenceSpace("local").then(xr_reference_space => {
+                        window.localStorage.setItem("xr_presenting", "true");
                         this.xr_reference_space = xr_reference_space;
                         this.xr_session = xr_session;
-                        this.vr_is_presenting = true;
-
-                        console.log("Starting webXR")
-                        
+                        this.xr_is_presenting = true;
+                        let first_on_resize = true;
                         // lets start the loop
                         let xr_on_request_animation_frame = (time, xr_frame) => {
-                            if (!this.vr_is_presenting) {
+                            if (first_on_resize) {
+                                this.on_screen_resize();
+                                first_on_resize = false;
+                            }
+                            if (!this.xr_is_presenting) {
                                 return;
                             }
                             this.xr_session.requestAnimationFrame(xr_on_request_animation_frame);
@@ -1203,9 +1237,18 @@
                                 return;
                             }
                             
-                            this.on_screen_resize();
                             this.to_wasm.paint_dirty();
-                            this.to_wasm.vr_frame(time / 1000.0, this.vr_frame_data);
+                            // lets collect things
+                            //console.log();
+                            let input_len = xr_session.inputSources.length;
+                            let right_pose =  input_len>0?xr_frame.getPose(xr_session.inputSources[0].gripSpace, this.xr_reference_space):null;
+                            let left_pose =  input_len>1?xr_frame.getPose(xr_session.inputSources[1].gripSpace, this.xr_reference_space):null;
+                            this.to_wasm.xr_update(
+                                time / 1000.0,
+                                this.xr_pose.transform.matrix,
+                                left_pose?left_pose.transform.matrix:null,
+                                right_pose?right_pose.transform.matrix:null
+                            );
                             this.in_animation_frame = true;
                             this.do_wasm_io();
                             this.in_animation_frame = false;
@@ -1213,7 +1256,8 @@
                         this.xr_session.requestAnimationFrame(xr_on_request_animation_frame);
                         
                         this.xr_session.addEventListener("end", () => {
-                            this.vr_is_presenting = false;
+                            window.localStorage.setItem("xr_presenting", "false");
+                            this.xr_is_presenting = false;
                             this.on_screen_resize();
                             this.to_wasm.paint_dirty();
                             this.request_animation_frame();
@@ -1223,47 +1267,34 @@
             }
         }
         
-        vr_stop_presenting() {
+        xr_stop_presenting() {
             
         }
         
-        
-                
-        mark_begin_canvas_render() {
-            if (this.vr_is_presenting) {
+        begin_main_canvas(r, g, b, a, depth) {
+            let gl = this.gl
+            this.is_main_canvas = true;
+            if (this.xr_is_presenting) {
+                let xr_webgllayer = this.xr_session.renderState.baseLayer;
+                this.gl.bindFramebuffer(gl.FRAMEBUFFER, xr_webgllayer.framebuffer);
+                gl.viewport(0, 0, xr_webgllayer.framebufferWidth, xr_webgllayer.framebufferHeight);
 
                 let left_view = this.xr_pose.views[0];
                 let right_view = this.xr_pose.views[1];
                 
-                this.vr_left_viewport =  this.xr_layer.getViewport(left_view);
-                this.vr_right_viewport =  this.xr_layer.getViewport(right_view);
+                this.xr_left_viewport = this.xr_layer.getViewport(left_view);
+                this.xr_right_viewport = this.xr_layer.getViewport(right_view);
                 
-                this.vr_left_projection_matrix = left_view.projectionMatrix;
-                this.vr_left_transform_matrix = left_view.transform.inverse.matrix;
-                this.vr_right_projection_matrix = right_view.projectionMatrix;
-                this.vr_right_transform_matrix = right_view.transform.inverse.matrix;
-            }
-        }
-        
-        mark_end_canvas_render() {
-        }
-        
-                
-        begin_main_canvas(r, g, b, a, depth) {
-            let gl = this.gl
-            this.is_main_canvas = true;
-            if (this.vr_is_presenting) { // set up the left eye
-                this.vr_eye_counter = 0;
-
-                let xr_webgllayer = this.xr_session.renderState.baseLayer;
-                this.gl.bindFramebuffer(gl.FRAMEBUFFER, xr_webgllayer.framebuffer);
-                gl.viewport(0, 0, xr_webgllayer.framebufferWidth, xr_webgllayer.framebufferHeight);
+                this.xr_left_projection_matrix = left_view.projectionMatrix;
+                this.xr_left_transform_matrix = left_view.transform.inverse.matrix;
+                this.xr_right_projection_matrix = right_view.projectionMatrix;
+                this.xr_right_transform_matrix = right_view.transform.inverse.matrix;
             }
             else {
                 gl.bindFramebuffer(gl.FRAMEBUFFER, null);
                 gl.viewport(0, 0, this.canvas.width, this.canvas.height);
             }
-
+            
             gl.clearColor(r, g, b, a);
             gl.clearDepth(depth);
             gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -1573,23 +1604,23 @@
             let instances = instance_buffer.length / shader.instance_slots;
             // lets do a drawcall!
             
-              
-            if (this.is_main_canvas && this.vr_is_presenting) {
+            
+            if (this.is_main_canvas && this.xr_is_presenting) {
                 for (let i = 2; i < pass_uniforms.length; i ++) {
                     let uni = pass_uniforms[i];
                     uni.fn(this, uni.loc, uni.offset + pass_uniforms_ptr);
                 }
-
+                
                 // the first 2 matrices are project and view
-                let left_viewport = this.vr_left_viewport;
+                let left_viewport = this.xr_left_viewport;
                 gl.viewport(left_viewport.x, left_viewport.y, left_viewport.width, left_viewport.height);
-                gl.uniformMatrix4fv(pass_uniforms[0].loc, false, this.vr_left_projection_matrix);
-                gl.uniformMatrix4fv(pass_uniforms[1].loc, false, this.vr_left_transform_matrix);
+                gl.uniformMatrix4fv(pass_uniforms[0].loc, false, this.xr_left_projection_matrix);
+                gl.uniformMatrix4fv(pass_uniforms[1].loc, false, this.xr_left_transform_matrix);
                 gl.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
-                let right_viewport = this.vr_right_viewport;
+                let right_viewport = this.xr_right_viewport;
                 gl.viewport(right_viewport.x, right_viewport.y, right_viewport.width, right_viewport.height);
-                gl.uniformMatrix4fv(pass_uniforms[0].loc, false, this.vr_right_projection_matrix);
-                gl.uniformMatrix4fv(pass_uniforms[1].loc, false, this.vr_right_transform_matrix);
+                gl.uniformMatrix4fv(pass_uniforms[0].loc, false, this.xr_right_projection_matrix);
+                gl.uniformMatrix4fv(pass_uniforms[1].loc, false, this.xr_right_transform_matrix);
                 gl.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
             }
             else {
@@ -1600,8 +1631,8 @@
                 gl.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
             }
         }
-
-
+        
+        
     }
     
     // array of function id's wasm can call on us, self is pointer to WasmApp
@@ -1724,25 +1755,19 @@
             var id = self.parse_f64();
             self.stop_timer(id);
         },
-        function vr_start_presenting_19(self) {
-            self.vr_start_presenting();
+        function xr_start_presenting_19(self) {
+            self.xr_start_presenting();
         },
-        function vr_stop_presenting_20(self) {
-            self.vr_stop_presenting();
+        function xr_stop_presenting_20(self) {
+            self.xr_stop_presenting();
         },
-        function mark_begin_canvas_render_21(self) {
-            self.mark_begin_canvas_render();
-        },
-        function mark_end_canvas_render_22(self) {
-            self.mark_end_canvas_render();
-        },
-        function begin_render_targets_23(self) {
+        function begin_render_targets_21(self) {
             let pass_id = self.mu32[self.parse ++];
             let width = self.mu32[self.parse ++];
             let height = self.mu32[self.parse ++];
             self.begin_render_targets(pass_id, width, height);
         },
-        function add_color_target_24(self) {
+        function add_color_target_22(self) {
             let texture_id = self.mu32[self.parse ++];
             let init_only = self.mu32[self.parse ++];
             let r = self.mf32[self.parse ++];
@@ -1751,19 +1776,19 @@
             let a = self.mf32[self.parse ++];
             self.add_color_target(texture_id, init_only, r, g, b, a)
         },
-        function set_depth_target_25(self) {
+        function set_depth_target_23(self) {
             let texture_id = self.mu32[self.parse ++];
             let init_only = self.mu32[self.parse ++];
             let depth = self.mf32[self.parse ++];
             self.set_depth_target(texture_id, init_only, depth);
         },
-        function end_render_targets_26(self) {
+        function end_render_targets_24(self) {
             self.end_render_targets();
         },
-        function set_default_depth_and_blend_mode_27(self) {
+        function set_default_depth_and_blend_mode_25(self) {
             self.set_default_depth_and_blend_mode();
         },
-        function begin_main_canvas_28(self) {
+        function begin_main_canvas_26(self) {
             let r = self.mf32[self.parse ++];
             let g = self.mf32[self.parse ++];
             let b = self.mf32[self.parse ++];
@@ -1771,7 +1796,7 @@
             let depth = self.mf32[self.parse ++];
             self.begin_main_canvas(r, g, b, a, depth);
         },
-        function http_send_29(self) {
+        function http_send_27(self) {
             let port = self.mu32[self.parse ++];
             let signal_id = self.mu32[self.parse ++];
             let verb = self.parse_string();
