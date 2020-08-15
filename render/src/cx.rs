@@ -108,6 +108,7 @@ pub struct Cx {
     
     pub is_in_redraw_cycle: bool,
     pub vr_can_present: bool,
+    pub vr_is_presenting: bool,
     pub default_dpi_factor: f32,
     pub current_dpi_factor: f32,
     pub window_stack: Vec<usize>,
@@ -225,7 +226,6 @@ impl Default for Cx {
             passes_free: Vec::new(),
             views: vec![CxView {..Default::default()}],
             views_free: Vec::new(),
-            
             fonts: Vec::new(),
             fonts_atlas: CxFontsAtlas::default(),
             textures: textures,
@@ -243,6 +243,7 @@ impl Default for Cx {
             current_dpi_factor: 1.0,
             is_in_redraw_cycle: false,
             vr_can_present: false,
+            vr_is_presenting: false,
             window_stack: Vec::new(),
             pass_stack: Vec::new(),
             view_stack: Vec::new(),

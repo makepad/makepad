@@ -17,7 +17,7 @@ pub struct DesktopWindow {
     pub min_btn: DesktopButton,
     pub max_btn: DesktopButton,
     pub close_btn: DesktopButton,
-    pub vr_btn: DesktopButton,
+    pub xr_btn: DesktopButton,
     pub caption_text: Text,
     pub caption_bg: Quad,
     pub caption_size: Vec2,
@@ -54,7 +54,7 @@ impl DesktopWindow {
             min_btn: DesktopButton::new(cx),
             max_btn: DesktopButton::new(cx),
             close_btn: DesktopButton::new(cx),
-            vr_btn: DesktopButton::new(cx),
+            xr_btn: DesktopButton::new(cx),
             
             window_menu: WindowMenu::new(cx),
             default_menu: Menu::main(vec![
@@ -81,12 +81,12 @@ impl DesktopWindow {
     pub fn handle_desktop_window(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
         //self.main_view.handle_scroll_bars(cx, event);
         //self.inner_view.handle_scroll_bars(cx, event);
-        if let ButtonEvent::Clicked = self.vr_btn.handle_button(cx, event) {
-            if self.window.vr_is_presenting(cx) {
-                self.window.vr_stop_presenting(cx);
+        if let ButtonEvent::Clicked = self.xr_btn.handle_button(cx, event) {
+            if self.window.xr_is_presenting(cx) {
+                self.window.xr_stop_presenting(cx);
             }
             else {
-                self.window.vr_start_presenting(cx);
+                self.window.xr_start_presenting(cx);
             }
         }
         if let ButtonEvent::Clicked = self.min_btn.handle_button(cx, event) {
@@ -247,7 +247,7 @@ impl DesktopWindow {
         if cx.vr_can_present { // show a switch-to-VRMode button
             cx.reset_turtle_pos();
             cx.move_turtle(cx.get_width_total() - 50.0, 0.);
-            self.vr_btn.draw_desktop_button(cx, DesktopButtonType::VRMode);
+            self.xr_btn.draw_desktop_button(cx, DesktopButtonType::XRMode);
         }
         self.main_view.end_view(cx);
         

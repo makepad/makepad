@@ -119,7 +119,7 @@ impl BuildManager {
                         head: head,
                         tail: tail,
                         max: 0
-                    })
+                    }) 
                 }
             }
             
@@ -137,6 +137,22 @@ impl BuildManager {
         }        
     }
     
+    pub fn handle_log_item_limit(&mut self, cx:&mut Cx){
+        if self.log_items.len() >= 700000 { // out of memory safety
+            if self.tail_log_items{
+                self.log_items.truncate(500000);
+                self.log_items.push(HubLogItem::Message("------------ Log truncated here -----------".to_string()));
+            }
+            else{ // if not tailing, just throw it away
+                if self.log_items.len() != 700001{
+                    self.log_items.push(HubLogItem::Message("------------ Log skipping, press tail to resume -----------".to_string()));
+                    cx.send_signal(self.signal, BuildManager::status_new_log_item());
+                }
+                return
+            }
+        }
+    }
+    
     pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &FromHubMsg) {
         //let hub_ui = storage.hub_ui.as_mut().unwrap();
         match &htc.msg {
@@ -146,20 +162,8 @@ impl BuildManager {
             HubMsg::CargoBegin {uid} => if self.is_running_uid(uid) {
             },
             HubMsg::LogItem {uid, item} => if self.is_running_uid(uid) {
-                if self.log_items.len() >= 700000 { // out of memory safety
-                    if self.tail_log_items{
-                        self.log_items.truncate(500000);
-                        self.log_items.push(HubLogItem::Message("------------ Log truncated here -----------".to_string()));
-                    }
-                    else{ // if not tailing, just throw it away
-                        if self.log_items.len() != 700001{
-                            self.log_items.push(HubLogItem::Message("------------ Log skipping, press tail to resume -----------".to_string()));
-                            cx.send_signal(self.signal, BuildManager::status_new_log_item());
-                        }
-                        return
-                    }
-                }
                 
+                self.handle_log_item_limit(cx);
                 self.log_items.push(item.clone());
                 if let Some(loc_message) = item.get_loc_message() {
                     let level = match item {
@@ -211,6 +215,12 @@ impl BuildManager {
             },
             _ => ()
         }
+    }
+    
+    pub fn add_log_message(&mut self, cx:&mut Cx, msg:String){
+        self.handle_log_item_limit(cx);
+        self.log_items.push(HubLogItem::Message(msg));
+        cx.send_signal(self.signal, BuildManager::status_new_log_item());
     }
 
     pub fn handle_shader_recompile_event(&mut self, cx:&mut Cx, re:&ShaderRecompileEvent, storage:&mut AppStorage){

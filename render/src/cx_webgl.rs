@@ -9,18 +9,17 @@ impl Cx {
         view_id: usize,
         scroll: Vec2,
         clip: (Vec2, Vec2),
-        vr_is_presenting: bool,
         zbias: &mut f32,
         zbias_step: f32
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
-        if vr_is_presenting {
-            self.views[view_id].uniform_view_transform(&Mat4::scale_translate(0.001, -0.001, 0.001, -0.5, 0.25, -0.5));
-        }
-        else {
-            self.views[view_id].uniform_view_transform(&Mat4::identity());
-        }
+        //if vr_is_presenting {
+        //    self.views[view_id].uniform_view_transform(&Mat4::scale_translate(0.001, -0.001, 0.001, -0.5, 0.25, -0.5));
+        // }
+        // else {
+        //     self.views[view_id].uniform_view_transform(&Mat4::identity());
+        // }
         self.views[view_id].parent_scroll = scroll;
         let local_scroll = self.views[view_id].get_local_scroll();
         let clip = self.views[view_id].intersect_clip(clip);
@@ -33,7 +32,6 @@ impl Cx {
                     sub_view_id,
                     Vec2 {x: local_scroll.x + scroll.x, y: local_scroll.y + scroll.y},
                     clip,
-                    vr_is_presenting,
                     zbias,
                     zbias_step
                 );
@@ -103,7 +101,7 @@ impl Cx {
         self.passes[pass_id].set_dpi_factor(dpi_factor);
     }
     
-    pub fn draw_pass_to_canvas(&mut self, pass_id: usize, vr_is_presenting: bool, dpi_factor: f32) {
+    pub fn draw_pass_to_canvas(&mut self, pass_id: usize, dpi_factor: f32) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
         // get the color and depth
@@ -129,17 +127,14 @@ impl Cx {
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         
-        self.platform.from_wasm.mark_begin_canvas_render();
         self.render_view(
             pass_id,
             view_id,
             Vec2::default(),
             (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
-            vr_is_presenting,
             &mut zbias,
             zbias_step
         );
-        self.platform.from_wasm.mark_end_canvas_render();
     }
     
     pub fn draw_pass_to_texture(&mut self, pass_id: usize, dpi_factor: f32) {
@@ -185,7 +180,6 @@ impl Cx {
             view_id,
             Vec2::default(),
             (Vec2{x:-50000.,y:-50000.},Vec2{x:50000.,y:50000.}),
-            false,
             &mut zbias,
             zbias_step
         );
