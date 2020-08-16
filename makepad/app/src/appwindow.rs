@@ -84,8 +84,6 @@ impl AppWindow {
     }
     
     pub fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, state: &mut AppState, storage: &mut AppStorage, build_manager: &mut BuildManager) {
-        
-        
         match self.desktop_window.handle_desktop_window(cx, event) {
             DesktopWindowEvent::EventForOtherWindow => {
                 return
@@ -100,16 +98,15 @@ impl AppWindow {
                     state.windows[window_index].window_inner_size = wc.new_geom.inner_size;
                     storage.save_state(cx, state);
                 }
+                if wc.old_geom.xr_is_presenting && !wc.new_geom.xr_is_presenting{
+                     self.desktop_window.inner_view.set_view_transform(cx, &Mat4::identity());
+                }           
             }
             _ => ()
         }
         
         match event {
-            Event::WindowGeomChange(gc)=>{
-                if gc.old_geom.xr_is_presenting && !gc.new_geom.xr_is_presenting{
-                     self.desktop_window.inner_view.set_view_transform(cx, &Mat4::identity());
-                }
-            },
+
             Event::XRUpdate(xu) => { // handle all VR updates here.
                 let view_rect = self.desktop_window.inner_view.get_rect(cx); 
                 let on_hand = Mat4::rotate_tsrt(
@@ -117,7 +114,7 @@ impl AppWindow {
                     Vec3{x:0.0005, y:-0.0005, z:0.001},
                     Vec3{x:-80.0,y:0.0,z:0.0},
                     Vec3{x:-0.,y:0.,z:0.0}, 
-                ); 
+                );
                 
                 if let Some(left_matrix) = xu.left_matrix{
                     let combined = Mat4::from_mul(&on_hand,&left_matrix);

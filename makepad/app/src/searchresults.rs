@@ -163,7 +163,7 @@ impl SearchResultDraw {
         
         //println!("{}", result.text_buffer_id.0);
         
-        let bg_area = self.item_bg.end_quad(cx, &bg_inst);
+        let bg_area = self.item_bg.end_quad(cx, bg_inst);
         list_item.animator.set_area(cx, bg_area);
         
     }
