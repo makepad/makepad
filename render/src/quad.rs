@@ -81,8 +81,8 @@ impl Quad {
         inst
     }
 
-    pub fn end_quad(&mut self, cx: &mut Cx, inst: &InstanceArea) -> Area {
-        let area = inst.clone().into();
+    pub fn end_quad(&mut self, cx: &mut Cx, inst: InstanceArea) -> Area {
+        let area = inst.into();
         let rect = cx.end_turtle(area);
         area.set_rect(cx, &rect);
         area

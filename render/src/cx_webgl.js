@@ -517,6 +517,69 @@
             ]
             
             var canvas = this.canvas
+
+            let use_touch_scroll_overlay = window.ontouchstart === null;
+            let last_mouse_finger;
+            if (use_touch_scroll_overlay){
+                var ts = this.touch_scroll_overlay = document.createElement('div')
+                ts.className = "cx_webgl_scroll_overlay"
+                var ts_inner = document.createElement('div')
+                var style = document.createElement('style')
+                style.innerHTML = "\n"
+                    + "div.cx_webgl_scroll_overlay {\n"
+                    + "z-index: 10000;\n"
+                    + "margin:0;\n"
+                    + "overflow:scroll;\n"
+                    + "top:0;\n"
+                    + "left:0;\n"
+                    + "width:100%;\n"
+                    + "height:100%;\n"
+                    + "position:fixed;\n"
+                    + "background-color:transparent\n"
+                    + "}\n"
+                    + "div.cx_webgl_scroll_overlay div{\n"
+                    + "margin:0;\n"
+                    + "width:400000px;\n"
+                    + "height:400000px;\n"
+                    + "background-color:transparent\n"
+                    + "}\n"
+                    
+                document.body.appendChild(style)
+                ts.appendChild(ts_inner);
+                document.body.appendChild(ts);
+                canvas = ts;
+
+                ts.scrollTop = 200000;
+                ts.scrollLeft = 200000;
+                let last_scroll_top = ts.scrollTop;
+                let last_scroll_left = ts.scrollLeft;
+                let scroll_timeout = null; 
+                ts.addEventListener('scroll', e=>{
+                    let new_scroll_top = ts.scrollTop;
+                    let new_scroll_left = ts.scrollLeft;
+                    let dx = new_scroll_left - last_scroll_left;
+                    let dy = new_scroll_top - last_scroll_top;
+                    last_scroll_top = new_scroll_top;
+                    last_scroll_left = new_scroll_left;
+                    window.clearTimeout(scroll_timeout);
+                    scroll_timeout = window.setTimeout(_=>{
+                        ts.scrollTop = 200000;
+                        ts.scrollLeft = 200000;
+                        last_scroll_top = ts.scrollTop;
+                        last_scroll_top = ts.scrollLeft;
+                    },200);
+
+                    let finger = last_mouse_finger;
+                    if(finger){
+                        finger.scroll_x = dx;
+                        finger.scroll_y = dy;
+                        finger.is_wheel = true;
+                        this.to_wasm.finger_scroll(finger);
+                        this.do_wasm_io();
+                    }
+                })
+            }
+ 
             function mouse_to_finger(e) {
                 return {
                     x: e.pageX,
@@ -647,11 +710,9 @@
                         })
                     }
                 }
-                this.to_wasm.finger_hover(mouse_to_finger(e));
-                var begin = performance.now();
-                
+                last_mouse_finger = mouse_to_finger(e);
+                this.to_wasm.finger_hover(last_mouse_finger);
                 this.do_wasm_io();
-                var end = performance.now();
                 //console.log("Redraw cycle "+(end-begin)+" ms");
             }
             window.addEventListener('mousemove', mouse_move);
@@ -734,6 +795,7 @@
                 this.do_wasm_io();
             };
             canvas.addEventListener('wheel', this.mouse_wheel_handler)
+
             //window.addEventListener('webkitmouseforcewillbegin', this.onCheckMacForce.bind(this), false)
             //window.addEventListener('webkitmouseforcechanged', this.onCheckMacForce.bind(this), false)
         }
@@ -743,15 +805,15 @@
                 return
             }
             var ta = this.text_area = document.createElement('textarea')
-            ta.className = "makepad"
+            ta.className = "cx_webgl_textinput"
             ta.setAttribute('autocomplete', 'off')
             ta.setAttribute('autocorrect', 'off')
             ta.setAttribute('autocapitalize', 'off')
             ta.setAttribute('spellcheck', 'false')
             var style = document.createElement('style')
             style.innerHTML = "\n"
-                + "textarea.makepad {\n"
-                + "z-index: 100000;\n"
+                + "textarea.cx_webgl_textinput {\n"
+                + "z-index: 1000;\n"
                 + "position: absolute;\n"
                 + "opacity: 0;\n"
                 + "border-radius: 4px;\n"
@@ -774,7 +836,7 @@
                 + "user-select: text;\n"
                 + "white-space: pre!important;\n"
                 + "}\n"
-                + "textarea: focus.makepad {\n"
+                + "textarea: focus.cx_webgl_textinput {\n"
                 + "outline: 0px !important;\n"
                 + "-webkit-appearance: none;\n"
                 + "}"
@@ -2005,7 +2067,6 @@
     var wasm_instances = [];
     
     function init() {
-        console.log("NOTICE! When profiling in chrome check 'Disable JavaScript Samples' under the gear icon. It slows the readings by a factor of 6-8x")
         for (let i = 0; i < canvasses.length; i ++) {
             // we found a canvas. instance the referenced wasm file
             var canvas = canvasses[i]

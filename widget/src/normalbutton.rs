@@ -20,7 +20,7 @@ impl NormalButton {
             text: Text::new(cx),
             animator: Animator::default(),
             _bg_area: Area::Empty,
-            _text_area: Area::Empty,  
+            _text_area: Area::Empty,
         }
     }
     
@@ -49,7 +49,8 @@ impl NormalButton {
             ..Theme::text_style_normal().get(cx)
         });
         
-        Self::anim_default().set(cx,Anim::new(Play::Cut {duration: 0.1}, vec![
+
+        Self::anim_default().set(cx, Anim::new(Play::Cut {duration: 0.1}, vec![
             Track::float(Self::hover(), Ease::Lin, vec![(1., 0.)]),
             Track::float(Self::down(), Ease::Lin, vec![(1.0, 0.)]),
             Track::color(Text::color(), Ease::Lin, vec![(1., pick!(#9).get(cx))]),
@@ -61,7 +62,7 @@ impl NormalButton {
             Track::color(Text::color(), Ease::Lin, vec![(0., pick!(#f).get(cx))]),
         ]));
         
-        Self::anim_down().set(cx,Anim::new(Play::Cut {duration: 0.2}, vec![
+        Self::anim_down().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::float(Self::down(), Ease::OutExp, vec![(0.0, 1.0), (1.0, 1.0)]),
             Track::float(Self::hover(), Ease::Lin, vec![(1.0, 1.0)]),
             Track::color(Text::color(), Ease::Lin, vec![(0., pick!(#c).get(cx))]),
@@ -76,12 +77,12 @@ impl NormalButton {
             const border_radius: float = 2.5;
             fn pixel() -> vec4 {
                 let cx = Df::viewport(pos * vec2(w, h));
-                cx.box(shadow, shadow, w - shadow*(1.+down), h- shadow*(1.+down), border_radius);
+                cx.box(shadow, shadow, w - shadow * (1. + down), h - shadow * (1. + down), border_radius);
                 cx.blur = 6.0;
                 cx.fill(mix(pick!(#0007), pick!(#0), hover));
                 cx.blur = 0.001;
-                cx.box(shadow, shadow, w - shadow*2., h - shadow*2., border_radius);
-                return cx.fill(mix(mix(pick!(#3),pick!(#4),hover), pick!(#2a), down));
+                cx.box(shadow, shadow, w - shadow * 2., h - shadow * 2., border_radius);
+                return cx.fill(mix(mix(pick!(#3), pick!(#4), hover), pick!(#2a), down));
             }
         "}));
     }
@@ -107,10 +108,8 @@ impl NormalButton {
         
         self.animator.init(cx, | cx | Self::anim_default().get(cx));
         
-        self.bg.color = self.animator.last_color(cx, Quad::color());
-        
         let bg_inst = self.bg.begin_quad(cx, Self::layout_bg().get(cx));
-        
+
         bg_inst.push_last_float(cx, &self.animator, Self::hover());
         bg_inst.push_last_float(cx, &self.animator, Self::down());
         
@@ -119,7 +118,7 @@ impl NormalButton {
         
         self._text_area = self.text.draw_text(cx, label);
         
-        self._bg_area = self.bg.end_quad(cx, &bg_inst);
+        self._bg_area = self.bg.end_quad(cx, bg_inst);
         self.animator.set_area(cx, self._bg_area);
     }
 }

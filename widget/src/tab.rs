@@ -323,7 +323,7 @@ impl Tab {
     
     pub fn end_tab(&mut self, cx: &mut Cx) {
         if let Some(bg_inst) = self._bg_inst.take() {
-            self._bg_area = self.bg.end_quad(cx, &bg_inst);
+            self._bg_area = self.bg.end_quad(cx, bg_inst);
             self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
         }
     }
