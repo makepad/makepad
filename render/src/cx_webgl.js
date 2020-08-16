@@ -566,7 +566,7 @@
                         ts.scrollTop = 200000;
                         ts.scrollLeft = 200000;
                         last_scroll_top = ts.scrollTop;
-                        last_scroll_top = ts.scrollLeft;
+                        last_scroll_left = ts.scrollLeft;
                     },200);
 
                     let finger = last_mouse_finger;
