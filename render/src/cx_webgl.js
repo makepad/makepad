@@ -1153,8 +1153,8 @@
             if (this.xr_is_presenting) {
                 let xr_webgllayer = this.xr_session.renderState.baseLayer;
                 this.dpi_factor = 3.0;
-                this.width = xr_webgllayer.framebufferWidth / this.dpi_factor;
-                this.height = xr_webgllayer.framebufferHeight / this.dpi_factor;
+                this.width = 1920.0 / this.dpi_factor;
+                this.height = 1080.0 / this.dpi_factor;
             }
             else {
                 if (canvas.getAttribute("fullpage")) {
@@ -1318,7 +1318,14 @@
             if (this.xr_can_present) {
                 navigator.xr.requestSession('immersive-vr').then(xr_session => {
                     
-                    this.xr_layer = new XRWebGLLayer(xr_session, this.gl);
+                    this.xr_layer = new XRWebGLLayer(xr_session, this.gl, {
+                        antialias: false,
+                        depth: true,
+                        stencil: false,
+                        alpha: false,
+                        ignoreDepthValues: false,
+                        framebufferScaleFactor: 1.7
+                    });
                     xr_session.updateRenderState({baseLayer: this.xr_layer});
                     
                     xr_session.requestReferenceSpace("local").then(xr_reference_space => {
