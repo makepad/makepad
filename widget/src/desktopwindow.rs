@@ -18,6 +18,7 @@ pub struct DesktopWindow {
     pub max_btn: DesktopButton,
     pub close_btn: DesktopButton,
     pub xr_btn: DesktopButton,
+    pub fullscreen_btn: DesktopButton,
     pub caption_text: Text,
     pub caption_bg: Quad,
     pub caption_size: Vec2,
@@ -55,6 +56,7 @@ impl DesktopWindow {
             max_btn: DesktopButton::new(cx),
             close_btn: DesktopButton::new(cx),
             xr_btn: DesktopButton::new(cx),
+            fullscreen_btn: DesktopButton::new(cx),
             
             window_menu: WindowMenu::new(cx),
             default_menu: Menu::main(vec![
@@ -87,6 +89,15 @@ impl DesktopWindow {
             }
             else {
                 self.window.xr_start_presenting(cx);
+            }
+        }
+
+        if let ButtonEvent::Clicked = self.fullscreen_btn.handle_button(cx, event) {
+            if self.window.is_fullscreen(cx) {
+                self.window.normal_window(cx);
+            }
+            else {
+                self.window.fullscreen_window(cx);
             }
         }
         if let ButtonEvent::Clicked = self.min_btn.handle_button(cx, event) {
@@ -224,8 +235,16 @@ impl DesktopWindow {
                     self.caption_bg.end_quad(cx, bg_inst);
                     cx.turtle_new_line();
                 },
-                _ => {
-                    
+                PlatformType::WASM => {
+                    if self.window.is_fullscreen(cx){ // put a bar at the top
+                        let bg_inst = self.caption_bg.begin_quad(cx, Layout {
+                            align: Align::center(),
+                            walk: Walk::wh(Width::Fill, Height::Fix(22.)),
+                            ..Default::default()
+                        });
+                        self.caption_bg.end_quad(cx, bg_inst);
+                        cx.turtle_new_line();
+                    }
                 }
             }
             self.caption_view.end_view(cx);
@@ -244,11 +263,21 @@ impl DesktopWindow {
     pub fn end_desktop_window(&mut self, cx: &mut Cx) {
         self.inner_view.end_view(cx);
         // lets draw a VR button top right over the UI.
-        if cx.vr_can_present { // show a switch-to-VRMode button
+        // window fullscreen?
+        
+        // only support fullscreen on web atm
+        if !cx.platform_type.is_desktop() && !self.window.is_fullscreen(cx){ 
             cx.reset_turtle_pos();
             cx.move_turtle(cx.get_width_total() - 50.0, 0.);
+            self.fullscreen_btn.draw_desktop_button(cx, DesktopButtonType::Fullscreen);
+        }
+
+        if self.window.xr_can_present(cx) { // show a switch-to-VRMode button
+            cx.reset_turtle_pos();
+            cx.move_turtle(cx.get_width_total() - 100.0, 0.);
             self.xr_btn.draw_desktop_button(cx, DesktopButtonType::XRMode);
         }
+
         self.main_view.end_view(cx);
         
         self.pass.end_pass(cx);
