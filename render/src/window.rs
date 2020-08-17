@@ -101,6 +101,37 @@ impl Window {
         }
     }
     
+    pub fn fullscreen_window(&mut self, cx:&mut Cx){
+        if let Some(window_id) = self.window_id {
+            cx.windows[window_id].window_command = CxWindowCmd::FullScreen;
+        }
+    }
+    
+    pub fn normal_window(&mut self, cx:&mut Cx){
+        if let Some(window_id) = self.window_id {
+            cx.windows[window_id].window_command = CxWindowCmd::NormalScreen;
+        }
+    }
+    
+        
+    pub fn can_fullscreen(&mut self, cx: &mut Cx) -> bool {
+        if let Some(window_id) = self.window_id {
+            cx.windows[window_id].window_geom.can_fullscreen
+        }
+        else {
+            false
+        }
+    }
+    
+    pub fn xr_can_present(&mut self, cx: &mut Cx) -> bool {
+        if let Some(window_id) = self.window_id {
+            cx.windows[window_id].window_geom.xr_can_present
+        }
+        else {
+            false
+        }
+    }
+    
     pub fn is_fullscreen(&mut self, cx: &mut Cx) -> bool {
         if let Some(window_id) = self.window_id {
             cx.windows[window_id].window_geom.is_fullscreen
@@ -162,6 +193,8 @@ impl Window {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WindowGeom {
     pub dpi_factor: f32,
+    pub can_fullscreen: bool,
+    pub xr_can_present: bool,
     pub xr_is_presenting: bool,
     pub is_fullscreen: bool,
     pub is_topmost: bool,
@@ -185,7 +218,9 @@ pub enum CxWindowCmd {
     Maximize,
     Minimize,
     XrStartPresenting,
-    XrStopPresenting
+    XrStopPresenting,
+    FullScreen,
+    NormalScreen
 }
 
 impl Default for CxWindowCmd {
