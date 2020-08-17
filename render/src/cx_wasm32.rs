@@ -79,10 +79,11 @@ impl Cx {
                         dpi_factor: to_wasm.mf32(),
                         outer_size: Vec2 {x: 0., y: 0.},
                         position: Vec2 {x: 0., y: 0.},
-                        xr_is_presenting: false
+                        xr_is_presenting: false,
+                        xr_can_present:to_wasm.mu32() > 0,
+                        can_fullscreen:to_wasm.mu32() > 0
                     };
                     self.default_dpi_factor = self.platform.window_geom.dpi_factor;
-                    self.vr_can_present = to_wasm.mu32() > 0;
                     self.platform.gpu_spec_is_low_on_uniforms = to_wasm.mu32() > 0;
                     
                     if self.windows.len() > 0 {
@@ -96,16 +97,17 @@ impl Cx {
                 4 => { // resize 
                     let old_geom = self.platform.window_geom.clone();
                     self.platform.window_geom = WindowGeom {
-                        is_fullscreen: false,
                         is_topmost: false,
                         inner_size: Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()},
                         dpi_factor: to_wasm.mf32(),
                         outer_size: Vec2 {x: 0., y: 0.},
                         position: Vec2 {x: 0., y: 0.},
-                        xr_is_presenting: to_wasm.mu32() > 0
+                        xr_is_presenting: to_wasm.mu32() > 0,
+                        xr_can_present: to_wasm.mu32() > 0,
+                        is_fullscreen: to_wasm.mu32() > 0,
+                        can_fullscreen: to_wasm.mu32() > 0,
                     };
                     let new_geom = self.platform.window_geom.clone();
-                    self.vr_can_present = to_wasm.mu32() > 0;
                     
                     if self.windows.len()>0 {
                         self.windows[0].window_geom = self.platform.window_geom.clone();
@@ -409,6 +411,14 @@ impl Cx {
                 },
                 CxWindowCmd::XrStopPresenting => {
                     self.platform.from_wasm.xr_stop_presenting();
+                    CxWindowCmd::None
+                },
+                CxWindowCmd::FullScreen =>{
+                    self.platform.from_wasm.fullscreen();
+                    CxWindowCmd::None
+                },
+                CxWindowCmd::NormalScreen =>{
+                    self.platform.from_wasm.normalscreen();
                     CxWindowCmd::None
                 },
                 _ => CxWindowCmd::None,
@@ -1161,7 +1171,7 @@ impl FromWasm {
     
     fn http_send(&mut self, verb: &str, path: &str, proto:&str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         self.fit(3);
-        self.mu32(29); 
+        self.mu32(27); 
         self.mu32(port as u32);
         self.mu32(signal.signal_id as u32);
         self.add_string(verb);
@@ -1172,7 +1182,15 @@ impl FromWasm {
         self.add_u8slice(body);
     }
     
+    pub fn fullscreen(&mut self) {
+        self.fit(1);
+        self.mu32(28);
+    }
     
+    pub fn normalscreen(&mut self) {
+        self.fit(1);
+        self.mu32(29);
+    }
 }
 
 #[derive(Clone)]

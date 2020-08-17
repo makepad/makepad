@@ -92,23 +92,26 @@
         }
         
         init(info) {
-            let pos = this.fit(6);
+            let pos = this.fit(7);
             this.mu32[pos ++] = 3;
             this.mf32[pos ++] = info.width;
             this.mf32[pos ++] = info.height;
             this.mf32[pos ++] = info.dpi_factor;
             this.mu32[pos ++] = info.xr_can_present? 1: 0;
+            this.mu32[pos ++] = info.can_fullscreen? 1: 0;
             this.mu32[pos ++] = info.gpu_spec_is_low_on_uniforms? 1: 0;
         }
         
         resize(info) {
-            let pos = this.fit(6);
+            let pos = this.fit(8);
             this.mu32[pos ++] = 4;
             this.mf32[pos ++] = info.width;
             this.mf32[pos ++] = info.height;
             this.mf32[pos ++] = info.dpi_factor;
             this.mu32[pos ++] = info.xr_is_presenting? 1: 0;
             this.mu32[pos ++] = info.xr_can_present? 1: 0;
+            this.mu32[pos ++] = info.is_fullscreen? 1: 0;
+            this.mu32[pos ++] = info.can_fullscreen? 1: 0;
         }
         
         animation_frame(time) {
@@ -341,6 +344,7 @@
                     height: this.height,
                     dpi_factor: this.dpi_factor,
                     xr_can_present: this.xr_can_present,
+                    can_fullscreen: this.can_fullscreen(),
                     xr_is_presenting: false,
                     gpu_spec_is_low_on_uniforms: this.gpu_spec_is_low_on_uniforms
                 })
@@ -1103,10 +1107,47 @@
             req.send(body.buffer);
         }
         
+        can_fullscreen(){
+            return (document.fullscreenEnabled || document.webkitFullscreenEnabled || document.mozFullscreenEnabled)?true:false
+        }
+        
+        is_fullscreen(){
+            return (document.fullscreenElement || document.webkitFullscreenElement || document.mozFullscreenElement)?true:false
+        }
+
+        fullscreen(){
+            if(document.body.requestFullscreen){
+                document.body.requestFullscreen();
+                return
+            }
+            if(document.body.webkitRequestFullscreen){
+                document.body.webkitRequestFullscreen();
+                return
+            }
+            if(document.body.mozRequestFullscreen){
+                document.body.mozRequestFullscreen();
+                return
+            }
+        }
+        
+        normalscreen(){
+            if(this.canvas.exitFullscreen){
+                this.canvas.exitFullscreen();
+                return
+            }
+            if(this.canvas.webkitExitFullscreen){
+                this.canvas.webkitExitFullscreen();
+                return
+            }
+            if(this.canvas.mozExitFullscreen){
+                this.canvas.mozExitFullscreen();
+                return
+            }
+        }
+        
         on_screen_resize() {
             var dpi_factor = window.devicePixelRatio;
-            var w,
-            h;
+            var w, h;
             var canvas = this.canvas;
             
             if (this.xr_is_presenting) {
@@ -1153,8 +1194,10 @@
                     width: this.width,
                     height: this.height,
                     dpi_factor: this.dpi_factor,
+                    xr_is_presenting: this.xr_is_presenting,
                     xr_can_present: this.xr_can_present,
-                    xr_is_presenting: this.xr_is_presenting
+                    is_fullscreen: this.is_fullscreen(),
+                    can_fullscreen: this.can_fullscreen()
                 })
                 this.request_animation_frame()
             }
@@ -1332,6 +1375,7 @@
         xr_stop_presenting() {
             
         }
+
         
         begin_main_canvas(r, g, b, a, depth) {
             let gl = this.gl
@@ -1869,7 +1913,13 @@
             let body = self.parse_u8slice();
             // do XHR.
             self.http_send(verb, path, proto, domain, port, content_type, body, signal_id);
-        }
+        },
+        function fullscreen_28(self) {
+            self.fullscreen();
+        },
+        function normalscreen_29(self) {
+            self.normalscreen();
+        },
     ]
     
     WasmApp.prototype.uniform_fn_table = {
