@@ -180,7 +180,7 @@ impl HttpServer {
                             
                             // write the header
                             let header = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-encoding: deflate\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-encoding: deflate\r\nCache-Control: max-age:0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                                 mime_type,
                                 data.len()
                             );
