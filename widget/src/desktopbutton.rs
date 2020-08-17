@@ -16,6 +16,7 @@ pub enum DesktopButtonType {
     WindowsMaxToggled,
     WindowsClose,
     XRMode,
+    Fullscreen
 }
 
 impl DesktopButtonType {
@@ -26,6 +27,7 @@ impl DesktopButtonType {
             DesktopButtonType::WindowsMaxToggled => 3.,
             DesktopButtonType::WindowsClose => 4.,
             DesktopButtonType::XRMode => 5.,
+            DesktopButtonType::Fullscreen => 6.,
         }
     }
 }
@@ -132,6 +134,22 @@ impl DesktopButton {
                     
                     return df.result;
                 }
+                // Fullscreen
+                if abs(button_type - 6.) < 0.1 {
+                    sz = 8.;
+                    df.clear(mix(pick!(#3), mix(pick!(#6), pick!(#9), down), hover));
+                    df.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
+                    df.rect(c.x - sz + 1.5, c.y - sz + 1.5, 2. * (sz-1.5), 2. * (sz-1.5));
+                    df.subtract();
+                    df.rect(c.x - sz + 4., c.y - sz - 2., 2. * (sz-4.), 2. * (sz+2.));
+                    df.subtract();
+                    df.rect(c.x - sz - 2., c.y - sz + 4., 2. * (sz+2.), 2. * (sz-4.));
+                    df.subtract();
+                    df.fill(pick!(white));//, 0.5 + 0.5 * dpi_dilate);
+                    
+                    return df.result;
+                }                
+                
                 return pick!(red);/*
                 df_viewport(pos * vec2(w, h));
                 df_box(0., 0., w, h, border_radius);
@@ -165,6 +183,7 @@ impl DesktopButton {
             | DesktopButtonType::WindowsMaxToggled 
             | DesktopButtonType::WindowsClose => (46.,29.),
             DesktopButtonType::XRMode => (50.,36.),
+            DesktopButtonType::Fullscreen => (50.,36.),
         };
         self.bg.shader = Self::shader_bg().get(cx);
         let bg_inst = self.bg.draw_quad(cx, Walk::wh(Width::Fix(w), Height::Fix(h)));
