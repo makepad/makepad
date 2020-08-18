@@ -46,7 +46,7 @@ impl Geometry {
         self.add_plane_3d(GeometryAxis::X, GeometryAxis::Z, GeometryAxis::Y, 1.0, 1.0, width, depth, height, width_segments, depth_segments, 2.0);
         self.add_plane_3d(GeometryAxis::X, GeometryAxis::Z, GeometryAxis::Y, 1.0, - 1.0, width, depth, -height, width_segments, depth_segments, 3.0);
         self.add_plane_3d(GeometryAxis::X, GeometryAxis::Y, GeometryAxis::Z, 1.0, - 1.0, width, height, depth, width_segments, height_segments, 4.0);
-        self.add_plane_3d(GeometryAxis::X, GeometryAxis::Z, GeometryAxis::Y, 1.0, 1.0, width, height, -depth, width_segments, height_segments, 5.0);
+        self.add_plane_3d(GeometryAxis::X, GeometryAxis::Y, GeometryAxis::Z, -1.0, -1.0, width, height, -depth, width_segments, height_segments, 5.0); 
     }
     
     
@@ -73,7 +73,7 @@ impl Geometry {
         let grid_x1 = grid_x + 1;
         let grid_y1 = grid_y + 1;
         
-        let vertex_offset = self.vertices.len();
+        let vertex_offset = self.vertices.len() / 9;
         
         for iy in 0..grid_y1 {
             let y = (iy as f32) * segment_height - height_half;

@@ -24,7 +24,7 @@ impl Cube {
     pub fn geom_pos() -> Vec3Id {uid!()}
     pub fn geom_id() -> FloatId {uid!()}
     pub fn geom_normal() -> Vec3Id {uid!()}
-    pub fn geom_uv() -> Vec3Id {uid!()}
+    pub fn geom_uv() -> Vec2Id {uid!()}
     
     pub fn transform() -> Mat4Id {uid!()}
     pub fn color() -> ColorId {uid!()}
@@ -33,14 +33,13 @@ impl Cube {
         // lets add the draw shader lib
         let mut sg = Cx::shader_defs(ShaderGen::new());
         
-        sg.geometry.add_cube_3d(1.0,1.0,1.0,1,1,1);
+        sg.geometry.add_cube_3d(0.1,0.1,0.1,1,1,1);
 
         sg.compose(shader!{"
-            
             geometry geom_pos: Self::geom_pos();
-            geometry geom_id: Self::geom_pos();
+            geometry geom_id: Self::geom_id();
             geometry geom_normal: Self::geom_normal();
-            geometry geom_normal: Self::geom_uv();
+            geometry geom_uv: Self::geom_uv();
             
             instance transform: Self::transform();
             instance color: Self::color();
@@ -50,7 +49,22 @@ impl Cube {
             }
             
             fn pixel() -> vec4 {
-                return vec4(color.rgb * color.a, color.a);
+                if geom_id>4.5{
+                    return pick!(red);
+                }
+                if geom_id>3.5{
+                    return pick!(green);
+                }
+                if geom_id>2.5{
+                    return pick!(blue);
+                }
+                if geom_id>1.5{
+                    return pick!(orange);
+                }
+                if geom_id>0.5{
+                    return pick!(yellow);
+                }
+                return pick!(white);
             }
             
         "})
@@ -61,8 +75,12 @@ impl Cube {
         if inst.need_uniforms_now(cx) {
         }
         //println!("{:?} {}", area, cx.current_draw_list_id);
+        inst.push_slice(cx, &transform.v);
         let data = [
-            
+            self.color.r,
+            self.color.g,
+            self.color.b,
+            self.color.a,
         ];
         inst.push_slice(cx, &data);
         inst

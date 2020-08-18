@@ -69,8 +69,7 @@ impl DesktopButton {
         ]));
         
         Self::shader_bg().set(cx,Quad::def_quad_shader().compose(shader!{"
-            
-            instance hover: Self::hover();
+            instance hover: Self::hover(); 
             instance down: Self::down();
             instance button_type: Self::button_type();
             

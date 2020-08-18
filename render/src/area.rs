@@ -469,6 +469,33 @@ impl Area{
         }
         Color::default()
     }
+    
+    pub fn write_mat4(&self, cx:&mut Cx, prop_ident:Mat4Id, value:&Mat4){
+        if let Some(inst_offset) = self.get_instance_offset(cx, PropId::Mat4(prop_ident)){
+            let write = self.get_write_ref(cx);
+            if let Some(write) = write{
+                for i in 0..write.count{
+                    for j in 0..16{
+                        write.buffer[write.offset + inst_offset + j + i * write.slots] = value.v[j];
+                    }
+                }
+            }
+        }
+   }
+
+    pub fn read_mat4(&self, cx:&Cx, prop_ident:ColorId)->Mat4{
+        if let Some(inst_offset) = self.get_instance_offset(cx, PropId::Color(prop_ident)){
+            let read = self.get_read_ref(cx);
+            if let Some(read) = read{
+                let mut ret = Mat4::default();
+                for j in 0..16{
+                    ret.v[j] = read.buffer[read.offset + inst_offset + j];
+                }
+                return ret
+            }
+        }
+        Mat4::default()
+    }
 
     pub fn write_uniform_float(&self, cx:&mut Cx, prop_ident:FloatId, v:f32){
         if let Some(uni_offset) = self.get_uniform_offset(cx, PropId::Float(prop_ident)){

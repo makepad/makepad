@@ -156,12 +156,12 @@ impl<'a> ShaderAnalyser<'a> {
     fn analyse_geometry_decl(&mut self, decl: &GeometryDecl) -> Result<(), Error> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         match ty {
-            Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {}
+            Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 | Ty::Mat4=> {}
             _ => {
                 return Err(Error {
                     span: decl.span,
                     message: String::from(
-                        "attribute must be either a floating-point scalar or vector",
+                        "attribute must be either a floating-point scalar or vector or mat4",
                     ),
                 })
             }
@@ -249,12 +249,12 @@ impl<'a> ShaderAnalyser<'a> {
     fn analyse_instance_decl(&mut self, decl: &InstanceDecl) -> Result<(), Error> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr)?;
         match ty {
-            Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {}
+            Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 | Ty::Mat4 => {}
             _ => {
                 return Err(Error {
                     span: decl.span,
                     message: String::from(
-                        "attribute must be either a floating-point scalar or vector",
+                        "attribute must be either a floating-point scalar or vector or mat4",
                     ),
                 })
             }
