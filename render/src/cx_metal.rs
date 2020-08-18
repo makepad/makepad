@@ -149,7 +149,7 @@ impl Cx {
                     let () = unsafe {msg_send![
                         encoder,
                         drawIndexedPrimitives: MTLPrimitiveType::Triangle
-                        indexCount: sh.shader_gen.geometry_indices.len() as u64
+                        indexCount: sh.shader_gen.geometry.indices.len() as u64
                         indexType: MTLIndexType::UInt32
                         indexBuffer: buf
                         indexBufferOffset: 0
@@ -849,12 +849,12 @@ impl Cx {
             library: library,
             geom_ibuf: {
                 let mut geom_ibuf = MetalBuffer {..Default::default()};
-                geom_ibuf.update_with_u32_data(metal_cx, &sh.shader_gen.geometry_indices);
+                geom_ibuf.update_with_u32_data(metal_cx, &sh.shader_gen.geometry.indices);
                 geom_ibuf
             },
             geom_vbuf: {
                 let mut geom_vbuf = MetalBuffer {..Default::default()};
-                geom_vbuf.update_with_f32_data(metal_cx, &sh.shader_gen.geometry_vertices);
+                geom_vbuf.update_with_f32_data(metal_cx, &sh.shader_gen.geometry.vertices);
                 geom_vbuf
             }
         });

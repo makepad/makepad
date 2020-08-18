@@ -68,8 +68,7 @@ impl TrapezoidText {
     
     pub fn def_trapezoid_shader() -> ShaderGen { 
         let mut sg = Cx::shader_defs(ShaderGen::new()); 
-        sg.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
-        sg.geometry_indices = vec![0, 1, 2, 2, 3, 0];
+        sg.geometry.add_quad_2d();
          
         sg.compose(shader!{"
             

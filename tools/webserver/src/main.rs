@@ -172,7 +172,7 @@ impl HttpServer {
                             url.push_str("index.html");
                         }
 
-                        if let Some(data) = filecache.get(&url){  
+                        if let Some(data) = filecache.get(&url){
                             let mime_type = if url.ends_with(".html") {"text/html"}
                                 else if url.ends_with(".wasm") {"application/wasm"}
                                 else if url.ends_with(".js") {"text/javascript"}
