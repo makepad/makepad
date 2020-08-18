@@ -4,6 +4,7 @@ use crate::error::Error;
 use crate::lex;
 use crate::parse;
 use crate::ty::*;
+use crate::geometry::*;
 use std::any::TypeId;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -35,8 +36,7 @@ pub struct ShaderSub {
 
 #[derive(Default, Clone, PartialEq)]
 pub struct ShaderGen {
-    pub geometry_vertices: Vec<f32>,
-    pub geometry_indices: Vec<u32>,
+    pub geometry: Geometry,
     pub subs: Vec<ShaderSub>,
 }
 
@@ -131,8 +131,8 @@ impl ShaderGen {
 
 impl Hash for ShaderGen {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.geometry_indices.hash(state);
-        for vertex in &self.geometry_vertices {
+        self.geometry.indices.hash(state);
+        for vertex in &self.geometry.vertices {
             vertex.to_bits().hash(state);
         }
         self.subs.hash(state);

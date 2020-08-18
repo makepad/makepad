@@ -81,8 +81,7 @@ impl Text {
         // lets add the draw shader lib
         let mut sg = Cx::shader_defs(ShaderGen::new());
 
-        sg.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
-        sg.geometry_indices = vec![0, 1, 2, 0, 3, 2];
+        sg.geometry.add_quad_2d();
         sg.compose(shader!{" 
             geometry geom: Self::geom();
             texture texturez: Self::texturez();

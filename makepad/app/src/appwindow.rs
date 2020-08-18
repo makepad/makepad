@@ -115,11 +115,16 @@ impl AppWindow {
                     Vec3{x:-80.0,y:0.0,z:0.0},
                     Vec3{x:-0.,y:0.,z:0.0}, 
                 );
+                let center = Mat4::rotate_tsrt(
+                    Vec3{x:0.,y:-view_rect.h,z:0.0},  
+                    Vec3{x:0.0005, y:-0.0005, z:0.001},
+                    Vec3{x:-0.0,y:0.0,z:0.0},  
+                    Vec3{x:-0.14,y:-0.15,z:-0.35}, 
+                );
+                let left_matrix = Mat4::from_transform(xu.left_input.grip);
+                let combined = Mat4::from_mul(&on_hand,&left_matrix);
                 
-                if let Some(left_matrix) = xu.left_matrix{
-                    let combined = Mat4::from_mul(&on_hand,&left_matrix);
-                    self.desktop_window.inner_view.set_view_transform(cx, &combined);
-                }
+                self.desktop_window.inner_view.set_view_transform(cx, &combined);
             },
             Event::KeyDown(ke) => match ke.key_code {
                 KeyCode::Backtick => if ke.modifiers.logo || ke.modifiers.control {

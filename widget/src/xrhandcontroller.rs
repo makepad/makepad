@@ -25,33 +25,20 @@ impl XRHandController {
         }
     }
 
-    pub fn shader_shape() -> ShaderId{
-        
-        struct ShaderId{
-            id:
-            shader_gen: ....
-        }
-    }
+    pub fn shader_shape() -> ShaderId{uid!()}
 
-    pub fn shader_bg() -> ShaderId {uid!()}
-
-    /*-main-share*/
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         // lets define the shader
-        Self::shader_shape().set(cx, Quad::def_quad_shader().compose(shader!{"
-            fn pixel() -> vec4 {
-                
-            }
+        Self::shader_shape().set(cx, Cube::def_cube_shader().compose(shader!{"
         "}));
     }
-    /*-*/
     
     pub fn handle_xr_hand_controller(&mut self, cx: &mut Cx, event: &mut Event) -> XRHandControllerEvent {
         XRHandControllerEvent::None
     }
     
     pub fn draw_xr_hand_controller(&mut self, cx: &mut Cx, label: &str) {
-        self.bg.shader = Self::shader_shape().get(cx);
+        self.shape.shader = Self::shader_shape().get(cx);
         self.animator.init(cx, | cx | Self::anim_default().get(cx));
         
         let bg_inst = self.bg.begin_quad(cx, Self::layout_bg().get(cx));

@@ -28,3 +28,4 @@ pub mod val;
 #[macro_use]
 pub mod shadergen;
 pub mod colors;
+pub mod geometry;
