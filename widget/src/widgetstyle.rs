@@ -12,6 +12,7 @@ use crate::scrollshadow::*;
 use crate::desktopbutton::*;
 use crate::splitter::*;
 use crate::tabcontrol::*;
+use crate::xrcontrol::*;
 
 #[derive(Debug, Copy, Clone, SerRon, DeRon, PartialEq)]
 pub struct StyleOptions {
@@ -179,4 +180,5 @@ pub fn set_widget_style(cx: &mut Cx, opt: &StyleOptions) {
     DesktopButton::style(cx, opt);
     Splitter::style(cx, opt);
     TabControl::style(cx, opt);
+    XRControl::style(cx, opt);
 }

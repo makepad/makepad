@@ -26,7 +26,9 @@ impl Cx {
         
         //let root_view = unsafe {&mut *(self.platform.root_view_ptr as *mut View<NoScrollBar>)};
         let mut to_wasm = ToWasm::from(msg);
-        self.platform.from_wasm = FromWasm::new();
+        if self.platform.from_wasm.offset == 0{
+            self.platform.from_wasm = FromWasm::new();
+        }
         let mut is_animation_frame = false;
         loop {
             let msg_type = to_wasm.mu32();
@@ -519,7 +521,7 @@ impl Cx {
         self.platform.from_wasm.end();
         
         //return wasm pointer to caller
-        self.platform.from_wasm.wasm_ptr()
+        self.platform.from_wasm.take_wasm_ptr()
     }
     
     // empty stub
@@ -749,7 +751,7 @@ impl Default for CxPlatform {
             is_initialized: false,
             gpu_spec_is_low_on_uniforms: false,
             window_geom: WindowGeom::default(),
-            from_wasm: FromWasm::zero(),
+            from_wasm: FromWasm::new(),
             vertex_buffers: 1,
             vertex_buffers_free: Vec::new(),
             index_buffers: 1,
@@ -909,8 +911,15 @@ impl FromWasm {
         self.mu32(0);
     }
     
-    pub fn wasm_ptr(&self) -> u32 {
-        self.mu32 as u32
+    pub fn take_wasm_ptr(&mut self) -> u32 {
+        let mu32 = self.mu32;
+        self.mu32 = 0 as *mut u32;
+        self.mf32 = 0 as *mut f32;
+        self.mf64 = 0 as *mut f64;
+        self.slots = 0;
+        self.used = 0;
+        self.offset = 0;
+        mu32 as u32
     }
     
     fn add_propdefvec(&mut self, shvars: &Vec<PropDef>) {
