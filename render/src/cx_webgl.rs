@@ -241,14 +241,14 @@ impl Cx {
         
         platform.from_wasm.alloc_array_buffer(
             geom_vb_id,
-            sh.shader_gen.geometry_vertices.len(),
-            sh.shader_gen.geometry_vertices.as_ptr() as *const f32
+            sh.shader_gen.geometry.vertices.len(),
+            sh.shader_gen.geometry.vertices.as_ptr() as *const f32
         );
         
         platform.from_wasm.alloc_index_buffer(
             geom_ib_id,
-            sh.shader_gen.geometry_indices.len(),
-            sh.shader_gen.geometry_indices.as_ptr() as *const u32
+            sh.shader_gen.geometry.indices.len(),
+            sh.shader_gen.geometry.indices.as_ptr() as *const u32
         );
         
         sh.mapping = mapping;

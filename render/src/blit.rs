@@ -39,12 +39,11 @@ impl Blit {
     pub fn texturez()->Texture2dId{uid!()}
     pub fn def_blit_shader() -> ShaderGen {
         // lets add the draw shader lib
-        let mut sb = ShaderGen::new();
+        let mut sg = ShaderGen::new();
         
-        sb.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
-        sb.geometry_indices = vec![0, 1, 2, 2, 3, 0];
+        sg.geometry.add_quad_2d();
         
-        sb.compose(shader!{"
+        sg.compose(shader!{"
             
             geometry geom: Self::geom();
             instance x: Self::x();
