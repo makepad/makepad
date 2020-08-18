@@ -85,6 +85,8 @@ mod events;
 mod menu; 
 mod shader;
 
+mod cube;
+
 pub use crate::cx::*;
 pub use crate::quad::*;
 pub use crate::blit::*;

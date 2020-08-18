@@ -5,6 +5,7 @@
     var is_add_to_homescreen_safari = is_mobile_safari && navigator.standalone;
     var is_touch_device = ('ontouchstart' in window || navigator.maxTouchPoints);
     var is_firefox = navigator.userAgent.toLowerCase().indexOf('firefox') > -1;
+    //var is_oculus_browser = navigator.userAgent.indexOf('OculusBrowser') > -1;
     
     // message we can send to wasm
     class ToWasm {
@@ -63,19 +64,31 @@
                 this.mf64[pos >> 1] = value;
             }
         }
-
-        send_optional_mat4(matrix){
-            if(matrix == null){
+        
+        send_optional_mat4(matrix) {
+            if (matrix == null) {
                 let pos = this.fit(1);
-                this.mu32[pos++] = 0;
+                this.mu32[pos ++] = 0;
             }
-            else{
+            else {
                 let pos = this.fit(17);
-                this.mu32[pos++] = 1;
-                for(let i = 0; i < 16; i++){
-                    this.mf32[pos++] = matrix[i];
+                this.mu32[pos ++] = 1;
+                for (let i = 0; i < 16; i ++) {
+                    this.mf32[pos ++] = matrix[i];
                 }
             }
+        }
+        
+        send_pose_transform(pose_transform) {
+            // lets send over a pose.
+            let pos = this.fit(7)
+            this.mf32[pos ++] = pose_transform.inverse.orientation.x;
+            this.mf32[pos ++] = pose_transform.inverse.orientation.y;
+            this.mf32[pos ++] = pose_transform.inverse.orientation.z;
+            this.mf32[pos ++] = pose_transform.inverse.orientation.w;
+            this.mf32[pos ++] = pose_transform.position.x;
+            this.mf32[pos ++] = pose_transform.position.y;
+            this.mf32[pos ++] = pose_transform.position.z;
         }
         
         deps_loaded(deps) {
@@ -241,19 +254,33 @@
             this.mu32[pos ++] = is_focus? 1: 0;
         }
         
-
         xr_update(
             time,
-            head_matrix,
-            left_matrix,
-            right_matrix,
+            head_pose_transform,
+            inputs,
         ) {
-            let pos = this.fit(1);
+            let pos = this.fit(2);
             this.mu32[pos ++] = 20;
+            this.mu32[pos ++] = inputs.length;
             this.send_f64(time);
-            this.send_optional_mat4(head_matrix);
-            this.send_optional_mat4(left_matrix);
-            this.send_optional_mat4(right_matrix);
+            this.send_pose_transform(head_pose_transform);
+            for (let input of inputs) {
+                this.send_pose_transform(input.grip_transform);
+                this.send_pose_transform(input.ray_transform);
+                let button_len = input.buttons.length;
+                let axes_len = input.axes.length;
+                let pos = this.fit(3 + button_len * 2 + axes_len);
+                this.mu32[pos++] = input.hand;
+                this.mu32[pos++] = input.buttons.length;
+                for(let i = 0; i < button_len; i++){
+                    this.mu32[pos ++] = input.buttons[i].pressed?1:0;
+                    this.mf32[pos ++] = input.buttons[i].value;
+                }
+                this.mu32[pos++] = input.axes.length;
+                for(let i = 0; i < axes_len; i++){
+                    this.mf32[pos ++] = input.axes[i]
+                }
+             }
         }
         
         paint_dirty(time, frame_data) {
@@ -355,7 +382,7 @@
                 for (var i = 0; i < loaders.length; i ++) {
                     loaders[i].parentNode.removeChild(loaders[i])
                 }
-
+                
             })
         }
         
@@ -521,10 +548,10 @@
             ]
             
             var canvas = this.canvas
-
+            
             let use_touch_scroll_overlay = window.ontouchstart === null;
             let last_mouse_finger;
-            if (use_touch_scroll_overlay){
+            if (use_touch_scroll_overlay) {
                 var ts = this.touch_scroll_overlay = document.createElement('div')
                 ts.className = "cx_webgl_scroll_overlay"
                 var ts_inner = document.createElement('div')
@@ -547,18 +574,18 @@
                     + "height:400000px;\n"
                     + "background-color:transparent\n"
                     + "}\n"
-                    
+                
                 document.body.appendChild(style)
                 ts.appendChild(ts_inner);
                 document.body.appendChild(ts);
                 canvas = ts;
-
+                
                 ts.scrollTop = 200000;
                 ts.scrollLeft = 200000;
                 let last_scroll_top = ts.scrollTop;
                 let last_scroll_left = ts.scrollLeft;
-                let scroll_timeout = null; 
-                ts.addEventListener('scroll', e=>{
+                let scroll_timeout = null;
+                ts.addEventListener('scroll', e => {
                     let new_scroll_top = ts.scrollTop;
                     let new_scroll_left = ts.scrollLeft;
                     let dx = new_scroll_left - last_scroll_left;
@@ -566,15 +593,15 @@
                     last_scroll_top = new_scroll_top;
                     last_scroll_left = new_scroll_left;
                     window.clearTimeout(scroll_timeout);
-                    scroll_timeout = window.setTimeout(_=>{
+                    scroll_timeout = window.setTimeout(_ => {
                         ts.scrollTop = 200000;
                         ts.scrollLeft = 200000;
                         last_scroll_top = ts.scrollTop;
                         last_scroll_left = ts.scrollLeft;
-                    },200);
-
+                    }, 200);
+                    
                     let finger = last_mouse_finger;
-                    if(finger){
+                    if (finger) {
                         finger.scroll_x = dx;
                         finger.scroll_y = dy;
                         finger.is_wheel = true;
@@ -583,7 +610,7 @@
                     }
                 })
             }
- 
+            
             function mouse_to_finger(e) {
                 return {
                     x: e.pageX,
@@ -676,9 +703,9 @@
                 }
                 return f
             }
-
+            
             var easy_xr_presenting_toggle = window.localStorage.getItem("xr_presenting") == "true"
-
+            
             var mouse_buttons_down = [];
             this.mouse_down_handler = e => {
                 e.preventDefault();
@@ -750,11 +777,11 @@
             }, {passive: false})
             
             var end_cancel_leave = e => {
-                if (easy_xr_presenting_toggle){
+                if (easy_xr_presenting_toggle) {
                     easy_xr_presenting_toggle = false;
                     this.xr_start_presenting();
                 };
-
+                
                 e.preventDefault();
                 var fingers = touch_to_finger_free(e);
                 for (let i = 0; i < fingers.length; i ++) {
@@ -799,7 +826,7 @@
                 this.do_wasm_io();
             };
             canvas.addEventListener('wheel', this.mouse_wheel_handler)
-
+            
             //window.addEventListener('webkitmouseforcewillbegin', this.onCheckMacForce.bind(this), false)
             //window.addEventListener('webkitmouseforcechanged', this.onCheckMacForce.bind(this), false)
         }
@@ -849,9 +876,6 @@
             ta.style.top = -100 + 'px'
             ta.style.height = 1
             ta.style.width = 1
-            
-            // make the IME not show up:
-            //ta.setAttribute('readonly','false')
             
             //document.addEventListener('focusout', this.onFocusOut.bind(this))
             var was_paste = false;
@@ -1107,39 +1131,39 @@
             req.send(body.buffer);
         }
         
-        can_fullscreen(){
-            return (document.fullscreenEnabled || document.webkitFullscreenEnabled || document.mozFullscreenEnabled)?true:false
+        can_fullscreen() {
+            return (document.fullscreenEnabled || document.webkitFullscreenEnabled || document.mozFullscreenEnabled)? true: false
         }
         
-        is_fullscreen(){
-            return (document.fullscreenElement || document.webkitFullscreenElement || document.mozFullscreenElement)?true:false
+        is_fullscreen() {
+            return (document.fullscreenElement || document.webkitFullscreenElement || document.mozFullscreenElement)? true: false
         }
-
-        fullscreen(){
-            if(document.body.requestFullscreen){
+        
+        fullscreen() {
+            if (document.body.requestFullscreen) {
                 document.body.requestFullscreen();
                 return
             }
-            if(document.body.webkitRequestFullscreen){
+            if (document.body.webkitRequestFullscreen) {
                 document.body.webkitRequestFullscreen();
                 return
             }
-            if(document.body.mozRequestFullscreen){
+            if (document.body.mozRequestFullscreen) {
                 document.body.mozRequestFullscreen();
                 return
             }
         }
         
-        normalscreen(){
-            if(this.canvas.exitFullscreen){
+        normalscreen() {
+            if (this.canvas.exitFullscreen) {
                 this.canvas.exitFullscreen();
                 return
             }
-            if(this.canvas.webkitExitFullscreen){
+            if (this.canvas.webkitExitFullscreen) {
                 this.canvas.webkitExitFullscreen();
                 return
             }
-            if(this.canvas.mozExitFullscreen){
+            if (this.canvas.mozExitFullscreen) {
                 this.canvas.mozExitFullscreen();
                 return
             }
@@ -1147,7 +1171,8 @@
         
         on_screen_resize() {
             var dpi_factor = window.devicePixelRatio;
-            var w, h;
+            var w,
+            h;
             var canvas = this.canvas;
             
             if (this.xr_is_presenting) {
@@ -1314,7 +1339,6 @@
         }
         
         xr_start_presenting() {
-            
             if (this.xr_can_present) {
                 navigator.xr.requestSession('immersive-vr').then(xr_session => {
                     
@@ -1324,17 +1348,23 @@
                         stencil: false,
                         alpha: false,
                         ignoreDepthValues: false,
-                        framebufferScaleFactor: 1.7
+                        framebufferScaleFactor: 1.5
                     });
                     xr_session.updateRenderState({baseLayer: this.xr_layer});
                     
                     xr_session.requestReferenceSpace("local").then(xr_reference_space => {
                         window.localStorage.setItem("xr_presenting", "true");
+                        
                         this.xr_reference_space = xr_reference_space;
                         this.xr_session = xr_session;
                         this.xr_is_presenting = true;
                         let first_on_resize = true;
+                        
+                        // read shit off the gamepad
+                        xr_session.gamepad;
+
                         // lets start the loop
+                        let last_gamepad = [];
                         let xr_on_request_animation_frame = (time, xr_frame) => {
                             if (first_on_resize) {
                                 this.on_screen_resize();
@@ -1353,13 +1383,25 @@
                             // lets collect things
                             //console.log();
                             let input_len = xr_session.inputSources.length;
-                            let right_pose =  input_len>0?xr_frame.getPose(xr_session.inputSources[0].gripSpace, this.xr_reference_space):null;
-                            let left_pose =  input_len>1?xr_frame.getPose(xr_session.inputSources[1].gripSpace, this.xr_reference_space):null;
+                            // send the input gripSpace and ray stuff.
+                            
+                            let inputs = [];
+                            for (let input of xr_session.inputSources) {
+                                
+                                let grip_pose = xr_frame.getPose(input.gripSpace, this.xr_reference_space);
+                                let ray_pose = xr_frame.getPose(input.targetRaySpace, this.xr_reference_space);
+                                inputs.push({
+                                    grip_transform:grip_pose.inverse.transform,
+                                    ray_transform:ray_pose.transform,
+                                    hand:input.handedness == "left"?1:input.handedness == "right"?2:0,
+                                    buttons:input.gamepad.buttons,
+                                    axes:input.gamepad.axes
+                                });
+                            }
                             this.to_wasm.xr_update(
                                 time / 1000.0,
-                                this.xr_pose.transform.matrix,
-                                left_pose?left_pose.transform.matrix:null,
-                                right_pose?right_pose.transform.matrix:null
+                                this.xr_pose.transform,
+                                inputs,
                             );
                             this.in_animation_frame = true;
                             this.do_wasm_io();
@@ -1382,7 +1424,7 @@
         xr_stop_presenting() {
             
         }
-
+        
         
         begin_main_canvas(r, g, b, a, depth) {
             let gl = this.gl
@@ -1391,7 +1433,7 @@
                 let xr_webgllayer = this.xr_session.renderState.baseLayer;
                 this.gl.bindFramebuffer(gl.FRAMEBUFFER, xr_webgllayer.framebuffer);
                 gl.viewport(0, 0, xr_webgllayer.framebufferWidth, xr_webgllayer.framebufferHeight);
-
+                
                 let left_view = this.xr_pose.views[0];
                 let right_view = this.xr_pose.views[1];
                 

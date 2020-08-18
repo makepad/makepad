@@ -80,8 +80,8 @@ impl Cx {
                         outer_size: Vec2 {x: 0., y: 0.},
                         position: Vec2 {x: 0., y: 0.},
                         xr_is_presenting: false,
-                        xr_can_present:to_wasm.mu32() > 0,
-                        can_fullscreen:to_wasm.mu32() > 0
+                        xr_can_present: to_wasm.mu32() > 0,
+                        can_fullscreen: to_wasm.mu32() > 0
                     };
                     self.default_dpi_factor = self.platform.window_geom.dpi_factor;
                     self.platform.gpu_spec_is_low_on_uniforms = to_wasm.mu32() > 0;
@@ -91,10 +91,10 @@ impl Cx {
                     }
                     
                     self.call_event_handler(&mut event_handler, &mut Event::Construct);
-                     
+                    
                     self.redraw_child_area(Area::All);
-                }, 
-                4 => { // resize 
+                },
+                4 => { // resize
                     let old_geom = self.platform.window_geom.clone();
                     self.platform.window_geom = WindowGeom {
                         is_topmost: false,
@@ -112,11 +112,11 @@ impl Cx {
                     if self.windows.len()>0 {
                         self.windows[0].window_geom = self.platform.window_geom.clone();
                     }
-                    if old_geom != new_geom{
-                        self.call_event_handler(&mut event_handler, &mut Event::WindowGeomChange(WindowGeomChangeEvent{
+                    if old_geom != new_geom {
+                        self.call_event_handler(&mut event_handler, &mut Event::WindowGeomChange(WindowGeomChangeEvent {
                             window_id: 0,
-                            old_geom:old_geom,
-                            new_geom:new_geom
+                            old_geom: old_geom,
+                            new_geom: new_geom
                         }));
                     }
                     
@@ -338,19 +338,55 @@ impl Cx {
                 },
                 20 => { // xr_update, TODO add all the matrices / tracked hands / position IO'ed here
                     is_animation_frame = true;
+                    let inputs_len = to_wasm.mu32();
                     let time = to_wasm.mf64();
-                    
-                    let head_matrix = to_wasm.parse_optional_mat4();
-                    let left_matrix = to_wasm.parse_optional_mat4();
-                    let right_matrix = to_wasm.parse_optional_mat4();
-                    
+                    let head_transform = to_wasm.parse_transform();
+                    let mut left_input = XRInput::default();
+                    let mut right_input = XRInput::default();
+                    let mut other_inputs = Vec::new();
+                    for _ in 0..inputs_len {
+                        let mut input = XRInput::default();
+                        input.active = true;
+                        input.grip = to_wasm.parse_transform();
+                        input.ray = to_wasm.parse_transform();
+
+                        let hand = to_wasm.mu32();
+                        let num_buttons = to_wasm.mu32() as usize;
+                        input.num_buttons = num_buttons;
+                        for i in 0..num_buttons{
+                            input.buttons[i].pressed = to_wasm.mu32() > 0;
+                            input.buttons[i].value = to_wasm.mf32();
+                        }
+
+                        let num_axes = to_wasm.mu32() as usize;
+                        input.num_axes = num_axes;
+                        for i in 0..num_axes{
+                            input.axes[i] = to_wasm.mf32();
+                        }
+
+                        if hand == 1{
+                            left_input = input;
+                        }
+                        else if hand == 2{
+                            right_input = input;
+                        }
+                        else{
+                            other_inputs.push(input);
+                        }
+                    }
                     // call the VRUpdate event
-                    self.call_event_handler(&mut event_handler, &mut Event::XRUpdate(XRUpdateEvent{
-                         time:time,
-                         head_matrix,
-                         left_matrix,
-                         right_matrix,
+                    self.call_event_handler(&mut event_handler, &mut Event::XRUpdate(XRUpdateEvent {
+                        time,
+                        head_transform,
+                        last_left_input: self.platform.xr_last_left_input.clone(),
+                        last_right_input: self.platform.xr_last_right_input.clone(),
+                        left_input: left_input.clone(),
+                        right_input: right_input.clone(),
+                        other_inputs,
                     }));
+                    
+                    self.platform.xr_last_left_input = left_input;
+                    self.platform.xr_last_right_input = right_input;
                     
                     //log!(self, "{} o clock",time);
                     if self.playing_anim_areas.len() != 0 {
@@ -369,9 +405,9 @@ impl Cx {
                 22 => { //http_send_response
                     let signal_id = to_wasm.mu32();
                     let success = to_wasm.mu32();
-                    self.signals.insert(Signal {signal_id: signal_id as usize}, vec![match success{
-                        1=>Cx::status_http_send_ok(),
-                        _=>Cx::status_http_send_fail()
+                    self.signals.insert(Signal {signal_id: signal_id as usize}, vec![match success {
+                        1 => Cx::status_http_send_ok(),
+                        _ => Cx::status_http_send_fail()
                     }]);
                 },
                 _ => {
@@ -413,11 +449,11 @@ impl Cx {
                     self.platform.from_wasm.xr_stop_presenting();
                     CxWindowCmd::None
                 },
-                CxWindowCmd::FullScreen =>{
+                CxWindowCmd::FullScreen => {
                     self.platform.from_wasm.fullscreen();
                     CxWindowCmd::None
                 },
-                CxWindowCmd::NormalScreen =>{
+                CxWindowCmd::NormalScreen => {
                     self.platform.from_wasm.normalscreen();
                     CxWindowCmd::None
                 },
@@ -540,7 +576,7 @@ impl Cx {
         }
     }
     
-    pub fn http_send(&mut self, verb: &str, path: &str, proto:&str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
+    pub fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         self.platform.from_wasm.http_send(verb, path, proto, domain, port, content_type, body, signal);
     }
     
@@ -702,6 +738,8 @@ pub struct CxPlatform {
     pub vaos: usize,
     pub vaos_free: Vec<usize>,
     pub fingers_down: Vec<bool>,
+    pub xr_last_left_input: XRInput,
+    pub xr_last_right_input: XRInput,
     pub file_read_id: u64,
 }
 
@@ -719,7 +757,9 @@ impl Default for CxPlatform {
             vaos: 1,
             vaos_free: Vec::new(),
             file_read_id: 1,
-            fingers_down: Vec::new()
+            fingers_down: Vec::new(),
+            xr_last_left_input: XRInput::default(),
+            xr_last_right_input: XRInput::default(),
         }
     }
 }
@@ -877,14 +917,14 @@ impl FromWasm {
         self.fit(1);
         self.mu32(shvars.len() as u32);
         for shvar in shvars {
-            self.add_string(match shvar.prop_id.shader_ty(){
-                Ty::Vec4=>"vec4",
-                Ty::Vec3=>"vec3",
-                Ty::Vec2=>"vec2",
-                Ty::Float=>"float",
-                Ty::Mat4=>"mat4",
-                Ty::Texture2D=>"sampler2D",
-                _=>panic!("unexpected type in add_propdefvec")
+            self.add_string(match shvar.prop_id.shader_ty() {
+                Ty::Vec4 => "vec4",
+                Ty::Vec3 => "vec3",
+                Ty::Vec2 => "vec2",
+                Ty::Float => "float",
+                Ty::Mat4 => "mat4",
+                Ty::Texture2D => "sampler2D",
+                _ => panic!("unexpected type in add_propdefvec")
             });
             self.add_string(&shvar.name);
         }
@@ -959,11 +999,11 @@ impl FromWasm {
         self.mu32(uniforms_dr.as_ptr() as u32);
         self.mu32(uniforms.as_ptr() as u32);
         self.mu32(textures.as_ptr() as u32);
-        if let Some(const_table) = const_table{
+        if let Some(const_table) = const_table {
             self.mu32(const_table.as_ptr() as u32);
             self.mu32(const_table.len() as u32);
         }
-        else{
+        else {
             self.mu32(0);
             self.mu32(0);
         }
@@ -1153,25 +1193,25 @@ impl FromWasm {
     fn add_u8slice(&mut self, msg: &[u8]) {
         let u8_len = msg.len();
         let len = u8_len>>2;
-        let spare = u8_len&3;
-        self.fit(len + if spare > 0{1}else{0} + 1);
+        let spare = u8_len & 3;
+        self.fit(len + if spare > 0 {1}else {0} + 1);
         self.mu32(u8_len as u32);
         // this is terrible. im sure this can be done so much nicer
-        for i in 0..len{
-            self.mu32( ((msg[(i<<2)+0] as u32)) | ((msg[(i<<2)+1] as u32) << 8) | ((msg[(i<<2)+2] as u32)<<16)  | ((msg[(i<<2)+3] as u32)<<24) );
+        for i in 0..len {
+            self.mu32(((msg[(i << 2) + 0] as u32)) | ((msg[(i << 2) + 1] as u32) << 8) | ((msg[(i << 2) + 2] as u32) << 16) | ((msg[(i << 2) + 3] as u32) << 24));
         }
-        match spare{
-            1=>self.mu32( msg[(len<<2)+0] as u32 ),
-            2=>self.mu32( (msg[(len<<2)+0] as u32) | ((msg[(len<<2)+1] as u32) << 8) ),
-            3=>self.mu32( (msg[(len<<2)+0] as u32) | ((msg[(len<<2)+1] as u32) << 8) | ((msg[(len<<2)+2] as u32) << 16) ),
-            _=>()
+        match spare {
+            1 => self.mu32(msg[(len << 2) + 0] as u32),
+            2 => self.mu32((msg[(len << 2) + 0] as u32) | ((msg[(len << 2) + 1] as u32) << 8)),
+            3 => self.mu32((msg[(len << 2) + 0] as u32) | ((msg[(len << 2) + 1] as u32) << 8) | ((msg[(len << 2) + 2] as u32) << 16)),
+            _ => ()
         }
         self.check();
     }
     
-    fn http_send(&mut self, verb: &str, path: &str, proto:&str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
+    fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         self.fit(3);
-        self.mu32(27); 
+        self.mu32(27);
         self.mu32(port as u32);
         self.mu32(signal.signal_id as u32);
         self.add_string(verb);
@@ -1264,16 +1304,20 @@ impl ToWasm {
         out
     }
     
-    fn parse_optional_mat4(&mut self) -> Option<Mat4>{
-        let has_mat = self.mu32();
-        if has_mat == 0{
-            return None;
+    fn parse_transform(&mut self) -> Transform {
+        Transform {
+            orientation: Vec4 {
+                x: self.mf32(),
+                y: self.mf32(),
+                z: self.mf32(),
+                w: self.mf32(),
+            },
+            position: Vec3 {
+                x: self.mf32(),
+                y: self.mf32(),
+                z: self.mf32(),
+            }
         }
-        let mut ret = Mat4::default();
-        for i in 0..16{
-            ret.v[i] = self.mf32();
-        }
-        return Some(ret);
     }
 }
 

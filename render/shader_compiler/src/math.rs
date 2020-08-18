@@ -138,6 +138,12 @@ pub struct Mat4 {
     pub v: [f32; 16],
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct Transform {
+    pub orientation: Vec4,
+    pub position: Vec3
+}
+
 #[derive(Clone, Copy, Default, Debug, PartialEq, SerRon, DeRon)]
 pub struct Vec2 {
     pub x: f32,
@@ -157,7 +163,7 @@ pub fn vec2(x:f32, y:f32)->Vec2{
     Vec2{x:x, y:y}
 }*/
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
@@ -218,14 +224,37 @@ impl Mat4 {
         ]}
     }
     
+    pub fn from_transform(transform: Transform) -> Mat4 {
+        let q = transform.orientation;
+        let t = transform.position;
+        return Mat4 {v: [
+            1.0 - 2.0 * q.y * q.y - 2.0 * q.z * q.z,
+            2.0 * q.x * q.y - 2.0 * q.z * q.w,
+            2.0 * q.x * q.z + 2.0 * q.y * q.w,
+            0.0,
+            2.0 * q.x * q.y + 2.0 * q.z * q.w,
+            1.0 - 2.0 * q.x * q.x - 2.0 * q.z * q.z,
+            2.0 * q.y * q.z - 2.0 * q.x * q.w,
+            0.0,
+            2.0 * q.x * q.z - 2.0 * q.y * q.w,
+            2.0 * q.y * q.z + 2.0 * q.x * q.w,
+            1.0 - 2.0 * q.x * q.x - 2.0 * q.y * q.y,
+            0.0,
+            t.x,
+            t.y,
+            t.z,
+            1.0
+        ]}
+    }
+    
     pub fn rotate_tsrt(t1: Vec3, s: Vec3, r: Vec3, t2: Vec3) -> Mat4 {
         const TORAD: f32 = 0.017453292519943295;
-        let cx = f32::cos(r.x*TORAD);
-        let cy = f32::cos(r.y*TORAD);
-        let cz = f32::cos(r.z*TORAD);
-        let sx = f32::sin(r.x*TORAD);
-        let sy = f32::sin(r.y*TORAD);
-        let sz = f32::sin(r.z*TORAD);
+        let cx = f32::cos(r.x * TORAD);
+        let cy = f32::cos(r.y * TORAD);
+        let cz = f32::cos(r.z * TORAD);
+        let sx = f32::sin(r.x * TORAD);
+        let sy = f32::sin(r.y * TORAD);
+        let sz = f32::sin(r.z * TORAD);
         let m0 = s.x * (cy * cz + sx * sy * sz);
         let m1 = s.y * (-sz * cy + cz * sx * sy);
         let m2 = s.z * (sy * cx);
@@ -340,29 +369,29 @@ impl Mat4 {
         }
     }
     
-    pub fn from_mul(a: &Mat4, b:&Mat4) -> Mat4 {
+    pub fn from_mul(a: &Mat4, b: &Mat4) -> Mat4 {
         // this is probably stupid. Programmed JS for too long.
         let a = &a.v;
         let b = &b.v;
-        fn d(i:&[f32;16], x:usize, y:usize)->f32{return i[x + 4*y]}
+        fn d(i: &[f32; 16], x: usize, y: usize) -> f32 {return i[x + 4 * y]}
         Mat4 {
             v: [
-                d(a,0,0) * d(b,0,0) + d(a,1,0) * d(b,0,1) + d(a,2,0) * d(b,0,2) + d(a,3,0) * d(b,0,3),
-                d(a,0,0) * d(b,1,0) + d(a,1,0) * d(b,1,1) + d(a,2,0) * d(b,1,2) + d(a,3,0) * d(b,1,3),
-                d(a,0,0) * d(b,2,0) + d(a,1,0) * d(b,2,1) + d(a,2,0) * d(b,2,2) + d(a,3,0) * d(b,2,3),
-                d(a,0,0) * d(b,3,0) + d(a,1,0) * d(b,3,1) + d(a,2,0) * d(b,3,2) + d(a,3,0) * d(b,3,3),
-                d(a,0,1) * d(b,0,0) + d(a,1,1) * d(b,0,1) + d(a,2,1) * d(b,0,2) + d(a,3,1) * d(b,0,3),
-                d(a,0,1) * d(b,1,0) + d(a,1,1) * d(b,1,1) + d(a,2,1) * d(b,1,2) + d(a,3,1) * d(b,1,3),
-                d(a,0,1) * d(b,2,0) + d(a,1,1) * d(b,2,1) + d(a,2,1) * d(b,2,2) + d(a,3,1) * d(b,2,3),
-                d(a,0,1) * d(b,3,0) + d(a,1,1) * d(b,3,1) + d(a,2,1) * d(b,3,2) + d(a,3,1) * d(b,3,3),
-                d(a,0,2) * d(b,0,0) + d(a,1,2) * d(b,0,1) + d(a,2,2) * d(b,0,2) + d(a,3,2) * d(b,0,3),
-                d(a,0,2) * d(b,1,0) + d(a,1,2) * d(b,1,1) + d(a,2,2) * d(b,1,2) + d(a,3,2) * d(b,1,3),
-                d(a,0,2) * d(b,2,0) + d(a,1,2) * d(b,2,1) + d(a,2,2) * d(b,2,2) + d(a,3,2) * d(b,2,3),
-                d(a,0,2) * d(b,3,0) + d(a,1,2) * d(b,3,1) + d(a,2,2) * d(b,3,2) + d(a,3,2) * d(b,3,3),
-                d(a,0,3) * d(b,0,0) + d(a,1,3) * d(b,0,1) + d(a,2,3) * d(b,0,2) + d(a,3,3) * d(b,0,3),
-                d(a,0,3) * d(b,1,0) + d(a,1,3) * d(b,1,1) + d(a,2,3) * d(b,1,2) + d(a,3,3) * d(b,1,3),
-                d(a,0,3) * d(b,2,0) + d(a,1,3) * d(b,2,1) + d(a,2,3) * d(b,2,2) + d(a,3,3) * d(b,2,3),
-                d(a,0,3) * d(b,3,0) + d(a,1,3) * d(b,3,1) + d(a,2,3) * d(b,3,2) + d(a,3,3) * d(b,3,3),
+                d(a, 0, 0) * d(b, 0, 0) + d(a, 1, 0) * d(b, 0, 1) + d(a, 2, 0) * d(b, 0, 2) + d(a, 3, 0) * d(b, 0, 3),
+                d(a, 0, 0) * d(b, 1, 0) + d(a, 1, 0) * d(b, 1, 1) + d(a, 2, 0) * d(b, 1, 2) + d(a, 3, 0) * d(b, 1, 3),
+                d(a, 0, 0) * d(b, 2, 0) + d(a, 1, 0) * d(b, 2, 1) + d(a, 2, 0) * d(b, 2, 2) + d(a, 3, 0) * d(b, 2, 3),
+                d(a, 0, 0) * d(b, 3, 0) + d(a, 1, 0) * d(b, 3, 1) + d(a, 2, 0) * d(b, 3, 2) + d(a, 3, 0) * d(b, 3, 3),
+                d(a, 0, 1) * d(b, 0, 0) + d(a, 1, 1) * d(b, 0, 1) + d(a, 2, 1) * d(b, 0, 2) + d(a, 3, 1) * d(b, 0, 3),
+                d(a, 0, 1) * d(b, 1, 0) + d(a, 1, 1) * d(b, 1, 1) + d(a, 2, 1) * d(b, 1, 2) + d(a, 3, 1) * d(b, 1, 3),
+                d(a, 0, 1) * d(b, 2, 0) + d(a, 1, 1) * d(b, 2, 1) + d(a, 2, 1) * d(b, 2, 2) + d(a, 3, 1) * d(b, 2, 3),
+                d(a, 0, 1) * d(b, 3, 0) + d(a, 1, 1) * d(b, 3, 1) + d(a, 2, 1) * d(b, 3, 2) + d(a, 3, 1) * d(b, 3, 3),
+                d(a, 0, 2) * d(b, 0, 0) + d(a, 1, 2) * d(b, 0, 1) + d(a, 2, 2) * d(b, 0, 2) + d(a, 3, 2) * d(b, 0, 3),
+                d(a, 0, 2) * d(b, 1, 0) + d(a, 1, 2) * d(b, 1, 1) + d(a, 2, 2) * d(b, 1, 2) + d(a, 3, 2) * d(b, 1, 3),
+                d(a, 0, 2) * d(b, 2, 0) + d(a, 1, 2) * d(b, 2, 1) + d(a, 2, 2) * d(b, 2, 2) + d(a, 3, 2) * d(b, 2, 3),
+                d(a, 0, 2) * d(b, 3, 0) + d(a, 1, 2) * d(b, 3, 1) + d(a, 2, 2) * d(b, 3, 2) + d(a, 3, 2) * d(b, 3, 3),
+                d(a, 0, 3) * d(b, 0, 0) + d(a, 1, 3) * d(b, 0, 1) + d(a, 2, 3) * d(b, 0, 2) + d(a, 3, 3) * d(b, 0, 3),
+                d(a, 0, 3) * d(b, 1, 0) + d(a, 1, 3) * d(b, 1, 1) + d(a, 2, 3) * d(b, 1, 2) + d(a, 3, 3) * d(b, 1, 3),
+                d(a, 0, 3) * d(b, 2, 0) + d(a, 1, 3) * d(b, 2, 1) + d(a, 2, 3) * d(b, 2, 2) + d(a, 3, 3) * d(b, 2, 3),
+                d(a, 0, 3) * d(b, 3, 0) + d(a, 1, 3) * d(b, 3, 1) + d(a, 2, 3) * d(b, 3, 2) + d(a, 3, 3) * d(b, 3, 3),
             ]
         }
     }
