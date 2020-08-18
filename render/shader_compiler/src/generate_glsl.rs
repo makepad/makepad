@@ -529,10 +529,11 @@ impl<'a> VarPacker<'a> {
     fn pack_var(&mut self, ident: Ident, ty: &Ty) {
         let var_size = ty.size();
         let mut var_offset = 0;
+        let mut in_matrix = None;
         while var_offset < var_size {
             let count = var_size - var_offset;
             let packed_count = self.packed_var_size - self.packed_var_offset;
-            let min_count = count.min(packed_count);
+            let min_count = if var_size > 4{ 1 } else{count.min(packed_count)};
             write!(
                 self.string,
                 "    {}_{}",
@@ -549,12 +550,31 @@ impl<'a> VarPacker<'a> {
             }
             write!(self.string, " = {}", ident).unwrap();
             if var_size > 1 {
-                write!(
-                    self.string,
-                    ".{}",
-                    Swizzle::from_range(var_offset, var_offset + min_count)
-                )
-                .unwrap();
+                if var_size <= 4{ 
+                    in_matrix = None;
+                    write!(
+                        self.string,
+                        ".{}",
+                        Swizzle::from_range(var_offset, var_offset + min_count)
+                    )
+                    .unwrap();
+                }
+                else{ // make a matrix constructor and unpack into it
+                    if let Some(in_matrix) = &mut in_matrix{
+                        *in_matrix += 1;
+                    }
+                    else{
+                        in_matrix = Some(0);
+                    }
+                    if let Some(in_matrix) = in_matrix{
+                        write!(
+                            self.string,
+                            "[{}][{}]",
+                            in_matrix>>2,
+                            in_matrix&3,
+                        ).unwrap();
+                    }
+                }
             }
             writeln!(self.string, ";").unwrap();
             self.packed_var_offset += min_count;
@@ -596,19 +616,39 @@ impl<'a> VarUnpacker<'a> {
 
     fn unpack_var(&mut self, ident: Ident, ty: &Ty) {
         let var_size = ty.size();
-        let mut var_offset = 0;
+        let mut var_offset = 0; 
+        let mut in_matrix = None;
         while var_offset < var_size {
             let count = var_size - var_offset;
             let packed_count = self.packed_var_size - self.packed_var_offset;
-            let min_count = count.min(packed_count);
+            let min_count = if var_size > 4{ 1 } else{count.min(packed_count)};
             write!(self.string, "    {}", ident).unwrap();
             if var_size > 1 {
-                write!(
-                    self.string,
-                    ".{}",
-                    Swizzle::from_range(var_offset, var_offset + min_count)
-                )
-                .unwrap();
+                if var_size <= 4{ // its a matrix
+                    in_matrix = None;
+                    write!(
+                        self.string,
+                        ".{}",
+                        Swizzle::from_range(var_offset, var_offset + min_count)
+                    )
+                    .unwrap();
+                }
+                else{ 
+                    if let Some(in_matrix) = &mut in_matrix{
+                        *in_matrix += 1;
+                    }
+                    else{
+                        in_matrix = Some(0);
+                    }
+                    if let Some(in_matrix) = in_matrix{
+                        write!(
+                            self.string,
+                            "[{}][{}]",
+                            in_matrix>>2,
+                            in_matrix&3,
+                        ).unwrap(); 
+                    }
+                }
             }
             write!(
                 self.string,
@@ -616,6 +656,7 @@ impl<'a> VarUnpacker<'a> {
                 self.packed_var_name, self.packed_var_index
             )
             .unwrap();
+            
             if self.packed_var_size > 1 {
                 write!(
                     self.string,
@@ -624,6 +665,7 @@ impl<'a> VarUnpacker<'a> {
                 )
                 .unwrap();
             }
+ 
             writeln!(self.string, ";").unwrap();
             var_offset += min_count;
             self.packed_var_offset += min_count;

@@ -1391,7 +1391,7 @@
                                 let grip_pose = xr_frame.getPose(input.gripSpace, this.xr_reference_space);
                                 let ray_pose = xr_frame.getPose(input.targetRaySpace, this.xr_reference_space);
                                 inputs.push({
-                                    grip_transform:grip_pose.inverse.transform,
+                                    grip_transform:grip_pose.transform,
                                     ray_transform:ray_pose.transform,
                                     hand:input.handedness == "left"?1:input.handedness == "right"?2:0,
                                     buttons:input.gamepad.buttons,

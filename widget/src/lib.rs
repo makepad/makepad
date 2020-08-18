@@ -42,5 +42,8 @@ pub use crate::scrollshadow::*;
 mod tokentype;
 pub use crate::tokentype::*;
 
+mod xrcontrol;
+pub use crate::xrcontrol::*;
+
 //mod texteditor;
 //pub use crate::texteditor::*;
