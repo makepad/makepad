@@ -74,7 +74,7 @@ impl Cx {
                     gl::UseProgram(shp.program);
                     gl::BindVertexArray(draw_call.platform.vao.unwrap());
                     let instances = draw_call.instance.len() / sh.mapping.instance_props.total_slots;
-                    let indices = sh.shader_gen.geometry_indices.len();
+                    let indices = sh.shader_gen.geometry.indices.len();
                     
                     let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
                     let view_uniforms = cxview.view_uniforms.as_slice();
@@ -654,12 +654,12 @@ impl Cx {
                 program: program, 
                 geom_ibuf: {
                     let mut buf = OpenglBuffer::default();
-                    buf.update_with_u32_data(opengl_cx, &sh.shader_gen.geometry_indices);
+                    buf.update_with_u32_data(opengl_cx, &sh.shader_gen.geometry.indices);
                     buf
                 },
                 geom_vbuf: {
                     let mut buf = OpenglBuffer::default();
-                    buf.update_with_f32_data(opengl_cx, &sh.shader_gen.geometry_vertices);
+                    buf.update_with_f32_data(opengl_cx, &sh.shader_gen.geometry.vertices);
                     buf
                 },
                 geometries,

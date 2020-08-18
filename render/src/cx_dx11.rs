@@ -131,7 +131,7 @@ impl Cx {
                         _ => ()
                     }
                 }
-                d3d11_cx.draw_indexed_instanced(sh.shader_gen.geometry_indices.len(), instances);
+                d3d11_cx.draw_indexed_instanced(sh.shader_gen.geometry.indices.len(), instances);
             }
         }
     }
@@ -385,12 +385,12 @@ impl Cx {
         sh.platform = Some(CxPlatformShader {
             geom_ibuf: {
                 let mut geom_ibuf = D3d11Buffer {..Default::default()};
-                geom_ibuf.update_with_u32_index_data(d3d11_cx, &sh.shader_gen.geometry_indices);
+                geom_ibuf.update_with_u32_index_data(d3d11_cx, &sh.shader_gen.geometry.indices);
                 geom_ibuf
             },
             geom_vbuf: {
                 let mut geom_vbuf = D3d11Buffer {..Default::default()};
-                geom_vbuf.update_with_f32_vertex_data(d3d11_cx, &sh.shader_gen.geometry_vertices);
+                geom_vbuf.update_with_f32_vertex_data(d3d11_cx, &sh.shader_gen.geometry.vertices);
                 geom_vbuf
             },
             const_table_uniforms:{
