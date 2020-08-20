@@ -25,8 +25,8 @@ pub trait BackendWriter {
         ty: &Ty,
     );
     
-    fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, ident:Ident, shader:&ShaderAst, sep:&str);
-
+    fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, ident: Ident, shader: &ShaderAst, sep: &str);
+    
     fn generate_var_expr_prefix(&self, string: &mut String, ident: Ident, kind: &Cell<Option<VarKind>>, shader: &ShaderAst, decl: &FnDecl);
     
     fn write_ident(&self, string: &mut String, ident: Ident);
@@ -35,9 +35,13 @@ pub trait BackendWriter {
     
     fn write_call_ident(&self, string: &mut String, ident: Ident, arg_exprs: &[Expr]);
     
-    fn needs_mul_fn_for_matrix_multiplication(&self)->bool;
+    fn needs_mul_fn_for_matrix_multiplication(&self) -> bool;
     
-    fn  const_table_is_vec4(&self) -> bool;
+    fn needs_unpack_for_matrix_multiplication(&self) -> bool;
+    
+    fn const_table_is_vec4(&self) -> bool;
+    
+    fn use_cons_fn(&self, what: &str) -> bool;
 }
 
 pub struct BlockGenerator<'a> {
@@ -45,7 +49,7 @@ pub struct BlockGenerator<'a> {
     pub decl: &'a FnDecl,
     pub backend_writer: &'a dyn BackendWriter,
     pub use_const_table: bool,
-    pub use_generated_cons_fns: bool,
+    //pub use_generated_cons_fns: bool,
     pub indent_level: usize,
     pub string: &'a mut String,
 }
@@ -222,7 +226,7 @@ impl<'a> BlockGenerator<'a> {
             backend_writer: self.backend_writer,
             use_const_table: self.use_const_table,
             //use_hidden_params: self.use_hidden_params,
-            use_generated_cons_fns: self.use_generated_cons_fns,
+            //use_generated_cons_fns: self.use_generated_cons_fns,
             string: self.string,
         }
         .generate_expr(expr)
@@ -246,20 +250,20 @@ pub struct ExprGenerator<'a> {
     pub backend_writer: &'a dyn BackendWriter,
     pub use_const_table: bool,
     //pub use_hidden_params2: bool,
-    pub use_generated_cons_fns: bool,
+    //pub use_generated_cons_fns: bool,
     pub string: &'a mut String,
 }
 
 impl<'a> ExprGenerator<'a> {
     pub fn generate_expr(&mut self, expr: &Expr) {
-        fn const_table_index_to_vec4(string:&mut String, index:usize){
+        fn const_table_index_to_vec4(string: &mut String, index: usize) {
             let base = index>>2;
-            let sub = index - (base<<2);
-            match sub{
-                0=>write!(string, "[{}].x", base).unwrap(),
-                1=>write!(string, "[{}].y", base).unwrap(),
-                2=>write!(string, "[{}].z", base).unwrap(),
-                _=>write!(string, "[{}].w", base).unwrap(),
+            let sub = index - (base << 2);
+            match sub {
+                0 => write!(string, "[{}].x", base).unwrap(),
+                1 => write!(string, "[{}].y", base).unwrap(),
+                2 => write!(string, "[{}].z", base).unwrap(),
+                _ => write!(string, "[{}].w", base).unwrap(),
             }
         }
         match (expr.const_val.borrow().as_ref(), expr.const_index.get()) {
@@ -269,10 +273,10 @@ impl<'a> ExprGenerator<'a> {
                 let mut sep = "";
                 for _ in 0..4 {
                     write!(self.string, "{}mpsc_const_table", sep).unwrap();
-                    if self.backend_writer.const_table_is_vec4(){
+                    if self.backend_writer.const_table_is_vec4() {
                         const_table_index_to_vec4(self.string, index);
                     }
-                    else{
+                    else {
                         write!(self.string, "[{}]", index).unwrap();
                     }
                     sep = ", ";
@@ -282,10 +286,10 @@ impl<'a> ExprGenerator<'a> {
             },
             (Some(Some(Val::Float(_))), Some(index)) if self.use_const_table => {
                 write!(self.string, "mpsc_const_table").unwrap();
-                if self.backend_writer.const_table_is_vec4(){
+                if self.backend_writer.const_table_is_vec4() {
                     const_table_index_to_vec4(self.string, index);
                 }
-                else{
+                else {
                     write!(self.string, "[{}]", index).unwrap();
                 }
             }
@@ -382,22 +386,75 @@ impl<'a> ExprGenerator<'a> {
     fn generate_bin_expr(&mut self, _span: Span, op: BinOp, left_expr: &Expr, right_expr: &Expr) {
         
         // if left_expr or right_expr is a matrix, HLSL needs to use mul()
-        if self.backend_writer.needs_mul_fn_for_matrix_multiplication(){
-            let left_is_mat =  match left_expr.ty.borrow().as_ref().unwrap() {
-                Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => true,
-                _=>false
-            };
-            let right_is_mat =  match right_expr.ty.borrow().as_ref().unwrap() {
-                Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => true,
-                _=>false
-            };
-            if left_is_mat || right_is_mat{
+        let left_is_mat = match left_expr.ty.borrow().as_ref().unwrap() {
+            Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => true,
+            _ => false
+        };
+        let right_is_mat = match right_expr.ty.borrow().as_ref().unwrap() {
+            Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => true,
+            _ => false
+        };
+        
+        if self.backend_writer.needs_mul_fn_for_matrix_multiplication() {
+            if left_is_mat || right_is_mat {
                 write!(self.string, "mul(").unwrap();
                 self.generate_expr(left_expr);
                 write!(self.string, ", ").unwrap();
                 self.generate_expr(right_expr);
                 write!(self.string, ")").unwrap();
                 return
+            }
+        }
+        else if self.backend_writer.needs_unpack_for_matrix_multiplication() {
+            if left_is_mat && !right_is_mat {
+                match right_expr.ty.borrow().as_ref().unwrap() {
+                    Ty::Vec4 => {
+                        write!(self.string, "(").unwrap();
+                        self.generate_expr(left_expr);
+                        write!(self.string, " {} ", op).unwrap();
+                        self.backend_writer.write_ty_lit(self.string, TyLit::Vec4);
+                        write!(self.string, "(").unwrap();
+                        self.generate_expr(right_expr);
+                        write!(self.string, "))").unwrap();
+                        return
+                    },
+                    Ty::Vec3 => {
+                        write!(self.string, "(").unwrap();
+                        self.generate_expr(left_expr);
+                        write!(self.string, " {} ", op).unwrap();
+                        self.backend_writer.write_ty_lit(self.string, TyLit::Vec3);
+                        write!(self.string, "(").unwrap();
+                        self.generate_expr(right_expr);
+                        write!(self.string, "))").unwrap();
+                        return
+                    },
+                    _ => ()
+                };
+            }
+            else if !left_is_mat && right_is_mat {
+                match left_expr.ty.borrow().as_ref().unwrap() {
+                    Ty::Vec4 => {
+                        write!(self.string, "(").unwrap();
+                        self.backend_writer.write_ty_lit(self.string, TyLit::Vec4);
+                        write!(self.string, "(").unwrap();
+                        self.generate_expr(left_expr);
+                        write!(self.string, ") {} ", op).unwrap();
+                        self.generate_expr(right_expr);
+                        write!(self.string, ")").unwrap();
+                        return
+                    },
+                    Ty::Vec3 => {
+                        write!(self.string, "(").unwrap();
+                        self.backend_writer.write_ty_lit(self.string, TyLit::Vec3);
+                        write!(self.string, "(").unwrap();
+                        self.generate_expr(left_expr);
+                        write!(self.string, ") {} ", op).unwrap();
+                        self.generate_expr(right_expr);
+                        write!(self.string, ")").unwrap();
+                        return
+                    },
+                    _ => ()
+                };
             }
         }
         
@@ -415,7 +472,7 @@ impl<'a> ExprGenerator<'a> {
     
     fn generate_method_call_expr(&mut self, span: Span, ident: Ident, arg_exprs: &[Expr]) {
         match arg_exprs[0].ty.borrow().as_ref().unwrap() {
-            Ty::Struct { 
+            Ty::Struct {
                 ident: struct_ident,
             } => {
                 self.generate_call_expr(
@@ -492,13 +549,13 @@ impl<'a> ExprGenerator<'a> {
     }
     
     fn generate_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {
-        if self.use_generated_cons_fns {
-            write!(self.string, "mpsc_").unwrap();
-            write!(self.string, "{}", ty_lit).unwrap();
-            //self.write_ty_lit(ty_lit);
-            for arg_expr in arg_exprs {
-                write!(self.string, "_{}", arg_expr.ty.borrow().as_ref().unwrap()).unwrap();
-            }
+        // lets build the constructor name
+        let mut cons_name = format!("mpsc_{}", ty_lit);
+        for arg_expr in arg_exprs {
+            write!(cons_name, "_{}", arg_expr.ty.borrow().as_ref().unwrap()).unwrap();
+        }
+        if self.backend_writer.use_cons_fn(&cons_name) {
+            write!(self.string, "{}", cons_name).unwrap();
         } else {
             self.write_ty_lit(ty_lit);
         }

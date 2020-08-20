@@ -246,12 +246,16 @@ impl<'a> ShaderGenerator<'a> {
     }
     
     fn generate_cons_fn(&mut self, ty_lit: TyLit, param_tys: &[Ty]) {
-        self.write_ty_lit(ty_lit);
-        write!(self.string, " mpsc_{}", ty_lit).unwrap();
+        let mut cons_name = format!("mpsc_{}", ty_lit);
         for param_ty in param_tys {
-            write!(self.string, "_{}", param_ty).unwrap();
+            write!(cons_name, "_{}", param_ty).unwrap();
         }
-        write!(self.string, "(").unwrap();
+        if !MetalBackendWriter.use_cons_fn(&cons_name){
+            return
+        }
+        
+        self.write_ty_lit(ty_lit);
+        write!(self.string, " {}(", cons_name).unwrap();
         let mut sep = "";
         if param_tys.len() == 1 {
             self.write_var_decl(false, false, Ident::new("x"), &param_tys[0])
@@ -516,7 +520,7 @@ impl<'a> ShaderGenerator<'a> {
             decl: None,
             backend_writer: &MetalBackendWriter,
             use_const_table: self.use_const_table,
-            use_generated_cons_fns: false,
+            //use_generated_cons_fns: false,
             string: self.string,
         }
         .generate_expr(expr)
@@ -525,7 +529,7 @@ impl<'a> ShaderGenerator<'a> {
     fn write_var_decl(&mut self, is_inout: bool, is_packed: bool, ident: Ident, ty: &Ty) {
         MetalBackendWriter.write_var_decl(&mut self.string, is_inout, is_packed, ident, ty);
     }
-    
+     
     fn write_ident(&mut self, ident: Ident) {
         MetalBackendWriter.write_ident(&mut self.string, ident);
     }
@@ -646,7 +650,7 @@ impl<'a> FnDeclGenerator<'a> {
             decl: self.decl,
             backend_writer: &MetalBackendWriter,
             use_const_table: self.use_const_table,
-            use_generated_cons_fns: false,
+           // use_generated_cons_fns: false,
             indent_level: 0,
             string: self.string,
         }
@@ -752,8 +756,21 @@ impl BackendWriter for MetalBackendWriter {
         false
     }
     
+    fn needs_unpack_for_matrix_multiplication(&self)->bool{
+        true
+    }
+    
     fn  const_table_is_vec4(&self) -> bool{
         false
+    }
+
+    fn use_cons_fn(&self, what:&str)->bool{
+        match what{
+            "mpsc_mat3_mat4"=>true,
+            "mpsc_mat2_mat4"=>true,
+            "mpsc_mat2_mat3"=>true,
+            _=>false
+        }
     }
 
     fn write_var_decl(

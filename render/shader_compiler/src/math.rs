@@ -144,6 +144,7 @@ pub struct Transform {
     pub position: Vec3
 }
 
+
 #[derive(Clone, Copy, Default, Debug, PartialEq, SerRon, DeRon)]
 pub struct Vec2 {
     pub x: f32,
@@ -228,17 +229,17 @@ impl Mat4 {
         let q = transform.orientation;
         let t = transform.position;
         return Mat4 {v: [
-            1.0 - 2.0 * q.y * q.y - 2.0 * q.z * q.z,
-            2.0 * q.x * q.y - 2.0 * q.z * q.w,
-            2.0 * q.x * q.z + 2.0 * q.y * q.w,
+            (1.0 - 2.0 * q.y * q.y - 2.0 * q.z * q.z),
+            (2.0 * q.x * q.y - 2.0 * q.z * q.w),
+            (2.0 * q.x * q.z + 2.0 * q.y * q.w),
             0.0,
-            2.0 * q.x * q.y + 2.0 * q.z * q.w,
-            1.0 - 2.0 * q.x * q.x - 2.0 * q.z * q.z,
-            2.0 * q.y * q.z - 2.0 * q.x * q.w,
+            (2.0 * q.x * q.y + 2.0 * q.z * q.w),
+            (1.0 - 2.0 * q.x * q.x - 2.0 * q.z * q.z),
+            (2.0 * q.y * q.z - 2.0 * q.x * q.w),
             0.0,
-            2.0 * q.x * q.z - 2.0 * q.y * q.w,
-            2.0 * q.y * q.z + 2.0 * q.x * q.w,
-            1.0 - 2.0 * q.x * q.x - 2.0 * q.y * q.y,
+            (2.0 * q.x * q.z - 2.0 * q.y * q.w),
+            (2.0 * q.y * q.z + 2.0 * q.x * q.w),
+            (1.0 - 2.0 * q.x * q.x - 2.0 * q.y * q.y),
             0.0,
             t.x,
             t.y,
@@ -247,7 +248,7 @@ impl Mat4 {
         ]}
     }
     
-    pub fn rotate_tsrt(t1: Vec3, s: Vec3, r: Vec3, t2: Vec3) -> Mat4 {
+    pub fn rotate_tsrt(t1: Vec3, s: f32, r: Vec3, t2: Vec3) -> Mat4 {
         const TORAD: f32 = 0.017453292519943295;
         let cx = f32::cos(r.x * TORAD);
         let cy = f32::cos(r.y * TORAD);
@@ -255,15 +256,15 @@ impl Mat4 {
         let sx = f32::sin(r.x * TORAD);
         let sy = f32::sin(r.y * TORAD);
         let sz = f32::sin(r.z * TORAD);
-        let m0 = s.x * (cy * cz + sx * sy * sz);
-        let m1 = s.y * (-sz * cy + cz * sx * sy);
-        let m2 = s.z * (sy * cx);
-        let m4 = s.x * (sz * cx);
-        let m5 = s.y * (cx * cz);
-        let m6 = s.z * (-sx);
-        let m8 = s.x * (-sy * cz + cy * sx * sz);
-        let m9 = s.y * (sy * sz + cy * sx * cz);
-        let m10 = s.z * (cx * cy);
+        let m0 = s * (cy * cz + sx * sy * sz);
+        let m1 = s * (-sz * cy + cz * sx * sy);
+        let m2 = s * (sy * cx);
+        let m4 = s * (sz * cx);
+        let m5 = s * (cx * cz);
+        let m6 = s * (-sx);
+        let m8 = s * (-sy * cz + cy * sx * sz);
+        let m9 = s * (sy * sz + cy * sx * cz);
+        let m10 = s * (cx * cy);
         return Mat4 {v: [
             m0,
             m4,
@@ -307,19 +308,19 @@ impl Mat4 {
         ]}
     }
     
-    pub fn scale_translate(sx: f32, sy: f32, sz: f32, x: f32, y: f32, z: f32) -> Mat4 {
+    pub fn scale_translate(s: f32, x: f32, y: f32, z: f32) -> Mat4 {
         return Mat4 {v: [
-            sx,
+            s,
             0.0,
             0.0,
             0.0,
             0.0,
-            sy,
+            s,
             0.0,
             0.0,
             0.0,
             0.0,
-            sz,
+            s,
             0.0,
             x,
             y,
