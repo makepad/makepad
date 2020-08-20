@@ -61,8 +61,8 @@ impl Cx {
     where F: FnMut(&mut Cx, &mut Event)
     {
         match event {
-            Event::FingerHover(_fe) => {
-                self.finger_over_last_area = Area::Empty;
+            Event::FingerHover(fe) => {
+                self.fingers[fe.digit].over_last = Area::Empty;
                 //self.hover_mouse_cursor = None;
             },
             Event::FingerUp(_fe) => {
@@ -98,10 +98,10 @@ impl Cx {
     pub fn process_desktop_post_event(&mut self, event: &mut Event) -> bool {
         match event {
             Event::FingerUp(fe) => { // decapture automatically
-                self.captured_fingers[fe.digit] = Area::Empty;
+                self.fingers[fe.digit].captured = Area::Empty;
             },
-            Event::FingerHover(_fe) => { // new last area finger over
-                self._finger_over_last_area = self.finger_over_last_area;
+            Event::FingerHover(fe) => { // new last area finger over
+                self.fingers[fe.digit]._over_last = self.fingers[fe.digit].over_last;
                 //if fe.hover_state == HoverState::Out{
                 //    self.hover_mouse_cursor = None;
                 //}

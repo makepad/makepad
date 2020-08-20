@@ -26,14 +26,16 @@ impl Cube {
     pub fn geom_normal() -> Vec3Id {uid!()}
     pub fn geom_uv() -> Vec2Id {uid!()}
     
-    pub fn transform() -> Mat4Id {uid!()}
+   pub fn transform() -> Mat4Id {uid!()}
     pub fn color() -> ColorId {uid!()}
-    
+    pub fn size() -> Vec3Id {uid!()}
+    pub fn pos() -> Vec3Id {uid!()}
+     
     pub fn def_cube_shader() -> ShaderGen {
         // lets add the draw shader lib
         let mut sg = Cx::shader_defs(ShaderGen::new());
         
-        sg.geometry.add_cube_3d(0.1,0.1,0.1,1,1,1);
+        sg.geometry.add_cube_3d(1.0,1.0,1.0,1,1,1);
 
         sg.compose(shader!{"
             geometry geom_pos: Self::geom_pos();
@@ -43,10 +45,14 @@ impl Cube {
             
             instance transform: Self::transform();
             instance color: Self::color();
+            instance size: Self::size();
+            instance pos: Self::pos();
             
             varying lit_col: vec4;
             
             fn color_form_id()->vec4{
+                return pick!(#c);
+                /*
                 if geom_id>4.5{
                     return pick!(red);
                 }
@@ -59,7 +65,7 @@ impl Cube {
                 if geom_id>1.5{
                     return pick!(orange);
                 }
-                return pick!(yellow);
+                return pick!(yellow);*/
             }
              
             fn vertex() -> vec4 {
@@ -69,7 +75,7 @@ impl Cube {
                 let dp = abs(normal.z);
                 let color = color_form_id();
                 lit_col = vec4( color.rgb *dp, color.a );
-                return camera_projection * (model_view * vec4(geom_pos.x, geom_pos.y, geom_pos.z + draw_zbias, 1.));
+                return camera_projection * (model_view * vec4(geom_pos.x*size.x+pos.x, geom_pos.y*size.y+pos.y, geom_pos.z*size.z + pos.z + draw_zbias, 1.));
             }
             
             fn pixel() -> vec4 {
@@ -79,17 +85,23 @@ impl Cube {
         "})
     }
     
-    pub fn draw_cube(&mut self, cx: &mut Cx, transform: &Mat4) -> InstanceArea {
+    pub fn draw_cube(&mut self, cx: &mut Cx, size:Vec3, pos:Vec3, transform: &Mat4) -> InstanceArea {
         let inst = cx.new_instance(&self.shader, 1);
         if inst.need_uniforms_now(cx) {
         }
         //println!("{:?} {}", area, cx.current_draw_list_id);
         inst.push_slice(cx, &transform.v);
-        let data = [
+        let data = [ 
             self.color.r,
             self.color.g,
             self.color.b,
             self.color.a,
+            size.x,
+            size.y,
+            size.z,
+            pos.x,
+            pos.y,
+            pos.z,
         ];
         inst.push_slice(cx, &data);
         inst

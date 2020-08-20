@@ -461,6 +461,7 @@ impl CocoaApp {
                 return if has_prec == YES {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent {
+                            digit:0,
                             window_id: cocoa_window.window_id,
                             scroll: Vec2 {x: -dx as f32, y: -dy as f32},
                             abs: cocoa_window.last_mouse_pos,
@@ -475,6 +476,7 @@ impl CocoaApp {
                 } else {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent {
+                            digit:0,
                             window_id: cocoa_window.window_id,
                             scroll: Vec2 {x: -dx as f32 * 32., y: -dy as f32 * 32.},
                             abs: cocoa_window.last_mouse_pos,
@@ -1037,6 +1039,7 @@ impl CocoaWindow {
             }
         };
         events.push(Event::FingerHover(FingerHoverEvent {
+            digit:0,
             window_id: self.window_id,
             abs: pos,
             rel: pos,
