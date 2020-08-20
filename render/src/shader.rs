@@ -19,6 +19,7 @@ impl CxShader {
             const TORAD: float = 0.017453292519943295;
             const GOLDEN: float = 1.618033988749895;
             
+            
             struct Df {
                 pos: vec2,
                 result: vec4,

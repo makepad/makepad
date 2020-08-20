@@ -34,11 +34,7 @@ impl XRControl {
         // lets define the shader
         let sg = Cube::def_cube_shader().compose(shader!{"
         "});
-        cx.platform.from_wasm.log(&format!(
-            "{} {}",
-            sg.geometry.indices.len(),
-            sg.geometry.vertices.len()
-        ));
+
         Self::shader_shape().set(cx, sg);
     }
     

@@ -44,11 +44,9 @@ impl Cube {
             instance transform: Self::transform();
             instance color: Self::color();
             
-            fn vertex() -> vec4 {
-                return camera_projection * (camera_view * (view_transform * (transform * vec4(geom_pos.x, geom_pos.y, geom_pos.z + draw_zbias, 1.))));
-            }
+            varying lit_col: vec4;
             
-            fn pixel() -> vec4 {
+            fn color_form_id()->vec4{
                 if geom_id>4.5{
                     return pick!(red);
                 }
@@ -61,10 +59,21 @@ impl Cube {
                 if geom_id>1.5{
                     return pick!(orange);
                 }
-                if geom_id>0.5{
-                    return pick!(yellow);
-                }
-                return pick!(white);
+                return pick!(yellow);
+            }
+             
+            fn vertex() -> vec4 {
+                let model_view =  camera_view * view_transform * transform;
+                let normal_matrix = mat3(model_view);
+                let normal = normalize(normal_matrix  * geom_normal );
+                let dp = abs(normal.z);
+                let color = color_form_id();
+                lit_col = vec4( color.rgb *dp, color.a );
+                return camera_projection * (model_view * vec4(geom_pos.x, geom_pos.y, geom_pos.z + draw_zbias, 1.));
+            }
+            
+            fn pixel() -> vec4 {
+                return lit_col;
             }
             
         "})
