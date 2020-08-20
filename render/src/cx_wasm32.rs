@@ -180,7 +180,7 @@ impl Cx {
                         modifiers: modifiers,
                         time: time
                     }));
-                    self.captured_fingers[digit] = Area::Empty;
+                    self.fingers[digit].captured = Area::Empty;
                     self.down_mouse_cursor = None;
                 },
                 8 => { // finger move
@@ -204,13 +204,14 @@ impl Cx {
                     }));
                 },
                 9 => { // finger hover
-                    self.finger_over_last_area = Area::Empty;
+                    self.fingers[0].over_last = Area::Empty;
                     let abs = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
                     self.hover_mouse_cursor = None;
                     let modifiers = unpack_key_modifier(to_wasm.mu32());
                     let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent {
                         any_down: false,
+                        digit: 0,
                         window_id: 0,
                         abs: abs,
                         rel: abs,
@@ -220,7 +221,7 @@ impl Cx {
                         modifiers: modifiers,
                         time: time
                     }));
-                    self._finger_over_last_area = self.finger_over_last_area;
+                    self.fingers[0]._over_last = self.fingers[0].over_last;
                     //if fe.hover_state == HoverState::Out {
                     //    self.hover_mouse_cursor = None;
                     // }
@@ -236,6 +237,7 @@ impl Cx {
                     let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerScroll(FingerScrollEvent {
                         window_id: 0,
+                        digit: 0,
                         abs: abs,
                         rel: abs,
                         rect: Rect::default(),
@@ -252,6 +254,7 @@ impl Cx {
                     let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent {
                         window_id: 0,
+                        digit: 0,
                         any_down: false,
                         abs: abs,
                         rel: abs,
