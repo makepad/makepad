@@ -358,6 +358,11 @@ pub fn generate_builtins() -> HashMap<Ident, Builtin> {
             (Ty::Vec3) -> Ty::Vec3,
             (Ty::Vec4) -> Ty::Vec4
         ]),
+        builtin!(transpose, [
+            (Ty::Mat4) -> Ty::Mat4,
+            (Ty::Mat3) -> Ty::Mat3
+        ]),
+
     ]
     .iter()
     .cloned()
