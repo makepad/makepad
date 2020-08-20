@@ -180,7 +180,7 @@ impl View {
         Ok(())
     }
     
-    pub fn view_will_redraw(&mut self, cx: &mut Cx) -> bool {
+    pub fn view_will_redraw(&self, cx: &mut Cx) -> bool {
         if let Some(view_id) = self.view_id {
             cx.view_will_redraw(view_id)
         }
@@ -199,7 +199,7 @@ impl View {
         view_area
     }
     
-    pub fn get_rect(&mut self, cx: &Cx) -> Rect {
+    pub fn get_rect(&self, cx: &Cx) -> Rect {
         if let Some(view_id) = self.view_id {
             let cxview = &cx.views[view_id];
             return cxview.rect
