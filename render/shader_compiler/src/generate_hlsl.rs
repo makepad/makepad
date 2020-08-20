@@ -307,12 +307,17 @@ impl<'a> ShaderGenerator<'a> {
     }
     
     fn generate_cons_fn(&mut self, ty_lit: TyLit, param_tys: &[Ty]) {
-        self.write_ty_lit(ty_lit);
-        write!(self.string, " mpsc_{}", ty_lit).unwrap();
+        
+        let mut cons_name = format!("mpsc_{}", ty_lit);
         for param_ty in param_tys {
-            write!(self.string, "_{}", param_ty).unwrap();
+            write!(cons_name, "_{}", param_ty).unwrap();
         }
-        write!(self.string, "(").unwrap();
+        if !HlslBackendWriter.use_cons_fn(&cons_name){
+            return 
+        }
+        
+        self.write_ty_lit(ty_lit);
+        write!(self.string, " {}(", cons_name).unwrap();
         let mut sep = "";
         if param_tys.len() == 1 {
             self.write_var_decl(false, false, Ident::new("x"), &param_tys[0])
@@ -490,7 +495,7 @@ impl<'a> ShaderGenerator<'a> {
             decl: None,
             backend_writer: &HlslBackendWriter,
             use_const_table: self.use_const_table,
-            use_generated_cons_fns: true,
+            //use_generated_cons_fns: true,
             string: self.string,
         }
         .generate_expr(expr)
@@ -623,7 +628,7 @@ impl<'a> FnDeclGenerator<'a> {
             decl: self.decl,
             backend_writer: &HlslBackendWriter,
             use_const_table: self.use_const_table,
-            use_generated_cons_fns: true,
+            //use_generated_cons_fns: true,
             indent_level: 0,
             string: self.string,
         }
@@ -693,8 +698,21 @@ impl BackendWriter for HlslBackendWriter {
         true
     }
 
+    fn needs_unpack_for_matrix_multiplication(&self)->bool{
+        false
+    }
+
     fn  const_table_is_vec4(&self) -> bool{
         true
+    }
+
+    fn use_cons_fn(&self, what:&str)->bool{
+        match what{
+            "mpsc_vec4_float_float_float_float"=>false,
+            "mpsc_vec3_float_float_float"=>false,
+            "mpsc_vec2_float_float"=>false,
+            _=>true
+        }
     }
      
     fn write_var_decl( 
