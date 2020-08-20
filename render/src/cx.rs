@@ -40,7 +40,7 @@ pub use crate::cx_metal::*;
 pub use crate::cx_windows::*;
 #[cfg(all(not(feature = "ipc"), target_os = "windows"))]
 pub use crate::cx_dx11::*;
- 
+
 #[cfg(all(not(feature = "ipc"), target_arch = "wasm32"))]
 pub use crate::cx_webgl::*;
 
@@ -97,7 +97,7 @@ pub struct Cx {
     pub textures: Vec<CxTexture>,
     pub textures_free: Vec<usize>,
     pub shaders: Vec<CxShader>,
-    pub shader_recompiles:Vec<usize>,
+    pub shader_recompiles: Vec<usize>,
     pub shader_map: HashMap<ShaderGen, usize>,
     pub shader_instance_id: usize,
     
@@ -136,12 +136,7 @@ pub struct Cx {
     
     pub down_mouse_cursor: Option<MouseCursor>,
     pub hover_mouse_cursor: Option<MouseCursor>,
-    pub captured_fingers: Vec<Area>,
-    pub finger_tap_count: Vec<(Vec2, f64, u32)>,
-    pub finger_down_abs_start: Vec<Vec2>,
-    pub finger_down_rel_start: Vec<Vec2>,
-    pub finger_over_last_area: Area,
-    pub _finger_over_last_area: Area,
+    pub fingers: Vec<CxPerFinger>,
     
     pub playing_anim_areas: Vec<AnimArea>,
     pub ended_anim_areas: Vec<AnimArea>,
@@ -184,19 +179,22 @@ pub struct CxStyle {
     pub shaders: HashMap<ShaderId, Shader>,
 }
 
+#[derive(Default, Clone)]
+pub struct CxPerFinger {
+    pub captured: Area,
+    pub tap_count: (Vec2, f64, u32),
+    pub down_abs_start: Vec2,
+    pub down_rel_start: Vec2,
+    pub over_last: Area,
+    pub _over_last: Area
+}
+
 pub const NUM_FINGERS: usize = 10;
 
 impl Default for Cx {
     fn default() -> Self {
-        let mut captured_fingers = Vec::new();
-        let mut finger_tap_count = Vec::new();
-        let mut finger_down_abs_start = Vec::new();
-        let mut finger_down_rel_start = Vec::new();
-        
-        captured_fingers.resize(NUM_FINGERS, Area::Empty);
-        finger_tap_count.resize(NUM_FINGERS, (Vec2::default(), 0.0, 0));
-        finger_down_abs_start.resize(NUM_FINGERS, Vec2::default());
-        finger_down_rel_start.resize(NUM_FINGERS, Vec2::default());
+        let mut fingers = Vec::new();
+        fingers.resize(NUM_FINGERS, CxPerFinger::default());
         
         let textures = vec![CxTexture {
             desc: TextureDesc {
@@ -268,12 +266,7 @@ impl Default for Cx {
             
             down_mouse_cursor: None,
             hover_mouse_cursor: None,
-            captured_fingers: captured_fingers,
-            finger_tap_count: finger_tap_count,
-            finger_down_abs_start: finger_down_abs_start,
-            finger_down_rel_start: finger_down_rel_start,
-            finger_over_last_area: Area::Empty,
-            _finger_over_last_area: Area::Empty,
+            fingers: fingers,
             
             style_base: CxStyle::default(),
             styles: Vec::new(),
@@ -327,17 +320,17 @@ impl Cx {
     }
     
     pub fn process_tap_count(&mut self, digit: usize, pos: Vec2, time: f64) -> u32 {
-        if digit >= self.finger_tap_count.len() {
+        if digit >= self.fingers.len() {
             return 0
         };
-        let (last_pos, last_time, count) = self.finger_tap_count[digit];
+        let (last_pos, last_time, count) = self.fingers[digit].tap_count;
         
         if (time - last_time) < 0.5 && pos.distance(&last_pos) < 10. {
-            self.finger_tap_count[digit] = (pos, time, count + 1);
+            self.fingers[digit].tap_count = (pos, time, count + 1);
             count + 1
         }
         else {
-            self.finger_tap_count[digit] = (pos, time, 1);
+            self.fingers[digit].tap_count = (pos, time, 1);
             1
         }
     }
@@ -616,7 +609,7 @@ impl Cx {
         }
     }
     
-    pub fn update_area_refs(&mut self, old_area: Area, new_area: Area)->Area{
+    pub fn update_area_refs(&mut self, old_area: Area, new_area: Area) -> Area {
         if old_area == Area::Empty || old_area == Area::All {
             return new_area
         }
@@ -625,8 +618,13 @@ impl Cx {
             anim_anim.area = new_area.clone()
         }
         
-        if let Some(digit_area) = self.captured_fingers.iter_mut().find( | v | **v == old_area) {
-            *digit_area = new_area.clone()
+        for finger in &mut self.fingers {
+            if finger.captured == old_area {
+                finger.captured = new_area.clone();
+            }
+            if finger._over_last == old_area {
+                finger._over_last = new_area.clone();
+            }
         }
         // update capture keyboard
         if self.key_focus == old_area {
@@ -640,9 +638,7 @@ impl Cx {
         if self.next_key_focus == old_area {
             self.next_key_focus = new_area.clone()
         }
-        if self._finger_over_last_area == old_area {
-            self._finger_over_last_area = new_area.clone()
-        }
+        
         //
         if let Some(next_frame) = self.frame_callbacks.iter_mut().find( | v | **v == old_area) {
             *next_frame = new_area.clone()
@@ -802,11 +798,11 @@ impl Cx {
         }
     }
     
-    pub fn call_shader_recompile_event<F>(&mut self, results:Vec<ShaderCompileResult>, mut event_handler: F)
+    pub fn call_shader_recompile_event<F>(&mut self, results: Vec<ShaderCompileResult>, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
         self.shader_recompiles.truncate(0);
-        if results.len()>0{
+        if results.len()>0 {
             self.call_event_handler(&mut event_handler, &mut Event::ShaderRecompile(ShaderRecompileEvent {
                 results: results
             }));
@@ -817,7 +813,7 @@ impl Cx {
     pub fn status_http_send_fail() -> StatusId {uid!()}
     
     pub fn recompile_shader_sub(&mut self, file: &str, line: usize, col: usize, code: String) {
-        if !self.live_macros_on_self{
+        if !self.live_macros_on_self {
             return
         }
         
@@ -827,9 +823,9 @@ impl Cx {
                 //println!("{} {}", file, sub.loc.path);
                 //i file == sub.loc.path{
                 // }
-
-                if file == sub.loc.path && line == sub.loc.line && col == sub.loc.column{
-                    if code != sub.code{
+                
+                if file == sub.loc.path && line == sub.loc.line && col == sub.loc.column {
+                    if code != sub.code {
                         sub.code = code.clone();
                         // we need to recompile some shader..
                         self.shader_recompiles.push(
