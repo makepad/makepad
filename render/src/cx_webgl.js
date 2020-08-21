@@ -40,9 +40,10 @@
             return pos;
         }
         
-        fetch_deps() {
-            let pos = this.fit(1);
+        fetch_deps(caps) {
+            let pos = this.fit(2);
             this.mu32[pos ++] = 1;
+            this.mu32[pos ++] = caps.gpu_spec_is_low_on_uniforms? 1: 0;
         }
         
         send_string(str) {
@@ -112,7 +113,6 @@
             this.mf32[pos ++] = info.dpi_factor;
             this.mu32[pos ++] = info.xr_can_present? 1: 0;
             this.mu32[pos ++] = info.can_fullscreen? 1: 0;
-            this.mu32[pos ++] = info.gpu_spec_is_low_on_uniforms? 1: 0;
         }
         
         resize(info) {
@@ -341,7 +341,9 @@
             this.to_wasm = new ToWasm(this);
             
             // fetch dependencies
-            this.to_wasm.fetch_deps();
+            this.to_wasm.fetch_deps({
+                gpu_spec_is_low_on_uniforms: this.gpu_spec_is_low_on_uniforms                
+            });
             
             this.do_wasm_io();
             
@@ -373,7 +375,6 @@
                     xr_can_present: this.xr_can_present,
                     can_fullscreen: this.can_fullscreen(),
                     xr_is_presenting: false,
-                    gpu_spec_is_low_on_uniforms: this.gpu_spec_is_low_on_uniforms
                 })
                 this.do_wasm_block = false;
                 this.do_wasm_io();
@@ -392,12 +393,10 @@
                 return
             }
             
-            //if(this.dpi_factor != window.devicePixelRatio){
-            //    this.on_screen_resize();
-            //}
-            
             this.to_wasm.end();
+            let id = this.to_wasm.mu32[2];
             let from_wasm_ptr = this.exports.process_to_wasm(this.app, this.to_wasm.pointer)
+
             // get a clean to_wasm set up immediately
             this.to_wasm = new ToWasm(this);
             
@@ -412,6 +411,7 @@
             
             // process all messages
             var send_fn_table = this.send_fn_table;
+            
             while (1) {
                 let msg_type = this.mu32[this.parse ++];
                 if (send_fn_table[msg_type](this)) {
@@ -777,10 +777,10 @@
             }, {passive: false})
             
             var end_cancel_leave = e => {
-                if (easy_xr_presenting_toggle) {
-                    easy_xr_presenting_toggle = false;
-                    this.xr_start_presenting();
-                };
+                //if (easy_xr_presenting_toggle) {
+                //    easy_xr_presenting_toggle = false;
+                //    this.xr_start_presenting();
+                //};
                 
                 e.preventDefault();
                 var fingers = touch_to_finger_free(e);
@@ -1379,7 +1379,6 @@
                                 return;
                             }
                             
-                            this.to_wasm.paint_dirty();
                             // lets collect things
                             //console.log();
                             let input_len = xr_session.inputSources.length;
@@ -1403,9 +1402,13 @@
                                 this.xr_pose.transform,
                                 inputs,
                             );
+                            //let perf_start = performance.now();
+                            this.do_wasm_io();
+                            this.to_wasm.animation_frame(time / 1000.0);
                             this.in_animation_frame = true;
                             this.do_wasm_io();
                             this.in_animation_frame = false;
+                            //console.log(performance.now() - perf_start);
                         }
                         this.xr_session.requestAnimationFrame(xr_on_request_animation_frame);
                         

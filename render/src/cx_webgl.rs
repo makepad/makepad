@@ -188,21 +188,31 @@ impl Cx {
     
     pub fn webgl_compile_all_shaders(&mut self) {
         for (shader_id, sh) in self.shaders.iter_mut().enumerate() {
-            let glsh = Self::webgl_compile_shader(shader_id, false, false, sh, &mut self.platform);
+            let glsh = Self::webgl_compile_shader(shader_id, !self.platform.gpu_spec_is_low_on_uniforms, false, sh, &mut self.platform, &mut self.shader_inherit_cache);
             if let ShaderCompileResult::Fail{err,..} = glsh {
                 self.platform.from_wasm.log(&format!("Got GLSL shader compile error: {}", err))
             }
         }
     }
     
-    pub fn webgl_compile_shader(shader_id: usize, gather_all_consts:bool, use_const_table: bool, sh: &mut CxShader, platform: &mut CxPlatform) -> ShaderCompileResult{
+    pub fn webgl_compile_shader(shader_id: usize, gather_all_consts:bool, use_const_table: bool, sh: &mut CxShader, platform: &mut CxPlatform, shader_inherit_cache:&mut ShaderInheritCache) -> ShaderCompileResult{
+        let shader_ast = sh.shader_gen.lex_parse_analyse(gather_all_consts, use_const_table, shader_inherit_cache);
         
-        let shader_ast = sh.shader_gen.lex_parse_analyse(gather_all_consts);
-        
-        if let Err(err) = shader_ast{
-            return ShaderCompileResult::Fail{id:shader_id, err:err}
-        } 
-        let shader_ast = shader_ast.unwrap();
+        let shader_ast = match shader_ast{
+            ShaderGenResult::Error(err)=>{
+                return ShaderCompileResult::Fail{id:shader_id, err:err}
+            },
+            ShaderGenResult::PatchedConstTable(const_table)=>{
+                sh.mapping.const_table = Some(const_table);
+                //platform.from_wasm.log("PATCHED");
+                return ShaderCompileResult::Nop{id:shader_id}
+            },
+            ShaderGenResult::ShaderAst(shader_ast)=>{
+               //platform.from_wasm.log("PARSED");
+                shader_ast
+            }
+        };
+
         let vertex = generate_glsl::generate_vertex_shader(&shader_ast,use_const_table);
         let fragment = generate_glsl::generate_fragment_shader(&shader_ast,use_const_table);
         let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, if use_const_table{shader_ast.const_table.borrow_mut().take()} else {None});

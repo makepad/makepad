@@ -2,7 +2,7 @@ use makepad_render::*;
 
 // Shader code itself
 
-fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
+fn shader() -> ShaderGen {ShaderView::base_shader().compose(shader!{"
     fn pixel() -> vec4 {
         let ratio = vec2(
             mix(w / h, 1.0, float(w <= h)),
@@ -20,16 +20,16 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
 
             let c = vec4(0.0);
             if t.y == 0.0 || t.y == 1.0 {
-                c += pick!(#856F37);
+                c += pick!(#41FF4D);
             }
             if t.y == 2.0 {
-                c += pick!(#11EF00);
+                c += pick!(#FF0000);
             }
             if t.y == 3.0 {
-                c += pick!(#FF8D00); 
+                c += pick!(#DE0707); 
             }
             if t.y == 4.0 {
-                c += pick!(#FF0000);
+                c += pick!(#EE2B00);
             }
             
             let ld = normalize(vec3(0.0, 0.0, 1.0));
@@ -188,14 +188,19 @@ impl ShaderView {
     pub fn finger_move() -> Vec2Id {uid!()}
     pub fn finger_down() -> FloatId {uid!()}
     pub fn time() -> FloatId {uid!()}
-    pub fn new(cx: &mut Cx) -> Self {
-        
-        Self::bg().set(cx, shader().compose(shader!{"
+    
+    pub fn base_shader()->ShaderGen{
+        Quad::def_quad_shader().compose(shader!{"
             instance finger_hover: ShaderView::finger_hover();
             instance finger_move: ShaderView::finger_move();
             instance finger_down: ShaderView::finger_down();
             instance time: ShaderView::time();
-        "}));
+        "})
+    }
+    
+    pub fn new(cx: &mut Cx) -> Self {
+        
+        Self::bg().set(cx, shader());
          
         Self {
             quad: Quad::new(cx),
@@ -212,6 +217,7 @@ impl ShaderView {
         match event.hits(cx, self.area, HitOpt::default()) {
             Event::Frame(_ae)=>{
                 self.time += 1.0/60.0;
+                //self.time = ae.time;
                 self.area.write_float(cx, Self::time(), self.time);
                 cx.next_frame(self.area);
             },

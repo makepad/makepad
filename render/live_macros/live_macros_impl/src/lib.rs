@@ -203,7 +203,7 @@ pub fn pick(input: TokenStream) -> TokenStream {
                     return Err(pct.span());
                 }
                 if let TokenTree::Ident(ident) = &items[1] {
-                    let res =  Color::parse_hex(&ident.to_string());
+                    let res =  Color::parse_hex_str(&ident.to_string());
                     if let Err(()) = res{
                         return Err(ident.span())
                     }
@@ -212,7 +212,7 @@ pub fn pick(input: TokenStream) -> TokenStream {
                     }
                 }
                 else if let TokenTree::Literal(lit) = &items[1]{
-                     let res = Color::parse_hex(&lit.to_string());
+                     let res = Color::parse_hex_str(&lit.to_string());
                      if let Err(()) = res{
                         return Err(lit.span())
                     }

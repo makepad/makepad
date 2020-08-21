@@ -641,7 +641,7 @@ impl FileTree {
     
     pub fn draw_file_tree(&mut self, cx: &mut Cx) {
         if self.view.begin_view(cx, Layout::default()).is_err() {return}
-        
+
         let mut file_walker = FileWalker::new(&mut self.root_node);
         
         // lets draw the filetree

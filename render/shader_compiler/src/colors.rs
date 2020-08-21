@@ -103,6 +103,23 @@ impl Color {
         }
     }
     
+    pub fn to_vec4(&self) -> Vec4{
+        Vec4{
+            x:self.r,
+            y:self.g,
+            z:self.b,
+            w:self.a,
+        }
+    }
+    
+    pub fn from_vec4(v:Vec4) -> Color{
+        Color{
+            r:v.x,
+            g:v.y,
+            b:v.z,
+            a:v.w,
+        }
+    }
     
     pub fn from_u32(val: u32) -> Color {
         Color {
@@ -134,9 +151,12 @@ impl Color {
         return out
     }
     
-    pub fn parse_hex(hex: &str) -> Result<Color, ()> {
-        let bytes = hex.as_bytes();
-        
+    
+    pub fn parse_hex_str(hex: &str) -> Result<Color, ()> {
+        Self::parse_hex(hex.as_bytes())
+    }
+    
+    pub fn parse_hex(bytes:&[u8]) -> Result<Color, ()> {
         fn hex_to_int(c: u32) -> Result<u32, ()> {
             if c >= 48 && c <= 57 {
                 return Ok(c - 48);
@@ -161,6 +181,16 @@ impl Color {
                     a: 1.0,
                 });
             }
+            2 =>{ //#ww
+                let w = ((hex_to_int(bytes[0] as u32) ? << 4) + hex_to_int(bytes[1] as u32) ?) as f32
+                    / 255.0;
+                return Ok(Color {
+                    r: w,
+                    g: w,
+                    b: w,
+                    a: 1.0,
+                });
+            },
             3 => {
                 // #rgb
                 let r = hex_to_int(bytes[0] as u32) ? as f32 / 15.0;
