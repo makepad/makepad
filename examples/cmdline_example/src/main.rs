@@ -122,10 +122,10 @@ fn main() {
         false,
     )
     .unwrap();
-    println!("GLSL VERTEX");
-    println!("{}", generate_glsl::generate_vertex_shader(&shader, true));
-    println!("GLSL FRAGMENT");
-    println!("{}", generate_glsl::generate_fragment_shader(&shader, true));
+    //println!("GLSL VERTEX");
+    //println!("{}", generate_glsl::generate_vertex_shader(&shader, true));
+    //println!("GLSL FRAGMENT");
+    //println!("{}", generate_glsl::generate_fragment_shader(&shader, true));
     //println!("METAL");
     //println!("{}", generate_metal::generate_shader(&shader, false));
     //println!("HLSL");

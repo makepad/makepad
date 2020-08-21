@@ -1,15 +1,24 @@
-use crate::analyse;
 use crate::ast::ShaderAst;
 use crate::error::Error;
 use crate::lex;
+use crate::token::TokenWithSpan;
 use crate::parse;
 use crate::ty::*;
 use crate::geometry::*;
+use crate::token::Token;
+use crate::analyse::ShaderAnalyser;
+use crate::span::Span;
+use crate::ident::Ident;
+use crate::env::{Env, Sym};
+use crate::lit::Lit;
+use crate::builtin::{self, Builtin};
+
 use std::any::TypeId;
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
 
-#[derive(Clone, Hash, PartialEq, Debug)]
+#[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct LiveLoc {
     pub path: String,
     pub line: usize,
@@ -42,7 +51,7 @@ pub struct ShaderGen {
 
 impl Eq for ShaderGen {}
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ShaderGenError {
     pub path: String,
     pub line: usize,
@@ -57,16 +66,55 @@ impl fmt::Display for ShaderGenError {
         write!(
             f,
             "{}: {} {} - {}",
-            self.path, self.line, self.col, self.msg
+            self.path,
+            self.line,
+            self.col,
+            self.msg
         )
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct ShaderInheritConst {
+    const_table: Vec<f32>,
+    const_table_spans: Vec<(usize, Span)>
+}
+
+#[derive(Clone, Debug)]
+pub struct ShaderInheritCacheNode {
+    pub code: String,
+    pub ast: ShaderAst,
+    pub env: Env,
+    pub tokens: Vec<TokenWithSpan>,
+    pub prev_consts: Option<ShaderInheritConst>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ShaderInheritCache {
+    pub builtins: HashMap<Ident, Builtin>,
+    pub map: HashMap<LiveLoc, ShaderInheritCacheNode>
+}
+
+impl ShaderInheritCache {
+    pub fn new() -> Self {
+        Self {
+            builtins: builtin::generate_builtins(),
+            map: HashMap::new()
+        }
+    }
+}
+
+pub enum ShaderGenResult {
+    ShaderAst(ShaderAst),
+    PatchedConstTable(Vec<f32>),
+    Error(ShaderGenError)
 }
 
 impl ShaderGen {
     pub fn new() -> Self {
         ShaderGen::default()
     }
-
+    
     pub fn byte_to_row_col(byte: usize, source: &str) -> (usize, usize) {
         let lines = source.split("\n");
         let mut o = 0;
@@ -78,7 +126,7 @@ impl ShaderGen {
         }
         return (0, 0);
     }
-
+    
     pub fn shader_gen_error(err: &Error, sub: &ShaderSub) -> ShaderGenError {
         // lets find the span info
         let start = ShaderGen::byte_to_row_col(err.span.start, &sub.code);
@@ -90,42 +138,221 @@ impl ShaderGen {
             msg: err.to_string(),
         }
     }
-
+    
     pub fn compose(mut self, sub: ShaderSub) -> Self {
         self.subs.push(sub);
         self
     }
-
-    pub fn lex_parse_analyse(&self, gather_all_consts:bool) -> Result<ShaderAst, ShaderGenError> {
+    
+    pub fn lex_parse_analyse(&self, gather_all: bool, use_const_table: bool, inherit_cache: &mut ShaderInheritCache) -> ShaderGenResult {
+        fn add_inputs_to_env(env: &mut Env, sub: &ShaderSub) {
+            for prop in &sub.geometries {
+                let _ = env.insert_sym(
+                    Span::default(),
+                    Ident::new(&prop.ident),
+                    Sym::TyVar {
+                        ty: prop.prop_id.shader_ty(),
+                    },
+                );
+            }
+            for prop in &sub.instances {
+                let _ = env.insert_sym(
+                    Span::default(),
+                    Ident::new(&prop.ident),
+                    Sym::TyVar {
+                        ty: prop.prop_id.shader_ty(),
+                    },
+                );
+            }
+            for prop in &sub.textures {
+                let _ = env.insert_sym(
+                    Span::default(),
+                    Ident::new(&prop.ident),
+                    Sym::TyVar {
+                        ty: prop.prop_id.shader_ty(),
+                    },
+                );
+            }
+            for prop in &sub.uniforms {
+                let _ = env.insert_sym(
+                    Span::default(),
+                    Ident::new(&prop.ident),
+                    Sym::TyVar {
+                        ty: prop.prop_id.shader_ty(),
+                    },
+                );
+            }
+        }
+        
+        fn check_const_table_patch(cache: &mut ShaderInheritCacheNode, tokens: &Vec<TokenWithSpan>) -> Option<Vec<f32>> {
+            if tokens.len() != cache.tokens.len() {
+                return None
+            }
+            if let Some(prev_consts) = &mut cache.prev_consts {
+                // lets do a token diff
+                let mut delta = 0;
+                let mut last = 0;
+                for i in 0..tokens.len() {
+                    if tokens[i].token != cache.tokens[i].token {
+                        delta += 1;
+                        last = i;
+                    }
+                }
+                if delta != 1 {
+                    return None
+                }
+                
+                let new_lit = if let Token::Lit(lit) = &tokens[last].token {
+                    lit.clone()
+                }
+                else {
+                    return None
+                };
+                let old_lit = if let Token::Lit(lit) = &cache.tokens[last].token {
+                    lit.clone()
+                }
+                else {
+                    return None
+                };
+                   
+                if new_lit.to_ty() != old_lit.to_ty(){
+                    return None
+                } 
+                
+                for i in 0..prev_consts.const_table_spans.len(){
+                    let (index, span) = prev_consts.const_table_spans[i];
+                    if span == cache.tokens[last].span {
+                        // ok now. we have a new_lit, now we simply have to stuff it the const table
+                        match new_lit{
+                            Lit::Float(v)=>{
+                                prev_consts.const_table[index] = v;
+                            },
+                            Lit::Vec4(v)=>{
+                                prev_consts.const_table[index+0] = v.x;
+                                prev_consts.const_table[index+1] = v.y;
+                                prev_consts.const_table[index+2] = v.z;
+                                prev_consts.const_table[index+3] = v.w;
+                            },
+                            _=>()
+                        }
+                        // now we have to patch up the const_table_spans that come after to the new token spans
+                        let mut last_span = 0;
+                        for i in 0..tokens.len() {
+                            match cache.tokens[i].token{
+                                Token::Lit(Lit::Float(_)) | Token::Lit(Lit::Vec4(_))=>{ // might be a const table
+                                    for i in last_span..prev_consts.const_table_spans.len(){
+                                        let (_, span) = &mut prev_consts.const_table_spans[i];
+                                        if *span == cache.tokens[i].span {
+                                            *span = tokens[i].span;
+                                            last_span = i + 1;
+                                            break; 
+                                        }
+                                    }
+                                },
+                                _=>()
+                            }
+                        }
+                        cache.tokens = tokens.clone();
+                        return Some(prev_consts.const_table.clone()) 
+                    }
+                }
+            } 
+            None
+        }
+        
+        if use_const_table { // we are a dynamic recompile. see if we can use inheritance cache
+            let sub = self.subs.last().unwrap();
+            if let Some(cache) = inherit_cache.map.get_mut(&sub.loc) {
+                if cache.code != sub.code { // we can reuse the cache
+                    // reuse cache
+                    let mut shader_ast = cache.ast.clone();
+                    let mut env = cache.env.clone();
+                    
+                    // lets see if we can diff the tokens.
+                    let tokens = lex::lex(sub.code.chars(), self.subs.len() - 1).collect::<Result<Vec<_>, _>>();
+                    if let Err(err) = &tokens {
+                        return ShaderGenResult::Error(ShaderGen::shader_gen_error(err, sub));
+                    }
+                    let tokens = tokens.unwrap();
+                    
+                    if let Some(patched_const_table) = check_const_table_patch(cache, &tokens){
+                        cache.code = sub.code.clone();
+                        return ShaderGenResult::PatchedConstTable(patched_const_table);
+                    }
+                    if let Err(err) = parse::parse(&tokens, &mut shader_ast) {
+                        return ShaderGenResult::Error(ShaderGen::shader_gen_error(&err, sub));
+                    }
+                    
+                    //parse_sub(sub, self.subs.len() - 1, &mut shader_ast) ?;
+                    add_inputs_to_env(&mut env, &sub);
+                    env.push_scope();
+                    
+                    if let Err(err) = (ShaderAnalyser {
+                        builtins: &inherit_cache.builtins,
+                        shader: &shader_ast,
+                        env,
+                        gather_all,
+                    }.analyse_shader()) {
+                        let sub = &self.subs[err.span.loc_id];
+                        return ShaderGenResult::Error(Self::shader_gen_error(&err, sub));
+                    }
+                    
+                    cache.prev_consts = Some(ShaderInheritConst {
+                        const_table: shader_ast.const_table.borrow().clone().unwrap(),
+                        const_table_spans: shader_ast.const_table_spans.borrow().clone().unwrap()
+                    });
+                    
+                    return ShaderGenResult::ShaderAst(shader_ast)
+                }
+            }
+        }
+        
         let mut shader_ast = ShaderAst::new();
-        let mut inputs = Vec::new();
+        let mut env = Env::new();
+        env.push_scope();
+        
+        for &ident in inherit_cache.builtins.keys() {
+            let _ = env.insert_sym(Span::default(), ident, Sym::Builtin);
+        }
+        
+        let last_index = self.subs.len() - 1;
         for (index, sub) in self.subs.iter().enumerate() {
-            // lets tokenize the sub
+            
             let tokens = lex::lex(sub.code.chars(), index).collect::<Result<Vec<_>, _>>();
             if let Err(err) = &tokens {
-                return Err(Self::shader_gen_error(err, sub));
+                return ShaderGenResult::Error(ShaderGen::shader_gen_error(err, sub));
             }
             let tokens = tokens.unwrap();
-            if let Err(err) = parse::parse(&tokens, &mut shader_ast) {
-                return Err(Self::shader_gen_error(&err, sub));
+            
+            // lets store the tokens.
+            if index == last_index { // lets store the inheritance chain in our cache
+                inherit_cache.map.insert(sub.loc.clone(), ShaderInheritCacheNode {
+                    code: sub.code.clone(),
+                    ast: shader_ast.clone(),
+                    env: env.clone(),
+                    tokens: tokens.clone(),
+                    prev_consts: None
+                });
             }
-            // lets add our instance_props
-            inputs.extend(sub.geometries.iter());
-            inputs.extend(sub.instances.iter());
-            inputs.extend(sub.uniforms.iter());
-            inputs.extend(sub.textures.iter());
+            
+            if let Err(err) = parse::parse(&tokens, &mut shader_ast) {
+                return ShaderGenResult::Error(ShaderGen::shader_gen_error(&err, sub));
+            }
+            
+            add_inputs_to_env(&mut env, &sub);
         }
-
-        // ok now we have the shader, lets analyse
-        // set the third argument here to true if you want to gather all const
-        // expressions into a table, and to false if you only want to gather
-        // macro expressions. 
-        if let Err(err) = analyse::analyse(&mut shader_ast, &inputs, gather_all_consts) {
+        
+        if let Err(err) = (ShaderAnalyser {
+            builtins: &inherit_cache.builtins,
+            shader: &shader_ast,
+            env,
+            gather_all,
+        }.analyse_shader()) {
             let sub = &self.subs[err.span.loc_id];
-            return Err(Self::shader_gen_error(&err, sub));
+            return ShaderGenResult::Error(Self::shader_gen_error(&err, sub));
         }
-
-        Ok(shader_ast)
+        
+        ShaderGenResult::ShaderAst(shader_ast)
     }
 }
 
@@ -312,7 +539,7 @@ impl Into<Ty> for Mat4Id {
 }
 
 #[macro_export]
-macro_rules! uid {
+macro_rules!uid {
     () => {{
         struct Unique {};
         std::any::TypeId::of::<Unique>().into()

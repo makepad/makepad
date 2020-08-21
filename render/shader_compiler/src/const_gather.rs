@@ -15,16 +15,19 @@ pub struct ConstGatherer<'a> {
 
 impl<'a> ConstGatherer<'a> {
     pub fn const_gather_expr(&self, expr: &Expr) {
-        let should_gather = match expr.kind {
-            ExprKind::MacroCall { .. } => true,
-            _ => self.gather_all,
+        let gather_span = match &expr.kind {
+            ExprKind::MacroCall { arg_exprs,..} => {
+                Some(arg_exprs[0].span)
+            },
+            _ => if self.gather_all{Some(expr.span)}else{None}
         };
-        if should_gather {
+        if let Some(expr_span) = gather_span {
             match expr.const_val.borrow().as_ref().unwrap() {
                 Some(Val::Vec4(val)) => {
                     expr.const_index.set(Some(
                         self.shader.const_table.borrow().as_ref().unwrap().len(),
                     ));
+                    self.write_span(&expr_span);
                     self.write_f32(val.x);
                     self.write_f32(val.y);
                     self.write_f32(val.z);
@@ -35,6 +38,7 @@ impl<'a> ConstGatherer<'a> {
                     expr.const_index.set(Some(
                         self.shader.const_table.borrow().as_ref().unwrap().len(),
                     ));
+                    self.write_span(&expr.span);
                     self.write_f32(*val);
                     return;
                 }
@@ -163,6 +167,16 @@ impl<'a> ConstGatherer<'a> {
     fn const_gather_var_expr(&self, _span: Span, _kind: &Cell<Option<VarKind>>, _ident: Ident) {}
 
     fn const_gather_lit_expr(&self, _span: Span, _lit: Lit) {}
+
+    fn write_span(&self, span: &Span) {
+        let index = self.shader.const_table.borrow().as_ref().unwrap().len();
+        self.shader
+            .const_table_spans
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .push((index, span.clone()));            
+    }
 
     fn write_f32(&self, val: f32) {
         self.shader

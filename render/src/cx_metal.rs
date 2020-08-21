@@ -751,7 +751,7 @@ impl Cx {
     
     pub fn mtl_compile_all_shaders(&mut self, metal_cx: &MetalCx) {
         for (index, sh) in &mut self.shaders.iter_mut().enumerate() {
-            let result = Self::mtl_compile_shader(index, false, sh, metal_cx);
+            let result = Self::mtl_compile_shader(index, false, sh, metal_cx, &mut self.shader_inherit_cache);
             if let ShaderCompileResult::Fail{err, ..} = result {
                 eprintln!("{}", err);
                 panic!("{}", err);
@@ -759,19 +759,26 @@ impl Cx {
         };
     } 
     
-    pub fn mtl_compile_shader(shader_id:usize, use_const_table:bool, sh: &mut CxShader, metal_cx: &MetalCx) -> ShaderCompileResult {
+    pub fn mtl_compile_shader(shader_id:usize, use_const_table:bool, sh: &mut CxShader, metal_cx: &MetalCx, inherit_cache: &mut ShaderInheritCache) -> ShaderCompileResult {
         
         //let now = std::time::Instant::now();
-        
-        let shader_ast = sh.shader_gen.lex_parse_analyse(true);
 
-        if let Err(err) = shader_ast{
-            return ShaderCompileResult::Fail{id:shader_id, err:err}
-        } 
-        let shader_ast = shader_ast.unwrap();
-        
+        let shader_ast = sh.shader_gen.lex_parse_analyse(true, use_const_table, inherit_cache);
+
+        let shader_ast = match shader_ast{
+            ShaderGenResult::Error(err)=>{
+                return ShaderCompileResult::Fail{id:shader_id, err:err}
+            },
+            ShaderGenResult::PatchedConstTable(const_table)=>{
+                sh.mapping.const_table = Some(const_table);
+                return ShaderCompileResult::Nop{id:shader_id}
+            },
+            ShaderGenResult::ShaderAst(shader_ast)=>{
+                shader_ast
+            }
+        };
+
         let mtlsl =  generate_metal::generate_shader(&shader_ast, use_const_table);
-        
         let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, if use_const_table{shader_ast.const_table.borrow_mut().take()} else {None});
     
         

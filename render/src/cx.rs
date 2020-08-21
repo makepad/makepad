@@ -100,7 +100,7 @@ pub struct Cx {
     pub shader_recompiles: Vec<usize>,
     pub shader_map: HashMap<ShaderGen, usize>,
     pub shader_instance_id: usize,
-    
+    pub shader_inherit_cache: ShaderInheritCache,
     pub live_macros_on_self: bool,
     
     pub str_to_id: RefCell<HashMap<String, usize>>,
@@ -229,6 +229,7 @@ impl Default for Cx {
             shaders: Vec::new(),
             shader_recompiles: Vec::new(),
             shader_map: HashMap::new(),
+            shader_inherit_cache: ShaderInheritCache::new(),
             
             live_macros_on_self: true,
             
@@ -791,7 +792,7 @@ impl Cx {
                 signals: signals,
             }));
             
-            if counter > 100 {
+            if counter > 100  {
                 println!("Signal feedback loop detected");
                 break
             }
@@ -801,7 +802,6 @@ impl Cx {
     pub fn call_shader_recompile_event<F>(&mut self, results: Vec<ShaderCompileResult>, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
-        self.shader_recompiles.truncate(0);
         if results.len()>0 {
             self.call_event_handler(&mut event_handler, &mut Event::ShaderRecompile(ShaderRecompileEvent {
                 results: results
