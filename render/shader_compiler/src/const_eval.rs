@@ -12,6 +12,7 @@ use std::cell::Cell;
 #[derive(Clone, Debug)]
 pub struct ConstEvaluator<'a> {
     pub shader: &'a ShaderAst,
+    pub no_const_collapse: bool
 }
 
 impl<'a> ConstEvaluator<'a> {
@@ -110,6 +111,9 @@ impl<'a> ConstEvaluator<'a> {
         let right_val = self.try_const_eval_expr(right_expr);
         let left_val = left_val?;
         let right_val = right_val?;
+        if self.no_const_collapse{
+            return None
+        }
         match op {
             BinOp::Or => match (&left_val, &right_val) {
                 (Val::Bool(x), Val::Bool(y)) => Some(Val::Bool(*x || *y)),
@@ -178,6 +182,9 @@ impl<'a> ConstEvaluator<'a> {
     fn try_const_eval_un_expr(&self, _span: Span, op: UnOp, expr: &Expr) -> Option<Val> {
         let val = self.try_const_eval_expr(expr);
         let val = val?;
+        if self.no_const_collapse{
+            return None
+        }
         match op {
             UnOp::Not => match val {
                 Val::Bool(x) => Some(Val::Bool(!x)),
