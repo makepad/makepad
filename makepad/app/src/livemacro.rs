@@ -60,16 +60,25 @@ impl LiveMacrosView {
         for (index, color_picker) in self.color_pickers.enumerate() {
             match color_picker.handle_color_picker(cx, event) {
                 ColorPickerEvent::Change {hsva} => {
-                    
-                    // ok now what. now we serialize out hsva into the textbuffer
-                    if let LiveMacro::Pick {range, ..} = &mut atb.live_macros.macros[*index] {
-                        // and let the things work out
+                    let in_place = if let LiveMacro::Pick {range, ..} = &mut atb.live_macros.macros[*index] {
                         let color = Color::from_hsva(hsva);
-                        // we have a range, now lets set the cursors to that range
-                        // and replace shit.
                         let new_string = format!("#{}", color.to_hex());
                         text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, self.undo_id);
-                        *range = (range.0, range.0 + new_string.len());
+                        // skip retokenize if its same size
+                        if new_string.len() == range.1 - range.0{
+                            for (index, c) in new_string.chars().enumerate(){
+                                atb.text_buffer.flat_text[range.0 + index] = c;
+                            }
+                            atb.text_buffer.token_chunks_id = atb.text_buffer.mutation_id;
+                            true
+                        }
+                        else{
+                            *range = (range.0, range.0 + new_string.len());
+                            false
+                        }
+                    }else{false};
+                    if in_place{
+                        atb.parse_live_macros(cx);
                     }
                 },
                 ColorPickerEvent::DoneChanging=>{
@@ -596,7 +605,7 @@ impl AppTextBuffer {
                             
                             // ok so now we need to parse the color, and turn it to HSV
                             let color = if tp.cur_type() == TokenType::Color { // its a #color
-                                let color = Color::parse_hex(&tp.cur_as_string()[1..]);
+                                let color = Color::parse_hex_str(&tp.cur_as_string()[1..]);
                                 if let Ok(color) = color {color}else {Color::white()}
                             }
                             else { // its a named color

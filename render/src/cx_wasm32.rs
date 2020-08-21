@@ -37,6 +37,7 @@ impl Cx {
                     break;
                 },
                 1 => { // fetch_deps
+                    self.platform.gpu_spec_is_low_on_uniforms = to_wasm.mu32() > 0;
                     
                     // send the UI our deps, overlap with shadercompiler
                     let mut load_deps = Vec::<String>::new();
@@ -86,7 +87,6 @@ impl Cx {
                         can_fullscreen: to_wasm.mu32() > 0
                     };
                     self.default_dpi_factor = self.platform.window_geom.dpi_factor;
-                    self.platform.gpu_spec_is_low_on_uniforms = to_wasm.mu32() > 0;
                     
                     if self.windows.len() > 0 {
                         self.windows[0].window_geom = self.platform.window_geom.clone();
@@ -342,7 +342,7 @@ impl Cx {
                     }
                 },
                 20 => { // xr_update, TODO add all the matrices / tracked hands / position IO'ed here
-                    is_animation_frame = true;
+                    //is_animation_frame = true;
                     let inputs_len = to_wasm.mu32();
                     let time = to_wasm.mf64();
                     let head_transform = to_wasm.parse_transform();
@@ -393,16 +393,6 @@ impl Cx {
                     self.platform.xr_last_left_input = left_input;
                     self.platform.xr_last_right_input = right_input;
                     
-                    //log!(self, "{} o clock",time);
-                    if self.playing_anim_areas.len() != 0 {
-                        self.call_animation_event(&mut event_handler, time);
-                    }
-                    if self.frame_callbacks.len() != 0 {
-                        self.call_frame_event(&mut event_handler, time);
-                    }
-                    // lets send an event with all the VR information into makepad
-                    
-                    
                 },
                 21 => { // paint_dirty, only set the passes of the main window to dirty
                     self.passes[self.windows[0].main_pass_id.unwrap()].paint_dirty = true;
@@ -426,7 +416,6 @@ impl Cx {
         if is_animation_frame && (self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0) {
             self.call_draw_event(&mut event_handler);
         }
-        
         self.call_signals(&mut event_handler);
         
         for window in &mut self.windows {
@@ -516,8 +505,9 @@ impl Cx {
         if !is_animation_frame {
             let mut shader_results = Vec::new();
             for shader_id in &self.shader_recompiles {
-                shader_results.push(Self::webgl_compile_shader(*shader_id, !self.platform.gpu_spec_is_low_on_uniforms, true, &mut self.shaders[*shader_id], &mut self.platform));
+                shader_results.push(Self::webgl_compile_shader(*shader_id, !self.platform.gpu_spec_is_low_on_uniforms, true, &mut self.shaders[*shader_id], &mut self.platform, &mut self.shader_inherit_cache));
             }
+            self.shader_recompiles.truncate(0);
             self.call_shader_recompile_event(shader_results, &mut event_handler);
         }
         // mark the end of the message

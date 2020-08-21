@@ -1,24 +1,27 @@
 use crate::ast::*;
-use crate::builtin::{self, Builtin};
+use crate::builtin::{Builtin};
 use crate::const_eval::ConstEvaluator;
 use crate::const_gather::ConstGatherer;
 use crate::dep_analyse::DepAnalyser;
 use crate::env::{Env, Sym, VarKind};
 use crate::error::Error;
 use crate::ident::Ident;
-use crate::shadergen::PropDef;
 use crate::span::Span;
 use crate::ty::Ty;
 use crate::ty_check::TyChecker;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, BTreeSet};
-
-pub fn analyse(shader: &ShaderAst, input_props: &[&PropDef], gather_all: bool) -> Result<(), Error> {
+/*
+pub fn analyse(shader: &ShaderAst, base_props:&[PropDef], sub_props: &[&PropDef], gather_all: bool) -> Result<(), Error> {
     let builtins = builtin::generate_builtins();
     let mut env = Env::new();
     env.push_scope();
 
-    for prop in input_props {
+    for &ident in builtins.keys() {
+        env.insert_sym(Span::default(), ident, Sym::Builtin)?;
+    }
+
+    for prop in sub_props {
         env.insert_sym(
             Span::default(),
             Ident::new(&prop.ident),
@@ -26,9 +29,6 @@ pub fn analyse(shader: &ShaderAst, input_props: &[&PropDef], gather_all: bool) -
                 ty: prop.prop_id.shader_ty(),
             },
         )?;
-    }
-    for &ident in builtins.keys() {
-        env.insert_sym(Span::default(), ident, Sym::Builtin)?;
     }
     env.push_scope();
     ShaderAnalyser {
@@ -38,14 +38,14 @@ pub fn analyse(shader: &ShaderAst, input_props: &[&PropDef], gather_all: bool) -
         gather_all,
     }
     .analyse_shader()
-}
+}*/
 
 #[derive(Debug)]
-struct ShaderAnalyser<'a> {
-    builtins: HashMap<Ident, Builtin>,
-    shader: &'a ShaderAst,
-    env: Env,
-    gather_all: bool,
+pub struct ShaderAnalyser<'a> {
+    pub builtins: &'a HashMap<Ident, Builtin>,
+    pub shader: &'a ShaderAst,
+    pub env: Env,
+    pub gather_all: bool,
 }
 
 impl<'a> ShaderAnalyser<'a> {
@@ -70,8 +70,9 @@ impl<'a> ShaderAnalyser<'a> {
         }
     }
 
-    fn analyse_shader(&mut self) -> Result<(), Error> {
+    pub fn analyse_shader(&mut self) -> Result<(), Error> {
         *self.shader.const_table.borrow_mut() = Some(Vec::new());
+        *self.shader.const_table_spans.borrow_mut() = Some(Vec::new());
         self.env.push_scope();
         for decl in &self.shader.decls {
             self.analyse_decl(decl)?;

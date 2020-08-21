@@ -569,11 +569,19 @@ impl Cx {
         
         // lets compile.
         let shader_ast = sh.shader_gen.lex_parse_analyse(true);
-        
-        if let Err(err) = shader_ast{
-            return ShaderCompileResult::Fail{id:shader_id, err:err}
-        } 
-        let shader_ast = shader_ast.unwrap();
+
+        let shader_ast = match shader_ast{
+            ShaderGenResult::Error(err)=>{
+                return ShaderCompileResult::Fail{id:shader_id, err:err}
+            },
+            ShaderGenResult::PatchedConstTable(const_table)=>{
+                sh.mapping.const_table = Some(const_table);
+                return ShaderCompileResult::Nop{id:shader_id}
+            },
+            ShaderGenResult::ShaderAst(shader_ast)=>{
+                shader_ast
+            }
+        };
         
         // lets generate the vertexshader
         let vertex = generate_glsl::generate_vertex_shader(&shader_ast, use_const_table);

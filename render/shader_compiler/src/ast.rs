@@ -12,6 +12,8 @@ use std::fmt;
 pub struct ShaderAst {
     pub debug: bool,
     pub const_table: RefCell<Option<Vec<f32>>>,
+    pub const_table_spans: RefCell<Option<Vec<(usize,Span)>>>,
+    
     pub decls: Vec<Decl>,
 }
 
@@ -20,6 +22,7 @@ impl ShaderAst {
         ShaderAst {
             debug: false,
             const_table: RefCell::new(None),
+            const_table_spans: RefCell::new(None),
             decls: Vec::new(),
         }
     }
@@ -340,6 +343,7 @@ pub enum ExprKind {
         lit: Lit,
     },
 }
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum MacroCallAnalysis {
