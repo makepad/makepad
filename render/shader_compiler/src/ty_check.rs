@@ -625,8 +625,8 @@ impl<'a> TyChecker<'a> {
                         }
                     }
                     ExprKind::Lit { span, lit } => {
-                        if let Lit::Int(val) = lit {
-                            Ok(Color::from_u32(val))
+                        if let Lit::Vec4(val) = lit {
+                            Ok(Color::from_vec4(val))
                         } else {
                             Err(span)
                         }
@@ -647,23 +647,11 @@ impl<'a> TyChecker<'a> {
                     a: color.a,
                 }));
                 return Ok(Ty::Vec4);
-            } else if arg_exprs.len() == 3 {
-                analysis.set(Some(MacroCallAnalysis::Pick {
-                    r: parse_color_channel(&arg_exprs[0], span)?,
-                    g: parse_color_channel(&arg_exprs[1], span)?,
-                    b: parse_color_channel(&arg_exprs[2], span)?,
-                    a: 1.0,
-                }));
-                return Ok(Ty::Vec4);
-            } else if arg_exprs.len() == 4 {
-                analysis.set(Some(MacroCallAnalysis::Pick {
-                    r: parse_color_channel(&arg_exprs[0], span)?,
-                    g: parse_color_channel(&arg_exprs[1], span)?,
-                    b: parse_color_channel(&arg_exprs[2], span)?,
-                    a: parse_color_channel(&arg_exprs[3], span)?,
-                }));
-                return Ok(Ty::Vec4);
-            }
+            } 
+            return Err(Error {
+                span,
+                message: "pick only supports single argument!".into(),
+            });
         }
         else if ident == Ident::new("slide"){
             if arg_exprs.len() == 0 {
