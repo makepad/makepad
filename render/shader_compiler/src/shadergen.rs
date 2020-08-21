@@ -292,6 +292,7 @@ impl ShaderGen {
                         shader: &shader_ast,
                         env,
                         gather_all,
+                        no_const_collapse: true
                     }.analyse_shader()) {
                         let sub = &self.subs[err.span.loc_id];
                         return ShaderGenResult::Error(Self::shader_gen_error(&err, sub));
@@ -347,6 +348,7 @@ impl ShaderGen {
             shader: &shader_ast,
             env,
             gather_all,
+            no_const_collapse: false,
         }.analyse_shader()) {
             let sub = &self.subs[err.span.loc_id];
             return ShaderGenResult::Error(Self::shader_gen_error(&err, sub));
