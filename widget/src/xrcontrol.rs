@@ -127,7 +127,8 @@ impl XRControl {
                     abs: pt,
                     rel: pt,
                     rect: Rect::default(),
-                    handled: false,
+                    handled_x: false,
+                    handled_y: false,
                     scroll: Vec2{x:input.axes[2]*15.0, y:input.axes[3]*15.0},
                     is_wheel: true,
                     modifiers: KeyModifiers::default(),
@@ -201,7 +202,6 @@ impl XRControl {
         }
         do_input_event(&mut events, cx, 0, self._left_cursor_pt, xr_event.time, &xr_event.left_input, &xr_event.last_left_input);
         do_input_event(&mut events, cx, 1, self._right_cursor_pt, xr_event.time, &xr_event.right_input, &xr_event.last_right_input);
-        
         events
     }
     
