@@ -33,7 +33,7 @@ pub struct LiveMacrosView {
 }
 
 
-impl LiveMacrosView { 
+impl LiveMacrosView {
     pub fn macro_changed() -> StatusId {uid!()}
     
     pub fn new(cx: &mut Cx) -> Self {
@@ -46,67 +46,78 @@ impl LiveMacrosView {
     }
     
     pub fn handle_live_macros(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, text_editor: &mut TextEditor) {
-        match event{
-             Event::Signal(se) => {
+        match event {
+            Event::Signal(se) => {
                 // process network messages for hub_ui
                 if let Some(_) = se.signals.get(&atb.live_macros.changed) {
                     self.scroll_view.redraw_view_area(cx);
                 }
             },
-            _=>()
+            _ => ()
         }
         
+        // instead of enumerating these things, i could enumerate the live_macros instead.
+        // then look up the widget by ID, and process any changes.
+        
         self.scroll_view.handle_scroll_view(cx, event);
-        for (index, color_picker) in self.color_pickers.enumerate() {
-            match color_picker.handle_color_picker(cx, event) {
-                ColorPickerEvent::Change {hsva} => {
-                    let in_place = if let LiveMacro::Pick {range, ..} = &mut atb.live_macros.macros[*index] {
-                        let color = Color::from_hsva(hsva);
-                        let new_string = format!("#{}", color.to_hex());
-                        text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, self.undo_id);
-                        // skip retokenize if its same size
-                        if new_string.len() == range.1 - range.0{
-                            for (index, c) in new_string.chars().enumerate(){
-                                atb.text_buffer.flat_text[range.0 + index] = c;
-                            }
-                            atb.text_buffer.token_chunks_id = atb.text_buffer.mutation_id;
-                            true
+        
+        let mut range_delta: isize = 0;
+        let mut any_changed = false;
+        let mut all_in_place = true;
+        for (index, live_macro) in atb.live_macros.macros.iter_mut().enumerate() {
+            match live_macro {
+                LiveMacro::Pick {range, ..} => {
+                    range.0 = (range.0 as isize + range_delta) as usize;
+                    range.1 = (range.1 as isize + range_delta) as usize;
+                    if let Some(color_picker) = self.color_pickers.get(index) {
+                        match color_picker.handle_color_picker(cx, event) {
+                            ColorPickerEvent::Change {hsva} => {
+                                any_changed = true;
+                                let color = Color::from_hsva(hsva);
+                                let new_string = format!("#{}", color.to_hex());
+                                let in_place = text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, self.undo_id);
+                                if !in_place {
+                                    range_delta += new_string.len() as isize - (range.1 - range.0) as isize;
+                                    *range = (range.0, range.0 + new_string.len());
+                                    all_in_place = false;
+                                }
+                            },
+                            ColorPickerEvent::DoneChanging => {
+                                self.undo_id += 1;
+                            },
+                            _ => ()
                         }
-                        else{
-                            *range = (range.0, range.0 + new_string.len());
-                            false
-                        }
-                    }else{false};
-                    if in_place{
-                        atb.parse_live_macros(cx);
                     }
                 },
-                ColorPickerEvent::DoneChanging=>{
-                    self.undo_id += 1;
+                LiveMacro::Slide {range, ..} => {
+                    range.0 = (range.0 as isize + range_delta) as usize;
+                    range.1 = (range.1 as isize + range_delta) as usize;
+                    if let Some(float_slider) = self.float_sliders.get(index) {
+                        match float_slider.handle_float_slider(cx, event) {
+                            FloatSliderEvent::Change {scaled_value} => {
+                                any_changed = true;
+                                let new_string = format!("{}", PrettyPrintedFloat(scaled_value));
+                                let in_place = text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, self.undo_id);
+                                if !in_place {
+                                    range_delta += new_string.len() as isize - (range.1 - range.0) as isize;
+                                    *range = (range.0, range.0 + new_string.len());
+                                    all_in_place = false;
+                                }
+                            }
+                            FloatSliderEvent::DoneChanging => {
+                                self.undo_id += 1;
+                            },
+                            _ => ()
+                        }
+                    }
                 },
                 _ => ()
             }
         }
-        for (index, float_slider) in self.float_sliders.enumerate() {
-            // these sliders will fire in sequence.
-            // ok now what. now we serialize out hsva into the textbuffer
-            if let LiveMacro::Slide {range, ..} = &mut atb.live_macros.macros[*index] {
-                
-                match float_slider.handle_float_slider(cx, event) {
-                    FloatSliderEvent::Change {scaled_value} => {
-                            // and let the things work out
-                        let new_string = format!("{}", PrettyPrintedFloat(scaled_value));
-                        text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, self.undo_id);
-                        *range = (range.0, range.0 + new_string.len());
-                    },
-                    FloatSliderEvent::DoneChanging=>{
-                        self.undo_id += 1;
-                    },
-                    _ => ()
-                }
-            }
+        if any_changed && all_in_place {
+            atb.text_buffer.mark_clean();
+            atb.parse_live_macros(cx, true);
         }
-        
     }
     
     pub fn draw_live_macros(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, _text_editor: &mut TextEditor) {
@@ -307,19 +318,19 @@ impl FloatSlider {
                 
                 df.fill(pick!(#4));
                 
-                let bheight = 15.; 
+                let bheight = 15.;
                 let bwidth = 10.;
                 
                 df.box((w - bwidth) * norm_value, cy - 0.5 * bheight, bwidth, bheight, 2.);
                 ////
-                let color = mix(mix(pick!(#5), pick!(#B),hover),pick!(#F),down);
+                let color = mix(mix(pick!(#5), pick!(#B), hover), pick!(#F), down);
                 df.fill(color);
                 
                 return df.result;
             }
-        "})) 
+        "}))
     }
-} 
+}
 
 
 pub enum ColorPickerEvent {
@@ -448,7 +459,7 @@ impl ColorPicker {
                         self.animator.play_anim(cx, Self::anim_default().get(cx));
                     }
                 }
-                else { 
+                else {
                     self.animator.play_anim(cx, Self::anim_default().get(cx));
                 }
                 self.drag_mode = ColorPickerDragMode::None;
@@ -482,7 +493,7 @@ impl ColorPicker {
         k.push_float(cx, self.hue);
         k.push_float(cx, self.sat);
         k.push_float(cx, self.val);
-
+        
         k.push_last_float(cx, &self.animator, Self::hover());
         k.push_last_float(cx, &self.animator, Self::down());
         
@@ -529,7 +540,7 @@ impl ColorPicker {
                 return vec2(
                     0.5 * sqrt(2. + 2. * sqrt(2.) * u + u2 - v2) -
                     0.5 * sqrt(2. - 2. * sqrt(2.) * u + u2 - v2),
-                    0.5 * sqrt(2. + 2. * v * sqrt(2.) - u2 + v2) -
+                    0.5 * sqrt(2. + 2. * sqrt(2.) * v - u2 + v2) -
                     0.5 * sqrt(2. - 2. * sqrt(2.) * v - u2 + v2)
                 );
             }
@@ -563,20 +574,20 @@ impl ColorPicker {
                 
                 let rect_puk = vec2(cx + sat * 2. * rsize - rsize, cy + (1. - val) * 2. * rsize - rsize);
                 
-                let color = mix(mix(pick!(#3),pick!(#E),hover),pick!(#F),down);
-                let puck_size = 0.1*w;
+                let color = mix(mix(pick!(#3), pick!(#E), hover), pick!(#F), down);
+                let puck_size = 0.1 * w;
                 df.circle(rect_puk.x, rect_puk.y, puck_size);
                 df.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
                 df.intersect();
                 df.fill(color);
-                df.circle(rect_puk.x, rect_puk.y, puck_size-1.-2.*hover + down);
+                df.circle(rect_puk.x, rect_puk.y, puck_size - 1. - 2. * hover + down);
                 df.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
                 df.intersect();
                 df.fill(rgbv);
                 
                 df.circle(circle_puk.x, circle_puk.y, puck_size);
                 df.fill(color);
-                df.circle(circle_puk.x, circle_puk.y, puck_size-1.-2.*hover + down);
+                df.circle(circle_puk.x, circle_puk.y, puck_size - 1. - 2. * hover + down);
                 df.fill(rgbv);
                 
                 return df.result;
@@ -587,15 +598,17 @@ impl ColorPicker {
 
 
 impl AppTextBuffer {
-    pub fn parse_live_macros(&mut self, cx: &mut Cx) {
+    pub fn parse_live_macros(&mut self, cx: &mut Cx, only_update_shaders:bool) {
         let mut tp = TokenParser::new(&self.text_buffer.flat_text, &self.text_buffer.token_chunks);
         // lets reset the data
-        self.live_macros.macros.truncate(0);
+        if !only_update_shaders{
+            self.live_macros.macros.truncate(0);
+        }
         let mut shader_end = 0;
         while tp.advance() {
             match tp.cur_type() {
                 TokenType::Macro => {
-                    if tp.eat("pick") && tp.eat("!") {
+                    if !only_update_shaders && tp.eat("pick") && tp.eat("!") {
                         if tp.cur_type() == TokenType::ParenOpen {
                             let range = tp.cur_pair_range();
                             tp.advance();
@@ -620,7 +633,7 @@ impl AppTextBuffer {
                             })
                         }
                     }
-                    else if tp.eat("slide") && tp.eat("!") {
+                    else if !only_update_shaders && tp.eat("slide") && tp.eat("!") {
                         if tp.cur_type() == TokenType::ParenOpen {
                             let in_shader = tp.cur_offset() < shader_end;
                             // now i just want the first number
