@@ -88,22 +88,22 @@ impl LiveMacrosView {
             }
         }
         for (index, float_slider) in self.float_sliders.enumerate() {
-            match float_slider.handle_float_slider(cx, event) {
-                FloatSliderEvent::Change {scaled_value} => {
-                    
-                    // ok now what. now we serialize out hsva into the textbuffer
-                    if let LiveMacro::Slide {range, ..} = &mut atb.live_macros.macros[*index] {
-                        // and let the things work out
+            // these sliders will fire in sequence.
+            // ok now what. now we serialize out hsva into the textbuffer
+            if let LiveMacro::Slide {range, ..} = &mut atb.live_macros.macros[*index] {
+                
+                match float_slider.handle_float_slider(cx, event) {
+                    FloatSliderEvent::Change {scaled_value} => {
+                            // and let the things work out
                         let new_string = format!("{}", PrettyPrintedFloat(scaled_value));
                         text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, self.undo_id);
                         *range = (range.0, range.0 + new_string.len());
-                        
-                    }
-                },
-                FloatSliderEvent::DoneChanging=>{
-                    self.undo_id += 1;
-                },
-                _ => ()
+                    },
+                    FloatSliderEvent::DoneChanging=>{
+                        self.undo_id += 1;
+                    },
+                    _ => ()
+                }
             }
         }
         

@@ -264,10 +264,6 @@ impl ShaderGen {
             let sub = self.subs.last().unwrap();
             if let Some(cache) = inherit_cache.map.get_mut(&sub.loc) {
                 if cache.code != sub.code { // we can reuse the cache
-                    // reuse cache
-                    let mut shader_ast = cache.ast.clone();
-                    let mut env = cache.env.clone();
-                    
                     // lets see if we can diff the tokens.
                     let tokens = lex::lex(sub.code.chars(), self.subs.len() - 1).collect::<Result<Vec<_>, _>>();
                     if let Err(err) = &tokens {
@@ -279,6 +275,10 @@ impl ShaderGen {
                         cache.code = sub.code.clone();
                         return ShaderGenResult::PatchedConstTable(patched_const_table);
                     }
+
+                    let mut shader_ast = cache.ast.clone();
+                    let mut env = cache.env.clone();
+
                     if let Err(err) = parse::parse(&tokens, &mut shader_ast) {
                         return ShaderGenResult::Error(ShaderGen::shader_gen_error(&err, sub));
                     }
@@ -306,7 +306,7 @@ impl ShaderGen {
                     return ShaderGenResult::ShaderAst(shader_ast)
                 }
             }
-        }
+        } 
         
         let mut shader_ast = ShaderAst::new();
         let mut env = Env::new();
