@@ -38,11 +38,14 @@ impl RustEditor {
         
         self.live_macros_view.handle_live_macros(cx, event, atb, &mut self.text_editor);
         
-        match self.splitter.handle_splitter(cx, event) {
-            SplitterEvent::Moving {..} => {
-                self.view.redraw_view_parent_area(cx);
-            },
-            _ => ()
+        let has_live_macros = atb.live_macros.macros.len() != 0;
+        if has_live_macros{
+            match self.splitter.handle_splitter(cx, event) {
+                SplitterEvent::Moving {..} => {
+                    self.view.redraw_view_parent_area(cx);
+                },
+                _ => ()
+            }
         }
         
         let ce = self.text_editor.handle_text_editor(cx, event, &mut atb.text_buffer);
@@ -66,12 +69,18 @@ impl RustEditor {
             return
         }; 
         
-        self.splitter.begin_splitter(cx);
+        let has_live_macros = atb.live_macros.macros.len() != 0;
         
-        self.live_macros_view.draw_live_macros(cx, atb, &mut self.text_editor);
-        
-        self.splitter.mid_splitter(cx);
-        
+        if has_live_macros{
+            
+            self.splitter.begin_splitter(cx); 
+            
+            self.live_macros_view.draw_live_macros(cx, atb, &mut self.text_editor);
+            
+            self.splitter.mid_splitter(cx);
+            
+        }
+            
         Self::update_token_chunks(cx, atb, search_index);
         
         if self.text_editor.begin_text_editor(cx, &mut atb.text_buffer).is_ok() {
@@ -81,9 +90,9 @@ impl RustEditor {
             
             self.text_editor.end_text_editor(cx, &mut atb.text_buffer);
         }
-        
-        self.splitter.end_splitter(cx);
-        
+        if has_live_macros{
+            self.splitter.end_splitter(cx);
+        }
         self.view.end_view(cx);
     }
     

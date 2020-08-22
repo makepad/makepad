@@ -199,6 +199,10 @@ impl Text {
     pub fn add_text<F>(&mut self, cx: &mut Cx, geom_x: f32, geom_y: f32, char_offset: usize, aligned: &mut AlignedInstance, chunk: &[char], mut char_callback: F)
     where F: FnMut(char, usize, f32, f32) -> f32
     {
+        if geom_x.is_nan() || geom_y.is_nan(){
+            return
+        }
+        
         let text_style = &self.text_style;
         let mut geom_x = geom_x;
         let mut char_offset = char_offset;
@@ -246,6 +250,7 @@ impl Text {
             // compute subpixel shift
             let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
             let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
+            
             
             // scale and snap it
             let scaled_min_pos_x = geom_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
