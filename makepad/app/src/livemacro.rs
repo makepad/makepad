@@ -2,7 +2,6 @@ use makepad_render::*;
 use makepad_widget::*;
 use crate::mprstokenizer::*;
 use crate::appstorage::*;
-use makepad_render::PrettyPrintedFloat;
 
 pub enum LiveMacro {
     Pick {range: (usize, usize), hsva: Vec4, in_shader: bool},
@@ -96,7 +95,7 @@ impl LiveMacrosView {
                         match float_slider.handle_float_slider(cx, event) {
                             FloatSliderEvent::Change {scaled_value} => {
                                 any_changed = true;
-                                let new_string = format!("{}", PrettyPrintedFloat(scaled_value));
+                                let new_string = format!("{}", PrettyPrintedFloat3Decimals(scaled_value));
                                 let in_place = text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, self.undo_id);
                                 if !in_place {
                                     range_delta += new_string.len() as isize - (range.1 - range.0) as isize;
