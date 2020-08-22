@@ -120,7 +120,7 @@ impl RustEditor {
             //    if atb.text_buffer.undo_stack.len() != 0{
             //        println!("PARSE LIVE {:?}", atb.text_buffer.undo_stack.last().unwrap().grouping);
             //    }
-                atb.parse_live_macros(cx);
+            atb.parse_live_macros(cx, false);
             //}
             
             // ok now lets write a diff with the previous one
