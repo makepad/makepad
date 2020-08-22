@@ -65,14 +65,15 @@ impl LiveMacrosView {
         let mut all_in_place = true;
         for (index, live_macro) in atb.live_macros.macros.iter_mut().enumerate() {
             match live_macro {
-                LiveMacro::Pick {range, ..} => {
+                LiveMacro::Pick {range, hsva, ..} => {
                     range.0 = (range.0 as isize + range_delta) as usize;
                     range.1 = (range.1 as isize + range_delta) as usize;
                     if let Some(color_picker) = self.color_pickers.get(index) {
                         match color_picker.handle_color_picker(cx, event) {
-                            ColorPickerEvent::Change {hsva} => {
+                            ColorPickerEvent::Change {hsva:new_hsva} => {
                                 any_changed = true;
-                                let color = Color::from_hsva(hsva);
+                                let color = Color::from_hsva(new_hsva);
+                                *hsva = new_hsva;
                                 let new_string = format!("#{}", color.to_hex());
                                 let in_place = text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, self.undo_id);
                                 if !in_place {
@@ -88,12 +89,13 @@ impl LiveMacrosView {
                         }
                     }
                 },
-                LiveMacro::Slide {range, ..} => {
+                LiveMacro::Slide {range, value, ..} => {
                     range.0 = (range.0 as isize + range_delta) as usize;
                     range.1 = (range.1 as isize + range_delta) as usize;
                     if let Some(float_slider) = self.float_sliders.get(index) {
                         match float_slider.handle_float_slider(cx, event) {
                             FloatSliderEvent::Change {scaled_value} => {
+                                *value = scaled_value;
                                 any_changed = true;
                                 let new_string = format!("{}", PrettyPrintedFloat3Decimals(scaled_value));
                                 let in_place = text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, self.undo_id);
