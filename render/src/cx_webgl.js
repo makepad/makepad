@@ -850,7 +850,7 @@
                 + "border-radius: 4px;\n"
                 + "color:white;\n"
                 + "font-size: 6;\n"
-                + "background: gray;\n"
+                + "background: gray;\n" 
                 + "-moz-appearance: none;\n"
                 + "appearance:none;\n"
                 + "border:none;\n"
