@@ -1342,7 +1342,7 @@
             if (this.xr_can_present) {
                 navigator.xr.requestSession('immersive-vr').then(xr_session => {
                     
-                    this.xr_layer = new XRWebGLLayer(xr_session, this.gl, {
+                    let xr_layer = new XRWebGLLayer(xr_session, this.gl, {
                         antialias: false,
                         depth: true,
                         stencil: false,
@@ -1350,8 +1350,17 @@
                         ignoreDepthValues: false,
                         framebufferScaleFactor: 1.5
                     });
-                    xr_session.updateRenderState({baseLayer: this.xr_layer});
                     
+                    let xr_layer2 = new XRWebGLLayer(xr_session, this.gl, {
+                        antialias: false,
+                        depth: true,
+                        stencil: false,
+                        alpha: false,
+                        ignoreDepthValues: false,
+                        framebufferScaleFactor: 0.3
+                    });
+                    
+                    xr_session.updateRenderState({baseLayer: xr_layer});
                     xr_session.requestReferenceSpace("local").then(xr_reference_space => {
                         window.localStorage.setItem("xr_presenting", "true");
                         
@@ -1365,7 +1374,17 @@
                         
                         // lets start the loop
                         let last_gamepad = [];
+                        let alternate = false;
                         let xr_on_request_animation_frame = (time, xr_frame) => {
+                            
+                            //if(alternate){
+                                //xr_session.updateRenderState({baseLayer: xr_layer});
+                           // }
+                            //else{
+                             //   xr_session.updateRenderState({baseLayer: xr_layer2});
+                            //}
+                            alternate = !alternate;
+                            
                             if (first_on_resize) {
                                 this.on_screen_resize();
                                 first_on_resize = false;
@@ -1440,8 +1459,8 @@
                 let left_view = this.xr_pose.views[0];
                 let right_view = this.xr_pose.views[1];
                 
-                this.xr_left_viewport = this.xr_layer.getViewport(left_view);
-                this.xr_right_viewport = this.xr_layer.getViewport(right_view);
+                this.xr_left_viewport = xr_webgllayer.getViewport(left_view);
+                this.xr_right_viewport = xr_webgllayer.getViewport(right_view);
                 
                 this.xr_left_projection_matrix = left_view.projectionMatrix;
                 this.xr_left_transform_matrix = left_view.transform.inverse.matrix;
