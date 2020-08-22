@@ -116,11 +116,29 @@ impl XRControl {
         
         let mut events = Vec::new();
         
-        fn do_input_event(cx: &mut Cx, digit: usize, pt: Vec2, time: f64, input: &XRInput, last_input: &XRInput) -> Event {
+        fn do_input_event(events:&mut Vec<Event>, cx: &mut Cx, digit: usize, pt: Vec2, time: f64, input: &XRInput, last_input: &XRInput) {
+            fn axis_not_zero(axis:f32)->bool{
+                axis < -0.01 || axis>0.01 
+            }
+            if axis_not_zero(input.axes[2]) || axis_not_zero(input.axes[3]){
+                events.push(Event::FingerScroll(FingerScrollEvent {
+                    window_id: 0,
+                    digit: digit,
+                    abs: pt,
+                    rel: pt,
+                    rect: Rect::default(),
+                    handled: false,
+                    scroll: Vec2{x:input.axes[2]*15.0, y:input.axes[3]*15.0},
+                    is_wheel: true,
+                    modifiers: KeyModifiers::default(),
+                    time: time
+                }));
+            }
+
             if input.buttons[0].pressed != last_input.buttons[0].pressed {
                 // we have finger up or down
                 if input.buttons[0].pressed {
-                    return Event::FingerDown(FingerDownEvent {
+                    events.push(Event::FingerDown(FingerDownEvent {
                         digit: digit,
                         window_id: 0,
                         tap_count: 0,
@@ -131,10 +149,10 @@ impl XRControl {
                         rect: Rect::default(),
                         modifiers: KeyModifiers::default(),
                         time: time
-                    });
+                    }));
                 }
                 else {
-                    return Event::FingerUp(FingerUpEvent {
+                    events.push(Event::FingerUp(FingerUpEvent {
                         digit: digit,
                         window_id: 0,
                         abs: pt,
@@ -146,12 +164,12 @@ impl XRControl {
                         rel_start: Vec2::default(),
                         modifiers: KeyModifiers::default(),
                         time: time
-                    });
+                    }));
                 }
                 
             }
             else if input.buttons[0].pressed { // we have move
-                return Event::FingerMove(FingerMoveEvent {
+                events.push(Event::FingerMove(FingerMoveEvent {
                     digit: digit,
                     window_id: 0,
                     abs: pt,
@@ -163,25 +181,26 @@ impl XRControl {
                     is_touch: true,
                     modifiers: KeyModifiers::default(),
                     time: time
-                });
+                }));
             }
-            cx.fingers[digit].over_last = Area::Empty;
-            return Event::FingerHover(FingerHoverEvent {
-                digit: digit,
-                any_down: false,
-                window_id: 0,
-                abs: pt,
-                rel: pt,
-                rect: Rect::default(),
-                handled: false,
-                hover_state: HoverState::Over,
-                modifiers: KeyModifiers::default(),
-                time: time
-            });
+            else{
+                cx.fingers[digit].over_last = Area::Empty;
+                events.push(Event::FingerHover(FingerHoverEvent {
+                    digit: digit,
+                    any_down: false,
+                    window_id: 0,
+                    abs: pt,
+                    rel: pt,
+                    rect: Rect::default(),
+                    handled: false,
+                    hover_state: HoverState::Over,
+                    modifiers: KeyModifiers::default(),
+                    time: time
+                }));
+            }
         }
-        
-        events.push(do_input_event(cx, 0, self._left_cursor_pt, xr_event.time, &xr_event.left_input, &xr_event.last_left_input));
-        events.push(do_input_event(cx, 1, self._right_cursor_pt, xr_event.time, &xr_event.right_input, &xr_event.last_right_input));
+        do_input_event(&mut events, cx, 0, self._left_cursor_pt, xr_event.time, &xr_event.left_input, &xr_event.last_left_input);
+        do_input_event(&mut events, cx, 1, self._right_cursor_pt, xr_event.time, &xr_event.right_input, &xr_event.last_right_input);
         
         events
     }
