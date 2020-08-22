@@ -254,7 +254,7 @@ impl ScrollBar {
     pub fn handle_scroll_bar(&mut self, cx: &mut Cx, event: &mut Event) -> ScrollBarEvent {
         // lets check if our view-area gets a mouse-scroll.
         match event {
-            Event::FingerScroll(fe) => if !fe.handled {
+            Event::FingerScroll(fe) =>{//if !fe.handled {
                 let rect = self._view_area.get_rect(cx);
                 if rect.contains(fe.abs.x, fe.abs.y) { // handle mousewheel
                     // we should scroll in either x or y
