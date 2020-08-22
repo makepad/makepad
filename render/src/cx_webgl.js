@@ -1418,7 +1418,7 @@
                             this.on_screen_resize();
                             this.to_wasm.paint_dirty();
                             this.request_animation_frame();
-                        })
+                        }) 
                     })
                 })
             }
