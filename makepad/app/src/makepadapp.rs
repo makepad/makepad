@@ -151,7 +151,7 @@ impl MakepadApp {
                         first: Box::new(DockItem::Splitter {
                             axis: Axis::Vertical,
                             align: SplitterAlign::Last,
-                            pos: 250.0, 
+                            pos: 150.0, 
                             first: Box::new(DockItem::TabControl {
                                 current: 1,
                                 previous: 0,
