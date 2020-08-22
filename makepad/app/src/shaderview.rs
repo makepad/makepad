@@ -20,16 +20,16 @@ fn shader() -> ShaderGen {ShaderView::base_shader().compose(shader!{"
 
             let c = vec4(0.0);
             if t.y == 0.0 || t.y == 1.0 {
-                c += pick!(#FF00D2);
+                c += pick!(#6EF8FF);
             }
             if t.y == 2.0 {
-                c += pick!(#000000);
+                c += pick!(#FF0000);
             }
             if t.y == 3.0 {
-                c += pick!(#000000); 
+                c += pick!(#0300DC); 
             }
             if t.y == 4.0 {
-                c += pick!(#FF0049);
+                c += pick!(#FDFF00);
             }
             
             let ld = normalize(vec3(0.0, 0.0, 1.0));
@@ -39,7 +39,7 @@ fn shader() -> ShaderGen {ShaderView::base_shader().compose(shader!{"
             
             let ia = 0.2; 
             let id = 0.3 * max(0.0, dot(ld, n)); 
-            let is = 0.5 * pow(max(0.0, dot(v, r)), slide!(0.000)*2.0);
+            let is = 0.5 * pow(max(0.0, dot(v, r)), slide!(0.105)*2.0);
             let i = ia + id + is;
             
             return i * c; 
