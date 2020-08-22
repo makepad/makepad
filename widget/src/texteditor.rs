@@ -477,7 +477,7 @@ impl TextEditor {
                 //df_rect(0.,0.,w,h);
                 cx.move_to(0., h - 1.);
                 cx.line_to(w, h - 1.);
-                return cx.stroke(pick!(white), 0.8);
+                return cx.stroke(pick!(#AB6363), 0.8);
                 /*
                 df_viewport(pos * vec2(w, h));
                 df_box(0.5, 0.5, w - 1., h - 1., 1.);
@@ -1011,6 +1011,16 @@ impl TextEditor {
         let last_mutation_id = text_buffer.mutation_id;
         // global events
         match event {
+            Event::XRUpdate(xu)=>{
+                if self.has_key_focus(cx) &&  xu.right_input.buttons[1].pressed != xu.last_right_input.buttons[1].pressed{
+                    if  xu.right_input.buttons[1].pressed{
+                        self.start_code_folding(cx, text_buffer);
+                    }
+                    else{
+                        self.start_code_unfolding(cx, text_buffer);                        
+                    }
+                }
+            },
             Event::Timer(te) => if self._cursor_blink_timer.is_timer(te) {
                 if self.has_key_focus(cx) {
                     self._cursor_blink_timer = cx.start_timer(self.cursor_blink_speed, false);
@@ -1239,7 +1249,7 @@ impl TextEditor {
             //    align: Align::left_top(),
             //    ..self.bg_layout.clone()
             //});
-            self.text.color = pick!(#666).get(cx);
+            self.text.color = pick!(#433838).get(cx);
             self.text.draw_text(cx, "...");
             //self.bg.end_quad(cx, &bg_inst);
             //self._bg_area = bg_inst.into_area();
