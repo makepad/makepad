@@ -170,11 +170,11 @@ impl TextEditor {
             view: ScrollView::new(cx),
             bg: Quad ::new(cx),
             shadow: ScrollShadow {
-                z: 10.,
+                z: 1.,
                 ..ScrollShadow::new(cx)
             },
             gutter_bg: Quad {
-                z: 9.0,
+                z: 2.1,
                 ..Quad::new(cx)
             },
             colors: CodeEditorColors::default(),
@@ -196,7 +196,7 @@ impl TextEditor {
                 ..Text::new(cx)
             },
             line_number_text: Text {
-                z: 9.,
+                z: 2.2,
                 wrapping: Wrapping::Line,
                 ..Text::new(cx)
             },
