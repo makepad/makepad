@@ -97,7 +97,8 @@ pub struct FingerScrollEvent {
     pub rect: Rect,
     pub scroll: Vec2,
     pub is_wheel: bool,
-    pub handled: bool,
+    pub handled_x: bool,
+    pub handled_y: bool,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
@@ -368,7 +369,7 @@ impl Event {
             },
             Event::FingerScroll(fe) => {
                 let rect = area.get_rect(&cx);
-                if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
+                if rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
                     //fe.handled = true;
                     return Event::FingerScroll(FingerScrollEvent {
                         rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
@@ -594,9 +595,6 @@ impl Event {
             Event::FingerHover(fe) => {
                 fe.handled = set;
             },
-            Event::FingerScroll(fe) => {
-                fe.handled = set;
-            },
             Event::FingerDown(fe) => {
                 fe.handled = set;
             },
@@ -607,9 +605,6 @@ impl Event {
     pub fn handled(&self) -> bool {
         match self {
             Event::FingerHover(fe) => {
-                fe.handled
-            },
-            Event::FingerScroll(fe) => {
                 fe.handled
             },
             Event::FingerDown(fe) => {

@@ -255,27 +255,38 @@ impl ScrollBar {
         // lets check if our view-area gets a mouse-scroll.
         match event {
             Event::FingerScroll(fe) =>{//if !fe.handled {
-                let rect = self._view_area.get_rect(cx);
-                if rect.contains(fe.abs.x, fe.abs.y) { // handle mousewheel
-                    // we should scroll in either x or y
-                    let scroll = match self.axis {
-                        Axis::Horizontal => if self.use_vertical_finger_scroll {fe.scroll.y}else {fe.scroll.x},
-                        Axis::Vertical => fe.scroll.y
-                    };
-                    if !self.smoothing.is_none() {
-                        let scroll_pos_target = self.get_scroll_target();
-                        if self.set_scroll_target(cx, scroll_pos_target + scroll) {
-                            fe.handled = true;
+                if !match self.axis{
+                    Axis::Horizontal => fe.handled_x,
+                    Axis::Vertical => fe.handled_y
+                }{
+                    let rect = self._view_area.get_rect(cx);
+                    if rect.contains(fe.abs.x, fe.abs.y) { // handle mousewheel
+                        // we should scroll in either x or y
+                        let scroll = match self.axis {
+                            Axis::Horizontal => if self.use_vertical_finger_scroll {fe.scroll.y}else {fe.scroll.x},
+                            Axis::Vertical => fe.scroll.y
                         };
-                        self.move_towards_scroll_target(cx); // take the first step now
-                        return self.make_scroll_event();
-                    }
-                    else {
-                        let scroll_pos = self.get_scroll_pos();
-                        if self.set_scroll_pos(cx, scroll_pos + scroll) {
-                            fe.handled = true;
+                        if !self.smoothing.is_none() {
+                            let scroll_pos_target = self.get_scroll_target();
+                            if self.set_scroll_target(cx, scroll_pos_target + scroll) {
+                                match self.axis{
+                                    Axis::Horizontal => fe.handled_x = true,
+                                    Axis::Vertical => fe.handled_y = true
+                                }
+                            };
+                            self.move_towards_scroll_target(cx); // take the first step now
+                            return self.make_scroll_event();
                         }
-                        return self.make_scroll_event();
+                        else {
+                            let scroll_pos = self.get_scroll_pos();
+                            if self.set_scroll_pos(cx, scroll_pos + scroll) {
+                                match self.axis{
+                                    Axis::Horizontal => fe.handled_x = true,
+                                    Axis::Vertical => fe.handled_y = true
+                                }
+                            }
+                            return self.make_scroll_event();
+                        }
                     }
                 }
             },
