@@ -43,7 +43,7 @@ impl ScrollBar {
             axis: Axis::Horizontal,
             animator: Animator::default(),
             bg: Quad {
-                z: 10.,
+                z: 2.5,
                 ..Quad::new(cx)
             },
             use_vertical_finger_scroll: false,
