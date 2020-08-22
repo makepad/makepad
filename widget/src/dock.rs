@@ -396,7 +396,7 @@ where TItem: Clone
             drop_size: Vec2 {x: 100., y: 70.},
             //drop_quad_color: Color_drop_quad::id(),
             drop_quad: Quad {
-                z: 10.,
+                z: 3.,
                 ..Quad::new(cx)
             },
             splitters: Elements::new(Splitter::new(cx)),
