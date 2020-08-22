@@ -974,13 +974,21 @@ impl TextEditor {
         
     }
     
-    pub fn handle_live_replace(&mut self, cx: &mut Cx, range:(usize, usize), what:&str, text_buffer: &mut TextBuffer, group:u64){
+    pub fn handle_live_replace(&mut self, cx: &mut Cx, range:(usize, usize), what:&str, text_buffer: &mut TextBuffer, group:u64)->bool{
         // let set the cursor selection
         self.cursors.clear_and_set_last_cursor_head_and_tail(range.1, range.0, text_buffer);
         self.cursors.replace_text(what, text_buffer, Some(TextUndoGrouping::LiveEdit(group)));
         self.scroll_last_cursor_visible(cx, text_buffer, 0.);
         self.view.redraw_view_area(cx);
         self.reset_cursor_blinker(cx);
+        // do inplace update so we don't need to re-tokenize possibly
+        if what.len() == range.1 - range.0{
+            for (index, c) in what.chars().enumerate(){
+                text_buffer.flat_text[range.0 + index] = c;
+            }
+            return true
+        }
+        return false
     }
     
     pub fn handle_text_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {

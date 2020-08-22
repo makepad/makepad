@@ -1402,13 +1402,13 @@
                                 this.xr_pose.transform,
                                 inputs,
                             );
-                            //let perf_start = performance.now();
+                            let perf_start = performance.now();
                             this.do_wasm_io();
                             this.to_wasm.animation_frame(time / 1000.0);
                             this.in_animation_frame = true;
                             this.do_wasm_io();
                             this.in_animation_frame = false;
-                            //console.log(performance.now() - perf_start);
+                            console.log(performance.now() - perf_start);
                         }
                         this.xr_session.requestAnimationFrame(xr_on_request_animation_frame);
                         

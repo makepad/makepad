@@ -447,6 +447,10 @@ impl TextBuffer {
         }
     }
     
+    pub fn mark_clean(&mut self){
+        self.token_chunks_id = self.mutation_id;
+    }
+    
     pub fn replace_range(&mut self, start: usize, len: usize, mut rep_lines: Vec<Vec<char>>) -> Vec<Vec<char>> {
         self.mutation_id += 1;
         let start_pos = self.offset_to_text_pos(start);
