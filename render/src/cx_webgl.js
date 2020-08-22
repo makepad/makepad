@@ -1178,8 +1178,8 @@
             if (this.xr_is_presenting) {
                 let xr_webgllayer = this.xr_session.renderState.baseLayer;
                 this.dpi_factor = 3.0;
-                this.width = 1920.0 / this.dpi_factor;
-                this.height = 1080.0 / this.dpi_factor;
+                this.width = 2560.0 / this.dpi_factor;
+                this.height = 2000.0 / this.dpi_factor;
             }
             else {
                 if (canvas.getAttribute("fullpage")) {

@@ -828,9 +828,11 @@ impl Cx {
                     if code != sub.code {
                         sub.code = code.clone();
                         // we need to recompile some shader..
-                        self.shader_recompiles.push(
-                            shader_index
-                        );
+                        if !self.shader_recompiles.contains(&shader_index){
+                            self.shader_recompiles.push(
+                                shader_index
+                            );
+                        }
                     }
                 }
             }
