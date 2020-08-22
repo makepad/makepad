@@ -22,10 +22,10 @@ impl Trapezoidator {
 
     /// Returns an iterator over trapezoids corresponding to the given iterator over line path
     /// commands.
-    pub fn trapezoidate<P: LinePathIterator>(&mut self, path: P) -> Trapezoidate {
+    pub fn trapezoidate<P: LinePathIterator>(&mut self, path: P)->Option<Trapezoidate>{
         let mut initial_point = None;
         let mut current_point = None;
-        path.for_each(&mut |command| {
+        if !path.for_each(&mut |command| {
             match command {
                 LinePathCommand::MoveTo(p) => {
                     //assert!(initial_point == current_point);
@@ -34,26 +34,32 @@ impl Trapezoidator {
                 }
                 LinePathCommand::LineTo(p) => {
                     let p0 = current_point.replace(p).unwrap();
-                    self.push_events_for_segment(LineSegment::new(p0, p));
+                    if self.push_events_for_segment(LineSegment::new(p0, p)){
+                        return false
+                    }
                 }
                 LinePathCommand::Close => {
                     let p = initial_point.take().unwrap();
                     let p0 = current_point.replace(p).unwrap();
-                    self.push_events_for_segment(LineSegment::new(p0, p))
+                    if self.push_events_for_segment(LineSegment::new(p0, p)){
+                        return false
+                    }
                 }
             }
             true
-        });
-        Trapezoidate {
+        }){
+            return None
+        };
+        Some(Trapezoidate {
             trapezoidator: self,
-        }
+        })
     }
 
-    fn push_events_for_segment(&mut self, segment: LineSegment) {
+    fn push_events_for_segment(&mut self, segment: LineSegment)->bool {
         let (winding, p0, p1) = match segment.p0.partial_cmp(&segment.p1) {
-            None => panic!(),
+            None => return true,
             Some(Ordering::Less) => (1, segment.p0, segment.p1),
-            Some(Ordering::Equal) => return,
+            Some(Ordering::Equal) => return false,
             Some(Ordering::Greater) => (-1, segment.p1, segment.p0),
         };
         self.event_queue.push(Event {
@@ -64,6 +70,7 @@ impl Trapezoidator {
             point: p1,
             pending_segment: None,
         });
+        false
     }
 
     fn pop_events_for_point(

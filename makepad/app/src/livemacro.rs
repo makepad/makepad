@@ -10,8 +10,8 @@ pub enum LiveMacro {
 }
 
 pub struct LiveMacros {
-    changed: Signal,
-    macros: Vec<LiveMacro>
+    pub changed: Signal,
+    pub macros: Vec<LiveMacro>
 }
 
 impl LiveMacros {
@@ -29,7 +29,7 @@ pub struct LiveMacrosView {
     pub undo_id: u64,
     pub color_pickers: Elements<usize, ColorPicker, ColorPicker>,
     pub float_sliders: Elements<usize, FloatSlider, FloatSlider>
-}
+} 
 
 
 impl LiveMacrosView {

@@ -270,17 +270,17 @@
                 let button_len = input.buttons.length;
                 let axes_len = input.axes.length;
                 let pos = this.fit(3 + button_len * 2 + axes_len);
-                this.mu32[pos++] = input.hand;
-                this.mu32[pos++] = input.buttons.length;
-                for(let i = 0; i < button_len; i++){
-                    this.mu32[pos ++] = input.buttons[i].pressed?1:0;
+                this.mu32[pos ++] = input.hand;
+                this.mu32[pos ++] = input.buttons.length;
+                for (let i = 0; i < button_len; i ++) {
+                    this.mu32[pos ++] = input.buttons[i].pressed? 1: 0;
                     this.mf32[pos ++] = input.buttons[i].value;
                 }
-                this.mu32[pos++] = input.axes.length;
-                for(let i = 0; i < axes_len; i++){
+                this.mu32[pos ++] = input.axes.length;
+                for (let i = 0; i < axes_len; i ++) {
                     this.mf32[pos ++] = input.axes[i]
                 }
-             }
+            }
         }
         
         paint_dirty(time, frame_data) {
@@ -342,7 +342,7 @@
             
             // fetch dependencies
             this.to_wasm.fetch_deps({
-                gpu_spec_is_low_on_uniforms: this.gpu_spec_is_low_on_uniforms                
+                gpu_spec_is_low_on_uniforms: this.gpu_spec_is_low_on_uniforms
             });
             
             this.do_wasm_io();
@@ -396,7 +396,7 @@
             this.to_wasm.end();
             let id = this.to_wasm.mu32[2];
             let from_wasm_ptr = this.exports.process_to_wasm(this.app, this.to_wasm.pointer)
-
+            
             // get a clean to_wasm set up immediately
             this.to_wasm = new ToWasm(this);
             
@@ -850,7 +850,7 @@
                 + "border-radius: 4px;\n"
                 + "color:white;\n"
                 + "font-size: 6;\n"
-                + "background: gray;\n" 
+                + "background: gray;\n"
                 + "-moz-appearance: none;\n"
                 + "appearance:none;\n"
                 + "border:none;\n"
@@ -1362,7 +1362,7 @@
                         
                         // read shit off the gamepad
                         xr_session.gamepad;
-
+                        
                         // lets start the loop
                         let last_gamepad = [];
                         let xr_on_request_animation_frame = (time, xr_frame) => {
@@ -1390,11 +1390,11 @@
                                 let grip_pose = xr_frame.getPose(input.gripSpace, this.xr_reference_space);
                                 let ray_pose = xr_frame.getPose(input.targetRaySpace, this.xr_reference_space);
                                 inputs.push({
-                                    grip_transform:grip_pose.transform,
-                                    ray_transform:ray_pose.transform,
-                                    hand:input.handedness == "left"?1:input.handedness == "right"?2:0,
-                                    buttons:input.gamepad.buttons,
-                                    axes:input.gamepad.axes
+                                    grip_transform: grip_pose.transform,
+                                    ray_transform: ray_pose.transform,
+                                    hand: input.handedness == "left"? 1: input.handedness == "right"? 2: 0,
+                                    buttons: input.gamepad.buttons,
+                                    axes: input.gamepad.axes
                                 });
                             }
                             this.to_wasm.xr_update(
@@ -1418,7 +1418,7 @@
                             this.on_screen_resize();
                             this.to_wasm.paint_dirty();
                             this.request_animation_frame();
-                        }) 
+                        })
                     })
                 })
             }
@@ -2174,16 +2174,32 @@
             var canvas = canvasses[i]
             let wasmfile = canvas.getAttribute("wasm");
             if (!wasmfile) continue
-            fetch(wasmfile)
-                .then(response => response.arrayBuffer())
-                .then(bytes => WebAssembly.instantiate(bytes, {}))
-                .then(results => {
-                wasm_instances.push(
-                    new WasmApp(canvas, results)
-                );
-            }, errors => {
-                console.log("Error compiling wasm file");
-            });
+            function fetch_wasm(wasmfile) {
+                let webasm = null;
+                function _log_str(chars_ptr, len) {
+                    let out = "";
+                    let array = new Uint32Array(webasm.instance.exports.memory.buffer, chars_ptr, len);
+                    for(let i = 0; i < len; i++){
+                        out += String.fromCharCode(array[i]);
+                    }
+                    console.log(out);
+                }
+                
+                fetch(wasmfile)
+                    .then(response => response.arrayBuffer())
+                    .then(bytes => WebAssembly.instantiate(bytes, {env: {
+                    _log_str
+                }}))
+                    .then(results => {
+                    webasm = results
+                    wasm_instances.push(
+                        new WasmApp(canvas, results)
+                    );
+                }, errors => {
+                    console.log("Error compiling wasm file", errors);
+                });
+            }
+            fetch_wasm(wasmfile);
             // load this wasm file
         }
     }
