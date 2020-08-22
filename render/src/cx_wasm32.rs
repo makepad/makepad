@@ -4,6 +4,17 @@ use std::alloc;
 use crate::cx::*;
 use makepad_shader_compiler::ty::Ty;
 
+extern "C" {
+    fn _log_str(chars:u32, len:u32);
+}
+
+pub fn log_str(val:&str){
+    unsafe{
+        let chars = val.chars().collect::<Vec<char>>();
+        _log_str(chars.as_ptr() as u32, chars.len() as u32);
+    }
+}
+
 impl Cx {
     
     pub fn get_default_window_size(&self) -> Vec2 {
