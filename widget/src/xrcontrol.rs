@@ -78,8 +78,9 @@ impl XRControl {
             Vec3 {x: -0.0, y: -180.0, z: 0.0},
             Vec3 {x: -0.20, y: -0.15, z: -0.3},
         );
-        
+
         window_view.set_view_transform(cx, &window_mat);
+        self.ray_view.set_view_transform(cx, &Mat4::identity());
         
         // lets set the left_input matrix
         self._left_ray_mat = Mat4::from_transform(xr_event.left_input.ray); // Mat4::from_mul(&Mat4::rotate(45.0, 0.0, 0.0), &Mat4::from_transform(xr_event.left_input.grip));

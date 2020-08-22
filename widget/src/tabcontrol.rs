@@ -86,6 +86,7 @@ impl TabControl {
                 TabEvent::DragMove(fe) => {
                     self._dragging_tab = Some((fe.clone(), *id));
                     // flag our view as dirty, to trigger
+                    //cx.redraw_child_area(Area::All);
                     self.tabs_view.redraw_view_area(cx);
                     self.drag_tab_view.redraw_view_area(cx);
                     
@@ -220,11 +221,7 @@ impl TabControl {
         self.tab_fill.draw_quad(cx, Walk::wh(Width::Fill, Height::Fill));
         self.tabs.sweep(cx, | _, _ | ());
         if let Some((fe, id)) = &self._dragging_tab {
-            if let Ok(()) = self.drag_tab_view.begin_view(cx, Layout {
-                abs_origin: Some(Vec2::default()),
-                ..Default::default()
-            }) {
-                
+            if let Ok(()) = self.drag_tab_view.begin_view(cx, Layout::abs_origin_zero()) {
                 self.drag_tab.abs_origin = Some(Vec2 {x: fe.abs.x - fe.rel_start.x, y: fe.abs.y - fe.rel_start.y});
                 let origin_tab = self.tabs.get_draw(cx, *id, | _cx, tmpl | tmpl.clone());
                 self.drag_tab.label = origin_tab.label.clone();

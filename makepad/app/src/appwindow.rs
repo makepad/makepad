@@ -101,7 +101,7 @@ impl AppWindow {
                     storage.save_state(cx, state);
                 }
                 if wc.old_geom.xr_is_presenting && !wc.new_geom.xr_is_presenting {
-                    self.desktop_window.inner_view.set_view_transform(cx, &Mat4::identity());
+                    self.desktop_window.main_view.set_view_transform(cx, &Mat4::identity());
                 }
             }
             _ => ()
@@ -109,7 +109,7 @@ impl AppWindow {
         
         match event {
             Event::XRUpdate(xu) => { // handle all VR updates here.
-                let mut events = self.xr_control.handle_xr_control(cx, xu, &self.desktop_window.inner_view);
+                let mut events = self.xr_control.handle_xr_control(cx, xu, &self.desktop_window.main_view);
                 for event in &mut events{
                     match event{
                         Event::FingerHover(fe)=>{
