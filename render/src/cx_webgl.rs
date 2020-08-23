@@ -212,7 +212,7 @@ impl Cx {
                 shader_ast
             }
         };
-
+        
         let vertex = generate_glsl::generate_vertex_shader(&shader_ast,use_const_table);
         let fragment = generate_glsl::generate_fragment_shader(&shader_ast,use_const_table);
         let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, if use_const_table{shader_ast.const_table.borrow_mut().take()} else {None});

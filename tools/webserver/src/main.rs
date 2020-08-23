@@ -19,7 +19,6 @@ fn main() {
     let ex_file = ["bindings.rs"];
     let ex_dirs = ["deps", "build", "edit_repo"];
      
-    // do the brotli compression async
     let brotli_filecache = Arc::new(Mutex::new(None));
     let zlib_filecache = Arc::new(Mutex::new(None));
     
@@ -47,7 +46,6 @@ fn main() {
                 *fc = None;
             }
             
-            // now start the zlib compression
             let mut new_brotli_filecache = HashMap::new();
             println!("Starting brotli compression");
             let mut total_size = 0;
