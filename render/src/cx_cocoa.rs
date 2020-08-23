@@ -469,7 +469,8 @@ impl CocoaApp {
                             rect: Rect::default(),
                             is_wheel: false,
                             modifiers: get_event_key_modifier(ns_event),
-                            handled: false,
+                            handled_x: false,
+                            handled_y: false,
                             time: self.time_now()
                         })
                     ]);
@@ -484,7 +485,8 @@ impl CocoaApp {
                             rect: Rect::default(),
                             is_wheel: true,
                             modifiers: get_event_key_modifier(ns_event),
-                            handled: false,
+                            handled_x: false,
+                            handled_y: false,
                             time: self.time_now()
                         })
                     ]);
