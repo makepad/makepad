@@ -132,7 +132,7 @@ impl HttpServer {
             }
         }
         
-        if accept_encoding.contains("deflate") {
+        if accept_encoding.contains("gzip") {
             if let Some(zlib_filecache) = zlib_filecache {
                 println!("HERE2 {:?}", url);
                 if let Some(data) = zlib_filecache.get(&url) {
