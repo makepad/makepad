@@ -297,7 +297,7 @@ impl ShaderGen {
                         let sub = &self.subs[err.span.loc_id];
                         return ShaderGenResult::Error(Self::shader_gen_error(&err, sub));
                     }
-                    
+                    cache.code = sub.code.clone();
                     cache.prev_consts = Some(ShaderInheritConst {
                         const_table: shader_ast.const_table.borrow().clone().unwrap(),
                         const_table_spans: shader_ast.const_table_spans.borrow().clone().unwrap()
