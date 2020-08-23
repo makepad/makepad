@@ -584,7 +584,8 @@ impl Win32Window {
                         rect: Rect::default(),
                         is_wheel: true,
                         modifiers: Self::get_key_modifiers(),
-                        handled: false,
+                        handled_x: false,
+                        handled_y: false,
                         time: window.time_now()
                     })
                 ]);
