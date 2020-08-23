@@ -357,7 +357,11 @@ fn write_bytes_to_tcp_stream_no_error(tcp_stream: &mut TcpStream, bytes: &[u8]) 
 }
 
 fn split_header_line<'a>(inp: &'a str, what: &str) -> Option<&'a str> {
-    if inp.starts_with(what) {
+    let mut what_lc = what.to_string();
+    what_lc.make_ascii_lowercase();
+    let mut inp_lc = inp.to_string();
+    inp_lc.make_ascii_lowercase();
+    if inp_lc.starts_with(&what_lc) {
         return Some(&inp[what.len()..(inp.len() - 2)])
     }
     None
