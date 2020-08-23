@@ -24,7 +24,7 @@ fn main() {
     let zlib_filecache = Arc::new(Mutex::new(None));
     
     let http_server = HttpServer::start_http_server(
-        SocketAddr::from(([0, 0, 0, 0], 8080)),
+        SocketAddr::from(([0, 0, 0, 0], 80)),
         brotli_filecache.clone(),
         zlib_filecache.clone(),
     ).expect("Can't start server");
