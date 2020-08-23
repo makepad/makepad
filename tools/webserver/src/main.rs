@@ -132,9 +132,8 @@ impl HttpServer {
             }
         }
         
-        if accept_encoding.contains("gzip") {
+        if accept_encoding.contains("gzip") || accept_encoding.contains("deflate"){
             if let Some(zlib_filecache) = zlib_filecache {
-                println!("HERE2 {:?}", url);
                 if let Some(data) = zlib_filecache.get(&url) {
                     let header = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\
@@ -321,7 +320,7 @@ impl HttpServer {
                             // ok we have the data. Jump to the post handler
                             return Self::handle_post(&mut tcp_stream, url, body);
                         }
-                        println!("HERE1 {:?}", header);
+
                         if let Some(url) = split_header_line(&header[0], "GET ") {
                             if let Some(accept_encoding) = accept_encoding {
                                 return Self::handle_get(&mut tcp_stream, url, accept_encoding, zlib_filecache, brotli_filecache)
