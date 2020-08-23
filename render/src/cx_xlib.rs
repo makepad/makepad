@@ -476,7 +476,8 @@ impl XlibApp {
                                         rect: Rect::default(),
                                         is_wheel: true,
                                         modifiers: self.xkeystate_to_modifiers(button.state),
-                                        handled: false,
+                                        handled_x: false,
+                                        handled_y: false,
                                         time: self.last_scroll_time
                                     })])
                                 }
