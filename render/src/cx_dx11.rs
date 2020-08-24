@@ -297,9 +297,11 @@ impl Cx {
             },
             ShaderGenResult::PatchedConstTable(const_table)=>{
                 sh.mapping.const_table = Some(const_table);
-                if let Some(const_table) = &sh.mapping.const_table{
-                    if const_table.len()>0{
-                        sh_platform.const_table_uniforms.update_with_f32_constant_data(d3d11_cx, const_table.as_slice());
+                if let Some(sh_platform) = &mut sh.platform{
+                    if let Some(const_table) = &sh.mapping.const_table{
+                        if const_table.len()>0{
+                            sh_platform.const_table_uniforms.update_with_f32_constant_data(d3d11_cx, const_table.as_slice());
+                        }
                     }
                 }
                 return ShaderCompileResult::Nop{id:shader_id}
