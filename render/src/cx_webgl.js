@@ -1999,7 +1999,7 @@
         },
         function normalscreen_29(self) {
             self.normalscreen();
-        },
+        }, 
     ]
     
     WasmApp.prototype.uniform_fn_table = {
