@@ -243,9 +243,9 @@ impl ShaderView {
     
     pub fn handle_shader_view(&mut self, cx: &mut Cx, event: &mut Event) {
         match event.hits(cx, self.area, HitOpt::default()) {
-            Event::Frame(_ae)=>{
-                self.time += 1.0/60.0;
-                //self.time = ae.time;
+            Event::Frame(ae)=>{
+                //self.time += 1.0/60.0;
+                self.time = ae.time as f32;
                 self.area.write_float(cx, Self::time(), self.time);
                 cx.next_frame(self.area);
             },
