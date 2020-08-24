@@ -7,6 +7,7 @@ pub struct TokenizerState<'a> {
     pub lines: &'a Vec<Vec<char>>,
     pub line_start: usize,
     pub line_counter: usize,
+    pub eof: bool,
     pub offset: usize,
     iter: std::slice::Iter<'a, char>
 }
@@ -18,6 +19,7 @@ impl<'a> TokenizerState<'a> {
             line_start: 0,
             line_counter: 0,
             offset: 0,
+            eof: false,
             prev: '\0',
             cur: '\0',
             next: '\0',
@@ -47,9 +49,11 @@ impl<'a> TokenizerState<'a> {
         }
         else {
             self.offset += 1;
+            self.eof = true;
             self.next = '\0'
         }
     }
+
     
     pub fn next_is_digit(&self) -> bool {
         self.next >= '0' && self.next <= '9'

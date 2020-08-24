@@ -1464,8 +1464,12 @@
                 
                 this.xr_left_projection_matrix = left_view.projectionMatrix;
                 this.xr_left_transform_matrix = left_view.transform.inverse.matrix;
+                this.xr_left_invtransform_matrix = left_view.transform.matrix;
+                
                 this.xr_right_projection_matrix = right_view.projectionMatrix;
                 this.xr_right_transform_matrix = right_view.transform.inverse.matrix;
+                this.xr_right_camera_pos = right_view.transform.inverse.position;
+                this.xr_right_invtransform_matrix = right_view.transform.matrix;
             }
             else {
                 gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1783,7 +1787,7 @@
             
             
             if (this.is_main_canvas && this.xr_is_presenting) {
-                for (let i = 2; i < pass_uniforms.length; i ++) {
+                for (let i = 3; i < pass_uniforms.length; i ++) {
                     let uni = pass_uniforms[i];
                     uni.fn(this, uni.loc, uni.offset + pass_uniforms_ptr);
                 }
@@ -1793,11 +1797,16 @@
                 gl.viewport(left_viewport.x, left_viewport.y, left_viewport.width, left_viewport.height);
                 gl.uniformMatrix4fv(pass_uniforms[0].loc, false, this.xr_left_projection_matrix);
                 gl.uniformMatrix4fv(pass_uniforms[1].loc, false, this.xr_left_transform_matrix);
+                gl.uniformMatrix4fv(pass_uniforms[2].loc, false, this.xr_left_invtransform_matrix);
+
                 gl.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
                 let right_viewport = this.xr_right_viewport;
                 gl.viewport(right_viewport.x, right_viewport.y, right_viewport.width, right_viewport.height);
+
                 gl.uniformMatrix4fv(pass_uniforms[0].loc, false, this.xr_right_projection_matrix);
                 gl.uniformMatrix4fv(pass_uniforms[1].loc, false, this.xr_right_transform_matrix);
+                gl.uniformMatrix4fv(pass_uniforms[2].loc, false, this.xr_right_invtransform_matrix);
+
                 gl.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
             }
             else {
