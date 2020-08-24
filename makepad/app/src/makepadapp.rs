@@ -46,7 +46,6 @@ impl MakepadApp {
         set_widget_style(cx, &default_opt);
         set_makepad_style(cx, &default_opt);
         let ms = cx.new_signal();
-        
         // set up the keyboard map
         Self::command_preferences().set_key(cx, KeyCode::Comma);
         Self::command_new_file().set_key(cx, KeyCode::KeyN);
@@ -127,66 +126,66 @@ impl MakepadApp {
                 dock_items: DockItem::Splitter {
                     axis: Axis::Vertical,
                     align: SplitterAlign::First,
-                    pos: 150.0,
-                    first: Box::new(DockItem::TabControl {
-                        current: 0,
-                        previous: 0,
-                        tabs: vec![
-                            DockTab {
-                                closeable: false,
-                                title: "Files".to_string(),
-                                item: Panel::FileTree
-                            },
-                            DockTab {
-                                closeable: false,
-                                title: "".to_string(),
-                                item: Panel::SearchResults
-                            }
-                        ]
+                    pos: 200.0,
+                    first: Box::new(DockItem::Splitter {
+                        axis: Axis::Horizontal,
+                        align: SplitterAlign::Last,
+                        pos: 250.0,
+                        first: Box::new(DockItem::TabControl {
+                            current: 0,
+                            previous: 0,
+                            tabs: vec![
+                                DockTab {
+                                    closeable: false,
+                                    title: "Files".to_string(),
+                                    item: Panel::FileTree
+                                },
+                                DockTab {
+                                    closeable: false,
+                                    title: "".to_string(),
+                                    item: Panel::SearchResults
+                                }
+                            ]
+                        }),
+                        last: Box::new(DockItem::TabControl {
+                            current: 0,
+                            previous: 0,
+                            tabs: vec![
+                                DockTab {
+                                    closeable: false,
+                                    title: "ShaderView".to_string(),
+                                    item: Panel::ShaderView
+                                },
+                            ],
+                        }),
                     }),
                     last: Box::new(DockItem::Splitter {
                         axis: Axis::Horizontal,
                         align: SplitterAlign::Last,
                         pos: 150.0,
-                        first: Box::new(DockItem::Splitter {
-                            axis: Axis::Vertical,
-                            align: SplitterAlign::Last,
-                            pos: 150.0, 
-                            first: Box::new(DockItem::TabControl {
-                                current: 1,
-                                previous: 0,
-                                tabs: vec![
-                                    DockTab {
-                                        closeable: false,
-                                        title: "Edit".to_string(),
-                                        item: Panel::FileEditorTarget
-                                    },
-                                    DockTab {
-                                        closeable: false,
-                                        title: "shaderview.rs".to_string(),
-                                        item: Panel::FileEditor {path: "main/makepad/makepad/app/src/shaderview.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
-                                    },
-                                    
-                                ],
-                            }),
-                            last: Box::new(DockItem::TabControl {
-                                current: 0,
-                                previous: 0,
-                                tabs: vec![
-                                    DockTab {
-                                        closeable: false,
-                                        title: "ShaderView".to_string(),
-                                        item: Panel::ShaderView
-                                    },
-                                ],
-                            }),
+                        first: Box::new(DockItem::TabControl {
+                            current: 1,
+                            previous: 0,
+                            tabs: vec![
+                                DockTab {
+                                    closeable: false,
+                                    title: "Edit".to_string(),
+                                    item: Panel::FileEditorTarget
+                                },
+                                DockTab {
+                                    closeable: false,
+                                    title: "shaderview.rs".to_string(),
+                                    item: Panel::FileEditor {path: "main/makepad/makepad/app/src/shaderview.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
+                                },
+                                
+                            ],
                         }),
                         last: Box::new(DockItem::Splitter {
                             axis: Axis::Vertical,
                             align: SplitterAlign::Last,
-                            pos: 150.0,
+                            pos: 250.0,
                             first: Box::new(DockItem::TabControl {
-                                current: 0,
+                                current: 0, 
                                 previous: 0,
                                 tabs: vec![
                                     DockTab {
@@ -197,7 +196,7 @@ impl MakepadApp {
                                 ]
                             }),
                             last: Box::new(DockItem::TabControl {
-                                current: 0,
+                                current: 1,
                                 previous: 0,
                                 tabs: vec![
                                     DockTab {
@@ -237,7 +236,7 @@ impl MakepadApp {
     
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
-
+            
             Event::Construct => {
                 self.storage.init(cx);
                 if !cx.platform_type.is_desktop() {

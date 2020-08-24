@@ -492,6 +492,7 @@ impl TextBuffer {
                 return middle
             }
             else if start_pos.row == end_pos.row { // replacing single line with multiple lines
+                
                 let mut last_bit: Vec<char> = self.lines[start_pos.row].drain(end_pos.col..).collect();
                 // but we have co drain end_col..
                 
@@ -556,6 +557,7 @@ impl TextBuffer {
         let rep_lines = Self::split_string_to_lines(string);
         let rep_lines_chars = calc_char_count(&rep_lines);
         let lines = self.replace_range(start, len, rep_lines);
+
         TextOp {
             start: start,
             len: rep_lines_chars,

@@ -518,6 +518,7 @@ impl TextCursorSet {
         for cursor in &mut self.set {
             let (start, end) = cursor.delta(delta);
             let op = text_buffer.replace_lines_with_string(start, end - start, text);
+
             delta += cursor.collapse(start, end, op.len);
             ops.push(op);
             old_max = cursor.calc_max(text_buffer, old_max);
