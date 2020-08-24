@@ -145,6 +145,7 @@ pub struct CxPassColorTexture {
 pub struct PassUniforms{
     camera_projection:[f32;16],
     camera_view:[f32;16],
+    camera_inv:[f32;16],
     dpi_factor:f32,
     dpi_dilate:f32,
     pad1:f32,
@@ -206,6 +207,8 @@ impl CxPass {
     
     fn camera_projection()->Mat4Id{uid!()}
     fn camera_view()->Mat4Id{uid!()}
+    fn camera_inv()->Mat4Id{uid!()}
+
     fn dpi_factor()->FloatId{uid!()}
     fn dpi_dilate()->FloatId{uid!()}
     
@@ -213,6 +216,7 @@ impl CxPass {
         sg.compose(shader!{"
             uniform camera_projection: Self::camera_projection() in pass;
             uniform camera_view: Self::camera_view() in pass;
+            uniform camera_inv: Self::camera_inv() in pass;
             uniform dpi_factor: Self::dpi_factor() in pass;
             uniform dpi_dilate: Self::dpi_dilate() in pass;
         "})

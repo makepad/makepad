@@ -99,6 +99,7 @@ impl RustEditor {
     pub fn update_token_chunks(cx: &mut Cx, atb: &mut AppTextBuffer, mut search_index: Option<&mut SearchIndex>) {
         
         if atb.text_buffer.needs_token_chunks() && atb.text_buffer.lines.len() >0 {
+            
             let mut state = TokenizerState::new(&atb.text_buffer.lines);
             let mut tokenizer = MprsTokenizer::new();
             let mut pair_stack = Vec::new();

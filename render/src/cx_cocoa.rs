@@ -333,7 +333,6 @@ impl CocoaApp {
                             // was a paste
                             let nsstring: id = msg_send![self.pasteboard, stringForType: NSStringPboardType];
                             let string = nsstring_to_string(nsstring);
-                            
                             self.do_callback(&mut vec![
                                 Event::TextInput(TextInputEvent {
                                     input: string,
