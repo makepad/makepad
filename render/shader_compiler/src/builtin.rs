@@ -192,6 +192,9 @@ pub fn generate_builtins() -> HashMap<Ident, Builtin> {
             (Ty::Vec3) -> Ty::Vec3,
             (Ty::Vec4) -> Ty::Vec4
         ]),
+        builtin!(inverse, [
+            (Ty::Mat4) -> Ty::Mat4
+        ]),
         builtin!(length, [
             (Ty::Float) -> Ty::Float,
             (Ty::Vec2) -> Ty::Float,
