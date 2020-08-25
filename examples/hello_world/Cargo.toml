@@ -1,5 +1,5 @@
 [package]
-name = "makepad-example-hello-world"
+name = "hello_world"
 version = "0.1.0"
 authors = ["makepaddev"]
 edition = "2018"

@@ -558,6 +558,7 @@ impl Win32Window {
             winuser::WM_MOUSELEAVE => {
                 window.track_mouse_event = false;
                 window.do_callback(&mut vec![Event::FingerHover(FingerHoverEvent {
+                    digit:0,
                     window_id: window.window_id,
                     any_down: false,
                     abs: window.last_mouse_pos,
@@ -574,6 +575,7 @@ impl Win32Window {
                 let delta = (wparam>>16) as u16 as i16 as f32;
                 window.do_callback(&mut vec![
                     Event::FingerScroll(FingerScrollEvent {
+                        digit:0,
                         window_id: window.window_id,
                         scroll: Vec2 {
                             x: 0.0,
@@ -866,7 +868,9 @@ impl Win32Window {
     
     pub fn get_window_geom(&self) -> WindowGeom {
         WindowGeom {
-            vr_is_presenting: false,
+            xr_can_present: false,
+            xr_is_presenting: false,
+            can_fullscreen: false,
             is_topmost: self.get_is_topmost(),
             is_fullscreen: self.get_is_maximized(),
             inner_size: self.get_inner_size(),
@@ -1084,6 +1088,7 @@ impl Win32Window {
             }
         };
         events.push(Event::FingerHover(FingerHoverEvent {
+            digit: 0,
             window_id: self.window_id,
             abs: pos,
             rel: pos,

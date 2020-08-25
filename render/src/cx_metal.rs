@@ -773,7 +773,7 @@ impl Cx {
                 sh.mapping.const_table = Some(const_table);
                 return ShaderCompileResult::Nop{id:shader_id}
             },
-            ShaderGenResult::ShaderAst(shader_ast)=>{
+            ShaderGenResult::ShaderAst(shader_ast)=>{ 
                 shader_ast
             }
         };
