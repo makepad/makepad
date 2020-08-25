@@ -64,15 +64,14 @@ impl RustEditor {
     }
     
     pub fn draw_rust_editor(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, search_index: Option<&mut SearchIndex>) {
-        
         if self.view.begin_view(cx, Layout::default()).is_err() {
             return
         }; 
         
+        //self.view.set_view_debug(cx, CxViewDebug::DrawTree);
         let has_live_macros = atb.live_macros.macros.len() != 0;
         
-        if has_live_macros{
-            
+        if has_live_macros{ 
             self.splitter.begin_splitter(cx); 
             
             self.live_macros_view.draw_live_macros(cx, atb, &mut self.text_editor);

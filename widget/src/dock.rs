@@ -352,6 +352,7 @@ where TItem: Clone
                         
                         let split = self.splitters.get_draw(cx, stack_top.uid, | _cx, tmpl | tmpl.clone());
                         split.mid_splitter(cx);
+                        
                         Some(DockWalkStack {counter: 0, uid: 0, item: unsafe {mem::transmute(last.as_mut())}})
                     }
                     else {

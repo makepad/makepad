@@ -1241,7 +1241,7 @@ impl TextEditor {
     pub fn begin_text_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) -> Result<(), ()> {
         // adjust dilation based on DPI factor
         self.view.begin_view(cx, Self::layout_bg().get(cx)) ?;
-        
+
         self.apply_style(cx);
         
         if !text_buffer.is_loaded {

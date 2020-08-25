@@ -207,6 +207,20 @@ impl View {
         Rect::default()
     }
     
+    pub fn get_view_transform(&self, cx:&Cx)->Mat4{
+         if let Some(view_id) = self.view_id {
+            let cxview = &cx.views[view_id];
+            return cxview.get_view_transform()
+        }
+        Mat4::default()
+    }
+    
+   pub fn set_view_debug(&self, cx:&mut Cx, view_debug:CxViewDebug){
+         if let Some(view_id) = self.view_id {
+            let cxview = &mut cx.views[view_id];
+            cxview.debug = Some(view_debug);
+        }
+    }
     
     pub fn redraw_view_area(&self, cx: &mut Cx) {
         if let Some(view_id) = self.view_id {
@@ -436,6 +450,15 @@ impl DrawCall {
         self.draw_uniforms.draw_scroll_w = local_scroll.y;
     }
     
+    pub fn get_local_scroll(&self)->Vec4 {
+        Vec4{
+            x: self.draw_uniforms.draw_scroll_x,
+            y: self.draw_uniforms.draw_scroll_y,
+            z: self.draw_uniforms.draw_scroll_z,
+            w: self.draw_uniforms.draw_scroll_w
+        }
+    }
+    
     pub fn set_zbias(&mut self, zbias: f32) {
         self.draw_uniforms.draw_zbias = zbias;
     }
@@ -482,6 +505,12 @@ impl ViewUniforms {
     }
 }
 
+#[derive(Clone)]
+pub enum CxViewDebug {
+    DrawTree,
+    Instances
+}
+
 #[derive(Default, Clone)]
 pub struct CxView {
     pub nesting_view_id: usize, // the id of the parent we nest in, codeflow wise
@@ -497,7 +526,8 @@ pub struct CxView {
     pub snapped_scroll: Vec2,
     pub platform: CxPlatformView,
     pub rect: Rect,
-    pub clipped: bool
+    pub clipped: bool,
+    pub debug: Option<CxViewDebug>
 }
 
 impl CxView {
@@ -580,6 +610,15 @@ impl CxView {
         for i in 0..16 {
             self.view_uniforms.view_transform[i] = v.v[i];
         }
+    }
+    
+    pub fn get_view_transform(&self)->Mat4 {
+        //dump in uniforms
+        let mut m = Mat4::default();
+        for i in 0..16 {
+            m.v[i] = self.view_uniforms.view_transform[i];
+        }
+        m
     }
     
 }
