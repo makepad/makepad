@@ -271,7 +271,7 @@ impl Cx {
     
     pub fn hlsl_compile_all_shaders(&mut self, d3d11_cx: &D3d11Cx) {
         for (index, sh) in &mut self.shaders.iter_mut().enumerate() {
-            let result = Self::hlsl_compile_shader(index, false, sh, d3d11_cx);
+            let result = Self::hlsl_compile_shader(index, false, sh, d3d11_cx, &mut self.shader_inherit_cache);
             if let ShaderCompileResult::Fail {err, ..} = result {
                 panic!("{}", err);
             }
@@ -288,14 +288,14 @@ impl Cx {
             _ => panic!("slots_to_dxgi_format unsupported slotcount {}", slots)
         }
     }
-    pub fn hlsl_compile_shader(shader_id: usize, use_const_table: bool, sh: &mut CxShader, d3d11_cx: &D3d11Cx) -> ShaderCompileResult {
-        let shader_ast = sh.shader_gen.lex_parse_analyse(true);
+    pub fn hlsl_compile_shader(shader_id: usize, use_const_table: bool, sh: &mut CxShader, d3d11_cx: &D3d11Cx, inherit_cache: &mut ShaderInheritCache) -> ShaderCompileResult {
+        let shader_ast = sh.shader_gen.lex_parse_analyse(true, use_const_table, inherit_cache); 
 
         let shader_ast = match shader_ast{
             ShaderGenResult::Error(err)=>{
                 return ShaderCompileResult::Fail{id:shader_id, err:err}
             },
-            ShaderGenResult::PatchedConstTable(const_table)=>{
+            ShaderGenResult::PatchedConstTable(const_table)=>{ 
                 sh.mapping.const_table = Some(const_table);
                 if let Some(sh_platform) = &mut sh.platform{
                     if let Some(const_table) = &sh.mapping.const_table{

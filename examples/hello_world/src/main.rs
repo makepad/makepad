@@ -30,7 +30,7 @@
 //!    fn draw_app(&mut self, cx: &mut Cx) {
 //!        self.window.begin_window(cx);
 //!        self.pass.begin_pass(cx);
-//!        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(32, 0, 0)));
+//!        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(pick!(#f).get(cx)));
 //!        if self.view.begin_view(cx, Layout::default()).is_ok() {
 //!            let mut quad = Quad::new(cx);
 //!            quad.shader = App::shader().get(cx);
@@ -198,7 +198,7 @@ impl HelloWorldApp {
     fn draw_app(&mut self, cx: &mut Cx) {
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
-        self.pass.set_window_clear_color(cx, color!(#5).get(cx));
+        self.pass.set_window_clear_color(cx, pick!(#5).get(cx));
         if self.view.begin_view(cx, Layout::default()).is_ok() {
             let mut quad = Quad::new(cx);
             quad.shader = Self::shader().get(cx);
