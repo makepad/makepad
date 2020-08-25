@@ -805,8 +805,8 @@ impl BackendWriter for GlslBackendWriter {
         
     }
     
-    fn generate_var_expr_prefix(&self, _string: &mut String, _ident: Ident, _kind: &Cell<Option<VarKind>>, _shader: &ShaderAst, _decl: &FnDecl){
-        
+    fn generate_var_expr(&self, string: &mut String, ident: Ident, _kind: &Cell<Option<VarKind>>, _shader: &ShaderAst, _decl: &FnDecl, _ty:&Option<Ty>){
+        write!(string, "{}", ident).unwrap()
     }
 
     fn needs_mul_fn_for_matrix_multiplication(&self)->bool{

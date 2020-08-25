@@ -201,15 +201,45 @@ impl<'a> ShaderGenerator<'a> {
         for decl in &self.shader.decls {
             match decl {
                 Decl::Instance(decl) => {
-                    write!(self.string, "    ").unwrap();
-                    self.write_var_decl(
-                        false,
-                        true,
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                    writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
-                    index += 1;
+                    match decl.ty_expr.ty.borrow().as_ref().unwrap(){
+                        Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 =>{
+                            write!(self.string, "    ").unwrap();
+                            self.write_var_decl(
+                                false,
+                                true,
+                                decl.ident,
+                                decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                            );
+                            writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
+                            index += 1;
+                        },
+                        Ty::Mat4 =>{
+                            for i in 0..4{
+                                write!(self.string, "    ").unwrap();
+                                self.write_ty_lit(TyLit::Vec4);
+                                write!(self.string, " {}{}", decl.ident, i).unwrap();
+                                writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
+                                index += 1;                                
+                            }
+                        },
+                        Ty::Mat3=>{
+                            for i in 0..3{
+                                write!(self.string, "    ").unwrap();
+                                self.write_ty_lit(TyLit::Vec3);
+                                write!(self.string, " {}{}", decl.ident, i).unwrap();
+                                writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
+                                index += 1;                                
+                            }
+                        },
+                        Ty::Mat2 =>{
+                            write!(self.string, "    ").unwrap();
+                            self.write_ty_lit(TyLit::Vec4);
+                            write!(self.string, " {}", decl.ident).unwrap();
+                            writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
+                            index += 1;                                
+                        },
+                        _=>panic!("unsupported type in generate_instance_struct")
+                    }
                 }
                 _ => {}
             }
@@ -672,14 +702,50 @@ impl BackendWriter for HlslBackendWriter {
     }
     
     
-    fn generate_var_expr_prefix(&self, string: &mut String, _ident: Ident, kind: &Cell<Option<VarKind>>, _shader: &ShaderAst, decl: &FnDecl) {
+    fn generate_var_expr(&self, string: &mut String, ident: Ident, kind: &Cell<Option<VarKind>>, _shader: &ShaderAst, decl: &FnDecl, ty:&Option<Ty>) {
         
         let is_used_in_vertex_shader = decl.is_used_in_vertex_shader.get().unwrap();
         let is_used_in_fragment_shader = decl.is_used_in_fragment_shader.get().unwrap();
         if is_used_in_vertex_shader {
             match kind.get().unwrap() {
                 VarKind::Geometry => write!(string, "mpsc_geometries.").unwrap(),
-                VarKind::Instance => write!(string, "mpsc_instances.").unwrap(),
+                VarKind::Instance =>{
+                    match ty{
+                        Some(Ty::Mat4)=>{
+                            write!(string, "float4x4(").unwrap();
+                            for i in 0..4{
+                                if i != 0{
+                                    write!(string, ",").unwrap();
+                                }
+                                write!(string, "mpsc_instances.").unwrap();
+                                write!(string, "{}{}", ident, i).unwrap();
+                            }
+                            write!(string, ")").unwrap();
+                            return
+                        },
+                        Some(Ty::Mat3)=>{
+                            write!(string, "float3x3(").unwrap();
+                            for i in 0..3{
+                                if i != 0{
+                                    write!(string, ",").unwrap();
+                                }
+                                write!(string, "mpsc_instances.").unwrap();
+                                write!(string, "{}{}", ident, i).unwrap();
+                            }
+                            write!(string, ")").unwrap();
+                            return
+                        },
+                        Some(Ty::Mat2)=>{
+                            write!(string, "float2x2(").unwrap();
+                            write!(string, "mpsc_instances.").unwrap();
+                            write!(string, ")").unwrap();
+                            return
+                        },
+                        _=>{
+                            write!(string, "mpsc_instances.").unwrap();
+                        }
+                    }
+                },
                 VarKind::Varying => write!(string, "mpsc_varyings.").unwrap(),
                 _ => {}
             }
@@ -692,6 +758,7 @@ impl BackendWriter for HlslBackendWriter {
                 _ => {}
             }
         }
+        write!(string, "{}", ident).unwrap();
     }
     
     fn needs_mul_fn_for_matrix_multiplication(&self) -> bool {
