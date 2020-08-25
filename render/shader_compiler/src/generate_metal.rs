@@ -704,7 +704,7 @@ impl BackendWriter for MetalBackendWriter {
         }
     }
     
-    fn generate_var_expr_prefix(&self, string: &mut String, ident: Ident, kind: &Cell<Option<VarKind>>, shader: &ShaderAst, decl: &FnDecl) {
+    fn generate_var_expr(&self, string: &mut String, ident: Ident, kind: &Cell<Option<VarKind>>, shader: &ShaderAst, decl: &FnDecl, _ty:&Option<Ty>) {
     
         let is_used_in_vertex_shader = decl.is_used_in_vertex_shader.get().unwrap();
         let is_used_in_fragment_shader = decl.is_used_in_fragment_shader.get().unwrap();
@@ -750,6 +750,7 @@ impl BackendWriter for MetalBackendWriter {
                 _ => {}
             }
         }
+        write!(string, "{}", ident).unwrap()
     }
 
     fn needs_mul_fn_for_matrix_multiplication(&self)->bool{
