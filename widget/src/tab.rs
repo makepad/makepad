@@ -314,6 +314,7 @@ impl Tab {
             self.text.text_style = Self::text_style_title().get(cx);
             self.text.color = self.animator.last_color(cx, Text::color());
             self._text_area = self.text.draw_text(cx, &self.label);
+
             cx.turtle_align_y();
             self._bg_inst = Some(bg_inst);
             
