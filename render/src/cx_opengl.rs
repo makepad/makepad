@@ -74,7 +74,7 @@ impl Cx {
                     gl::UseProgram(shp.program);
                     gl::BindVertexArray(draw_call.platform.vao.unwrap());
                     let instances = draw_call.instance.len() / sh.mapping.instance_props.total_slots;
-                    let indices = sh.shader_gen.geometry_indices.len();
+                    let indices = sh.shader_gen.geometry.indices.len();
                     
                     let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
                     let view_uniforms = cxview.view_uniforms.as_slice();
@@ -569,11 +569,19 @@ impl Cx {
         
         // lets compile.
         let shader_ast = sh.shader_gen.lex_parse_analyse(true);
-        
-        if let Err(err) = shader_ast{
-            return ShaderCompileResult::Fail{id:shader_id, err:err}
-        } 
-        let shader_ast = shader_ast.unwrap();
+
+        let shader_ast = match shader_ast{
+            ShaderGenResult::Error(err)=>{
+                return ShaderCompileResult::Fail{id:shader_id, err:err}
+            },
+            ShaderGenResult::PatchedConstTable(const_table)=>{
+                sh.mapping.const_table = Some(const_table);
+                return ShaderCompileResult::Nop{id:shader_id}
+            },
+            ShaderGenResult::ShaderAst(shader_ast)=>{
+                shader_ast
+            }
+        };
         
         // lets generate the vertexshader
         let vertex = generate_glsl::generate_vertex_shader(&shader_ast, use_const_table);
@@ -654,12 +662,12 @@ impl Cx {
                 program: program, 
                 geom_ibuf: {
                     let mut buf = OpenglBuffer::default();
-                    buf.update_with_u32_data(opengl_cx, &sh.shader_gen.geometry_indices);
+                    buf.update_with_u32_data(opengl_cx, &sh.shader_gen.geometry.indices);
                     buf
                 },
                 geom_vbuf: {
                     let mut buf = OpenglBuffer::default();
-                    buf.update_with_f32_data(opengl_cx, &sh.shader_gen.geometry_vertices);
+                    buf.update_with_f32_data(opengl_cx, &sh.shader_gen.geometry.vertices);
                     buf
                 },
                 geometries,

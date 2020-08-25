@@ -3,6 +3,7 @@ use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
 use crate::span::Span;
 use crate::token::{Token, TokenWithSpan};
+use crate::colors::Color;
 
 #[derive(Clone, Debug)]
 pub struct Lex<C> {
@@ -74,10 +75,18 @@ where
             }
             ('#', _) => {
                 self.skip_char();
-                let mut digits = Vec::new();
+                let mut hex = Vec::new();
                 while let Some(ch) = self.read_char_if(|ch| ch.is_ascii_hexdigit()) {
-                    digits.push(ch.to_digit(16).unwrap());
+                    hex.push(ch as u8)
+                    //digits.push(ch.to_digit(16).unwrap() as u8);
                 }
+                if let Ok(color) = Color::parse_hex(&hex){
+                    Token::Lit(Lit::Vec4(color.to_vec4()))
+                }
+                else{
+                    return Err(span.error(self, "Cannot parse color".into()));
+                }
+                /*
                 let mut value = 0;
                 match digits.len() {
                     1 => {
@@ -126,7 +135,7 @@ where
                     }
                     _ => return Err(span.error(self, "invalid color literal".into())),
                 }
-                Token::Lit(Lit::Int(value))
+                */
             }
             ('&', '&') => {
                 self.skip_two_chars();

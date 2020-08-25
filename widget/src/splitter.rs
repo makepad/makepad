@@ -198,6 +198,7 @@ impl Splitter {
                         pos
                     }
                 };
+                //log_str(&format!("CALC POS {}", calc_pos));
                 // pixelsnap calc_pos
                 if calc_pos != self._calc_pos {
                     self._calc_pos = calc_pos;

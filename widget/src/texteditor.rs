@@ -170,11 +170,11 @@ impl TextEditor {
             view: ScrollView::new(cx),
             bg: Quad ::new(cx),
             shadow: ScrollShadow {
-                z: 10.,
+                z: 1.,
                 ..ScrollShadow::new(cx)
             },
             gutter_bg: Quad {
-                z: 9.0,
+                z: 2.1,
                 ..Quad::new(cx)
             },
             colors: CodeEditorColors::default(),
@@ -196,7 +196,7 @@ impl TextEditor {
                 ..Text::new(cx)
             },
             line_number_text: Text {
-                z: 9.,
+                z: 2.2,
                 wrapping: Wrapping::Line,
                 ..Text::new(cx)
             },
@@ -477,7 +477,7 @@ impl TextEditor {
                 //df_rect(0.,0.,w,h);
                 cx.move_to(0., h - 1.);
                 cx.line_to(w, h - 1.);
-                return cx.stroke(pick!(white), 0.8);
+                return cx.stroke(pick!(#AB6363), 0.8);
                 /*
                 df_viewport(pos * vec2(w, h));
                 df_box(0.5, 0.5, w - 1., h - 1., 1.);
@@ -974,13 +974,21 @@ impl TextEditor {
         
     }
     
-    pub fn handle_live_replace(&mut self, cx: &mut Cx, range:(usize, usize), what:&str, text_buffer: &mut TextBuffer, group:u64){
+    pub fn handle_live_replace(&mut self, cx: &mut Cx, range:(usize, usize), what:&str, text_buffer: &mut TextBuffer, group:u64)->bool{
         // let set the cursor selection
         self.cursors.clear_and_set_last_cursor_head_and_tail(range.1, range.0, text_buffer);
         self.cursors.replace_text(what, text_buffer, Some(TextUndoGrouping::LiveEdit(group)));
         self.scroll_last_cursor_visible(cx, text_buffer, 0.);
         self.view.redraw_view_area(cx);
         self.reset_cursor_blinker(cx);
+        // do inplace update so we don't need to re-tokenize possibly
+        if what.len() == range.1 - range.0{
+            for (index, c) in what.chars().enumerate(){
+                text_buffer.flat_text[range.0 + index] = c;
+            }
+            return true
+        }
+        return false
     }
     
     pub fn handle_text_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
@@ -1003,6 +1011,16 @@ impl TextEditor {
         let last_mutation_id = text_buffer.mutation_id;
         // global events
         match event {
+            Event::XRUpdate(xu)=>{
+                if self.has_key_focus(cx) &&  xu.right_input.buttons[1].pressed != xu.last_right_input.buttons[1].pressed{
+                    if  xu.right_input.buttons[1].pressed{
+                        self.start_code_folding(cx, text_buffer);
+                    }
+                    else{
+                        self.start_code_unfolding(cx, text_buffer);                        
+                    }
+                }
+            },
             Event::Timer(te) => if self._cursor_blink_timer.is_timer(te) {
                 if self.has_key_focus(cx) {
                     self._cursor_blink_timer = cx.start_timer(self.cursor_blink_speed, false);
@@ -1231,7 +1249,7 @@ impl TextEditor {
             //    align: Align::left_top(),
             //    ..self.bg_layout.clone()
             //});
-            self.text.color = pick!(#666).get(cx);
+            self.text.color = pick!(#433838).get(cx);
             self.text.draw_text(cx, "...");
             //self.bg.end_quad(cx, &bg_inst);
             //self._bg_area = bg_inst.into_area();

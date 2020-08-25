@@ -447,6 +447,10 @@ impl TextBuffer {
         }
     }
     
+    pub fn mark_clean(&mut self){
+        self.token_chunks_id = self.mutation_id;
+    }
+    
     pub fn replace_range(&mut self, start: usize, len: usize, mut rep_lines: Vec<Vec<char>>) -> Vec<Vec<char>> {
         self.mutation_id += 1;
         let start_pos = self.offset_to_text_pos(start);
@@ -488,6 +492,7 @@ impl TextBuffer {
                 return middle
             }
             else if start_pos.row == end_pos.row { // replacing single line with multiple lines
+                
                 let mut last_bit: Vec<char> = self.lines[start_pos.row].drain(end_pos.col..).collect();
                 // but we have co drain end_col..
                 
@@ -552,6 +557,7 @@ impl TextBuffer {
         let rep_lines = Self::split_string_to_lines(string);
         let rep_lines_chars = calc_char_count(&rep_lines);
         let lines = self.replace_range(start, len, rep_lines);
+
         TextOp {
             start: start,
             len: rep_lines_chars,

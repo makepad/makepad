@@ -112,7 +112,16 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
-        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("vertex")).unwrap());
+        let vertex_decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
+        for &(ty_lit, ref param_tys) in vertex_decl
+            .cons_fn_deps
+            .borrow_mut()
+            .as_ref()
+            .unwrap()
+        {
+            self.generate_cons_fn(ty_lit, param_tys);
+        }
+        self.generate_fn_decl(vertex_decl);
         writeln!(self.string, "void main() {{").unwrap();
         let mut geometry_unpacker = VarUnpacker::new(
             "mpsc_packed_geometry",
@@ -203,7 +212,17 @@ impl<'a> ShaderGenerator<'a> {
                 _ => {}
             }
         }
-        self.generate_fn_decl(self.shader.find_fn_decl(Ident::new("pixel")).unwrap());
+
+        let pixel_decl = self.shader.find_fn_decl(Ident::new("pixel")).unwrap();
+        for &(ty_lit, ref param_tys) in pixel_decl
+            .cons_fn_deps
+            .borrow_mut()
+            .as_ref()
+            .unwrap()
+        {
+            self.generate_cons_fn(ty_lit, param_tys);
+        }
+        self.generate_fn_decl(pixel_decl);
         writeln!(self.string, "void main() {{").unwrap();
         let mut varying_unpacker = VarUnpacker::new(
             "mpsc_packed_varying",
@@ -409,6 +428,96 @@ impl<'a> ShaderGenerator<'a> {
             packed_var_index += 1;
         }
     }
+    
+    
+    fn generate_cons_fn(&mut self, ty_lit: TyLit, param_tys: &[Ty]) {
+        let mut cons_name = format!("mpsc_{}", ty_lit);
+        for param_ty in param_tys {
+            write!(cons_name, "_{}", param_ty).unwrap();
+        }
+        if !GlslBackendWriter.use_cons_fn(&cons_name){
+            return
+        }
+        
+        self.write_ty_lit(ty_lit);
+        write!(self.string, " {}(", cons_name).unwrap();
+        let mut sep = "";
+        if param_tys.len() == 1 {
+            self.write_var_decl(false, Ident::new("x"), &param_tys[0])
+        } else {
+            for (index, param_ty) in param_tys.iter().enumerate() {
+                write!(self.string, "{}", sep).unwrap();
+                self.write_var_decl(false, Ident::new(format!("x{}", index)), param_ty);
+                sep = ", ";
+            }
+        }
+        writeln!(self.string, ") {{").unwrap();
+        write!(self.string, "    return ").unwrap();
+        self.write_ty_lit(ty_lit);
+        write!(self.string, "(").unwrap();
+        let ty = ty_lit.to_ty();
+        if param_tys.len() == 1 {
+            let param_ty = &param_tys[0];
+            match param_ty {
+                Ty::Bool | Ty::Int | Ty::Float => {
+                    let mut sep = "";
+                    for _ in 0..ty.size() {
+                        write!(self.string, "{}x", sep).unwrap();
+                        sep = ", ";
+                    }
+                }
+                Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => {
+                    let dst_size = match ty {
+                        Ty::Mat2 => 2,
+                        Ty::Mat3 => 3,
+                        Ty::Mat4 => 4,
+                        _ => panic!(),
+                    };
+                    let src_size = match param_ty {
+                        Ty::Mat2 => 2,
+                        Ty::Mat3 => 3,
+                        Ty::Mat4 => 4,
+                        _ => panic!(),
+                    };
+                    let mut sep = "";
+                    for col_index in 0..dst_size {
+                        for row_index in 0..dst_size {
+                            if row_index < src_size && col_index < src_size {
+                                write!(self.string, "{}x[{}][{}]", sep, col_index, row_index)
+                                    .unwrap();
+                            } else {
+                                write!(
+                                    self.string,
+                                    "{}{}",
+                                    sep,
+                                    if col_index == row_index {1.0} else {0.0}
+                                )
+                                    .unwrap();
+                            }
+                            sep = ", ";
+                        }
+                    }
+                }
+                _ => panic!(),
+            }
+        } else {
+            let mut sep = "";
+            for (index_0, param_ty) in param_tys.iter().enumerate() {
+                if param_ty.size() == 1 {
+                    write!(self.string, "{}x{}", sep, index_0).unwrap();
+                    sep = ", ";
+                } else {
+                    for index_1 in 0..param_ty.size() {
+                        write!(self.string, "{}x{}[{}]", sep, index_0, index_1).unwrap();
+                        sep = ", ";
+                    }
+                }
+            }
+        }
+        writeln!(self.string, ");").unwrap();
+        writeln!(self.string, "}}").unwrap();
+    }
+    
 
     fn generate_fn_decl(&mut self, decl: &FnDecl) {
         FnDeclGenerator {
@@ -427,7 +536,7 @@ impl<'a> ShaderGenerator<'a> {
             decl: None,
             backend_writer: &GlslBackendWriter,
             use_const_table: self.use_const_table,
-            use_generated_cons_fns: false,
+            //use_generated_cons_fns: false,
             string: self.string,
         }
         .generate_expr(expr)
@@ -436,6 +545,16 @@ impl<'a> ShaderGenerator<'a> {
     fn write_var_decl(&mut self, is_inout: bool, ident: Ident, ty: &Ty) {
         GlslBackendWriter.write_var_decl(&mut self.string, is_inout, false, ident, ty);
     }
+    
+    
+    fn write_ident(&mut self, ident: Ident) {
+        GlslBackendWriter.write_ident(&mut self.string, ident);
+    }
+    
+    fn write_ty_lit(&mut self, ty_lit: TyLit) {
+        GlslBackendWriter.write_ty_lit(&mut self.string, ty_lit);
+    }
+    
 }
 
 struct FnDeclGenerator<'a> {
@@ -489,7 +608,7 @@ impl<'a> FnDeclGenerator<'a> {
             decl: self.decl,
             backend_writer: &GlslBackendWriter,
             use_const_table: self.use_const_table,
-            use_generated_cons_fns: false,
+            //use_generated_cons_fns: false,
             indent_level: 0,
             string: self.string,
         }
@@ -529,10 +648,11 @@ impl<'a> VarPacker<'a> {
     fn pack_var(&mut self, ident: Ident, ty: &Ty) {
         let var_size = ty.size();
         let mut var_offset = 0;
+        let mut in_matrix = None;
         while var_offset < var_size {
             let count = var_size - var_offset;
             let packed_count = self.packed_var_size - self.packed_var_offset;
-            let min_count = count.min(packed_count);
+            let min_count = if var_size > 4{ 1 } else{count.min(packed_count)};
             write!(
                 self.string,
                 "    {}_{}",
@@ -549,12 +669,31 @@ impl<'a> VarPacker<'a> {
             }
             write!(self.string, " = {}", ident).unwrap();
             if var_size > 1 {
-                write!(
-                    self.string,
-                    ".{}",
-                    Swizzle::from_range(var_offset, var_offset + min_count)
-                )
-                .unwrap();
+                if var_size <= 4{ 
+                    in_matrix = None;
+                    write!(
+                        self.string,
+                        ".{}",
+                        Swizzle::from_range(var_offset, var_offset + min_count)
+                    )
+                    .unwrap();
+                }
+                else{ // make a matrix constructor and unpack into it
+                    if let Some(in_matrix) = &mut in_matrix{
+                        *in_matrix += 1;
+                    }
+                    else{
+                        in_matrix = Some(0);
+                    }
+                    if let Some(in_matrix) = in_matrix{
+                        write!(
+                            self.string,
+                            "[{}][{}]",
+                            in_matrix>>2,
+                            in_matrix&3,
+                        ).unwrap();
+                    }
+                }
             }
             writeln!(self.string, ";").unwrap();
             self.packed_var_offset += min_count;
@@ -596,19 +735,39 @@ impl<'a> VarUnpacker<'a> {
 
     fn unpack_var(&mut self, ident: Ident, ty: &Ty) {
         let var_size = ty.size();
-        let mut var_offset = 0;
+        let mut var_offset = 0; 
+        let mut in_matrix = None;
         while var_offset < var_size {
             let count = var_size - var_offset;
             let packed_count = self.packed_var_size - self.packed_var_offset;
-            let min_count = count.min(packed_count);
+            let min_count = if var_size > 4{ 1 } else{count.min(packed_count)};
             write!(self.string, "    {}", ident).unwrap();
             if var_size > 1 {
-                write!(
-                    self.string,
-                    ".{}",
-                    Swizzle::from_range(var_offset, var_offset + min_count)
-                )
-                .unwrap();
+                if var_size <= 4{ // its a matrix
+                    in_matrix = None;
+                    write!(
+                        self.string,
+                        ".{}",
+                        Swizzle::from_range(var_offset, var_offset + min_count)
+                    )
+                    .unwrap();
+                }
+                else{ 
+                    if let Some(in_matrix) = &mut in_matrix{
+                        *in_matrix += 1;
+                    }
+                    else{
+                        in_matrix = Some(0);
+                    }
+                    if let Some(in_matrix) = in_matrix{
+                        write!(
+                            self.string,
+                            "[{}][{}]",
+                            in_matrix>>2,
+                            in_matrix&3,
+                        ).unwrap(); 
+                    }
+                }
             }
             write!(
                 self.string,
@@ -616,6 +775,7 @@ impl<'a> VarUnpacker<'a> {
                 self.packed_var_name, self.packed_var_index
             )
             .unwrap();
+            
             if self.packed_var_size > 1 {
                 write!(
                     self.string,
@@ -624,6 +784,7 @@ impl<'a> VarUnpacker<'a> {
                 )
                 .unwrap();
             }
+ 
             writeln!(self.string, ";").unwrap();
             var_offset += min_count;
             self.packed_var_offset += min_count;
@@ -644,17 +805,26 @@ impl BackendWriter for GlslBackendWriter {
         
     }
     
-    fn generate_var_expr_prefix(&self, _string: &mut String, _ident: Ident, _kind: &Cell<Option<VarKind>>, _shader: &ShaderAst, _decl: &FnDecl){
-        
+    fn generate_var_expr(&self, string: &mut String, ident: Ident, _kind: &Cell<Option<VarKind>>, _shader: &ShaderAst, _decl: &FnDecl, _ty:&Option<Ty>){
+        write!(string, "{}", ident).unwrap()
     }
 
     fn needs_mul_fn_for_matrix_multiplication(&self)->bool{
         false
     }
 
+    fn needs_unpack_for_matrix_multiplication(&self)->bool{
+        false
+    }
+
     fn  const_table_is_vec4(&self) -> bool{
         false
     }
+
+    fn use_cons_fn(&self, _what:&str)->bool{
+        false
+    }
+
 
     fn write_var_decl(
         &self,

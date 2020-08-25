@@ -126,12 +126,15 @@ impl JSTokenizer {
             }
         }
         else {
+            if state.eof{
+                return TokenType::Eof
+            }
             state.advance_with_cur();
             match state.cur {
                 
                 '\0' => { // eof insert a terminating space and end
-                    chunk.push(' ');
-                    return TokenType::Eof
+                    chunk.push('\0');
+                    return TokenType::Whitespace
                 },
                 '\n' => {
                     chunk.push('\n');
@@ -169,7 +172,7 @@ impl JSTokenizer {
                             _ => false
                         };
                         if is_regexp {
-                            while state.next != '\0' && state.next != '\n' {
+                            while !state.eof && state.next != '\n' {
                                 if state.next != '/' || state.prev != '\\' && state.cur == '\\' && state.next == '/' {
                                     chunk.push(state.next);
                                     state.advance_with_prev();
@@ -199,7 +202,7 @@ impl JSTokenizer {
                     let end_char = state.cur;
                     chunk.push(state.cur);
                     state.prev = '\0';
-                    while state.next != '\0' && state.next != '\n' {
+                    while !state.eof && state.next != '\n' {
                         if state.next == '\\' {
                             Self::parse_js_escape_char(state, chunk);
                         }

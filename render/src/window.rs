@@ -101,6 +101,37 @@ impl Window {
         }
     }
     
+    pub fn fullscreen_window(&mut self, cx:&mut Cx){
+        if let Some(window_id) = self.window_id {
+            cx.windows[window_id].window_command = CxWindowCmd::FullScreen;
+        }
+    }
+    
+    pub fn normal_window(&mut self, cx:&mut Cx){
+        if let Some(window_id) = self.window_id {
+            cx.windows[window_id].window_command = CxWindowCmd::NormalScreen;
+        }
+    }
+    
+        
+    pub fn can_fullscreen(&mut self, cx: &mut Cx) -> bool {
+        if let Some(window_id) = self.window_id {
+            cx.windows[window_id].window_geom.can_fullscreen
+        }
+        else {
+            false
+        }
+    }
+    
+    pub fn xr_can_present(&mut self, cx: &mut Cx) -> bool {
+        if let Some(window_id) = self.window_id {
+            cx.windows[window_id].window_geom.xr_can_present
+        }
+        else {
+            false
+        }
+    }
+    
     pub fn is_fullscreen(&mut self, cx: &mut Cx) -> bool {
         if let Some(window_id) = self.window_id {
             cx.windows[window_id].window_geom.is_fullscreen
@@ -110,24 +141,24 @@ impl Window {
         }
     }
     
-    pub fn vr_is_presenting(&mut self, cx: &mut Cx) -> bool {
+    pub fn xr_is_presenting(&mut self, cx: &mut Cx) -> bool {
         if let Some(window_id) = self.window_id {
-            cx.windows[window_id].window_geom.vr_is_presenting
+            cx.windows[window_id].window_geom.xr_is_presenting
         }
         else {
             false
         }
     }
     
-    pub fn vr_start_presenting(&mut self, cx: &mut Cx){
+    pub fn xr_start_presenting(&mut self, cx: &mut Cx){
         if let Some(window_id) = self.window_id {
-            cx.windows[window_id].window_command = CxWindowCmd::VrStartPresenting;
+            cx.windows[window_id].window_command = CxWindowCmd::XrStartPresenting;
         }
     }
     
-    pub fn vr_stop_presenting(&mut self, cx: &mut Cx){
+    pub fn xr_stop_presenting(&mut self, cx: &mut Cx){
         if let Some(window_id) = self.window_id {
-            cx.windows[window_id].window_command = CxWindowCmd::VrStopPresenting;
+            cx.windows[window_id].window_command = CxWindowCmd::XrStopPresenting;
         }
     }
     
@@ -162,7 +193,9 @@ impl Window {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WindowGeom {
     pub dpi_factor: f32,
-    pub vr_is_presenting: bool,
+    pub can_fullscreen: bool,
+    pub xr_can_present: bool,
+    pub xr_is_presenting: bool,
     pub is_fullscreen: bool,
     pub is_topmost: bool,
     pub position: Vec2,
@@ -184,8 +217,10 @@ pub enum CxWindowCmd {
     Restore,
     Maximize,
     Minimize,
-    VrStartPresenting,
-    VrStopPresenting
+    XrStartPresenting,
+    XrStopPresenting,
+    FullScreen,
+    NormalScreen
 }
 
 impl Default for CxWindowCmd {

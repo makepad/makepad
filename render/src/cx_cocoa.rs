@@ -333,7 +333,6 @@ impl CocoaApp {
                             // was a paste
                             let nsstring: id = msg_send![self.pasteboard, stringForType: NSStringPboardType];
                             let string = nsstring_to_string(nsstring);
-                            
                             self.do_callback(&mut vec![
                                 Event::TextInput(TextInputEvent {
                                     input: string,
@@ -461,6 +460,7 @@ impl CocoaApp {
                 return if has_prec == YES {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent {
+                            digit:0,
                             window_id: cocoa_window.window_id,
                             scroll: Vec2 {x: -dx as f32, y: -dy as f32},
                             abs: cocoa_window.last_mouse_pos,
@@ -468,13 +468,15 @@ impl CocoaApp {
                             rect: Rect::default(),
                             is_wheel: false,
                             modifiers: get_event_key_modifier(ns_event),
-                            handled: false,
+                            handled_x: false,
+                            handled_y: false,
                             time: self.time_now()
                         })
                     ]);
                 } else {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent {
+                            digit:0,
                             window_id: cocoa_window.window_id,
                             scroll: Vec2 {x: -dx as f32 * 32., y: -dy as f32 * 32.},
                             abs: cocoa_window.last_mouse_pos,
@@ -482,7 +484,8 @@ impl CocoaApp {
                             rect: Rect::default(),
                             is_wheel: true,
                             modifiers: get_event_key_modifier(ns_event),
-                            handled: false,
+                            handled_x: false,
+                            handled_y: false,
                             time: self.time_now()
                         })
                     ]);
@@ -864,9 +867,11 @@ impl CocoaWindow {
     
     pub fn get_window_geom(&self) -> WindowGeom {
         WindowGeom {
-            vr_is_presenting: false,
+            xr_is_presenting: false,
+            xr_can_present: false,
             is_topmost: false,
             is_fullscreen: self.is_fullscreen,
+            can_fullscreen: false,
             inner_size: self.get_inner_size(),
             outer_size: self.get_outer_size(),
             dpi_factor: self.get_dpi_factor(),
@@ -1035,6 +1040,7 @@ impl CocoaWindow {
             }
         };
         events.push(Event::FingerHover(FingerHoverEvent {
+            digit:0,
             window_id: self.window_id,
             abs: pos,
             rel: pos,

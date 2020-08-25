@@ -269,7 +269,7 @@ impl MprsTokenizer {
                 return TokenType::Whitespace;
             }
             loop {
-                if state.next == '\0' {
+                if state.eof {
                     self.in_string = false;
                     return TokenType::StringChunk
                 }
@@ -299,7 +299,7 @@ impl MprsTokenizer {
         }
         else if self.comment_depth >0 { // parse comments
             loop {
-                if state.next == '\0' {
+                if state.eof {
                     self.comment_depth = 0;
                     return TokenType::CommentChunk
                 }
@@ -354,11 +354,14 @@ impl MprsTokenizer {
             }
         }
         else {
+            if state.eof{
+                return TokenType::Eof
+            }
             state.advance_with_cur();
             match state.cur {
                 '\0' => { // eof insert a terminating space and end
-                    chunk.push(' ');
-                    return TokenType::Eof
+                    chunk.push('\0');
+                    return TokenType::Whitespace
                 },
                 '\n' => {
                     chunk.push('\n');
@@ -444,7 +447,7 @@ impl MprsTokenizer {
                     }
                     
                     state.prev = '\0';
-                    while state.next != '\0' && state.next != '\n' {
+                    while !state.eof && state.next != '\n' {
                         if state.next != '"' || state.prev != '\\' && state.cur == '\\' && state.next == '"' {
                             chunk.push(state.next);
                             state.advance_with_prev();
@@ -570,9 +573,17 @@ impl MprsTokenizer {
                 },
                 '<' => {
                     chunk.push(state.cur);
-                    if state.next == '=' || state.next == '<' {
+                    if state.next == '=' {
                         chunk.push(state.next);
                         state.advance();
+                    }
+                    if state.next == '<' {
+                        chunk.push(state.next);
+                        state.advance();
+                        if state.next == '=' {
+                            chunk.push(state.next);
+                            state.advance();
+                        }
                     }
                     return TokenType::Operator;
                 },
@@ -581,6 +592,14 @@ impl MprsTokenizer {
                     if state.next == '=' {
                         chunk.push(state.next);
                         state.advance();
+                    }
+                    if state.next == '>' {
+                        chunk.push(state.next);
+                        state.advance();
+                        if state.next == '=' {
+                            chunk.push(state.next);
+                            state.advance();
+                        }
                     }
                     return TokenType::Operator;
                 },

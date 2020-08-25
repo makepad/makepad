@@ -4,6 +4,17 @@ use std::alloc;
 use crate::cx::*;
 use makepad_shader_compiler::ty::Ty;
 
+extern "C" {
+    fn _log_str(chars:u32, len:u32);
+}
+
+pub fn log_str(val:&str){
+    unsafe{
+        let chars = val.chars().collect::<Vec<char>>();
+        _log_str(chars.as_ptr() as u32, chars.len() as u32);
+    }
+}
+
 impl Cx {
     
     pub fn get_default_window_size(&self) -> Vec2 {
@@ -26,7 +37,9 @@ impl Cx {
         
         //let root_view = unsafe {&mut *(self.platform.root_view_ptr as *mut View<NoScrollBar>)};
         let mut to_wasm = ToWasm::from(msg);
-        self.platform.from_wasm = FromWasm::new();
+        if self.platform.from_wasm.offset == 0{
+            self.platform.from_wasm = FromWasm::new();
+        }
         let mut is_animation_frame = false;
         loop {
             let msg_type = to_wasm.mu32();
@@ -35,6 +48,7 @@ impl Cx {
                     break;
                 },
                 1 => { // fetch_deps
+                    self.platform.gpu_spec_is_low_on_uniforms = to_wasm.mu32() > 0;
                     
                     // send the UI our deps, overlap with shadercompiler
                     let mut load_deps = Vec::<String>::new();
@@ -79,34 +93,44 @@ impl Cx {
                         dpi_factor: to_wasm.mf32(),
                         outer_size: Vec2 {x: 0., y: 0.},
                         position: Vec2 {x: 0., y: 0.},
-                        vr_is_presenting: false
+                        xr_is_presenting: false,
+                        xr_can_present: to_wasm.mu32() > 0,
+                        can_fullscreen: to_wasm.mu32() > 0
                     };
                     self.default_dpi_factor = self.platform.window_geom.dpi_factor;
-                    self.vr_can_present = to_wasm.mu32() > 0;
-                    self.platform.gpu_spec_is_low_on_uniforms = to_wasm.mu32() > 0;
                     
                     if self.windows.len() > 0 {
                         self.windows[0].window_geom = self.platform.window_geom.clone();
                     }
                     
                     self.call_event_handler(&mut event_handler, &mut Event::Construct);
-                     
+                    
                     self.redraw_child_area(Area::All);
-                }, 
-                4 => { // resize 
+                },
+                4 => { // resize
+                    let old_geom = self.platform.window_geom.clone();
                     self.platform.window_geom = WindowGeom {
-                        is_fullscreen: false,
                         is_topmost: false,
                         inner_size: Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()},
                         dpi_factor: to_wasm.mf32(),
                         outer_size: Vec2 {x: 0., y: 0.},
                         position: Vec2 {x: 0., y: 0.},
-                        vr_is_presenting: to_wasm.mu32() > 0
+                        xr_is_presenting: to_wasm.mu32() > 0,
+                        xr_can_present: to_wasm.mu32() > 0,
+                        is_fullscreen: to_wasm.mu32() > 0,
+                        can_fullscreen: to_wasm.mu32() > 0,
                     };
-                    self.vr_can_present = to_wasm.mu32() > 0;
+                    let new_geom = self.platform.window_geom.clone();
                     
                     if self.windows.len()>0 {
                         self.windows[0].window_geom = self.platform.window_geom.clone();
+                    }
+                    if old_geom != new_geom {
+                        self.call_event_handler(&mut event_handler, &mut Event::WindowGeomChange(WindowGeomChangeEvent {
+                            window_id: 0,
+                            old_geom: old_geom,
+                            new_geom: new_geom
+                        }));
                     }
                     
                     // do our initial redraw and repaint
@@ -167,7 +191,7 @@ impl Cx {
                         modifiers: modifiers,
                         time: time
                     }));
-                    self.captured_fingers[digit] = Area::Empty;
+                    self.fingers[digit].captured = Area::Empty;
                     self.down_mouse_cursor = None;
                 },
                 8 => { // finger move
@@ -191,13 +215,14 @@ impl Cx {
                     }));
                 },
                 9 => { // finger hover
-                    self.finger_over_last_area = Area::Empty;
+                    self.fingers[0].over_last = Area::Empty;
                     let abs = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
                     self.hover_mouse_cursor = None;
                     let modifiers = unpack_key_modifier(to_wasm.mu32());
                     let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent {
                         any_down: false,
+                        digit: 0,
                         window_id: 0,
                         abs: abs,
                         rel: abs,
@@ -207,7 +232,7 @@ impl Cx {
                         modifiers: modifiers,
                         time: time
                     }));
-                    self._finger_over_last_area = self.finger_over_last_area;
+                    self.fingers[0]._over_last = self.fingers[0].over_last;
                     //if fe.hover_state == HoverState::Out {
                     //    self.hover_mouse_cursor = None;
                     // }
@@ -223,10 +248,12 @@ impl Cx {
                     let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerScroll(FingerScrollEvent {
                         window_id: 0,
+                        digit: 0,
                         abs: abs,
                         rel: abs,
                         rect: Rect::default(),
-                        handled: false,
+                        handled_x: false,
+                        handled_y: false,
                         scroll: scroll,
                         is_wheel: is_wheel,
                         modifiers: modifiers,
@@ -239,6 +266,7 @@ impl Cx {
                     let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent {
                         window_id: 0,
+                        digit: 0,
                         any_down: false,
                         abs: abs,
                         rel: abs,
@@ -325,16 +353,58 @@ impl Cx {
                         self.call_event_handler(&mut event_handler, &mut Event::AppFocus);
                     }
                 },
-                20 => { // vr_frame, TODO add all the matrices / tracked hands / position IO'ed here
-                    is_animation_frame = true;
+                20 => { // xr_update, TODO add all the matrices / tracked hands / position IO'ed here
+                    //is_animation_frame = true;
+                    let inputs_len = to_wasm.mu32();
                     let time = to_wasm.mf64();
-                    //log!(self, "{} o clock",time);
-                    if self.playing_anim_areas.len() != 0 {
-                        self.call_animation_event(&mut event_handler, time);
+                    let head_transform = to_wasm.parse_transform();
+                    let mut left_input = XRInput::default();
+                    let mut right_input = XRInput::default();
+                    let mut other_inputs = Vec::new();
+                    for _ in 0..inputs_len {
+                        let mut input = XRInput::default();
+                        input.active = true;
+                        input.grip = to_wasm.parse_transform();
+                        input.ray = to_wasm.parse_transform();
+
+                        let hand = to_wasm.mu32();
+                        let num_buttons = to_wasm.mu32() as usize;
+                        input.num_buttons = num_buttons;
+                        for i in 0..num_buttons{
+                            input.buttons[i].pressed = to_wasm.mu32() > 0;
+                            input.buttons[i].value = to_wasm.mf32();
+                        }
+
+                        let num_axes = to_wasm.mu32() as usize;
+                        input.num_axes = num_axes;
+                        for i in 0..num_axes{
+                            input.axes[i] = to_wasm.mf32();
+                        }
+
+                        if hand == 1{
+                            left_input = input;
+                        }
+                        else if hand == 2{
+                            right_input = input;
+                        }
+                        else{
+                            other_inputs.push(input);
+                        }
                     }
-                    if self.frame_callbacks.len() != 0 {
-                        self.call_frame_event(&mut event_handler, time);
-                    }
+                    // call the VRUpdate event
+                    self.call_event_handler(&mut event_handler, &mut Event::XRUpdate(XRUpdateEvent {
+                        time,
+                        head_transform,
+                        last_left_input: self.platform.xr_last_left_input.clone(),
+                        last_right_input: self.platform.xr_last_right_input.clone(),
+                        left_input: left_input.clone(),
+                        right_input: right_input.clone(),
+                        other_inputs,
+                    }));
+                    
+                    self.platform.xr_last_left_input = left_input;
+                    self.platform.xr_last_right_input = right_input;
+                    
                 },
                 21 => { // paint_dirty, only set the passes of the main window to dirty
                     self.passes[self.windows[0].main_pass_id.unwrap()].paint_dirty = true;
@@ -342,9 +412,9 @@ impl Cx {
                 22 => { //http_send_response
                     let signal_id = to_wasm.mu32();
                     let success = to_wasm.mu32();
-                    self.signals.insert(Signal {signal_id: signal_id as usize}, vec![match success{
-                        1=>Cx::status_http_send_ok(),
-                        _=>Cx::status_http_send_fail()
+                    self.signals.insert(Signal {signal_id: signal_id as usize}, vec![match success {
+                        1 => Cx::status_http_send_ok(),
+                        _ => Cx::status_http_send_fail()
                     }]);
                 },
                 _ => {
@@ -358,7 +428,6 @@ impl Cx {
         if is_animation_frame && (self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0) {
             self.call_draw_event(&mut event_handler);
         }
-        
         self.call_signals(&mut event_handler);
         
         for window in &mut self.windows {
@@ -378,12 +447,20 @@ impl Cx {
             };
             
             window.window_command = match &window.window_command {
-                CxWindowCmd::VrStartPresenting => {
-                    self.platform.from_wasm.vr_start_presenting();
+                CxWindowCmd::XrStartPresenting => {
+                    self.platform.from_wasm.xr_start_presenting();
                     CxWindowCmd::None
                 },
-                CxWindowCmd::VrStopPresenting => {
-                    self.platform.from_wasm.vr_stop_presenting();
+                CxWindowCmd::XrStopPresenting => {
+                    self.platform.from_wasm.xr_stop_presenting();
+                    CxWindowCmd::None
+                },
+                CxWindowCmd::FullScreen => {
+                    self.platform.from_wasm.fullscreen();
+                    CxWindowCmd::None
+                },
+                CxWindowCmd::NormalScreen => {
+                    self.platform.from_wasm.normalscreen();
                     CxWindowCmd::None
                 },
                 _ => CxWindowCmd::None,
@@ -414,7 +491,7 @@ impl Cx {
                             // its a render window
                             windows_need_repaint -= 1;
                             let dpi_factor = self.platform.window_geom.dpi_factor;
-                            self.draw_pass_to_canvas(*pass_id, self.platform.window_geom.vr_is_presenting, dpi_factor);
+                            self.draw_pass_to_canvas(*pass_id, dpi_factor);
                         }
                         CxPassDepOf::Pass(parent_pass_id) => {
                             let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
@@ -440,15 +517,16 @@ impl Cx {
         if !is_animation_frame {
             let mut shader_results = Vec::new();
             for shader_id in &self.shader_recompiles {
-                shader_results.push(Self::webgl_compile_shader(*shader_id, !self.platform.gpu_spec_is_low_on_uniforms, true, &mut self.shaders[*shader_id], &mut self.platform));
+                shader_results.push(Self::webgl_compile_shader(*shader_id, !self.platform.gpu_spec_is_low_on_uniforms, true, &mut self.shaders[*shader_id], &mut self.platform, &mut self.shader_inherit_cache));
             }
+            self.shader_recompiles.truncate(0);
             self.call_shader_recompile_event(shader_results, &mut event_handler);
         }
         // mark the end of the message
         self.platform.from_wasm.end();
         
         //return wasm pointer to caller
-        self.platform.from_wasm.wasm_ptr()
+        self.platform.from_wasm.take_wasm_ptr()
     }
     
     // empty stub
@@ -505,7 +583,7 @@ impl Cx {
         }
     }
     
-    pub fn http_send(&mut self, verb: &str, path: &str, proto:&str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
+    pub fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         self.platform.from_wasm.http_send(verb, path, proto, domain, port, content_type, body, signal);
     }
     
@@ -667,6 +745,8 @@ pub struct CxPlatform {
     pub vaos: usize,
     pub vaos_free: Vec<usize>,
     pub fingers_down: Vec<bool>,
+    pub xr_last_left_input: XRInput,
+    pub xr_last_right_input: XRInput,
     pub file_read_id: u64,
 }
 
@@ -676,7 +756,7 @@ impl Default for CxPlatform {
             is_initialized: false,
             gpu_spec_is_low_on_uniforms: false,
             window_geom: WindowGeom::default(),
-            from_wasm: FromWasm::zero(),
+            from_wasm: FromWasm::new(),
             vertex_buffers: 1,
             vertex_buffers_free: Vec::new(),
             index_buffers: 1,
@@ -684,7 +764,9 @@ impl Default for CxPlatform {
             vaos: 1,
             vaos_free: Vec::new(),
             file_read_id: 1,
-            fingers_down: Vec::new()
+            fingers_down: Vec::new(),
+            xr_last_left_input: XRInput::default(),
+            xr_last_right_input: XRInput::default(),
         }
     }
 }
@@ -834,22 +916,29 @@ impl FromWasm {
         self.mu32(0);
     }
     
-    pub fn wasm_ptr(&self) -> u32 {
-        self.mu32 as u32
+    pub fn take_wasm_ptr(&mut self) -> u32 {
+        let mu32 = self.mu32;
+        self.mu32 = 0 as *mut u32;
+        self.mf32 = 0 as *mut f32;
+        self.mf64 = 0 as *mut f64;
+        self.slots = 0;
+        self.used = 0;
+        self.offset = 0;
+        mu32 as u32
     }
     
     fn add_propdefvec(&mut self, shvars: &Vec<PropDef>) {
         self.fit(1);
         self.mu32(shvars.len() as u32);
         for shvar in shvars {
-            self.add_string(match shvar.prop_id.shader_ty(){
-                Ty::Vec4=>"vec4",
-                Ty::Vec3=>"vec3",
-                Ty::Vec2=>"vec2",
-                Ty::Float=>"float",
-                Ty::Mat4=>"mat4",
-                Ty::Texture2D=>"sampler2D",
-                _=>panic!("unexpected type in add_propdefvec")
+            self.add_string(match shvar.prop_id.shader_ty() {
+                Ty::Vec4 => "vec4",
+                Ty::Vec3 => "vec3",
+                Ty::Vec2 => "vec2",
+                Ty::Float => "float",
+                Ty::Mat4 => "mat4",
+                Ty::Texture2D => "sampler2D",
+                _ => panic!("unexpected type in add_propdefvec")
             });
             self.add_string(&shvar.name);
         }
@@ -924,11 +1013,11 @@ impl FromWasm {
         self.mu32(uniforms_dr.as_ptr() as u32);
         self.mu32(uniforms.as_ptr() as u32);
         self.mu32(textures.as_ptr() as u32);
-        if let Some(const_table) = const_table{
+        if let Some(const_table) = const_table {
             self.mu32(const_table.as_ptr() as u32);
             self.mu32(const_table.len() as u32);
         }
-        else{
+        else {
             self.mu32(0);
             self.mu32(0);
         }
@@ -1047,29 +1136,19 @@ impl FromWasm {
         self.add_f64(id as f64);
     }
     
-    pub fn vr_start_presenting(&mut self) {
+    pub fn xr_start_presenting(&mut self) {
         self.fit(1);
         self.mu32(19);
     }
     
-    pub fn vr_stop_presenting(&mut self) {
+    pub fn xr_stop_presenting(&mut self) {
         self.fit(1);
         self.mu32(20);
     }
     
-    pub fn mark_vr_draw_eye(&mut self) {
-        self.fit(1);
-        self.mu32(21);
-    }
-    
-    pub fn loop_vr_draw_eye(&mut self) {
-        self.fit(1);
-        self.mu32(22);
-    }
-    
     pub fn begin_render_targets(&mut self, pass_id: usize, width: usize, height: usize) {
         self.fit(4);
-        self.mu32(23);
+        self.mu32(21);
         self.mu32(pass_id as u32);
         self.mu32(width as u32);
         self.mu32(height as u32);
@@ -1077,7 +1156,7 @@ impl FromWasm {
     
     pub fn add_color_target(&mut self, texture_id: usize, init_only: bool, color: Color) {
         self.fit(7);
-        self.mu32(24);
+        self.mu32(22);
         self.mu32(texture_id as u32);
         self.mu32(if init_only {1} else {0});
         self.mf32(color.r);
@@ -1088,7 +1167,7 @@ impl FromWasm {
     
     pub fn set_depth_target(&mut self, texture_id: usize, init_only: bool, depth: f32) {
         self.fit(4);
-        self.mu32(25);
+        self.mu32(23);
         self.mu32(texture_id as u32);
         self.mu32(if init_only {1} else {0});
         self.mf32(depth);
@@ -1096,17 +1175,17 @@ impl FromWasm {
     
     pub fn end_render_targets(&mut self) {
         self.fit(1);
-        self.mu32(26);
+        self.mu32(24);
     }
     
     pub fn set_default_depth_and_blend_mode(&mut self) {
         self.fit(1);
-        self.mu32(27);
+        self.mu32(25);
     }
     
     pub fn begin_main_canvas(&mut self, color: Color, depth: f32) {
         self.fit(6);
-        self.mu32(28);
+        self.mu32(26);
         self.mf32(color.r);
         self.mf32(color.g);
         self.mf32(color.b);
@@ -1128,25 +1207,25 @@ impl FromWasm {
     fn add_u8slice(&mut self, msg: &[u8]) {
         let u8_len = msg.len();
         let len = u8_len>>2;
-        let spare = u8_len&3;
-        self.fit(len + if spare > 0{1}else{0} + 1);
+        let spare = u8_len & 3;
+        self.fit(len + if spare > 0 {1}else {0} + 1);
         self.mu32(u8_len as u32);
         // this is terrible. im sure this can be done so much nicer
-        for i in 0..len{
-            self.mu32( ((msg[(i<<2)+0] as u32)) | ((msg[(i<<2)+1] as u32) << 8) | ((msg[(i<<2)+2] as u32)<<16)  | ((msg[(i<<2)+3] as u32)<<24) );
+        for i in 0..len {
+            self.mu32(((msg[(i << 2) + 0] as u32)) | ((msg[(i << 2) + 1] as u32) << 8) | ((msg[(i << 2) + 2] as u32) << 16) | ((msg[(i << 2) + 3] as u32) << 24));
         }
-        match spare{
-            1=>self.mu32( msg[(len<<2)+0] as u32 ),
-            2=>self.mu32( (msg[(len<<2)+0] as u32) | ((msg[(len<<2)+1] as u32) << 8) ),
-            3=>self.mu32( (msg[(len<<2)+0] as u32) | ((msg[(len<<2)+1] as u32) << 8) | ((msg[(len<<2)+2] as u32) << 16) ),
-            _=>()
+        match spare {
+            1 => self.mu32(msg[(len << 2) + 0] as u32),
+            2 => self.mu32((msg[(len << 2) + 0] as u32) | ((msg[(len << 2) + 1] as u32) << 8)),
+            3 => self.mu32((msg[(len << 2) + 0] as u32) | ((msg[(len << 2) + 1] as u32) << 8) | ((msg[(len << 2) + 2] as u32) << 16)),
+            _ => ()
         }
         self.check();
     }
     
-    fn http_send(&mut self, verb: &str, path: &str, proto:&str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
+    fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         self.fit(3);
-        self.mu32(29); 
+        self.mu32(27);
         self.mu32(port as u32);
         self.mu32(signal.signal_id as u32);
         self.add_string(verb);
@@ -1157,7 +1236,15 @@ impl FromWasm {
         self.add_u8slice(body);
     }
     
+    pub fn fullscreen(&mut self) {
+        self.fit(1);
+        self.mu32(28);
+    }
     
+    pub fn normalscreen(&mut self) {
+        self.fit(1);
+        self.mu32(29);
+    }
 }
 
 #[derive(Clone)]
@@ -1229,6 +1316,22 @@ impl ToWasm {
             }
         }
         out
+    }
+    
+    fn parse_transform(&mut self) -> Transform {
+        Transform {
+            orientation: Vec4 {
+                x: self.mf32(),
+                y: self.mf32(),
+                z: self.mf32(),
+                w: self.mf32(),
+            },
+            position: Vec3 {
+                x: self.mf32(),
+                y: self.mf32(),
+                z: self.mf32(),
+            }
+        }
     }
 }
 

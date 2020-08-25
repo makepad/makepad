@@ -134,7 +134,7 @@ impl LogItemDraw {
             }
         }
         
-        let bg_area = self.item_bg.end_quad(cx, &bg_inst);
+        let bg_area = self.item_bg.end_quad(cx, bg_inst);
         list_item.animator.set_area(cx, bg_area);
     }
     
@@ -179,7 +179,7 @@ impl LogItemDraw {
                 self.text.draw_text(cx, " - starting when done");
             }
         }
-        self.item_bg.end_quad(cx, &bg_inst);
+        self.item_bg.end_quad(cx, bg_inst);
     }
     
     pub fn draw_filler(&mut self, cx: &mut Cx, counter: usize) {

@@ -3,7 +3,7 @@ use makepad_trapezoidator::Trapezoidator;
 use makepad_geometry::{AffineTransformation, Transform, Vector};
 use makepad_internal_iter::*;
 use makepad_path::PathIterator;
-//use makepad_shader_compiler::shader::*; 
+//use makepad_shader_compiler::shader::*;
 //use makepad_shader_macro::*;
 
 impl Cx {
@@ -12,11 +12,11 @@ impl Cx {
         self.load_font_path(&self.font(style))
     }
     */
-    pub fn reset_font_atlas_and_redraw(&mut self){
-        for font in &mut self.fonts{
+    pub fn reset_font_atlas_and_redraw(&mut self) {
+        for font in &mut self.fonts {
             font.atlas_pages.truncate(0);
         }
-        self.fonts_atlas.alloc_xpos = 0.; 
+        self.fonts_atlas.alloc_xpos = 0.;
         self.fonts_atlas.alloc_ypos = 0.;
         self.fonts_atlas.alloc_hmax = 0.;
         self.fonts_atlas.clear_buffer = true;
@@ -44,7 +44,7 @@ impl Cx {
 }
 
 #[derive(Copy, Clone, Default)]
-pub struct Font{
+pub struct Font {
     pub font_id: Option<usize>
 }
 
@@ -52,25 +52,24 @@ pub struct TrapezoidText {
     shader: Shader,
     trapezoidator: Trapezoidator
 }
- 
+
 impl TrapezoidText {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             shader: cx.add_shader(Self::def_trapezoid_shader(), "TrapezoidShader"),
             trapezoidator: Trapezoidator::default(),
         }
-    } 
+    }
     
-    fn geom()->Vec2Id{uid!()}
-    fn a_xs()->Vec2Id{uid!()}
-    fn a_ys()->Vec4Id{uid!()}
-    fn chan()->FloatId{uid!()}
+    fn geom() -> Vec2Id {uid!()}
+    fn a_xs() -> Vec2Id {uid!()}
+    fn a_ys() -> Vec4Id {uid!()}
+    fn chan() -> FloatId {uid!()}
     
-    pub fn def_trapezoid_shader() -> ShaderGen { 
-        let mut sg = Cx::shader_defs(ShaderGen::new()); 
-        sg.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
-        sg.geometry_indices = vec![0, 1, 2, 2, 3, 0];
-         
+    pub fn def_trapezoid_shader() -> ShaderGen {
+        let mut sg = Cx::shader_defs(ShaderGen::new());
+        sg.geometry.add_quad_2d();
+        
         sg.compose(shader!{"
             
             geometry geom: Self::geom();
@@ -140,16 +139,16 @@ impl TrapezoidText {
                 let p_min = v_pixel.xy - 0.5;
                 let p_max = v_pixel.xy + 0.5;
                 let t_area = compute_clamped_trapezoid_area(p_min, p_max);
-                if chan < 0.5{
-                    return vec4(t_area,0.,0.,0.);
+                if chan < 0.5 {
+                    return vec4(t_area, 0., 0., 0.);
                 }
-                if chan < 1.5{
-                    return vec4(0., t_area, 0.,0.);
+                if chan < 1.5 {
+                    return vec4(0., t_area, 0., 0.);
                 }
-                if chan < 2.5{
-                    return vec4(0., 0., t_area,0.);
+                if chan < 2.5 {
+                    return vec4(0., 0., t_area, 0.);
                 }
-                return vec4(t_area, t_area, t_area,0.);
+                return vec4(t_area, t_area, t_area, 0.);
             }
             
             fn vertex() -> vec4 {
@@ -167,9 +166,9 @@ impl TrapezoidText {
             }
         "})
     }
-
+    
     // test api for directly drawing a glyph
-    pub fn draw_char(&mut self, cx: &mut Cx, c:char, font_id:usize, font_size:f32) {
+    pub fn draw_char(&mut self, cx: &mut Cx, c: char, font_id: usize, font_size: f32) {
         // now lets make a draw_character function
         let inst = cx.new_instance(&self.shader, 1);
         if inst.need_uniforms_now(cx) {
@@ -190,28 +189,30 @@ impl TrapezoidText {
             }
             let glyph = &cx.fonts[font_id].font_loaded.as_ref().unwrap().glyphs[slot];
             let dpi_factor = cx.current_dpi_factor;
-            let pos = cx.get_turtle_pos(); 
+            let pos = cx.get_turtle_pos();
             let font_scale_logical = font_size * 96.0 / (72.0 * font.units_per_em);
             let font_scale_pixels = font_scale_logical * dpi_factor;
-            
             let mut trapezoids = Vec::new();
-            trapezoids.extend_from_internal_iter(
-                self.trapezoidator.trapezoidate(
-                    glyph
-                        .outline
-                        .commands()
-                        .map({
-                        move | command | {
-                            command.transform(
-                                &AffineTransformation::identity()
-                                    .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
-                                    .uniform_scale(font_scale_pixels)
-                                    .translate(Vector::new(pos.x, pos.y))
-                            )
-                        }
-                    }).linearize(0.5),
-                ),
+            let trapezoidate = self.trapezoidator.trapezoidate(
+                glyph
+                    .outline
+                    .commands()
+                    .map({
+                    move | command | {
+                        command.transform(
+                            &AffineTransformation::identity()
+                                .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
+                                .uniform_scale(font_scale_pixels)
+                                .translate(Vector::new(pos.x, pos.y))
+                        )
+                    }
+                }).linearize(0.5),
             );
+            if let Some(trapezoidate) = trapezoidate {
+                trapezoids.extend_from_internal_iter(
+                    trapezoidate
+                );
+            }
             trapezoids
         };
         for trapezoid in trapezoids {
@@ -235,11 +236,11 @@ impl TrapezoidText {
         }
         
         let mut size = 1.0;
-        for i in 0..3{
-            if i == 1{
+        for i in 0..3 {
+            if i == 1 {
                 size = 0.75;
             }
-            if i == 2{
+            if i == 2 {
                 size = 0.6;
             }
             let trapezoids = {
@@ -255,29 +256,33 @@ impl TrapezoidText {
                 }
                 
                 let glyphtc = atlas_page.atlas_glyphs[todo.glyph_id][todo.subpixel_id].unwrap();
-                let tx = glyphtc.tx1 * cx.fonts_atlas.texture_size.x + todo.subpixel_x_fract* atlas_page.dpi_factor;
-                let ty = 1.0 + glyphtc.ty1 * cx.fonts_atlas.texture_size.y - todo.subpixel_y_fract* atlas_page.dpi_factor;
+                let tx = glyphtc.tx1 * cx.fonts_atlas.texture_size.x + todo.subpixel_x_fract * atlas_page.dpi_factor;
+                let ty = 1.0 + glyphtc.ty1 * cx.fonts_atlas.texture_size.y - todo.subpixel_y_fract * atlas_page.dpi_factor;
                 
                 let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * font.units_per_em);
                 let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
                 let mut trapezoids = Vec::new();
-                trapezoids.extend_from_internal_iter(
-                    self.trapezoidator.trapezoidate(
-                        glyph
-                            .outline
-                            .commands()
-                            .map({
-                            move | command | {
-                                command.transform(
-                                    &AffineTransformation::identity()
-                                        .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
-                                        .uniform_scale(font_scale_pixels * size)
-                                        .translate(Vector::new(tx, ty))
-                                )
-                            }
-                        }).linearize(0.5),
-                    ),
+                //log_str(&format!("Serializing char {} {} {} {}", glyphtc.tx1 , cx.fonts_atlas.texture_size.x ,todo.subpixel_x_fract ,atlas_page.dpi_factor));
+                let trapezoidate = self.trapezoidator.trapezoidate(
+                    glyph
+                        .outline
+                        .commands()
+                        .map({
+                        move | command | {
+                            command.transform(
+                                &AffineTransformation::identity()
+                                    .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
+                                    .uniform_scale(font_scale_pixels * size)
+                                    .translate(Vector::new(tx, ty))
+                            )
+                        }
+                    }).linearize(0.5),
                 );
+                if let Some(trapezoidate) = trapezoidate{
+                    trapezoids.extend_from_internal_iter(
+                        trapezoidate
+                    );
+                }
                 trapezoids
             };
             for trapezoid in trapezoids {
@@ -328,11 +333,11 @@ impl CxAfterDraw {
         if cx.fonts_atlas.atlas_todo.len()>0 {
             self.atlas_pass.begin_pass(cx);
             self.atlas_pass.set_size(cx, cx.fonts_atlas.texture_size);
-            let clear = if cx.fonts_atlas.clear_buffer{
+            let clear = if cx.fonts_atlas.clear_buffer {
                 cx.fonts_atlas.clear_buffer = false;
                 ClearColor::ClearWith(Color::default())
             }
-            else{
+            else {
                 ClearColor::InitWith(Color::default())
             };
             self.atlas_pass.add_color_texture(cx, &mut self.atlas_texture, clear);

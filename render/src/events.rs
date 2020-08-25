@@ -77,6 +77,7 @@ impl Default for HoverState {
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FingerHoverEvent {
     pub window_id: usize,
+    pub digit: usize,
     pub abs: Vec2,
     pub rel: Vec2,
     pub rect: Rect,
@@ -90,12 +91,14 @@ pub struct FingerHoverEvent {
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FingerScrollEvent {
     pub window_id: usize,
+    pub digit: usize,
     pub abs: Vec2,
     pub rel: Vec2,
     pub rect: Rect,
     pub scroll: Vec2,
     pub is_wheel: bool,
-    pub handled: bool,
+    pub handled_x: bool,
+    pub handled_y: bool,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
@@ -225,6 +228,35 @@ pub struct WindowDragQueryEvent {
     pub response: WindowDragQueryResponse,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct XRButton {
+    pub value:f32,
+    pub pressed:bool
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct XRInput {
+    pub active: bool,
+    pub grip: Transform,
+    pub ray: Transform,
+    pub num_buttons: usize,
+    pub buttons: [XRButton;8],
+    pub num_axes: usize,
+    pub axes: [f32;8],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct XRUpdateEvent {
+    // alright what data are we stuffing in 
+    pub time: f64,
+    pub head_transform: Transform,
+    pub left_input: XRInput,
+    pub last_left_input: XRInput,
+    pub right_input: XRInput,
+    pub last_right_input: XRInput,
+    pub other_inputs: Vec<XRInput>
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     None,
@@ -237,6 +269,7 @@ pub enum Event {
     AnimEnded(AnimateEvent),
     Animate(AnimateEvent),
     Frame(FrameEvent),
+    XRUpdate(XRUpdateEvent),
     WindowSetHoverCursor(MouseCursor),
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
@@ -336,7 +369,7 @@ impl Event {
             },
             Event::FingerScroll(fe) => {
                 let rect = area.get_rect(&cx);
-                if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
+                if rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
                     //fe.handled = true;
                     return Event::FingerScroll(FingerScrollEvent {
                         rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
@@ -348,10 +381,10 @@ impl Event {
             Event::FingerHover(fe) => {
                 let rect = area.get_rect(&cx);
                 
-                if cx._finger_over_last_area == area {
+                if cx.fingers[fe.digit]._over_last == area {
                     let mut any_down = false;
-                    for fin_area in &cx.captured_fingers {
-                        if *fin_area == area {
+                    for finger in &cx.fingers {
+                        if finger.captured == area {
                             any_down = true;
                             break;
                         }
@@ -362,7 +395,7 @@ impl Event {
                             //    cx.finger_over_last_area = Area::Empty;
                         }
                         else {
-                            cx.finger_over_last_area = area;
+                            cx.fingers[fe.digit].over_last = area;
                         }
                         return Event::FingerHover(FingerHoverEvent {
                             rel: area.abs_to_rel(cx, fe.abs),
@@ -385,13 +418,13 @@ impl Event {
                 else {
                     if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
                         let mut any_down = false;
-                        for fin_area in &cx.captured_fingers {
-                            if *fin_area == area {
+                        for finger in &cx.fingers {
+                            if finger.captured == area {
                                 any_down = true;
                                 break;
                             }
                         }
-                        cx.finger_over_last_area = area;
+                        cx.fingers[fe.digit].over_last = area;
                         fe.handled = true;
                         //self.was_over_last_call = true;
                         return Event::FingerHover(FingerHoverEvent {
@@ -406,9 +439,9 @@ impl Event {
             },
             Event::FingerMove(fe) => {
                 // check wether our digit is captured, otherwise don't send
-                if cx.captured_fingers[fe.digit] == area {
-                    let abs_start = cx.finger_down_abs_start[fe.digit];
-                    let rel_start = cx.finger_down_rel_start[fe.digit];
+                if cx.fingers[fe.digit].captured == area {
+                    let abs_start = cx.fingers[fe.digit].down_abs_start;
+                    let rel_start = cx.fingers[fe.digit].down_rel_start;
                     let rect = area.get_rect(&cx);
                     return Event::FingerMove(FingerMoveEvent {
                         abs_start: abs_start,
@@ -426,16 +459,16 @@ impl Event {
                     if rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
                         // scan if any of the fingers already captured this area
                         if !opt.use_multi_touch {
-                            for fin_area in &cx.captured_fingers {
-                                if *fin_area == area {
+                            for finger in &cx.fingers {
+                                if finger.captured == area {
                                     return Event::None;
                                 }
                             }
                         }
-                        cx.captured_fingers[fe.digit] = area;
+                        cx.fingers[fe.digit].captured = area;
                         let rel = area.abs_to_rel(cx, fe.abs);
-                        cx.finger_down_abs_start[fe.digit] = fe.abs;
-                        cx.finger_down_rel_start[fe.digit] = rel;
+                        cx.fingers[fe.digit].down_abs_start = fe.abs;
+                        cx.fingers[fe.digit].down_rel_start = rel;
                         fe.handled = true;
                         return Event::FingerDown(FingerDownEvent {
                             rel: rel,
@@ -446,10 +479,10 @@ impl Event {
                 }
             },
             Event::FingerUp(fe) => {
-                if cx.captured_fingers[fe.digit] == area {
-                    cx.captured_fingers[fe.digit] = Area::Empty;
-                    let abs_start = cx.finger_down_abs_start[fe.digit];
-                    let rel_start = cx.finger_down_rel_start[fe.digit];
+                if cx.fingers[fe.digit].captured == area {
+                    cx.fingers[fe.digit].captured = Area::Empty;
+                    let abs_start = cx.fingers[fe.digit].down_abs_start;
+                    let rel_start = cx.fingers[fe.digit].down_rel_start;
                     let rect = area.get_rect(&cx);
                     return Event::FingerUp(FingerUpEvent {
                         is_over: rect.contains(fe.abs.x, fe.abs.y),
@@ -562,9 +595,6 @@ impl Event {
             Event::FingerHover(fe) => {
                 fe.handled = set;
             },
-            Event::FingerScroll(fe) => {
-                fe.handled = set;
-            },
             Event::FingerDown(fe) => {
                 fe.handled = set;
             },
@@ -575,9 +605,6 @@ impl Event {
     pub fn handled(&self) -> bool {
         match self {
             Event::FingerHover(fe) => {
-                fe.handled
-            },
-            Event::FingerScroll(fe) => {
                 fe.handled
             },
             Event::FingerDown(fe) => {

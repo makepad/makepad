@@ -38,11 +38,14 @@ impl RustEditor {
         
         self.live_macros_view.handle_live_macros(cx, event, atb, &mut self.text_editor);
         
-        match self.splitter.handle_splitter(cx, event) {
-            SplitterEvent::Moving {..} => {
-                self.view.redraw_view_parent_area(cx);
-            },
-            _ => ()
+        let has_live_macros = atb.live_macros.macros.len() != 0;
+        if has_live_macros{
+            match self.splitter.handle_splitter(cx, event) {
+                SplitterEvent::Moving {..} => {
+                    self.view.redraw_view_parent_area(cx);
+                },
+                _ => ()
+            }
         }
         
         let ce = self.text_editor.handle_text_editor(cx, event, &mut atb.text_buffer);
@@ -66,12 +69,18 @@ impl RustEditor {
             return
         }; 
         
-        self.splitter.begin_splitter(cx);
+        let has_live_macros = atb.live_macros.macros.len() != 0;
         
-        self.live_macros_view.draw_live_macros(cx, atb, &mut self.text_editor);
-        
-        self.splitter.mid_splitter(cx);
-        
+        if has_live_macros{
+            
+            self.splitter.begin_splitter(cx); 
+            
+            self.live_macros_view.draw_live_macros(cx, atb, &mut self.text_editor);
+            
+            self.splitter.mid_splitter(cx);
+            
+        }
+            
         Self::update_token_chunks(cx, atb, search_index);
         
         if self.text_editor.begin_text_editor(cx, &mut atb.text_buffer).is_ok() {
@@ -81,16 +90,16 @@ impl RustEditor {
             
             self.text_editor.end_text_editor(cx, &mut atb.text_buffer);
         }
-        
-        self.splitter.end_splitter(cx);
-        
+        if has_live_macros{
+            self.splitter.end_splitter(cx);
+        }
         self.view.end_view(cx);
     }
     
     pub fn update_token_chunks(cx: &mut Cx, atb: &mut AppTextBuffer, mut search_index: Option<&mut SearchIndex>) {
         
-        
         if atb.text_buffer.needs_token_chunks() && atb.text_buffer.lines.len() >0 {
+            
             let mut state = TokenizerState::new(&atb.text_buffer.lines);
             let mut tokenizer = MprsTokenizer::new();
             let mut pair_stack = Vec::new();
@@ -121,7 +130,7 @@ impl RustEditor {
             //    if atb.text_buffer.undo_stack.len() != 0{
             //        println!("PARSE LIVE {:?}", atb.text_buffer.undo_stack.last().unwrap().grouping);
             //    }
-                atb.parse_live_macros(cx);
+            atb.parse_live_macros(cx, false);
             //}
             
             // ok now lets write a diff with the previous one

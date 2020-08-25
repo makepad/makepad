@@ -34,8 +34,7 @@ impl Quad {
     pub fn def_quad_shader() -> ShaderGen {
         // lets add the draw shader lib
         let mut sg = Cx::shader_defs(ShaderGen::new()); 
-        sg.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
-        sg.geometry_indices = vec![0, 1, 2, 2, 3, 0];
+        sg.geometry.add_quad_2d();
         
         sg.compose(shader!{"
             
@@ -81,8 +80,8 @@ impl Quad {
         inst
     }
 
-    pub fn end_quad(&mut self, cx: &mut Cx, inst: &InstanceArea) -> Area {
-        let area = inst.clone().into();
+    pub fn end_quad(&mut self, cx: &mut Cx, inst: InstanceArea) -> Area {
+        let area = inst.into();
         let rect = cx.end_turtle(area);
         area.set_rect(cx, &rect);
         area

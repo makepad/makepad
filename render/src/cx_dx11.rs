@@ -131,7 +131,7 @@ impl Cx {
                         _ => ()
                     }
                 }
-                d3d11_cx.draw_indexed_instanced(sh.shader_gen.geometry_indices.len(), instances);
+                d3d11_cx.draw_indexed_instanced(sh.shader_gen.geometry.indices.len(), instances);
             }
         }
     }
@@ -271,7 +271,7 @@ impl Cx {
     
     pub fn hlsl_compile_all_shaders(&mut self, d3d11_cx: &D3d11Cx) {
         for (index, sh) in &mut self.shaders.iter_mut().enumerate() {
-            let result = Self::hlsl_compile_shader(index, false, sh, d3d11_cx);
+            let result = Self::hlsl_compile_shader(index, false, sh, d3d11_cx, &mut self.shader_inherit_cache);
             if let ShaderCompileResult::Fail {err, ..} = result {
                 panic!("{}", err);
             }
@@ -288,13 +288,28 @@ impl Cx {
             _ => panic!("slots_to_dxgi_format unsupported slotcount {}", slots)
         }
     }
-    pub fn hlsl_compile_shader(shader_id: usize, use_const_table: bool, sh: &mut CxShader, d3d11_cx: &D3d11Cx) -> ShaderCompileResult {
-        let shader_ast = sh.shader_gen.lex_parse_analyse(true);
-        
-        if let Err(err) = shader_ast {
-            return ShaderCompileResult::Fail {id: shader_id, err: err}
-        }
-        let shader_ast = shader_ast.unwrap();
+    pub fn hlsl_compile_shader(shader_id: usize, use_const_table: bool, sh: &mut CxShader, d3d11_cx: &D3d11Cx, inherit_cache: &mut ShaderInheritCache) -> ShaderCompileResult {
+        let shader_ast = sh.shader_gen.lex_parse_analyse(true, use_const_table, inherit_cache); 
+
+        let shader_ast = match shader_ast{
+            ShaderGenResult::Error(err)=>{
+                return ShaderCompileResult::Fail{id:shader_id, err:err}
+            },
+            ShaderGenResult::PatchedConstTable(const_table)=>{ 
+                sh.mapping.const_table = Some(const_table);
+                if let Some(sh_platform) = &mut sh.platform{
+                    if let Some(const_table) = &sh.mapping.const_table{
+                        if const_table.len()>0{
+                            sh_platform.const_table_uniforms.update_with_f32_constant_data(d3d11_cx, const_table.as_slice());
+                        }
+                    }
+                }
+                return ShaderCompileResult::Nop{id:shader_id}
+            },
+            ShaderGenResult::ShaderAst(shader_ast)=>{
+                shader_ast
+            }
+        };
         
         let hlsl = generate_hlsl::generate_shader(&shader_ast, use_const_table);
         let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, if use_const_table{shader_ast.const_table.borrow_mut().take()} else {None});
@@ -352,7 +367,6 @@ impl Cx {
         let inst_named = NamedProps::construct(&mapping.instances);
         let mut strings = Vec::new();
         
-        
         for (index, geom) in geom_named.props.iter().enumerate() {
             strings.push(ffi::CString::new(format!("GEOM{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
             layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
@@ -366,17 +380,51 @@ impl Cx {
             })
         }
         
-        for (index, inst) in inst_named.props.iter().enumerate() {
-            strings.push(ffi::CString::new(format!("INST{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
-            layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
-                SemanticName: strings.last().unwrap().as_ptr() as *const _,
-                SemanticIndex: 0,
-                Format: Self::slots_to_dxgi_format(inst.slots),
-                InputSlot: 1,
-                AlignedByteOffset: (inst.offset * 4) as u32,
-                InputSlotClass: d3d11::D3D11_INPUT_PER_INSTANCE_DATA,
-                InstanceDataStepRate: 1
-            })
+        let mut index = 0;
+        for inst in &inst_named.props {
+            if inst.slots == 16{
+                for _ in 0..4{
+                    strings.push(ffi::CString::new(format!("INST{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
+                    layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
+                        SemanticName: strings.last().unwrap().as_ptr() as *const _,
+                        SemanticIndex: 0,
+                        Format: Self::slots_to_dxgi_format(4),
+                        InputSlot: 1,
+                        AlignedByteOffset: (inst.offset * 4) as u32,
+                        InputSlotClass: d3d11::D3D11_INPUT_PER_INSTANCE_DATA,
+                        InstanceDataStepRate: 1
+                    });  
+                    index += 1;
+                }
+            }
+            else if inst.slots == 9{ 
+                for _ in 0..3{
+                    strings.push(ffi::CString::new(format!("INST{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
+                    layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
+                        SemanticName: strings.last().unwrap().as_ptr() as *const _,
+                        SemanticIndex: 0,
+                        Format: Self::slots_to_dxgi_format(3),
+                        InputSlot: 1,
+                        AlignedByteOffset: (inst.offset * 4) as u32,
+                        InputSlotClass: d3d11::D3D11_INPUT_PER_INSTANCE_DATA,
+                        InstanceDataStepRate: 1
+                    });  
+                    index += 1;
+                }
+            }            
+            else{
+                strings.push(ffi::CString::new(format!("INST{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
+                layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
+                    SemanticName: strings.last().unwrap().as_ptr() as *const _,
+                    SemanticIndex: 0,
+                    Format: Self::slots_to_dxgi_format(inst.slots),
+                    InputSlot: 1,
+                    AlignedByteOffset: (inst.offset * 4) as u32,
+                    InputSlotClass: d3d11::D3D11_INPUT_PER_INSTANCE_DATA,
+                    InstanceDataStepRate: 1
+                }); 
+                index += 1;
+            }
         }
         
         let input_layout = d3d11_cx.create_input_layout(&vs_blob, &layout_desc).expect("cannot create input layout");
@@ -385,12 +433,12 @@ impl Cx {
         sh.platform = Some(CxPlatformShader {
             geom_ibuf: {
                 let mut geom_ibuf = D3d11Buffer {..Default::default()};
-                geom_ibuf.update_with_u32_index_data(d3d11_cx, &sh.shader_gen.geometry_indices);
+                geom_ibuf.update_with_u32_index_data(d3d11_cx, &sh.shader_gen.geometry.indices);
                 geom_ibuf
             },
             geom_vbuf: {
                 let mut geom_vbuf = D3d11Buffer {..Default::default()};
-                geom_vbuf.update_with_f32_vertex_data(d3d11_cx, &sh.shader_gen.geometry_vertices);
+                geom_vbuf.update_with_f32_vertex_data(d3d11_cx, &sh.shader_gen.geometry.vertices);
                 geom_vbuf
             },
             const_table_uniforms:{
@@ -1198,265 +1246,7 @@ impl D3d11Cx {
         }
     }
     
-    /*
     
-                            /*
-                        TextureFormat::ImageBGRAf32 => {},
-                        TextureFormat::ImageRf32 => {
-                            if cxtexture.update_image {
-                                cxtexture.update_image = false;
-                                d3d11_cx.update_platform_texture_image_rf32(
-                                    &mut cxtexture.platform.single,
-                                    cxtexture.desc.width.unwrap(),
-                                    cxtexture.desc.height.unwrap(),
-                                    &cxtexture.image_f32,
-                                );
-                            }
-                            d3d11_cx.set_shader_resource(i, &cxtexture.platform.single.shader_resource);
-                        },
-                        TextureFormat::ImageRGf32 => {
-                            if cxtexture.update_image {
-                                cxtexture.update_image = false;
-                                d3d11_cx.update_platform_texture_image_rgf32(
-                                    &mut cxtexture.platform.single,
-                                    cxtexture.desc.width.unwrap(),
-                                    cxtexture.desc.height.unwrap(),
-                                    &cxtexture.image_f32,
-                                );
-                            }
-                            d3d11_cx.set_shader_resource(i, &cxtexture.platform.single.shader_resource);
-                        },
-                        TextureFormat::MappedRGf32 | TextureFormat::MappedRf32 | TextureFormat::MappedBGRA | TextureFormat::MappedBGRAf32 => {
-                            if let Ok(mut mapped) = cxtexture.platform.mapped.lock() {
-                                if mapped.textures[0].texture.is_none() {
-                                    d3d11_cx.init_mapped_textures(
-                                        &mut *mapped,
-                                        &cxtexture.desc.format,
-                                        cxtexture.desc.width.unwrap(),
-                                        cxtexture.desc.height.unwrap()
-                                    );
-                                }
-                                if let Some(index) = d3d11_cx.flip_mapped_textures(&mut mapped, repaint_id) {
-                                    d3d11_cx.set_shader_resource(i, &mapped.textures[index].shader_resource);
-                                }
-                            }
-                        },*/
-                        
-    pub fn init_mapped_textures(&self, mapped: &mut CxPlatformTextureMapped, texture_format: &TextureFormat, width: usize, height: usize) {
-        let slots_per_pixel;
-        let format;
-        match texture_format {
-            TextureFormat::MappedRGf32 => {
-                slots_per_pixel = 2;
-                format = dxgiformat::DXGI_FORMAT_R32G32_FLOAT;
-            }
-            TextureFormat::MappedRf32 => {
-                slots_per_pixel = 1;
-                format = dxgiformat::DXGI_FORMAT_R32_FLOAT;
-            }
-            TextureFormat::MappedBGRA => {
-                slots_per_pixel = 1;
-                format = dxgiformat::DXGI_FORMAT_R8G8B8A8_UNORM;
-            }
-            TextureFormat::MappedBGRAf32 => {
-                slots_per_pixel = 4;
-                format = dxgiformat::DXGI_FORMAT_R32G32B32A32_FLOAT;
-            },
-            _ => {
-                panic!("Wrong format for init_mapped_texures");
-            }
-        }
-        let texture_desc = d3d11::D3D11_TEXTURE2D_DESC {
-            Width: width as u32,
-            Height: height as u32,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: format,
-            SampleDesc: dxgitype::DXGI_SAMPLE_DESC {Count: 1, Quality: 0},
-            Usage: d3d11::D3D11_USAGE_DYNAMIC,
-            BindFlags: d3d11::D3D11_BIND_SHADER_RESOURCE,
-            CPUAccessFlags: d3d11::D3D11_CPU_ACCESS_WRITE,
-            MiscFlags: 0,
-        };
-        for i in 0..MAPPED_TEXTURE_BUFFER_COUNT {
-            let mut texture = ptr::null_mut();
-            let hr = unsafe {self.device.CreateTexture2D(&texture_desc, ptr::null(), &mut texture as *mut *mut _)};
-            if winerror::SUCCEEDED(hr) {
-                let mut shader_resource = ptr::null_mut();
-                unsafe {self.device.CreateShaderResourceView(texture as *mut _, ptr::null(), &mut shader_resource as *mut *mut _)};
-                mapped.textures[i].slots_per_pixel = slots_per_pixel;
-                mapped.textures[i].width = width;
-                mapped.textures[i].height = height;
-                mapped.textures[i].texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
-                let mut shader_resource = ptr::null_mut();
-                unsafe {self.device.CreateShaderResourceView(texture as *mut _, ptr::null(), &mut shader_resource as *mut *mut _)};
-                
-                mapped.textures[i].shader_resource = Some(unsafe {ComPtr::from_raw(shader_resource as *mut _)});
-                let mut d3d11_resource = ptr::null_mut();
-                unsafe {mapped.textures[i].texture.as_ref().unwrap().QueryInterface(
-                    &d3d11::ID3D11Resource::uuidof(),
-                    &mut d3d11_resource as *mut *mut _
-                )};
-                mapped.textures[i].d3d11_resource = Some(unsafe {ComPtr::from_raw(d3d11_resource as *mut _)});
-                // map them by default
-                self.map_texture(&mut mapped.textures[i]);
-            }
-            else {
-                panic!("init_mapped_textures failed");
-            }
-        }
-    }
-    
-    pub fn flip_mapped_textures(&self, mapped: &mut CxPlatformTextureMapped, repaint_id: u64) -> Option<usize> {
-        if mapped.repaint_id == repaint_id {
-            return mapped.repaint_read
-        }
-        mapped.repaint_id = repaint_id;
-        for i in 0..MAPPED_TEXTURE_BUFFER_COUNT {
-            if mapped.write > mapped.read && i == mapped.read % MAPPED_TEXTURE_BUFFER_COUNT {
-                if mapped.textures[i].locked {
-                    panic!("Texture locked whilst unmapping, should never happen!")
-                }
-                self.unmap_texture(&mut mapped.textures[i]);
-            }
-            else if mapped.read == 0 || i != (mapped.read - 1) % MAPPED_TEXTURE_BUFFER_COUNT { // keep a safety for not stalling gpu
-                self.map_texture(&mut mapped.textures[i]);
-            }
-        }
-        if mapped.read != mapped.write && mapped.textures[mapped.read % MAPPED_TEXTURE_BUFFER_COUNT].map_ptr.is_none() {
-            let read = mapped.read;
-            if mapped.read != mapped.write && mapped.write > mapped.read {
-                if mapped.write > mapped.read + 1 { // space ahead
-                    mapped.read += 1;
-                }
-            }
-            mapped.repaint_read = Some(read % MAPPED_TEXTURE_BUFFER_COUNT);
-            return mapped.repaint_read;
-        }
-        mapped.repaint_read = None;
-        return None
-    }
-    
-    pub fn map_texture(&self, texture: &mut CxPlatformTextureResource) {
-        if !texture.map_ptr.is_none() {
-            return
-        }
-        unsafe {
-            let mut mapped_resource = std::mem::zeroed();
-            let d3d11_resource = texture.d3d11_resource.as_ref().unwrap();
-            let hr = self.context.Map(d3d11_resource.as_raw(), 0, d3d11::D3D11_MAP_WRITE_DISCARD, 0, &mut mapped_resource);
-            if winerror::SUCCEEDED(hr) {
-                texture.map_ptr = Some(mapped_resource.pData);
-            }
-        }
-    }
-    
-    pub fn unmap_texture(&self, texture: &mut CxPlatformTextureResource) {
-        if texture.map_ptr.is_none() {
-            return
-        }
-        let d3d11_resource = texture.d3d11_resource.as_ref().unwrap();
-        unsafe {
-            self.context.Unmap(d3d11_resource.as_raw(), 0);
-        }
-        texture.map_ptr = None;
-    }*/
-    
-    /*
-    pub fn update_platform_texture_image_rf32(&self, res: &mut CxPlatformTextureResource, width: usize, height: usize, image_f32: &Vec<f32>) {
-        if image_f32.len() != width * height {
-            println!("update_platform_texture_image_rf32 with wrong buffer_u32 size!");
-            return;
-        }
-        
-        let mut texture = ptr::null_mut();
-        let sub_data = d3d11::D3D11_SUBRESOURCE_DATA {
-            pSysMem: image_f32.as_ptr() as *const _,
-            SysMemPitch: (width * 4) as u32,
-            SysMemSlicePitch: 0
-        };
-        
-        let texture_desc = d3d11::D3D11_TEXTURE2D_DESC {
-            Width: width as u32,
-            Height: height as u32,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: dxgiformat::DXGI_FORMAT_R32_FLOAT,
-            SampleDesc: dxgitype::DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0
-            },
-            Usage: d3d11::D3D11_USAGE_DEFAULT,
-            BindFlags: d3d11::D3D11_BIND_SHADER_RESOURCE,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
-        };
-        
-        let hr = unsafe {self.device.CreateTexture2D(&texture_desc, &sub_data, &mut texture as *mut *mut _)};
-        if winerror::SUCCEEDED(hr) {
-            let mut shader_resource = ptr::null_mut();
-            unsafe {self.device.CreateShaderResourceView(
-                texture as *mut _,
-                ptr::null(),
-                &mut shader_resource as *mut *mut _
-            )};
-            res.width = width;
-            res.height = height;
-            res.texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
-            res.shader_resource = Some(unsafe {ComPtr::from_raw(shader_resource as *mut _)});
-        }
-        else {
-            panic!("update_platform_texture_image_rf32 failed");
-        }
-    }
-    
-    
-    pub fn update_platform_texture_image_rgf32(&self, res: &mut CxPlatformTextureResource, width: usize, height: usize, image_f32: &Vec<f32>) {
-        if image_f32.len() != width * height * 2 {
-            println!("update_platform_texture_image_rgf32 with wrong buffer_f32 size {} {}!", width * height * 2, image_f32.len());
-            return;
-        }
-        
-        let mut texture = ptr::null_mut();
-        let sub_data = d3d11::D3D11_SUBRESOURCE_DATA {
-            pSysMem: image_f32.as_ptr() as *const _,
-            SysMemPitch: (width * 8) as u32,
-            SysMemSlicePitch: 0
-        };
-        
-        let texture_desc = d3d11::D3D11_TEXTURE2D_DESC {
-            Width: width as u32,
-            Height: height as u32,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: dxgiformat::DXGI_FORMAT_R32G32_FLOAT,
-            SampleDesc: dxgitype::DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0
-            },
-            Usage: d3d11::D3D11_USAGE_DEFAULT,
-            BindFlags: d3d11::D3D11_BIND_SHADER_RESOURCE,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
-        };
-        
-        let hr = unsafe {self.device.CreateTexture2D(&texture_desc, &sub_data, &mut texture as *mut *mut _)};
-        if winerror::SUCCEEDED(hr) {
-            let mut shader_resource = ptr::null_mut();
-            unsafe {self.device.CreateShaderResourceView(
-                texture as *mut _,
-                ptr::null(),
-                &mut shader_resource as *mut *mut _
-            )};
-            res.texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
-            res.width = width;
-            res.height = height;
-            res.shader_resource = Some(unsafe {ComPtr::from_raw(shader_resource as *mut _)});
-        }
-        else {
-            panic!("update_platform_texture_image_rgf32 failed");
-        }
-    }*/
 }
 
 #[derive(Clone, Default)]
@@ -1715,4 +1505,265 @@ impl CxThread {
             };
         }
     }
-}*/
+}
+/*
+    
+                            /*
+                        TextureFormat::ImageBGRAf32 => {},
+                        TextureFormat::ImageRf32 => {
+                            if cxtexture.update_image {
+                                cxtexture.update_image = false;
+                                d3d11_cx.update_platform_texture_image_rf32(
+                                    &mut cxtexture.platform.single,
+                                    cxtexture.desc.width.unwrap(),
+                                    cxtexture.desc.height.unwrap(),
+                                    &cxtexture.image_f32,
+                                );
+                            }
+                            d3d11_cx.set_shader_resource(i, &cxtexture.platform.single.shader_resource);
+                        },
+                        TextureFormat::ImageRGf32 => {
+                            if cxtexture.update_image {
+                                cxtexture.update_image = false;
+                                d3d11_cx.update_platform_texture_image_rgf32(
+                                    &mut cxtexture.platform.single,
+                                    cxtexture.desc.width.unwrap(),
+                                    cxtexture.desc.height.unwrap(),
+                                    &cxtexture.image_f32,
+                                );
+                            }
+                            d3d11_cx.set_shader_resource(i, &cxtexture.platform.single.shader_resource);
+                        },
+                        TextureFormat::MappedRGf32 | TextureFormat::MappedRf32 | TextureFormat::MappedBGRA | TextureFormat::MappedBGRAf32 => {
+                            if let Ok(mut mapped) = cxtexture.platform.mapped.lock() {
+                                if mapped.textures[0].texture.is_none() {
+                                    d3d11_cx.init_mapped_textures(
+                                        &mut *mapped,
+                                        &cxtexture.desc.format,
+                                        cxtexture.desc.width.unwrap(),
+                                        cxtexture.desc.height.unwrap()
+                                    );
+                                }
+                                if let Some(index) = d3d11_cx.flip_mapped_textures(&mut mapped, repaint_id) {
+                                    d3d11_cx.set_shader_resource(i, &mapped.textures[index].shader_resource);
+                                }
+                            }
+                        },*/
+                        
+    pub fn init_mapped_textures(&self, mapped: &mut CxPlatformTextureMapped, texture_format: &TextureFormat, width: usize, height: usize) {
+        let slots_per_pixel;
+        let format;
+        match texture_format {
+            TextureFormat::MappedRGf32 => {
+                slots_per_pixel = 2;
+                format = dxgiformat::DXGI_FORMAT_R32G32_FLOAT;
+            }
+            TextureFormat::MappedRf32 => {
+                slots_per_pixel = 1;
+                format = dxgiformat::DXGI_FORMAT_R32_FLOAT;
+            }
+            TextureFormat::MappedBGRA => {
+                slots_per_pixel = 1;
+                format = dxgiformat::DXGI_FORMAT_R8G8B8A8_UNORM;
+            }
+            TextureFormat::MappedBGRAf32 => {
+                slots_per_pixel = 4;
+                format = dxgiformat::DXGI_FORMAT_R32G32B32A32_FLOAT;
+            },
+            _ => {
+                panic!("Wrong format for init_mapped_texures");
+            }
+        }
+        let texture_desc = d3d11::D3D11_TEXTURE2D_DESC {
+            Width: width as u32,
+            Height: height as u32,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: format,
+            SampleDesc: dxgitype::DXGI_SAMPLE_DESC {Count: 1, Quality: 0},
+            Usage: d3d11::D3D11_USAGE_DYNAMIC,
+            BindFlags: d3d11::D3D11_BIND_SHADER_RESOURCE,
+            CPUAccessFlags: d3d11::D3D11_CPU_ACCESS_WRITE,
+            MiscFlags: 0,
+        };
+        for i in 0..MAPPED_TEXTURE_BUFFER_COUNT {
+            let mut texture = ptr::null_mut();
+            let hr = unsafe {self.device.CreateTexture2D(&texture_desc, ptr::null(), &mut texture as *mut *mut _)};
+            if winerror::SUCCEEDED(hr) {
+                let mut shader_resource = ptr::null_mut();
+                unsafe {self.device.CreateShaderResourceView(texture as *mut _, ptr::null(), &mut shader_resource as *mut *mut _)};
+                mapped.textures[i].slots_per_pixel = slots_per_pixel;
+                mapped.textures[i].width = width;
+                mapped.textures[i].height = height;
+                mapped.textures[i].texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
+                let mut shader_resource = ptr::null_mut();
+                unsafe {self.device.CreateShaderResourceView(texture as *mut _, ptr::null(), &mut shader_resource as *mut *mut _)};
+                
+                mapped.textures[i].shader_resource = Some(unsafe {ComPtr::from_raw(shader_resource as *mut _)});
+                let mut d3d11_resource = ptr::null_mut();
+                unsafe {mapped.textures[i].texture.as_ref().unwrap().QueryInterface(
+                    &d3d11::ID3D11Resource::uuidof(),
+                    &mut d3d11_resource as *mut *mut _
+                )};
+                mapped.textures[i].d3d11_resource = Some(unsafe {ComPtr::from_raw(d3d11_resource as *mut _)});
+                // map them by default
+                self.map_texture(&mut mapped.textures[i]);
+            }
+            else {
+                panic!("init_mapped_textures failed");
+            }
+        }
+    }
+    
+    pub fn flip_mapped_textures(&self, mapped: &mut CxPlatformTextureMapped, repaint_id: u64) -> Option<usize> {
+        if mapped.repaint_id == repaint_id {
+            return mapped.repaint_read
+        }
+        mapped.repaint_id = repaint_id;
+        for i in 0..MAPPED_TEXTURE_BUFFER_COUNT {
+            if mapped.write > mapped.read && i == mapped.read % MAPPED_TEXTURE_BUFFER_COUNT {
+                if mapped.textures[i].locked {
+                    panic!("Texture locked whilst unmapping, should never happen!")
+                }
+                self.unmap_texture(&mut mapped.textures[i]);
+            }
+            else if mapped.read == 0 || i != (mapped.read - 1) % MAPPED_TEXTURE_BUFFER_COUNT { // keep a safety for not stalling gpu
+                self.map_texture(&mut mapped.textures[i]);
+            }
+        }
+        if mapped.read != mapped.write && mapped.textures[mapped.read % MAPPED_TEXTURE_BUFFER_COUNT].map_ptr.is_none() {
+            let read = mapped.read;
+            if mapped.read != mapped.write && mapped.write > mapped.read {
+                if mapped.write > mapped.read + 1 { // space ahead
+                    mapped.read += 1;
+                }
+            }
+            mapped.repaint_read = Some(read % MAPPED_TEXTURE_BUFFER_COUNT);
+            return mapped.repaint_read;
+        }
+        mapped.repaint_read = None;
+        return None
+    }
+    
+    pub fn map_texture(&self, texture: &mut CxPlatformTextureResource) {
+        if !texture.map_ptr.is_none() {
+            return
+        }
+        unsafe {
+            let mut mapped_resource = std::mem::zeroed();
+            let d3d11_resource = texture.d3d11_resource.as_ref().unwrap();
+            let hr = self.context.Map(d3d11_resource.as_raw(), 0, d3d11::D3D11_MAP_WRITE_DISCARD, 0, &mut mapped_resource);
+            if winerror::SUCCEEDED(hr) {
+                texture.map_ptr = Some(mapped_resource.pData);
+            }
+        }
+    }
+    
+    pub fn unmap_texture(&self, texture: &mut CxPlatformTextureResource) {
+        if texture.map_ptr.is_none() {
+            return
+        }
+        let d3d11_resource = texture.d3d11_resource.as_ref().unwrap();
+        unsafe {
+            self.context.Unmap(d3d11_resource.as_raw(), 0);
+        }
+        texture.map_ptr = None;
+    }*/
+    
+    /*
+    pub fn update_platform_texture_image_rf32(&self, res: &mut CxPlatformTextureResource, width: usize, height: usize, image_f32: &Vec<f32>) {
+        if image_f32.len() != width * height {
+            println!("update_platform_texture_image_rf32 with wrong buffer_u32 size!");
+            return;
+        }
+        
+        let mut texture = ptr::null_mut();
+        let sub_data = d3d11::D3D11_SUBRESOURCE_DATA {
+            pSysMem: image_f32.as_ptr() as *const _,
+            SysMemPitch: (width * 4) as u32,
+            SysMemSlicePitch: 0
+        };
+        
+        let texture_desc = d3d11::D3D11_TEXTURE2D_DESC {
+            Width: width as u32,
+            Height: height as u32,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: dxgiformat::DXGI_FORMAT_R32_FLOAT,
+            SampleDesc: dxgitype::DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0
+            },
+            Usage: d3d11::D3D11_USAGE_DEFAULT,
+            BindFlags: d3d11::D3D11_BIND_SHADER_RESOURCE,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        
+        let hr = unsafe {self.device.CreateTexture2D(&texture_desc, &sub_data, &mut texture as *mut *mut _)};
+        if winerror::SUCCEEDED(hr) {
+            let mut shader_resource = ptr::null_mut();
+            unsafe {self.device.CreateShaderResourceView(
+                texture as *mut _,
+                ptr::null(),
+                &mut shader_resource as *mut *mut _
+            )};
+            res.width = width;
+            res.height = height;
+            res.texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
+            res.shader_resource = Some(unsafe {ComPtr::from_raw(shader_resource as *mut _)});
+        }
+        else {
+            panic!("update_platform_texture_image_rf32 failed");
+        }
+    }
+    
+    
+    pub fn update_platform_texture_image_rgf32(&self, res: &mut CxPlatformTextureResource, width: usize, height: usize, image_f32: &Vec<f32>) {
+        if image_f32.len() != width * height * 2 {
+            println!("update_platform_texture_image_rgf32 with wrong buffer_f32 size {} {}!", width * height * 2, image_f32.len());
+            return;
+        }
+        
+        let mut texture = ptr::null_mut();
+        let sub_data = d3d11::D3D11_SUBRESOURCE_DATA {
+            pSysMem: image_f32.as_ptr() as *const _,
+            SysMemPitch: (width * 8) as u32,
+            SysMemSlicePitch: 0
+        };
+        
+        let texture_desc = d3d11::D3D11_TEXTURE2D_DESC {
+            Width: width as u32,
+            Height: height as u32,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: dxgiformat::DXGI_FORMAT_R32G32_FLOAT,
+            SampleDesc: dxgitype::DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0
+            },
+            Usage: d3d11::D3D11_USAGE_DEFAULT,
+            BindFlags: d3d11::D3D11_BIND_SHADER_RESOURCE,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        
+        let hr = unsafe {self.device.CreateTexture2D(&texture_desc, &sub_data, &mut texture as *mut *mut _)};
+        if winerror::SUCCEEDED(hr) {
+            let mut shader_resource = ptr::null_mut();
+            unsafe {self.device.CreateShaderResourceView(
+                texture as *mut _,
+                ptr::null(),
+                &mut shader_resource as *mut *mut _
+            )};
+            res.texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
+            res.width = width;
+            res.height = height;
+            res.shader_resource = Some(unsafe {ComPtr::from_raw(shader_resource as *mut _)});
+        }
+        else {
+            panic!("update_platform_texture_image_rgf32 failed");
+        }
+    }*/
+
+*/

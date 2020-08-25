@@ -2,44 +2,72 @@ use makepad_render::*;
 
 // Shader code itself
 
-fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
+fn shader() -> ShaderGen {ShaderView::base_shader().compose(shader!{"
+    varying camera_vec: vec3;
+    
+    fn vertex() -> vec4 {
+        // return vec4(geom.x-0.5, geom.y, 0., 1.);
+        let scr = scroll();
+        let clipped: vec2 = clamp(
+            geom * vec2(w, h) + vec2(x, y) - scr,
+            draw_clip.xy,
+            draw_clip.zw
+        );
+        pos = (clipped + scr - vec2(x, y)) / vec2(w, h);
+        
+        if camera_inv[0][0] == 0.0{
+            camera_vec = vec3(0.,0.,-1.); 
+        }
+        else{
+            let wp = camera_view * view_transform * vec4(x + pos.x * w, y + pos.y * h, 0.0, 1.0); 
+            let vc = mat3(camera_inv) * wp.xyz;
+            camera_vec = normalize(vec3(vc.x, -vc.y, vc.z)); 
+        }
+         
+        // only pass the clipped position forward
+        return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + draw_zbias, 1.)));
+    }
+    
     fn pixel() -> vec4 {
         let ratio = vec2(
             mix(w / h, 1.0, float(w <= h)),
             mix(1.0, h / w, float(w <= h))
-        );
-        let p0 = vec3((2.0 * pos - 1.0) *  ratio, 2.0); 
-        let v = vec3(0.0, 0.0, -1.0);
-        let m = identity() * rotation(vec3(1.0, 1.0, 1.0), time);
+        ); 
+
+        // point on rect -1..1 
+        let p0 = vec3((2.0 * pos - 1.0) *  ratio, 1.0); 
+        let v = camera_vec;
+
+        let m = identity() * rotation(vec3(1.0, 1.0, 1.0), time); 
         p0 = (m * vec4(p0, 1.0)).xyz;
         v = (m * vec4(v, 0.0)).xyz;
-        let t = march_ray(p0, v);
+        let t = march_ray(p0, v); 
         if t.x < T_MAX {
-            let p = p0 + t.x * v;
+            let p = p0 + t.x * v;  
             let n = estimate_normal(p);
 
             let c = vec4(0.0);
             if t.y == 0.0 || t.y == 1.0 {
-                c += pick!(#856F37);
+                c += pick!(#6EF8FF);
             }
             if t.y == 2.0 {
-                c += pick!(#11EF00);
+                c += pick!(#FF0000);
             }
             if t.y == 3.0 {
-                c += pick!(#FD8C00); 
+                c += pick!(#0300DC); 
             }
             if t.y == 4.0 {
-                c += pick!(#FF0000);
+                c += pick!(#FDFF00);
             }
             
             let ld = normalize(vec3(0.0, 0.0, 1.0));
             let ls = normalize(vec3(0.0, 0.0, 1.0));
             let v = normalize(p0);
-            let r = slide!(1.0)*2.0 * dot(n, ls) * n - ls;
+            let r = 2.0 * dot(n, ls) * n - ls;
             
-            let ia = 0.2;
-            let id = 0.3 * max(0.0, dot(ld, n));
-            let is = 0.5 * pow(max(0.0, dot(v, r)), slide!(0.8851563)*2.0);
+            let ia = 0.2; 
+            let id = 0.3 * max(0.0, dot(ld, n)); 
+            let is = 0.5 * pow(max(0.0, dot(v, r)), slide!(0.105)*2.0);
             let i = ia + id + is;
             
             return i * c; 
@@ -125,7 +153,7 @@ fn shader() -> ShaderGen {Quad::def_quad_shader().compose(shader!{"
     }
     
     fn displace(p: vec3, d: vec2) -> vec2 {
-        return vec2(0.05 * sin(10.0* p.x) * sin(10.0 * p.y) * sin(10.0* p.z) + d.x, d.y);
+        return vec2((0.05 + 0.2*slide!(0.)) * sin(10.0* p.x) * sin(10.0 * p.y) * sin(10.0* p.z) + d.x, d.y);
     }
     
     fn difference(d1: vec2, d2: vec2) -> vec2 {
@@ -188,14 +216,19 @@ impl ShaderView {
     pub fn finger_move() -> Vec2Id {uid!()}
     pub fn finger_down() -> FloatId {uid!()}
     pub fn time() -> FloatId {uid!()}
-    pub fn new(cx: &mut Cx) -> Self {
-        
-        Self::bg().set(cx, shader().compose(shader!{"
+    
+    pub fn base_shader()->ShaderGen{
+        Quad::def_quad_shader().compose(shader!{"
             instance finger_hover: ShaderView::finger_hover();
             instance finger_move: ShaderView::finger_move();
             instance finger_down: ShaderView::finger_down();
             instance time: ShaderView::time();
-        "}));
+        "})
+    }
+    
+    pub fn new(cx: &mut Cx) -> Self {
+        
+        Self::bg().set(cx, shader());
          
         Self {
             quad: Quad::new(cx),
@@ -210,8 +243,9 @@ impl ShaderView {
     
     pub fn handle_shader_view(&mut self, cx: &mut Cx, event: &mut Event) {
         match event.hits(cx, self.area, HitOpt::default()) {
-            Event::Frame(_ae)=>{
-                self.time += 1.0/60.0;
+            Event::Frame(ae)=>{
+                //self.time += 1.0/60.0;
+                self.time = ae.time as f32;
                 self.area.write_float(cx, Self::time(), self.time);
                 cx.next_frame(self.area);
             },

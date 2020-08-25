@@ -641,7 +641,7 @@ impl FileTree {
     
     pub fn draw_file_tree(&mut self, cx: &mut Cx) {
         if self.view.begin_view(cx, Layout::default()).is_err() {return}
-        
+
         let mut file_walker = FileWalker::new(&mut self.root_node);
         
         // lets draw the filetree
@@ -786,7 +786,7 @@ impl FileTree {
                 }
             }
             
-            self.item_draw.node_bg.end_quad(cx, &inst);
+            self.item_draw.node_bg.end_quad(cx, inst);
             
             cx.turtle_new_line();
             // if any of the parents is closing, don't count alternating lines
@@ -831,7 +831,7 @@ impl FileTree {
                             FileNode::Folder {name, ..} => {name},
                             FileNode::File {name, ..} => {name}
                         });
-                        self.drag_bg.end_quad(cx, &inst);
+                        self.drag_bg.end_quad(cx, inst);
                     }
                 }
                 self.drag_view.end_view(cx);

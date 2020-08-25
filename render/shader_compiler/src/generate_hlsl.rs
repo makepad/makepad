@@ -201,15 +201,45 @@ impl<'a> ShaderGenerator<'a> {
         for decl in &self.shader.decls {
             match decl {
                 Decl::Instance(decl) => {
-                    write!(self.string, "    ").unwrap();
-                    self.write_var_decl(
-                        false,
-                        true,
-                        decl.ident,
-                        decl.ty_expr.ty.borrow().as_ref().unwrap(),
-                    );
-                    writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
-                    index += 1;
+                    match decl.ty_expr.ty.borrow().as_ref().unwrap(){
+                        Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 =>{
+                            write!(self.string, "    ").unwrap();
+                            self.write_var_decl(
+                                false,
+                                true,
+                                decl.ident,
+                                decl.ty_expr.ty.borrow().as_ref().unwrap(),
+                            );
+                            writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
+                            index += 1;
+                        },
+                        Ty::Mat4 =>{
+                            for i in 0..4{
+                                write!(self.string, "    ").unwrap();
+                                self.write_ty_lit(TyLit::Vec4);
+                                write!(self.string, " {}{}", decl.ident, i).unwrap();
+                                writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
+                                index += 1;                                
+                            }
+                        },
+                        Ty::Mat3=>{
+                            for i in 0..3{
+                                write!(self.string, "    ").unwrap();
+                                self.write_ty_lit(TyLit::Vec3);
+                                write!(self.string, " {}{}", decl.ident, i).unwrap();
+                                writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
+                                index += 1;                                
+                            }
+                        },
+                        Ty::Mat2 =>{
+                            write!(self.string, "    ").unwrap();
+                            self.write_ty_lit(TyLit::Vec4);
+                            write!(self.string, " {}", decl.ident).unwrap();
+                            writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
+                            index += 1;                                
+                        },
+                        _=>panic!("unsupported type in generate_instance_struct")
+                    }
                 }
                 _ => {}
             }
@@ -307,12 +337,17 @@ impl<'a> ShaderGenerator<'a> {
     }
     
     fn generate_cons_fn(&mut self, ty_lit: TyLit, param_tys: &[Ty]) {
-        self.write_ty_lit(ty_lit);
-        write!(self.string, " mpsc_{}", ty_lit).unwrap();
+        
+        let mut cons_name = format!("mpsc_{}", ty_lit);
         for param_ty in param_tys {
-            write!(self.string, "_{}", param_ty).unwrap();
+            write!(cons_name, "_{}", param_ty).unwrap();
         }
-        write!(self.string, "(").unwrap();
+        if !HlslBackendWriter.use_cons_fn(&cons_name){
+            return 
+        }
+        
+        self.write_ty_lit(ty_lit);
+        write!(self.string, " {}(", cons_name).unwrap();
         let mut sep = "";
         if param_tys.len() == 1 {
             self.write_var_decl(false, false, Ident::new("x"), &param_tys[0])
@@ -490,7 +525,7 @@ impl<'a> ShaderGenerator<'a> {
             decl: None,
             backend_writer: &HlslBackendWriter,
             use_const_table: self.use_const_table,
-            use_generated_cons_fns: true,
+            //use_generated_cons_fns: true,
             string: self.string,
         }
         .generate_expr(expr)
@@ -623,7 +658,7 @@ impl<'a> FnDeclGenerator<'a> {
             decl: self.decl,
             backend_writer: &HlslBackendWriter,
             use_const_table: self.use_const_table,
-            use_generated_cons_fns: true,
+            //use_generated_cons_fns: true,
             indent_level: 0,
             string: self.string,
         }
@@ -667,14 +702,50 @@ impl BackendWriter for HlslBackendWriter {
     }
     
     
-    fn generate_var_expr_prefix(&self, string: &mut String, _ident: Ident, kind: &Cell<Option<VarKind>>, _shader: &ShaderAst, decl: &FnDecl) {
+    fn generate_var_expr(&self, string: &mut String, ident: Ident, kind: &Cell<Option<VarKind>>, _shader: &ShaderAst, decl: &FnDecl, ty:&Option<Ty>) {
         
         let is_used_in_vertex_shader = decl.is_used_in_vertex_shader.get().unwrap();
         let is_used_in_fragment_shader = decl.is_used_in_fragment_shader.get().unwrap();
         if is_used_in_vertex_shader {
             match kind.get().unwrap() {
                 VarKind::Geometry => write!(string, "mpsc_geometries.").unwrap(),
-                VarKind::Instance => write!(string, "mpsc_instances.").unwrap(),
+                VarKind::Instance =>{
+                    match ty{
+                        Some(Ty::Mat4)=>{
+                            write!(string, "float4x4(").unwrap();
+                            for i in 0..4{
+                                if i != 0{
+                                    write!(string, ",").unwrap();
+                                }
+                                write!(string, "mpsc_instances.").unwrap();
+                                write!(string, "{}{}", ident, i).unwrap();
+                            }
+                            write!(string, ")").unwrap();
+                            return
+                        },
+                        Some(Ty::Mat3)=>{
+                            write!(string, "float3x3(").unwrap();
+                            for i in 0..3{
+                                if i != 0{
+                                    write!(string, ",").unwrap();
+                                }
+                                write!(string, "mpsc_instances.").unwrap();
+                                write!(string, "{}{}", ident, i).unwrap();
+                            }
+                            write!(string, ")").unwrap();
+                            return
+                        },
+                        Some(Ty::Mat2)=>{
+                            write!(string, "float2x2(").unwrap();
+                            write!(string, "mpsc_instances.").unwrap();
+                            write!(string, ")").unwrap();
+                            return
+                        },
+                        _=>{
+                            write!(string, "mpsc_instances.").unwrap();
+                        }
+                    }
+                },
                 VarKind::Varying => write!(string, "mpsc_varyings.").unwrap(),
                 _ => {}
             }
@@ -687,14 +758,28 @@ impl BackendWriter for HlslBackendWriter {
                 _ => {}
             }
         }
+        write!(string, "{}", ident).unwrap();
     }
     
     fn needs_mul_fn_for_matrix_multiplication(&self) -> bool {
         true
     }
 
+    fn needs_unpack_for_matrix_multiplication(&self)->bool{
+        false
+    }
+
     fn  const_table_is_vec4(&self) -> bool{
         true
+    }
+
+    fn use_cons_fn(&self, what:&str)->bool{
+        match what{
+            "mpsc_vec4_float_float_float_float"=>false,
+            "mpsc_vec3_float_float_float"=>false,
+            "mpsc_vec2_float_float"=>false,
+            _=>true
+        }
     }
      
     fn write_var_decl( 

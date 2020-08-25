@@ -9,18 +9,11 @@ impl Cx {
         view_id: usize,
         scroll: Vec2,
         clip: (Vec2, Vec2),
-        vr_is_presenting: bool,
         zbias: &mut f32,
         zbias_step: f32
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
-        if vr_is_presenting {
-            self.views[view_id].uniform_view_transform(&Mat4::scale_translate(0.0005, -0.0005, 0.001, -0.3, 1.8, -0.4));
-        }
-        else {
-            self.views[view_id].uniform_view_transform(&Mat4::identity());
-        }
         self.views[view_id].parent_scroll = scroll;
         let local_scroll = self.views[view_id].get_local_scroll();
         let clip = self.views[view_id].intersect_clip(clip);
@@ -33,7 +26,6 @@ impl Cx {
                     sub_view_id,
                     Vec2 {x: local_scroll.x + scroll.x, y: local_scroll.y + scroll.y},
                     clip,
-                    vr_is_presenting,
                     zbias,
                     zbias_step
                 );
@@ -103,7 +95,7 @@ impl Cx {
         self.passes[pass_id].set_dpi_factor(dpi_factor);
     }
     
-    pub fn draw_pass_to_canvas(&mut self, pass_id: usize, vr_is_presenting: bool, dpi_factor: f32) {
+    pub fn draw_pass_to_canvas(&mut self, pass_id: usize, dpi_factor: f32) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
         // get the color and depth
@@ -129,21 +121,14 @@ impl Cx {
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         
-        if vr_is_presenting {
-            self.platform.from_wasm.mark_vr_draw_eye();
-        } 
         self.render_view(
             pass_id,
             view_id,
             Vec2::default(),
             (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
-            vr_is_presenting,
             &mut zbias,
             zbias_step
         );
-        if vr_is_presenting {
-            self.platform.from_wasm.loop_vr_draw_eye();
-        }
     }
     
     pub fn draw_pass_to_texture(&mut self, pass_id: usize, dpi_factor: f32) {
@@ -189,7 +174,6 @@ impl Cx {
             view_id,
             Vec2::default(),
             (Vec2{x:-50000.,y:-50000.},Vec2{x:50000.,y:50000.}),
-            false,
             &mut zbias,
             zbias_step
         );
@@ -198,21 +182,31 @@ impl Cx {
     
     pub fn webgl_compile_all_shaders(&mut self) {
         for (shader_id, sh) in self.shaders.iter_mut().enumerate() {
-            let glsh = Self::webgl_compile_shader(shader_id, false, false, sh, &mut self.platform);
+            let glsh = Self::webgl_compile_shader(shader_id, !self.platform.gpu_spec_is_low_on_uniforms, false, sh, &mut self.platform, &mut self.shader_inherit_cache);
             if let ShaderCompileResult::Fail{err,..} = glsh {
                 self.platform.from_wasm.log(&format!("Got GLSL shader compile error: {}", err))
             }
         }
     }
     
-    pub fn webgl_compile_shader(shader_id: usize, gather_all_consts:bool, use_const_table: bool, sh: &mut CxShader, platform: &mut CxPlatform) -> ShaderCompileResult{
+    pub fn webgl_compile_shader(shader_id: usize, gather_all_consts:bool, use_const_table: bool, sh: &mut CxShader, platform: &mut CxPlatform, shader_inherit_cache:&mut ShaderInheritCache) -> ShaderCompileResult{
+        let shader_ast = sh.shader_gen.lex_parse_analyse(gather_all_consts, use_const_table, shader_inherit_cache);
         
-        let shader_ast = sh.shader_gen.lex_parse_analyse(gather_all_consts);
+        let shader_ast = match shader_ast{
+            ShaderGenResult::Error(err)=>{
+                return ShaderCompileResult::Fail{id:shader_id, err:err}
+            },
+            ShaderGenResult::PatchedConstTable(const_table)=>{
+                sh.mapping.const_table = Some(const_table);
+                //platform.from_wasm.log("PATCHED");
+                return ShaderCompileResult::Nop{id:shader_id}
+            },
+            ShaderGenResult::ShaderAst(shader_ast)=>{
+               //platform.from_wasm.log("PARSED");
+                shader_ast
+            }
+        };
         
-        if let Err(err) = shader_ast{
-            return ShaderCompileResult::Fail{id:shader_id, err:err}
-        } 
-        let shader_ast = shader_ast.unwrap();
         let vertex = generate_glsl::generate_vertex_shader(&shader_ast,use_const_table);
         let fragment = generate_glsl::generate_fragment_shader(&shader_ast,use_const_table);
         let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, if use_const_table{shader_ast.const_table.borrow_mut().take()} else {None});
@@ -221,12 +215,18 @@ impl Cx {
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
+            mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
+            mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
+            mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
             {}\0", vertex);
         let fragment = format!("
             #extension GL_OES_standard_derivatives : enable
             precision highp float;
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
+            mat4 transpose(mat4 m){{return mat4(m[0][0],m[1][0],m[2][0],m[3][0],m[0][1],m[1][1],m[2][1],m[3][1],m[0][2],m[1][2],m[2][2],m[3][3], m[3][0], m[3][1], m[3][2], m[3][3]);}}
+            mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
+            mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
             {}\0", fragment);
 
         if shader_ast.debug{
@@ -238,7 +238,7 @@ impl Cx {
              
         // lets check if we need to recompile the shader at all
         if let Some(sh_platform) = &sh.platform{
-            platform.from_wasm.log(&format!("{} {}", sh_platform.vertex == vertex , sh_platform.fragment == fragment));
+            log_str(&format!("VERTEX1 {} VERTEX2 {}", sh_platform.vertex, vertex));
             if sh_platform.vertex == vertex && sh_platform.fragment == fragment{
                 sh.mapping = mapping;
                 return ShaderCompileResult::Nop{id:shader_id}
@@ -252,14 +252,14 @@ impl Cx {
         
         platform.from_wasm.alloc_array_buffer(
             geom_vb_id,
-            sh.shader_gen.geometry_vertices.len(),
-            sh.shader_gen.geometry_vertices.as_ptr() as *const f32
+            sh.shader_gen.geometry.vertices.len(),
+            sh.shader_gen.geometry.vertices.as_ptr() as *const f32
         );
         
         platform.from_wasm.alloc_index_buffer(
             geom_ib_id,
-            sh.shader_gen.geometry_indices.len(),
-            sh.shader_gen.geometry_indices.as_ptr() as *const u32
+            sh.shader_gen.geometry.indices.len(),
+            sh.shader_gen.geometry.indices.as_ptr() as *const u32
         );
         
         sh.mapping = mapping;
