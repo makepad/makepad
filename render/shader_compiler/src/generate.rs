@@ -27,7 +27,7 @@ pub trait BackendWriter {
     
     fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, ident: Ident, shader: &ShaderAst, sep: &str);
     
-    fn generate_var_expr_prefix(&self, string: &mut String, ident: Ident, kind: &Cell<Option<VarKind>>, shader: &ShaderAst, decl: &FnDecl);
+    fn generate_var_expr(&self, string: &mut String, ident: Ident, kind: &Cell<Option<VarKind>>, shader: &ShaderAst, decl: &FnDecl, ty:&Option<Ty>);
     
     fn write_ident(&self, string: &mut String, ident: Ident);
     
@@ -361,7 +361,7 @@ impl<'a> ExprGenerator<'a> {
                     span,
                     ref kind,
                     ident,
-                } => self.generate_var_expr(span, kind, ident),
+                } => self.generate_var_expr(span, kind, ident, &expr.ty.borrow()),
                 ExprKind::Lit {span, lit} => self.generate_lit_expr(span, lit),
             },
         }
@@ -569,11 +569,11 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, ")").unwrap();
     }
     
-    fn generate_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind>>, ident: Ident) {
+    fn generate_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind>>, ident: Ident, ty:&Option<Ty>) {
+        //self.backend_write.generate_var_expr(&mut self.string, span, kind, &self.shader, decl)
         if let Some(decl) = self.decl {
-            self.backend_writer.generate_var_expr_prefix(&mut self.string, ident, kind, &self.shader, decl);
+            self.backend_writer.generate_var_expr(&mut self.string, ident, kind, &self.shader, decl, ty)
         }
-        write!(self.string, "{}", ident).unwrap()
     }
     
     fn generate_lit_expr(&mut self, _span: Span, lit: Lit) {
