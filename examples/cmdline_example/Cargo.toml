@@ -4,9 +4,3 @@ version = "0.1.0"
 edition = "2018"
 
 [dependencies]
-
-[dependencies.makepad-shader-compiler] 
-path="../../render/shader_compiler"
-
-#[dependencies.image_formats]
-#path="./image_formats"

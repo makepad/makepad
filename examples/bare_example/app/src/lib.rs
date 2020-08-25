@@ -13,25 +13,13 @@ impl BareExampleApp {
     pub fn bg() -> ShaderId {uid!()}
     pub fn counter() -> FloatId {uid!()}
     pub fn new(cx: &mut Cx) -> Self {
-        /*
-        shader!{"
-            let counter: Self::counter();
-            fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_circle(0.5 * w, 0.5 * h, 0.5 * w);
-                //return df_fill(color!(green));
-                return df_fill(mix(color!(green), color!(blue), abs(sin(counter))));
-            }
-        "};*/
         
         Self::bg().set(cx, Quad::def_quad_shader().compose(shader!{"
             instance counter: Self::counter();
             fn pixel() -> vec4 {
-                
-                //return color!(red);
                 let df = Df::viewport(pos * vec2(w, h));
                 df.circle(0.5 * w, 0.5 * h, 0.5 * w);
-                return df.fill(mix(color, color!(blue), abs(sin(counter))));
+                return df.fill(mix(color, pick!(blue), abs(sin(counter))));
             }  
         "}));
         
@@ -65,7 +53,7 @@ impl BareExampleApp {
         if self.main_view.begin_view(cx, Layout::default()).is_ok() {
             
             self.quad.shader = Self::bg().get(cx);
-            self.quad.color = color!(orange).get(cx);
+            self.quad.color = pick!(orange).get(cx);
             let k = self.quad.draw_quad_abs(cx, Rect {x: 100., y: 100., w: 200., h: 200.});
             k.push_float(cx, 10.);
             

@@ -252,7 +252,7 @@ impl Cx {
 
             let mut shader_results = Vec::new();
             for shader_id in &self.shader_recompiles {
-                shader_results.push(Self::hlsl_compile_shader(*shader_id, true, &mut self.shaders[*shader_id], &d3d11_cx));
+                shader_results.push(Self::hlsl_compile_shader(*shader_id, true, &mut self.shaders[*shader_id], &d3d11_cx, &mut self.shader_inherit_cache));
             }
             self.shader_recompiles.truncate(0);
             self.call_shader_recompile_event(shader_results, &mut event_handler);

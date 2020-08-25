@@ -75,7 +75,6 @@ mod pass;
 mod texture;
 mod animator;
 mod elements;
-mod colors;
 mod area;
 //mod shadergen;
 mod quad;
