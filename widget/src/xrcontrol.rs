@@ -55,7 +55,6 @@ impl XRControl {
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         // lets define the shader
         Self::shader_ray_cube().set(cx, Cube::def_cube_shader().compose(shader!{"
-            
         "}));
         
         Self::shader_ray_cursor().set(cx, Quad::def_quad_shader().compose(shader!{"
@@ -66,7 +65,7 @@ impl XRControl {
             }
         "}));
         
-    }
+    } 
     
     pub fn handle_xr_control(&mut self, cx: &mut Cx, xr_event: &XRUpdateEvent, window_view: &View) -> Vec<Event> {
         

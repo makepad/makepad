@@ -367,7 +367,6 @@ impl Cx {
         let inst_named = NamedProps::construct(&mapping.instances);
         let mut strings = Vec::new();
         
-        
         for (index, geom) in geom_named.props.iter().enumerate() {
             strings.push(ffi::CString::new(format!("GEOM{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
             layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
@@ -381,17 +380,51 @@ impl Cx {
             })
         }
         
-        for (index, inst) in inst_named.props.iter().enumerate() {
-            strings.push(ffi::CString::new(format!("INST{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
-            layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
-                SemanticName: strings.last().unwrap().as_ptr() as *const _,
-                SemanticIndex: 0,
-                Format: Self::slots_to_dxgi_format(inst.slots),
-                InputSlot: 1,
-                AlignedByteOffset: (inst.offset * 4) as u32,
-                InputSlotClass: d3d11::D3D11_INPUT_PER_INSTANCE_DATA,
-                InstanceDataStepRate: 1
-            })
+        let mut index = 0;
+        for inst in &inst_named.props {
+            if inst.slots == 16{
+                for _ in 0..4{
+                    strings.push(ffi::CString::new(format!("INST{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
+                    layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
+                        SemanticName: strings.last().unwrap().as_ptr() as *const _,
+                        SemanticIndex: 0,
+                        Format: Self::slots_to_dxgi_format(4),
+                        InputSlot: 1,
+                        AlignedByteOffset: (inst.offset * 4) as u32,
+                        InputSlotClass: d3d11::D3D11_INPUT_PER_INSTANCE_DATA,
+                        InstanceDataStepRate: 1
+                    });  
+                    index += 1;
+                }
+            }
+            else if inst.slots == 9{ 
+                for _ in 0..3{
+                    strings.push(ffi::CString::new(format!("INST{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
+                    layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
+                        SemanticName: strings.last().unwrap().as_ptr() as *const _,
+                        SemanticIndex: 0,
+                        Format: Self::slots_to_dxgi_format(3),
+                        InputSlot: 1,
+                        AlignedByteOffset: (inst.offset * 4) as u32,
+                        InputSlotClass: d3d11::D3D11_INPUT_PER_INSTANCE_DATA,
+                        InstanceDataStepRate: 1
+                    });  
+                    index += 1;
+                }
+            }            
+            else{
+                strings.push(ffi::CString::new(format!("INST{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
+                layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
+                    SemanticName: strings.last().unwrap().as_ptr() as *const _,
+                    SemanticIndex: 0,
+                    Format: Self::slots_to_dxgi_format(inst.slots),
+                    InputSlot: 1,
+                    AlignedByteOffset: (inst.offset * 4) as u32,
+                    InputSlotClass: d3d11::D3D11_INPUT_PER_INSTANCE_DATA,
+                    InstanceDataStepRate: 1
+                }); 
+                index += 1;
+            }
         }
         
         let input_layout = d3d11_cx.create_input_layout(&vs_blob, &layout_desc).expect("cannot create input layout");
