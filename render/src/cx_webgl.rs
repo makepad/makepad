@@ -78,6 +78,11 @@ impl Cx {
                 );
             }
         }
+        if let Some(vd) = &self.views[view_id].debug {
+            let mut s = String::new();
+            self.debug_draw_tree_recur(false, &mut s, view_id, 0);
+            log_str(&s);
+        }
     }
     
     pub fn setup_render_pass(&mut self, pass_id: usize, inherit_dpi_factor: f32) {
@@ -238,7 +243,6 @@ impl Cx {
              
         // lets check if we need to recompile the shader at all
         if let Some(sh_platform) = &sh.platform{
-            log_str(&format!("VERTEX1 {} VERTEX2 {}", sh_platform.vertex, vertex));
             if sh_platform.vertex == vertex && sh_platform.fragment == fragment{
                 sh.mapping = mapping;
                 return ShaderCompileResult::Nop{id:shader_id}

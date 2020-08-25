@@ -139,7 +139,7 @@ impl Cx {
                     match turtle.layout.line_wrap {
                         LineWrap::NewLine => {
                             if (turtle.pos.x + walk.margin.l + w) >
-                            (turtle.origin.x + turtle.width - turtle.layout.padding.r) {
+                            (turtle.origin.x + turtle.width - turtle.layout.padding.r)+ 0.01 {
                                 // what is the move delta.
                                 let old_x = turtle.pos.x;
                                 let old_y = turtle.pos.y;
@@ -184,7 +184,7 @@ impl Cx {
                     match turtle.layout.line_wrap {
                         LineWrap::NewLine => {
                             if (turtle.pos.y + walk.margin.t + h) >
-                            (turtle.origin.y + turtle.height - turtle.layout.padding.b) {
+                            (turtle.origin.y + turtle.height - turtle.layout.padding.b) + 0.01 {
                                 // what is the move delta.
                                 let old_x = turtle.pos.x;
                                 let old_y = turtle.pos.y;
