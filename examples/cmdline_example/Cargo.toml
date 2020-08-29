@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2018"
 
 [dependencies]
+makepad-shader-compiler = { path = "../../render/shader_compiler", version = "0.1" } 
+makepad-live-macros = { path = "../../render/live_macros", version = "0.2" } 
+

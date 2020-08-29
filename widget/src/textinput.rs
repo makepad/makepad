@@ -39,7 +39,29 @@ impl TextInput {
     pub fn style_text_input() -> StyleId {uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+        
         cx.begin_style(Self::style_text_input());
+        /*
+        live!(cx,{
+            texteditor::layout_bg = Layout {
+                walk: Walk {
+                    width: Width::Compute,
+                    height: Height::Compute,
+                    margin: Margin {t: 4., l: 0., r: 0., b: 0.}
+                },
+                padding: Padding::all(7.),
+            }
+            textinput::shader_bg = Shader {
+                use render::quad::*;
+                fn pixel() -> vec4 {
+                    let cx = Df::viewport(pos * vec2(w, h));
+                    cx.box(0., 0., w, h, 2.5);
+                    return cx.fill(color);
+                }
+            }
+            texteditor::gutter_width = 1.0;
+        })*/
+            
         TextEditor::layout_bg().set(cx, Layout {
             walk: Walk {width: Width::Compute, height: Height::Compute, margin: Margin {t: 4., l: 0., r: 0., b: 0.}},
             padding: Padding::all(7.),
@@ -55,6 +77,7 @@ impl TextInput {
                 return cx.fill(color);
             }
         "}));
+        
         cx.end_style();
     }
     
@@ -74,7 +97,7 @@ impl TextInput {
         self.text_buffer.get_as_string()
     }
     
-    pub fn select_all(&mut self, cx: &mut Cx){
+    pub fn select_all(&mut self, cx: &mut Cx) {
         self.text_editor.cursors.select_all(&mut self.text_buffer);
         self.text_editor.view.redraw_view_area(cx);
     }

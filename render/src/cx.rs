@@ -17,6 +17,7 @@ pub use crate::view::*;
 pub use crate::pass::*;
 pub use crate::texture::*;
 pub use crate::text::*;
+pub use crate::live::*;
 
 pub use crate::events::*;
 //pub use crate::elements::*;
@@ -24,7 +25,6 @@ pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::menu::*;
 pub use crate::styling::*;
-pub use crate::liveclient::*;
 pub use crate::shader::*;
 
 #[cfg(all(not(feature = "ipc"), target_os = "linux"))]
@@ -151,16 +151,35 @@ pub struct Cx {
     pub styles: Vec<CxStyle>,
     pub style_map: HashMap<StyleId, usize>,
     pub style_stack: Vec<usize>,
+
+    pub live_base: CxLive,
+    pub lives: Vec<CxLive>,
+    pub live_map: HashMap<LiveId, usize>,
+    pub live_stack: Vec<usize>,
     
     pub command_settings: HashMap<CommandId, CxCommandSetting>,
     
     pub panic_now: bool,
     pub panic_redraw: bool,
     
+    pub live_macros: HashMap<CxLiveLoc, CxLiveMacro>,
     //pub live_client: Option<LiveClient>,
     
     pub platform: CxPlatform,
 }
+
+#[derive(Clone, Default, Hash, PartialEq)]
+pub struct CxLiveLoc{
+    file:String,
+    line:usize,
+    column:usize,
+}
+
+#[derive(Clone, Default)]
+pub struct CxLiveMacro{
+    code:String
+}
+
 
 #[derive(Clone, Copy, Default)]
 pub struct CxCommandSetting {
@@ -179,6 +198,18 @@ pub struct CxStyle {
     pub anims: HashMap<AnimId, Anim>,
     pub shaders: HashMap<ShaderId, Shader>,
 }
+
+#[derive(Default)]
+pub struct CxLive {
+    pub floats: HashMap<LiveId, f32>,
+    pub colors: HashMap<LiveId, Color>,
+    pub text_styles: HashMap<LiveId, TextStyle>,
+    pub layouts: HashMap<LiveId, Layout>,
+    pub walks: HashMap<LiveId, Walk>,
+    pub anims: HashMap<LiveId, Anim>,
+    pub shaders: HashMap<LiveId, Shader>,
+}
+
 
 #[derive(Default, Clone)]
 pub struct CxPerFinger {
@@ -274,6 +305,11 @@ impl Default for Cx {
             styles: Vec::new(),
             style_map: HashMap::new(),
             style_stack: Vec::new(),
+
+            live_base: CxLive::default(),
+            lives: Vec::new(),
+            live_map: HashMap::new(),
+            live_stack: Vec::new(),
             
             command_settings: HashMap::new(),
             
@@ -289,6 +325,8 @@ impl Default for Cx {
             panic_redraw: false,
             
             platform: CxPlatform {..Default::default()},
+            
+            live_macros:HashMap::new(),
         }
     }
 }
