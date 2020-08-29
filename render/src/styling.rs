@@ -1,13 +1,15 @@
 use crate::cx::*;
 use std::any::TypeId;
 
-impl Cx{
-    pub fn begin_style(&mut self, style_id:StyleId){
+impl Cx {
+    
+    
+    pub fn begin_style(&mut self, style_id: StyleId) {
         // lets fetch the style, if it doesnt exist allocate it
-        if let Some(index) = self.style_map.get(&style_id){
+        if let Some(index) = self.style_map.get(&style_id) {
             self.style_stack.push(*index);
         }
-        else{
+        else {
             let index = self.styles.len();
             self.style_map.insert(style_id, index);
             self.styles.push(CxStyle::default());
@@ -15,20 +17,40 @@ impl Cx{
         }
     }
     
-    pub fn end_style(&mut self){
+    pub fn end_style(&mut self) {
         self.style_stack.pop().expect("end_style pop failed");
     }
     
-    pub fn get_mut_style_top(&mut self)->&mut CxStyle{
-        if let Some(last) = self.style_stack.last(){
+    pub fn get_mut_style_top(&mut self) -> &mut CxStyle {
+        if let Some(last) = self.style_stack.last() {
             &mut self.styles[*last]
         }
-        else{
+        else {
             &mut self.style_base
         }
-    } 
+    }
+}
 
-}  
+pub trait LivePickGet{
+    fn get(&self, cx:&Cx)->Color;
+}
+
+impl LivePickGet for LivePick{
+    fn get(&self, _cx:&Cx)->Color{
+        self.color
+    }    
+}
+
+
+pub trait LiveSlideGet{
+    fn get(&self, cx:&Cx)->f32;
+}
+
+impl LiveSlideGet for LiveSlide{
+    fn get(&self, _cx:&Cx)->f32{
+        self.value
+    }    
+}
 
 
 // floats
@@ -36,20 +58,20 @@ impl Cx{
 
 #[derive(PartialEq, Copy, Clone, Hash, Eq)]
 pub struct FloatStyleId(pub TypeId);
- 
-pub trait FloatStyle{ 
+
+pub trait FloatStyle {
     fn set(&self, cx: &mut Cx, value: f32);
     fn get(&self, cx: &Cx) -> f32;
 }
- 
-impl FloatStyle for FloatId{
+
+impl FloatStyle for FloatId {
     fn set(&self, cx: &mut Cx, value: f32) {
         cx.get_mut_style_top().floats.insert(*self, value);
     }
     
     fn get(&self, cx: &Cx) -> f32 {
-        for style_id in &cx.style_stack{
-            if let Some(value) = cx.styles[*style_id].floats.get(self){
+        for style_id in &cx.style_stack {
+            if let Some(value) = cx.styles[*style_id].floats.get(self) {
                 return *value
             }
         }
@@ -61,19 +83,19 @@ impl FloatStyle for FloatId{
 // Colors
 
 
-pub trait ColorStyle{
+pub trait ColorStyle {
     fn set(&self, cx: &mut Cx, value: Color);
     fn get(&self, cx: &Cx) -> Color;
 }
 
-impl ColorStyle for ColorId{
+impl ColorStyle for ColorId {
     fn set(&self, cx: &mut Cx, value: Color) {
         cx.get_mut_style_top().colors.insert(*self, value);
     }
     
     fn get(&self, cx: &Cx) -> Color {
-        for style_id in &cx.style_stack{
-            if let Some(value) = cx.styles[*style_id].colors.get(self){
+        for style_id in &cx.style_stack {
+            if let Some(value) = cx.styles[*style_id].colors.get(self) {
                 return *value
             }
         }
@@ -95,8 +117,8 @@ impl TextStyleId {
     }
     
     pub fn get(&self, cx: &Cx) -> TextStyle {
-        for style_id in &cx.style_stack{
-            if let Some(value) = cx.styles[*style_id].text_styles.get(self){
+        for style_id in &cx.style_stack {
+            if let Some(value) = cx.styles[*style_id].text_styles.get(self) {
                 return *value
             }
         }
@@ -120,8 +142,8 @@ impl LayoutId {
     }
     
     pub fn get(&self, cx: &Cx) -> Layout {
-        for style_id in &cx.style_stack{
-            if let Some(value) = cx.styles[*style_id].layouts.get(self){
+        for style_id in &cx.style_stack {
+            if let Some(value) = cx.styles[*style_id].layouts.get(self) {
                 return *value
             }
         }
@@ -146,8 +168,8 @@ impl WalkId {
     }
     
     pub fn get(&self, cx: &Cx) -> Walk {
-        for style_id in &cx.style_stack{
-            if let Some(value) = cx.styles[*style_id].walks.get(self){
+        for style_id in &cx.style_stack {
+            if let Some(value) = cx.styles[*style_id].walks.get(self) {
                 return *value
             }
         }
@@ -174,8 +196,8 @@ impl AnimId {
     }
     
     pub fn get(&self, cx: &Cx) -> Anim {
-        for style_id in &cx.style_stack{
-            if let Some(value) = cx.styles[*style_id].anims.get(self){
+        for style_id in &cx.style_stack {
+            if let Some(value) = cx.styles[*style_id].anims.get(self) {
                 return value.clone()
             }
         }
@@ -200,8 +222,8 @@ impl ShaderId {
     }
     
     pub fn get(&self, cx: &Cx) -> Shader {
-        for style_id in &cx.style_stack{
-            if let Some(value) = cx.styles[*style_id].shaders.get(self){
+        for style_id in &cx.style_stack {
+            if let Some(value) = cx.styles[*style_id].shaders.get(self) {
                 return *value
             }
         }

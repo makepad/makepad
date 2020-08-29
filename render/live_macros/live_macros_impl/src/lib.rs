@@ -12,6 +12,18 @@ mod macro_lib;
 use crate::macro_lib::*;
 
 
+#[proc_macro_hack]
+pub fn live(input: TokenStream) -> TokenStream {
+    // our args are cx, {" "}
+    
+    
+    TokenStream::new()
+}
+
+
+// we implement the live! macros and the other value access macros
+// color!, float!, vec2! vec3! vec4! shader! anim! layout!
+
 fn live_loc(tb:&mut TokenBuilder, span:Span){
     tb.add("LiveLoc {");
     tb.add("path :").ident_with_span("file", span).add("! ( ) . to_string ( ) . replace ( ").string("\\").add(",").string("/").add(") ,");
@@ -271,4 +283,7 @@ pub fn pick(input: TokenStream) -> TokenStream {
     tb.add("} }");
     tb.end()
 }
+
+
+
 
