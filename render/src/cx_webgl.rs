@@ -78,7 +78,7 @@ impl Cx {
                 );
             }
         }
-        if let Some(vd) = &self.views[view_id].debug {
+        if let Some(_) = &self.views[view_id].debug {
             let mut s = String::new();
             self.debug_draw_tree_recur(false, &mut s, view_id, 0);
             log_str(&s);

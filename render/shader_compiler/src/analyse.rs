@@ -20,6 +20,7 @@ pub fn analyse(shader: &ShaderAst, base_props:&[PropDef], sub_props: &[&PropDef]
     for &ident in builtins.keys() {
         env.insert_sym(Span::default(), ident, Sym::Builtin)?;
     }
+       
 
     for prop in sub_props {
         env.insert_sym(
