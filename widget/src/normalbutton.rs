@@ -48,7 +48,6 @@ impl NormalButton {
         Self::text_style_label().set(cx, TextStyle {
             ..Theme::text_style_normal().get(cx)
         });
-        
 
         Self::anim_default().set(cx, Anim::new(Play::Cut {duration: 0.1}, vec![
             Track::float(Self::hover(), Ease::Lin, vec![(1., 0.)]),
@@ -66,7 +65,7 @@ impl NormalButton {
             Track::float(Self::down(), Ease::OutExp, vec![(0.0, 1.0), (1.0, 1.0)]),
             Track::float(Self::hover(), Ease::Lin, vec![(1.0, 1.0)]),
             Track::color(Text::color(), Ease::Lin, vec![(0., pick!(#c).get(cx))]),
-        ]));
+        ])); 
         
         // lets define the shader
         Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"

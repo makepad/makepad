@@ -17,4 +17,5 @@ pub fn set_makepad_style(cx: &mut Cx, opt:&StyleOptions) {
     ItemDisplay::style(cx, opt);
     ColorPicker::style(cx, opt);
     FloatSlider::style(cx, opt);
+    LiveMacrosView::style(cx, opt);
 }
