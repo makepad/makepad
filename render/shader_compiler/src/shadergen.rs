@@ -18,6 +18,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::collections::HashMap;
 
+
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct LiveLoc {
     pub path: String,
