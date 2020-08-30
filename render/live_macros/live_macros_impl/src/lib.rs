@@ -11,13 +11,29 @@ use makepad_shader_compiler::shadergen::ShaderGen;
 mod macro_lib; 
 use crate::macro_lib::*;
 
-
 #[proc_macro_hack]
 pub fn live(input: TokenStream) -> TokenStream {
     // our args are cx, {" "}
-    
-    
-    TokenStream::new()
+    let mut tp = TokenParser::new(input);
+    if let Some(cx_name) = tp.eat_any_ident(){
+        if tp.eat_punct(',') && tp.open_brace(){
+            if let Some(body) = tp.eat_literal(){
+                // we have a body
+                let mut tb = TokenBuilder::new();
+                let span = body.span();
+                tb.ident_with_span(&cx_name, span).add(". add_live_body (");
+                tb.add("LiveBody {");
+                tb.add("file :").ident_with_span("file", span).add("! ( ) . to_string ( ) . replace ( ").string("\\").add(",").string("/").add(") ,");
+                tb.add("module_path :").ident_with_span("module_path", span).add("! ( ) . to_string ( ) . replace ( ").string("\\").add(",").string("/").add(") ,");
+                tb.add("line :").ident_with_span("line", span).add("! ( ) as usize").add(","); 
+                tb.add("column : ").ident_with_span("column", span).add("! ( ) as usize ,");
+                tb.add("body : ").string(&body.to_string());
+                tb.add(". to_string ( ) } )");
+                return tb.end();
+            }
+        }
+    }
+    tp.unexpected()
 }
 
 
