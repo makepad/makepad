@@ -423,7 +423,7 @@ impl Cx {
             glx_sys::glXMakeCurrent(opengl_cx.display, opengl_cx.hidden_window, opengl_cx.context);
         }
         for (index, sh) in self.shaders.iter_mut().enumerate() {
-            let result = Self::opengl_compile_shader(index, false, sh, opengl_cx);
+            let result = Self::opengl_compile_shader(index, false, sh, opengl_cx, &mut self.shader_inherit_cache);
             if let ShaderCompileResult::Fail{err, ..} = result {
                 panic!("{}", err);
             } 
@@ -565,10 +565,10 @@ impl Cx {
         gl_texture_slots
     }
     
-    pub fn opengl_compile_shader(shader_id:usize, use_const_table:bool, sh: &mut CxShader, opengl_cx: &OpenglCx) -> ShaderCompileResult {
+    pub fn opengl_compile_shader(shader_id:usize, use_const_table:bool, sh: &mut CxShader, opengl_cx: &OpenglCx, inherit_cache: &mut ShaderInheritCache) -> ShaderCompileResult {
         
         // lets compile.
-        let shader_ast = sh.shader_gen.lex_parse_analyse(true);
+        let shader_ast = sh.shader_gen.lex_parse_analyse(true, use_const_table, inherit_cache);
 
         let shader_ast = match shader_ast{
             ShaderGenResult::Error(err)=>{

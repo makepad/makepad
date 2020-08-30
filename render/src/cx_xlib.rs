@@ -361,6 +361,7 @@ impl XlibApp {
                                 if let Some(window_ptr) = self.window_map.get(&crossing.window) {
                                     let window = &mut (**window_ptr);
                                     window.do_callback(&mut vec![Event::FingerHover(FingerHoverEvent {
+                                        digit: 0,
                                         window_id: window.window_id,
                                         any_down: false,
                                         abs: window.last_mouse_pos,
@@ -466,6 +467,7 @@ impl XlibApp {
                                     // completely arbitrary scroll acceleration curve.
                                     let speed = 1200.0 * (0.2 - 2. * (self.last_scroll_time - last_scroll_time)).max(0.01);
                                     self.do_callback(&mut vec![Event::FingerScroll(FingerScrollEvent {
+                                        digit: 0,
                                         window_id: window.window_id,
                                         scroll: Vec2 {
                                             x: if button.button == 6 {-speed as f32} else if button.button == 7 {speed as f32} else {0.},
@@ -1288,7 +1290,9 @@ impl XlibWindow {
     
     pub fn get_window_geom(&self) -> WindowGeom {
         WindowGeom {
-            vr_is_presenting: false,
+            xr_is_presenting: false,
+            xr_can_present: false,
+            can_fullscreen: false,
             is_topmost: self.get_is_topmost(),
             is_fullscreen: self.get_is_maximized(),
             inner_size: self.get_inner_size(),
@@ -1533,6 +1537,7 @@ impl XlibWindow {
             }
         };
         events.push(Event::FingerHover(FingerHoverEvent {
+            digit: 0,
             window_id: self.window_id,
             abs: pos,
             rel: pos,
