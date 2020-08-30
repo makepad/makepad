@@ -8,7 +8,7 @@ mod styling;
 #[macro_use]
 mod cx;
 #[macro_use]
-mod liveclient;
+mod live;
 
 #[cfg(all(not(feature="ipc"),target_os = "linux"))]
 mod cx_opengl;

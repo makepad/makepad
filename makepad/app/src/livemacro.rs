@@ -25,24 +25,47 @@ impl LiveMacros {
 
 #[derive(Clone)]
 pub struct LiveMacrosView {
+    pub bg: Quad,
+    pub text: Text,
     pub scroll_view: ScrollView,
     pub undo_id: u64,
     pub color_pickers: Elements<usize, ColorPicker, ColorPicker>,
     pub float_sliders: Elements<usize, FloatSlider, FloatSlider>
-} 
+}
 
 
 impl LiveMacrosView {
     pub fn macro_changed() -> StatusId {uid!()}
+    pub fn text_style_caption() -> TextStyleId {uid!()}
     
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             scroll_view: ScrollView::new(cx),
             undo_id: 0,
             color_pickers: Elements::new(ColorPicker::new(cx)),
-            float_sliders: Elements::new(FloatSlider::new(cx))
+            float_sliders: Elements::new(FloatSlider::new(cx)),
+            bg: Quad::new(cx),
+            text: Text::new(cx),
         }
     }
+    
+    pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+        Self::layout_bg().set(cx, Layout {
+            align: Align::center(),
+            walk: Walk {
+                width: Width::Fill,
+                height: Height::Compute,
+                margin: Margin::all(1.0),
+            },
+            padding: Padding {l: 16.0, t: 12.0, r: 16.0, b: 12.0},
+            ..Default::default()
+        });
+        Self::text_style_caption().set(cx, TextStyle {
+            ..Theme::text_style_normal().get(cx)
+        });
+    }
+    
+    pub fn layout_bg() -> LayoutId {uid!()}
     
     pub fn handle_live_macros(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, text_editor: &mut TextEditor) {
         match event {
@@ -70,7 +93,7 @@ impl LiveMacrosView {
                     range.1 = (range.1 as isize + range_delta) as usize;
                     if let Some(color_picker) = self.color_pickers.get(index) {
                         match color_picker.handle_color_picker(cx, event) {
-                            ColorPickerEvent::Change {hsva:new_hsva} => {
+                            ColorPickerEvent::Change {hsva: new_hsva} => {
                                 any_changed = true;
                                 let color = Color::from_hsva(new_hsva);
                                 *hsva = new_hsva;
@@ -121,15 +144,25 @@ impl LiveMacrosView {
         }
     }
     
+    pub fn draw_heading(&mut self, _cx: &mut Cx) {
+        
+    }
+    
     pub fn draw_live_macros(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, _text_editor: &mut TextEditor) {
-        // alright so we have a list of macros..
-        // now we have to draw them.
         if self.scroll_view.begin_view(cx, Layout {
             direction: Direction::Down,
-            ..Layout::default()
+            ..Layout::default() 
         }).is_ok() {
             for (index, m) in atb.live_macros.macros.iter_mut().enumerate() {
-                match m {
+                // lets draw the title
+                // then we do the widget.
+                //float!(texteditor:gutter_width, 0.).get(cx)
+                
+                //let bgi = self.bg.begin_quad(cx, Self::layout_bg().get(cx));
+                //self.text.text_style = Self::text_style_caption().get(cx);
+                //self.bg.end_quad(cx, bgi);
+                
+                match m { 
                     LiveMacro::Pick {hsva, ..} => {
                         self.color_pickers.get_draw(cx, index, | _, t | t.clone()).draw_color_picker(cx, *hsva);
                     },
@@ -599,10 +632,10 @@ impl ColorPicker {
 
 
 impl AppTextBuffer {
-    pub fn parse_live_macros(&mut self, cx: &mut Cx, only_update_shaders:bool) {
+    pub fn parse_live_macros(&mut self, cx: &mut Cx, only_update_shaders: bool) {
         let mut tp = TokenParser::new(&self.text_buffer.flat_text, &self.text_buffer.token_chunks);
         // lets reset the data
-        if !only_update_shaders{
+        if !only_update_shaders {
             self.live_macros.macros.truncate(0);
         }
         let mut shader_end = 0;

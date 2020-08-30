@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::cell::RefCell;
+use std::fmt::Write;
 
 pub use makepad_shader_compiler::shadergen::*;
 pub use makepad_shader_compiler::colors::*;
@@ -16,6 +17,7 @@ pub use crate::view::*;
 pub use crate::pass::*;
 pub use crate::texture::*;
 pub use crate::text::*;
+pub use crate::live::*;
 
 pub use crate::events::*;
 //pub use crate::elements::*;
@@ -23,7 +25,6 @@ pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::menu::*;
 pub use crate::styling::*;
-pub use crate::liveclient::*;
 pub use crate::shader::*;
 
 #[cfg(all(not(feature = "ipc"), target_os = "linux"))]
@@ -150,16 +151,35 @@ pub struct Cx {
     pub styles: Vec<CxStyle>,
     pub style_map: HashMap<StyleId, usize>,
     pub style_stack: Vec<usize>,
+
+    pub live_base: CxLive,
+    pub lives: Vec<CxLive>,
+    pub live_map: HashMap<LiveId, usize>,
+    pub live_stack: Vec<usize>,
     
     pub command_settings: HashMap<CommandId, CxCommandSetting>,
     
     pub panic_now: bool,
     pub panic_redraw: bool,
     
+    pub live_macros: HashMap<CxLiveLoc, CxLiveMacro>,
     //pub live_client: Option<LiveClient>,
     
     pub platform: CxPlatform,
 }
+
+#[derive(Clone, Default, Hash, PartialEq)]
+pub struct CxLiveLoc{
+    file:String,
+    line:usize,
+    column:usize,
+}
+
+#[derive(Clone, Default)]
+pub struct CxLiveMacro{
+    code:String
+}
+
 
 #[derive(Clone, Copy, Default)]
 pub struct CxCommandSetting {
@@ -178,6 +198,18 @@ pub struct CxStyle {
     pub anims: HashMap<AnimId, Anim>,
     pub shaders: HashMap<ShaderId, Shader>,
 }
+
+#[derive(Default)]
+pub struct CxLive {
+    pub floats: HashMap<LiveId, f32>,
+    pub colors: HashMap<LiveId, Color>,
+    pub text_styles: HashMap<LiveId, TextStyle>,
+    pub layouts: HashMap<LiveId, Layout>,
+    pub walks: HashMap<LiveId, Walk>,
+    pub anims: HashMap<LiveId, Anim>,
+    pub shaders: HashMap<LiveId, Shader>,
+}
+
 
 #[derive(Default, Clone)]
 pub struct CxPerFinger {
@@ -273,6 +305,11 @@ impl Default for Cx {
             styles: Vec::new(),
             style_map: HashMap::new(),
             style_stack: Vec::new(),
+
+            live_base: CxLive::default(),
+            lives: Vec::new(),
+            live_map: HashMap::new(),
+            live_stack: Vec::new(),
             
             command_settings: HashMap::new(),
             
@@ -288,6 +325,8 @@ impl Default for Cx {
             panic_redraw: false,
             
             platform: CxPlatform {..Default::default()},
+            
+            live_macros:HashMap::new(),
         }
     }
 }
@@ -839,67 +878,68 @@ impl Cx {
         }
     }
     
-    /*
-    pub fn debug_draw_tree_recur(&mut self, draw_list_id: usize, depth:usize){
-        if draw_list_id >= self.draw_lists.len(){
-            println!("---------- Drawlist still empty ---------");
+    
+    pub fn debug_draw_tree_recur(&mut self, dump_instances:bool, s: &mut String, view_id:usize, depth:usize){
+        if view_id >= self.views.len(){
+            writeln!(s, "---------- Drawlist still empty ---------").unwrap();
             return
         }
         let mut indent = String::new();
         for _i in 0..depth{
             indent.push_str("  ");
         }
-        let draw_calls_len = self.draw_lists[draw_list_id].draw_calls_len;
-        if draw_list_id == 0{
-            println!("---------- Begin Debug draw tree for redraw_id: {} ---------", self.redraw_id)
+        let draw_calls_len = self.views[view_id].draw_calls_len;
+        if view_id == 0{
+            writeln!(s,"---------- Begin Debug draw tree for redraw_id: {} ---------", self.redraw_id).unwrap();
         }
-        println!("{}list {}: len:{} rect:{:?}", indent, draw_list_id, draw_calls_len, self.draw_lists[draw_list_id].rect);
+        writeln!(s,"{}view {}: len:{} rect:{:?} scroll:{:?}", indent, view_id, draw_calls_len, self.views[view_id].rect, self.views[view_id].get_local_scroll()).unwrap();
         indent.push_str("  ");
         for draw_call_id in 0..draw_calls_len{
-            let sub_list_id = self.draw_lists[draw_list_id].draw_calls[draw_call_id].sub_list_id;
-            if sub_list_id != 0{
-                self.debug_draw_tree_recur(sub_list_id, depth + 1);
+            let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
+            if sub_view_id != 0{
+                self.debug_draw_tree_recur(dump_instances, s, sub_view_id, depth + 1);
             }
             else{
-                let draw_list = &mut self.draw_lists[draw_list_id];
-                let draw_call = &mut draw_list.draw_calls[draw_call_id];
+               let cxview = &mut self.views[view_id];
+                let draw_call = &mut cxview.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
-                let shc = &self.compiled_shaders[draw_call.shader_id];
-                let slots = shc.instance_slots;
+                let slots = sh.mapping.instance_props.total_slots;
                 let instances = draw_call.instance.len() / slots;
-                println!("{}call {}: {}({}) x:{}", indent, draw_call_id, sh.name, draw_call.shader_id, instances);
+                writeln!(s, "{}call {}: {}({}) *:{} scroll:{}", indent, draw_call_id, sh.name, draw_call.shader_id, instances, draw_call.get_local_scroll()).unwrap();
                 // lets dump the instance geometry
-                for inst in 0..instances.min(1){
-                    let mut out = String::new();
-                    let mut off = 0;
-                    for prop in &shc.named_instance_props.props{
-                        match prop.slots{
-                            1=>out.push_str(&format!("{}:{} ", prop.name,
-                                draw_call.instance[inst*slots + off])),
-                            2=>out.push_str(&format!("{}:v2({},{}) ", prop.name,
-                                draw_call.instance[inst*slots+ off],
-                                draw_call.instance[inst*slots+1+ off])),
-                            3=>out.push_str(&format!("{}:v3({},{},{}) ", prop.name,
-                                draw_call.instance[inst*slots+ off],
-                                draw_call.instance[inst*slots+1+ off],
-                                draw_call.instance[inst*slots+1+ off])),
-                            4=>out.push_str(&format!("{}:v4({},{},{},{}) ", prop.name,
-                                draw_call.instance[inst*slots+ off],
-                                draw_call.instance[inst*slots+1+ off],
-                                draw_call.instance[inst*slots+2+ off],
-                                draw_call.instance[inst*slots+3+ off])),
-                            _=>{}
+                if dump_instances{
+                    for inst in 0..instances.min(1){
+                        let mut out = String::new();
+                        let mut off = 0;
+                        for prop in &sh.mapping.instance_props.props{
+                            match prop.slots{
+                                1=>out.push_str(&format!("{}:{} ", prop.name,
+                                    draw_call.instance[inst*slots + off])),
+                                2=>out.push_str(&format!("{}:v2({},{}) ", prop.name,
+                                    draw_call.instance[inst*slots+ off],
+                                    draw_call.instance[inst*slots+1+ off])),
+                                3=>out.push_str(&format!("{}:v3({},{},{}) ", prop.name,
+                                    draw_call.instance[inst*slots+ off],
+                                    draw_call.instance[inst*slots+1+ off],
+                                    draw_call.instance[inst*slots+1+ off])),
+                                4=>out.push_str(&format!("{}:v4({},{},{},{}) ", prop.name,
+                                    draw_call.instance[inst*slots+ off],
+                                    draw_call.instance[inst*slots+1+ off],
+                                    draw_call.instance[inst*slots+2+ off],
+                                    draw_call.instance[inst*slots+3+ off])),
+                                _=>{}
+                            }
+                            off += prop.slots;
                         }
-                        off += prop.slots;
+                        writeln!(s, "  {}instance {}: {}", indent, inst, out).unwrap();
                     }
-                    println!("  {}instance {}: {}", indent, inst, out);
                 }
             }
         }
-        if draw_list_id == 0{
-            println!("---------- End Debug draw tree for redraw_id: {} ---------", self.redraw_id)
+        if view_id == 0{
+            writeln!(s, "---------- End Debug draw tree for redraw_id: {} ---------", self.redraw_id).unwrap();
         }
-    }*/
+    }
 }
 
 // palette types
