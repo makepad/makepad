@@ -144,7 +144,7 @@ impl LiveMacrosView {
         }
     }
     
-    pub fn draw_heading(&mut self, cx: &mut Cx) {
+    pub fn draw_heading(&mut self, _cx: &mut Cx) {
         
     }
     
@@ -158,9 +158,9 @@ impl LiveMacrosView {
                 // then we do the widget.
                 //float!(texteditor:gutter_width, 0.).get(cx)
                 
-                let bgi = self.bg.begin_quad(cx, Self::layout_bg().get(cx));
-                self.text.text_style = Self::text_style_caption().get(cx);
-                self.bg.end_quad(cx, bgi);
+                //let bgi = self.bg.begin_quad(cx, Self::layout_bg().get(cx));
+                //self.text.text_style = Self::text_style_caption().get(cx);
+                //self.bg.end_quad(cx, bgi);
                 
                 match m { 
                     LiveMacro::Pick {hsva, ..} => {
