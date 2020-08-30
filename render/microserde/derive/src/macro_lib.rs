@@ -277,6 +277,23 @@ impl TokenParser {
         return false
     }
     
+    pub fn is_literal(&mut self) -> bool {
+        // check if our current thing is an ident, ifso eat it.
+        if let Some(TokenTree::Literal(_)) = &self.current {
+            return true
+        }
+        return false
+    }
+
+    pub fn eat_literal(&mut self) -> Option<Literal> {
+        // check if our current thing is an ident, ifso eat it.
+        if let Some(TokenTree::Literal(lit)) = &self.current {
+            return Some(lit.clone())
+        }
+        return None
+    }
+
+    
     pub fn is_punct(&mut self, what: char) -> bool {
         // check if our punct is multichar.
         if let Some(TokenTree::Punct(current)) = &self.current {
