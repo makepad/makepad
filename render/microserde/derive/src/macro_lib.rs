@@ -448,6 +448,7 @@ impl TokenParser {
         if self.open_paren(){
             let mut ret = Vec::new();
             while !self.eat_eot(){
+                self.eat_ident("pub");
                 if let Some(tt) = self.eat_type(){
                     ret.push(tt);
                     self.eat_punct(',');
