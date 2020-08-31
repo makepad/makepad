@@ -4,6 +4,7 @@ use crate::ident::Ident;
 use crate::lit::Lit;
 use crate::span::Span;
 use crate::token::{Token, TokenWithSpan};
+use crate::livetypes::*;
 use std::cell::{Cell, RefCell};
 use std::fmt::Write;
 use std::iter::Cloned;
@@ -12,24 +13,32 @@ use std::slice::Iter;
 pub fn parse(tokens_with_span: &[TokenWithSpan], shader: &mut ShaderAst) -> Result<(), Error> {
     let mut tokens_with_span = tokens_with_span.iter().cloned();
     let token_with_span = tokens_with_span.next().unwrap();
+    /*
     Parser {
         tokens_with_span,
         token_with_span,
         end: 0,
         shader,
     }
-    .parse()
+    .parse()*/
+    return Ok(())
 }
 
 struct Parser<'a> {
     tokens_with_span: Cloned<Iter<'a, TokenWithSpan>>,
     token_with_span: TokenWithSpan,
     end: usize,
+    live_styles: &'a mut LiveStyles,
     shader: &'a mut ShaderAst,
 }
 
 impl<'a> Parser<'a> {
-    fn parse(&mut self) -> Result<(), Error> {
+    // parse a live block
+    fn parse_live(&mut self) -> Result<(), Error>{
+        Ok(())
+    }
+    
+    fn parse_shader(&mut self) -> Result<(), Error> {
         while self.peek_token() != Token::Eof {
             let span = self.begin_span();
             match self.peek_token() {

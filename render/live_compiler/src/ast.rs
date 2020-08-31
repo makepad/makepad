@@ -4,16 +4,20 @@ use crate::lit::{Lit, TyLit};
 use crate::span::Span;
 use crate::ty::Ty;
 use crate::val::Val;
+//use crate::livetypes::*;
+
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::fmt;
+use std::collections::HashMap;
+
 
 #[derive(Clone, Debug)]
 pub struct ShaderAst {
     pub debug: bool,
+    pub shader_id: usize,
     pub const_table: RefCell<Option<Vec<f32>>>,
     pub const_table_spans: RefCell<Option<Vec<(usize,Span)>>>,
-    
     pub decls: Vec<Decl>,
 }
 
@@ -21,6 +25,7 @@ impl ShaderAst {
     pub fn new() -> ShaderAst {
         ShaderAst {
             debug: false,
+            shader_id: 0,
             const_table: RefCell::new(None),
             const_table_spans: RefCell::new(None),
             decls: Vec::new(),

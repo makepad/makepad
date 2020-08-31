@@ -3,7 +3,7 @@ use crate::env::VarKind;
 use crate::error::Error;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
-use crate::math::Vec4;
+use makepad_live_compiler::math::*;
 use crate::span::Span;
 use crate::ty::Ty;
 use crate::val::Val;

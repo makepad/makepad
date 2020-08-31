@@ -8,11 +8,6 @@ pub struct AnimArea {
     pub total_time: f64
 }
 
-#[derive(Clone)] 
-pub struct Anim {
-    pub mode: Play,
-    pub tracks: Vec<Track>
-}
 
 #[derive(Clone)]
 pub enum AnimLastValue {
@@ -471,6 +466,13 @@ impl Animator {
             //}
         }
     }
+}
+
+
+#[derive(Clone)] 
+pub struct Anim {
+    pub mode: Play,
+    pub tracks: Vec<Track>
 }
 
 #[derive(Clone)]

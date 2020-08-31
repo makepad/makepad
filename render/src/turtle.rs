@@ -44,8 +44,8 @@ impl Cx {
         }
         
         // abs origin overrides the computation of width/height to use the parent abs_origin
-        let (width, min_width) = layout.walk.width.eval_width(self, layout.walk.margin, is_abs_origin, abs_size.x);
-        let (height, min_height) = layout.walk.height.eval_height(self, layout.walk.margin, is_abs_origin, abs_size.y);
+        let (width, min_width) = self.eval_width(&layout.walk.width, layout.walk.margin, is_abs_origin, abs_size.x);
+        let (height, min_height) = self.eval_height(&layout.walk.height, layout.walk.margin, is_abs_origin, abs_size.y);
 
         let turtle = Turtle {
             align_list_x: self.align_list.len(),
@@ -130,8 +130,8 @@ impl Cx {
     pub fn walk_turtle_with_old(&mut self, walk: Walk, old_turtle: Option<&Turtle>) -> Rect {
         let mut align_dx = 0.0;
         let mut align_dy = 0.0;
-        let (w,_mw) = walk.width.eval_width(self, walk.margin, false, 0.0);
-        let (h,_mh) = walk.height.eval_height(self, walk.margin, false, 0.0);
+        let (w,_mw) = self.eval_width(&walk.width, walk.margin, false, 0.0);
+        let (h,_mh) = self.eval_height(&walk.height, walk.margin, false, 0.0);
         
         let ret = if let Some(turtle) = self.turtles.last_mut() {
             let (x, y) = match turtle.layout.direction {
@@ -747,7 +747,45 @@ impl Cx {
         false
     }
     
+    
+    pub fn eval_width(&self, width: &Width, margin: Margin, abs: bool, abs_pos: f32) -> (f32,f32) {
+        match width {
+            Width::Compute => (std::f32::NAN,0.),
+            Width::ComputeFill => (std::f32::NAN,self._get_width_left(abs, abs_pos) - (margin.l + margin.r)),
+            Width::Fix(v) => (max_zero_keep_nan(*v),0.),
+            Width::Fill => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - (margin.l + margin.r)),0.),
+            Width::FillPad(p) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - p - (margin.l + margin.r)),0.),
+            Width::FillScale(s) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) * s - (margin.l + margin.r)),0.),
+            Width::FillScalePad(s, p) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) * s - p - (margin.l + margin.r)),0.),
+            Width::Scale(s) => (max_zero_keep_nan(self._get_width_total(abs, abs_pos) * s - (margin.l + margin.r)),0.),
+            Width::ScalePad(s, p) => (max_zero_keep_nan(self._get_width_total(abs, abs_pos) * s - p - (margin.l + margin.r)),0.),
+        }
+    }
+
+    pub fn eval_height(&self, height: &Height, margin: Margin, abs: bool, abs_pos: f32) -> (f32,f32) {
+        match height {
+            Height::Compute => (std::f32::NAN,0.),
+            Height::ComputeFill => (std::f32::NAN,self._get_height_left(abs, abs_pos) - (margin.t + margin.b)),
+            Height::Fix(v) => (max_zero_keep_nan(*v),0.),
+            Height::Fill => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - (margin.t + margin.b)),0.),
+            Height::FillPad(p) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - p - (margin.t + margin.b)),0.),
+            Height::FillScale(s) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) * s - (margin.t + margin.b)),0.),
+            Height::FillScalePad(s, p) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) * s - p - (margin.t + margin.b)),0.),
+            Height::Scale(s) => (max_zero_keep_nan(self._get_height_total(abs, abs_pos) * s - (margin.t + margin.b)),0.),
+            Height::ScalePad(s, p) => (max_zero_keep_nan(self._get_height_total(abs, abs_pos) * s - p - (margin.t + margin.b)),0.),
+        }
+    }
 }
+
+fn max_zero_keep_nan(v: f32) -> f32 {
+    if v.is_nan() {
+        v
+    }
+    else {
+        f32::max(v, 0.0)
+    }
+}
+
 /*
 thread_local!(pub static debug_pts_store: RefCell<Vec<(f32,f32,i32,String)>> = RefCell::new(Vec::new()));
 pub fn debug_pt(x:f32, y:f32, color:i32, s:&str){
@@ -776,141 +814,6 @@ pub fn debug_pt(x:f32, y:f32, color:i32, s:&str){
         })*/
 
 
-#[derive(Copy, Clone, Debug)]
-pub enum Width {
-    Fill,
-    Fix(f32),
-    Compute,
-    ComputeFill,
-    FillPad(f32),
-    FillScale(f32),
-    FillScalePad(f32, f32),
-    Scale(f32),
-    ScalePad(f32, f32),
-}
-
-#[derive(Copy, Clone, Debug)]
-pub enum Height {
-    Fill,
-    Fix(f32),
-    Compute,
-    ComputeFill,
-    FillPad(f32),
-    FillScale(f32),
-    FillScalePad(f32, f32),
-    Scale(f32),
-    ScalePad(f32, f32),
-}
-
-impl Default for Width {
-    fn default() -> Self {
-        Width::Fill
-    }
-}
-
-
-impl Default for Height {
-    fn default() -> Self {
-        Height::Fill
-    }
-}
-
-
-impl Width {
-    pub fn fixed(&self) -> f32 {
-        match self {
-            Width::Fix(v) => *v,
-            _ => 0.
-        }
-    }
-    
-    pub fn eval_width(&self, cx: &Cx, margin: Margin, abs: bool, abs_pos: f32) -> (f32,f32) {
-        match self {
-            Width::Compute => (std::f32::NAN,0.),
-            Width::ComputeFill => (std::f32::NAN,cx._get_width_left(abs, abs_pos) - (margin.l + margin.r)),
-            Width::Fix(v) => (max_zero_keep_nan(*v),0.),
-            Width::Fill => (max_zero_keep_nan(cx._get_width_left(abs, abs_pos) - (margin.l + margin.r)),0.),
-            Width::FillPad(p) => (max_zero_keep_nan(cx._get_width_left(abs, abs_pos) - p - (margin.l + margin.r)),0.),
-            Width::FillScale(s) => (max_zero_keep_nan(cx._get_width_left(abs, abs_pos) * s - (margin.l + margin.r)),0.),
-            Width::FillScalePad(s, p) => (max_zero_keep_nan(cx._get_width_left(abs, abs_pos) * s - p - (margin.l + margin.r)),0.),
-            Width::Scale(s) => (max_zero_keep_nan(cx._get_width_total(abs, abs_pos) * s - (margin.l + margin.r)),0.),
-            Width::ScalePad(s, p) => (max_zero_keep_nan(cx._get_width_total(abs, abs_pos) * s - p - (margin.l + margin.r)),0.),
-        }
-    }
-}
-
-impl Height {
-    pub fn fixed(&self) -> f32 {
-        match self {
-            Height::Fix(v) => *v,
-            _ => 0.
-        }
-    }
-    pub fn eval_height(&self, cx: &Cx, margin: Margin, abs: bool, abs_pos: f32) -> (f32,f32) {
-        match self {
-            Height::Compute => (std::f32::NAN,0.),
-            Height::ComputeFill => (std::f32::NAN,cx._get_height_left(abs, abs_pos) - (margin.t + margin.b)),
-            Height::Fix(v) => (max_zero_keep_nan(*v),0.),
-            Height::Fill => (max_zero_keep_nan(cx._get_height_left(abs, abs_pos) - (margin.t + margin.b)),0.),
-            Height::FillPad(p) => (max_zero_keep_nan(cx._get_height_left(abs, abs_pos) - p - (margin.t + margin.b)),0.),
-            Height::FillScale(s) => (max_zero_keep_nan(cx._get_height_left(abs, abs_pos) * s - (margin.t + margin.b)),0.),
-            Height::FillScalePad(s, p) => (max_zero_keep_nan(cx._get_height_left(abs, abs_pos) * s - p - (margin.t + margin.b)),0.),
-            Height::Scale(s) => (max_zero_keep_nan(cx._get_height_total(abs, abs_pos) * s - (margin.t + margin.b)),0.),
-            Height::ScalePad(s, p) => (max_zero_keep_nan(cx._get_height_total(abs, abs_pos) * s - p - (margin.t + margin.b)),0.),
-        }
-    }
-}
-
-
-#[derive(Copy, Clone, Debug)]
-pub enum LineWrap {
-    None,
-    NewLine,
-    MaxSize(f32)
-}
-impl Default for LineWrap {
-    fn default() -> Self {
-        LineWrap::None
-    }
-}
-
-#[derive(Copy, Clone, Default, Debug)]
-pub struct Layout {
-    pub padding: Padding,
-    pub align: Align,
-    pub direction: Direction,
-    pub line_wrap: LineWrap,
-    pub new_line_padding: f32,
-    pub abs_origin: Option<Vec2>,
-    pub abs_size: Option<Vec2>,
-    pub walk: Walk,
-}
-
-#[derive(Copy, Clone, Default, Debug)]
-pub struct Walk {
-    pub margin: Margin,
-    pub width: Width,
-    pub height: Height,
-}
-
-impl Walk {
-    pub fn wh(w: Width, h: Height) -> Self {
-        Self {
-            width: w,
-            height: h,
-            margin: Margin::zero(),
-        }
-    }
-}
-
-impl Layout {
-    pub fn abs_origin_zero() -> Self {
-        Layout {
-            abs_origin: Some(Vec2::default()),
-            ..Default::default()
-        }
-    }
-}
 
 #[derive(Clone, Default, Debug)]
 pub struct Turtle {
@@ -930,13 +833,4 @@ pub struct Turtle {
     pub biggest: f32,
     pub layout: Layout,
     pub guard_area: Area
-}
-
-pub fn max_zero_keep_nan(v: f32) -> f32 {
-    if v.is_nan() {
-        v
-    }
-    else {
-        f32::max(v, 0.0)
-    }
 }
