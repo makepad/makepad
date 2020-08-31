@@ -16,7 +16,11 @@ struct MyStruct<T> where T: Clone {
     j: String,
     k: [u32;2],
     l: (u64, u32, u16, u8),
+    m: MyAnomStruct,
 } 
+
+#[derive(SerBin, DeBin, SerJson, DeJson, SerRon, DeRon, PartialEq)]
+struct MyAnomStruct(f32, pub f64);
 
 #[derive(SerBin, DeBin, SerJson, DeJson, SerRon, DeRon, PartialEq)]
 enum MyEnum<T> where T: Clone {
@@ -42,6 +46,7 @@ fn main() {
         j: "Hello".to_string(),
         k: [10,11],
         l: (1, 2, 3, 4),
+        m: MyAnomStruct(2.0,3.0),
     };
     let bin = x.serialize_bin();
     println!("Bin len: {}", bin.len());
