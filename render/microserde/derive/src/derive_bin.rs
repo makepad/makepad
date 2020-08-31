@@ -114,7 +114,7 @@ pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
             if let Some(types) = types{
                 tb.add("(");
                 for _ in 0..types.len(){
-                     tb.add("DeBin :: de_bin ( o , d ) ?");
+                     tb.add("DeBin :: de_bin ( o , d ) ? ,");
                 }
                 tb.add(")");
             }
