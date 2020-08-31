@@ -476,6 +476,15 @@ impl TokenParser {
             tb.add("]");
             return Some(tb.end())
         }
+        else if self.open_paren(){ // tuple type
+            tb.add("(");
+            while !self.eat_eot(){
+                tb.stream(self.eat_type());
+                self.eat_punct(',');
+            }
+            tb.add(")");
+            return Some(tb.end());
+        }
         else if let Some(ty) = self.eat_any_ident() {
             tb.ident(&ty);
             tb.stream(self.eat_generic());

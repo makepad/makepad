@@ -14,7 +14,8 @@ struct MyStruct<T> where T: Clone {
     h: MyEnum<T>,
     i: MyEnum<T>,
     j: String,
-    k: [u32;2]
+    k: [u32;2],
+    l: (u64, u32, u16, u8),
 } 
 
 #[derive(SerBin, DeBin, SerJson, DeJson, SerRon, DeRon, PartialEq)]
@@ -39,7 +40,8 @@ fn main() {
         h: MyEnum::Four {z: None, w: 8},
         i: MyEnum::Four {z: Some(9), w: 8},
         j: "Hello".to_string(),
-        k: [10,11]
+        k: [10,11],
+        l: (1, 2, 3, 4),
     };
     let bin = x.serialize_bin();
     println!("Bin len: {}", bin.len());
