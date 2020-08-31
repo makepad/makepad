@@ -1,5 +1,5 @@
 use crate::shadergen::LiveLoc;
-use crate::math::*;
+use makepad_live_compiler::math::*;
 
 #[derive(Clone, Debug)]
 pub struct LiveSlide {

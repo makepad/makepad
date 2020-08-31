@@ -1,6 +1,6 @@
 use crate::ty::Ty;
 use crate::val::Val;
-use crate::math::Vec4;
+use makepad_live_compiler::math::*;
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
