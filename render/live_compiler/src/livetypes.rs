@@ -1,473 +1,376 @@
-use crate::cx::*;
+use std::collections::{HashMap};
+use crate::colors::Color;
+use makepad_microserde::*;
+use crate::math::*;
 use std::f64::consts::PI;
+use crate::ast::ShaderAst;
 
-#[derive(Clone)]
-pub struct AnimArea {
-    pub area: Area,
-    pub start_time: f64,
-    pub total_time: f64
+#[derive(Clone, Hash, PartialEq, Eq, Debug)]
+pub struct LiveBody {
+    pub file: String,
+    pub module_path: String,
+    pub line: usize,
+    pub column: usize,
+    pub code: String
 }
 
 
-#[derive(Clone)]
-pub enum AnimLastValue {
-    Float(f32), 
-    Vec2(Vec2), 
-    Vec3(Vec3),
-    Vec4(Vec4),
-    Color(Color),
+#[derive(PartialEq, Copy, Clone, Hash, Eq)]
+pub struct LiveId(pub u64);
+
+pub const fn str_to_liveid(modstr: &str, idstr: &str) -> LiveId {
+    let modpath = modstr.as_bytes();
+    let modpath_len = modpath.len();
+    let id = idstr.as_bytes();
+    let id_len = id.len();
+    
+    let mut value = 0u64;
+    if id.len()>5
+        && id[0] == 's' as u8
+        && id[1] == 'e' as u8
+        && id[2] == 'l' as u8
+        && id[3] == 'f' as u8
+        && id[4] == ':' as u8 {
+        
+        let mut o = 0;
+        let mut i = 0;
+        while i < modpath_len {
+            value ^= (modpath[i] as u64) << ((o & 7) << 3);
+            o += 1;
+            i += 1;
+        }
+        let mut i = 4;
+        while i < id_len {
+            value ^= (id[i] as u64) << ((o & 7) << 3);
+            o += 1;
+            i += 1;
+        }
+        return LiveId(value)
+    }
+    if id.len()>6
+        && id[0] == 'c' as u8
+        && id[1] == 'r' as u8
+        && id[2] == 'a' as u8
+        && id[3] == 't' as u8
+        && id[4] == 'e' as u8
+        && id[5] == ':' as u8 {
+        let mut o = 0;
+        let mut i = 0;
+        while i < modpath_len {
+            if modpath[i] == ':' as u8{
+                break
+            }
+            value ^= (modpath[i] as u64) << ((o & 7) << 3);
+            o += 1;
+            i += 1;
+        }
+        let mut i = 5;
+        while i < id_len {
+            value ^= (id[i] as u64) << ((o & 7) << 3);
+            o += 1;
+            i += 1;
+        }
+        return LiveId(value)
+    }
+    let mut i = 0;
+    let mut o = 0;
+    while i < id_len {
+        value ^= (id[i] as u64) << ((o & 7) << 3);
+        o += 1;
+        i += 1;
+    }
+    LiveId(value)
 }
 
-#[derive(Default, Clone)]
-pub struct Animator {
-    current: Option<Anim>,
-    next: Option<Anim>,
-    pub area: Area,
-    pub theme_update_id: usize,
-    pub last_values: Vec<(PropId, AnimLastValue)>,
+#[derive(Clone, Default)]
+pub struct LiveStyles {
+    pub base: LiveStyle,
+    pub styles:HashMap<LiveId, LiveStyle>
 }
 
-impl Animator {
+#[derive(Clone, Default)]
+pub struct LiveStyle {
+    pub floats: HashMap<LiveId, f32>,
+    pub colors: HashMap<LiveId, Color>,
+    pub text_styles: HashMap<LiveId, TextStyle>,
+    pub layouts: HashMap<LiveId, Layout>,
+    pub walks: HashMap<LiveId, Walk>,
+    pub anims: HashMap<LiveId, Anim>,
+    pub shaders: HashMap<LiveId, ShaderAst>,
+}
 
-    pub fn init<F>(&mut self, cx: &mut Cx, cb: F)
-    where F: Fn(&Cx) -> Anim {
-        if self.theme_update_id != cx.theme_update_id {
-            self.theme_update_id = cx.theme_update_id;
-            let anim = cb(cx);
-            // lets stop all animations if we had any
-            if let Some(anim_area) = cx.playing_anim_areas.iter_mut().find( | v | v.area == self.area) {
-                anim_area.total_time = 0.;
-            }
-            self.set_anim_as_last_values(&anim);
-        }
-    }
-    
-    pub fn set_anim_as_last_values(&mut self, anim: &Anim) {
-        for track in &anim.tracks {
-            // we dont have a last float, find it in the tracks
-            let ident = track.ident();
-            match track {
-                Track::Color(ft) => {
-                    let val = if ft.track.len()>0 {ft.track.last().unwrap().1}else {Color::default()};
-                    if let Some((_name, value)) = self.last_values.iter_mut().find( | (name, _) | *name == ident) {
-                        *value = AnimLastValue::Color(val);
-                    }
-                    else {
-                        self.last_values.push((ident.clone(), AnimLastValue::Color(val)));
-                    }
-                },
-                Track::Vec4(ft) => {
-                    let val = if ft.track.len()>0 {ft.track.last().unwrap().1}else {Vec4::default()};
-                    if let Some((_name, value)) = self.last_values.iter_mut().find( | (name, _) | *name == ident) {
-                        *value = AnimLastValue::Vec4(val);
-                    }
-                    else {
-                        self.last_values.push((ident.clone(), AnimLastValue::Vec4(val)));
-                    }
-                },
-                Track::Vec3(ft) => {
-                    let val = if ft.track.len()>0 {ft.track.last().unwrap().1}else {Vec3::default()};
-                    if let Some((_name, value)) = self.last_values.iter_mut().find( | (name, _) | *name == ident) {
-                        *value = AnimLastValue::Vec3(val);
-                    }
-                    else {
-                        self.last_values.push((ident.clone(), AnimLastValue::Vec3(val)));
-                    }
-                },
-                Track::Vec2(ft) => {
-                    let val = if ft.track.len()>0 {ft.track.last().unwrap().1}else {Vec2::default()};
-                    if let Some((_name, value)) = self.last_values.iter_mut().find( | (name, _) | *name == ident) {
-                        *value = AnimLastValue::Vec2(val);
-                    }
-                    else {
-                        self.last_values.push((ident.clone(), AnimLastValue::Vec2(val)));
-                    }
-                },
-                Track::Float(ft) => {
-                    let val = if ft.track.len()>0 {ft.track.last().unwrap().1}else {0.};
-                    if let Some((_name, value)) = self.last_values.iter_mut().find( | (name, _) | *name == ident) {
-                        *value = AnimLastValue::Float(val);
-                    }
-                    else {
-                        self.last_values.push((ident.clone(), AnimLastValue::Float(val)));
-                    }
-                },
-            }
-        }
-    }
-    
-    pub fn end(&mut self) {
-        if let Some(current) = self.current.take() {
-            self.set_anim_as_last_values(&current);
-        }
-    }
-    
-    pub fn end_and_set(&mut self, anim: Anim) {
-        self.current = None;
-        self.set_anim_as_last_values(&anim);
-    }
-    
-    pub fn term_anim_playing(&mut self) -> bool {
-        if let Some(current) = &self.current {
-            return current.mode.term();
-        }
-        return false
-    }
-    
-    pub fn play_anim(&mut self, cx: &mut Cx, anim: Anim) {
-        self.theme_update_id = cx.theme_update_id;
-        // if our area is invalid, we should just set our default value
-        if let Some(current) = &self.current {
-            if current.mode.term() { // can't override a term anim
-                return
-            }
-        }
+#[derive(Copy, Clone, Default)]
+pub struct Font {
+    pub font_id: Option<usize>
+}
 
-        if !self.area.is_valid(cx) {
-            self.set_anim_as_last_values(&anim);
-            self.current = Some(anim);
-            return
-        }
-        // alright first we find area, it already exists
-        if let Some(anim_area) = cx.playing_anim_areas.iter_mut().find( | v | v.area == self.area) {
-            //do we cut the animation in right now?
-            if anim.mode.cut() || self.current.is_none() {
-                self.current = Some(anim);
-                anim_area.start_time = std::f64::NAN;
-                self.next = None;
-                anim_area.total_time = self.current.as_ref().unwrap().mode.total_time();
-            }
-            else { // queue it
-                self.next = Some(anim);
-                // lets ask an animation anim how long it is
-                anim_area.total_time = self.current.as_ref().unwrap().mode.total_time() + self.next.as_ref().unwrap().mode.total_time()
-            }
-        }
-        else if self.area != Area::Empty { // its new
-            self.current = Some(anim);
-            self.next = None;
-            cx.playing_anim_areas.push(AnimArea {
-                area: self.area.clone(),
-                start_time: std::f64::NAN,
-                total_time: self.current.as_ref().unwrap().mode.total_time()
-            })
-        }
-    }
-    
-    pub fn set_area(&mut self, cx: &mut Cx, area: Area) {
-        self.area = cx.update_area_refs(self.area, area.clone());
-    }
-    
-    
-    pub fn update_anim_track(&mut self, cx: &mut Cx, time: f64) -> Option<f64> {
-        // alright first we find area in running animations
-        let anim_index_opt = cx.playing_anim_areas.iter().position( | v | v.area == self.area);
-        if anim_index_opt.is_none() {
-            return None
-        }
-        let anim_index = anim_index_opt.unwrap();
-        
-        // initialize start time
-        if cx.playing_anim_areas[anim_index].start_time.is_nan() {
-            cx.playing_anim_areas[anim_index].start_time = time;
-        }
-        let mut start_time = cx.playing_anim_areas[anim_index].start_time;
-        
-        // fetch current anim
-        if self.current.is_none() { // remove anim
-            cx.playing_anim_areas.remove(anim_index);
-            return None
-        }
-        
-        let current_total_time = self.current.as_ref().unwrap().mode.total_time();
-        
-        // process queueing
-        if time - start_time >= current_total_time && !self.next.is_none() {
-            self.current = self.next.clone();
-            self.next = None;
-            // update animation slot
-            start_time += current_total_time;
-            if let Some(anim) = cx.playing_anim_areas.iter_mut().find( | v | v.area == self.area) {
-                anim.start_time = start_time;
-                anim.total_time -= current_total_time;
-            }
-            Some(self.current.as_ref().unwrap().mode.compute_time(time - start_time))
-        }
-        else {
-            Some(self.current.as_ref().unwrap().mode.compute_time(time - start_time))
-        }
-    }
-    
-    pub fn find_track_index(&mut self, ident: PropId) -> Option<usize> {
-        // find our track
-        for (track_index, track) in &mut self.current.as_ref().unwrap().tracks.iter().enumerate() {
-            if track.ident() == ident {
-                return Some(track_index);
-            }
-        }
-        None
-    }
-    
-    pub fn calc_float(&mut self, cx: &mut Cx, ident: FloatId, time: f64) -> f32 {
-        let last = Self::_last_float(ident, &self.last_values);
-        let mut ret = last;
-        if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(PropId::Float(ident)) {
-                if let Track::Float(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
-                    ret = Track::compute_track_float(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
-                }
-            }
-        }
-        self.set_last_float(ident, ret);
-        return ret
-    }
-    
-    pub fn last_float(&self, _cx: &Cx, ident: FloatId) -> f32 {
-        Self::_last_float(ident, &self.last_values)
-    }
-    
-    pub fn _last_float(ident: FloatId, last_float: &Vec<(PropId, AnimLastValue)>) -> f32 {
-        if let Some((_, value)) = last_float.iter().find( | v | v.0 == PropId::Float(ident)) {
-            if let AnimLastValue::Float(value) = value {
-                return *value
-            }
-        }
-        return 0.0
-    }
-    
-    pub fn set_last_float(&mut self, ident: FloatId, value: f32) {
-        Self::_set_last_float(ident, value, &mut self.last_values)
-    }
-    
-    pub fn _set_last_float(ident: FloatId, value: f32, last_values: &mut Vec<(PropId, AnimLastValue)>) {
-        let ty_ident = PropId::Float(ident);
-        if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
-            *last = AnimLastValue::Float(value);
-        }
-        else {
-            last_values.push((ty_ident, AnimLastValue::Float(value)))
-        }
-    }
-    
-    pub fn calc_vec2(&mut self, cx: &mut Cx, ident: Vec2Id, time: f64) -> Vec2 {
-        let last = Self::_last_vec2(ident, &self.last_values);
-        let mut ret = last;
-        if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(PropId::Vec2(ident)) {
-                if let Track::Vec2(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
-                    ret = Track::compute_track_vec2(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
-                }
-            }
-        }
-        self.set_last_vec2(ident, ret);
-        return ret
-    }
-    
-    pub fn last_vec2(&self, _cx: &Cx, ident: Vec2Id) -> Vec2 {
-        Self::_last_vec2(ident, &self.last_values)
-    }
-    
-    pub fn _last_vec2(ident: Vec2Id, last_values: &Vec<(PropId, AnimLastValue)>) -> Vec2 {
-        if let Some((_, value)) = last_values.iter().find( | v | v.0 == PropId::Vec2(ident)) {
-            if let AnimLastValue::Vec2(value) = value {
-                return *value
-            }
-        }
-        return Vec2::default()
-    }
-    
-    pub fn set_last_vec2(&mut self, ident: Vec2Id, value: Vec2) {
-        Self::_set_last_vec2(ident, value, &mut self.last_values);
-    }
-    
-    pub fn _set_last_vec2(ident: Vec2Id, value: Vec2, last_values: &mut Vec<(PropId, AnimLastValue)>) {
-        let ty_ident = PropId::Vec2(ident);
-        if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
-            *last = AnimLastValue::Vec2(value);
-        }
-        else {
-            last_values.push((ty_ident, AnimLastValue::Vec2(value)))
-        }
-    }
-    
-    pub fn calc_vec3(&mut self, cx: &mut Cx, ident: Vec3Id, time: f64) -> Vec3 {
-        let last = Self::_last_vec3(ident, &self.last_values);
-        let mut ret = last;
-        if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(PropId::Vec3(ident)) {
-                if let Track::Vec3(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
-                    ret = Track::compute_track_vec3(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
-                }
-            }
-        }
-        self.set_last_vec3(ident, ret);
-        return ret
-    }
-    
-    pub fn last_vec3(&self, _cx: &Cx, ident: Vec3Id) -> Vec3 {
-        Self::_last_vec3(ident, &self.last_values)
-    }
-    
-    pub fn _last_vec3(ident: Vec3Id, last_values: &Vec<(PropId, AnimLastValue)>) -> Vec3 {
-        if let Some((_, value)) = last_values.iter().find( | v | v.0 == PropId::Vec3(ident)) {
-            if let AnimLastValue::Vec3(value) = value {
-                return *value
-            }
-        }
-        return Vec3::default()
-    }
-    
-    pub fn set_last_vec3(&mut self, ident: Vec3Id, value: Vec3) {
-        Self::_set_last_vec3(ident, value, &mut self.last_values);
-    }
-    
-    pub fn _set_last_vec3(ident: Vec3Id, value: Vec3, last_values: &mut Vec<(PropId, AnimLastValue)>) {
-        let ty_ident = PropId::Vec3(ident);
-        if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
-            *last = AnimLastValue::Vec3(value);
-        }
-        else {
-            last_values.push((ty_ident, AnimLastValue::Vec3(value)))
-        }
-    }
-    
-    pub fn calc_vec4(&mut self, cx: &mut Cx, ident: Vec4Id, time: f64) -> Vec4 {
-        let last = Self::_last_vec4(ident, &self.last_values);
-        let mut ret = last;
-        if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(PropId::Vec4(ident)) {
-                if let Track::Vec4(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
-                    ret = Track::compute_track_vec4(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
-                }
-            }
-        }
-        self.set_last_vec4(ident, ret);
-        return ret
-    }
-    
-    pub fn last_vec4(&self, _cx: &Cx, ident: Vec4Id) -> Vec4 {
-        Self::_last_vec4(ident, &self.last_values)
-    }
-    
-    pub fn _last_vec4(ident: Vec4Id, last_values: &Vec<(PropId, AnimLastValue)>) -> Vec4 {
-        if let Some((_, value)) = last_values.iter().find( | v | v.0 == PropId::Vec4(ident)) {
-            if let AnimLastValue::Vec4(value) = value {
-                return *value
-            }
-        }
-        return Vec4::default()
-    }
-    
-    pub fn set_last_vec4(&mut self, ident: Vec4Id, value: Vec4) {
-        Self::_set_last_vec4(ident, value, &mut self.last_values);
-    }
-    
-    pub fn _set_last_vec4(ident: Vec4Id, value: Vec4, last_values: &mut Vec<(PropId, AnimLastValue)>) {
-        let ty_ident = PropId::Vec4(ident);
-        if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
-            *last = AnimLastValue::Vec4(value);
-        }
-        else {
-            last_values.push((ty_ident, AnimLastValue::Vec4(value)))
-        }
-    }
-    
-    pub fn calc_color(&mut self, cx: &mut Cx, ident: ColorId, time: f64) -> Color {
-        if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(PropId::Color(ident)) {
-                if let Track::Color(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
-                    let last = Self::_last_color(ident, &self.last_values);
-                    let ret = Track::compute_track_color(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
-                    self.set_last_color(ident, ret);
-                    return ret
-                }
-            }
-        }
-        
-        return Color::default();
-    }
-    
-    pub fn last_color(&self, _cx: &Cx, ident: ColorId) -> Color {
-        if let Some((_, value)) = self.last_values.iter().find( | v | v.0 == PropId::Color(ident)) {
-            if let AnimLastValue::Color(value) = value {
-                return *value
-            }
-        }
-        Color::default()
-    }
-    
-    pub fn _last_color(ident: ColorId, last_values: &Vec<(PropId, AnimLastValue)>) -> Color {
-        if let Some((_, value)) = last_values.iter().find( | v | v.0 == PropId::Color(ident)) {
-            if let AnimLastValue::Color(value) = value {
-                return *value
-            }
-        }
-        
-        return Color::default()
-    }
-    
-    pub fn set_last_color(&mut self, ident: ColorId, value: Color) {
-        Self::_set_last_color(ident, value, &mut self.last_values);
-    }
-    
-    pub fn _set_last_color(ident: ColorId, value: Color, last_values: &mut Vec<(PropId, AnimLastValue)>) {
-        let ty_ident = PropId::Color(ident);
-        if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
-            *last = AnimLastValue::Color(value)
-        }
-        else {
-            last_values.push((ty_ident, AnimLastValue::Color(value)))
-        }
-    }
-    
-    pub fn last_area(&mut self, _cx: &mut Cx, _area: Area, _time: f64) {
-        
-    }
-    
-    pub fn calc_area(&mut self, cx: &mut Cx, area: Area, time: f64) {
-        
-        if let Some(time) = self.update_anim_track(cx, time) {
-            
-            for track_index in 0..self.current.as_ref().unwrap().tracks.len() {
-                //if let Some((time, track_index)) = self.fetch_calc_track(cx, ident, time) {
-                match &mut self.current.as_mut().unwrap().tracks[track_index] {
-                    Track::Color(ft) => {
-                        let init = Self::_last_color(ft.ident, &self.last_values);
-                        let ret = Track::compute_track_color(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
-                        Self::_set_last_color(ft.ident, ret, &mut self.last_values);
-                        area.write_color(cx, ft.ident, ret);
-                    },
-                    Track::Vec4(ft) => {
-                        let init = Self::_last_vec4(ft.ident, &self.last_values);
-                        let ret = Track::compute_track_vec4(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
-                        Self::_set_last_vec4(ft.ident, ret, &mut self.last_values);
-                        area.write_vec4(cx, ft.ident, ret);
-                    },
-                    Track::Vec3(ft) => {
-                        let init = Self::_last_vec3(ft.ident, &self.last_values);
-                        let ret = Track::compute_track_vec3(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
-                        Self::_set_last_vec3(ft.ident, ret, &mut self.last_values);
-                        area.write_vec3(cx, ft.ident, ret);
-                    },
-                    Track::Vec2(ft) => {
-                        let init = Self::_last_vec2(ft.ident, &self.last_values);
-                        let ret = Track::compute_track_vec2(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
-                        Self::_set_last_vec2(ft.ident, ret, &mut self.last_values);
-                        area.write_vec2(cx, ft.ident, ret);
-                    },
-                    Track::Float(ft) => {
-                        let init = Self::_last_float(ft.ident, &self.last_values);
-                        let ret = Track::compute_track_float(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
-                        Self::_set_last_float(ft.ident, ret, &mut self.last_values);
-                        area.write_float(cx, ft.ident, ret);
-                    }
-                };
-            }
-            //}
+
+#[derive(Clone, Copy)]
+pub struct TextStyle {
+    pub font: Font,
+    pub font_size: f32,
+    pub brightness: f32,
+    pub curve: f32,
+    pub line_spacing: f32,
+    pub top_drop: f32,
+    pub height_factor: f32,
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        TextStyle {
+            font: Font::default(),
+            font_size: 8.0,
+            brightness: 1.0,
+            curve: 0.6,
+            line_spacing: 1.4,
+            top_drop: 1.1,
+            height_factor: 1.3,
         }
     }
 }
 
+#[derive(Copy, Clone, Debug)]
+pub enum LineWrap {
+    None,
+    NewLine,
+    MaxSize(f32)
+}
+impl Default for LineWrap {
+    fn default() -> Self {
+        LineWrap::None
+    }
+}
+
+#[derive(Copy, Clone, Default, Debug)]
+pub struct Layout {
+    pub padding: Padding,
+    pub align: Align,
+    pub direction: Direction,
+    pub line_wrap: LineWrap,
+    pub new_line_padding: f32,
+    pub abs_origin: Option<Vec2>,
+    pub abs_size: Option<Vec2>,
+    pub walk: Walk,
+}
+
+#[derive(Copy, Clone, Default, Debug)]
+pub struct Walk {
+    pub margin: Margin,
+    pub width: Width,
+    pub height: Height,
+}
+
+impl Walk {
+    pub fn wh(w: Width, h: Height) -> Self {
+        Self {
+            width: w,
+            height: h,
+            margin: Margin::zero(),
+        }
+    }
+}
+
+impl Layout {
+    pub fn abs_origin_zero() -> Self {
+        Layout {
+            abs_origin: Some(Vec2::default()),
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Align {
+    pub fx: f32,
+    pub fy: f32
+}
+
+impl Align {
+    pub fn left_top() -> Align {Align {fx: 0., fy: 0.}}
+    pub fn center_top() -> Align {Align {fx: 0.5, fy: 0.0}}
+    pub fn right_top() -> Align {Align {fx: 1.0, fy: 0.0}}
+    pub fn left_center() -> Align {Align {fx: 0.0, fy: 0.5}}
+    pub fn center() -> Align {Align {fx: 0.5, fy: 0.5}}
+    pub fn right_center() -> Align {Align {fx: 1.0, fy: 0.5}}
+    pub fn left_bottom() -> Align {Align {fx: 0., fy: 1.0}}
+    pub fn center_bottom() -> Align {Align {fx: 0.5, fy: 1.0}}
+    pub fn right_bottom() -> Align {Align {fx: 1.0, fy: 1.0}}
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Margin {
+    pub l: f32,
+    pub t: f32,
+    pub r: f32,
+    pub b: f32
+}
+
+impl Margin {
+    pub fn zero() -> Margin {
+        Margin {l: 0.0, t: 0.0, r: 0.0, b: 0.0}
+    }
+    
+    pub fn all(v: f32) -> Margin {
+        Margin {l: v, t: v, r: v, b: v}
+    }
+    
+    pub fn left(v: f32) -> Margin {
+        Margin {l: v, t: 0.0, r: 0.0, b: 0.0}
+    }
+    
+    pub fn top(v: f32) -> Margin {
+        Margin {l: 0.0, t: v, r: 0.0, b: 0.0}
+    }
+    
+    pub fn right(v: f32) -> Margin {
+        Margin {l: 0.0, t: 0.0, r: v, b: 0.0}
+    }
+    
+    pub fn bottom(v: f32) -> Margin {
+        Margin {l: 0.0, t: 0.0, r: 0.0, b: v}
+    }
+    
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Padding {
+    pub l: f32,
+    pub t: f32,
+    pub r: f32,
+    pub b: f32
+}
+
+impl Padding {
+    pub fn zero() -> Padding {
+        Padding {l: 0.0, t: 0.0, r: 0.0, b: 0.0}
+    }
+    pub fn all(v: f32) -> Padding {
+        Padding {l: v, t: v, r: v, b: v}
+    }
+}
+
+
+#[derive(Copy, Clone, Debug)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down
+}
+
+impl Default for Direction {
+    fn default() -> Self {
+        Direction::Right
+    }
+}
+
+#[derive(Copy, Clone, SerRon, DeRon)]
+pub enum Axis {
+    Horizontal,
+    Vertical
+}
+
+impl Default for Axis {
+    fn default() -> Self {
+        Axis::Horizontal
+    }
+}
+
+
+#[derive(Copy, Clone, Debug)]
+pub enum Width {
+    Fill,
+    Fix(f32),
+    Compute,
+    ComputeFill,
+    FillPad(f32),
+    FillScale(f32),
+    FillScalePad(f32, f32),
+    Scale(f32),
+    ScalePad(f32, f32),
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum Height {
+    Fill,
+    Fix(f32),
+    Compute,
+    ComputeFill,
+    FillPad(f32),
+    FillScale(f32),
+    FillScalePad(f32, f32),
+    Scale(f32),
+    ScalePad(f32, f32),
+}
+
+impl Default for Width {
+    fn default() -> Self {
+        Width::Fill
+    }
+}
+
+
+impl Default for Height {
+    fn default() -> Self {
+        Height::Fill
+    }
+}
+
+
+impl Width {
+    pub fn fixed(&self) -> f32 {
+        match self {
+            Width::Fix(v) => *v,
+            _ => 0.
+        }
+    }
+
+}
+
+impl Height {
+    pub fn fixed(&self) -> f32 {
+        match self {
+            Height::Fix(v) => *v,
+            _ => 0.
+        }
+    }
+}
+
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, SerRon, DeRon)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32
+}
+
+impl Rect {
+    
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        return x >= self.x && x <= self.x + self.w &&
+        y >= self.y && y <= self.y + self.h;
+    }
+    pub fn intersects(&self, r: Rect) -> bool {
+        !(
+            r.x > self.x + self.w ||
+            r.x + r.w < self.x ||
+            r.y > self.y + self.h ||
+            r.y + r.h < self.y
+        )
+    }
+    
+    pub fn contains_with_margin(&self, x: f32, y: f32, margin: &Option<Margin>) -> bool {
+        if let Some(margin) = margin {
+            return x >= self.x - margin.l && x <= self.x + self.w + margin.r &&
+            y >= self.y - margin.t && y <= self.y + self.h + margin.b;
+        }
+        else {
+            return self.contains(x, y);
+        }
+    }
+}
 
 #[derive(Clone)] 
 pub struct Anim {
@@ -861,7 +764,7 @@ impl Ease {
 
 #[derive(Clone)]
 pub struct FloatTrack {
-    pub ident: FloatId,
+    pub ident: LiveId,
     pub ease: Ease,
     pub cut_init: Option<f32>,
     pub track: Vec<(f64, f32)>
@@ -869,7 +772,7 @@ pub struct FloatTrack {
 
 #[derive(Clone)]
 pub struct Vec2Track {
-    pub ident: Vec2Id,
+    pub ident: LiveId,
     pub ease: Ease,
     pub cut_init: Option<Vec2>,
     pub track: Vec<(f64, Vec2)>
@@ -877,7 +780,7 @@ pub struct Vec2Track {
 
 #[derive(Clone)]
 pub struct Vec3Track {
-    pub ident: Vec3Id,
+    pub ident: LiveId,
     pub ease: Ease,
     pub cut_init: Option<Vec3>,
     pub track: Vec<(f64, Vec3)>
@@ -885,7 +788,7 @@ pub struct Vec3Track {
 
 #[derive(Clone)]
 pub struct Vec4Track {
-    pub ident: Vec4Id,
+    pub ident: LiveId,
     pub ease: Ease,
     pub cut_init: Option<Vec4>,
     pub track: Vec<(f64, Vec4)>
@@ -893,7 +796,7 @@ pub struct Vec4Track {
 
 #[derive(Clone)]
 pub struct ColorTrack {
-    pub ident: ColorId,
+    pub ident: LiveId,
     pub ease: Ease,
     pub cut_init: Option<Color>,
     pub track: Vec<(f64, Color)>
@@ -910,7 +813,7 @@ pub enum Track {
 
 impl Track {
     
-    pub fn float(ident: FloatId, ease: Ease, track: Vec<(f64, f32)>) -> Track {
+    pub fn float(ident: LiveId, ease: Ease, track: Vec<(f64, f32)>) -> Track {
         Track::Float(FloatTrack {
             cut_init: None,
             ease: ease,
@@ -919,7 +822,7 @@ impl Track {
         })
     }
     
-    pub fn vec2(ident: Vec2Id, ease: Ease, track: Vec<(f64, Vec2)>) -> Track {
+    pub fn vec2(ident: LiveId, ease: Ease, track: Vec<(f64, Vec2)>) -> Track {
         Track::Vec2(Vec2Track {
             cut_init: None,
             ease: ease,
@@ -928,7 +831,7 @@ impl Track {
         })
     }
     
-    pub fn vec3(ident: Vec3Id, ease: Ease, track: Vec<(f64, Vec3)>) -> Track {
+    pub fn vec3(ident: LiveId, ease: Ease, track: Vec<(f64, Vec3)>) -> Track {
         Track::Vec3(Vec3Track {
             cut_init: None,
             ease: ease,
@@ -937,7 +840,7 @@ impl Track {
         })
     }
     
-    pub fn vec4(ident: Vec4Id, ease: Ease, track: Vec<(f64, Vec4)>) -> Track {
+    pub fn vec4(ident: LiveId, ease: Ease, track: Vec<(f64, Vec4)>) -> Track {
         Track::Vec4(Vec4Track {
             cut_init: None,
             ease: ease,
@@ -947,7 +850,7 @@ impl Track {
     }
     
     
-    pub fn color(ident: ColorId, ease: Ease, track: Vec<(f64, Color)>) -> Track {
+    pub fn color(ident: LiveId, ease: Ease, track: Vec<(f64, Color)>) -> Track {
         Track::Color(ColorTrack {
             cut_init: None,
             ease: ease,
@@ -1096,22 +999,22 @@ impl Track {
         return lerp(*val1, val2.1, f)
     }
     
-    pub fn ident(&self) -> PropId {
+    pub fn ident(&self) -> LiveId {
         match self {
             Track::Float(ft) => {
-                PropId::Float(ft.ident)
+                ft.ident
             },
             Track::Vec2(ft) => {
-                PropId::Vec2(ft.ident)
+                ft.ident
             }
             Track::Vec3(ft) => {
-                PropId::Vec3(ft.ident)
+                ft.ident
             }
             Track::Vec4(ft) => {
-                PropId::Vec4(ft.ident)
+                ft.ident
             }
             Track::Color(ft) => {
-                PropId::Color(ft.ident)
+                ft.ident
             }
         }
     }

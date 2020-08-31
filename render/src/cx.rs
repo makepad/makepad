@@ -8,6 +8,22 @@ pub use makepad_shader_compiler::util::*;
 pub use makepad_shader_compiler::math::*;
 pub use makepad_shader_compiler::uid;
 pub use makepad_live_macros::*;
+pub use makepad_live_compiler::livetypes::{
+    Width,
+    Height,
+    LineWrap,
+    TextStyle,
+    Layout,
+    Walk,
+    LiveStyles,
+    Direction,
+    Rect,
+    Padding,
+    Margin,
+    Axis,
+    Align,
+    Font
+};
 
 pub use crate::fonts::*;
 pub use crate::turtle::*;
@@ -104,8 +120,8 @@ pub struct Cx {
     pub shader_inherit_cache: ShaderInheritCache,
     pub live_macros_on_self: bool,
     
-    pub str_to_id: RefCell<HashMap<String, usize>>,
-    pub id_to_str: RefCell<HashMap<usize, String>>,
+    pub str_to_id: RefCell<HashMap<String, usize >>,
+    pub id_to_str: RefCell<HashMap<usize, String >>,
     
     pub is_in_redraw_cycle: bool,
     pub default_dpi_factor: f32,
@@ -145,17 +161,14 @@ pub struct Cx {
     pub frame_callbacks: Vec<Area>,
     pub _frame_callbacks: Vec<Area>,
     
-    pub signals: HashMap<Signal, Vec<StatusId>>,
+    pub signals: HashMap<Signal, Vec<StatusId >>,
     
     pub style_base: CxStyle,
     pub styles: Vec<CxStyle>,
     pub style_map: HashMap<StyleId, usize>,
     pub style_stack: Vec<usize>,
-
-    pub live_base: CxLive,
-    pub lives: Vec<CxLive>,
-    pub live_map: HashMap<LiveId, usize>,
-    pub live_stack: Vec<usize>,
+    
+    pub live_styles: LiveStyles,
     
     pub command_settings: HashMap<CommandId, CxCommandSetting>,
     
@@ -169,15 +182,15 @@ pub struct Cx {
 }
 
 #[derive(Clone, Default, Hash, PartialEq)]
-pub struct CxLiveLoc{
-    file:String,
-    line:usize,
-    column:usize,
+pub struct CxLiveLoc {
+    file: String,
+    line: usize,
+    column: usize,
 }
 
 #[derive(Clone, Default)]
-pub struct CxLiveMacro{
-    code:String
+pub struct CxLiveMacro {
+    code: String
 }
 
 
@@ -198,18 +211,6 @@ pub struct CxStyle {
     pub anims: HashMap<AnimId, Anim>,
     pub shaders: HashMap<ShaderId, Shader>,
 }
-
-#[derive(Default)]
-pub struct CxLive {
-    pub floats: HashMap<LiveId, f32>,
-    pub colors: HashMap<LiveId, Color>,
-    pub text_styles: HashMap<LiveId, TextStyle>,
-    pub layouts: HashMap<LiveId, Layout>,
-    pub walks: HashMap<LiveId, Walk>,
-    pub anims: HashMap<LiveId, Anim>,
-    pub shaders: HashMap<LiveId, Shader>,
-}
-
 
 #[derive(Default, Clone)]
 pub struct CxPerFinger {
@@ -305,11 +306,8 @@ impl Default for Cx {
             styles: Vec::new(),
             style_map: HashMap::new(),
             style_stack: Vec::new(),
-
-            live_base: CxLive::default(),
-            lives: Vec::new(),
-            live_map: HashMap::new(),
-            live_stack: Vec::new(),
+            
+            live_styles: LiveStyles::default(),
             
             command_settings: HashMap::new(),
             
@@ -326,7 +324,7 @@ impl Default for Cx {
             
             platform: CxPlatform {..Default::default()},
             
-            live_macros:HashMap::new(),
+            live_macros: HashMap::new(),
         }
     }
 }
@@ -831,7 +829,7 @@ impl Cx {
                 signals: signals,
             }));
             
-            if counter > 100  {
+            if counter > 100 {
                 println!("Signal feedback loop detected");
                 break
             }
@@ -867,7 +865,7 @@ impl Cx {
                     if code != sub.code {
                         sub.code = code.clone();
                         // we need to recompile some shader..
-                        if !self.shader_recompiles.contains(&shader_index){
+                        if !self.shader_recompiles.contains(&shader_index) {
                             self.shader_recompiles.push(
                                 shader_index
                             );
@@ -879,55 +877,45 @@ impl Cx {
     }
     
     
-    pub fn debug_draw_tree_recur(&mut self, dump_instances:bool, s: &mut String, view_id:usize, depth:usize){
-        if view_id >= self.views.len(){
+    pub fn debug_draw_tree_recur(&mut self, dump_instances: bool, s: &mut String, view_id: usize, depth: usize) {
+        if view_id >= self.views.len() {
             writeln!(s, "---------- Drawlist still empty ---------").unwrap();
             return
         }
         let mut indent = String::new();
-        for _i in 0..depth{
+        for _i in 0..depth {
             indent.push_str("  ");
         }
         let draw_calls_len = self.views[view_id].draw_calls_len;
-        if view_id == 0{
-            writeln!(s,"---------- Begin Debug draw tree for redraw_id: {} ---------", self.redraw_id).unwrap();
+        if view_id == 0 {
+            writeln!(s, "---------- Begin Debug draw tree for redraw_id: {} ---------", self.redraw_id).unwrap();
         }
-        writeln!(s,"{}view {}: len:{} rect:{:?} scroll:{:?}", indent, view_id, draw_calls_len, self.views[view_id].rect, self.views[view_id].get_local_scroll()).unwrap();
+        writeln!(s, "{}view {}: len:{} rect:{:?} scroll:{:?}", indent, view_id, draw_calls_len, self.views[view_id].rect, self.views[view_id].get_local_scroll()).unwrap();
         indent.push_str("  ");
-        for draw_call_id in 0..draw_calls_len{
+        for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
-            if sub_view_id != 0{
+            if sub_view_id != 0 {
                 self.debug_draw_tree_recur(dump_instances, s, sub_view_id, depth + 1);
             }
-            else{
-               let cxview = &mut self.views[view_id];
+            else {
+                let cxview = &mut self.views[view_id];
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
                 let slots = sh.mapping.instance_props.total_slots;
                 let instances = draw_call.instance.len() / slots;
                 writeln!(s, "{}call {}: {}({}) *:{} scroll:{}", indent, draw_call_id, sh.name, draw_call.shader_id, instances, draw_call.get_local_scroll()).unwrap();
                 // lets dump the instance geometry
-                if dump_instances{
-                    for inst in 0..instances.min(1){
+                if dump_instances {
+                    for inst in 0..instances.min(1) {
                         let mut out = String::new();
                         let mut off = 0;
-                        for prop in &sh.mapping.instance_props.props{
-                            match prop.slots{
-                                1=>out.push_str(&format!("{}:{} ", prop.name,
-                                    draw_call.instance[inst*slots + off])),
-                                2=>out.push_str(&format!("{}:v2({},{}) ", prop.name,
-                                    draw_call.instance[inst*slots+ off],
-                                    draw_call.instance[inst*slots+1+ off])),
-                                3=>out.push_str(&format!("{}:v3({},{},{}) ", prop.name,
-                                    draw_call.instance[inst*slots+ off],
-                                    draw_call.instance[inst*slots+1+ off],
-                                    draw_call.instance[inst*slots+1+ off])),
-                                4=>out.push_str(&format!("{}:v4({},{},{},{}) ", prop.name,
-                                    draw_call.instance[inst*slots+ off],
-                                    draw_call.instance[inst*slots+1+ off],
-                                    draw_call.instance[inst*slots+2+ off],
-                                    draw_call.instance[inst*slots+3+ off])),
-                                _=>{}
+                        for prop in &sh.mapping.instance_props.props {
+                            match prop.slots {
+                                1 => out.push_str(&format!("{}:{} ", prop.name, draw_call.instance[inst * slots + off])),
+                                2 => out.push_str(&format!("{}:v2({},{}) ", prop.name, draw_call.instance[inst * slots + off], draw_call.instance[inst * slots + 1 + off])),
+                                3 => out.push_str(&format!("{}:v3({},{},{}) ", prop.name, draw_call.instance[inst * slots + off], draw_call.instance[inst * slots + 1 + off], draw_call.instance[inst * slots + 1 + off])),
+                                4 => out.push_str(&format!("{}:v4({},{},{},{}) ", prop.name, draw_call.instance[inst * slots + off], draw_call.instance[inst * slots + 1 + off], draw_call.instance[inst * slots + 2 + off], draw_call.instance[inst * slots + 3 + off])),
+                                _ => {}
                             }
                             off += prop.slots;
                         }
@@ -936,7 +924,7 @@ impl Cx {
                 }
             }
         }
-        if view_id == 0{
+        if view_id == 0 {
             writeln!(s, "---------- End Debug draw tree for redraw_id: {} ---------", self.redraw_id).unwrap();
         }
     }

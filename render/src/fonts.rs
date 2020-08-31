@@ -43,11 +43,6 @@ impl Cx {
     }
 }
 
-#[derive(Copy, Clone, Default)]
-pub struct Font {
-    pub font_id: Option<usize>
-}
-
 pub struct TrapezoidText {
     shader: Shader,
     trapezoidator: Trapezoidator
