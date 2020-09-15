@@ -437,11 +437,11 @@ impl MprsTokenizer {
                     
                     chunk.push(state.cur);
                     
-                    if chunk.len()>=2 && chunk[chunk.len() - 2] == '{' {
+                    if chunk.len()>=3 && chunk[chunk.len() - 3] == 'r' && chunk[chunk.len() - 2] == '#'{
                         self.in_string_code = true;
                         return TokenType::ParenOpen;
                     }
-                    if state.next == '}' && self.in_string_code {
+                    if state.next == '#' && self.in_string_code {
                         self.in_string_code = false;
                         return TokenType::ParenClose;
                     }
