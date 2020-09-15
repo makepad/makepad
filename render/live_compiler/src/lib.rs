@@ -30,3 +30,4 @@ pub mod shadergen;
 pub mod colors;
 pub mod geometry;
 pub mod livetypes;
+pub mod detok;

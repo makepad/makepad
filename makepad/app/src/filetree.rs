@@ -265,7 +265,8 @@ impl FileTreeItemDraw {
                     return df.stroke(color*0.5, 1.);
                 }
                 else { // its a folder
-                    df.box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
+                    let t = slide!(1.000);
+                    df.box(0. * w, t*0.35 * h, 0.87 * w, 0.39 * h, 0.75);
                     df.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
                     df.union(); 
                     // ok so.
@@ -500,7 +501,7 @@ impl FileTree {
                 Event::Animate(ae) => {
                     node_draw.animator.calc_area(cx, node_draw.animator.area, ae.time);
                 },
-                Event::AnimEnded(_) => {
+                Event::AnimEnded(_) => { 
                     node_draw.animator.end();
                 },
                 Event::FingerDown(_fe) => {
