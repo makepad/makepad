@@ -20,7 +20,7 @@ pub struct TabControl {
     pub _dragging_tab: Option<(FingerMoveEvent, usize)>,
     pub _tab_id_alloc: usize,
     pub _tab_now_selected: Option<usize>,
-    pub _tab_last_selected:Option<usize>,
+    pub _tab_last_selected: Option<usize>,
     pub _focussed: bool
 }
 
@@ -63,8 +63,8 @@ impl TabControl {
             tab_fill: Quad::new(cx),
             animator: Animator::default(),
             _dragging_tab: None,
-            _tab_now_selected:None,
-            _tab_last_selected:None,
+            _tab_now_selected: None,
+            _tab_last_selected: None,
             _focussed: false,
             _tab_id_alloc: 0
         }
@@ -141,10 +141,12 @@ impl TabControl {
         tab_control_event
     }
     
-    pub fn tab_control_style()->StyleId{uid!()}
-
-    pub fn style(cx:&mut Cx, opt:&StyleOptions){
+    pub fn tab_control_style() -> StyleId {uid!()}
+    
+    pub fn style(cx: &mut Cx, opt: &StyleOptions) {
+        
         cx.begin_style(Self::tab_control_style());
+        
         ScrollBar::bar_size().set(cx, 8. * opt.scale.powf(0.5));
         cx.end_style();
     }
@@ -183,7 +185,7 @@ impl TabControl {
     pub fn begin_tabs(&mut self, cx: &mut Cx) -> ViewRedraw {
         //cx.begin_turtle(&Layout{
         if let Err(_) = self.tabs_view.begin_view(cx, Layout {
-            walk:Walk::wh(Width::Fill, Height::Compute),
+            walk: Walk::wh(Width::Fill, Height::Compute),
             ..Layout::default()
         }) {
             return Err(())
@@ -192,11 +194,11 @@ impl TabControl {
         self._tab_id_alloc = 0;
         Ok(())
     }
-
-    pub fn get_draw_tab(&mut self, cx: &mut Cx, label: &str, selected: bool, closeable: bool)->&mut Tab{
+    
+    pub fn get_draw_tab(&mut self, cx: &mut Cx, label: &str, selected: bool, closeable: bool) -> &mut Tab {
         let new_tab = self.tabs.get(self._tab_id_alloc).is_none();
         let tab = self.tabs.get_draw(cx, self._tab_id_alloc, | _cx, tmpl | tmpl.clone());
-        if selected{
+        if selected {
             self._tab_now_selected = Some(self._tab_id_alloc);
         }
         self._tab_id_alloc += 1;
@@ -210,7 +212,7 @@ impl TabControl {
         }
         tab
     }
-
+    
     pub fn draw_tab(&mut self, cx: &mut Cx, label: &str, selected: bool, closeable: bool) {
         let tab = self.get_draw_tab(cx, label, selected, closeable);
         tab.draw_tab(cx);
@@ -234,10 +236,10 @@ impl TabControl {
         cx.begin_style(Self::tab_control_style());
         self.tabs_view.end_view(cx);
         cx.end_style();
-        if self._tab_now_selected != self._tab_last_selected{
+        if self._tab_now_selected != self._tab_last_selected {
             // lets scroll the thing into view
-            if let Some(tab_id) = self._tab_now_selected{
-                if let Some(tab) = self.tabs.get(tab_id){
+            if let Some(tab_id) = self._tab_now_selected {
+                if let Some(tab) = self.tabs.get(tab_id) {
                     let tab_rect = tab._bg_area.get_rect(cx);
                     self.tabs_view.scroll_into_view_abs(cx, tab_rect);
                 }

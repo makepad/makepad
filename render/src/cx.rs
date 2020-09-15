@@ -12,7 +12,6 @@ pub use makepad_live_compiler::livetypes::{
     Width,
     Height,
     LineWrap,
-    TextStyle,
     Layout,
     Walk,
     LiveStyles,

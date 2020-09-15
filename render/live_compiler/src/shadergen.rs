@@ -1,16 +1,16 @@
 use crate::ast::ShaderAst;
-use crate::error::Error;
-use crate::lex;
+use crate::error::LiveError;
+//use crate::lex;
 use crate::token::TokenWithSpan;
-use crate::parse;
+//use crate::parse;
 use crate::ty::*;
 use crate::geometry::*;
-use crate::token::Token;
-use crate::analyse::ShaderAnalyser;
+//use crate::token::Token;
+//use crate::analyse::ShaderAnalyser;
 use crate::span::Span;
 use crate::ident::Ident;
-use crate::env::{Env, Sym};
-use crate::lit::Lit;
+use crate::env::{Env};
+//use crate::lit::Lit;
 use crate::builtin::{self, Builtin};
 
 use std::any::TypeId;
@@ -128,7 +128,7 @@ impl ShaderGen {
         return (0, 0);
     }
     
-    pub fn shader_gen_error(err: &Error, sub: &ShaderSub) -> ShaderGenError {
+    pub fn shader_gen_error(err: &LiveError, sub: &ShaderSub) -> ShaderGenError {
         // lets find the span info
         let start = ShaderGen::byte_to_row_col(err.span.start, &sub.code);
         ShaderGenError {
@@ -144,7 +144,7 @@ impl ShaderGen {
         self.subs.push(sub);
         self
     }
-    
+    /*
     pub fn lex_parse_analyse(&self, gather_all: bool, use_const_table: bool, inherit_cache: &mut ShaderInheritCache) -> ShaderGenResult {
         fn add_inputs_to_env(env: &mut Env, sub: &ShaderSub) {
             for prop in &sub.geometries {
@@ -356,7 +356,7 @@ impl ShaderGen {
         }
         
         ShaderGenResult::ShaderAst(shader_ast)
-    }
+    }*/
 }
 
 impl Hash for ShaderGen {

@@ -3,6 +3,7 @@ use {
         ast::*,
         env::VarKind,
         ident::Ident,
+        ident::IdentPath,
         lit::{Lit, TyLit},
         span::Span,
         ty::Ty,
@@ -342,9 +343,9 @@ impl<'a> ExprGenerator<'a> {
                 } => self.generate_index_expr(span, expr, index_expr),
                 ExprKind::Call {
                     span,
-                    ident,
+                    ident_path,
                     ref arg_exprs,
-                } => self.generate_call_expr(span, ident, arg_exprs),
+                } => self.generate_call_expr(span, ident_path, arg_exprs),
                 ExprKind::MacroCall {
                     ref analysis,
                     span,
@@ -360,8 +361,8 @@ impl<'a> ExprGenerator<'a> {
                 ExprKind::Var {
                     span,
                     ref kind,
-                    ident,
-                } => self.generate_var_expr(span, kind, ident, &expr.ty.borrow()),
+                    ident_path,
+                } => self.generate_var_expr(span, kind, ident_path, &expr.ty.borrow()),
                 ExprKind::Lit {span, lit} => self.generate_lit_expr(span, lit),
             },
         }
@@ -477,7 +478,7 @@ impl<'a> ExprGenerator<'a> {
             } => {
                 self.generate_call_expr(
                     span,
-                    Ident::new(format!("{}::{}", struct_ident, ident)),
+                    IdentPath::from_two(*struct_ident, ident),
                     arg_exprs,
                 );
             }
@@ -497,7 +498,9 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, "]").unwrap();
     }
     
-    fn generate_call_expr(&mut self, _span: Span, ident: Ident, arg_exprs: &[Expr]) {
+    fn generate_call_expr(&mut self, _span: Span, ident_path: IdentPath, arg_exprs: &[Expr]) {
+        let ident = ident_path.get_single().expect("IMPL");
+
         //TODO add built-in check
         self.backend_writer.write_call_ident(&mut self.string, ident, arg_exprs);
         
@@ -569,13 +572,15 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, ")").unwrap();
     }
     
-    fn generate_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind>>, ident: Ident, ty:&Option<Ty>) {
+    fn generate_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind>>, ident_path: IdentPath, ty:&Option<Ty>) {
         //self.backend_write.generate_var_expr(&mut self.string, span, kind, &self.shader, decl)
+        let ident = ident_path.get_single().expect("IMPL");
+
         if let Some(decl) = self.decl {
             self.backend_writer.generate_var_expr(&mut self.string, ident, kind, &self.shader, decl, ty)
         }
     }
-    
+
     fn generate_lit_expr(&mut self, _span: Span, lit: Lit) {
         write!(self.string, "{}", lit).unwrap();
     }

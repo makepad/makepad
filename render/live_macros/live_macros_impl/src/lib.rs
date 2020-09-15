@@ -16,18 +16,19 @@ pub fn live(input: TokenStream) -> TokenStream {
     // our args are cx, {" "}
     let mut tp = TokenParser::new(input);
     if let Some(cx_name) = tp.eat_any_ident(){
-        if tp.eat_punct(',') && tp.open_brace(){
+        if tp.eat_punct(',') {
             if let Some(code) = tp.eat_literal(){
                 // we have a body
                 let mut tb = TokenBuilder::new();
                 let span = code.span();
+                let code = code.to_string();
                 tb.ident_with_span(&cx_name, span).add(". add_live_body (");
                 tb.add("LiveBody {");
                 tb.add("file :").ident_with_span("file", span).add("! ( ) . to_string ( ) . replace ( ").string("\\").add(",").string("/").add(") ,");
                 tb.add("module_path :").ident_with_span("module_path", span).add("! ( ) . to_string ( ) . replace ( ").string("\\").add(",").string("/").add(") ,");
                 tb.add("line :").ident_with_span("line", span).add("! ( ) as usize").add(","); 
                 tb.add("column : ").ident_with_span("column", span).add("! ( ) as usize ,");
-                tb.add("code : ").string(&code.to_string());
+                tb.add("code : ").string(&code[3..code.len()-2]);
                 tb.add(". to_string ( ) } )");
                 return tb.end();
             }
