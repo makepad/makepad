@@ -1,9 +1,10 @@
 use crate::ast::*;
 use crate::env::{Env, Sym, VarKind};
-use crate::ident::Ident;
+use crate::ident::{Ident,IdentPath};
 use crate::lit::{Lit, TyLit};
 use crate::span::Span;
 use crate::ty::Ty;
+use crate::livetypes::LiveId;
 use std::cell::Cell;
 
 #[derive(Clone, Debug)]
@@ -46,9 +47,9 @@ impl<'a> DepAnalyser<'a> {
             } => self.dep_analyse_index_expr(span, expr, index_expr),
             ExprKind::Call {
                 span,
-                ident,
+                ident_path,
                 ref arg_exprs,
-            } => self.dep_analyse_call_expr(span, ident, arg_exprs),
+            } => self.dep_analyse_call_expr(span, ident_path, arg_exprs),
             ExprKind::MacroCall {
                 span,
                 ref analysis,
@@ -63,8 +64,8 @@ impl<'a> DepAnalyser<'a> {
             ExprKind::Var {
                 span,
                 ref kind,
-                ident,
-            } => self.dep_analyse_var_expr(span, kind, ident),
+                ident_path,
+            } => self.dep_analyse_var_expr(span, kind, ident_path),
             ExprKind::Lit { span, lit } => self.dep_analyse_lit_expr(span, lit),
         }
     }
@@ -106,7 +107,7 @@ impl<'a> DepAnalyser<'a> {
             Ty::Struct { ident } => {
                 self.dep_analyse_call_expr(
                     span,
-                    Ident::new(format!("{}::{}", ident, method_ident)),
+                    IdentPath::from_two(*ident, method_ident),
                     arg_exprs,
                 );
             }
@@ -123,7 +124,8 @@ impl<'a> DepAnalyser<'a> {
         self.dep_analyse_expr(index_expr);
     }
 
-    fn dep_analyse_call_expr(&mut self, _span: Span, ident: Ident, arg_exprs: &[Expr]) {
+    fn dep_analyse_call_expr(&mut self, _span: Span, ident_path: IdentPath, arg_exprs: &[Expr]) {
+        let ident = ident_path.get_single().expect("IMPL");
         for arg_expr in arg_exprs {
             self.dep_analyse_expr(arg_expr);
         }
@@ -175,7 +177,9 @@ impl<'a> DepAnalyser<'a> {
             ));
     }
 
-    fn dep_analyse_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind>>, ident: Ident) {
+    fn dep_analyse_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind>>, ident_path: IdentPath) {
+        let ident = ident_path.get_single().expect("IMPL");
+
         match kind.get().unwrap() {
             VarKind::Geometry => {
                 self.decl
@@ -215,6 +219,10 @@ impl<'a> DepAnalyser<'a> {
             }
             _ => {}
         }
+    }
+
+    fn dep_analyse_live_id_expr(&mut self, _span: Span, _kind: &Cell<Option<VarKind>>, _id:LiveId, _ident: Ident) {
+
     }
 
     fn dep_analyse_lit_expr(&mut self, _span: Span, _lit: Lit) {}

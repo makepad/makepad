@@ -8,7 +8,6 @@ pub struct AnimArea {
     pub total_time: f64
 }
 
-
 #[derive(Clone)]
 pub enum AnimLastValue {
     Float(f32), 

@@ -11,6 +11,31 @@ pub enum Wrapping {
 }
 
 
+#[derive(Clone, Copy)]
+pub struct TextStyle {
+    pub font: Font,
+    pub font_size: f32,
+    pub brightness: f32,
+    pub curve: f32,
+    pub line_spacing: f32,
+    pub top_drop: f32,
+    pub height_factor: f32,
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        TextStyle {
+            font: Font::default(),
+            font_size: 8.0,
+            brightness: 1.0,
+            curve: 0.6,
+            line_spacing: 1.4,
+            top_drop: 1.1,
+            height_factor: 1.3,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Text {
     pub text_style: TextStyle,

@@ -57,7 +57,7 @@ fn shader() -> ShaderGen {ShaderView::base_shader().compose(shader!{"
                 c += pick!(#0300DC);
             }
             if t.y == 4.0 {
-                c += pick!(#FDFF00);
+                c += pick!(#0000FF);
             }
             
             let ld = normalize(vec3(0.0, 0.0, 1.0));
@@ -67,7 +67,7 @@ fn shader() -> ShaderGen {ShaderView::base_shader().compose(shader!{"
             
             let ia = 0.2;
             let id = 0.3 * max(0.0, dot(ld, n));
-            let is = 0.5 * pow(max(0.0, dot(v, r)), slide!(1.000) * 2.0);
+            let is = 0.5 * pow(max(0.0, dot(v, r)), slide!(0.040) * 2.0);
             let i = ia + id + is;
             
             return i * c;
@@ -153,7 +153,7 @@ fn shader() -> ShaderGen {ShaderView::base_shader().compose(shader!{"
     }
     
     fn displace(p: vec3, d: vec2) -> vec2 {
-        return vec2((0.05 + 0.2 * slide!(0.)) * sin(10.0 * p.x) * sin(10.0 * p.y) * sin(10.0 * p.z) + d.x, d.y);
+        return vec2((0.05 + 0.2 * slide!(1.000)) * sin(10.0 * p.x) * sin(10.0 * p.y) * sin(10.0 * p.z) + d.x, d.y);
     }
     
     fn difference(d1: vec2, d2: vec2) -> vec2 {
