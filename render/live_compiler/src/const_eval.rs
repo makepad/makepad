@@ -1,7 +1,7 @@
 use crate::ast::*;
 use crate::env::VarKind;
-use crate::error::Error;
-use crate::ident::Ident;
+use crate::error::LiveError;
+use crate::ident::{Ident,IdentPath};
 use crate::lit::{Lit, TyLit};
 use crate::math::Vec4;
 use crate::span::Span;
@@ -16,8 +16,8 @@ pub struct ConstEvaluator<'a> {
 }
 
 impl<'a> ConstEvaluator<'a> {
-    pub fn const_eval_expr(&self, expr: &Expr) -> Result<Val, Error> {
-        self.try_const_eval_expr(expr).ok_or_else(|| Error {
+    pub fn const_eval_expr(&self, expr: &Expr) -> Result<Val, LiveError> {
+        self.try_const_eval_expr(expr).ok_or_else(|| LiveError {
             span: expr.span,
             message: String::from("expression is not const"),
         })
@@ -55,9 +55,9 @@ impl<'a> ConstEvaluator<'a> {
             } => self.try_const_eval_index_expr(span, expr, index_expr),
             ExprKind::Call {
                 span,
-                ident,
+                ident_path,
                 ref arg_exprs,
-            } => self.try_const_eval_call_expr(span, ident, arg_exprs),
+            } => self.try_const_eval_call_expr(span, ident_path, arg_exprs),
             ExprKind::MacroCall {
                 span,
                 ref analysis,
@@ -73,8 +73,8 @@ impl<'a> ConstEvaluator<'a> {
             ExprKind::Var {
                 span,
                 ref kind,
-                ident,
-            } => self.try_const_eval_var_expr(span, kind, ident),
+                ident_path,
+            } => self.try_const_eval_var_expr(span, kind, ident_path),
             ExprKind::Lit { span, lit } => self.try_const_eval_lit_expr(span, lit),
         };
         *expr.const_val.borrow_mut() = Some(const_val.clone());
@@ -209,7 +209,7 @@ impl<'a> ConstEvaluator<'a> {
                 ident: struct_ident,
             } => self.try_const_eval_call_expr(
                 span,
-                Ident::new(format!("{}::{}", struct_ident, ident)),
+                IdentPath::from_two(*struct_ident, ident),
                 arg_exprs,
             ),
             _ => panic!(),
@@ -239,7 +239,7 @@ impl<'a> ConstEvaluator<'a> {
     fn try_const_eval_call_expr(
         &self,
         _span: Span,
-        _ident: Ident,
+        _ident_path: IdentPath,
         arg_exprs: &[Expr],
     ) -> Option<Val> {
         for arg_expr in arg_exprs {
@@ -277,12 +277,14 @@ impl<'a> ConstEvaluator<'a> {
         None
     }
 
+
     fn try_const_eval_var_expr(
         &self,
         _span: Span,
         kind: &Cell<Option<VarKind>>,
-        ident: Ident,
+        ident_path: IdentPath,
     ) -> Option<Val> {
+        let ident = ident_path.get_single().expect("IMPL");
         
         match kind.get().unwrap() {
             VarKind::Const => Some(

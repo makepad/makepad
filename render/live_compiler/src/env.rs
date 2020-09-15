@@ -1,4 +1,4 @@
-use crate::error::Error;
+use crate::error::LiveError;
 use crate::ident::Ident;
 use crate::span::Span;
 use crate::ty::Ty;
@@ -27,13 +27,13 @@ impl Env {
         self.scopes.pop().unwrap();
     }
 
-    pub fn insert_sym(&mut self, span: Span, ident: Ident, sym: Sym) -> Result<(), Error> {
+    pub fn insert_sym(&mut self, span: Span, ident: Ident, sym: Sym) -> Result<(), LiveError> {
         match self.scopes.last_mut().unwrap().entry(ident) {
             Entry::Vacant(entry) => {
                 entry.insert(sym);
                 Ok(())
             }
-            Entry::Occupied(_) => Err(Error {
+            Entry::Occupied(_) => Err(LiveError {
                 span,
                 message: format!("`{}` is already defined in this scope", ident),
             }),

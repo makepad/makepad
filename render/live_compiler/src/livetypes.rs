@@ -4,6 +4,10 @@ use makepad_microserde::*;
 use crate::math::*;
 use std::f64::consts::PI;
 use crate::ast::ShaderAst;
+use crate::error::LiveError;
+use crate::detok::*;
+use crate::token::Token;
+use crate::ident::{Ident};
 
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct LiveBody {
@@ -14,73 +18,17 @@ pub struct LiveBody {
     pub code: String
 }
 
-
-#[derive(PartialEq, Copy, Clone, Hash, Eq)]
-pub struct LiveId(pub u64);
-
-pub const fn str_to_liveid(modstr: &str, idstr: &str) -> LiveId {
-    let modpath = modstr.as_bytes();
-    let modpath_len = modpath.len();
-    let id = idstr.as_bytes();
-    let id_len = id.len();
-    
-    let mut value = 0u64;
-    if id.len()>5
-        && id[0] == 's' as u8
-        && id[1] == 'e' as u8
-        && id[2] == 'l' as u8
-        && id[3] == 'f' as u8
-        && id[4] == ':' as u8 {
-        
-        let mut o = 0;
-        let mut i = 0;
-        while i < modpath_len {
-            value ^= (modpath[i] as u64) << ((o & 7) << 3);
-            o += 1;
-            i += 1;
-        }
-        let mut i = 4;
-        while i < id_len {
-            value ^= (id[i] as u64) << ((o & 7) << 3);
-            o += 1;
-            i += 1;
-        }
-        return LiveId(value)
-    }
-    if id.len()>6
-        && id[0] == 'c' as u8
-        && id[1] == 'r' as u8
-        && id[2] == 'a' as u8
-        && id[3] == 't' as u8
-        && id[4] == 'e' as u8
-        && id[5] == ':' as u8 {
-        let mut o = 0;
-        let mut i = 0;
-        while i < modpath_len {
-            if modpath[i] == ':' as u8{
-                break
-            }
-            value ^= (modpath[i] as u64) << ((o & 7) << 3);
-            o += 1;
-            i += 1;
-        }
-        let mut i = 5;
-        while i < id_len {
-            value ^= (id[i] as u64) << ((o & 7) << 3);
-            o += 1;
-            i += 1;
-        }
-        return LiveId(value)
-    }
-    let mut i = 0;
-    let mut o = 0;
-    while i < id_len {
-        value ^= (id[i] as u64) << ((o & 7) << 3);
-        o += 1;
-        i += 1;
-    }
-    LiveId(value)
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LiveBodyError {
+    pub file: String,
+    pub line: usize,
+    pub col: usize,
+    pub len: usize,
+    pub msg: String,
 }
+
+#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
+pub struct LiveId(pub u64);
 
 #[derive(Clone, Default)]
 pub struct LiveStyles {
@@ -105,9 +53,9 @@ pub struct Font {
 }
 
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, DeTok, DeTokSplat)]
 pub struct TextStyle {
-    pub font: Font,
+    pub font: Ident,
     pub font_size: f32,
     pub brightness: f32,
     pub curve: f32,
@@ -119,7 +67,7 @@ pub struct TextStyle {
 impl Default for TextStyle {
     fn default() -> Self {
         TextStyle {
-            font: Font::default(),
+            font: Ident::default(),
             font_size: 8.0,
             brightness: 1.0,
             curve: 0.6,
@@ -130,7 +78,7 @@ impl Default for TextStyle {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, DeTok)]
 pub enum LineWrap {
     None,
     NewLine,
@@ -142,7 +90,7 @@ impl Default for LineWrap {
     }
 }
 
-#[derive(Copy, Clone, Default, Debug)]
+#[derive(Copy, Clone, Default, Debug, DeTokSplat, DeTok)]
 pub struct Layout {
     pub padding: Padding,
     pub align: Align,
@@ -154,7 +102,7 @@ pub struct Layout {
     pub walk: Walk,
 }
 
-#[derive(Copy, Clone, Default, Debug)]
+#[derive(Copy, Clone, Default, Debug, DeTokSplat, DeTok)]
 pub struct Walk {
     pub margin: Margin,
     pub width: Width,
@@ -180,7 +128,7 @@ impl Layout {
     }
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, DeTokSplat, DeTok)]
 pub struct Align {
     pub fx: f32,
     pub fy: f32
@@ -198,7 +146,7 @@ impl Align {
     pub fn right_bottom() -> Align {Align {fx: 1.0, fy: 1.0}}
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, DeTokSplat, DeTok)]
 pub struct Margin {
     pub l: f32,
     pub t: f32,
@@ -233,7 +181,7 @@ impl Margin {
     
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, DeTokSplat, DeTok)]
 pub struct Padding {
     pub l: f32,
     pub t: f32,
@@ -251,7 +199,7 @@ impl Padding {
 }
 
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, DeTok)]
 pub enum Direction {
     Left,
     Right,
@@ -265,7 +213,7 @@ impl Default for Direction {
     }
 }
 
-#[derive(Copy, Clone, SerRon, DeRon)]
+#[derive(Copy, Clone, SerRon, DeRon, DeTok)]
 pub enum Axis {
     Horizontal,
     Vertical
@@ -278,7 +226,7 @@ impl Default for Axis {
 }
 
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, DeTok)]
 pub enum Width {
     Fill,
     Fix(f32),
@@ -291,7 +239,7 @@ pub enum Width {
     ScalePad(f32, f32),
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, DeTok)]
 pub enum Height {
     Fill,
     Fix(f32),
@@ -338,7 +286,7 @@ impl Height {
 }
 
 
-#[derive(Clone, Copy, Default, Debug, PartialEq, SerRon, DeRon)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, SerRon, DeRon, DeTokSplat, DeTok)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -378,7 +326,7 @@ pub struct Anim {
     pub tracks: Vec<Track>
 }
 
-#[derive(Clone)]
+#[derive(Clone, DeTok)]
 pub enum Ease {
     Lin,
     InQuad,
@@ -1058,6 +1006,27 @@ impl Track {
             }
         }
     }
+
+
+    pub fn set_ease(&mut self, ease:Ease)  {
+        match self {
+            Track::Float(ft) => {
+                ft.ease = ease
+            },
+            Track::Vec2(ft) => {
+                ft.ease = ease
+            }
+            Track::Vec3(ft) => {
+                ft.ease = ease
+            }
+            Track::Vec4(ft) => {
+                ft.ease = ease
+            }
+            Track::Color(ft) => {
+                ft.ease = ease
+            }
+        }
+    }
 }
 
 impl Anim {
@@ -1076,7 +1045,7 @@ impl Anim {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, DeTok, Debug)]
 pub enum Play {
     Chain {duration: f64},
     Cut {duration: f64},
@@ -1211,3 +1180,69 @@ impl Play {
         }
     }
 }
+
+
+pub const fn str_to_live_id(modstr: &str, idstr: &str) -> LiveId {
+    let modpath = modstr.as_bytes();
+    let modpath_len = modpath.len();
+    let id = idstr.as_bytes();
+    let id_len = id.len();
+    
+    let mut value = 0u64;
+    if id.len()>5
+        && id[0] == 's' as u8
+        && id[1] == 'e' as u8
+        && id[2] == 'l' as u8
+        && id[3] == 'f' as u8
+        && id[4] == ':' as u8 {
+        
+        let mut o = 0;
+        let mut i = 0;
+        while i < modpath_len {
+            value ^= (modpath[i] as u64) << ((o & 7) << 3);
+            o += 1;
+            i += 1;
+        }
+        let mut i = 4;
+        while i < id_len {
+            value ^= (id[i] as u64) << ((o & 7) << 3);
+            o += 1;
+            i += 1;
+        }
+        return LiveId(value)
+    }
+    if id.len()>6
+        && id[0] == 'c' as u8
+        && id[1] == 'r' as u8
+        && id[2] == 'a' as u8
+        && id[3] == 't' as u8
+        && id[4] == 'e' as u8
+        && id[5] == ':' as u8 {
+        let mut o = 0;
+        let mut i = 0;
+        while i < modpath_len {
+            if modpath[i] == ':' as u8{
+                break
+            }
+            value ^= (modpath[i] as u64) << ((o & 7) << 3);
+            o += 1;
+            i += 1;
+        }
+        let mut i = 5;
+        while i < id_len {
+            value ^= (id[i] as u64) << ((o & 7) << 3);
+            o += 1;
+            i += 1;
+        }
+        return LiveId(value)
+    }
+    let mut i = 0;
+    let mut o = 0;
+    while i < id_len {
+        value ^= (id[i] as u64) << ((o & 7) << 3);
+        o += 1;
+        i += 1;
+    }
+    LiveId(value)
+}
+

@@ -8,7 +8,7 @@ pub enum Lit {
     Bool(bool),
     Int(u32),
     Float(f32),
-    Vec4(Vec4)
+    Vec4(Vec4),
 }
 
 impl Lit {

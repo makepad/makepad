@@ -12,6 +12,9 @@ use crate::derive_ron::*;
 mod derive_json;
 use crate::derive_json::*;
 
+mod derive_tok;
+use crate::derive_tok::*;
+
 #[proc_macro_derive(SerBin)]
 pub fn derive_ser_bin(input: TokenStream) -> TokenStream {
     derive_ser_bin_impl(input)
@@ -42,4 +45,15 @@ pub fn derive_ser_ron(input: TokenStream) -> TokenStream {
 pub fn derive_de_ron(input: TokenStream) -> TokenStream {
     derive_de_ron_impl(input)
 }
+
+#[proc_macro_derive(DeTok)]
+pub fn derive_de_tok(input: TokenStream) -> TokenStream {
+    derive_de_tok_impl(input)
+}
+
+#[proc_macro_derive(DeTokSplat)]
+pub fn derive_de_tok_splat(input: TokenStream) -> TokenStream {
+    derive_de_tok_splat_impl(input)
+}
+
 

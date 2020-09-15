@@ -13,7 +13,7 @@ pub struct LivePick {
     pub color: Color,
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Color {
     pub r: f32,
     pub g: f32,

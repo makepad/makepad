@@ -1,16 +1,13 @@
 use crate::env::VarKind;
-use crate::ident::Ident;
+use crate::ident::{Ident, IdentPath};
 use crate::lit::{Lit, TyLit};
 use crate::span::Span;
 use crate::ty::Ty;
 use crate::val::Val;
-//use crate::livetypes::*;
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::fmt;
-use std::collections::HashMap;
-
 
 #[derive(Clone, Debug)]
 pub struct ShaderAst {
@@ -324,7 +321,7 @@ pub enum ExprKind {
     },
     Call {
         span: Span,
-        ident: Ident,
+        ident_path: IdentPath,
         arg_exprs: Vec<Expr>,
     },
     MacroCall {
@@ -341,7 +338,7 @@ pub enum ExprKind {
     Var {
         span: Span,
         kind: Cell<Option<VarKind>>,
-        ident: Ident,
+        ident_path: IdentPath,
     },
     Lit {
         span: Span,
