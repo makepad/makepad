@@ -1,56 +1,18 @@
 use makepad_live_macros::*;
 use makepad_live_compiler::livetypes::*;
-use makepad_live_compiler::lex;
-use makepad_live_compiler::error::LiveError;
-use makepad_live_compiler::parse;
+use makepad_live_compiler::ast::ShaderAst;
+use makepad_live_compiler::analyse::ShaderAnalyser;
+use makepad_live_compiler::builtin::{self};
+use makepad_live_compiler::env::{Sym, Env};
+use makepad_live_compiler::span::{Span};
+use makepad_live_compiler::generate_glsl;
 
 struct Cx {
-    live_styles: LiveStyles
+    live_styles: LiveStyles,
 }
 
 impl Cx {
-    pub fn byte_to_row_col(byte: usize, source: &str) -> (usize, usize) {
-        let lines = source.split("\n");
-        let mut o = 0;
-        for (index, line) in lines.enumerate() {
-            if byte >= o && byte < o + line.len() {
-                return (index, byte - o);
-            }
-            o += line.len() + 1;
-        }
-        return (0, 0);
-    }
-    
-    pub fn live_body_error(err: LiveError, live_body: &LiveBody) -> LiveBodyError {
-        // lets find the span info
-        let start = Self::byte_to_row_col(err.span.start, &live_body.code);
-        LiveBodyError {
-            file: live_body.file.clone(),
-            line: start.0 + live_body.line,
-            col: start.1 + 1,
-            len: err.span.end - err.span.start,
-            msg: err.to_string(),
-        }
-    }
-    
-    pub fn add_live_body(&mut self, live_body: LiveBody)->Result<(),LiveBodyError> {
 
-        let tokens = lex::lex(live_body.code.chars(), 0).collect::<Result<Vec<_>, _>>();
-        if let Err(err) = tokens {
-            return Err(Self::live_body_error(err, &live_body));
-        }
-        let tokens = tokens.unwrap();
-        
-        if let Err(err) = parse::parse(&tokens, &live_body.module_path, &mut self.live_styles) {
-            return Err(Self::live_body_error(err, &live_body));
-        }
-        // lets parse this body
-        // and add all the different bits into our live system
-        // this will only happen at startup like the shadercompiler
-        // to make sure all deps are there.
-        println!("ADD BODY");
-        return Ok(());
-    }
 }
 
 fn main() { 
@@ -90,17 +52,99 @@ fn main() {
         }
         self::mycolor: #ff0f,
         self::myslider: 1.0,
+        
+        render::quad::shader: shader_lib{
+            struct Mp{
+                x: float
+            }
+            impl Mp{
+                fn myfn(inout self){
+                }
+            }
+            
+            fn vertex()->vec4{
+                return vec4(0.,0.,0.,1.);
+            }
+            fn pixel()->vec4{
+                return vec4(1.0,0.0,0.0,1.0);
+            }
+        }
+        
         self::shader_bg: shader{
             instance myinst: vec2;
-            
             use render::quad::shader::*; 
             
-            fn pixel(){
+            fn pixel()->vec4{
+                let v: Mp;
+                v.myfn();
+                
                 let x = self::myslider;
                 let y = self::mycolor;
+                return vec4(0.,0.,0.,1.);
             }
         }
     "#);
+    
+    // alright now lets generate out our shader.
+    // lets iterate shaders
+    for (_live_id, shader_ast) in &cx.live_styles.base.shaders{
+        let mut out_ast = ShaderAst::new();
+        let mut visited = Vec::new();
+        fn recurse(visited: &mut Vec<LiveId>, in_ast:&ShaderAst, out_ast:&mut ShaderAst, live_styles:&LiveStyles){
+            for use_ident_path in &in_ast.uses{
+                let use_live_id = use_ident_path.to_live_id(&in_ast.module_path);
+                
+                if !visited.contains(&use_live_id){
+                    
+                    visited.push(use_live_id);
+                    if let Some(shader_lib) = live_styles.shader_libs.get(&use_live_id){
+                        
+                        recurse(visited, shader_lib, out_ast, live_styles);
+                    }
+                    else if let Some(shader) = live_styles.base.shaders.get(&use_live_id){
+                        
+                        recurse(visited, shader, out_ast, live_styles);
+                    }
+                    else{ // error somehow
+                        eprintln!("Cannot find library or shader {}", use_ident_path);
+                    }
+                }
+            }
+            if in_ast.debug{out_ast.debug = true};
+            for decl in &in_ast.decls{
+                out_ast.decls.push(decl.clone())
+            }
+        }
+        recurse(&mut visited, shader_ast, &mut out_ast, &cx.live_styles);
+
+        let mut env = Env::new(&cx.live_styles);
+        env.push_scope();
+        let builtins = builtin::generate_builtins();
+
+        for &ident in builtins.keys() {
+            let _ = env.insert_sym(Span::default(), ident.to_ident_path(), Sym::Builtin);
+        }
+        
+        // lets run analyse and glsl gen on it.
+        let gather_all = false;
+        if let Err(err) = (ShaderAnalyser {
+            builtins: &builtins,
+            shader: &out_ast,
+            env: &mut env,
+            gather_all,
+            no_const_collapse: false,
+        }.analyse_shader()) {
+            // error
+            let err = cx.live_styles.live_body_error(err.span.live_body_id, err);
+            println!("{:?}", err);
+        }
+        
+        // lets generate a glsl shader
+        let vertex = generate_glsl::generate_vertex_shader(&out_ast, &env, false);
+        let fragment = generate_glsl::generate_fragment_shader(&out_ast, &env, false);
+        println!("{} {}", vertex, fragment);
+    }
+    
     if let Err(x) = x{
         println!("{:?}", x);
     }

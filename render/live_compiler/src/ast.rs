@@ -4,7 +4,6 @@ use crate::lit::{Lit, TyLit};
 use crate::span::Span;
 use crate::ty::Ty;
 use crate::val::Val;
-
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -12,9 +11,12 @@ use std::fmt;
 #[derive(Clone, Debug)]
 pub struct ShaderAst {
     pub debug: bool,
-    pub shader_id: usize,
+    pub shader_id: Option<usize>,
     pub const_table: RefCell<Option<Vec<f32>>>,
     pub const_table_spans: RefCell<Option<Vec<(usize,Span)>>>,
+    pub livestyle_uniform_deps: RefCell<Option<BTreeSet<(Ty,IdentPath)>>>,
+    pub module_path: String,
+    pub uses: Vec<IdentPath>,
     pub decls: Vec<Decl>,
 }
 
@@ -22,9 +24,12 @@ impl ShaderAst {
     pub fn new() -> ShaderAst {
         ShaderAst {
             debug: false,
-            shader_id: 0,
+            module_path: String::new(),
+            shader_id: None,
+            uses: Vec::new(), 
             const_table: RefCell::new(None),
             const_table_spans: RefCell::new(None),
+            livestyle_uniform_deps: RefCell::new(None),
             decls: Vec::new(),
         }
     }
@@ -49,13 +54,13 @@ impl ShaderAst {
         })
     }
 
-    pub fn find_fn_decl(&self, ident: Ident) -> Option<&FnDecl> {
+    pub fn find_fn_decl(&self, ident_path: IdentPath) -> Option<&FnDecl> {
         self.decls.iter().rev().find_map(|decl| {
             match decl {
                 Decl::Fn(decl) => Some(decl),
                 _ => None,
             }
-            .filter(|decl| decl.ident == ident)
+            .filter(|decl| decl.ident_path == ident_path)
         })
     }
 
@@ -134,7 +139,7 @@ pub struct FnDecl {
     pub return_ty: RefCell<Option<Ty>>,
     pub is_used_in_vertex_shader: Cell<Option<bool>>,
     pub is_used_in_fragment_shader: Cell<Option<bool>>,
-    pub callees: RefCell<Option<BTreeSet<Ident>>>, 
+    pub callees: RefCell<Option<BTreeSet<IdentPath>>>, 
     pub uniform_block_deps: RefCell<Option<BTreeSet<Ident>>>,
     pub has_texture_deps: Cell<Option<bool>>,
     pub geometry_deps: RefCell<Option<BTreeSet<Ident>>>,
@@ -142,7 +147,7 @@ pub struct FnDecl {
     pub has_varying_deps: Cell<Option<bool>>,
     pub builtin_deps: RefCell<Option<BTreeSet<Ident>>>,
     pub cons_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>)>>>,
-    pub ident: Ident,
+    pub ident_path: IdentPath,
     pub params: Vec<Param>,
     pub return_ty_expr: Option<TyExpr>,
     pub block: Block,

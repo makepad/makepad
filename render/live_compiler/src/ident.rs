@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Once;
 use crate::livetypes::LiveId;
+use std::fmt::Write;
 
 #[derive(Clone, Copy, Default, Eq, Hash, PartialEq)]
 pub struct Ident(usize);
@@ -33,6 +34,10 @@ impl Ident {
     F: FnOnce(&str) -> R,
     {
         Interner::with( | interner | f(&interner.strings[self.0]))
+    }
+    
+    pub fn to_ident_path(self)->IdentPath{
+        IdentPath::from_ident(self)
     }
 }
 
@@ -83,19 +88,55 @@ impl Interner {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Default, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct IdentPath {
     segs: [Ident; 4],
     len: usize
 }
 
 impl IdentPath {
-    pub fn new() -> Self {
-        IdentPath {
-            segs: [Ident::default(), Ident::default(), Ident::default(), Ident::default()],
-            len: 0
+    
+    pub fn from_ident(ident:Ident)->Self{
+        IdentPath{
+            segs: [ident, Ident::default(), Ident::default(), Ident::default()],
+            len :1
         }
     }
+
+    pub fn from_two_idents(ident1:Ident, ident2:Ident)->Self{
+        IdentPath{
+            segs: [ident1, ident2, Ident::default(), Ident::default()],
+            len :2
+        }
+    }
+    
+    pub fn to_struct_fn_ident(&self)->Ident{
+        let mut s = String::new();
+        for i in 0..self.len {
+            if i != 0 {
+                write!(s, "_").unwrap();
+            }
+            self.segs[i].with( | string | write!(s, "{}", string)).unwrap()
+        }
+        Ident::new(&s)
+    }
+
+    pub fn from_str(value:&str)->Self{
+        IdentPath{
+            segs: [Ident::new(value), Ident::default(), Ident::default(), Ident::default()],
+            len :1
+        }
+    }
+
+    pub fn write_underscored_ident(&self, string:&mut String){
+        for i in 0..self.len{
+            if i != 0{
+                write!(string, "_").unwrap();
+            }
+            write!(string, "{}", self.segs[i]).unwrap();
+        }
+    }
+
     
     pub fn is_self_id(&self) -> bool {
         self.len > 1 && self.segs[0] == Ident::new("self")
@@ -127,6 +168,42 @@ impl IdentPath {
         return Some(self.segs[0])
     }
     
+    pub fn qualify(&self, modpath: &str) -> IdentPath{
+        let mut out = IdentPath::default();
+        if self.segs[0] == Ident::new("self") {
+            let mut last = 0;
+            for (index,c) in modpath.chars().enumerate(){
+                if c == ':'{
+                    // do the range last->us and make an ident
+                    if index-last > 1{
+                        out.push(Ident::new(&modpath[last..index]));
+                    }
+                    last = index;
+                }
+            }
+            out.push(Ident::new(&modpath[last..]));
+            for i in 1..self.len{
+                out.push(self.segs[i]);
+            }
+        }
+        else if self.segs[0] == Ident::new("crate") {
+            for (index,c) in modpath.chars().enumerate(){
+                if c == ':' as char {
+                    out.push(Ident::new(&modpath[0..index]));
+                    break
+                }
+            }
+            for i in 1..self.len{
+                out.push(self.segs[i]);
+            }
+        }
+        else {
+            for i in 0..self.len{
+                out.push(self.segs[i]);
+            }
+        };
+        out
+    }
     
     pub fn to_live_id(&self, modpath: &str) -> LiveId {
         // ok lets hash an IdentPath into a proper liveid;

@@ -26,9 +26,9 @@ pub trait BackendWriter {
         ty: &Ty,
     );
     
-    fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, ident: Ident, shader: &ShaderAst, sep: &str);
+    fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, ident_path: IdentPath, shader: &ShaderAst, sep: &str);
     
-    fn generate_var_expr(&self, string: &mut String, ident: Ident, kind: &Cell<Option<VarKind>>, shader: &ShaderAst, decl: &FnDecl, ty:&Option<Ty>);
+    fn generate_var_expr(&self, string: &mut String, span:Span, ident_path: IdentPath, kind: &Cell<Option<VarKind>>, shader: &ShaderAst, decl: &FnDecl, ty:&Option<Ty>);
     
     fn write_ident(&self, string: &mut String, ident: Ident);
     
@@ -499,7 +499,7 @@ impl<'a> ExprGenerator<'a> {
     }
     
     fn generate_call_expr(&mut self, _span: Span, ident_path: IdentPath, arg_exprs: &[Expr]) {
-        let ident = ident_path.get_single().expect("IMPL");
+        let ident = ident_path.to_struct_fn_ident();
 
         //TODO add built-in check
         self.backend_writer.write_call_ident(&mut self.string, ident, arg_exprs);
@@ -514,7 +514,7 @@ impl<'a> ExprGenerator<'a> {
             sep = ", ";
         }
         
-        self.backend_writer.write_call_expr_hidden_args(&mut self.string, self.use_const_table, ident, &self.shader, &sep);
+        self.backend_writer.write_call_expr_hidden_args(&mut self.string, self.use_const_table, ident_path, &self.shader, &sep);
         
         write!(self.string, ")").unwrap();
     }
@@ -572,12 +572,10 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, ")").unwrap();
     }
     
-    fn generate_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind>>, ident_path: IdentPath, ty:&Option<Ty>) {
+    fn generate_var_expr(&mut self, span: Span, kind: &Cell<Option<VarKind>>, ident_path: IdentPath, ty:&Option<Ty>) {
         //self.backend_write.generate_var_expr(&mut self.string, span, kind, &self.shader, decl)
-        let ident = ident_path.get_single().expect("IMPL");
-
         if let Some(decl) = self.decl {
-            self.backend_writer.generate_var_expr(&mut self.string, ident, kind, &self.shader, decl, ty)
+            self.backend_writer.generate_var_expr(&mut self.string, span, ident_path, kind, &self.shader, decl, ty)
         }
     }
 

@@ -284,7 +284,12 @@ impl<'a> ConstEvaluator<'a> {
         kind: &Cell<Option<VarKind>>,
         ident_path: IdentPath,
     ) -> Option<Val> {
-        let ident = ident_path.get_single().expect("IMPL");
+        let ident = if let Some(ident) = ident_path.get_single(){
+            ident
+        }
+        else{
+            return None
+        };
         
         match kind.get().unwrap() {
             VarKind::Const => Some(
