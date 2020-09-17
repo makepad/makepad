@@ -11,11 +11,11 @@ use {
     std::cell::Cell,
 };
 
-pub struct LhsChecker<'a> {
-    pub env: &'a Env,
+pub struct LhsChecker<'a,'b> {
+    pub env: &'a Env<'b>,
 }
 
-impl<'a> LhsChecker<'a> {
+impl<'a,'b> LhsChecker<'a,'b> {
     pub fn lhs_check_expr(&mut self, expr: &Expr) -> Result<(), LiveError> {
         match expr.kind {
             ExprKind::Cond {
@@ -179,9 +179,8 @@ impl<'a> LhsChecker<'a> {
         _kind: &Cell<Option<VarKind>>,
         ident_path: IdentPath,
     ) -> Result<(), LiveError> {
-        let ident = ident_path.get_single().expect("IMPL");
 
-        match *self.env.find_sym(ident).unwrap() {
+        match self.env.find_sym(ident_path, span).unwrap() {
             Sym::Var { is_mut, .. } => {
                 if !is_mut {
                     return Err(LiveError {

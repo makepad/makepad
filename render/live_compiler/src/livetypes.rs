@@ -7,7 +7,10 @@ use crate::ast::ShaderAst;
 use crate::error::LiveError;
 use crate::detok::*;
 use crate::token::Token;
+use crate::span::LiveBodyId;
 use crate::ident::{Ident};
+use crate::lex;
+use crate::parse;
 
 #[derive(Clone, Hash, PartialEq, Eq, Debug)]
 pub struct LiveBody {
@@ -30,13 +33,69 @@ pub struct LiveBodyError {
 #[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
 pub struct LiveId(pub u64);
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct LiveStyles {
+    pub live_bodies: Vec<LiveBody>,
+    pub shader_libs: HashMap<LiveId, ShaderAst>,
     pub base: LiveStyle,
     pub styles:HashMap<LiveId, LiveStyle>
 }
 
-#[derive(Clone, Default)]
+impl LiveStyles{
+    pub fn get_style(&mut self, live_id:&Option<LiveId>)->&mut LiveStyle{
+        if let Some(live_id) = live_id{
+            return self.styles.entry(*live_id).or_insert_with(|| LiveStyle::default())
+        }
+        else{
+            return &mut self.base
+        }
+    }
+    
+    pub fn live_body_error(&self, live_body_id:LiveBodyId, err: LiveError) -> LiveBodyError {
+        let live_body = &self.live_bodies[live_body_id.0];
+        fn byte_to_row_col(byte: usize, source: &str) -> (usize, usize) {
+            let lines = source.split("\n");
+            let mut o = 0;
+            for (index, line) in lines.enumerate() {
+                if byte >= o && byte < o + line.len() {
+                    return (index, byte - o);
+                }
+                o += line.len() + 1;
+            }
+            return (0, 0);
+        }
+        // lets find the span info
+        let start = byte_to_row_col(err.span.start, &live_body.code);
+        LiveBodyError {
+            file: live_body.file.clone(),
+            line: start.0 + live_body.line,
+            col: start.1 + 1,
+            len: err.span.end - err.span.start,
+            msg: err.to_string(),
+        }
+    }
+    
+    
+    pub fn add_live_body(&mut self, live_body: LiveBody)->Result<(),LiveBodyError> {
+        let live_body_id = LiveBodyId(self.live_bodies.len());
+        self.live_bodies.push(live_body.clone());
+        
+        let tokens = lex::lex(live_body.code.chars(), live_body_id).collect::<Result<Vec<_>, _>>();
+        if let Err(err) = tokens {
+            return Err(self.live_body_error(live_body_id, err));
+        }
+        let tokens = tokens.unwrap();
+        
+        if let Err(err) = parse::parse(&tokens, &live_body.module_path, self) {
+            return Err(self.live_body_error(live_body_id, err));
+        }
+
+        return Ok(());
+    }
+}
+
+
+#[derive(Clone, Debug, Default)]
 pub struct LiveStyle {
     pub floats: HashMap<LiveId, f32>,
     pub colors: HashMap<LiveId, Color>,
@@ -47,13 +106,7 @@ pub struct LiveStyle {
     pub shaders: HashMap<LiveId, ShaderAst>,
 }
 
-#[derive(Copy, Clone, Default)]
-pub struct Font {
-    pub font_id: Option<usize>
-}
-
-
-#[derive(Clone, Copy, DeTok, DeTokSplat)]
+#[derive(Clone, Debug, Copy, DeTok, DeTokSplat)]
 pub struct TextStyle {
     pub font: Ident,
     pub font_size: f32,
@@ -320,13 +373,13 @@ impl Rect {
     }
 }
 
-#[derive(Clone)] 
+#[derive(Clone, Debug)] 
 pub struct Anim {
     pub mode: Play,
     pub tracks: Vec<Track>
 }
 
-#[derive(Clone, DeTok)]
+#[derive(Clone, DeTok, Debug)]
 pub enum Ease {
     Lin,
     InQuad,
@@ -710,7 +763,7 @@ impl Ease {
 }
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FloatTrack {
     pub ident: LiveId,
     pub ease: Ease,
@@ -718,7 +771,7 @@ pub struct FloatTrack {
     pub track: Vec<(f64, f32)>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Vec2Track {
     pub ident: LiveId,
     pub ease: Ease,
@@ -726,7 +779,7 @@ pub struct Vec2Track {
     pub track: Vec<(f64, Vec2)>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Vec3Track {
     pub ident: LiveId,
     pub ease: Ease,
@@ -734,7 +787,7 @@ pub struct Vec3Track {
     pub track: Vec<(f64, Vec3)>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Vec4Track {
     pub ident: LiveId,
     pub ease: Ease,
@@ -742,7 +795,7 @@ pub struct Vec4Track {
     pub track: Vec<(f64, Vec4)>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ColorTrack {
     pub ident: LiveId,
     pub ease: Ease,
@@ -750,7 +803,7 @@ pub struct ColorTrack {
     pub track: Vec<(f64, Color)>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Track {
     Float(FloatTrack),
     Vec2(Vec2Track),

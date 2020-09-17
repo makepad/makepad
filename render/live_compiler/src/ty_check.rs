@@ -16,13 +16,13 @@ use std::fmt::Write;
 use std::rc::Rc; 
 
 #[derive(Clone, Debug)]
-pub struct TyChecker<'a> {
+pub struct TyChecker<'a,'b> {
     pub builtins: &'a HashMap<Ident, Builtin>,
     pub shader: &'a ShaderAst,
-    pub env: &'a Env,
+    pub env: &'a Env<'b>,
 } 
 
-impl<'a> TyChecker<'a> {
+impl<'a,'b> TyChecker<'a,'b> {
     fn lhs_checker(&self) -> LhsChecker {
         LhsChecker { env: self.env }
     }
@@ -53,7 +53,7 @@ impl<'a> TyChecker<'a> {
     }
 
     fn ty_check_var_ty_expr(&mut self, span: Span, ident: Ident) -> Result<Ty, LiveError> {
-        match self.env.find_sym(ident).ok_or_else(|| LiveError {
+        match self.env.find_sym(ident.to_ident_path(), span).ok_or_else(|| LiveError {
             span,
             message: format!("`{}` is not defined in this scope", ident),
         })? {
@@ -493,18 +493,17 @@ impl<'a> TyChecker<'a> {
         ident_path: IdentPath,
         arg_exprs: &[Expr],
     ) -> Result<Ty, LiveError> {
-        let ident = ident_path.get_single().expect("IMPL");
         
         for arg_expr in arg_exprs {
             self.ty_check_expr(arg_expr)?;
         }
 
-        match self.env.find_sym(ident).ok_or_else(|| LiveError {
+        match self.env.find_sym(ident_path, span).ok_or_else(|| LiveError {
             span,
-            message: format!("`{}` is not defined", ident),
+            message: format!("`{}` is not defined", ident_path),
         })? {
             Sym::Builtin => {
-                let builtin = self.builtins.get(&ident).unwrap();
+                let builtin = self.builtins.get(&ident_path.get_single().expect("unexpected")).unwrap();
                 let arg_tys = arg_exprs
                     .iter()
                     .map(|arg_expr| arg_expr.ty.borrow().as_ref().unwrap().clone())
@@ -517,7 +516,7 @@ impl<'a> TyChecker<'a> {
                         write!(
                             message,
                             "can't apply builtin `{}` to arguments of types ",
-                            ident
+                            ident_path
                         )
                         .unwrap();
                         let mut sep = "";
@@ -530,13 +529,13 @@ impl<'a> TyChecker<'a> {
                     .clone())
             }
             Sym::Fn => {
-                let fn_decl = self.shader.find_fn_decl(ident).unwrap();
+                let fn_decl = self.shader.find_fn_decl(ident_path).unwrap();
                 if arg_exprs.len() < fn_decl.params.len() {
                     return Err(LiveError {
                         span,
                         message: format!(
                             "not enough arguments for call to function `{}`: expected {}, got {}",
-                            ident,
+                            ident_path,
                             fn_decl.params.len(),
                             arg_exprs.len(),
                         )
@@ -548,7 +547,7 @@ impl<'a> TyChecker<'a> {
                         span,
                         message: format!(
                             "too many arguments for call to function `{}`: expected {}, got {}",
-                            ident,
+                            ident_path,
                             fn_decl.params.len(),
                             arg_exprs.len()
                         )
@@ -568,7 +567,7 @@ impl<'a> TyChecker<'a> {
                             message: format!(
                                 "wrong type for argument {} in call to function `{}`: expected `{}`, got `{}`",
                                 index + 1,
-                                ident,
+                                ident_path,
                                 param_ty,
                                 arg_ty,
                             ).into()
@@ -582,7 +581,7 @@ impl<'a> TyChecker<'a> {
             }
             _ => Err(LiveError {
                 span,
-                message: format!("`{}` is not a function", ident).into(),
+                message: format!("`{}` is not a function", ident_path).into(),
             }),
         }
     }
@@ -781,23 +780,31 @@ impl<'a> TyChecker<'a> {
         kind: &Cell<Option<VarKind>>,
         ident_path: IdentPath,
     ) -> Result<Ty, LiveError> {
-        let ident = ident_path.get_single().expect("IMPL");
-
-        match *self.env.find_sym(ident).ok_or_else(|| LiveError {
+        
+        match self.env.find_sym(ident_path, span).ok_or_else(|| LiveError {
             span,
-            message: format!("`{}` is not defined in this scope", ident),
+            message: format!("`{}` is not defined in this scope", ident_path),
         })? {
             Sym::Var {
                 ref ty,
                 kind: new_kind,
                 ..
             } => {
+                // lets fully qualify it here
+                let qualified = self.env.qualify_ident_path(span.live_body_id, ident_path);
+                self.shader
+                    .livestyle_uniform_deps
+                    .borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .insert((ty.clone(), qualified));
+                
                 kind.set(Some(new_kind));
                 Ok(ty.clone())
             }
             _ => Err(LiveError {
                 span,
-                message: format!("`{}` is not a variable", ident).into(),
+                message: format!("`{}` is not a variable", ident_path).into(),
             }),
         }
     }

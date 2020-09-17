@@ -1,17 +1,4 @@
-use crate::shadergen::LiveLoc;
 use crate::math::*;
-
-#[derive(Clone, Debug)]
-pub struct LiveSlide {
-    pub loc: LiveLoc,
-    pub value: f32,
-}
-
-#[derive(Clone, Debug)]
-pub struct LivePick {
-    pub loc: LiveLoc,
-    pub color: Color,
-}
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Color {
