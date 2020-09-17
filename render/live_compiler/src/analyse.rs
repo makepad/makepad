@@ -5,7 +5,7 @@ use crate::const_gather::ConstGatherer;
 use crate::dep_analyse::DepAnalyser;
 use crate::env::{Env, Sym, VarKind};
 use crate::error::LiveError;
-use crate::ident::Ident;
+use crate::ident::{Ident,IdentPath};
 use crate::span::Span;
 use crate::ty::Ty;
 use crate::ty_check::TyChecker;
@@ -42,15 +42,15 @@ pub fn analyse(shader: &ShaderAst, base_props:&[PropDef], sub_props: &[&PropDef]
 }*/
 
 #[derive(Debug)]
-pub struct ShaderAnalyser<'a> {
+pub struct ShaderAnalyser<'a,'b> {
     pub builtins: &'a HashMap<Ident, Builtin>,
     pub shader: &'a ShaderAst,
-    pub env: Env,
+    pub env: &'a mut Env<'b>,
     pub gather_all: bool,
     pub no_const_collapse: bool
 }
 
-impl<'a> ShaderAnalyser<'a> {
+impl<'a,'b> ShaderAnalyser<'a,'b> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
             builtins: &self.builtins,
@@ -76,6 +76,7 @@ impl<'a> ShaderAnalyser<'a> {
     pub fn analyse_shader(&mut self) -> Result<(), LiveError> {
         *self.shader.const_table.borrow_mut() = Some(Vec::new());
         *self.shader.const_table_spans.borrow_mut() = Some(Vec::new());
+        *self.shader.livestyle_uniform_deps.borrow_mut() = Some(BTreeSet::new());
         self.env.push_scope();
         for decl in &self.shader.decls {
             self.analyse_decl(decl) ?;
@@ -116,17 +117,17 @@ impl<'a> ShaderAnalyser<'a> {
         self.analyse_call_tree(
             ShaderKind::Vertex,
             &mut Vec::new(),
-            self.shader.find_fn_decl(Ident::new("vertex")).unwrap(),
+            self.shader.find_fn_decl(IdentPath::from_str("vertex")).unwrap(),
         ) ?;
         self.analyse_call_tree(
             ShaderKind::Fragment,
             &mut Vec::new(),
-            self.shader.find_fn_decl(Ident::new("pixel")).unwrap(),
+            self.shader.find_fn_decl(IdentPath::from_str("pixel")).unwrap(),
         ) ?;
         let mut visited = HashSet::new();
-        let vertex_decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
+        let vertex_decl = self.shader.find_fn_decl(IdentPath::from_str("vertex")).unwrap();
         self.propagate_deps(&mut visited, vertex_decl) ?;
-        let fragment_decl = self.shader.find_fn_decl(Ident::new("pixel")).unwrap();
+        let fragment_decl = self.shader.find_fn_decl(IdentPath::from_str("pixel")).unwrap();
         self.propagate_deps(&mut visited, fragment_decl) ?;
         for &geometry_dep in fragment_decl.geometry_deps.borrow().as_ref().unwrap() {
             self.shader
@@ -173,7 +174,7 @@ impl<'a> ShaderAnalyser<'a> {
         }
         self.env.insert_sym(
             decl.span,
-            decl.ident,
+            decl.ident.to_ident_path(),
             Sym::Var {
                 is_mut: false,
                 ty,
@@ -192,7 +193,7 @@ impl<'a> ShaderAnalyser<'a> {
         self.const_evaluator().const_eval_expr(&decl.expr) ?;
         self.env.insert_sym(
             decl.span,
-            decl.ident,
+            decl.ident.to_ident_path(),
             Sym::Var {
                 is_mut: false,
                 ty: actual_ty,
@@ -211,7 +212,7 @@ impl<'a> ShaderAnalyser<'a> {
             .map( | return_ty_expr | self.ty_checker().ty_check_ty_expr(return_ty_expr))
             .transpose() ?
         .unwrap_or(Ty::Void);
-        if decl.ident == Ident::new("vertex") {
+        if decl.ident_path == IdentPath::from_str("vertex") {
             match return_ty {
                 Ty::Vec4 => {}
                 _ => {
@@ -223,7 +224,7 @@ impl<'a> ShaderAnalyser<'a> {
                     })
                 }
             }
-        } else if decl.ident == Ident::new("pixel") {
+        } else if decl.ident_path == IdentPath::from_str("pixel") {
             match return_ty {
                 Ty::Vec4 => {}
                 _ => {
@@ -247,12 +248,13 @@ impl<'a> ShaderAnalyser<'a> {
             }
         }
         *decl.return_ty.borrow_mut() = Some(return_ty);
-        self.env.insert_sym(decl.span, decl.ident, Sym::Fn).ok();
+        self.env.insert_sym(decl.span, decl.ident_path, Sym::Fn).ok();
         Ok(())
     }
     
     fn analyse_instance_decl(&mut self, decl: &InstanceDecl) -> Result<(), LiveError> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
+        
         match ty {
             Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 | Ty::Mat4 => {}
             _ => {
@@ -266,7 +268,7 @@ impl<'a> ShaderAnalyser<'a> {
         }
         self.env.insert_sym(
             decl.span,
-            decl.ident,
+            decl.ident.to_ident_path(),
             Sym::Var {
                 is_mut: false,
                 ty,
@@ -281,7 +283,7 @@ impl<'a> ShaderAnalyser<'a> {
         }
         self.env.insert_sym(
             decl.span,
-            decl.ident,
+            decl.ident.to_ident_path(),
             Sym::TyVar {
                 ty: Ty::Struct {ident: decl.ident},
             },
@@ -301,7 +303,7 @@ impl<'a> ShaderAnalyser<'a> {
         }
         self.env.insert_sym(
             decl.span,
-            decl.ident,
+            decl.ident.to_ident_path(),
             Sym::Var {
                 is_mut: false,
                 ty,
@@ -314,7 +316,7 @@ impl<'a> ShaderAnalyser<'a> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
         self.env.insert_sym(
             decl.span,
-            decl.ident,
+            decl.ident.to_ident_path(),
             Sym::Var {
                 is_mut: false,
                 ty,
@@ -338,7 +340,7 @@ impl<'a> ShaderAnalyser<'a> {
         }
         self.env.insert_sym(
             decl.span,
-            decl.ident,
+            decl.ident.to_ident_path(),
             Sym::Var {
                 is_mut: true,
                 ty,
@@ -350,10 +352,10 @@ impl<'a> ShaderAnalyser<'a> {
     fn analyse_call_tree(
         &mut self,
         kind: ShaderKind,
-        call_stack: &mut Vec<Ident>,
+        call_stack: &mut Vec<IdentPath>,
         decl: &FnDecl,
     ) -> Result<(), LiveError> {
-        call_stack.push(decl.ident);
+        call_stack.push(decl.ident_path);
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
             let callee_decl = self.shader.find_fn_decl(callee).unwrap();
             if match kind {
@@ -365,7 +367,7 @@ impl<'a> ShaderAnalyser<'a> {
             if call_stack.contains(&callee) {
                 return Err(LiveError {
                     span: decl.span,
-                    message: format!("function `{}` recursively calls `{}`", decl.ident, callee),
+                    message: format!("function `{}` recursively calls `{}`", decl.ident_path, callee),
                 });
             }
             self.analyse_call_tree(kind, call_stack, callee_decl) ?;
@@ -378,8 +380,8 @@ impl<'a> ShaderAnalyser<'a> {
         Ok(())
     }
     
-    fn propagate_deps(&mut self, visited: &mut HashSet<Ident>, decl: &FnDecl) -> Result<(), LiveError> {
-        if visited.contains(&decl.ident) {
+    fn propagate_deps(&mut self, visited: &mut HashSet<IdentPath>, decl: &FnDecl) -> Result<(), LiveError> {
+        if visited.contains(&decl.ident_path) {
             return Ok(());
         }
         for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
@@ -433,7 +435,7 @@ impl<'a> ShaderAnalyser<'a> {
                     span: decl.span,
                     message: format!(
                         "function `{}` can't access any geometries, since it's used in both the vertex and fragment shader",
-                        decl.ident
+                        decl.ident_path
                     ),
                 });
             }
@@ -442,7 +444,7 @@ impl<'a> ShaderAnalyser<'a> {
                     span: decl.span,
                     message: format!(
                         "function `{}` can't access any instances, since it's used in both the vertex and fragment shader",
-                        decl.ident
+                        decl.ident_path
                     ),
                 });
             }
@@ -451,28 +453,28 @@ impl<'a> ShaderAnalyser<'a> {
                     span: decl.span,
                     message: format!(
                         "function `{}` can't access any varyings, since it's used in both the vertex and fragment shader",
-                        decl.ident
+                        decl.ident_path
                     ),
                 });
             }
         }
-        visited.insert(decl.ident);
+        visited.insert(decl.ident_path);
         Ok(())
     }
 }
 
 #[derive(Debug)]
-struct FnDefAnalyser<'a> {
+struct FnDefAnalyser<'a,'b> {
     builtins: &'a HashMap<Ident, Builtin>,
     shader: &'a ShaderAst,
     decl: &'a FnDecl,
-    env: &'a mut Env,
+    env: &'a mut Env<'b>,
     gather_all: bool,
     is_inside_loop: bool,
     no_const_collapse: bool
 }
 
-impl<'a> FnDefAnalyser<'a> {
+impl<'a,'b> FnDefAnalyser<'a,'b> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
             builtins: self.builtins,
@@ -508,7 +510,7 @@ impl<'a> FnDefAnalyser<'a> {
         for param in &self.decl.params {
             self.env.insert_sym(
                 param.span,
-                param.ident,
+                param.ident.to_ident_path(),
                 Sym::Var {
                     is_mut: true,
                     ty: param.ty_expr.ty.borrow().as_ref().unwrap().clone(),
@@ -650,7 +652,7 @@ impl<'a> FnDefAnalyser<'a> {
         self.env.push_scope();
         self.env.insert_sym(
             span,
-            ident,
+            ident.to_ident_path(),
             Sym::Var {
                 is_mut: false,
                 ty: Ty::Int,
@@ -727,7 +729,7 @@ impl<'a> FnDefAnalyser<'a> {
         });
         self.env.insert_sym(
             span,
-            ident,
+            ident.to_ident_path(),
             Sym::Var {
                 is_mut: true,
                 ty: ty.borrow().as_ref().unwrap().clone(),

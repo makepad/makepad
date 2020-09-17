@@ -22,7 +22,7 @@ pub fn live(input: TokenStream) -> TokenStream {
                 let mut tb = TokenBuilder::new();
                 let span = code.span();
                 let code = code.to_string();
-                tb.ident_with_span(&cx_name, span).add(". add_live_body (");
+                tb.ident_with_span(&cx_name, span).add(". live_styles . add_live_body (");
                 tb.add("LiveBody {");
                 tb.add("file :").ident_with_span("file", span).add("! ( ) . to_string ( ) . replace ( ").string("\\").add(",").string("/").add(") ,");
                 tb.add("module_path :").ident_with_span("module_path", span).add("! ( ) . to_string ( ) . replace ( ").string("\\").add(",").string("/").add(") ,");

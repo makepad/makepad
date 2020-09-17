@@ -8,13 +8,13 @@ use crate::livetypes::LiveId;
 use std::cell::Cell;
 
 #[derive(Clone, Debug)]
-pub struct DepAnalyser<'a> {
+pub struct DepAnalyser<'a,'b> {
     pub shader: &'a ShaderAst,
     pub decl: &'a FnDecl,
-    pub env: &'a Env,
+    pub env: &'a Env<'b>,
 }
 
-impl<'a> DepAnalyser<'a> {
+impl<'a,'b> DepAnalyser<'a,'b> {
     pub fn dep_analyse_expr(&mut self, expr: &Expr) {
         match expr.kind {
             ExprKind::Cond {
@@ -124,19 +124,19 @@ impl<'a> DepAnalyser<'a> {
         self.dep_analyse_expr(index_expr);
     }
 
-    fn dep_analyse_call_expr(&mut self, _span: Span, ident_path: IdentPath, arg_exprs: &[Expr]) {
-        let ident = ident_path.get_single().expect("IMPL");
+    fn dep_analyse_call_expr(&mut self, span: Span, ident_path: IdentPath, arg_exprs: &[Expr]) {
+        //let ident = ident_path.get_single().expect("IMPL");
         for arg_expr in arg_exprs {
             self.dep_analyse_expr(arg_expr);
         }
-        match self.env.find_sym(ident).unwrap() {
+        match self.env.find_sym(ident_path, span).unwrap() {
             Sym::Builtin => {
                 self.decl
                     .builtin_deps
                     .borrow_mut()
                     .as_mut()
                     .unwrap()
-                    .insert(ident);
+                    .insert(ident_path.get_single().expect("Builtin cant use ::"));
             }
             Sym::Fn => {
                 self.decl
@@ -144,7 +144,7 @@ impl<'a> DepAnalyser<'a> {
                     .borrow_mut()
                     .as_mut()
                     .unwrap()
-                    .insert(ident);
+                    .insert(ident_path);
             }
             _ => panic!(),
         }
@@ -178,8 +178,6 @@ impl<'a> DepAnalyser<'a> {
     }
 
     fn dep_analyse_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind>>, ident_path: IdentPath) {
-        let ident = ident_path.get_single().expect("IMPL");
-
         match kind.get().unwrap() {
             VarKind::Geometry => {
                 self.decl
@@ -187,7 +185,7 @@ impl<'a> DepAnalyser<'a> {
                     .borrow_mut()
                     .as_mut()
                     .unwrap()
-                    .insert(ident);
+                    .insert(ident_path.get_single().expect("unexpected"));
             }
             VarKind::Instance => {
                 self.decl
@@ -195,7 +193,7 @@ impl<'a> DepAnalyser<'a> {
                     .borrow_mut()
                     .as_mut()
                     .unwrap()
-                    .insert(ident);
+                    .insert(ident_path.get_single().expect("unexpected"));
             }
             VarKind::Texture => {
                 self.decl.has_texture_deps.set(Some(true));
@@ -208,7 +206,7 @@ impl<'a> DepAnalyser<'a> {
                     .unwrap()
                     .insert(
                         self.shader
-                            .find_uniform_decl(ident)
+                            .find_uniform_decl(ident_path.get_single().expect("unexpected"))
                             .unwrap()
                             .block_ident
                             .unwrap_or(Ident::new("default")),
@@ -216,6 +214,15 @@ impl<'a> DepAnalyser<'a> {
             }
             VarKind::Varying => {
                 self.decl.has_varying_deps.set(Some(true));
+            }
+            VarKind::LiveStyle =>{
+                self.decl
+                    .uniform_block_deps
+                    .borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .insert(Ident::new("livestyle"));
+
             }
             _ => {}
         }

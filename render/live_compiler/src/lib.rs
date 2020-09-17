@@ -26,7 +26,6 @@ pub mod ty_check;
 pub mod util;
 pub mod val;
 #[macro_use]
-pub mod shadergen;
 pub mod colors;
 pub mod geometry;
 pub mod livetypes;

@@ -21,8 +21,9 @@ pub use makepad_live_compiler::livetypes::{
     Margin,
     Axis,
     Align,
-    Font
 };
+#[derive(Clone, Copy, Default)]
+pub struct Font{pub font_id:Option<usize>}
 
 pub use crate::fonts::*;
 pub use crate::turtle::*;
