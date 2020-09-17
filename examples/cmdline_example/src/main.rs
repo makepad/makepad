@@ -5,7 +5,7 @@ use makepad_live_compiler::analyse::ShaderAnalyser;
 use makepad_live_compiler::builtin::{self};
 use makepad_live_compiler::env::{Sym, Env};
 use makepad_live_compiler::span::{Span};
-use makepad_live_compiler::generate_glsl;
+use makepad_live_compiler::generate_hlsl;
 
 struct Cx {
     live_styles: LiveStyles,
@@ -140,9 +140,9 @@ fn main() {
         }
         
         // lets generate a glsl shader
-        let vertex = generate_glsl::generate_vertex_shader(&out_ast, &env, false);
-        let fragment = generate_glsl::generate_fragment_shader(&out_ast, &env, false);
-        println!("{} {}", vertex, fragment);
+        let shader = generate_hlsl::generate_shader(&out_ast, &env, false);
+        //let fragment = generate_glsl::generate_fragment_shader(&out_ast, &env, false);
+        println!("{}",shader);
     }
     
     if let Err(x) = x{
