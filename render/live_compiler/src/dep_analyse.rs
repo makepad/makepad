@@ -221,7 +221,7 @@ impl<'a,'b> DepAnalyser<'a,'b> {
                     .borrow_mut()
                     .as_mut()
                     .unwrap()
-                    .insert(Ident::new("livestyle"));
+                    .insert(Ident::new("live"));
 
             }
             _ => {}
