@@ -1,14 +1,14 @@
 use crate::error::LiveError;
 use crate::ident::Ident;
 use crate::lit::{Lit, TyLit};
-use crate::span::Span;
+use crate::span::{Span,LiveBodyId};
 use crate::token::{Token, TokenWithSpan};
 use crate::colors::Color;
 
 #[derive(Clone, Debug)]
 pub struct Lex<C> {
     chars: C,
-    loc_id: usize,
+    live_body_id: LiveBodyId,
     ch_0: char,
     ch_1: char,
     index: usize,
@@ -179,7 +179,6 @@ where
                 if has_frac_part || has_exp_part {
                     Token::Lit(Lit::Float(string.parse::<f32>().unwrap()))
                 } else {
-                    println!("GOT I32 #{}#", string); 
                     Token::Lit(Lit::Int(string.parse::<i32>().map_err(|_| {
                         span.error(self, "overflowing integer literal".into())
                     })?))
@@ -264,7 +263,7 @@ where
                     "for" => Token::For,
                     "from" => Token::From,
                     "if" => Token::If,
-                    "impl" => Token::Impl,
+                    "impl" => Token::Ident(Ident::new("impl")),
                     "in" => Token::In,
                     "inout" => Token::Inout,
                     "int" => Token::TyLit(TyLit::Int),
@@ -373,7 +372,7 @@ where
 
     fn begin_span(&mut self) -> SpanTracker {
         SpanTracker {
-            loc_id: self.loc_id,
+            live_body_id: self.live_body_id,
             start: self.index,
         }
     }
@@ -399,7 +398,7 @@ where
     }
 }
 
-pub fn lex<C>(chars: C, loc_id: usize) -> Lex<C::IntoIter>
+pub fn lex<C>(chars: C, live_body_id: LiveBodyId) -> Lex<C::IntoIter>
 where
     C: IntoIterator<Item = char>,
 {
@@ -410,14 +409,14 @@ where
         chars,
         ch_0,
         ch_1,
-        loc_id,
+        live_body_id,
         index: 0,
         is_done: false,
     }
 }
 
 struct SpanTracker {
-    loc_id: usize,
+    live_body_id: LiveBodyId,
     start: usize,
 }
 
@@ -425,7 +424,7 @@ impl SpanTracker {
     fn token<C>(&self, lex: &Lex<C>, token: Token) -> TokenWithSpan {
         TokenWithSpan {
             span: Span {
-                loc_id: self.loc_id,
+                live_body_id: self.live_body_id,
                 start: self.start,
                 end: lex.index,
             },
@@ -436,7 +435,7 @@ impl SpanTracker {
     fn error<C>(&self, lex: &Lex<C>, message: String) -> LiveError {
         LiveError {
             span: Span {
-                loc_id: self.loc_id,
+                live_body_id: self.live_body_id,
                 start: self.start,
                 end: lex.index,
             },

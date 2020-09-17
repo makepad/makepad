@@ -2,8 +2,9 @@ use {
     crate::{
         ast::*,
         env::VarKind,
+        span::Span,
         generate::{BackendWriter, BlockGenerator, ExprGenerator},
-        ident::Ident,
+        ident::{Ident,IdentPath},
         lit::TyLit,
         ty::Ty,
     },
@@ -43,8 +44,8 @@ impl<'a> ShaderGenerator<'a> {
         self.generate_instance_struct();
         self.generate_varying_struct();
         self.generate_const_decls();
-        let vertex_decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
-        let fragment_decl = self.shader.find_fn_decl(Ident::new("pixel")).unwrap();
+        let vertex_decl = self.shader.find_fn_decl(IdentPath::from_str("vertex")).unwrap();
+        let fragment_decl = self.shader.find_fn_decl(IdentPath::from_str("pixel")).unwrap();
         for &(ty_lit, ref param_tys) in vertex_decl
             .cons_fn_deps
             .borrow_mut()
@@ -333,7 +334,7 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, "}}").unwrap();
     }
     
-    fn generate_fn_decl(&mut self, decl: &FnDecl, visited: &mut HashSet<Ident>) {
+    fn generate_fn_decl(&mut self, decl: &FnDecl, visited: &mut HashSet<IdentPath>) {
         FnDeclGenerator {
             shader: self.shader,
             decl,
@@ -345,7 +346,7 @@ impl<'a> ShaderGenerator<'a> {
     }
     
     fn generate_vertex_main(&mut self) {
-        let decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
+        let decl = self.shader.find_fn_decl(IdentPath::from_str("vertex")).unwrap();
         write!(self.string, "vertex mpsc_Varyings mpsc_vertex_main(").unwrap();
         write!(self.string, "mpsc_Textures mpsc_textures").unwrap();
         write!(
@@ -400,7 +401,7 @@ impl<'a> ShaderGenerator<'a> {
             .unwrap();
         writeln!(self.string, "    mpsc_Varyings mpsc_varyings;").unwrap();
         write!(self.string, "    mpsc_varyings.mpsc_position = ").unwrap();
-        self.write_ident(decl.ident);
+        self.write_ident(decl.ident_path.get_single().expect("unexpected"));
         write!(self.string, "(").unwrap();
         let mut sep = "";
         if self.use_const_table {
@@ -453,7 +454,7 @@ impl<'a> ShaderGenerator<'a> {
     }
     
     fn generate_fragment_main(&mut self) {
-        let decl = self.shader.find_fn_decl(Ident::new("pixel")).unwrap();
+        let decl = self.shader.find_fn_decl(IdentPath::from_str("pixel")).unwrap();
         write!(self.string, "fragment float4 mpsc_fragment_main(").unwrap();
         write!(self.string, "mpsc_Varyings mpsc_varyings[[stage_in]]").unwrap();
         write!(
@@ -488,7 +489,7 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, ") {{").unwrap();
         
         write!(self.string, "    return ").unwrap();
-        self.write_ident(decl.ident);
+        self.write_ident(decl.ident_path.get_single().expect("unexpected"));
         write!(self.string, "(").unwrap();
         let mut sep = "";
         if self.use_const_table {
@@ -543,13 +544,13 @@ struct FnDeclGenerator<'a> {
     shader: &'a ShaderAst,
     decl: &'a FnDecl,
     use_const_table: bool,
-    visited: &'a mut HashSet<Ident>,
+    visited: &'a mut HashSet<IdentPath>,
     string: &'a mut String,
 }
 
 impl<'a> FnDeclGenerator<'a> {
     fn generate_fn_decl(&mut self) {
-        if self.visited.contains(&self.decl.ident) {
+        if self.visited.contains(&self.decl.ident_path) {
             return;
         }
         for &callee in self.decl.callees.borrow().as_ref().unwrap().iter() {
@@ -565,7 +566,7 @@ impl<'a> FnDeclGenerator<'a> {
         self.write_var_decl(
             false,
             false,
-            self.decl.ident,
+            self.decl.ident_path.to_struct_fn_ident(),
             self.decl.return_ty.borrow().as_ref().unwrap(),
         );
         write!(self.string, "(").unwrap();
@@ -641,7 +642,7 @@ impl<'a> FnDeclGenerator<'a> {
         write!(self.string, ") ").unwrap();
         self.generate_block(&self.decl.block);
         writeln!(self.string).unwrap();
-        self.visited.insert(self.decl.ident);
+        self.visited.insert(self.decl.ident_path);
     }
     
     fn generate_block(&mut self, block: &Block) {
@@ -665,9 +666,9 @@ impl<'a> FnDeclGenerator<'a> {
 struct MetalBackendWriter;
 
 impl BackendWriter for MetalBackendWriter {
-    fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, ident: Ident, shader: &ShaderAst, sep:&str) {
+    fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, ident_path: IdentPath, shader: &ShaderAst, sep:&str) {
         let mut sep = sep;
-        if let Some(decl) = shader.find_fn_decl(ident) {
+        if let Some(decl) = shader.find_fn_decl(ident_path) {
             if use_const_table {
                 write!(string, "{}mpsc_const_table", sep).unwrap();
                 sep = ", ";
@@ -704,7 +705,7 @@ impl BackendWriter for MetalBackendWriter {
         }
     }
     
-    fn generate_var_expr(&self, string: &mut String, ident: Ident, kind: &Cell<Option<VarKind>>, shader: &ShaderAst, decl: &FnDecl, _ty:&Option<Ty>) {
+    fn generate_var_expr(&self, string: &mut String, _span:Span, ident_path: IdentPath, kind: &Cell<Option<VarKind>>, shader: &ShaderAst, decl: &FnDecl, _ty:&Option<Ty>) {
     
         let is_used_in_vertex_shader = decl.is_used_in_vertex_shader.get().unwrap();
         let is_used_in_fragment_shader = decl.is_used_in_fragment_shader.get().unwrap();
@@ -717,7 +718,7 @@ impl BackendWriter for MetalBackendWriter {
                         string,
                         "mpsc_{}_uniforms.",
                         shader
-                            .find_uniform_decl(ident)
+                            .find_uniform_decl(ident_path.get_single().expect("unexpected"))
                             .unwrap()
                             .block_ident
                             .unwrap_or(Ident::new("default")),
@@ -736,7 +737,7 @@ impl BackendWriter for MetalBackendWriter {
                         string,
                         "mpsc_{}_uniforms.",
                         shader
-                            .find_uniform_decl(ident)
+                            .find_uniform_decl(ident_path.get_single().expect("unexpected"))
                             .unwrap()
                             .block_ident
                             .unwrap_or(Ident::new("default")),
@@ -750,7 +751,7 @@ impl BackendWriter for MetalBackendWriter {
                 _ => {}
             }
         }
-        write!(string, "{}", ident).unwrap()
+        write!(string, "{}", ident_path.get_single().expect("unexpected")).unwrap()
     }
 
     fn needs_mul_fn_for_matrix_multiplication(&self)->bool{

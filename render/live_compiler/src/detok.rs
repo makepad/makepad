@@ -1,7 +1,7 @@
 use crate::token::{Token};
 use crate::error::LiveError;
 use crate::ident::{Ident, IdentPath};
-use crate::span::Span;
+use crate::span::{Span,LiveBodyId};
 use crate::lit::{Lit};
 use crate::colors::Color;
 use crate::math::*;
@@ -25,7 +25,7 @@ pub trait DeTokParser {
 }
 
 pub struct SpanTracker {
-    pub loc_id: usize,
+    pub live_body_id: LiveBodyId,
     pub start: usize,
 }
 
@@ -35,7 +35,7 @@ impl SpanTracker {
     F: FnOnce(Span) -> R,
     {
         f(Span {
-            loc_id: self.loc_id,
+            live_body_id: self.live_body_id,
             start: self.start,
             end: parser.end(),
         })
@@ -44,7 +44,7 @@ impl SpanTracker {
     pub fn error(&self, parser: &dyn DeTokParser, message: String) -> LiveError {
         LiveError {
             span: Span {
-                loc_id: self.loc_id,
+                live_body_id: self.live_body_id,
                 start: self.start,
                 end: parser.token_end(),
             },
