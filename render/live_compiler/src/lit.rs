@@ -1,6 +1,7 @@
 use crate::ty::Ty;
 use crate::val::Val;
 use crate::colors::Color;
+use crate::ident::Ident;
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -91,6 +92,26 @@ impl TyLit {
             TyLit::Mat4 => Ty::Mat4,
             TyLit::Texture2D => Ty::Texture2D,
         }
+    }
+    
+    pub fn from_ident(ident:Ident)->Option<TyLit>{
+        if ident == Ident::new("bool"){return Some(TyLit::Bool)}
+        if ident == Ident::new("int"){return Some(TyLit::Int)}
+        if ident == Ident::new("float"){return Some(TyLit::Float)}
+        if ident == Ident::new("vec2"){return Some(TyLit::Vec2)}
+        if ident == Ident::new("vec3"){return Some(TyLit::Vec3)}
+        if ident == Ident::new("vec4"){return Some(TyLit::Vec4)}
+        if ident == Ident::new("mat2"){return Some(TyLit::Mat2)}
+        if ident == Ident::new("mat3"){return Some(TyLit::Mat3)}
+        if ident == Ident::new("mat4"){return Some(TyLit::Mat4)}
+        if ident == Ident::new("texture2D"){return Some(TyLit::Texture2D)}
+        if ident == Ident::new("bvec2"){return Some(TyLit::Bvec2)}
+        if ident == Ident::new("bvec3"){return Some(TyLit::Bvec3)}
+        if ident == Ident::new("bvec4"){return Some(TyLit::Bvec4)}
+        if ident == Ident::new("ivec2"){return Some(TyLit::Ivec2)}
+        if ident == Ident::new("ivec3"){return Some(TyLit::Ivec3)}
+        if ident == Ident::new("ivec4"){return Some(TyLit::Ivec4)}
+        None
     }
 }
 

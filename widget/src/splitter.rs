@@ -1,6 +1,5 @@
 use makepad_render::*;
 use makepad_microserde::*;
-use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct Splitter {
@@ -60,36 +59,54 @@ impl Splitter {
         }
     }
     
-    pub fn anim_default() -> AnimId {uid!()}
-    pub fn anim_over() -> AnimId {uid!()}
-    pub fn anim_down() -> AnimId {uid!()}
-    pub fn shader_bg() -> ShaderId {uid!()}
-    
-    pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+    pub fn style(cx: &mut Cx) {
         
-        Self::anim_default().set(cx, Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color(Quad::color(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter().get(cx))]),
-        ]));
-        
-        Self::anim_over().set(cx, Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(Quad::color(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter_over().get(cx))]),
-        ]));
-        
-        Self::anim_down().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(Quad::color(), Ease::Lin, vec![
-                (0.0, Theme::color_bg_splitter_peak().get(cx)),
-                (1.0, Theme::color_bg_splitter_drag().get(cx))
-            ]),
-        ]));
-        
-        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"
+        live!(cx, r#"
             
-            fn pixel() -> vec4 {
-                let df = Df::viewport(pos * vec2(w, h));
-                df.box(0., 0., w, h, 0.5);
-                return df.fill(color);
+            self::color_bg: #19
+            self::color_over: #5
+            self::color_peak: #f
+            self::color_drag: #6
+            
+            self::anim_default: Anim {
+                play: Cut {duration: 0.5}
+                ColorTrack {
+                    ease: Lin,
+                    1.0: self::color_bg,
+                    live_id: makepad_render::quad::shader::color
+                }
             }
-        "}));
+            
+            self::anim_over: Anim {
+                play: Cut {duration: 0.05}
+                ColorTrack {
+                    ease: Lin,
+                    1.0: self::color_over,
+                    live_id: makepad_render::quad::shader::color
+                }
+            }
+            
+            self::anim_down: Anim {
+                play: Cut {duration: 0.02}
+                ColorTrack {
+                    ease: Lin,
+                    0.0: self::color_peak,
+                    1.0: self::color_drag,
+                    live_id: makepad_render::quad::shader::color
+                }
+            }
+            
+            self::shader_bg: Shader {
+                use makepad_render::quad::shader::*;
+                
+                fn pixel() -> vec4 {
+                    let df = Df::viewport(pos * vec2(w, h));
+                    df.box(0., 0., w, h, 0.5);
+                    return df.fill(color);
+                }
+            }
+            
+        "#);
     }
     
     pub fn handle_splitter(&mut self, cx: &mut Cx, event: &mut Event) -> SplitterEvent {

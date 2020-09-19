@@ -45,7 +45,7 @@ macro_rules!live_id {
 }
 
 #[macro_export]
-macro_rules!shader {
+macro_rules!live_shader {
     ( $ cx: ident, $ path: path) => {
         $ cx.live_styles.get_shader(
             live_str_to_id(module_path!(), stringify!( $ path)),
@@ -56,7 +56,7 @@ macro_rules!shader {
 }
 
 #[macro_export]
-macro_rules!geometry {
+macro_rules!live_geometry {
     ( $ cx: ident, $ path: path) => {
         $ cx.live_styles.get_geometry(
             live_str_to_id(module_path!(), stringify!( $ path)),
@@ -66,7 +66,7 @@ macro_rules!geometry {
 }
 
 #[macro_export]
-macro_rules!color {
+macro_rules!live_color {
     ( $ cx: ident, $ path: path) => {
         $ cx.live_styles.get_color(
             live_str_to_id(module_path!(), stringify!( $ path)),
@@ -76,9 +76,51 @@ macro_rules!color {
 }
 
 #[macro_export]
-macro_rules!float {
+macro_rules!live_float {
     ( $ cx: ident, $ path: path) => {
         $ cx.live_styles.get_float(
+            live_str_to_id(module_path!(), stringify!( $ path)),
+            stringify!( $ path)
+        )
+    }
+}
+
+#[macro_export]
+macro_rules!live_text_style {
+    ( $ cx: ident, $ path: path) => {
+        $ cx.live_styles.get_text_style(
+            live_str_to_id(module_path!(), stringify!( $ path)),
+            stringify!( $ path)
+        )
+    }
+}
+
+#[macro_export]
+macro_rules!live_anim {
+    ( $ cx: ident, $ path: path) => {
+        $ cx.live_styles.get_anim(
+            live_str_to_id(module_path!(), stringify!( $ path)),
+            stringify!( $ path)
+        )
+    }
+}
+
+
+#[macro_export]
+macro_rules!live_walk {
+    ( $ cx: ident, $ path: path) => {
+        $ cx.live_styles.get_walk(
+            live_str_to_id(module_path!(), stringify!( $ path)),
+            stringify!( $ path)
+        )
+    }
+}
+
+
+#[macro_export]
+macro_rules!live_layout {
+    ( $ cx: ident, $ path: path) => {
+        $ cx.live_styles.get_layout(
             live_str_to_id(module_path!(), stringify!( $ path)),
             stringify!( $ path)
         )
