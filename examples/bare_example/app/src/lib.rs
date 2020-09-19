@@ -14,7 +14,7 @@ impl BareExampleApp {
         live!(cx, r#"
             self::bg_color: #f00,
             self::bg_color2: #00f,
-            self::bg_shader: shader { 
+            self::bg_shader: Shader { 
                 use makepad_render::quad::shader::*;
 
                 instance counter: float;

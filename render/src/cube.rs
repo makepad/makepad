@@ -10,7 +10,7 @@ impl Cube {
 
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            shader: shader!(cx, self::shader),
+            shader: live_shader!(cx, self::shader),
             color: Color::parse_hex_str("#c").unwrap()
         }
     }

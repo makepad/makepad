@@ -10,14 +10,14 @@ impl Quad {
     
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            shader: shader!(cx, self::shader),
+            shader: live_shader!(cx, self::shader),
             z: 0.0,
             color: Color::parse_name("green").unwrap()
         }
     }
     
     pub fn style(cx: &mut Cx) {
-        live!(cx, r#"self::shader: shader {
+        live!(cx, r#"self::shader: Shader {
 
             use crate::shader_std::prelude::*;
             

@@ -1,5 +1,5 @@
 use crate::ident::Ident;
-use crate::lit::{Lit, TyLit};
+use crate::lit::{Lit};
 use crate::span::Span;
 use std::fmt;
 
@@ -43,18 +43,18 @@ pub enum Token {
     Continue,
     Else,
     For,
-    Fn,
-    From,
+    //Fn,
+    //From,
     If,
-    In,
-    Inout,
+    //In,
+    //Inout,
     Let,
     Return,
-    Crate,
+    //Crate,
     Splat,
-    Self_,
+    //Self_,
     Struct,
-    To,
+    //To,
     LeftBracket,
     RightBracket,
     LeftBrace,
@@ -63,7 +63,7 @@ pub enum Token {
     String(Ident),
     Ident(Ident),
     Lit(Lit),
-    TyLit(TyLit),
+    //TyLit(TyLit),
 }
 
 impl fmt::Display for Token {
@@ -101,18 +101,13 @@ impl fmt::Display for Token {
             Token::Const => write!(f, "const"),
             Token::Continue => write!(f, "continue"),
             Token::Else => write!(f, "else"),
-            Token::Fn => write!(f, "fn"),
+            //Token::Fn => write!(f, "fn"),
             Token::For => write!(f, "for"),
-            Token::From => write!(f, "from"),
             Token::If => write!(f, "if"),
-            Token::In => write!(f, "in"),
-            Token::Inout => write!(f, "inout"),
+            //Token::Inout => write!(f, "inout"),
             Token::Let => write!(f, "let"),
             Token::Return => write!(f, "return"),
-            Token::Self_ => write!(f, "self"),
-            Token::Crate => write!(f, "self"),
             Token::Struct => write!(f, "struct"),
-            Token::To => write!(f, "to"),
             Token::LeftBracket => write!(f, "["),
             Token::RightBracket => write!(f, "]"),
             Token::LeftBrace => write!(f, "{{"),
@@ -121,7 +116,6 @@ impl fmt::Display for Token {
             Token::Ident(ident) => write!(f, "{}", ident),
             Token::String(ident) => write!(f, "\"{}\"", ident),
             Token::Lit(lit) => write!(f, "{}", lit),
-            Token::TyLit(ty_lit) => write!(f, "{}", ty_lit),
         }
     }
 }

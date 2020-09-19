@@ -19,16 +19,17 @@ impl Blit {
             min_y: 0.0,
             max_x: 1.0,
             max_y: 1.0,
-            shader: shader!(cx, self::shader),
+            shader: live_shader!(cx, self::shader),
             do_scroll: false,
         }
     }
     
     pub fn style(cx: &mut Cx) {
-        live!(cx, r#"self::shader: shader {
-            use crate::std::prelude::*;
-            
-            geometry geom: vec2 = crate::std::quad_2d;
+        live!(cx, r#"self::shader: Shader {
+            use crate::shader_std::prelude::*;
+
+            default_geometry: crate::shader_std::quad_2d;
+            geometry geom: vec2;
             
             instance x: float;
             instance y: float;
@@ -41,7 +42,7 @@ impl Blit {
             
             uniform alpha: float;
             
-            texture texturez: texture2d;
+            texture texturez: texture2D;
             
             varying tc: vec2;
             varying v_pixel: vec2;

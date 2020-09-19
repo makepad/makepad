@@ -9,19 +9,24 @@ use crate::ident::{Ident};
 use crate::error::LiveError;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub struct Shader{
+pub struct Shader {
     pub shader_id: usize,
     pub location_hash: u64
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub struct Geometry{
+pub struct Geometry {
     pub geometry_id: usize,
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub struct Texture{
+pub struct Texture {
     pub texture_id: usize,
+}
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct Font {
+    pub font_id: usize,
 }
 
 #[derive(Clone, PartialEq)]
@@ -67,7 +72,7 @@ pub struct LiveId(pub u64);
 
 #[derive(Clone, Debug, Copy, DeTok, DeTokSplat)]
 pub struct TextStyle {
-    pub font: Ident,
+    pub font: Font,
     pub font_size: f32,
     pub brightness: f32,
     pub curve: f32,
@@ -79,7 +84,7 @@ pub struct TextStyle {
 impl Default for TextStyle {
     fn default() -> Self {
         TextStyle {
-            font: Ident::default(),
+            font: Font {font_id: 0},
             font_size: 8.0,
             brightness: 1.0,
             curve: 0.6,
@@ -285,7 +290,7 @@ impl Width {
             _ => 0.
         }
     }
-
+    
 }
 
 impl Height {
@@ -332,9 +337,9 @@ impl Rect {
     }
 }
 
-#[derive(Clone, Debug)] 
+#[derive(Clone, Debug)]
 pub struct Anim {
-    pub mode: Play,
+    pub play: Play,
     pub tracks: Vec<Track>
 }
 
@@ -721,104 +726,41 @@ impl Ease {
     }
 }
 
-
-#[derive(Clone, Debug)]
-pub struct FloatTrack {
-    pub ident: LiveId,
-    pub ease: Ease,
-    pub cut_init: Option<f32>,
-    pub track: Vec<(f64, f32)>
-}
-
-#[derive(Clone, Debug)]
-pub struct Vec2Track {
-    pub ident: LiveId,
-    pub ease: Ease,
-    pub cut_init: Option<Vec2>,
-    pub track: Vec<(f64, Vec2)>
-}
-
-#[derive(Clone, Debug)]
-pub struct Vec3Track {
-    pub ident: LiveId,
-    pub ease: Ease,
-    pub cut_init: Option<Vec3>,
-    pub track: Vec<(f64, Vec3)>
-}
-
-#[derive(Clone, Debug)]
-pub struct Vec4Track {
-    pub ident: LiveId,
-    pub ease: Ease,
-    pub cut_init: Option<Vec4>,
-    pub track: Vec<(f64, Vec4)>
-}
-
-#[derive(Clone, Debug)]
-pub struct ColorTrack {
-    pub ident: LiveId,
-    pub ease: Ease,
-    pub cut_init: Option<Color>,
-    pub track: Vec<(f64, Color)>
-}
-
 #[derive(Clone, Debug)]
 pub enum Track {
-    Float(FloatTrack),
-    Vec2(Vec2Track),
-    Vec3(Vec3Track),
-    Vec4(Vec4Track),
-    Color(ColorTrack),
+    Float {
+        live_id: LiveId,
+        ease: Ease,
+        cut_init: Option<f32>,
+        keys: Vec<(f64, f32)>
+    },
+    Vec2 {
+        live_id: LiveId,
+        ease: Ease,
+        cut_init: Option<Vec2>,
+        keys: Vec<(f64, Vec2)>
+    },
+    Vec3 {
+        live_id: LiveId,
+        ease: Ease,
+        cut_init: Option<Vec3>,
+        keys: Vec<(f64, Vec3)>
+    },
+    Vec4 {
+        live_id: LiveId,
+        ease: Ease,
+        cut_init: Option<Vec4>,
+        keys: Vec<(f64, Vec4)>
+    },
+    Color {
+        live_id: LiveId,
+        ease: Ease,
+        cut_init: Option<Color>,
+        keys: Vec<(f64, Color)>
+    },
 }
 
 impl Track {
-    
-    pub fn float(ident: LiveId, ease: Ease, track: Vec<(f64, f32)>) -> Track {
-        Track::Float(FloatTrack {
-            cut_init: None,
-            ease: ease,
-            ident: ident,
-            track: track
-        })
-    }
-    
-    pub fn vec2(ident: LiveId, ease: Ease, track: Vec<(f64, Vec2)>) -> Track {
-        Track::Vec2(Vec2Track {
-            cut_init: None,
-            ease: ease,
-            ident: ident,
-            track: track
-        })
-    }
-    
-    pub fn vec3(ident: LiveId, ease: Ease, track: Vec<(f64, Vec3)>) -> Track {
-        Track::Vec3(Vec3Track {
-            cut_init: None,
-            ease: ease,
-            ident: ident,
-            track: track
-        })
-    }
-    
-    pub fn vec4(ident: LiveId, ease: Ease, track: Vec<(f64, Vec4)>) -> Track {
-        Track::Vec4(Vec4Track {
-            cut_init: None,
-            ease: ease,
-            ident: ident,
-            track: track
-        })
-    }
-    
-    
-    pub fn color(ident: LiveId, ease: Ease, track: Vec<(f64, Color)>) -> Track {
-        Track::Color(ColorTrack {
-            cut_init: None,
-            ease: ease,
-            ident: ident,
-            track: track
-        })
-    }
-    
     
     pub fn compute_track_float(time: f64, track: &Vec<(f64, f32)>, cut_init: &mut Option<f32>, init: f32, ease: &Ease) -> f32 {
         if track.is_empty() {return init}
@@ -959,99 +901,112 @@ impl Track {
         return lerp(*val1, val2.1, f)
     }
     
-    pub fn ident(&self) -> LiveId {
+    pub fn live_id(&self) -> LiveId {
         match self {
-            Track::Float(ft) => {
-                ft.ident
+            Track::Float{live_id,..} => {
+                *live_id
             },
-            Track::Vec2(ft) => {
-                ft.ident
+            Track::Vec2{live_id,..} => {
+                *live_id
             }
-            Track::Vec3(ft) => {
-                ft.ident
+            Track::Vec3{live_id,..} => {
+                *live_id
             }
-            Track::Vec4(ft) => {
-                ft.ident
+            Track::Vec4{live_id,..} => {
+                *live_id
             }
-            Track::Color(ft) => {
-                ft.ident
+            Track::Color{live_id,..} => {
+                *live_id
             }
         }
     }
     
     pub fn reset_cut_init(&mut self) {
         match self {
-            Track::Color(at) => {
-                at.cut_init = None;
+            Track::Color{cut_init,..} => {
+                *cut_init = None;
             },
-            Track::Vec4(at) => {
-                at.cut_init = None;
+            Track::Vec4{cut_init,..} => {
+                *cut_init = None;
             },
-            Track::Vec3(at) => {
-                at.cut_init = None;
+            Track::Vec3{cut_init,..} => {
+                *cut_init = None;
             },
-            Track::Vec2(at) => {
-                at.cut_init = None;
+            Track::Vec2{cut_init,..} => {
+                *cut_init = None;
             },
-            Track::Float(at) => {
-                at.cut_init = None;
+            Track::Float{cut_init,..} => {
+                *cut_init = None;
             }
         }
     }
     
     pub fn ease(&self) -> &Ease {
         match self {
-            Track::Float(ft) => {
-                &ft.ease
+            Track::Float{ease, ..} => {
+                ease
             },
-            Track::Vec2(ft) => {
-                &ft.ease
+            Track::Vec2{ease, ..} => {
+                ease
             }
-            Track::Vec3(ft) => {
-                &ft.ease
+            Track::Vec3{ease, ..} => {
+                ease
             }
-            Track::Vec4(ft) => {
-                &ft.ease
+            Track::Vec4{ease, ..} => {
+                ease
             }
-            Track::Color(ft) => {
-                &ft.ease
+            Track::Color{ease, ..} => {
+                ease
             }
         }
     }
-
-
-    pub fn set_ease(&mut self, ease:Ease)  {
+    
+    
+    pub fn set_ease(&mut self, new_ease: Ease) {
         match self {
-            Track::Float(ft) => {
-                ft.ease = ease
+            Track::Float{ease, ..} => {
+                *ease = new_ease
             },
-            Track::Vec2(ft) => {
-                ft.ease = ease
-            }
-            Track::Vec3(ft) => {
-                ft.ease = ease
-            }
-            Track::Vec4(ft) => {
-                ft.ease = ease
-            }
-            Track::Color(ft) => {
-                ft.ease = ease
-            }
+            Track::Vec2{ease, ..} => {
+                *ease = new_ease
+            },
+            Track::Vec3{ease, ..} => {
+                *ease = new_ease
+            },
+            Track::Vec4{ease, ..} => {
+                *ease = new_ease
+            },
+            Track::Color{ease, ..} => {
+                *ease = new_ease
+            },
+        }
+    }
+    
+    pub fn set_live_id(&mut self, new_live_id: LiveId) {
+        match self {
+            Track::Float{live_id, ..} => {
+                *live_id = new_live_id
+            },
+            Track::Vec2{live_id, ..} => {
+                *live_id = new_live_id
+            },
+            Track::Vec3{live_id, ..} => {
+                *live_id = new_live_id
+            },
+            Track::Vec4{live_id, ..} => {
+                *live_id = new_live_id
+            },
+            Track::Color{live_id, ..} => {
+                *live_id = new_live_id
+            },
         }
     }
 }
 
 impl Anim {
-    pub fn new(mode: Play, tracks: Vec<Track>) -> Anim {
-        Anim {
-            mode: mode,
-            tracks: tracks
-        }
-    }
-    
     pub fn empty() -> Anim {
         Anim {
-            mode: Play::Cut {duration: 0.},
+            play: Play::Cut {duration: 0.},
             tracks: vec![]
         }
     }
@@ -1194,7 +1149,7 @@ impl Play {
 }
 
 
-pub const fn live_location_hash(path: &str, line:u64, col:u64) -> u64 {
+pub const fn live_location_hash(path: &str, line: u64, col: u64) -> u64 {
     // lets hash the path
     let path = path.as_bytes();
     let path_len = path.len();
@@ -1206,8 +1161,8 @@ pub const fn live_location_hash(path: &str, line:u64, col:u64) -> u64 {
         o += 1;
         i += 1;
     }
-    value ^= line;
-    value ^= col<<32;
+        value ^= line;
+    value ^= col << 32;
     value
 }
 
@@ -1250,7 +1205,7 @@ pub const fn live_str_to_id(modstr: &str, idstr: &str) -> LiveId {
         let mut o = 0;
         let mut i = 0;
         while i < modpath_len {
-            if modpath[i] == ':' as u8{
+            if modpath[i] == ':' as u8 {
                 break
             }
             value ^= (modpath[i] as u64) << ((o & 7) << 3);
@@ -1272,6 +1227,6 @@ pub const fn live_str_to_id(modstr: &str, idstr: &str) -> LiveId {
         o += 1;
         i += 1;
     }
-    LiveId(value)
+        LiveId(value)
 }
 
