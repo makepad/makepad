@@ -783,22 +783,14 @@ impl<'a, 'b> TyChecker<'a, 'b> {
             } => {
                 // if kind is LiveId
                 if let VarKind::LiveStyle = new_kind {
-                    if let Some(ty_lit) = ty.maybe_ty_lit(){
-                        // lets fully qualify it here
-                        let qualified = self.env.qualify_ident_path(span.live_body_id, ident_path);
-                        self.shader
-                            .livestyle_uniform_deps
-                            .borrow_mut()
-                            .as_mut()
-                            .unwrap()
-                            .insert((ty_lit, qualified));
-                    }
-                    else{
-                        return Err(LiveError {
-                            span,
-                            message: format!("`{}` type not supported as live uniform", ident_path).into(),
-                        })                        
-                    }
+                    // lets fully qualify it here
+                    let qualified = self.env.qualify_ident_path(span.live_body_id, ident_path);
+                    self.shader
+                        .livestyle_uniform_deps
+                        .borrow_mut()
+                        .as_mut()
+                        .unwrap()
+                        .insert((ty.clone(), qualified));
                 }
                 
                 kind.set(Some(new_kind));
