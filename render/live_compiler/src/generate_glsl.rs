@@ -1,8 +1,9 @@
 use {
     crate::{
-        ast::*,
+        shaderast::*,
         span::Span,
         env::{Env, VarKind},
+        analyse::ShaderCompileOptions,
         generate::{BackendWriter, BlockGenerator, ExprGenerator},
         ident::{Ident, IdentPath},
         lit::TyLit,
@@ -14,12 +15,12 @@ use {
     std::cell::Cell,
 };
 
-pub fn generate_vertex_shader(shader: &ShaderAst, env: &Env, use_const_table: bool) -> String {
+pub fn generate_vertex_shader(shader: &ShaderAst, env: &Env, options:ShaderCompileOptions) -> String {
     let mut string = String::new();
     ShaderGenerator {
         shader,
         env,
-        use_const_table,
+        create_const_table: options.create_const_table,
         string: &mut string,
         backend_writer: &GlslBackendWriter {env: env}
     }
@@ -27,12 +28,12 @@ pub fn generate_vertex_shader(shader: &ShaderAst, env: &Env, use_const_table: bo
     string
 }
 
-pub fn generate_fragment_shader(shader: &ShaderAst, env: &Env, use_const_table: bool) -> String {
+pub fn generate_fragment_shader(shader: &ShaderAst, env: &Env, options:ShaderCompileOptions) -> String {
     let mut string = String::new();
     ShaderGenerator {
         shader,
         env,
-        use_const_table,
+        create_const_table: options.create_const_table,
         string: &mut string,
         backend_writer: &GlslBackendWriter {env: env}
     }
@@ -43,7 +44,7 @@ pub fn generate_fragment_shader(shader: &ShaderAst, env: &Env, use_const_table: 
 struct ShaderGenerator<'a, 'b> {
     shader: &'a ShaderAst,
     env: &'a Env<'b>,
-    use_const_table: bool,
+    create_const_table: bool,
     string: &'a mut String,
     backend_writer: &'a dyn BackendWriter
 }
@@ -277,7 +278,7 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
             }
         }
         
-        if self.use_const_table {
+        if self.create_const_table {
             writeln!(
                 self.string,
                 "uniform float mpsc_const_table[{}];",
@@ -539,7 +540,7 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
         FnDeclGenerator {
             shader: self.shader,
             decl,
-            use_const_table: self.use_const_table,
+            create_const_table: self.create_const_table,
             backend_writer,
             visited: &mut HashSet::new(),
             string: self.string,
@@ -552,7 +553,7 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
             shader: self.shader,
             decl: None,
             backend_writer: self.backend_writer,
-            use_const_table: self.use_const_table,
+            create_const_table: self.create_const_table,
             //use_generated_cons_fns: false,
             string: self.string,
         }
@@ -577,7 +578,7 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
 struct FnDeclGenerator<'a> {
     shader: &'a ShaderAst,
     decl: &'a FnDecl,
-    use_const_table: bool,
+    create_const_table: bool,
     visited: &'a mut HashSet<IdentPath>,
     string: &'a mut String,
     backend_writer: &'a dyn BackendWriter
@@ -592,7 +593,7 @@ impl<'a> FnDeclGenerator<'a> {
             FnDeclGenerator {
                 shader: self.shader,
                 decl: self.shader.find_fn_decl(callee).unwrap(),
-                use_const_table: self.use_const_table,
+                create_const_table: self.create_const_table,
                 visited: self.visited,
                 backend_writer: self.backend_writer,
                 string: self.string,
@@ -626,7 +627,7 @@ impl<'a> FnDeclGenerator<'a> {
             shader: self.shader,
             decl: self.decl,
             backend_writer: self.backend_writer,
-            use_const_table: self.use_const_table,
+            create_const_table: self.create_const_table,
             //use_generated_cons_fns: false,
             indent_level: 0,
             string: self.string,

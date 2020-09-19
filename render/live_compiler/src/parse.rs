@@ -1,22 +1,23 @@
-use crate::ast::*;
+use crate::shaderast::*;
 use crate::error::LiveError;
-use crate::ident::{Ident, IdentPath};
+use crate::ident::{Ident, IdentPath, IdentPathWithSpan};
 use crate::lit::{Lit};
 use crate::span::Span;
 use crate::token::{Token, TokenWithSpan};
+use crate::livestyles::{LiveStyles};
 use crate::livetypes::*;
 use crate::detok::*;
-use crate::math::*;
 use crate::colors::Color;
 
 use std::cell::{Cell, RefCell};
 use std::iter::Cloned;
 use std::slice::Iter;
 
-pub fn parse(tokens_with_span: &[TokenWithSpan], module_path: &str, live_styles:&mut LiveStyles) -> Result<(), LiveError> {
+pub fn parse(tokens_with_span: &[TokenWithSpan], module_path: &str, live_styles: &mut LiveStyles, shader_alloc_start: &mut usize) -> Result<(), LiveError> {
     let mut tokens_with_span = tokens_with_span.iter().cloned();
     let token_with_span = tokens_with_span.next().unwrap();
     Parser {
+        shader_alloc_start,
         live_styles: live_styles,
         module_path: module_path.to_string(),
         tokens_with_span,
@@ -27,6 +28,7 @@ pub fn parse(tokens_with_span: &[TokenWithSpan], module_path: &str, live_styles:
 }
 
 struct Parser<'a> {
+    shader_alloc_start: &'a mut usize,
     live_styles: &'a mut LiveStyles,
     tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
     token_with_span: TokenWithSpan,
@@ -61,13 +63,13 @@ impl<'a> DeTokParser for Parser<'a> {
     fn error_missing_prop(&mut self, what: &str) -> LiveError {
         self.error(format!("Error missing property {}", what))
     }
-
+    
     fn error_not_splattable(&mut self, what: &str) -> LiveError {
         self.error(format!("Error type {} not splattable", what))
     }
     
-    fn error_enum(&mut self, ident:Ident, what: &str) -> LiveError {
-        self.error(format!("Error missing {} for enum {}", ident.to_string(),  what))
+    fn error_enum(&mut self, ident: Ident, what: &str) -> LiveError {
+        self.error(format!("Error missing {} for enum {}", ident.to_string(), what))
     }
     
     
@@ -119,12 +121,12 @@ impl<'a> DeTokParser for Parser<'a> {
             }
         }
     }
-
-    fn end(&self)->usize{
+    
+    fn end(&self) -> usize {
         self.end
     }
     
-    fn token_end(&self)->usize{
+    fn token_end(&self) -> usize {
         self.token_with_span.span.end
     }
     
@@ -151,19 +153,12 @@ impl<'a> DeTokParser for Parser<'a> {
             start: self.token_with_span.span.start,
         }
     }
-
-    fn ident_path_to_live_id(&self, ident_path:&IdentPath)->LiveId{
-        ident_path.to_live_id(&self.module_path)
+    
+    fn ident_path_to_live_id(&self, ident_path: &IdentPath) -> LiveId {
+        ident_path.qualify(&self.module_path).to_live_id()
     }
-
-
-}
-
-enum TrackValue {
-    Float(f32),
-    Vec2(Vec2),
-    Vec3(Vec3),
-    Vec4(Vec4)
+    
+    
 }
 
 impl<'a> Parser<'a> {
@@ -174,76 +169,90 @@ impl<'a> Parser<'a> {
         while self.peek_token() != Token::Eof {
             let span = self.begin_span();
             // at this level we expect a live_id
-            let ident_path = self.parse_ident_path() ?;
+            let qualified_ident_path = self.parse_ident_path() ?.qualify(&self.module_path);
             
             //if current_style.is_none() && (ident_path.len() != 2 || !ident_path.is_self_id()) {
             //    return Err(span.error(self, format!("Ident not a self::id form `{}` override using a style block", ident_path)));
             // }
             
-            let live_id = ident_path.to_live_id(&self.module_path);
+            let live_id = qualified_ident_path.to_live_id();
             self.expect_token(Token::Colon) ?;
             
             match self.peek_token() {
-                Token::RightBrace=>{
-                    if current_style.is_none(){
+                Token::RightBrace => {
+                    if current_style.is_none() {
                         return Err(span.error(self, format!("Unexpected }}")));
                     }
                     current_style = None;
                 }
-                Token::Ident(ident) if ident == Ident::new("style") =>{
-                    if !current_style.is_none(){
+                Token::Ident(ident) if ident == Ident::new("style") => {
+                    if !current_style.is_none() {
                         return Err(span.error(self, format!("Cannot nest styles")));
                     }
                     // its a style.
                     self.skip_token();
-                    self.expect_token(Token::LeftBrace)?;
+                    self.expect_token(Token::LeftBrace) ?;
                     current_style = Some(live_id);
                 }
                 Token::Ident(ident) if ident == Ident::new("anim") => {
                     self.skip_token();
-                    let anim = Anim::de_tok(self)?;
-                    self.live_styles.get_style(&current_style).anims.insert(live_id, anim);
+                    let anim = Anim::de_tok(self) ?;
+                    self.live_styles.get_style_mut(&current_style).anims.insert(live_id, anim);
                 }
                 Token::Ident(ident) if ident == Ident::new("shader") => {
                     // lets parse this shaaaader!
                     self.skip_token();
                     // lets make a new shader_ast
                     let mut shader_ast = ShaderAst::new();
-                    self.parse_shader(&mut shader_ast)?;
-                    self.live_styles.get_style(&current_style).shaders.insert(live_id, shader_ast);
+                    shader_ast.qualified_ident_path = qualified_ident_path;
+                    shader_ast.module_path = self.module_path.clone();
+                    self.parse_shader(&mut shader_ast) ?;
+                    let style = self.live_styles.get_style_mut(&current_style);
+                    if let Some(old_ast) = style.shaders.get(&live_id) {
+                        shader_ast.shader = old_ast.shader;
+                    }
+                    else {
+                        shader_ast.shader = Some(Shader {
+                            shader_id: *self.shader_alloc_start,
+                            location_hash: 0
+                        });
+                        *self.shader_alloc_start += 1;
+                    }
+                    style.shaders.insert(live_id, shader_ast);
                 }
                 Token::Ident(ident) if ident == Ident::new("shader_lib") => {
                     // lets parse this shaaaader!
                     self.skip_token();
                     // lets make a new shader_ast
                     let mut shader_ast = ShaderAst::new();
+                    shader_ast.qualified_ident_path = qualified_ident_path;
                     shader_ast.module_path = self.module_path.clone();
-                    self.parse_shader(&mut shader_ast)?;
+                    self.parse_shader(&mut shader_ast) ?;
                     self.live_styles.shader_libs.insert(live_id, shader_ast);
                 }
                 Token::Ident(ident) if ident == Ident::new("layout") => { // lets parse these things
                     self.skip_token();
                     // lets de_tok a layout
-                    let layout = Layout::de_tok(self)?;
-                    self.live_styles.get_style(&current_style).layouts.insert(live_id, layout);
+                    let layout = Layout::de_tok(self) ?;
+                    self.live_styles.get_style_mut(&current_style).layouts.insert(live_id, layout);
                 }
                 Token::Ident(ident) if ident == Ident::new("walk") => { // lets parse these things
                     self.skip_token();
-                    let walk = Walk::de_tok(self)?;
-                    self.live_styles.get_style(&current_style).walks.insert(live_id, walk);
+                    let walk = Walk::de_tok(self) ?;
+                    self.live_styles.get_style_mut(&current_style).walks.insert(live_id, walk);
                 }
-                Token::Ident(ident) if ident == Ident::new("text_style") => {// lets parse these things
+                Token::Ident(ident) if ident == Ident::new("text_style") => { // lets parse these things
                     self.skip_token();
-                    let text_style = TextStyle::de_tok(self)?;
-                    self.live_styles.get_style(&current_style).text_styles.insert(live_id, text_style);
+                    let text_style = TextStyle::de_tok(self) ?;
+                    self.live_styles.get_style_mut(&current_style).text_styles.insert(live_id, text_style);
                 }
-                Token::Lit(Lit::Int(_)) | Token::Lit(Lit::Float(_))=>{
-                    let val = f32::de_tok(self)?;
-                    self.live_styles.get_style(&current_style).floats.insert(live_id, val);
+                Token::Lit(Lit::Int(_)) | Token::Lit(Lit::Float(_)) => {
+                    let val = f32::de_tok(self) ?;
+                    self.live_styles.get_style_mut(&current_style).floats.insert(live_id, val);
                 }
-                Token::Lit(Lit::Color(_))=>{
-                    let val = Color::de_tok(self)?;
-                    self.live_styles.get_style(&current_style).colors.insert(live_id, val);
+                Token::Lit(Lit::Color(_)) => {
+                    let val = Color::de_tok(self) ?;
+                    self.live_styles.get_style_mut(&current_style).colors.insert(live_id, val);
                 }
                 _ => ()
             }
@@ -254,9 +263,17 @@ impl<'a> Parser<'a> {
     
     fn parse_shader(&mut self, shader_ast: &mut ShaderAst) -> Result<(), LiveError> {
         self.expect_token(Token::LeftBrace) ?;
-        while self.peek_token() != Token::Eof{
+        while self.peek_token() != Token::Eof {
             match self.peek_token() {
-                Token::Ident(ident) if ident == Ident::new("geometry")=>{
+                Token::Ident(ident) if ident == Ident::new("default_geometry") => {
+                    self.skip_token();
+                    self.expect_token(Token::Colon) ?;
+                    let span = self.begin_span();
+                    let ident_path = self.parse_ident_path() ?;
+                    shader_ast.default_geometry = Some(IdentPathWithSpan {span: span.end(self, | span | span), ident_path});
+                    self.expect_token(Token::Semi) ?;
+                }
+                Token::Ident(ident) if ident == Ident::new("geometry") => {
                     self.skip_token();
                     let decl = self.parse_geometry_decl() ?;
                     shader_ast.decls.push(Decl::Geometry(decl));
@@ -269,7 +286,7 @@ impl<'a> Parser<'a> {
                     let decl = self.parse_fn_decl(None) ?;
                     shader_ast.decls.push(Decl::Fn(decl));
                 }
-                Token::Ident(ident) if ident == Ident::new("impl")=>{
+                Token::Ident(ident) if ident == Ident::new("impl") => {
                     self.skip_token();
                     let prefix = self.parse_ident() ?;
                     self.expect_token(Token::LeftBrace) ?;
@@ -282,22 +299,22 @@ impl<'a> Parser<'a> {
                     let decl = self.parse_struct_decl() ?;
                     shader_ast.decls.push(Decl::Struct(decl));
                 }
-                Token::Ident(ident) if ident == Ident::new("instance")=>{
+                Token::Ident(ident) if ident == Ident::new("instance") => {
                     self.skip_token();
                     let decl = self.parse_instance_decl() ?;
                     shader_ast.decls.push(Decl::Instance(decl));
                 }
-                Token::Ident(ident) if ident == Ident::new("texture")=>{
+                Token::Ident(ident) if ident == Ident::new("texture") => {
                     self.skip_token();
                     let decl = self.parse_texture_decl() ?;
                     shader_ast.decls.push(Decl::Texture(decl));
                 }
-                Token::Ident(ident) if ident == Ident::new("uniform")=>{
+                Token::Ident(ident) if ident == Ident::new("uniform") => {
                     self.skip_token();
                     let decl = self.parse_uniform_decl() ?;
                     shader_ast.decls.push(Decl::Uniform(decl));
                 }
-                Token::Ident(ident) if ident == Ident::new("varying")=>{
+                Token::Ident(ident) if ident == Ident::new("varying") => {
                     self.skip_token();
                     let decl = self.parse_varying_decl() ?;
                     shader_ast.decls.push(Decl::Varying(decl));
@@ -306,15 +323,16 @@ impl<'a> Parser<'a> {
                     self.skip_token();
                     shader_ast.debug = true;
                 }
-                Token::Ident(ident) if ident == Ident::new("use")=>{
+                Token::Ident(ident) if ident == Ident::new("use") => {
                     // parsing use..
                     self.skip_token();
+                    let span = self.begin_span();
                     let ident_path = self.parse_ident_path() ?;
-                    self.expect_token(Token::Star)?;
-                    self.expect_token(Token::Semi)?;
-                    shader_ast.uses.push(ident_path);
+                    self.expect_token(Token::Star) ?;
+                    self.expect_token(Token::Semi) ?;
+                    shader_ast.uses.push(IdentPathWithSpan {span: span.end(self, | span | span), ident_path});
                 }
-                Token::RightBrace=>{
+                Token::RightBrace => {
                     self.skip_token();
                     return Ok(())
                 },
@@ -374,7 +392,7 @@ impl<'a> Parser<'a> {
                 let span = self.begin_span();
                 let is_inout = self.accept_token(Token::Inout);
                 if self.accept_token(Token::Self_) {
-                    params.push(span.end(self, |span| Param {
+                    params.push(span.end(self, | span | Param {
                         span,
                         is_inout,
                         ident: Ident::new("self"),
@@ -387,10 +405,10 @@ impl<'a> Parser<'a> {
                         },
                     }))
                 } else {
-                    let ident = self.parse_ident()?;
-                    self.expect_token(Token::Colon)?;
-                    let ty_expr = self.parse_ty_expr()?;
-                    params.push(span.end(self, |span| Param {
+                    let ident = self.parse_ident() ?;
+                    self.expect_token(Token::Colon) ?;
+                    let ty_expr = self.parse_ty_expr() ?;
+                    params.push(span.end(self, | span | Param {
                         span,
                         is_inout,
                         ident,
@@ -398,7 +416,7 @@ impl<'a> Parser<'a> {
                     }));
                 }
             } else {
-                params.push(self.parse_param()?);
+                params.push(self.parse_param() ?);
             }
             while self.accept_token(Token::Comma) {
                 params.push(self.parse_param() ?);
@@ -411,7 +429,7 @@ impl<'a> Parser<'a> {
             None
         };
         let block = self.parse_block() ?;
-
+        
         Ok(span.end(self, | span | FnDecl {
             span,
             return_ty: RefCell::new(None),
@@ -1026,7 +1044,7 @@ impl<'a> Parser<'a> {
                             },
                         }))
                     }
-                    _ => Ok(span.end(self, |span| Expr {
+                    _ => Ok(span.end(self, | span | Expr {
                         span,
                         ty: RefCell::new(None),
                         const_val: RefCell::new(None),

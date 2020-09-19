@@ -1,4 +1,4 @@
-use crate::ast::*;
+use crate::shaderast::*;
 use crate::builtin::Builtin;
 use crate::colors::Color;
 use crate::env::{Env, Sym, VarKind};
