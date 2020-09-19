@@ -130,14 +130,16 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
         }
         
         writeln!(self.string, "struct mpsc_live_Uniforms {{").unwrap();
-        for (ty, ident_path) in self.shader.livestyle_uniform_deps.borrow().as_ref().unwrap() {
+        for (ty_lit, ident_path) in self.shader.livestyle_uniform_deps.borrow().as_ref().unwrap() {
             // we have a span and an ident_path.
             // lets fully qualify it
-            write!(self.string, "    {} ", ty).unwrap();
+            write!(self.string, "    ").unwrap();
+            self.backend_writer.write_ty_lit(self.string, *ty_lit);
+            write!(self.string, " ").unwrap();
             ident_path.write_underscored_ident(self.string);
             writeln!(self.string, ";").unwrap();
         }
-        writeln!(self.string, "}}").unwrap();
+        writeln!(self.string, "}};").unwrap();
     }
     
     fn generate_texture_struct(&mut self) {

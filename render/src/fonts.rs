@@ -300,7 +300,7 @@ pub struct CxAfterDraw {
 impl CxAfterDraw {
     pub fn new(cx: &mut Cx) -> Self {
         cx.fonts_atlas.texture_size = Vec2 {x: 2048.0, y: 2048.0};
-        let mut atlas_texture = Texture::new(cx);
+        let atlas_texture = Texture::new(cx);
 
         cx.fonts_atlas.texture_id = atlas_texture.texture_id;
         
