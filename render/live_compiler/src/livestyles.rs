@@ -92,7 +92,6 @@ impl LiveStyles {
     }
     
     pub fn get_shader(&self, live_id: LiveId, location_hash: u64, name: &str) -> Shader {
-        println!("GETTING SHADER {} {:?}", name, live_id);
         for style_index in &self.style_stack {
             if let Some(shader_ast) = self.style_list[*style_index].shaders.get(&live_id) {
                 if let Some(shader) = &shader_ast.shader {

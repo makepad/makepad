@@ -786,7 +786,7 @@ impl Cx {
         
         let mtlsl = generate_metal::generate_shader(&shader_ast, live_styles, options);
         let debug = shader_ast.debug;
-        let mapping = CxShaderMapping::from_shader_ast(shader_ast, default_geometry, options);
+        let mapping = CxShaderMapping::from_shader_ast(shader_ast, options);
         
         if debug {
             println!("--------------- Shader {} --------------- \n{}\n---------------\n", shader_id, mtlsl);
@@ -823,7 +823,7 @@ impl Cx {
         
         //let err_str: id = unsafe {msg_send![err, localizedDescription]};
         //println!("{}", nsstring_to_string(err_str));
-        
+        sh.default_geometry = default_geometry;
         sh.mapping = mapping;
         sh.platform = Some(CxPlatformShader {
             metal_shader: mtlsl,

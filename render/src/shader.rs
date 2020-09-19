@@ -176,7 +176,6 @@ impl UniformProps {
 
 #[derive(Debug, Default, Clone)]
 pub struct CxShaderMapping {
-    pub default_geometry: Option<Geometry>,
     pub rect_instance_props: RectInstanceProps,
     pub default_uniform_props: UniformProps,
     pub live_uniform_props: UniformProps,
@@ -187,7 +186,7 @@ pub struct CxShaderMapping {
 }
 
 impl CxShaderMapping {
-    pub fn from_shader_ast(shader_ast: ShaderAst, default_geometry: Option<Geometry>, options:ShaderCompileOptions) -> Self {
+    pub fn from_shader_ast(shader_ast: ShaderAst, options:ShaderCompileOptions) -> Self {
         
         let mut instances = Vec::new();
         let mut geometries = Vec::new();
@@ -252,7 +251,6 @@ impl CxShaderMapping {
             }
         }
         CxShaderMapping {
-            default_geometry,
             rect_instance_props: RectInstanceProps::construct(&instances),
             default_uniform_props: UniformProps::construct(&default_uniforms),
             live_uniform_props: UniformProps::construct(&live_uniforms),
