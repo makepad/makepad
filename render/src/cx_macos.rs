@@ -1,6 +1,7 @@
 // MacOS specific loop
 use crate::cx_cocoa::*;
 use crate::cx::*;
+use crate::shader_std::*;
 
 impl Cx {
     
@@ -17,6 +18,8 @@ impl Cx {
         
         let mut metal_windows: Vec<MetalWindow> = Vec::new();
 
+        define_shader_stdlib(self);
+        
         self.mtl_compile_all_shaders(&metal_cx);
 
         self.load_theme_fonts();

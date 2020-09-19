@@ -1,5 +1,4 @@
 use crate::cx::*;
-
 #[derive(Clone)]
 pub struct Quad {
     pub shader: Shader,
@@ -18,10 +17,11 @@ impl Quad {
     }
     
     pub fn style(cx: &mut Cx) {
-        
         live!(cx, r#"self::shader: shader {
-            use crate::std::prelude::*;
-            default_geometry: crate::std::quad_2d;
+
+            use crate::shader_std::prelude::*;
+            
+            default_geometry: crate::shader_std::quad_2d;
             geometry geom: vec2;
             
             varying pos: vec2;

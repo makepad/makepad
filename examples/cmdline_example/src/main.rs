@@ -106,7 +106,7 @@ fn main() {
             }
         }
     "#);
-
+    
     cx.live_styles.geometries.insert(
         live_id!(self::mygeom),
         Geometry{geometry_id:0}
