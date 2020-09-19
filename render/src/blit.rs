@@ -12,52 +12,38 @@ pub struct Blit {
 }
 
 impl Blit {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
             alpha: 1.0,
-            min_x:0.0,
-            min_y:0.0,
-            max_x:1.0,
-            max_y:1.0,
-            shader: cx.add_shader(Self::def_blit_shader(), "Blit"),
-            do_scroll:false,
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+            shader: shader!(cx, self::shader),
+            do_scroll: false,
         }
     }
     
-    fn geom()->Vec2Id{uid!()}
-    pub fn x()->FloatId{uid!()}
-    pub fn y()->FloatId{uid!()}
-    pub fn w()->FloatId{uid!()}
-    pub fn h()->FloatId{uid!()}
-    pub fn min_x()->FloatId{uid!()}
-    pub fn min_y()->FloatId{uid!()}
-    pub fn max_x()->FloatId{uid!()}
-    pub fn max_y()->FloatId{uid!()}
-    pub fn z()->FloatId{uid!()}
-    pub fn color()->ColorId{uid!()}
-    pub fn alpha()->FloatId{uid!()}
-    pub fn texturez()->Texture2dId{uid!()}
-    pub fn def_blit_shader() -> ShaderGen {
-        // lets add the draw shader lib
-        let mut sg = ShaderGen::new();
-        
-        sg.geometry.add_quad_2d();
-        
-        sg.compose(shader!{"
+    pub fn style(cx: &mut Cx) {
+        live!(cx, r#"self::shader: shader {
+            use crate::std::prelude::*;
             
-            geometry geom: Self::geom();
-            instance x: Self::x();
-            instance y: Self::y();
-            instance w: Self::w();
-            instance h: Self::h();
-            instance min_x: Self::min_x();
-            instance min_y: Self::min_y();
-            instance max_x: Self::max_x();
-            instance max_y: Self::max_y();
+            geometry geom: vec2 = crate::std::quad_2d;
+            
+            instance x: float;
+            instance y: float;
+            instance w: float;
+            instance h: float;
+            instance min_x: float;
+            instance min_y: float;
+            instance max_x: float;
+            instance max_y: float;
+            
+            uniform alpha: float;
+            
+            texture texturez: texture2d;
+            
             varying tc: vec2;
-            uniform alpha: Self::alpha();
-            
-            texture texturez:Self::texturez();
             varying v_pixel: vec2;
             //let dpi_dilate: float<Uniform>;
             
@@ -68,9 +54,9 @@ impl Blit {
                     geom * vec2(w, h) + vec2(x, y) + shift,
                     draw_clip.xy,
                     draw_clip.zw
-                ); 
+                );
                 let pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
-                tc = mix(vec2(min_x,min_y), vec2(max_x,max_y), pos);
+                tc = mix(vec2(min_x, min_y), vec2(max_x, max_y), pos);
                 v_pixel = clipped;
                 // only pass the clipped position forward
                 return camera_projection * vec4(clipped.x, clipped.y, 0., 1.);
@@ -79,12 +65,10 @@ impl Blit {
             fn pixel() -> vec4 {
                 return vec4(sample2d(texturez, tc.xy).rgb, alpha);
             }
-            
-        "})
+        }"#);
     }
     
-    
-    pub fn begin_blit(&mut self, cx: &mut Cx, texture:&Texture, layout: Layout) -> InstanceArea {
+    pub fn begin_blit(&mut self, cx: &mut Cx, texture: Texture, layout: Layout) -> InstanceArea {
         let inst = self.draw_blit(cx, texture, Rect::default());
         let area = inst.clone().into();
         cx.begin_turtle(layout, area);
@@ -98,22 +82,22 @@ impl Blit {
         area
     }
     
-    pub fn draw_blit_walk(&mut self, cx: &mut Cx, texture:&Texture, walk:Walk) -> InstanceArea {
+    pub fn draw_blit_walk(&mut self, cx: &mut Cx, texture: Texture, walk: Walk) -> InstanceArea {
         let geom = cx.walk_turtle(walk);
         let inst = self.draw_blit_abs(cx, texture, geom);
         cx.align_instance(inst);
         inst
     }
     
-    pub fn draw_blit(&mut self, cx: &mut Cx, texture:&Texture, rect: Rect) -> InstanceArea {
+    pub fn draw_blit(&mut self, cx: &mut Cx, texture: Texture, rect: Rect) -> InstanceArea {
         let pos = cx.get_turtle_origin();
         let inst = self.draw_blit_abs(cx, texture, Rect {x: rect.x + pos.x, y: rect.y + pos.y, w: rect.w, h: rect.h});
         cx.align_instance(inst);
         inst
     }
     
-    pub fn draw_blit_abs(&mut self, cx: &mut Cx, texture:&Texture, rect: Rect) -> InstanceArea {
-        let inst = cx.new_instance_draw_call(&self.shader, 1);
+    pub fn draw_blit_abs(&mut self, cx: &mut Cx, texture: Texture, rect: Rect) -> InstanceArea {
+        let inst = cx.new_instance_draw_call(self.shader, None, 1);
         if inst.need_uniforms_now(cx) {
             inst.push_uniform_float(cx, if self.do_scroll {1.0}else {0.0});
             inst.push_uniform_float(cx, self.alpha);

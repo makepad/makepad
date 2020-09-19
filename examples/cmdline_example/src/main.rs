@@ -1,33 +1,53 @@
-use makepad_live_macros::*;
-use makepad_live_compiler::livetypes::*;
-use makepad_live_compiler::ast::ShaderAst;
-use makepad_live_compiler::analyse::ShaderAnalyser;
-use makepad_live_compiler::builtin::{self};
-use makepad_live_compiler::env::{Sym, Env};
-use makepad_live_compiler::span::{Span};
-use makepad_live_compiler::generate_hlsl;
+use makepad_live_compiler::generate_metal;
+use makepad_live_compiler::analyse::ShaderCompileOptions;
+use makepad_live_compiler::shaderast::ShaderAst;
+use makepad_live_compiler::livetypes::{Geometry,live_str_to_id};
+use makepad_live_compiler::livestyles::{LiveStyles, LiveBody,};
 
 struct Cx {
     live_styles: LiveStyles,
 }
 
 impl Cx {
-
+    pub fn add_live_body(&mut self, live_body: LiveBody) {
+        let mut shader_alloc_start = 0;
+        if let Err(err) = self.live_styles.add_live_body(live_body, &mut shader_alloc_start) {
+            eprintln!("{:?}", err);
+        }
+    }
 }
 
-fn main() { 
-    let mut cx = Cx {live_styles:LiveStyles::default()}; 
-    
+macro_rules!live {
+    ( $ cx: ident, $ code: literal) => {
+        $ cx.add_live_body(LiveBody {
+            file: file!().to_string().replace("\\", ","),
+            module_path: module_path!().to_string(),
+            line: line!() as usize,
+            column: column!() as usize,
+            code: $ code.to_string()
+        })
+    }
+}
+
+#[macro_export]
+macro_rules!live_id {
+    ( $ path: path) => {
+        live_str_to_id(module_path!(), stringify!( $ path))
+    }
+}
+
+fn main() {
+    let mut cx = Cx {live_styles: LiveStyles::default()};
     let x = live!(cx, r#"
-        self::anim_default: anim{
-            play: Cut{duration:0.1},
-            self::shader_bg::myinst: float_track{
+        self::anim_default: anim {
+            play: Cut {duration: 0.1},
+            self::shader_bg::myinst: float_track {
                 ease: Lin,
                 0.0: 0.0,
                 1.0: 1.0
             }
         },
-        self::my_walk: walk{
+        self::my_walk: walk {
             width: Fix(10.),
             height: Fix(10.),
             margin: {l: -4., t: 0., r: 4., b: 0.}
@@ -41,7 +61,7 @@ fn main() {
             },
             padding: {l: 16.0, t: 12.0, r: 16.0, b: 12.0},
         },
-        self::text_style_unscaled:text_style{
+        self::text_style_unscaled: text_style {
             font: "resources/Ubuntu-R.ttf",
             font_size: 8.0,
             brightness: 1.0,
@@ -53,99 +73,60 @@ fn main() {
         self::mycolor: #ff0f,
         self::myslider: 1.0,
         
-        render::quad::shader: shader_lib{
-            struct Mp{
+        render::quad::shader: shader_lib {
+            struct Mp {
                 x: float
             }
-            impl Mp{
-                fn myfn(inout self){
+            impl Mp {
+                fn myfn(inout self) {
                 }
             }
             
-            fn vertex()->vec4{
-                return vec4(0.,0.,0.,1.);
+            fn vertex() -> vec4 {
+                return vec4(0., 0., 0., 1.);
             }
-            fn pixel()->vec4{
-                return vec4(1.0,0.0,0.0,1.0);
+            fn pixel() -> vec4 {
+                return vec4(1.0, 0.0, 0.0, 1.0);
             }
         }
         
-        self::shader_bg: shader{
+        self::shader_bg: shader {
+            default_geometry: self::mygeom;
+            geometry mygeom: vec2;
             instance myinst: vec2;
-            use render::quad::shader::*; 
+            use render::quad::shader::*;
             
-            fn pixel()->vec4{
+            fn pixel() -> vec4 {
                 let v: Mp;
                 v.myfn();
                 
                 let x = self::myslider;
                 let y = self::mycolor;
-                return vec4(0.,0.,0.,1.);
+                return vec4(0., 0., 0., 1.);
             }
         }
     "#);
-    
-    // alright now lets generate out our shader.
-    // lets iterate shaders
-    for (_live_id, shader_ast) in &cx.live_styles.base.shaders{
-        let mut out_ast = ShaderAst::new();
-        let mut visited = Vec::new();
-        fn recurse(visited: &mut Vec<LiveId>, in_ast:&ShaderAst, out_ast:&mut ShaderAst, live_styles:&LiveStyles){
-            for use_ident_path in &in_ast.uses{
-                let use_live_id = use_ident_path.to_live_id(&in_ast.module_path);
-                
-                if !visited.contains(&use_live_id){
-                    
-                    visited.push(use_live_id);
-                    if let Some(shader_lib) = live_styles.shader_libs.get(&use_live_id){
-                        
-                        recurse(visited, shader_lib, out_ast, live_styles);
-                    }
-                    else if let Some(shader) = live_styles.base.shaders.get(&use_live_id){
-                        
-                        recurse(visited, shader, out_ast, live_styles);
-                    }
-                    else{ // error somehow
-                        eprintln!("Cannot find library or shader {}", use_ident_path);
-                    }
-                }
-            }
-            if in_ast.debug{out_ast.debug = true};
-            for decl in &in_ast.decls{
-                out_ast.decls.push(decl.clone())
+
+    cx.live_styles.geometries.insert(
+        live_id!(self::mygeom),
+        Geometry{geometry_id:0}
+    );
+
+    let options = ShaderCompileOptions {
+        gather_all: false,
+        create_const_table: false,
+        no_const_collapse: false
+    };
+    cx.live_styles.enumerate_all_shaders( | shader_ast | {
+        match cx.live_styles.collect_and_analyse_shader_ast(&shader_ast, options) {
+            Err(err) => {
+                eprintln!("{}", err);
+                panic!()
+            },
+            Ok(shader_ast) => {
+                eprintln!("HERE!");
             }
         }
-        recurse(&mut visited, shader_ast, &mut out_ast, &cx.live_styles);
-
-        let mut env = Env::new(&cx.live_styles);
-        env.push_scope();
-        let builtins = builtin::generate_builtins();
-
-        for &ident in builtins.keys() {
-            let _ = env.insert_sym(Span::default(), ident.to_ident_path(), Sym::Builtin);
-        }
-        
-        // lets run analyse and glsl gen on it.
-        let gather_all = false;
-        if let Err(err) = (ShaderAnalyser {
-            builtins: &builtins,
-            shader: &out_ast,
-            env: &mut env,
-            gather_all,
-            no_const_collapse: false,
-        }.analyse_shader()) {
-            // error
-            let err = cx.live_styles.live_body_error(err.span.live_body_id, err);
-            println!("{:?}", err);
-        }
-        
-        // lets generate a glsl shader
-        let shader = generate_hlsl::generate_shader(&out_ast, &env, false);
-        //let fragment = generate_glsl::generate_fragment_shader(&out_ast, &env, false);
-        println!("{}",shader);
-    }
+    })
     
-    if let Err(x) = x{
-        println!("{:?}", x);
-    }
 }

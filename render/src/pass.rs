@@ -82,21 +82,19 @@ impl Pass {
         cxpass.clear_color = clear_color;
     }
     
-    pub fn add_color_texture(&mut self, cx: &mut Cx, texture: &mut Texture, clear_color: ClearColor) {
-        texture.set_desc(cx, None);
+    pub fn add_color_texture(&mut self, cx: &mut Cx, texture: Texture, clear_color: ClearColor) {
         let pass_id = self.pass_id.expect("Please call add_color_texture after begin_pass");
         let cxpass = &mut cx.passes[pass_id];
         cxpass.color_textures.push(CxPassColorTexture {
-            texture_id: texture.texture_id.unwrap(),
+            texture_id: texture.texture_id,
             clear_color: clear_color
         })
     }
     
-    pub fn set_depth_texture(&mut self, cx: &mut Cx, texture: &mut Texture, clear_depth: ClearDepth) {
-        texture.set_desc(cx, None);
+    pub fn set_depth_texture(&mut self, cx: &mut Cx, texture: Texture, clear_depth: ClearDepth) {
         let pass_id = self.pass_id.expect("Please call set_depth_texture after begin_pass");
         let cxpass = &mut cx.passes[pass_id];
-        cxpass.depth_texture = texture.texture_id;
+        cxpass.depth_texture = Some(texture.texture_id);
         cxpass.clear_depth = clear_depth;
     }
     
@@ -204,23 +202,6 @@ pub enum CxPassDepOf {
 
 
 impl CxPass {
-    
-    fn camera_projection()->Mat4Id{uid!()}
-    fn camera_view()->Mat4Id{uid!()}
-    fn camera_inv()->Mat4Id{uid!()}
-
-    fn dpi_factor()->FloatId{uid!()}
-    fn dpi_dilate()->FloatId{uid!()}
-    
-    pub fn def_uniforms(sg: ShaderGen) -> ShaderGen {
-        sg.compose(shader!{"
-            uniform camera_projection: Self::camera_projection() in pass;
-            uniform camera_view: Self::camera_view() in pass;
-            uniform camera_inv: Self::camera_inv() in pass;
-            uniform dpi_factor: Self::dpi_factor() in pass;
-            uniform dpi_dilate: Self::dpi_dilate() in pass;
-        "})
-    }
     
     pub fn uniform_camera_projection(&mut self, v: &Mat4) {
         //dump in uniforms

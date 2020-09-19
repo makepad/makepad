@@ -1,7 +1,6 @@
 use crate::cx::*;
 use std::any::TypeId;
 use std::collections::HashMap;
-use makepad_shader_compiler::shadergen::ShaderGenError;
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct KeyModifiers {
@@ -165,7 +164,7 @@ pub struct ShaderRecompileEvent {
 pub enum ShaderCompileResult{
     Ok{id:usize},
     Nop{id:usize},
-    Fail{id:usize, err:ShaderGenError},
+    Fail{id:usize, err:LiveBodyError},
 }
 
 

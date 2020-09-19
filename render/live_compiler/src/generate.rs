@@ -1,6 +1,6 @@
 use {
     crate::{
-        ast::*,
+        shaderast::*,
         env::VarKind,
         ident::Ident,
         ident::IdentPath,
@@ -49,7 +49,7 @@ pub struct BlockGenerator<'a> {
     pub shader: &'a ShaderAst,
     pub decl: &'a FnDecl,
     pub backend_writer: &'a dyn BackendWriter,
-    pub use_const_table: bool,
+    pub create_const_table: bool,
     //pub use_generated_cons_fns: bool,
     pub indent_level: usize,
     pub string: &'a mut String,
@@ -225,7 +225,7 @@ impl<'a> BlockGenerator<'a> {
             shader: self.shader,
             decl: Some(self.decl),
             backend_writer: self.backend_writer,
-            use_const_table: self.use_const_table,
+            create_const_table: self.create_const_table,
             //use_hidden_params: self.use_hidden_params,
             //use_generated_cons_fns: self.use_generated_cons_fns,
             string: self.string,
@@ -249,7 +249,7 @@ pub struct ExprGenerator<'a> {
     pub shader: &'a ShaderAst,
     pub decl: Option<&'a FnDecl>,
     pub backend_writer: &'a dyn BackendWriter,
-    pub use_const_table: bool,
+    pub create_const_table: bool,
     //pub use_hidden_params2: bool,
     //pub use_generated_cons_fns: bool,
     pub string: &'a mut String,
@@ -268,7 +268,7 @@ impl<'a> ExprGenerator<'a> {
             }
         }
         match (expr.const_val.borrow().as_ref(), expr.const_index.get()) {
-            (Some(Some(Val::Vec4(_))), Some(mut index)) if self.use_const_table => {
+            (Some(Some(Val::Vec4(_))), Some(mut index)) if self.create_const_table => {
                 self.write_ty_lit(TyLit::Vec4);
                 write!(self.string, "(").unwrap();
                 let mut sep = "";
@@ -285,7 +285,7 @@ impl<'a> ExprGenerator<'a> {
                 }
                 write!(self.string, ")").unwrap();
             },
-            (Some(Some(Val::Float(_))), Some(index)) if self.use_const_table => {
+            (Some(Some(Val::Float(_))), Some(index)) if self.create_const_table => {
                 write!(self.string, "mpsc_const_table").unwrap();
                 if self.backend_writer.const_table_is_vec4() {
                     const_table_index_to_vec4(self.string, index);
@@ -514,7 +514,7 @@ impl<'a> ExprGenerator<'a> {
             sep = ", ";
         }
         
-        self.backend_writer.write_call_expr_hidden_args(&mut self.string, self.use_const_table, ident_path, &self.shader, &sep);
+        self.backend_writer.write_call_expr_hidden_args(&mut self.string, self.create_const_table, ident_path, &self.shader, &sep);
         
         write!(self.string, ")").unwrap();
     }
