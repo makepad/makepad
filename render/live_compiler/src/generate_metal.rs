@@ -1,10 +1,12 @@
 use {
     crate::{
-        ast::*,
+        shaderast::*,
         env::{VarKind, Env},
         span::Span,
+        analyse::ShaderCompileOptions,
         generate::{BackendWriter, BlockGenerator, ExprGenerator},
         ident::{Ident, IdentPath},
+        livestyles::LiveStyles,
         lit::TyLit,
         ty::Ty,
     },
@@ -15,14 +17,15 @@ use {
     },
 };
 
-pub fn generate_shader(shader: &ShaderAst, env: &Env, use_const_table: bool) -> String {
+pub fn generate_shader(shader: &ShaderAst, live_styles: &LiveStyles, options: ShaderCompileOptions) -> String {
     let mut string = String::new();
+    let env = Env::new(live_styles);
     ShaderGenerator {
         shader,
-        env,
-        use_const_table,
+        env: &env,
+        create_const_table: options.create_const_table,
         string: &mut string,
-        backend_writer: &MetalBackendWriter {env: env}
+        backend_writer: &MetalBackendWriter {env: &env}
     }
     .generate_shader();
     string
@@ -30,7 +33,7 @@ pub fn generate_shader(shader: &ShaderAst, env: &Env, use_const_table: bool) -> 
 
 struct ShaderGenerator<'a, 'b> {
     shader: &'a ShaderAst,
-    use_const_table: bool,
+    create_const_table: bool,
     string: &'a mut String,
     env: &'a Env<'b>,
     backend_writer: &'a dyn BackendWriter
@@ -352,7 +355,7 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
         FnDeclGenerator {
             shader: self.shader,
             decl,
-            use_const_table: self.use_const_table,
+            create_const_table: self.create_const_table,
             visited,
             backend_writer: self.backend_writer,
             string: self.string,
@@ -392,7 +395,7 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
             self.string,
             ", constant mpsc_live_Uniforms &mpsc_live_uniforms [[buffer(6)]]"
         ).unwrap();
-        if self.use_const_table {
+        if self.create_const_table {
             write!(
                 self.string,
                 ", constant const float *mpsc_const_table [[buffer(7)]]"
@@ -414,7 +417,7 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
         self.write_ident(decl.ident_path.get_single().expect("unexpected"));
         write!(self.string, "(").unwrap();
         let mut sep = "";
-        if self.use_const_table {
+        if self.create_const_table {
             write!(self.string, "mpsc_const_table").unwrap();
             sep = ", ";
         }
@@ -487,7 +490,7 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
             self.string,
             ", constant mpsc_live_Uniforms &mpsc_live_uniforms [[buffer(4)]]"
         ).unwrap();
-        if self.use_const_table {
+        if self.create_const_table {
             write!(
                 self.string,
                 ", constant const float *mpsc_const_table [[buffer(5)]]"
@@ -501,7 +504,7 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
         self.write_ident(decl.ident_path.get_single().expect("unexpected"));
         write!(self.string, "(").unwrap();
         let mut sep = "";
-        if self.use_const_table {
+        if self.create_const_table {
             write!(self.string, "mpsc_const_table").unwrap();
             sep = ", ";
         }
@@ -529,7 +532,7 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
             shader: self.shader,
             decl: None,
             backend_writer: self.backend_writer,
-            use_const_table: self.use_const_table,
+            create_const_table: self.create_const_table,
             //use_generated_cons_fns: false,
             string: self.string,
         }
@@ -552,7 +555,7 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
 struct FnDeclGenerator<'a> {
     shader: &'a ShaderAst,
     decl: &'a FnDecl,
-    use_const_table: bool,
+    create_const_table: bool,
     visited: &'a mut HashSet<IdentPath>,
     string: &'a mut String,
     backend_writer: &'a dyn BackendWriter
@@ -568,7 +571,7 @@ impl<'a> FnDeclGenerator<'a> {
                 shader: self.shader,
                 backend_writer: self.backend_writer,
                 decl: self.shader.find_fn_decl(callee).unwrap(),
-                use_const_table: self.use_const_table,
+                create_const_table: self.create_const_table,
                 visited: self.visited,
                 string: self.string,
             }
@@ -592,7 +595,7 @@ impl<'a> FnDeclGenerator<'a> {
             );
             sep = ", ";
         }
-        if self.use_const_table {
+        if self.create_const_table {
             write!(self.string, "{}constant float *mpsc_const_table", sep).unwrap();
             sep = ", ";
         }
@@ -661,7 +664,7 @@ impl<'a> FnDeclGenerator<'a> {
             shader: self.shader,
             decl: self.decl,
             backend_writer: self.backend_writer,
-            use_const_table: self.use_const_table,
+            create_const_table: self.create_const_table,
             // use_generated_cons_fns: false,
             indent_level: 0,
             string: self.string,

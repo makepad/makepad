@@ -1,8 +1,8 @@
 use crate::error::LiveError;
-use crate::ident::{IdentPath};
+use crate::ident::{IdentPath, QualifiedIdentPath};
 use crate::span::{Span,LiveBodyId};
 use crate::ty::Ty;
-use crate::livetypes::LiveStyles;
+use crate::livestyles::LiveStyles;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
@@ -24,7 +24,7 @@ impl<'a> Env<'a> {
         }
         // lets look up ident_path in our live_styles
         // we support color and float lookups, and soon animation lookups too.
-        let live_id = ident_path.to_live_id(&self.live_styles.live_bodies[span.live_body_id.0].module_path);
+        let live_id = ident_path.qualify(&self.live_styles.live_bodies[span.live_body_id.0].module_path).to_live_id();
         if let Some(_) = self.live_styles.base.colors.get(&live_id){
             return Some(Sym::Var{
                 is_mut: false,
@@ -42,7 +42,7 @@ impl<'a> Env<'a> {
         return None
     }
 
-    pub fn qualify_ident_path(&self, live_body_id:LiveBodyId, ident_path:IdentPath)->IdentPath{
+    pub fn qualify_ident_path(&self, live_body_id:LiveBodyId, ident_path:IdentPath)->QualifiedIdentPath{
         ident_path.qualify(&self.live_styles.live_bodies[live_body_id.0].module_path)
     }
 

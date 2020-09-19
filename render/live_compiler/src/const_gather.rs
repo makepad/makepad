@@ -1,4 +1,4 @@
-use crate::ast::*;
+use crate::shaderast::*;
 use crate::env::VarKind;
 use crate::ident::{Ident,IdentPath};
 use crate::lit::{Lit, TyLit};

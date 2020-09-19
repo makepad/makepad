@@ -51,54 +51,37 @@ impl Text {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             text_style: TextStyle::default(),
-            shader: cx.add_shader(Self::def_text_shader(), "TextAtlas"),
+            shader: shader!(cx, self::shader),
             z: 0.0,
             wrapping: Wrapping::Word,
-            color: pick!(white).get(cx),
+            color: Color::parse_name("white").unwrap(),
             font_scale: 1.0,
         }
     }
     
-    fn geom()->Vec2Id{uid!()}
-    pub fn font_tc() -> Vec4Id {uid!()}
-    pub fn color() -> ColorId {uid!()}
-    pub fn x() -> FloatId {uid!()}
-    pub fn y() -> FloatId {uid!()}
-    pub fn w() -> FloatId {uid!()}
-    pub fn h() -> FloatId {uid!()}
-    pub fn z() -> FloatId {uid!()}
-    pub fn base_x() -> FloatId {uid!()}
-    pub fn base_y() -> FloatId {uid!()}
-    pub fn font_size() -> FloatId {uid!()}
-    pub fn marker() -> FloatId {uid!()}
-    pub fn char_offset() -> FloatId {uid!()}
-    
-    pub fn brightness() -> FloatId {uid!()}
-    pub fn curve() -> FloatId {uid!()}
-    
-    pub fn texturez() -> Texture2dId {uid!()}
-    
-    pub fn def_text_shader() -> ShaderGen {
-        // lets add the draw shader lib
-        let mut sg = Cx::shader_defs(ShaderGen::new());
+    pub fn style(cx: &mut Cx) {
+        
+        live!(cx, r#"self::shader: shader {
 
-        sg.geometry.add_quad_2d();
-        sg.compose(shader!{" 
-            geometry geom: Self::geom();
-            texture texturez: Self::texturez();
+            use crate::std::prelude::*;
             
-            instance font_tc: Self::font_tc();
-            instance color: Self::color();
-            instance x: Self::x();
-            instance y: Self::y();
-            instance w: Self::w();
-            instance h: Self::h();
-            instance z: Self::z();
-            instance base_x: Self::base_x();
-            instance base_y: Self::base_y();
-            instance font_size: Self::font_size();
-            instance char_offset: Self::char_offset();
-            instance marker: Self::marker();
+            default_geometry: crate::std::quad_2d;
+            geometry geom: vec2;
+
+            texture texturez: texture2d;
+            
+            instance font_tc: vec4;
+            instance color: vec4;
+            instance x: float;
+            instance y: float;
+            instance w: float;
+            instance h: float;
+            instance z: float;
+            instance base_x: float;
+            instance base_y: float;
+            instance font_size: float;
+            instance char_offset: float;
+            instance marker: float;
             
             varying tex_coord1: vec2;
             varying tex_coord2: vec2;
@@ -106,8 +89,8 @@ impl Text {
             varying clipped: vec2;
             //let rect: vec4<Varying>;
             
-            uniform brightness: Self::brightness();
-            uniform curve: Self::curve();
+            uniform brightness: float;
+            uniform curve: float;
             
             fn get_color() -> vec4 {
                 return color;
@@ -179,12 +162,12 @@ impl Text {
                 
                 return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + draw_zbias, 1.)));
             }
-        "})
+        }"#);
     }
     
     pub fn begin_text(&mut self, cx: &mut Cx) -> AlignedInstance {
         //let font_id = self.font.font_id.unwrap();
-        let inst = cx.new_instance(&self.shader, 0);
+        let inst = cx.new_instance(self.shader, None, 0);
         let aligned = cx.align_instance(inst);
         let text_style = &self.text_style;
         let brightness = text_style.brightness;
@@ -415,11 +398,11 @@ impl Text {
     pub fn find_closest_offset(&self, cx: &Cx, area: &Area, pos: Vec2) -> usize {
         let scroll_pos = area.get_scroll_pos(cx);
         let spos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
-        let x_o = area.get_instance_offset(cx, Self::base_x().into()).unwrap();
-        let y_o = area.get_instance_offset(cx, Self::base_y().into()).unwrap();
-        let w_o = area.get_instance_offset(cx, Self::w().into()).unwrap();
-        let font_size_o = area.get_instance_offset(cx, Self::font_size().into()).unwrap();
-        let char_offset_o = area.get_instance_offset(cx, Self::char_offset().into()).unwrap();
+        let x_o = area.get_instance_offset(cx, live_id!(self::shader::base_x), Ty::Float).unwrap();
+        let y_o = area.get_instance_offset(cx, live_id!(self::shader::base_y), Ty::Float).unwrap();
+        let w_o = area.get_instance_offset(cx, live_id!(self::shader::w), Ty::Float).unwrap();
+        let font_size_o = area.get_instance_offset(cx, live_id!(self::shader::font_size), Ty::Float).unwrap();
+        let char_offset_o = area.get_instance_offset(cx, live_id!(self::shader::char_offset), Ty::Float).unwrap();
         let read = area.get_read_ref(cx);
         let text_style = &self.text_style;
         let line_spacing = text_style.line_spacing;

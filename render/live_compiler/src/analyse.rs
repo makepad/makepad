@@ -1,4 +1,4 @@
-use crate::ast::*;
+use crate::shaderast::*;
 use crate::builtin::{Builtin};
 use crate::const_eval::ConstEvaluator;
 use crate::const_gather::ConstGatherer;
@@ -41,13 +41,19 @@ pub fn analyse(shader: &ShaderAst, base_props:&[PropDef], sub_props: &[&PropDef]
     .analyse_shader()
 }*/
 
+#[derive(Debug, Clone, Copy)]
+pub struct ShaderCompileOptions{
+    pub gather_all: bool,
+    pub create_const_table: bool,
+    pub no_const_collapse: bool
+}
+
 #[derive(Debug)]
 pub struct ShaderAnalyser<'a,'b> {
     pub builtins: &'a HashMap<Ident, Builtin>,
     pub shader: &'a ShaderAst,
     pub env: &'a mut Env<'b>,
-    pub gather_all: bool,
-    pub no_const_collapse: bool
+    pub options: ShaderCompileOptions,
 }
 
 impl<'a,'b> ShaderAnalyser<'a,'b> {
@@ -62,14 +68,14 @@ impl<'a,'b> ShaderAnalyser<'a,'b> {
     fn const_evaluator(&self) -> ConstEvaluator {
         ConstEvaluator {
             shader: self.shader,
-            no_const_collapse: self.no_const_collapse
+            no_const_collapse: self.options.no_const_collapse
         }
     }
     
     fn const_gatherer(&self) -> ConstGatherer {
         ConstGatherer {
             shader: self.shader,
-            gather_all: self.gather_all,
+            gather_all: self.options.gather_all,
         }
     }
     
@@ -78,6 +84,9 @@ impl<'a,'b> ShaderAnalyser<'a,'b> {
         *self.shader.const_table_spans.borrow_mut() = Some(Vec::new());
         *self.shader.livestyle_uniform_deps.borrow_mut() = Some(BTreeSet::new());
         self.env.push_scope();
+        for &ident in self.builtins.keys() {
+            let _ = self.env.insert_sym(Span::default(), ident.to_ident_path(), Sym::Builtin);
+        }
         for decl in &self.shader.decls {
             self.analyse_decl(decl) ?;
         }
@@ -89,9 +98,8 @@ impl<'a,'b> ShaderAnalyser<'a,'b> {
                         shader: self.shader,
                         decl,
                         env: &mut self.env,
-                        gather_all: self.gather_all,
+                        options: self.options,
                         is_inside_loop: false,
-                        no_const_collapse: self.no_const_collapse
                     }
                     .analyse_fn_def() ?;
                 }
@@ -469,9 +477,8 @@ struct FnDefAnalyser<'a,'b> {
     shader: &'a ShaderAst,
     decl: &'a FnDecl,
     env: &'a mut Env<'b>,
-    gather_all: bool,
+    options: ShaderCompileOptions,
     is_inside_loop: bool,
-    no_const_collapse: bool
 }
 
 impl<'a,'b> FnDefAnalyser<'a,'b> {
@@ -486,14 +493,14 @@ impl<'a,'b> FnDefAnalyser<'a,'b> {
     fn const_evaluator(&self) -> ConstEvaluator {
         ConstEvaluator {
             shader: self.shader,
-            no_const_collapse: self.no_const_collapse
+            no_const_collapse: self.options.no_const_collapse
         }
     }
     
     fn const_gatherer(&self) -> ConstGatherer {
         ConstGatherer {
             shader: self.shader,
-            gather_all: self.gather_all,
+            gather_all: self.options.gather_all,
         }
     }
     

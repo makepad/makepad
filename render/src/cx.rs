@@ -1,29 +1,11 @@
 use std::collections::HashMap;
-use std::cell::RefCell;
 use std::fmt::Write;
 
-pub use makepad_shader_compiler::shadergen::*;
-pub use makepad_shader_compiler::colors::*;
-pub use makepad_shader_compiler::util::*;
-pub use makepad_shader_compiler::math::*;
-pub use makepad_shader_compiler::uid;
-pub use makepad_live_macros::*;
-pub use makepad_live_compiler::livetypes::{
-    Width,
-    Height,
-    LineWrap,
-    Layout,
-    Walk,
-    LiveStyles,
-    Direction,
-    Rect,
-    Padding,
-    Margin,
-    Axis,
-    Align,
-};
-#[derive(Clone, Copy, Default)]
-pub struct Font{pub font_id:Option<usize>}
+pub use makepad_live_compiler::livetypes::*;
+pub use makepad_live_compiler::livestyles::*;
+pub use makepad_live_compiler::math::*;
+pub use makepad_live_compiler::colors::*;
+pub use makepad_live_compiler::ty::Ty;
 
 pub use crate::fonts::*;
 pub use crate::turtle::*;
@@ -31,17 +13,18 @@ pub use crate::cursor::*;
 pub use crate::window::*;
 pub use crate::view::*;
 pub use crate::pass::*;
+pub use crate::geometry::*;
 pub use crate::texture::*;
 pub use crate::text::*;
 pub use crate::live::*;
-
 pub use crate::events::*;
-//pub use crate::elements::*;
 pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::menu::*;
-pub use crate::styling::*;
 pub use crate::shader::*;
+pub use crate::live::*;
+pub use crate::geometrygen::*;
+pub use crate::uid;
 
 #[cfg(all(not(feature = "ipc"), target_os = "linux"))]
 pub use crate::cx_linux::*;
@@ -113,16 +96,14 @@ pub struct Cx {
     pub fonts_atlas: CxFontsAtlas,
     pub textures: Vec<CxTexture>,
     pub textures_free: Vec<usize>,
+    
+    pub geometries: Vec<CxGeometry>,
+
     pub shaders: Vec<CxShader>,
-    pub shader_recompiles: Vec<usize>,
-    pub shader_map: HashMap<ShaderGen, usize>,
-    pub shader_instance_id: usize,
-    pub shader_inherit_cache: ShaderInheritCache,
+    //pub shader_recompiles: Vec<Shader>,
+
     pub live_macros_on_self: bool,
-    
-    pub str_to_id: RefCell<HashMap<String, usize >>,
-    pub id_to_str: RefCell<HashMap<usize, String >>,
-    
+
     pub is_in_redraw_cycle: bool,
     pub default_dpi_factor: f32,
     pub current_dpi_factor: f32,
@@ -142,7 +123,7 @@ pub struct Cx {
     pub event_id: u64,
     pub timer_id: u64,
     pub signal_id: usize,
-    pub theme_update_id: usize,
+    pub live_update_id: u64,
     
     pub prev_key_focus: Area,
     pub next_key_focus: Area,
@@ -163,53 +144,21 @@ pub struct Cx {
     
     pub signals: HashMap<Signal, Vec<StatusId >>,
     
-    pub style_base: CxStyle,
-    pub styles: Vec<CxStyle>,
-    pub style_map: HashMap<StyleId, usize>,
-    pub style_stack: Vec<usize>,
-    
     pub live_styles: LiveStyles,
     
     pub command_settings: HashMap<CommandId, CxCommandSetting>,
     
     pub panic_now: bool,
     pub panic_redraw: bool,
-    
-    pub live_macros: HashMap<CxLiveLoc, CxLiveMacro>,
-    //pub live_client: Option<LiveClient>,
-    
+
     pub platform: CxPlatform,
 }
-
-#[derive(Clone, Default, Hash, PartialEq)]
-pub struct CxLiveLoc {
-    file: String,
-    line: usize,
-    column: usize,
-}
-
-#[derive(Clone, Default)]
-pub struct CxLiveMacro {
-    code: String
-}
-
 
 #[derive(Clone, Copy, Default)]
 pub struct CxCommandSetting {
     pub shift: bool,
     pub key_code: KeyCode,
     pub enabled: bool
-}
-
-#[derive(Default)]
-pub struct CxStyle {
-    pub floats: HashMap<FloatId, f32>,
-    pub colors: HashMap<ColorId, Color>,
-    pub text_styles: HashMap<TextStyleId, TextStyle>,
-    pub layouts: HashMap<LayoutId, Layout>,
-    pub walks: HashMap<WalkId, Walk>,
-    pub anims: HashMap<AnimId, Anim>,
-    pub shaders: HashMap<ShaderId, Shader>,
 }
 
 #[derive(Default, Clone)]
@@ -246,9 +195,7 @@ impl Default for Cx {
             counter: 0,
             platform_type: PlatformType::Windows,
             running: true,
-            
-            //live_client: LiveClient::connect_to_live_server(None),
-            
+
             windows: Vec::new(),
             windows_free: Vec::new(),
             passes: Vec::new(),
@@ -260,14 +207,11 @@ impl Default for Cx {
             textures: textures,
             textures_free: Vec::new(),
             shaders: Vec::new(),
-            shader_recompiles: Vec::new(),
-            shader_map: HashMap::new(),
-            shader_inherit_cache: ShaderInheritCache::new(),
+            //shader_recompiles: Vec::new(),
+
+            geometries: Vec::new(),
             
             live_macros_on_self: true,
-            
-            id_to_str: RefCell::new(HashMap::new()),
-            str_to_id: RefCell::new(HashMap::new()),
             
             default_dpi_factor: 1.0,
             current_dpi_factor: 1.0,
@@ -288,8 +232,7 @@ impl Default for Cx {
             repaint_id: 1,
             timer_id: 1,
             signal_id: 1,
-            shader_instance_id: 1,
-            theme_update_id: 1,
+            live_update_id: 1,
             
             next_key_focus: Area::Empty,
             prev_key_focus: Area::Empty,
@@ -302,12 +245,7 @@ impl Default for Cx {
             hover_mouse_cursor: None,
             fingers: fingers,
             
-            style_base: CxStyle::default(),
-            styles: Vec::new(),
-            style_map: HashMap::new(),
-            style_stack: Vec::new(),
-            
-            live_styles: LiveStyles::default(),
+            live_styles: LiveStyles::new(),
             
             command_settings: HashMap::new(),
             
@@ -323,39 +261,13 @@ impl Default for Cx {
             panic_redraw: false,
             
             platform: CxPlatform {..Default::default()},
-            
-            live_macros: HashMap::new(),
+
         }
     }
 }
 
 
 impl Cx {
-    
-    pub fn shader_defs(sg: ShaderGen) -> ShaderGen {
-        let sg = CxShader::def_df(sg);
-        let sg = CxPass::def_uniforms(sg);
-        let sg = CxView::def_uniforms(sg);
-        sg
-    }
-    
-    pub fn add_shader(&mut self, sg: ShaderGen, name: &str) -> Shader {
-        let inst_id = self.shader_instance_id;
-        self.shader_instance_id += 1;
-        if let Some(stored_id) = self.shader_map.get(&sg) {
-            return Shader {shader_id: Some((*stored_id, inst_id))}
-        }
-        
-        let new_id = self.shaders.len();
-        self.shader_map.insert(sg.clone(), new_id);
-        self.shaders.push(CxShader {
-            name: name.to_string(),
-            shader_gen: sg,
-            platform: None,
-            mapping: CxShaderMapping::default()
-        });
-        Shader {shader_id: Some((new_id, inst_id))}
-    }
     
     pub fn process_tap_count(&mut self, digit: usize, pos: Vec2, time: f64) -> u32 {
         if digit >= self.fingers.len() {
@@ -754,7 +666,7 @@ impl Cx {
         self.redraw_parent_areas.truncate(0);
         self.call_event_handler(&mut event_handler, &mut Event::Draw);
         self.is_in_redraw_cycle = false;
-        if self.style_stack.len()>0 {
+        if self.live_styles.style_stack.len()>0 {
             panic!("Style stack disaligned, forgot a cx.end_style()");
         }
         if self.view_stack.len()>0 {
@@ -848,34 +760,7 @@ impl Cx {
     
     pub fn status_http_send_ok() -> StatusId {uid!()}
     pub fn status_http_send_fail() -> StatusId {uid!()}
-    
-    pub fn recompile_shader_sub(&mut self, file: &str, line: usize, col: usize, code: String) {
-        if !self.live_macros_on_self {
-            return
-        }
-        
-        for (shader_index, shader) in self.shaders.iter_mut().enumerate() {
-            // ok so lets enumerate our subs
-            for sub in &mut shader.shader_gen.subs {
-                //println!("{} {}", file, sub.loc.path);
-                //i file == sub.loc.path{
-                // }
-                
-                if file == sub.loc.path && line == sub.loc.line && col == sub.loc.column {
-                    if code != sub.code {
-                        sub.code = code.clone();
-                        // we need to recompile some shader..
-                        if !self.shader_recompiles.contains(&shader_index) {
-                            self.shader_recompiles.push(
-                                shader_index
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
+
     
     pub fn debug_draw_tree_recur(&mut self, dump_instances: bool, s: &mut String, view_id: usize, depth: usize) {
         if view_id >= self.views.len() {
