@@ -5,7 +5,8 @@ use crate::span::{Span,LiveBodyId};
 use crate::lit::{Lit};
 use crate::colors::Color;
 use crate::math::*;
-use crate::livetypes::{LiveId, Play, Anim, Ease, Track, FloatTrack, Vec2Track, Vec3Track, Vec4Track, ColorTrack};
+use crate::livestyles::LiveStyles;
+use crate::livetypes::{Font, LiveId, Play, Anim, Ease, Track};
 
 pub trait DeTokParser {
     fn ident_path_to_live_id(&self, ident_path: &IdentPath) -> LiveId;
@@ -18,6 +19,9 @@ pub trait DeTokParser {
     fn parse_ident_path(&mut self) -> Result<IdentPath, LiveError>;
     fn accept_token(&mut self, token: Token) -> bool;
     fn expect_token(&mut self, expected: Token) -> Result<(), LiveError>;
+    fn accept_ident(&mut self, ident_str:&str) -> bool;
+    fn expect_ident(&mut self, ident_str:&str) -> Result<(), LiveError>;
+    fn get_live_styles(&mut self)->&mut LiveStyles;
     fn error_not_splattable(&mut self, what: &str) -> LiveError;
     fn error_missing_prop(&mut self, what: &str) -> LiveError;
     fn error_enum(&mut self, ident:Ident, what: &str) -> LiveError;
@@ -86,6 +90,14 @@ macro_rules!impl_de_tok_for_float {
                             _ => ()
                         }
                     },
+                    Token::Ident(_)=>{ // try to parse ident path, and read from styles
+                        let ident_path = p.parse_ident_path()?;
+                        let live_id = p.ident_path_to_live_id(&ident_path);
+                        if let Some(float) = p.get_live_styles().base.floats.get(&live_id){
+                            return Ok(*float as $ty);
+                        }
+                        return Err(p.error(format!("Float {} not found", ident_path)));
+                    },
                     _ => ()
                 }
                 Err(p.error(format!("Expected float literal")))
@@ -151,20 +163,6 @@ impl DeTok for bool {
         Err(p.error(format!("Expected integer literal")))
     }
 }
-
-impl DeTok for Ident {
-    fn de_tok(p: &mut dyn DeTokParser) -> Result<Ident, LiveError> {
-        match p.peek_token() {
-            Token::String(ident) => {
-                p.skip_token();
-                return Ok(ident)
-            },
-            _ => ()
-        }
-        Err(p.error(format!("Expected integer literal")))
-    }
-}
-
 
 impl<T> DeTok for Option<T> where T: DeTok {
     fn de_tok(p: &mut dyn DeTokParser) -> Result<Option<T>, LiveError> {
@@ -232,6 +230,14 @@ impl DeTok for Color {
                 p.skip_token();
                 return Ok(c);
             },
+            Token::Ident(_)=>{ // try to parse ident path, and read from styles
+                let ident_path = p.parse_ident_path()?;
+                let live_id = p.ident_path_to_live_id(&ident_path);
+                if let Some(color) = p.get_live_styles().base.colors.get(&live_id){
+                    return Ok(*color);
+                }
+                return Err(p.error(format!("Color {} not found", ident_path)));
+            },
             token => {
                 return Err(p.error(format!("Expected color {}", token)));
             }
@@ -239,23 +245,37 @@ impl DeTok for Color {
     }
 }
 
+impl DeTok for Font {
+    fn de_tok(p: &mut dyn DeTokParser) -> Result<Font, LiveError> {
+        // simply parse a string
+        match p.peek_token() {
+            Token::String(ident) => {
+                p.skip_token();
+                return Ok(p.get_live_styles().get_or_insert_font_by_ident(ident))
+            }
+            _ => ()
+        }
+        Err(p.error(format!("Expected integer literal")))
+    }
+}
+
 
 fn parse_track_rhs(p: &mut dyn DeTokParser, time: f64, track: &mut Track) -> Result<(), LiveError> {
     match track {
-        Track::Float(t) => {
-            t.track.push((time, f32::de_tok(p) ?));
+        Track::Float{keys, ..} => {
+            keys.push((time, f32::de_tok(p) ?));
         },
-        Track::Vec2(t) => {
-            t.track.push((time, Vec2::de_tok(p) ?));
+        Track::Vec2{keys, ..} => {
+            keys.push((time, Vec2::de_tok(p) ?));
         }
-        Track::Vec3(t) => {
-            t.track.push((time, Vec3::de_tok(p) ?));
+        Track::Vec3{keys, ..} => {
+            keys.push((time, Vec3::de_tok(p) ?));
         }
-        Track::Vec4(t) => {
-            t.track.push((time, Vec4::de_tok(p) ?));
+        Track::Vec4{keys, ..} => {
+            keys.push((time, Vec4::de_tok(p) ?));
         }
-        Track::Color(t) => {
-            t.track.push((time, Color::de_tok(p) ?));
+        Track::Color{keys, ..} => {
+            keys.push((time, Color::de_tok(p) ?));
         }
     }
     Ok(())
@@ -272,20 +292,43 @@ fn parse_track(p: &mut dyn DeTokParser, track: &mut Track) -> Result<(), LiveErr
                     p.expect_token(Token::Colon) ?;
                     track.set_ease(Ease::de_tok(p) ?);
                 }
+                if ident == Ident::new("live_id") {
+                    p.skip_token();
+                    p.expect_token(Token::Colon) ?;
+                    let ident_path = p.parse_ident_path() ?;
+                    track.set_live_id(p.ident_path_to_live_id(&ident_path));
+                }
+                if ident == Ident::new("keys") {
+                    p.skip_token();
+                    p.expect_token(Token::Colon) ?;
+                    p.expect_token(Token::LeftBrace) ?;
+                    loop {
+                        let span = p.begin_span();
+                        match p.peek_token() {
+                             Token::Lit(Lit::Int(i)) => { // integer time
+                                p.skip_token();
+                                p.expect_token(Token::Colon) ?;
+                                // now lets parse the RHS
+                                parse_track_rhs(p, i as f64, track) ?;
+                            },
+                            Token::Lit(Lit::Float(f)) => { // float time
+                                p.skip_token();
+                                p.expect_token(Token::Colon) ?;
+                                parse_track_rhs(p, f as f64, track) ?;
+                            },
+                            Token::RightBrace => {
+                                p.skip_token();
+                                break;
+                            },
+                            token => {
+                                return Err(span.error(p, format!("Unexpected token in track {}", token)));
+                            }
+                        }
+                    }
+                }
                 else {
                     return Err(span.error(p, format!("Invalid key for track {}", ident)));
                 }
-            },
-            Token::Lit(Lit::Int(i)) => { // integer time
-                p.skip_token();
-                p.expect_token(Token::Colon) ?;
-                // now lets parse the RHS
-                parse_track_rhs(p, i as f64, track) ?;
-            },
-            Token::Lit(Lit::Float(f)) => { // float time
-                p.skip_token();
-                p.expect_token(Token::Colon) ?;
-                parse_track_rhs(p, f as f64, track) ?;
             },
             Token::RightBrace => {
                 p.skip_token();
@@ -309,90 +352,95 @@ impl DeTok for Anim {
             
             if p.accept_token(Token::RightBrace) {
                 return Ok(Anim {
-                    mode: play,
+                    play: play,
                     tracks: tracks
                 })
             }
             
-            let span = p.begin_span();
-            let ident_path = p.parse_ident_path() ?;
-            if let Some(ident) = ident_path.get_single() {
-                if ident == Ident::new("play") {
-                    p.expect_token(Token::Colon) ?;
-                    play = Play::de_tok(p) ?;
-                }
-                else {
-                    return Err(span.error(p, format!("Invalid key for anim {}", ident)));
-                }
-            }
-            else { // its a trakc
+            let ident = p.parse_ident() ?;
+        
+            if ident == Ident::new("play") {
                 p.expect_token(Token::Colon) ?;
-                match p.peek_token() {
-                    Token::Ident(ident) => {
-                        if ident == Ident::new("float_track") {
-                            p.skip_token();
-                            let mut track = Track::Float(FloatTrack {
-                                ident: p.ident_path_to_live_id(&ident_path),
-                                ease: Ease::Lin,
-                                cut_init: None,
-                                track: Vec::new()
-                            });
-                            parse_track(p, &mut track) ?;
-                            tracks.push(track);
-                        }
-                        else if ident == Ident::new("vec2_track") {
-                            p.skip_token();
-                            let mut track = Track::Vec2(Vec2Track {
-                                ident: p.ident_path_to_live_id(&ident_path),
-                                ease: Ease::Lin,
-                                cut_init: None,
-                                track: Vec::new()
-                            });
-                            parse_track(p, &mut track) ?;
-                            tracks.push(track);
-                        }
-                        else if ident == Ident::new("vec3_track") {
-                            p.skip_token();
-                            let mut track = Track::Vec3(Vec3Track {
-                                ident: p.ident_path_to_live_id(&ident_path),
-                                ease: Ease::Lin,
-                                cut_init: None,
-                                track: Vec::new()
-                            });
-                            parse_track(p, &mut track) ?;
-                            tracks.push(track);
-                        }
-                        else if ident == Ident::new("vec4_track") {
-                            p.skip_token();
-                            let mut track = Track::Vec4(Vec4Track {
-                                ident: p.ident_path_to_live_id(&ident_path),
-                                ease: Ease::Lin,
-                                cut_init: None,
-                                track: Vec::new()
-                            });
-                            parse_track(p, &mut track) ?;
-                            tracks.push(track);
-                        }
-                        else if ident == Ident::new("color_track") {
-                            p.skip_token();
-                            let mut track = Track::Color(ColorTrack {
-                                ident: p.ident_path_to_live_id(&ident_path),
-                                ease: Ease::Lin,
-                                cut_init: None,
-                                track: Vec::new()
-                            });
-                            parse_track(p, &mut track) ?;
-                            tracks.push(track);
-                        }
-                        else {
-                            return Err(span.error(p, format!("Expected float,vec2,vec3,vec4,color got {}", ident)));
-                        }
-                    },
-                    token => {
-                        return Err(span.error(p, format!("Unexpected token {}", token)));
+                play = Play::de_tok(p) ?;
+            }
+            else if ident == Ident::new("tracks"){
+                p.skip_token();
+                p.expect_token(Token::Colon) ?;
+                p.expect_token(Token::LeftBracket) ?;
+                loop {
+                    if p.accept_token(Token::RightBracket){
+                        break;
                     }
+                    if p.accept_token(Token::Ident(Ident::new("Track"))){
+                        p.expect_token(Token::PathSep)?;
+                    }
+                    
+                    let span = p.begin_span();
+                    let ident = p.parse_ident()?;
+                    
+                    if ident == Ident::new("Float") {
+                        p.skip_token();
+                        let mut track = Track::Float{
+                            live_id: LiveId(tracks.len() as u64),
+                            ease: Ease::Lin,
+                            cut_init: None,
+                            keys: Vec::new()
+                        };
+                        parse_track(p, &mut track) ?;
+                        tracks.push(track);
+                    }
+                    else if ident == Ident::new("Vec2") {
+                        p.skip_token();
+                        let mut track = Track::Vec2{
+                            live_id: LiveId(tracks.len() as u64),
+                            ease: Ease::Lin,
+                            cut_init: None,
+                            keys: Vec::new()
+                        };
+                        parse_track(p, &mut track) ?;
+                        tracks.push(track);
+                    }
+                    else if ident == Ident::new("Vec3") {
+                        p.skip_token();
+                        let mut track = Track::Vec3{
+                            live_id: LiveId(tracks.len() as u64),
+                            ease: Ease::Lin,
+                            cut_init: None,
+                            keys: Vec::new()
+                        };
+                        parse_track(p, &mut track) ?;
+                        tracks.push(track);
+                    }
+                    else if ident == Ident::new("Vec4") {
+                        p.skip_token();
+                        let mut track = Track::Vec4{
+                            live_id: LiveId(tracks.len() as u64),
+                            ease: Ease::Lin,
+                            cut_init: None,
+                            keys: Vec::new()
+                        };
+                        parse_track(p, &mut track) ?;
+                        tracks.push(track);
+                    }
+                    else if ident == Ident::new("Color") {
+                        p.skip_token();
+                        let mut track = Track::Color{
+                            live_id: LiveId(tracks.len() as u64),
+                            ease: Ease::Lin,
+                            cut_init: None,
+                            keys: Vec::new()
+                        };
+                        parse_track(p, &mut track) ?;
+                        tracks.push(track);
+                    }
+                    else{
+                        return Err(span.error(p, format!("Unexpected track type {}", ident)));
+                    }
+                    
+                    p.accept_token(Token::Comma);
                 }
             }
+            
             p.accept_token(Token::Comma);
             
         }

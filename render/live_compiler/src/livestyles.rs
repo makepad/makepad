@@ -40,6 +40,7 @@ pub struct LiveStyles {
     pub style_list: Vec<LiveStyle>,
     pub styles: HashMap<LiveId, usize>,
     pub style_stack: Vec<usize>,
+    pub font_index: HashMap<Ident, Font>
 }
 
 #[derive(Clone, Debug, Default)]
@@ -135,7 +136,55 @@ impl LiveStyles {
         }
         *self.base.floats.get(&live_id).expect(&format!("Float not found {}", name))
     }
+
+    pub fn get_text_style(&self, live_id: LiveId, name: &str) -> TextStyle {
+        for style_index in &self.style_stack {
+            if let Some(text_style) = self.style_list[*style_index].text_styles.get(&live_id) {
+                return *text_style
+            }
+        }
+        *self.base.text_styles.get(&live_id).expect(&format!("TextStyle not found {}", name))
+    }
+
+    pub fn get_walk(&self, live_id: LiveId, name: &str) -> Walk {
+        for style_index in &self.style_stack {
+            if let Some(walk) = self.style_list[*style_index].walks.get(&live_id) {
+                return *walk
+            }
+        }
+        *self.base.walks.get(&live_id).expect(&format!("Walk not found {}", name))
+    }
+
+    pub fn get_anim(&self, live_id: LiveId, name: &str) -> Anim {
+        for style_index in &self.style_stack {
+            if let Some(anim) = self.style_list[*style_index].anims.get(&live_id) {
+                return anim.clone()
+            }
+        }
+        self.base.anims.get(&live_id).expect(&format!("Anim not found {}", name)).clone()
+    }
     
+    pub fn get_layout(&self, live_id: LiveId, name: &str) -> Layout {
+        for style_index in &self.style_stack {
+            if let Some(layout) = self.style_list[*style_index].layouts.get(&live_id) {
+                return *layout
+            }
+        }
+        *self.base.layouts.get(&live_id).expect(&format!("Anim not found {}", name))
+    }
+    
+    pub fn get_or_insert_font_by_ident(&mut self, ident:Ident)->Font{
+         if let Some(font) = self.font_index.get(&ident){
+            return *font
+        }
+        else{
+            let id = self.font_index.len();
+            let font =  Font{font_id:id};
+            self.font_index.insert(ident, font);
+            return font
+        }
+    }
+
     pub fn live_body_error(&self, err: LiveError) -> LiveBodyError {
         let live_body = &self.live_bodies[err.span.live_body_id.0];
         fn byte_to_row_col(byte: usize, source: &str) -> (usize, usize) {

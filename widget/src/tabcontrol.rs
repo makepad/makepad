@@ -56,7 +56,7 @@ impl TabControl {
                 ..View::new(cx)
             },
             hover: Quad {
-                color: pick!(purple).get(cx),
+                color: Color::parse_name("purple").unwrap(),
                 ..Quad::new(cx)
             },
             //tab_fill_color: Color_bg_normal::id(),

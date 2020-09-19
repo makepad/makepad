@@ -2,12 +2,12 @@ use makepad_render::*;
 use crate::buttonlogic::*;
 use crate::desktopbutton::*;
 use crate::windowmenu::*;
-use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct DesktopWindow {
     pub window: Window,
     pub pass: Pass,
+    pub clear_color: Color,
     pub color_texture: Texture,
     pub depth_texture: Texture,
     pub caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
@@ -46,8 +46,9 @@ impl DesktopWindow {
         Self {
             window: Window::new(cx),
             pass: Pass::default(),
-            color_texture: Texture::default(),
-            depth_texture: Texture::default(),
+            clear_color: Color::parse_hex_str("1e").unwrap(),
+            color_texture: Texture::new(cx),
+            depth_texture: Texture::new(cx),
             main_view: View::new(cx),
             caption_view: View::new(cx),
             inner_view: View::new(cx),
@@ -76,7 +77,8 @@ impl DesktopWindow {
     
     pub fn text_style_window_caption() ->TextStyleId{uid!()}
     
-    pub fn style(cx:&mut Cx, _opt:&StyleOptions){
+    pub fn style(cx:&mut Cx){
+        
         Self::text_style_window_caption().set(cx, Theme::text_style_unscaled().get(cx));
     }
     
@@ -169,8 +171,8 @@ impl DesktopWindow {
         
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
-        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(pick!(30, 30, 30).get(cx)));
-        self.pass.set_depth_texture(cx, &mut self.depth_texture, ClearDepth::ClearWith(1.0));
+        self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(self.clear_color));
+        self.pass.set_depth_texture(cx, self.depth_texture, ClearDepth::ClearWith(1.0));
         
         let _ = self.main_view.begin_view(cx, Layout::default());
         
