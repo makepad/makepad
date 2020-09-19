@@ -1,110 +1,69 @@
-use std::collections::{HashMap};
 use crate::colors::Color;
 use makepad_microserde::*;
+use makepad_detok_derive::*;
 use crate::math::*;
 use std::f64::consts::PI;
-use crate::ast::ShaderAst;
-use crate::error::LiveError;
 use crate::detok::*;
 use crate::token::Token;
-use crate::span::LiveBodyId;
 use crate::ident::{Ident};
-use crate::lex;
-use crate::parse;
+use crate::error::LiveError;
 
-#[derive(Clone, Hash, PartialEq, Eq, Debug)]
-pub struct LiveBody {
-    pub file: String,
-    pub module_path: String,
-    pub line: usize,
-    pub column: usize,
-    pub code: String
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct Shader{
+    pub shader_id: usize,
+    pub location_hash: u64
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct LiveBodyError {
-    pub file: String,
-    pub line: usize,
-    pub col: usize,
-    pub len: usize,
-    pub msg: String,
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct Geometry{
+    pub geometry_id: usize,
 }
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct Texture{
+    pub texture_id: usize,
+}
+
+#[derive(Clone, PartialEq)]
+pub enum TextureFormat {
+    Default,
+    ImageBGRA,
+    Depth32Stencil8,
+    RenderBGRA,
+    RenderBGRAf16,
+    RenderBGRAf32,
+    //    ImageBGRAf32,
+    //    ImageRf32,
+    //    ImageRGf32,
+    //    MappedBGRA,
+    //    MappedBGRAf32,
+    //    MappedRf32,
+    //    MappedRGf32,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct TextureDesc {
+    pub format: TextureFormat,
+    pub width: Option<usize>,
+    pub height: Option<usize>,
+    pub multisample: Option<usize>
+}
+
+impl Default for TextureDesc {
+    fn default() -> Self {
+        TextureDesc {
+            format: TextureFormat::Default,
+            width: None,
+            height: None,
+            multisample: None
+        }
+    }
+}
+
 
 #[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
 pub struct LiveId(pub u64);
 
-#[derive(Clone, Default, Debug)]
-pub struct LiveStyles {
-    pub live_bodies: Vec<LiveBody>,
-    pub shader_libs: HashMap<LiveId, ShaderAst>,
-    pub base: LiveStyle,
-    pub styles:HashMap<LiveId, LiveStyle>
-}
-
-impl LiveStyles{
-    pub fn get_style(&mut self, live_id:&Option<LiveId>)->&mut LiveStyle{
-        if let Some(live_id) = live_id{
-            return self.styles.entry(*live_id).or_insert_with(|| LiveStyle::default())
-        }
-        else{
-            return &mut self.base
-        }
-    }
-    
-    pub fn live_body_error(&self, live_body_id:LiveBodyId, err: LiveError) -> LiveBodyError {
-        let live_body = &self.live_bodies[live_body_id.0];
-        fn byte_to_row_col(byte: usize, source: &str) -> (usize, usize) {
-            let lines = source.split("\n");
-            let mut o = 0;
-            for (index, line) in lines.enumerate() {
-                if byte >= o && byte < o + line.len() {
-                    return (index, byte - o);
-                }
-                o += line.len() + 1;
-            }
-            return (0, 0);
-        }
-        // lets find the span info
-        let start = byte_to_row_col(err.span.start, &live_body.code);
-        LiveBodyError {
-            file: live_body.file.clone(),
-            line: start.0 + live_body.line,
-            col: start.1 + 1,
-            len: err.span.end - err.span.start,
-            msg: err.to_string(),
-        }
-    }
-    
-    
-    pub fn add_live_body(&mut self, live_body: LiveBody)->Result<(),LiveBodyError> {
-        let live_body_id = LiveBodyId(self.live_bodies.len());
-        self.live_bodies.push(live_body.clone());
-        
-        let tokens = lex::lex(live_body.code.chars(), live_body_id).collect::<Result<Vec<_>, _>>();
-        if let Err(err) = tokens {
-            return Err(self.live_body_error(live_body_id, err));
-        }
-        let tokens = tokens.unwrap();
-        
-        if let Err(err) = parse::parse(&tokens, &live_body.module_path, self) {
-            return Err(self.live_body_error(live_body_id, err));
-        }
-
-        return Ok(());
-    }
-}
-
-
-#[derive(Clone, Debug, Default)]
-pub struct LiveStyle {
-    pub floats: HashMap<LiveId, f32>,
-    pub colors: HashMap<LiveId, Color>,
-    pub text_styles: HashMap<LiveId, TextStyle>,
-    pub layouts: HashMap<LiveId, Layout>,
-    pub walks: HashMap<LiveId, Walk>,
-    pub anims: HashMap<LiveId, Anim>,
-    pub shaders: HashMap<LiveId, ShaderAst>,
-}
 
 #[derive(Clone, Debug, Copy, DeTok, DeTokSplat)]
 pub struct TextStyle {
@@ -861,7 +820,7 @@ impl Track {
     }
     
     
-    fn compute_track_float(time: f64, track: &Vec<(f64, f32)>, cut_init: &mut Option<f32>, init: f32, ease: &Ease) -> f32 {
+    pub fn compute_track_float(time: f64, track: &Vec<(f64, f32)>, cut_init: &mut Option<f32>, init: f32, ease: &Ease) -> f32 {
         if track.is_empty() {return init}
         fn lerp(a: f32, b: f32, f: f32) -> f32 {
             return a * (1.0 - f) + b * f;
@@ -888,7 +847,7 @@ impl Track {
         return lerp(*val1, val2.1, f)
     }
     
-    fn compute_track_vec2(time: f64, track: &Vec<(f64, Vec2)>, cut_init: &mut Option<Vec2>, init: Vec2, ease: &Ease) -> Vec2 {
+    pub fn compute_track_vec2(time: f64, track: &Vec<(f64, Vec2)>, cut_init: &mut Option<Vec2>, init: Vec2, ease: &Ease) -> Vec2 {
         if track.is_empty() {return init}
         fn lerp(a: Vec2, b: Vec2, f: f32) -> Vec2 {
             let nf = 1.0 - f;
@@ -916,7 +875,7 @@ impl Track {
         return lerp(*val1, val2.1, f)
     }
     
-    fn compute_track_vec3(time: f64, track: &Vec<(f64, Vec3)>, cut_init: &mut Option<Vec3>, init: Vec3, ease: &Ease) -> Vec3 {
+    pub fn compute_track_vec3(time: f64, track: &Vec<(f64, Vec3)>, cut_init: &mut Option<Vec3>, init: Vec3, ease: &Ease) -> Vec3 {
         if track.is_empty() {return init}
         fn lerp(a: Vec3, b: Vec3, f: f32) -> Vec3 {
             let nf = 1.0 - f;
@@ -944,7 +903,7 @@ impl Track {
         return lerp(*val1, val2.1, f)
     }
     
-    fn compute_track_vec4(time: f64, track: &Vec<(f64, Vec4)>, cut_init: &mut Option<Vec4>, init: Vec4, ease: &Ease) -> Vec4 {
+    pub fn compute_track_vec4(time: f64, track: &Vec<(f64, Vec4)>, cut_init: &mut Option<Vec4>, init: Vec4, ease: &Ease) -> Vec4 {
         if track.is_empty() {return init}
         fn lerp(a: Vec4, b: Vec4, f: f32) -> Vec4 {
             let nf = 1.0 - f;
@@ -972,7 +931,7 @@ impl Track {
         return lerp(*val1, val2.1, f)
     }
     
-    fn compute_track_color(time: f64, track: &Vec<(f64, Color)>, cut_init: &mut Option<Color>, init: Color, ease: &Ease) -> Color {
+    pub fn compute_track_color(time: f64, track: &Vec<(f64, Color)>, cut_init: &mut Option<Color>, init: Color, ease: &Ease) -> Color {
         if track.is_empty() {return init}
         fn lerp(a: Color, b: Color, f: f32) -> Color {
             let nf = 1.0 - f;
@@ -1235,7 +1194,24 @@ impl Play {
 }
 
 
-pub const fn str_to_live_id(modstr: &str, idstr: &str) -> LiveId {
+pub const fn live_location_hash(path: &str, line:u64, col:u64) -> u64 {
+    // lets hash the path
+    let path = path.as_bytes();
+    let path_len = path.len();
+    let mut i = 0;
+    let mut o = 0;
+    let mut value = 0u64;
+    while i < path_len {
+        value ^= (path[i] as u64) << ((o & 7) << 3);
+        o += 1;
+        i += 1;
+    }
+    value ^= line;
+    value ^= col<<32;
+    value
+}
+
+pub const fn live_str_to_id(modstr: &str, idstr: &str) -> LiveId {
     let modpath = modstr.as_bytes();
     let modpath_len = modpath.len();
     let id = idstr.as_bytes();

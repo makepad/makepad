@@ -1,6 +1,6 @@
 use {
     crate::{
-        ast::*,
+        shaderast::*,
         env::{Env, Sym, VarKind},
         error::LiveError,
         ident::{Ident, IdentPath},

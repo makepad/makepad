@@ -3,7 +3,9 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Once;
+use crate::span::Span;
 use crate::livetypes::LiveId;
+use crate::livestyles::LiveStyles;
 use std::fmt::Write;
 
 #[derive(Clone, Copy, Default, Eq, Hash, PartialEq)]
@@ -94,6 +96,63 @@ pub struct IdentPath {
     len: usize
 }
 
+#[derive(Clone, Default, Copy, Eq, PartialEq, Hash, PartialOrd, Ord, Debug)]
+pub struct QualifiedIdentPath(pub IdentPath);
+
+#[derive(Clone, Copy, Default, Eq, PartialEq, Debug)]
+pub struct IdentPathWithSpan{
+    pub span:Span,
+    pub ident_path:IdentPath,
+}
+
+impl IdentPathWithSpan{
+    pub fn to_live_id(&self, live_styles:&LiveStyles)->LiveId{
+        self.ident_path.qualify(&live_styles.live_bodies[self.span.live_body_id.0].module_path).to_live_id()
+    }
+}
+
+impl QualifiedIdentPath{
+
+    pub fn to_live_id(&self) -> LiveId {
+        // lets add the other segs
+        let mut value = 0u64;
+        let mut o = 0;
+        for i in 0..self.0.len {
+            if i != 0 {
+                value ^= (':' as u64) << ((o & 7) << 3);
+                o += 1;
+                value ^= (':' as u64) << ((o & 7) << 3);
+                o += 1;
+            }
+            self.0.segs[i].with( | id_str | {
+                let id = id_str.as_bytes();
+                for i in 0..id.len() {
+                    value ^= (id[i] as u64) << ((o & 7) << 3);
+                    o += 1;
+                }
+            })
+        }
+        LiveId(value)
+    }    
+
+
+    pub fn write_underscored_ident(&self, string:&mut String){
+        for i in 0..self.0.len{
+            if i != 0{
+                write!(string, "_").unwrap();
+            }
+            write!(string, "{}", self.0.segs[i]).unwrap();
+        }
+    }
+
+    pub fn with_final_ident(&self, ident:Ident)->Self{
+        let mut new = self.clone();
+        new.0.push(ident);
+        new
+    }
+    
+}
+
 impl IdentPath {
     
     pub fn from_ident(ident:Ident)->Self{
@@ -128,16 +187,6 @@ impl IdentPath {
         }
     }
 
-    pub fn write_underscored_ident(&self, string:&mut String){
-        for i in 0..self.len{
-            if i != 0{
-                write!(string, "_").unwrap();
-            }
-            write!(string, "{}", self.segs[i]).unwrap();
-        }
-    }
-
-    
     pub fn is_self_id(&self) -> bool {
         self.len > 1 && self.segs[0] == Ident::new("self")
     }
@@ -168,7 +217,7 @@ impl IdentPath {
         return Some(self.segs[0])
     }
     
-    pub fn qualify(&self, modpath: &str) -> IdentPath{
+    pub fn qualify(&self, modpath: &str) -> QualifiedIdentPath{
         let mut out = IdentPath::default();
         if self.segs[0] == Ident::new("self") {
             let mut last = 0;
@@ -202,58 +251,9 @@ impl IdentPath {
                 out.push(self.segs[i]);
             }
         };
-        out
+        QualifiedIdentPath(out)
     }
     
-    pub fn to_live_id(&self, modpath: &str) -> LiveId {
-        // ok lets hash an IdentPath into a proper liveid;
-        let modpath = modpath.as_bytes();
-        let modpath_len = modpath.len();
-        
-        let mut value = 0u64;
-        let mut o = 0;
-        let start = if self.segs[0] == Ident::new("self") {
-            let mut i = 0;
-            while i < modpath_len {
-                value ^= (modpath[i] as u64) << ((o & 7) << 3);
-                o += 1;
-                i += 1;
-            }
-            1
-        }
-        else if self.segs[0] == Ident::new("crate") {
-            let mut i = 0;
-            while i < modpath_len {
-                if modpath[i] == ':' as u8 {
-                    break
-                }
-                value ^= (modpath[i] as u64) << ((o & 7) << 3);
-                o += 1;
-                i += 1;
-            }
-            1
-        }
-        else {
-            0
-        };
-        // lets add the other segs
-        for i in start..self.len {
-            if i != 0 {
-                value ^= (':' as u64) << ((o & 7) << 3);
-                o += 1;
-                value ^= (':' as u64) << ((o & 7) << 3);
-                o += 1;
-            }
-            self.segs[i].with( | id_str | {
-                let id = id_str.as_bytes();
-                for i in 0..id.len() {
-                    value ^= (id[i] as u64) << ((o & 7) << 3);
-                    o += 1;
-                }
-            })
-        }
-        LiveId(value)
-    }
 }
 
 impl fmt::Debug for IdentPath {

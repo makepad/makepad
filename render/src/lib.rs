@@ -1,10 +1,5 @@
 #![allow(dead_code)]
 
-// shared modules
-//#[macro_use]
-//mod shader;
-#[macro_use]
-mod styling;
 #[macro_use]
 mod cx;
 #[macro_use]
@@ -76,15 +71,16 @@ mod texture;
 mod animator;
 mod elements;
 mod area;
-//mod shadergen;
+mod geometrygen;
 mod quad;
 mod blit;
 mod text;
 mod events;
 mod menu; 
+mod geometry;
 mod shader;
-
 mod cube;
+mod shader_std;
 
 pub use crate::cx::*;
 pub use crate::quad::*;
@@ -92,6 +88,3 @@ pub use crate::cube::*;
 pub use crate::blit::*;
 pub use crate::text::*;
 pub use crate::elements::*;
-pub use makepad_shader_compiler::shadergen::*;
-pub use makepad_shader_compiler::math::*;
-pub use makepad_live_macros::*;
