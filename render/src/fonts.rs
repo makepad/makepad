@@ -159,7 +159,7 @@ impl TrapezoidText {
     // test api for directly drawing a glyph
     pub fn draw_char(&mut self, cx: &mut Cx, c: char, font_id: usize, font_size: f32) {
         // now lets make a draw_character function
-        let inst = cx.new_instance(shader!(cx, self::trapezoid_shader), None, 1);
+        let inst = cx.new_instance(live_shader!(cx, self::trapezoid_shader), None, 1);
         if inst.need_uniforms_now(cx) {
         }
         
@@ -220,7 +220,7 @@ impl TrapezoidText {
     
     // atlas drawing function used by CxAfterDraw
     pub fn draw_todo(&mut self, cx: &mut Cx, todo: CxFontsAtlasTodo) {
-        let inst = cx.new_instance(shader!(cx, self::trapezoid_shader), None, 1);
+        let inst = cx.new_instance(live_shader!(cx, self::trapezoid_shader), None, 1);
         if inst.need_uniforms_now(cx) {
         }
         

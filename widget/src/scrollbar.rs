@@ -1,5 +1,4 @@
 use makepad_render::*;
-use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct ScrollBar {
@@ -64,50 +63,55 @@ impl ScrollBar {
         }
     }
     
-    pub fn bar_size() -> FloatId {uid!()}
-    pub fn is_vertical() -> FloatId {uid!()}
-    pub fn norm_handle() -> FloatId {uid!()}
-    pub fn norm_scroll() -> FloatId {uid!()}
-    
-    pub fn anim_default() -> AnimId {uid!()}
-    pub fn anim_over() -> AnimId {uid!()}
-    pub fn anim_down() -> AnimId {uid!()}
-    pub fn shader_bg() -> ShaderId {uid!()}
-    
-    pub fn style(cx: &mut Cx, opt: &StyleOptions) {
-        Self::bar_size().set(cx, 12. * opt.scale.powf(0.5));
+    pub fn style(cx: &mut Cx) {
         
-        Self::anim_default().set(cx, Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color(Quad::color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_base().get(cx))])
-        ]));
-        
-        Self::anim_over().set(cx, Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(Quad::color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_over().get(cx))])
-        ]));
-        
-        Self::anim_down().set(cx, Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(Quad::color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_down().get(cx))])
-        ]));
-        
-        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"
+        live!(cx, r#"
+            self::bar_size: 12.0
             
-            instance is_vertical: Self::is_vertical();
-            instance norm_handle: Self::norm_handle();
-            instance norm_scroll: Self::norm_scroll();
+            self::color_base: #5
+            self::color_over: #7
+            self::color_down: #9
             
-            const border_radius: float = 1.5;
-            
-            fn pixel() -> vec4 {
-                let df = Df::viewport(pos * vec2(w, h));
-                if is_vertical > 0.5 {
-                    df.box(1., h * norm_scroll, w * 0.5, h * norm_handle, border_radius);
-                }
-                else {
-                    df.box(w * norm_scroll, 1., w * norm_handle, h * 0.5, border_radius);
-                }
-                return df.fill_keep(color);
+            self::anim_default: Anim {
+                play: Cut {duration: 0.5}
+                tracks: [
+                    Color {keys: {1.0: self::color_base}, live_id: makepad_render::quad::shader::color}
+                ]
             }
-        "}));
+            
+            self::anim_over: Anim {
+                play: Cut {duration: 0.05}
+                tracks: [
+                    Color {keys: {1.0: self::color_over}, live_id: makepad_render::quad::shader::color}
+                ]
+            }
+            
+            self::anim_down: Anim {
+                play: Cut {duration: 0.05}
+                tracks: [
+                    Color {keys: {1.0: self::color_down}, live_id: makepad_render::quad::shader::color}
+                ]
+            }
+            
+            self::shader_bg: Shader {
+                instance is_vertical: float;
+                instance norm_handle: float;
+                instance norm_scroll: float;
+                
+                const border_radius: float = 1.5;
+                
+                fn pixel() -> vec4 {
+                    let df = Df::viewport(pos * vec2(w, h));
+                    if is_vertical > 0.5 {
+                        df.box(1., h * norm_scroll, w * 0.5, h * norm_handle, border_radius);
+                    }
+                    else {
+                        df.box(w * norm_scroll, 1., w * norm_handle, h * 0.5, border_radius);
+                    }
+                    return df.fill_keep(color);
+                }
+            }
+        "#);
     }
     // reads back normalized scroll position info
     pub fn get_normalized_scroll_pos(&self) -> (f32, f32) {
@@ -227,7 +231,7 @@ impl ScrollBar {
         return false
     }
     
-    pub fn scroll_into_view(&mut self, cx: &mut Cx, pos: f32, size: f32, smooth:bool) {
+    pub fn scroll_into_view(&mut self, cx: &mut Cx, pos: f32, size: f32, smooth: bool) {
         if pos < self._scroll_pos { // scroll up
             let scroll_to = pos;
             if !smooth || self.smoothing.is_none() {
@@ -254,11 +258,11 @@ impl ScrollBar {
     pub fn handle_scroll_bar(&mut self, cx: &mut Cx, event: &mut Event) -> ScrollBarEvent {
         // lets check if our view-area gets a mouse-scroll.
         match event {
-            Event::FingerScroll(fe) =>{//if !fe.handled {
-                if !match self.axis{
+            Event::FingerScroll(fe) => { //if !fe.handled {
+                if !match self.axis {
                     Axis::Horizontal => fe.handled_x,
                     Axis::Vertical => fe.handled_y
-                }{
+                } {
                     let rect = self._view_area.get_rect(cx);
                     if rect.contains(fe.abs.x, fe.abs.y) { // handle mousewheel
                         // we should scroll in either x or y
@@ -269,7 +273,7 @@ impl ScrollBar {
                         if !self.smoothing.is_none() {
                             let scroll_pos_target = self.get_scroll_target();
                             if self.set_scroll_target(cx, scroll_pos_target + scroll) {
-                                match self.axis{
+                                match self.axis {
                                     Axis::Horizontal => fe.handled_x = true,
                                     Axis::Vertical => fe.handled_y = true
                                 }
@@ -280,7 +284,7 @@ impl ScrollBar {
                         else {
                             let scroll_pos = self.get_scroll_pos();
                             if self.set_scroll_pos(cx, scroll_pos + scroll) {
-                                match self.axis{
+                                match self.axis {
                                     Axis::Horizontal => fe.handled_x = true,
                                     Axis::Vertical => fe.handled_y = true
                                 }
@@ -307,7 +311,7 @@ impl ScrollBar {
                     return self.make_scroll_event()
                 },
                 Event::FingerDown(fe) => {
-                    self.animator.play_anim(cx, Self::anim_down().get(cx));
+                    self.animator.play_anim(cx, live_anim!(cx, self::anim_down));
                     let rel = match self.axis {
                         Axis::Horizontal => fe.rel.x,
                         Axis::Vertical => fe.rel.y
@@ -329,10 +333,10 @@ impl ScrollBar {
                         cx.set_hover_mouse_cursor(MouseCursor::Default);
                         match fe.hover_state {
                             HoverState::In => {
-                                self.animator.play_anim(cx, Self::anim_over().get(cx));
+                                self.animator.play_anim(cx, live_anim!(cx, self::anim_over));
                             },
                             HoverState::Out => {
-                                self.animator.play_anim(cx, Self::anim_default().get(cx));
+                                self.animator.play_anim(cx, live_anim!(cx, self::anim_default));
                             },
                             _ => ()
                         }
@@ -342,14 +346,14 @@ impl ScrollBar {
                     self._drag_point = None;
                     if fe.is_over {
                         if !fe.is_touch {
-                            self.animator.play_anim(cx, Self::anim_over().get(cx));
+                            self.animator.play_anim(cx, live_anim!(cx, self::anim_over));
                         }
                         else {
-                            self.animator.play_anim(cx, Self::anim_default().get(cx));
+                            self.animator.play_anim(cx, live_anim!(cx, self::anim_default));
                         }
                     }
                     else {
-                        self.animator.play_anim(cx, Self::anim_default().get(cx));
+                        self.animator.play_anim(cx, live_anim!(cx, self::anim_default));
                     }
                     return ScrollBarEvent::ScrollDone;
                 },
@@ -378,13 +382,13 @@ impl ScrollBar {
     }
     
     pub fn draw_scroll_bar(&mut self, cx: &mut Cx, axis: Axis, view_area: Area, view_rect: Rect, view_total: Vec2) -> f32 {
-        self.animator.init(cx, | cx | Self::anim_default().get(cx));
-        self.bg.shader = Self::shader_bg().get(cx);
-        self.bg.color = self.animator.last_color(cx, Quad::color());
+        self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
+        self.bg.shader = live_shader!(cx, self::shader_bg);
+        self.bg.color = self.animator.last_color(cx, live_id!(makepad_render::quad::shader::color));
         self._bg_area = Area::Empty;
         self._view_area = view_area;
         self.axis = axis;
-        self.bar_size = Self::bar_size().get(cx);
+        self.bar_size = live_float!(cx, self::bar_size);
         match self.axis {
             Axis::Horizontal => {
                 self._visible = view_total.x > view_rect.w + 0.1;

@@ -39,7 +39,7 @@ macro_rules!live_id {
 fn main() {
     let mut cx = Cx {live_styles: LiveStyles::default()};
     let x = live!(cx, r#"
-        self::anim_default: anim {
+        self::anim_default: Anim {
             play: Cut {duration: 0.1},
             self::shader_bg::myinst: float_track {
                 ease: Lin,
@@ -47,12 +47,12 @@ fn main() {
                 1.0: 1.0
             }
         },
-        self::my_walk: walk {
+        self::my_walk: Walk {
             width: Fix(10.),
             height: Fix(10.),
             margin: {l: -4., t: 0., r: 4., b: 0.}
         },
-        self::my_layout: layout {
+        self::my_layout: Layout {
             align: all(0.5),
             walk: {
                 width: Compute,
@@ -61,7 +61,7 @@ fn main() {
             },
             padding: {l: 16.0, t: 12.0, r: 16.0, b: 12.0},
         },
-        self::text_style_unscaled: text_style {
+        self::text_style_unscaled: TextStyle {
             font: "resources/Ubuntu-R.ttf",
             font_size: 8.0,
             brightness: 1.0,
@@ -73,7 +73,7 @@ fn main() {
         self::mycolor: #ff0f,
         self::myslider: 1.0,
         
-        render::quad::shader: shader_lib {
+        render::quad::shader: ShaderLib {
             struct Mp {
                 x: float
             }
@@ -90,7 +90,7 @@ fn main() {
             }
         }
         
-        self::shader_bg: shader {
+        self::shader_bg: Shader {
             default_geometry: self::mygeom;
             geometry mygeom: vec2;
             instance myinst: vec2;

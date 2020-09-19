@@ -1,5 +1,6 @@
 
 use crate::cx::*;
+use makepad_live_compiler::ident::Ident;
 
 #[derive(Clone)]
 pub enum Wrapping {
@@ -10,7 +11,7 @@ pub enum Wrapping {
     Ellipsis(f32)
 }
 
-
+/*
 #[derive(Clone, Copy)]
 pub struct TextStyle {
     pub font: Font,
@@ -34,7 +35,7 @@ impl Default for TextStyle {
             height_factor: 1.3,
         }
     }
-}
+}*/
 
 #[derive(Clone)]
 pub struct Text {
@@ -46,12 +47,19 @@ pub struct Text {
     pub font_scale: f32,
 }
 
-
 impl Text {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            text_style: TextStyle::default(),
-            shader: shader!(cx, self::shader),
+            text_style: TextStyle {
+                font: Font{font_id:0},
+                font_size: 8.0,
+                brightness: 1.0,
+                curve: 0.6,
+                line_spacing: 1.4,
+                top_drop: 1.1,
+                height_factor: 1.3,
+            },
+            shader: live_shader!(cx, self::shader),
             z: 0.0,
             wrapping: Wrapping::Word,
             color: Color::parse_name("white").unwrap(),
@@ -61,14 +69,15 @@ impl Text {
     
     pub fn style(cx: &mut Cx) {
         
-        live!(cx, r#"self::shader: shader {
+        live!(cx, r#"self::shader: Shader {
 
             use crate::shader_std::prelude::*;
             
-            default_geometry: crate::std::quad_2d;
+            default_geometry: crate::shader_std::quad_2d;
+            
             geometry geom: vec2;
 
-            texture texturez: texture2d;
+            texture texturez: texture2D;
             
             instance font_tc: vec4;
             instance color: vec4;
@@ -190,7 +199,7 @@ impl Text {
         let text_style = &self.text_style;
         let mut geom_x = geom_x;
         let mut char_offset = char_offset;
-        let font_id = text_style.font.font_id.unwrap();
+        let font_id = text_style.font.font_id;
         
         let cxfont = &mut cx.fonts[font_id];
         
@@ -321,7 +330,7 @@ impl Text {
         let height_factor = text_style.height_factor;
         let mut iter = text.chars().peekable();
         
-        let font_id = text_style.font.font_id.unwrap();
+        let font_id = text_style.font.font_id;
         let font_size_logical = text_style.font_size * 96.0 / (72.0 * cx.fonts[font_id].font_loaded.as_ref().unwrap().units_per_em);
         
         while let Some(c) = iter.next() {
@@ -440,7 +449,7 @@ impl Text {
     }
     
     pub fn get_monospace_base(&self, cx: &Cx) -> Vec2 {
-        let font_id = self.text_style.font.font_id.unwrap();
+        let font_id = self.text_style.font.font_id;
         let font = cx.fonts[font_id].font_loaded.as_ref().unwrap();
         let slot = font.char_code_to_glyph_index_map[33];
         let glyph = &font.glyphs[slot];
