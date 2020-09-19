@@ -10,8 +10,7 @@ pub struct BareExampleApp {
 }
 
 impl BareExampleApp {
-    pub fn new(cx: &mut Cx) -> Self {
-        
+    pub fn style(cx: &mut Cx){
         live!(cx, r#"
             self::bg_color: #f0f,
             self::bg_shader: shader {
@@ -22,12 +21,13 @@ impl BareExampleApp {
                 fn pixel() -> vec4 {
                     let df = Df::viewport(pos * vec2(w, h));
                     df.circle(0.5 * w, 0.5 * h, 0.5 * w);
-                    return df.fill(mix(color, pick!(blue), abs(sin(counter))));
+                    return df.fill(mix(color, self::bg_color, abs(sin(counter))));
                 }
             }
-            
         "#);
-        
+    }
+    
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
             window: Window::new(cx),
             pass: Pass::default(),
@@ -37,7 +37,6 @@ impl BareExampleApp {
             count: 0.
         }
     }
-    
     
     pub fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
         match event {
