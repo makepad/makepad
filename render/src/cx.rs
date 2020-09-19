@@ -837,6 +837,8 @@ macro_rules!main_app {
     ( $ app: ident) => {
         //TODO do this with a macro to generate both entrypoints for App and Cx
         let mut cx = Cx::default();
+        cx.style();
+        $app::style(&mut cx);
         let mut app = $ app::new(&mut cx);
         let mut cxafterdraw = CxAfterDraw::new(&mut cx);
         cx.event_loop( | cx, mut event | {

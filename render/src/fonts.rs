@@ -54,9 +54,9 @@ impl TrapezoidText {
         
         live!(cx, r#"
             self::trapezoid_shader: shader{
-                use makepad_render::std::prelude::*;
-
-                geometry geom: vec2 = makepad_render::std::normalized_quad;
+                use crate::shader_std::prelude::*;
+                default_geometry: crate::shader_std::quad_2d;
+                geometry geom: vec2;
                 
                 instance a_xs: vec2;
                 instance a_ys: vec4;
