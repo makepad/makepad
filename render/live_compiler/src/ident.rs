@@ -92,8 +92,8 @@ impl Interner {
 
 #[derive(Clone, Default, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct IdentPath {
-    segs: [Ident; 4],
-    len: usize
+    pub segs: [Ident; 4],
+    pub len: usize
 }
 
 #[derive(Clone, Default, Copy, Eq, PartialEq, Hash, PartialOrd, Ord, Debug)]
@@ -224,10 +224,10 @@ impl IdentPath {
             for (index,c) in modpath.chars().enumerate(){
                 if c == ':'{
                     // do the range last->us and make an ident
-                    if index-last > 1{
+                    if index-last > 0{
                         out.push(Ident::new(&modpath[last..index]));
                     }
-                    last = index;
+                    last = index + 1;
                 }
             }
             out.push(Ident::new(&modpath[last..]));
@@ -274,8 +274,14 @@ impl fmt::Display for IdentPath {
             if i != 0 {
                 write!(f, "::").unwrap();
             }
-            self.segs[i].with( | string | write!(f, "{}", string)).unwrap()
+            self.segs[i].with( | string | write!(f, "#{}#", string)).unwrap()
         }
         Ok(())
+    }
+}
+
+impl fmt::Display for QualifiedIdentPath {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.0.fmt(f)
     }
 }

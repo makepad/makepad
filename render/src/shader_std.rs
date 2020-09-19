@@ -1,4 +1,11 @@
 use crate::cx::*;
+use crate::quad::Quad;
+
+impl Cx{
+    pub fn style(&mut self){
+        define_shader_stdlib(self);
+    }
+}
 
 pub fn define_shader_stdlib(cx: &mut Cx) {
     
@@ -7,6 +14,9 @@ pub fn define_shader_stdlib(cx: &mut Cx) {
     
     let g = Geometry::from_geometry_gen(cx, GeometryGen::from_cube_3d(1.0,1.0,1.0,1,1,1));
     cx.live_styles.geometries.insert(live_id!(self::cube_3d),g);
+    
+    Quad::style(cx);
+    //Text::style(cx);
     
     live!(cx, r#"
         self::geometry_3d: shader_lib {
