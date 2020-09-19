@@ -63,7 +63,7 @@ impl Text {
         
         live!(cx, r#"self::shader: shader {
 
-            use crate::std::prelude::*;
+            use crate::shader_std::prelude::*;
             
             default_geometry: crate::std::quad_2d;
             geometry geom: vec2;
