@@ -182,11 +182,12 @@ pub struct CxShaderMapping {
     pub instance_props: InstanceProps,
     pub geometry_props: InstanceProps,
     pub textures: Vec<PropDef>,
-    pub const_table: Option<Vec<f32>>
+    pub const_table: Option<Vec<f32 >>,
+    pub live_uniform_buf: Vec<f32>
 }
 
 impl CxShaderMapping {
-    pub fn from_shader_ast(shader_ast: ShaderAst, options:ShaderCompileOptions) -> Self {
+    pub fn from_shader_ast(shader_ast: ShaderAst, options: ShaderCompileOptions) -> Self {
         
         let mut instances = Vec::new();
         let mut geometries = Vec::new();
@@ -196,72 +197,106 @@ impl CxShaderMapping {
         let mut view_uniforms = Vec::new();
         let mut pass_uniforms = Vec::new();
         let mut textures = Vec::new();
-        for decl in shader_ast.decls{
-            match decl{
-                Decl::Geometry(decl)=>{
-                    let prop_def = PropDef{
+        for decl in shader_ast.decls {
+            match decl {
+                Decl::Geometry(decl) => {
+                    let prop_def = PropDef {
                         name: decl.ident.to_string(),
-                        ty:  decl.ty_expr.ty.borrow().clone().unwrap(),
+                        ty: decl.ty_expr.ty.borrow().clone().unwrap(),
                         live_id: shader_ast.qualified_ident_path.with_final_ident(decl.ident).to_live_id()
                     };
                     geometries.push(prop_def);
                 }
-                Decl::Instance(decl)=>{
-                    let prop_def = PropDef{
+                Decl::Instance(decl) => {
+                    let prop_def = PropDef {
                         name: decl.ident.to_string(),
-                        ty:  decl.ty_expr.ty.borrow().clone().unwrap(),
-                        live_id: shader_ast.qualified_ident_path.with_final_ident(decl.ident).to_live_id()
-                    };
-                    instances.push(prop_def);                    
-                }
-                Decl::Uniform(decl)=>{
-                    let prop_def = PropDef{
-                        name:decl.ident.to_string(),
                         ty: decl.ty_expr.ty.borrow().clone().unwrap(),
                         live_id: shader_ast.qualified_ident_path.with_final_ident(decl.ident).to_live_id()
                     };
-                    match decl.block_ident{
-                        Some(bi) if bi == Ident::new("draw")=>{
+                    instances.push(prop_def);
+                }
+                Decl::Uniform(decl) => {
+                    let prop_def = PropDef {
+                        name: decl.ident.to_string(),
+                        ty: decl.ty_expr.ty.borrow().clone().unwrap(),
+                        live_id: shader_ast.qualified_ident_path.with_final_ident(decl.ident).to_live_id()
+                    };
+                    match decl.block_ident {
+                        Some(bi) if bi == Ident::new("draw") => {
                             draw_uniforms.push(prop_def);
                         }
-                        Some(bi) if bi == Ident::new("view")=>{
+                        Some(bi) if bi == Ident::new("view") => {
                             view_uniforms.push(prop_def);
                         }
-                        Some(bi) if bi == Ident::new("pass")=>{
+                        Some(bi) if bi == Ident::new("pass") => {
                             pass_uniforms.push(prop_def);
                         }
-                        Some(bi) if bi == Ident::new("default")=>{
+                        Some(bi) if bi == Ident::new("default") => {
                             default_uniforms.push(prop_def);
                         }
-                        Some(bi) if bi == Ident::new("live")=>{
-                            live_uniforms.push(prop_def);
-                        },
-                        _=>()
+                        _ => ()
                     }
                 }
-                Decl::Texture(decl)=>{
-                    let prop_def = PropDef{
-                        name:decl.ident.to_string(),
+                Decl::Texture(decl) => {
+                    let prop_def = PropDef {
+                        name: decl.ident.to_string(),
                         ty: decl.ty_expr.ty.borrow().clone().unwrap(),
                         live_id: shader_ast.qualified_ident_path.with_final_ident(decl.ident).to_live_id()
                     };
                     textures.push(prop_def);
                 }
-                _=>()
+                _ => ()
             }
         }
+        
+         for (ty, qualified_ident_path) in shader_ast.livestyle_uniform_deps.borrow().as_ref().unwrap() {
+            let prop_def = PropDef {
+                name: qualified_ident_path.to_string(),
+                ty: ty.clone(),
+                live_id: qualified_ident_path.to_live_id()
+            };
+            live_uniforms.push(prop_def)
+        }
+        
+        
+        let live_uniform_props = UniformProps::construct(&live_uniforms);
+        let mut live_uniform_buf = Vec::new();
+        live_uniform_buf.resize(live_uniform_props.total_slots, 0.0);
         CxShaderMapping {
+            live_uniform_buf,
             rect_instance_props: RectInstanceProps::construct(&instances),
             default_uniform_props: UniformProps::construct(&default_uniforms),
-            live_uniform_props: UniformProps::construct(&live_uniforms),
+            live_uniform_props: live_uniform_props,
             instance_props: InstanceProps::construct(&instances),
             geometry_props: InstanceProps::construct(&geometries),
             textures: textures,
-            const_table: if options.create_const_table{
+            const_table: if options.create_const_table {
                 shader_ast.const_table.borrow_mut().take()
             }
-            else{
+            else {
                 None
+            }
+        }
+    }
+    
+    pub fn update_live_uniforms(&mut self, live_styles: &LiveStyles) {
+        // and write em into the live_uniforms buffer
+        for prop in &self.live_uniform_props.props {
+            match prop.ty {
+                Ty::Vec4 => { // color or anim
+                    let color = live_styles.get_color(prop.live_id, &prop.name);
+                    let o = prop.offset;
+                    self.live_uniform_buf[o + 0] = color.r;
+                    self.live_uniform_buf[o + 1] = color.g;
+                    self.live_uniform_buf[o + 2] = color.b;
+                    self.live_uniform_buf[o + 3] = color.a;
+                },
+                Ty::Float => { // float or anim
+                    let float = live_styles.get_float(prop.live_id, &prop.name);
+                    let o = prop.offset;
+                    self.live_uniform_buf[o] = float;
+                },
+                _=>()
             }
         }
     }
@@ -274,3 +309,4 @@ pub struct CxShader {
     pub platform: Option<CxPlatformShader>,
     pub mapping: CxShaderMapping
 }
+
