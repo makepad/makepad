@@ -17,7 +17,7 @@ pub struct ShaderAst {
     pub shader: Option<Shader>,
     pub const_table: RefCell<Option<Vec<f32>>>,
     pub const_table_spans: RefCell<Option<Vec<(usize,Span)>>>,
-    pub livestyle_uniform_deps: RefCell<Option<BTreeSet<(TyLit,QualifiedIdentPath)>>>,
+    pub livestyle_uniform_deps: RefCell<Option<BTreeSet<(Ty,QualifiedIdentPath)>>>,
     pub uses: Vec<IdentPathWithSpan>,
     pub decls: Vec<Decl>,
     pub default_geometry: Option<IdentPathWithSpan>
