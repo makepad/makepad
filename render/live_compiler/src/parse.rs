@@ -87,7 +87,7 @@ impl<'a> DeTokParser for Parser<'a> {
         let mut ident_path = IdentPath::default();
         let span = self.begin_span();
         match self.peek_token() {
-
+            
             Token::Ident(ident) => {
                 self.skip_token();
                 ident_path.push(ident);
@@ -140,9 +140,9 @@ impl<'a> DeTokParser for Parser<'a> {
         Ok(())
     }
     
-    fn accept_ident(&mut self, ident_str:&str) -> bool {
-        if let Token::Ident(ident) = self.peek_token(){
-            if ident == Ident::new(ident_str){
+    fn accept_ident(&mut self, ident_str: &str) -> bool {
+        if let Token::Ident(ident) = self.peek_token() {
+            if ident == Ident::new(ident_str) {
                 self.skip_token();
                 return true
             }
@@ -150,10 +150,10 @@ impl<'a> DeTokParser for Parser<'a> {
         false
     }
     
-    fn expect_ident(&mut self, ident_str:&str) -> Result<(), LiveError> {
+    fn expect_ident(&mut self, ident_str: &str) -> Result<(), LiveError> {
         let actual = self.peek_token();
-        if let Token::Ident(ident) = actual{
-            if ident == Ident::new(ident_str){
+        if let Token::Ident(ident) = actual {
+            if ident == Ident::new(ident_str) {
                 self.skip_token();
                 return Ok(())
             }
@@ -171,8 +171,8 @@ impl<'a> DeTokParser for Parser<'a> {
     fn ident_path_to_live_id(&self, ident_path: &IdentPath) -> LiveId {
         ident_path.qualify(&self.module_path).to_live_id()
     }
-
-    fn get_live_styles(&mut self)->&mut LiveStyles{
+    
+    fn get_live_styles(&mut self) -> &mut LiveStyles {
         self.live_styles
     }
     
@@ -185,8 +185,9 @@ impl<'a> Parser<'a> {
         let mut current_style = None;
         while self.peek_token() != Token::Eof {
             let span = self.begin_span();
+            
             // at this level we expect a live_id
-            let qualified_ident_path = self.parse_ident_path() ?.qualify(&self.module_path);
+            let qualified_ident_path = self.parse_ident_path() ? .qualify(&self.module_path);
             
             //if current_style.is_none() && (ident_path.len() != 2 || !ident_path.is_self_id()) {
             //    return Err(span.error(self, format!("Ident not a self::id form `{}` override using a style block", ident_path)));
@@ -196,13 +197,7 @@ impl<'a> Parser<'a> {
             self.expect_token(Token::Colon) ?;
             
             match self.peek_token() {
-                Token::RightBrace => {
-                    if current_style.is_none() {
-                        return Err(span.error(self, format!("Unexpected }}")));
-                    }
-                    current_style = None;
-                }
-                Token::Ident(ident) if ident == Ident::new("style") => {
+                Token::Ident(ident) if ident == Ident::new("Style") => {
                     if !current_style.is_none() {
                         return Err(span.error(self, format!("Cannot nest styles")));
                     }
@@ -266,16 +261,24 @@ impl<'a> Parser<'a> {
                 Token::Lit(Lit::Int(_)) | Token::Lit(Lit::Float(_)) => {
                     let val = f32::de_tok(self) ?;
                     self.live_styles.get_style_mut(&current_style).floats.insert(live_id, val);
-                    self.expect_token(Token::Semi)?;
+                    self.expect_token(Token::Semi) ?;
                 }
                 Token::Lit(Lit::Color(_)) => {
                     let val = Color::de_tok(self) ?;
                     self.live_styles.get_style_mut(&current_style).colors.insert(live_id, val);
-                    self.expect_token(Token::Semi)?;
+                    self.expect_token(Token::Semi) ?;
                 }
                 token => {
                     return Err(span.error(self, format!("Unexpected token {}", token)));
                 }
+            }
+            
+            if let Token::RightBrace = self.peek_token() {
+                self.skip_token();
+                if current_style.is_none() {
+                    return Err(span.error(self, format!("Unexpected }}")));
+                }
+                current_style = None;
             }
             
         }
@@ -730,13 +733,13 @@ impl<'a> Parser<'a> {
         match self.peek_token() {
             Token::Ident(ident) => {
                 self.skip_token();
-                if let Some(ty_lit) = TyLit::from_ident(ident){
+                if let Some(ty_lit) = TyLit::from_ident(ident) {
                     Ok(span.end(self, | span | TyExpr {
                         ty: RefCell::new(None),
                         kind: TyExprKind::Lit {span, ty_lit: ty_lit},
                     }))
                 }
-                else{
+                else {
                     Ok(span.end(self, | span | TyExpr {
                         ty: RefCell::new(None),
                         kind: TyExprKind::Var {span, ident},
@@ -1027,7 +1030,7 @@ impl<'a> Parser<'a> {
         match self.peek_token() {
             
             Token::Ident(ident) => {
-                if let Some(ty_lit) = TyLit::from_ident(ident){
+                if let Some(ty_lit) = TyLit::from_ident(ident) {
                     self.skip_token();
                     self.expect_token(Token::LeftParen) ?;
                     let mut arg_exprs = Vec::new();

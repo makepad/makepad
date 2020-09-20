@@ -30,34 +30,35 @@ impl TabClose {
             }
             
             self::anim_default: Anim {
-                play: Cut {duration: 0.2}
+                play: Cut {duration: 0.2},
                 tracks: [
-                    Color {keys: {1.0: self::color_deselected_focus}, ident: makepad_render::quad::shader::color}
-                    Float {keys: {1.0: 0.0}, ident: self::shader_bg::hover},
-                    Float {keys: {1.0: 0.0}, ident: self::shader_bg::down},
+                    Color {keys: {1.0: self::color_deselected_focus}, live_id: makepad_render::quad::shader::color},
+                    Float {keys: {1.0: 0.0}, live_id: self::shader_bg::hover},
+                    Float {keys: {1.0: 0.0}, live_id: self::shader_bg::down},
                 ]
             }
             
             self::anim_over: Anim {
-                play: Cut {duration: 0.2}
+                play: Cut {duration: 0.2},
                 tracks: [
-                    Color {keys: {0.0: self::color_selected_focus}, ident: makepad_render::quad::shader::color}
-                    Float {keys: {1.0: 1.0}, ident: self::shader_bg::hover},
-                    Float {keys: {1.0: 0.0}, ident: self::shader_bg::down},
+                    Color {keys: {0.0: self::color_selected_focus}, live_id: makepad_render::quad::shader::color},
+                    Float {keys: {1.0: 1.0}, live_id: self::shader_bg::hover},
+                    Float {keys: {1.0: 0.0}, live_id: self::shader_bg::down},
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.2}
                 tracks: [
-                    Color {keys: {0.0: self::color_selected_focus}, ident: makepad_render::quad::shader::color}
-                    Float {keys: {1.0: 1.0}, ident: self::shader_bg::hover},
-                    Float {keys: {0.0: 0.0, 1.0: 0.0}, ident: self::shader_bg::down},
+                    Color {keys: {0.0: self::color_selected_focus}, live_id: makepad_render::quad::shader::color},
+                    Float {keys: {1.0: 1.0}, live_id: self::shader_bg::hover},
+                    Float {keys: {0.0: 0.0, 1.0: 0.0}, live_id: self::shader_bg::down},
                 ]
             }
             
             self::shader_bg: Shader {
-
+                use makepad_render::quad::shader::*;
+                
                 instance hover: float;
                 instance down: float;
 
@@ -74,7 +75,7 @@ impl TabClose {
                     return cx.stroke(color, 1. + down * 0.2);
                     //return df_fill(color);
                 }
-            };
+            }
         "#);
     }
     
