@@ -575,7 +575,7 @@ impl HubBuilder {
                     item: HubLogItem::LocPanic(LocMessage {
                         path: if let Some(path) = path {path}else {"".to_string()},
                         line: line,
-                        col: 1,
+                        column: 1,
                         range: None,
                         body: rendered[0].clone(),
                         rendered: Some(rendered.join("")),
@@ -716,7 +716,7 @@ impl HubBuilder {
                                 // lets try to pull path out of rendered, this fixes some rust bugs
                                 let mut path = span.file_name;
                                 let line = span.line_start as usize;
-                                let col = span.column_start as usize;
+                                let column = span.column_start as usize;
                                 if let Some(rendered) = &message.rendered {
                                     let lines: Vec<&str> = rendered.split('\n').collect();
                                     if lines.len() > 1 {
@@ -732,7 +732,7 @@ impl HubBuilder {
                                 let loc_message = LocMessage {
                                     path: format!("{}/{}/{}", builder, workspace, de_relativize_path(&path)).replace("\\", "/"),
                                     line: line,
-                                    col: col,
+                                    column: column,
                                     range: Some((span.byte_start as usize, span.byte_end as usize)),
                                     body: msg,
                                     rendered: message.rendered.clone(),

@@ -521,34 +521,12 @@ impl<'a> ExprGenerator<'a> {
     
     fn generate_macro_call_expr(
         &mut self,
-        analysis: &Cell<Option<MacroCallAnalysis>>,
+        _analysis: &Cell<Option<MacroCallAnalysis>>,
         _span: Span,
         _ident: Ident,
         _arg_exprs: &[Expr],
     ) {
-        
-        match analysis.get().unwrap() {
-            MacroCallAnalysis::Pick {r, g, b, a} => {
-                self.backend_writer.write_ty_lit(self.string, TyLit::Vec4);
-                
-                write!(
-                    self.string,
-                    "({},{},{},{})",
-                    PrettyPrintedFloat(r),
-                    PrettyPrintedFloat(g),
-                    PrettyPrintedFloat(b),
-                    PrettyPrintedFloat(a)
-                ).unwrap();
-                
-            },
-            MacroCallAnalysis::Slide {v} => {
-                write!(
-                    self.string,
-                    "{}",
-                    PrettyPrintedFloat(v),
-                ).unwrap();
-            }
-        }
+
     }
     
     fn generate_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {

@@ -221,7 +221,7 @@ pub struct HubBuilderConfig {
 pub struct LocMessage {
     pub path: String,
     pub line: usize,
-    pub col: usize,
+    pub column: usize,
     pub body: String,
     pub range: Option<(usize, usize)>,
     pub rendered: Option<String>,
