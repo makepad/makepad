@@ -324,7 +324,7 @@ impl TextEditor {
             self::color_comment: #638d54;
             self::color_doc_comment: #78ab68;
             self::color_paren_d1: #d4;
-            self::color_paren_d2: #d4
+            self::color_paren_d2: #d4;
             self::color_operator: #d4;
             self::color_delimiter: #d4;
             self::color_unexpected: #f00;
@@ -458,6 +458,7 @@ impl TextEditor {
             }
             
             self::shader_bg: Shader {
+                use makepad_render::quad::shader::*;
                 fn pixel() -> vec4 {
                     return vec4(color.rgb * color.a, color.a);
                 }
