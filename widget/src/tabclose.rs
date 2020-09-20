@@ -20,8 +20,8 @@ impl TabClose {
     pub fn style(cx: &mut Cx) {
         
         live!(cx, r#"
-            self::color_selected_focus: #f
-            self::color_deselected_focus: #9d
+            self::color_selected_focus: #f;
+            self::color_deselected_focus: #9d;
             
             self::walk: Walk {
                 width: Fix(10.),

@@ -1,6 +1,5 @@
 
 use crate::cx::*;
-use makepad_live_compiler::ident::Ident;
 
 #[derive(Clone)]
 pub enum Wrapping {

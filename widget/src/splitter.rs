@@ -63,10 +63,10 @@ impl Splitter {
         
         live!(cx, r#"
             
-            self::color_bg: #19
-            self::color_over: #5
-            self::color_peak: #f
-            self::color_drag: #6
+            self::color_bg: #19;
+            self::color_over: #5;
+            self::color_peak: #f;
+            self::color_drag: #6;
             
             self::anim_default: Anim {
                 play: Cut {duration: 0.5}
@@ -117,7 +117,7 @@ impl Splitter {
             Event::AnimEnded(_) => self.animator.end(),
             Event::FingerDown(fe) => {
                 self._is_moving = true;
-                self.animator.play_anim(cx, Self::anim_down().get(cx));
+                self.animator.play_anim(cx, live_anim!(cx, self::anim_down));
                 match self.axis {
                     Axis::Horizontal => cx.set_down_mouse_cursor(MouseCursor::RowResize),
                     Axis::Vertical => cx.set_down_mouse_cursor(MouseCursor::ColResize)
@@ -136,10 +136,10 @@ impl Splitter {
                 if !self._is_moving {
                     match fe.hover_state {
                         HoverState::In => {
-                            self.animator.play_anim(cx, Self::anim_over().get(cx));
+                            self.animator.play_anim(cx, live_anim!(cx, self::anim_over));
                         },
                         HoverState::Out => {
-                            self.animator.play_anim(cx, Self::anim_default().get(cx));
+                            self.animator.play_anim(cx, live_anim!(cx, self::anim_default));
                         },
                         _ => ()
                     }
@@ -149,14 +149,14 @@ impl Splitter {
                 self._is_moving = false;
                 if fe.is_over {
                     if !fe.is_touch {
-                        self.animator.play_anim(cx, Self::anim_over().get(cx));
+                        self.animator.play_anim(cx, live_anim!(cx, self::anim_over));
                     }
                     else {
-                        self.animator.play_anim(cx, Self::anim_default().get(cx));
+                        self.animator.play_anim(cx, live_anim!(cx, self::anim_default));
                     }
                 }
                 else {
-                    self.animator.play_anim(cx, Self::anim_default().get(cx));
+                    self.animator.play_anim(cx, live_anim!(cx, self::anim_default));
                 }
                 // we should change our mode based on which edge we are closest to
                 // the rule is center - 30 + 30
@@ -253,7 +253,7 @@ impl Splitter {
     }
     
     pub fn begin_splitter(&mut self, cx: &mut Cx) {
-        self.animator.init(cx, | cx | Self::anim_default().get(cx));
+        self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
         let rect = cx.get_turtle_rect();
         self._calc_pos = match self.align {
             SplitterAlign::First => self.pos,
@@ -288,8 +288,8 @@ impl Splitter {
         cx.end_turtle(Area::Empty);
         let rect = cx.get_turtle_rect();
         let origin = cx.get_turtle_origin();
-        self.bg.shader = Self::shader_bg().get(cx);
-        self.bg.color = self.animator.last_color(cx, Quad::color());
+        self.bg.shader = live_shader!(cx, self::shader_bg);
+        self.bg.color = self.animator.last_color(cx, live_id!(makepad_render::quad::shader::color));
         match self.axis {
             Axis::Horizontal => {
                 cx.set_turtle_pos(Vec2 {x: origin.x, y: origin.y + self._calc_pos});

@@ -25,9 +25,9 @@ pub struct LiveBody {
 pub struct LiveBodyError {
     pub file: String,
     pub line: usize,
-    pub col: usize,
+    pub column: usize,
     pub len: usize,
-    pub msg: String,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -38,7 +38,7 @@ pub struct LiveStyles {
     pub geometries: HashMap<LiveId, Geometry>,
     pub base: LiveStyle,
     pub style_list: Vec<LiveStyle>,
-    pub styles: HashMap<LiveId, usize>,
+    pub style_map: HashMap<LiveId, usize>,
     pub style_stack: Vec<usize>,
     pub font_index: HashMap<Ident, Font>
 }
@@ -62,8 +62,8 @@ impl fmt::Display for LiveBodyError {
             "{}: {} {} - {}",
             self.file,
             self.line,
-            self.col,
-            self.msg
+            self.column,
+            self.message
         )
     }
 }
@@ -76,11 +76,12 @@ impl LiveStyles {
             ..Self::default()
         }
     }
+
     
     pub fn get_style_mut(&mut self, live_id: &Option<LiveId>) -> &mut LiveStyle {
         if let Some(live_id) = live_id {
             let style_list = &mut self.style_list;
-            let id = self.styles.entry(*live_id).or_insert_with( || {
+            let id = self.style_map.entry(*live_id).or_insert_with( || {
                 let id = style_list.len();
                 style_list.push(LiveStyle::default());
                 id
@@ -111,6 +112,31 @@ impl LiveStyles {
         }
     }
     
+    pub fn style_begin(&mut self, style_id: LiveId, name: &str) {
+        // lets fetch the style, if it doesnt exist allocate it
+        if let Some(index) = self.style_map.get(&style_id) {
+            self.style_stack.push(*index);
+        }
+        else {
+            panic!("Style {} not found", name)
+        }
+    }
+    
+    pub fn style_end(&mut self, style_id: LiveId, name: &str) {
+        // lets fetch the style, if it doesnt exist allocate it
+        if let Some(index) = self.style_map.get(&style_id) {
+            if self.style_stack.len() == 0{
+                panic!("Style stack empty at style_end of {}", name)
+            }
+            if *index != self.style_stack.pop().unwrap(){
+                panic!("Style stack disaligned at style_end of {}", name)
+            }
+        }
+        else {
+            panic!("Style {} not found at style_end", name)
+        }
+    }
+        
     pub fn get_geometry(&self, live_id: LiveId, name: &str) -> Geometry {
         if let Some(geometry) = self.geometries.get(&live_id) {
             return *geometry
@@ -203,9 +229,9 @@ impl LiveStyles {
         LiveBodyError {
             file: live_body.file.clone(),
             line: start.0 + live_body.line,
-            col: start.1 + 1,
+            column: start.1 + 1,
             len: err.span.end - err.span.start,
-            msg: err.to_string(),
+            message: err.to_string(),
         }
     }
     
@@ -260,7 +286,7 @@ impl LiveStyles {
                     else { // error
                         return Err(live_styles.live_body_error(LiveError {
                             span: use_ipws.span,
-                            message: format!("Cannot find library or shader {}", use_ipws.ident_path)
+                            message: format!("Cannot find library or shader: {}", use_ipws.ident_path)
                         }))
                     }
                 }

@@ -2,7 +2,7 @@ use makepad_render::*;
 use crate::texteditor::*;
 use crate::textbuffer::*;
 use crate::tokentype::*;
-use crate::widgetstyle::*;
+
 #[derive(Clone)]
 pub struct TextInput {
     pub text_editor: TextEditor,
@@ -36,49 +36,33 @@ impl TextInput {
         }
     }
     
-    pub fn style_text_input() -> StyleId {uid!()}
-    
-    pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+    pub fn style(cx: &mut Cx) {
         
-        cx.begin_style(Self::style_text_input());
-        /*
-        live!(cx,{
-            texteditor::layout_bg = Layout {
-                walk: Walk {
-                    width: Width::Compute,
-                    height: Height::Compute,
-                    margin: Margin {t: 4., l: 0., r: 0., b: 0.}
-                },
-                padding: Padding::all(7.),
-            }
-            textinput::shader_bg = Shader {
-                use render::quad::*;
-                fn pixel() -> vec4 {
-                    let cx = Df::viewport(pos * vec2(w, h));
-                    cx.box(0., 0., w, h, 2.5);
-                    return cx.fill(color);
+        live!(cx, r#"
+            self::color_empty_message: #666;
+            self::style_text_input: Style {
+                crate::texteditor::gutter_width: 0.0
+                crate::texteditor::padding_top: 0.0
+                
+                crate::texteditor::layout_bg: Layout {
+                    walk: {
+                        width: Compute,
+                        height: Compute,
+                        margin: {t: 4., l: 0., r: 0., b: 0.}
+                    },
+                    padding: all(7.),
+                }
+                
+                crate::texteditor::shader_bg: Shader {
+                    use makepad_render::quad::shader::*;
+                    fn pixel() -> vec4 {
+                        let cx = Df::viewport(pos * vec2(w, h));
+                        cx.box(0., 0., w, h, 2.5);
+                        return cx.fill(color);
+                    }
                 }
             }
-            texteditor::gutter_width = 1.0;
-        })*/
-            
-        TextEditor::layout_bg().set(cx, Layout {
-            walk: Walk {width: Width::Compute, height: Height::Compute, margin: Margin {t: 4., l: 0., r: 0., b: 0.}},
-            padding: Padding::all(7.),
-            ..Layout::default()
-        });
-        TextEditor::color_bg().set(cx, TextEditor::color_bg().get(cx));
-        TextEditor::gutter_width().set(cx, 0.);
-        TextEditor::padding_top().set(cx, 0.);
-        TextEditor::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"
-            fn pixel() -> vec4 {
-                let cx = Df::viewport(pos * vec2(w, h));
-                cx.box(0., 0., w, h, 2.5);
-                return cx.fill(color);
-            }
-        "}));
-        
-        cx.end_style();
+        "#)
     }
     
     pub fn handle_text_input(&mut self, cx: &mut Cx, event: &mut Event) -> TextEditorEvent {
@@ -109,7 +93,7 @@ impl TextInput {
     }
     
     pub fn draw_text_input(&mut self, cx: &mut Cx) {
-        cx.begin_style(Self::style_text_input());
+        live_style_begin!(cx, self::style_text_input);
         let text_buffer = &mut self.text_buffer;
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
             
@@ -126,11 +110,14 @@ impl TextInput {
             }
         }
         
-        if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return cx.end_style();}
+        if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {
+            live_style_end!(cx, self::style_text_input);
+            return;
+        }
         
         if text_buffer.is_empty() {
             let pos = cx.get_turtle_pos();
-            self.text_editor.text.color = pick!(#666).get(cx);
+            self.text_editor.text.color = live_color!(cx, self::color_empty_message);
             self.text_editor.text.draw_text(cx, &self.empty_message);
             cx.set_turtle_pos(pos);
         }
@@ -140,7 +127,7 @@ impl TextInput {
         }
         
         self.text_editor.end_text_editor(cx, text_buffer);
-        cx.end_style();
+        live_style_end!(cx, self::style_text_input);
     }
 }
 

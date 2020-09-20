@@ -13,7 +13,7 @@ fn main(){
 }
 impl WidgetExampleApp {
     pub fn new(cx: &mut Cx) -> Self {
-        set_widget_style(cx, &StyleOptions{scale:0.5,..StyleOptions::default()});
+        
         Self {
             desktop_window: DesktopWindow::new(cx),
             button: NormalButton::new(cx),
@@ -25,6 +25,10 @@ impl WidgetExampleApp {
                 ]),
             ])
         }
+    }
+    
+    fn style(cx: &mut Cx){
+        set_widget_style(cx);
     }
        
     fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {

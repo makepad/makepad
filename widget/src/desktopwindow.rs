@@ -62,7 +62,7 @@ impl DesktopWindow {
             window_menu: WindowMenu::new(cx),
             default_menu: Menu::main(vec![
                 Menu::sub("App", vec![
-                    Menu::item("Quit App",  Cx::command_quit()),
+                    Menu::item("Quit App", Cx::command_quit()),
                 ]),
             ]),
             caption_text: Text::new(cx),
@@ -75,11 +75,13 @@ impl DesktopWindow {
         }
     }
     
-    pub fn text_style_window_caption() ->TextStyleId{uid!()}
-    
-    pub fn style(cx:&mut Cx){
-        
-        Self::text_style_window_caption().set(cx, Theme::text_style_unscaled().get(cx));
+    pub fn style(cx: &mut Cx) {
+        live!(cx, r#"
+            color_bg_selected_over: #3d;
+            text_style_window_caption: TextStyle{
+                ..crate::widgetstyle::text_style_unscaled
+            }
+        "#);
     }
     
     pub fn handle_desktop_window(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
@@ -93,7 +95,7 @@ impl DesktopWindow {
                 self.window.xr_start_presenting(cx);
             }
         }
-
+        
         if let ButtonEvent::Clicked = self.fullscreen_btn.handle_button(cx, event) {
             if self.window.is_fullscreen(cx) {
                 self.window.normal_window(cx);
@@ -177,11 +179,11 @@ impl DesktopWindow {
         let _ = self.main_view.begin_view(cx, Layout::default());
         
         if self.caption_view.begin_view(cx, Layout {
-            walk:Walk::wh(Width::Fill, Height::Compute),
+            walk: Walk::wh(Width::Fill, Height::Compute),
             ..Layout::default()
         }).is_ok() {
-            self.caption_text.text_style = Self::text_style_window_caption().get(cx);
-            self.caption_bg.color = Theme::color_bg_selected_over().get(cx);//cx.colors[self.caption_bg_color];
+            self.caption_text.text_style = live_text_style!(cx, self::text_style_window_caption);
+            self.caption_bg.color = live_color!(cx, self::color_bg_selected_over); //cx.colors[self.caption_bg_color];
             // alright here we draw our platform buttons.
             match cx.platform_type {
                 PlatformType::Linux | PlatformType::Windows => {
@@ -224,7 +226,7 @@ impl DesktopWindow {
                     if let Some(menu) = menu {
                         cx.update_menu(menu);
                     }
-                    else{
+                    else {
                         cx.update_menu(&self.default_menu);
                     }
                     let bg_inst = self.caption_bg.begin_quad(cx, Layout {
@@ -238,7 +240,7 @@ impl DesktopWindow {
                     cx.turtle_new_line();
                 },
                 PlatformType::WASM => {
-                    if self.window.is_fullscreen(cx){ // put a bar at the top
+                    if self.window.is_fullscreen(cx) { // put a bar at the top
                         let bg_inst = self.caption_bg.begin_quad(cx, Layout {
                             align: Align::center(),
                             walk: Walk::wh(Width::Fill, Height::Fix(22.)),
@@ -257,7 +259,7 @@ impl DesktopWindow {
             let _ = self.inner_view.begin_view(cx, Layout {abs_origin: Some(Vec2::default()), ..Layout::default()});
         }
         else {
-            let _ = self.inner_view.begin_view(cx, Layout{..Layout::default()});
+            let _ = self.inner_view.begin_view(cx, Layout {..Layout::default()});
         }
         Ok(())
     }
@@ -268,18 +270,18 @@ impl DesktopWindow {
         // window fullscreen?
         
         // only support fullscreen on web atm
-        if !cx.platform_type.is_desktop() && !self.window.is_fullscreen(cx){ 
+        if !cx.platform_type.is_desktop() && !self.window.is_fullscreen(cx) {
             cx.reset_turtle_pos();
             cx.move_turtle(cx.get_width_total() - 50.0, 0.);
             self.fullscreen_btn.draw_desktop_button(cx, DesktopButtonType::Fullscreen);
         }
-
+        
         if self.window.xr_can_present(cx) { // show a switch-to-VRMode button
             cx.reset_turtle_pos();
             cx.move_turtle(cx.get_width_total() - 100.0, 0.);
             self.xr_btn.draw_desktop_button(cx, DesktopButtonType::XRMode);
         }
-
+        
         self.main_view.end_view(cx);
         
         self.pass.end_pass(cx);
