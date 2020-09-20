@@ -274,7 +274,7 @@ impl fmt::Display for IdentPath {
             if i != 0 {
                 write!(f, "::").unwrap();
             }
-            self.segs[i].with( | string | write!(f, "#{}#", string)).unwrap()
+            self.segs[i].with( | string | write!(f, "{}", string)).unwrap()
         }
         Ok(())
     }

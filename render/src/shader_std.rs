@@ -2,10 +2,12 @@ use crate::cx::*;
 use crate::quad::Quad;
 use crate::text::Text;
 use crate::blit::Blit;
+use crate::cube::Cube;
 
 impl Cx{
     pub fn style(&mut self){
         define_shader_stdlib(self);
+        Cube::style(self);
         Quad::style(self);
         Text::style(self);
         Blit::style(self);
@@ -23,19 +25,20 @@ pub fn define_shader_stdlib(cx: &mut Cx) {
     //Text::style(cx);
     
     live!(cx, r#"
-        self::geometry_3d: shader_lib {
+        
+        self::geometry_3d: ShaderLib {
             geometry geom_pos: vec3;
             geometry geom_id: float;
             geometry geom_normal: vec3;
             geometry geom_uv: vec2;
         }
         
-        self::prelude: shader_lib {
+        self::prelude: ShaderLib {
             use self::uniforms::*;
             use self::lib::*;
         }
         
-        self::uniforms: shader_lib {
+        self::uniforms: ShaderLib {
             uniform camera_projection: mat4 in pass;
             uniform camera_view: mat4 in pass;
             uniform camera_inv: mat4 in pass;
@@ -49,7 +52,7 @@ pub fn define_shader_stdlib(cx: &mut Cx) {
             uniform draw_zbias: float in draw;
         }
         
-        self::lib: shader_lib {
+        self::lib: ShaderLib {
             const PI: float = 3.141592653589793;
             const E: float = 2.718281828459045;
             const LN2: float = 0.6931471805599453;

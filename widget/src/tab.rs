@@ -1,7 +1,6 @@
 use makepad_render::*;
 use crate::buttonlogic::*;
 use crate::tabclose::*;
-use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct Tab {
@@ -61,13 +60,13 @@ impl Tab {
         
         live!(cx, r#"
             
-            self::color_bg_selected: #34
-            self::color_bg_normal: #28
+            self::color_bg_selected: #34;
+            self::color_bg_normal: #28;
             
-            self::color_text_selected_focus: #f
-            self::color_text_deselected_focus: #9d
-            self::color_text_selected_defocus: #9d
-            self::color_text_deselected_defocus: #82
+            self::color_text_selected_focus: #f;
+            self::color_text_deselected_focus: #9d;
+            self::color_text_selected_defocus: #9d;
+            self::color_text_deselected_defocus: #82;
             
             self::layout_bg: Layout {
                 align: {fx: 0.0, fy: 0.5},
@@ -113,18 +112,18 @@ impl Tab {
     pub fn get_text_color(&self, cx: &Cx) -> Color {
         if self._is_selected {
             if self._is_focussed {
-                Theme::color_text_selected_focus().get(cx)
+                live_color!(cx, self::color_text_selected_focus)
             }
             else {
-                Theme::color_text_selected_defocus().get(cx)
+                live_color!(cx, self::color_text_selected_defocus)
             }
         }
         else {
             if self._is_focussed {
-                Theme::color_text_deselected_focus().get(cx)
+                live_color!(cx, self::color_text_deselected_focus)
             }
             else {
-                Theme::color_text_deselected_defocus().get(cx)
+                live_color!(cx, self::color_text_deselected_defocus)
             }
         }
     }
