@@ -191,11 +191,13 @@ impl TextEditor {
             //view_layout: Layout::default(),
             text: Text {
                 z: 2.00,
+                shader: live_shader!(cx, makepad_render::text::shader),
                 wrapping: Wrapping::Line,
                 ..Text::new(cx)
             },
             line_number_text: Text {
                 z: 2.2,
+                shader: live_shader!(cx, makepad_render::text::shader),
                 wrapping: Wrapping::Line,
                 ..Text::new(cx)
             },

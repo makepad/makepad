@@ -105,6 +105,7 @@ impl Text {
             }
             
             fn pixel() -> vec4 {
+                
                 let dx = dFdx(vec2(tex_coord1.x * 2048.0, 0.)).x;
                 let dp = 1.0 / 2048.0;
 
@@ -403,6 +404,91 @@ impl Text {
         self.end_text(cx, &aligned)
     }
     
+    pub fn draw_text2(&mut self, cx: &mut Cx, text: &str) -> Area {
+        let mut aligned = self.begin_text(cx);
+        
+        let mut chunk = Vec::new();
+        let mut width = 0.0;
+        let mut elipct = 0;
+        let text_style = &self.text_style;
+        let font_size = text_style.font_size;
+        let line_spacing = text_style.line_spacing;
+        let height_factor = text_style.height_factor;
+        let mut iter = text.chars().peekable();
+        
+        let font_id = text_style.font.font_id;
+        let font_size_logical = text_style.font_size * 96.0 / (72.0 * cx.fonts[font_id].font_loaded.as_ref().unwrap().units_per_em);
+        
+        while let Some(c) = iter.next() {
+            let last = iter.peek().is_none();
+            
+            let mut emit = last;
+            let mut newline = false;
+            let slot = if c < '\u{10000}' {
+                cx.fonts[font_id].font_loaded.as_ref().unwrap().char_code_to_glyph_index_map[c as usize]
+            } else {
+                0
+            };
+            if c == '\n' {
+                emit = true;
+                newline = true;
+            }
+            if slot != 0 {
+                let glyph = &cx.fonts[font_id].font_loaded.as_ref().unwrap().glyphs[slot];
+                width += glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
+                match self.wrapping {
+                    Wrapping::Char => {
+                        chunk.push(c);
+                        emit = true
+                    },
+                    Wrapping::Word => {
+                        chunk.push(c);
+                        if c == ' ' || c == '\t' || c == ',' || c == '\n' {
+                            emit = true;
+                        }
+                    },
+                    Wrapping::Line => {
+                        chunk.push(c);
+                        if c == 10 as char || c == 13 as char {
+                            emit = true;
+                        }
+                        newline = true;
+                    },
+                    Wrapping::None => {
+                        chunk.push(c);
+                    },
+                    Wrapping::Ellipsis(ellipsis_width) => {
+                        if width>ellipsis_width { // output ...
+                            if elipct < 3 {
+                                chunk.push('.');
+                                elipct += 1;
+                            }
+                        }
+                        else {
+                            chunk.push(c)
+                        }
+                    }
+                }
+            }
+            if emit {
+                let height = font_size * height_factor * self.font_scale;
+                let geom = cx.walk_turtle(Walk {
+                    width: Width::Fix(width),
+                    height: Height::Fix(height),
+                    margin: Margin::zero()
+                });
+                self.add_text(cx, geom.x, geom.y, 0, &mut aligned, &chunk, | _, _, _, _ | {0.0});
+                width = 0.0;
+                chunk.truncate(0);
+                if newline {
+                    cx.turtle_new_line_min_height(font_size * line_spacing * self.font_scale);
+                }
+            }
+        }
+        self.end_text(cx, &aligned)
+    }
+    
+    
     // looks up text with the behavior of a text selection mouse cursor
     pub fn find_closest_offset(&self, cx: &Cx, area: &Area, pos: Vec2) -> usize {
         let scroll_pos = area.get_scroll_pos(cx);
@@ -432,7 +518,7 @@ impl Text {
                             let prev_w = read.buffer[read.offset + w_o + prev_index * read.slots];
                             if index < read.count - 1 && prev_x > spos.x + prev_w { // fix newline jump-back
                                 return read.buffer[read.offset + char_offset_o + index * read.slots] as usize;
-                            }
+                            } 
                             return read.buffer[read.offset + char_offset_o + prev_index * read.slots] as usize;
                         }
                         index += 1;
