@@ -60,8 +60,8 @@ impl Tab {
         
         live!(cx, r#"
             
-            self::color_bg_selected: #34;
-            self::color_bg_normal: #28;
+            self::color_bg_selected: #28;
+            self::color_bg_normal: #34;
             
             self::color_text_selected_focus: #f;
             self::color_text_deselected_focus: #9d;

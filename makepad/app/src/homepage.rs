@@ -146,8 +146,9 @@ impl HomePage {
             write highly performant multimedia applications. Please note the following text \
             input doesn't work on mobile-web yet. We also won't email you a confirmation right now, that will follow later.\n");
         
-        
+
         self.email_input.draw_text_input(cx);
+        
         self.send_mail_button.draw_normal_button(cx, match self.email_state {
             EmailState::Empty => "Sign up for our newsletter here.",
             EmailState::Invalid => "Email adress invalid",
@@ -156,6 +157,7 @@ impl HomePage {
             EmailState::ErrorSending => "Could not send your email adress, please retry!",
             EmailState::OkSending => "Thank you, we'll keep you informed!"
         });
+        
         cx.turtle_new_line();
         
         t.draw_text(cx, "\
