@@ -236,10 +236,10 @@ impl Area{
                 let draw_call = &cxview.draw_calls[inst.draw_call_id];
                 let sh = &cx.shaders[draw_call.shader_id];
                 for prop in &sh.mapping.instance_props.props{
-                    if prop.ty != ty{
-                        return None
-                    }
                     if prop.live_id == live_id{
+                        if prop.ty != ty{
+                            panic!("Type wrong of live_id fetch in shader:{}, passed as arg: {}", prop.ty, ty);
+                        }
                         return Some(prop.offset)
                     }
                 }
