@@ -66,11 +66,11 @@ impl ScrollBar {
     pub fn style(cx: &mut Cx) {
         
         live!(cx, r#"
-            self::bar_size: 12.0
+            self::bar_size: 12.0;
             
-            self::color_base: #5
-            self::color_over: #7
-            self::color_down: #9
+            self::color_base: #5;
+            self::color_over: #7;
+            self::color_down: #9;
             
             self::anim_default: Anim {
                 play: Cut {duration: 0.5}
@@ -148,7 +148,7 @@ impl ScrollBar {
     // writes the norm_scroll value into the shader
     pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
         let (norm_scroll, _) = self.get_normalized_scroll_pos();
-        self._bg_area.write_float(cx, Self::norm_scroll(), norm_scroll);
+        self._bg_area.write_float(cx, live_id!(self::shader_bg::norm_scroll), norm_scroll);
     }
     
     // turns scroll_pos into an event on this.event

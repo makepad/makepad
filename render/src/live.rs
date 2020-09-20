@@ -4,15 +4,15 @@ impl Cx {
     pub fn add_live_body(&mut self, live_body: LiveBody) {
         let mut shader_alloc_start = self.shaders.len();
         if let Err(err) = self.live_styles.add_live_body(live_body, &mut shader_alloc_start) {
-            eprintln!("{:?}", err);
+            eprintln!("{}:{} {} - {}", err.file, err.line, err.column, err.message);
         }
         // lets add the required CxShader slots
         for _ in self.shaders.len()..shader_alloc_start {
             self.shaders.push(CxShader::default());
         }
         // also add texture slots/require textures
-        
     }
+
 }
 
 #[macro_export]
@@ -41,6 +41,26 @@ macro_rules!live {
 macro_rules!live_id {
     ( $ path: path) => {
         live_str_to_id(module_path!(), stringify!( $ path))
+    }
+}
+
+#[macro_export]
+macro_rules!live_style_begin {
+    ( $ cx: ident, $ path: path) => {
+        $ cx.live_styles.style_begin(
+            live_str_to_id(module_path!(), stringify!( $ path)),
+            stringify!( $ path)
+        )
+    }
+}
+
+#[macro_export]
+macro_rules!live_style_end {
+    ( $ cx: ident, $ path: path) => {
+        $ cx.live_styles.style_end(
+            live_str_to_id(module_path!(), stringify!( $ path)),
+            stringify!( $ path)
+        )
     }
 }
 

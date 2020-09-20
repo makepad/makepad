@@ -3,7 +3,6 @@ use makepad_render::*;
 use crate::scrollbar::*;
 use crate::scrollview::*;
 use crate::tab::*;
-use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct TabControl {
@@ -34,6 +33,7 @@ pub enum TabControlEvent {
 }
 
 impl TabControl {
+
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             tabs_view: ScrollView {
@@ -70,6 +70,16 @@ impl TabControl {
         }
     }
     
+    pub fn style(cx: &mut Cx) {
+        live!(cx, r#"
+            self::color_bg_normal: #34;
+            self::tab_control_style: Style {
+                crate::scrollbar::bar_size: 8.0
+            }
+            
+        "#)
+    }
+        
     pub fn handle_tab_control(&mut self, cx: &mut Cx, event: &mut Event) -> TabControlEvent {
         let mut tab_control_event = TabControlEvent::None;
         
@@ -141,16 +151,6 @@ impl TabControl {
         tab_control_event
     }
     
-    pub fn tab_control_style() -> StyleId {uid!()}
-    
-    pub fn style(cx: &mut Cx, opt: &StyleOptions) {
-        
-        cx.begin_style(Self::tab_control_style());
-        
-        ScrollBar::bar_size().set(cx, 8. * opt.scale.powf(0.5));
-        cx.end_style();
-    }
-    
     pub fn get_tab_rects(&mut self, cx: &Cx) -> Vec<Rect> {
         let mut rects = Vec::new();
         for tab in self.tabs.iter() {
@@ -219,7 +219,7 @@ impl TabControl {
     }
     
     pub fn end_tabs(&mut self, cx: &mut Cx) {
-        self.tab_fill.color = Theme::color_bg_normal().get(cx);
+        self.tab_fill.color = live_color!(cx, self::color_bg_normal);
         self.tab_fill.draw_quad(cx, Walk::wh(Width::Fill, Height::Fill));
         self.tabs.sweep(cx, | _, _ | ());
         if let Some((fe, id)) = &self._dragging_tab {
@@ -233,9 +233,9 @@ impl TabControl {
                 self.drag_tab_view.end_view(cx);
             }
         }
-        cx.begin_style(Self::tab_control_style());
+        live_style_begin!(cx, self::tab_control_style);
         self.tabs_view.end_view(cx);
-        cx.end_style();
+        live_style_end!(cx, self::tab_control_style);
         if self._tab_now_selected != self._tab_last_selected {
             // lets scroll the thing into view
             if let Some(tab_id) = self._tab_now_selected {
