@@ -70,7 +70,7 @@ impl Default for TextureDesc {
 pub struct LiveId(pub u64);
 
 
-#[derive(Clone, Debug, Copy, DeTok, DeTokSplat)]
+#[derive(Clone, Debug, Copy, DeTok)]
 pub struct TextStyle {
     pub font: Font,
     pub font_size: f32,
@@ -93,6 +93,21 @@ impl Default for TextStyle {
             height_factor: 1.3,
         }
     }
+}
+
+impl DeTokSplat for TextStyle {
+    fn de_tok_splat(p: &mut dyn DeTokParser) -> Result<Self,
+    LiveError> {
+        let ident_path = p.parse_ident_path() ?;
+        let live_id = p.ident_path_to_live_id(&ident_path);
+        if let Some(text_style) = p.get_live_styles().base.text_styles.get(&live_id) {
+            return Ok(*text_style);
+        }
+        else{
+            return Err(p.error(format!("Textstyle {} not found in splat", ident_path)));
+        }
+    }
+    
 }
 
 #[derive(Copy, Clone, Debug, DeTok)]

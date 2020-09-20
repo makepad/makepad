@@ -1,7 +1,7 @@
 use crate::token::{Token};
 use crate::error::LiveError;
 use crate::ident::{Ident, IdentPath};
-use crate::span::{Span,LiveBodyId};
+use crate::span::{Span, LiveBodyId};
 use crate::lit::{Lit};
 use crate::colors::Color;
 use crate::math::*;
@@ -19,12 +19,12 @@ pub trait DeTokParser {
     fn parse_ident_path(&mut self) -> Result<IdentPath, LiveError>;
     fn accept_token(&mut self, token: Token) -> bool;
     fn expect_token(&mut self, expected: Token) -> Result<(), LiveError>;
-    fn accept_ident(&mut self, ident_str:&str) -> bool;
-    fn expect_ident(&mut self, ident_str:&str) -> Result<(), LiveError>;
-    fn get_live_styles(&mut self)->&mut LiveStyles;
+    fn accept_ident(&mut self, ident_str: &str) -> bool;
+    fn expect_ident(&mut self, ident_str: &str) -> Result<(), LiveError>;
+    fn get_live_styles(&mut self) -> &mut LiveStyles;
     fn error_not_splattable(&mut self, what: &str) -> LiveError;
     fn error_missing_prop(&mut self, what: &str) -> LiveError;
-    fn error_enum(&mut self, ident:Ident, what: &str) -> LiveError;
+    fn error_enum(&mut self, ident: Ident, what: &str) -> LiveError;
     fn begin_span(&self) -> SpanTracker;
 }
 
@@ -68,6 +68,7 @@ pub trait DeTokSplat: Sized {
     LiveError>;
 }
 
+
 // we now have to implement DeTok for all our integer types
 // float types, bools, etc
 
@@ -90,11 +91,11 @@ macro_rules!impl_de_tok_for_float {
                             _ => ()
                         }
                     },
-                    Token::Ident(_)=>{ // try to parse ident path, and read from styles
-                        let ident_path = p.parse_ident_path()?;
+                    Token::Ident(_) => { // try to parse ident path, and read from styles
+                        let ident_path = p.parse_ident_path() ?;
                         let live_id = p.ident_path_to_live_id(&ident_path);
-                        if let Some(float) = p.get_live_styles().base.floats.get(&live_id){
-                            return Ok(*float as $ty);
+                        if let Some(float) = p.get_live_styles().base.floats.get(&live_id) {
+                            return Ok(*float as $ ty);
                         }
                         return Err(p.error(format!("Float {} not found", ident_path)));
                     },
@@ -230,10 +231,10 @@ impl DeTok for Color {
                 p.skip_token();
                 return Ok(c);
             },
-            Token::Ident(_)=>{ // try to parse ident path, and read from styles
-                let ident_path = p.parse_ident_path()?;
+            Token::Ident(_) => { // try to parse ident path, and read from styles
+                let ident_path = p.parse_ident_path() ?;
                 let live_id = p.ident_path_to_live_id(&ident_path);
-                if let Some(color) = p.get_live_styles().base.colors.get(&live_id){
+                if let Some(color) = p.get_live_styles().base.colors.get(&live_id) {
                     return Ok(*color);
                 }
                 return Err(p.error(format!("Color {} not found", ident_path)));
@@ -262,19 +263,19 @@ impl DeTok for Font {
 
 fn parse_track_rhs(p: &mut dyn DeTokParser, time: f64, track: &mut Track) -> Result<(), LiveError> {
     match track {
-        Track::Float{keys, ..} => {
+        Track::Float {keys, ..} => {
             keys.push((time, f32::de_tok(p) ?));
         },
-        Track::Vec2{keys, ..} => {
+        Track::Vec2 {keys, ..} => {
             keys.push((time, Vec2::de_tok(p) ?));
         }
-        Track::Vec3{keys, ..} => {
+        Track::Vec3 {keys, ..} => {
             keys.push((time, Vec3::de_tok(p) ?));
         }
-        Track::Vec4{keys, ..} => {
+        Track::Vec4 {keys, ..} => {
             keys.push((time, Vec4::de_tok(p) ?));
         }
-        Track::Color{keys, ..} => {
+        Track::Color {keys, ..} => {
             keys.push((time, Color::de_tok(p) ?));
         }
     }
@@ -292,20 +293,20 @@ fn parse_track(p: &mut dyn DeTokParser, track: &mut Track) -> Result<(), LiveErr
                     p.expect_token(Token::Colon) ?;
                     track.set_ease(Ease::de_tok(p) ?);
                 }
-                if ident == Ident::new("live_id") {
+                else if ident == Ident::new("live_id") {
                     p.skip_token();
                     p.expect_token(Token::Colon) ?;
                     let ident_path = p.parse_ident_path() ?;
                     track.set_live_id(p.ident_path_to_live_id(&ident_path));
                 }
-                if ident == Ident::new("keys") {
+                else if ident == Ident::new("keys") {
                     p.skip_token();
                     p.expect_token(Token::Colon) ?;
                     p.expect_token(Token::LeftBrace) ?;
                     loop {
                         let span = p.begin_span();
                         match p.peek_token() {
-                             Token::Lit(Lit::Int(i)) => { // integer time
+                            Token::Lit(Lit::Int(i)) => { // integer time
                                 p.skip_token();
                                 p.expect_token(Token::Colon) ?;
                                 // now lets parse the RHS
@@ -320,8 +321,11 @@ fn parse_track(p: &mut dyn DeTokParser, track: &mut Track) -> Result<(), LiveErr
                                 p.skip_token();
                                 break;
                             },
+                            Token::Comma=>{
+                                p.skip_token();
+                            },
                             token => {
-                                return Err(span.error(p, format!("Unexpected token in track {}", token)));
+                                return Err(span.error(p, format!("Unexpected token in track keys {}", token)));
                             }
                         }
                     }
@@ -333,6 +337,9 @@ fn parse_track(p: &mut dyn DeTokParser, track: &mut Track) -> Result<(), LiveErr
             Token::RightBrace => {
                 p.skip_token();
                 return Ok(());
+            },
+            Token::Comma=>{
+                p.skip_token();
             },
             token => {
                 return Err(span.error(p, format!("Unexpected token in track {}", token)));
@@ -358,29 +365,27 @@ impl DeTok for Anim {
             }
             
             let ident = p.parse_ident() ?;
-        
+            
             if ident == Ident::new("play") {
                 p.expect_token(Token::Colon) ?;
                 play = Play::de_tok(p) ?;
             }
-            else if ident == Ident::new("tracks"){
-                p.skip_token();
+            else if ident == Ident::new("tracks") {
                 p.expect_token(Token::Colon) ?;
                 p.expect_token(Token::LeftBracket) ?;
                 loop {
-                    if p.accept_token(Token::RightBracket){
+                    if p.accept_token(Token::RightBracket) {
                         break;
                     }
-                    if p.accept_token(Token::Ident(Ident::new("Track"))){
-                        p.expect_token(Token::PathSep)?;
+                    if p.accept_token(Token::Ident(Ident::new("Track"))) {
+                        p.expect_token(Token::PathSep) ?;
                     }
                     
                     let span = p.begin_span();
-                    let ident = p.parse_ident()?;
+                    let ident = p.parse_ident() ?;
                     
                     if ident == Ident::new("Float") {
-                        p.skip_token();
-                        let mut track = Track::Float{
+                        let mut track = Track::Float {
                             live_id: LiveId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
@@ -390,8 +395,7 @@ impl DeTok for Anim {
                         tracks.push(track);
                     }
                     else if ident == Ident::new("Vec2") {
-                        p.skip_token();
-                        let mut track = Track::Vec2{
+                        let mut track = Track::Vec2 {
                             live_id: LiveId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
@@ -401,8 +405,7 @@ impl DeTok for Anim {
                         tracks.push(track);
                     }
                     else if ident == Ident::new("Vec3") {
-                        p.skip_token();
-                        let mut track = Track::Vec3{
+                        let mut track = Track::Vec3 {
                             live_id: LiveId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
@@ -412,8 +415,7 @@ impl DeTok for Anim {
                         tracks.push(track);
                     }
                     else if ident == Ident::new("Vec4") {
-                        p.skip_token();
-                        let mut track = Track::Vec4{
+                        let mut track = Track::Vec4 {
                             live_id: LiveId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
@@ -423,8 +425,7 @@ impl DeTok for Anim {
                         tracks.push(track);
                     }
                     else if ident == Ident::new("Color") {
-                        p.skip_token();
-                        let mut track = Track::Color{
+                        let mut track = Track::Color {
                             live_id: LiveId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
@@ -433,7 +434,7 @@ impl DeTok for Anim {
                         parse_track(p, &mut track) ?;
                         tracks.push(track);
                     }
-                    else{
+                    else {
                         return Err(span.error(p, format!("Unexpected track type {}", ident)));
                     }
                     

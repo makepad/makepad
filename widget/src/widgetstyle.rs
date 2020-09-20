@@ -33,7 +33,7 @@ pub fn set_widget_style(cx: &mut Cx) {
         self::text_style_fixed: TextStyle{
             font: "resources/LiberationMono-Regular.ttf",
             brightness: 1.1,
-            font_size: 8.0 * opt.scale, 
+            font_size: 8.0, 
             line_spacing: 1.8,
             top_drop: 1.3,
             ..self::text_style_unscaled

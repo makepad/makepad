@@ -40,9 +40,11 @@ impl TextInput {
         
         live!(cx, r#"
             self::color_empty_message: #666;
+            
             self::style_text_input: Style {
-                crate::texteditor::gutter_width: 0.0
-                crate::texteditor::padding_top: 0.0
+                
+                crate::texteditor::gutter_width: 0.0;
+                crate::texteditor::padding_top: 0.0;
                 
                 crate::texteditor::layout_bg: Layout {
                     walk: {

@@ -94,6 +94,8 @@ impl ScrollBar {
             }
             
             self::shader_bg: Shader {
+                use makepad_render::quad::shader::*;
+
                 instance is_vertical: float;
                 instance norm_handle: float;
                 instance norm_scroll: float;

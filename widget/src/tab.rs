@@ -75,7 +75,7 @@ impl Tab {
             }
             
             self::text_style_title: TextStyle {
-                ..crate::theme::text_style_normal
+                ..crate::widgetstyle::text_style_normal
             }
             
             self::shader_bg: Shader {
