@@ -69,6 +69,8 @@ impl DesktopButton {
             }
             
             self::shader_bg: Shader {
+                use makepad_render::quad::shader::*;
+
                 instance hover: float;
                 instance down: float;
                 instance button_type: float;

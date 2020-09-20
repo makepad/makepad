@@ -77,8 +77,8 @@ impl DesktopWindow {
     
     pub fn style(cx: &mut Cx) {
         live!(cx, r#"
-            color_bg_selected_over: #3d;
-            text_style_window_caption: TextStyle{
+            self::color_bg_selected_over: #3d;
+            self::text_style_window_caption: TextStyle{
                 ..crate::widgetstyle::text_style_unscaled
             }
         "#);

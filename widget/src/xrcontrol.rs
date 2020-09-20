@@ -56,7 +56,7 @@ impl XRControl {
             }
             
             self::shader_ray_cursor: Shader {
-                use makepad_render::cube::shader::*;
+                use makepad_render::quad::shader::*;
                 fn pixel() -> vec4 {
                     let df = Df::viewport(pos * vec2(w, h));
                     df.circle(0.5 * w, 0.5 * h, 0.5 * w);

@@ -35,7 +35,7 @@ impl NormalButton {
             }
             
             self::text_style_label: TextStyle {
-                ..crate::theme::text_style_normal
+                ..crate::widgetstyle::text_style_normal
             }
             
             self::anim_default: Anim {
@@ -52,7 +52,7 @@ impl NormalButton {
                 tracks:[
                     Float {keys:{1.0: 0.0}, live_id: self::shader_bg::down},
                     Float {keys:{0.0: 1.0, 1.0: 1.0}, live_id: self::shader_bg::hover},
-                    Color {keys:{0.0: #f}, live_id: makepad_render::text::shader::color}:
+                    Color {keys:{0.0: #f}, live_id: makepad_render::text::shader::color}
                 ]
             }
             

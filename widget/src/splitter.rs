@@ -70,30 +70,23 @@ impl Splitter {
             
             self::anim_default: Anim {
                 play: Cut {duration: 0.5}
-                ColorTrack {
-                    ease: Lin,
-                    1.0: self::color_bg,
-                    live_id: makepad_render::quad::shader::color
-                }
+                tracks: [
+                    Color {keys: {1.0: self::color_bg} live_id: makepad_render::quad::shader::color}
+                ]
             }
             
             self::anim_over: Anim {
                 play: Cut {duration: 0.05}
-                ColorTrack {
-                    ease: Lin,
-                    1.0: self::color_over,
-                    live_id: makepad_render::quad::shader::color
-                }
+                tracks: [
+                    Color {keys: {1.0: self::color_over}, live_id: makepad_render::quad::shader::color}
+                ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.02}
-                ColorTrack {
-                    ease: Lin,
-                    0.0: self::color_peak,
-                    1.0: self::color_drag,
-                    live_id: makepad_render::quad::shader::color
-                }
+                tracks: [
+                    Color {keys: {0.0: self::color_peak, 1.0: self::color_drag}, live_id: makepad_render::quad::shader::color}
+                ]
             }
             
             self::shader_bg: Shader {

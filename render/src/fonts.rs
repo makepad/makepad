@@ -53,7 +53,7 @@ impl TrapezoidText {
     pub fn style(cx: &mut Cx) -> Self {
         
         live!(cx, r#"
-            self::trapezoid_shader: shader{
+            self::trapezoid_shader: Shader{
                 use crate::shader_std::prelude::*;
                 default_geometry: crate::shader_std::quad_2d;
                 geometry geom: vec2;
