@@ -1,6 +1,5 @@
 
 use makepad_render::*;
-use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct XRControl {
@@ -49,23 +48,23 @@ impl XRControl {
         }
     }
     
-    pub fn shader_ray_cube() -> ShaderId {uid!()}
-    pub fn shader_ray_cursor() -> ShaderId {uid!()}
-    
-    pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+    pub fn style(cx: &mut Cx) {
         // lets define the shader
-        Self::shader_ray_cube().set(cx, Cube::def_cube_shader().compose(shader!{"
-        "}));
-        
-        Self::shader_ray_cursor().set(cx, Quad::def_quad_shader().compose(shader!{"
-            fn pixel() -> vec4 {
-                let df = Df::viewport(pos * vec2(w, h));
-                df.circle(0.5 * w, 0.5 * h, 0.5 * w);
-                return df.fill(pick!(white));
+        live!(cx, r#"
+            self::shader_ray_cube: Shader {
+                use makepad_render::cube::shader::*;
             }
-        "}));
-        
-    } 
+            
+            self::shader_ray_cursor: Shader {
+                use makepad_render::cube::shader::*;
+                fn pixel() -> vec4 {
+                    let df = Df::viewport(pos * vec2(w, h));
+                    df.circle(0.5 * w, 0.5 * h, 0.5 * w);
+                    return df.fill(#f);
+                }
+            }
+        "#)
+    }
     
     pub fn handle_xr_control(&mut self, cx: &mut Cx, xr_event: &XRUpdateEvent, window_view: &View) -> Vec<Event> {
         
@@ -77,7 +76,7 @@ impl XRControl {
             Vec3 {x: -0.0, y: -180.0, z: 0.0},
             Vec3 {x: -0.20, y: -0.15, z: -0.3},
         );
-
+        
         window_view.set_view_transform(cx, &window_mat);
         self.ray_view.set_view_transform(cx, &Mat4::identity());
         
@@ -88,8 +87,8 @@ impl XRControl {
         self.ray_view.set_view_transform(cx, &Mat4::identity());
         self.last_xr_update = Some(xr_event.clone());
         
-        self._left_ray_area.write_mat4(cx, Cube::transform(), &self._left_ray_mat);
-        self._right_ray_area.write_mat4(cx, Cube::transform(), &self._right_ray_mat);
+        self._left_ray_area.write_mat4(cx, live_id!(makepad_render::cube::shader::transform), &self._left_ray_mat);
+        self._right_ray_area.write_mat4(cx, live_id!(makepad_render::cube::shader::transform), &self._right_ray_mat);
         
         // we have 2 points, 0,0,0 and 0,0,1? pointing straight back
         // then, we transform those with our left input ray
@@ -108,18 +107,18 @@ impl XRControl {
         self._right_cursor_pt = window_plane.intersect_line(right_origin.to_vec3(), right_vector.to_vec3()).to_vec2();
         self._left_cursor_pt = window_plane.intersect_line(left_origin.to_vec3(), left_vector.to_vec3()).to_vec2();
         
-        self._right_cursor_area.write_float(cx, Quad::x(), self._right_cursor_pt.x - 0.5 * self.cursor_size);
-        self._right_cursor_area.write_float(cx, Quad::y(), self._right_cursor_pt.y - 0.5 * self.cursor_size);
-        self._left_cursor_area.write_float(cx, Quad::x(), self._left_cursor_pt.x - 0.5 * self.cursor_size);
-        self._left_cursor_area.write_float(cx, Quad::y(), self._left_cursor_pt.y - 0.5 * self.cursor_size);
+        self._right_cursor_area.write_float(cx, live_id!(makepad_render::quad::shader::x), self._right_cursor_pt.x - 0.5 * self.cursor_size);
+        self._right_cursor_area.write_float(cx, live_id!(makepad_render::quad::shader::y), self._right_cursor_pt.y - 0.5 * self.cursor_size);
+        self._left_cursor_area.write_float(cx, live_id!(makepad_render::quad::shader::x), self._left_cursor_pt.x - 0.5 * self.cursor_size);
+        self._left_cursor_area.write_float(cx, live_id!(makepad_render::quad::shader::y), self._left_cursor_pt.y - 0.5 * self.cursor_size);
         
         let mut events = Vec::new();
         
-        fn do_input_event(events:&mut Vec<Event>, cx: &mut Cx, digit: usize, pt: Vec2, time: f64, input: &XRInput, last_input: &XRInput) {
-            fn axis_not_zero(axis:f32)->bool{
-                axis < -0.01 || axis>0.01 
+        fn do_input_event(events: &mut Vec<Event>, cx: &mut Cx, digit: usize, pt: Vec2, time: f64, input: &XRInput, last_input: &XRInput) {
+            fn axis_not_zero(axis: f32) -> bool {
+                axis < -0.01 || axis>0.01
             }
-            if axis_not_zero(input.axes[2]) || axis_not_zero(input.axes[3]){
+            if axis_not_zero(input.axes[2]) || axis_not_zero(input.axes[3]) {
                 events.push(Event::FingerScroll(FingerScrollEvent {
                     window_id: 0,
                     digit: digit,
@@ -128,13 +127,13 @@ impl XRControl {
                     rect: Rect::default(),
                     handled_x: false,
                     handled_y: false,
-                    scroll: Vec2{x:input.axes[2]*15.0, y:input.axes[3]*15.0},
+                    scroll: Vec2 {x: input.axes[2] * 15.0, y: input.axes[3] * 15.0},
                     is_wheel: true,
                     modifiers: KeyModifiers::default(),
                     time: time
                 }));
             }
-
+            
             if input.buttons[0].pressed != last_input.buttons[0].pressed {
                 // we have finger up or down
                 if input.buttons[0].pressed {
@@ -183,7 +182,7 @@ impl XRControl {
                     time: time
                 }));
             }
-            else{
+            else {
                 cx.fingers[digit].over_last = Area::Empty;
                 events.push(Event::FingerHover(FingerHoverEvent {
                     digit: digit,
@@ -205,8 +204,8 @@ impl XRControl {
     }
     
     pub fn draw_xr_control(&mut self, cx: &mut Cx) {
-        self.ray_cube.shader = Self::shader_ray_cube().get(cx);
-        self.ray_cursor.shader = Self::shader_ray_cursor().get(cx);
+        self.ray_cube.shader = live_shader!(cx, self::shader_ray_cube);
+        self.ray_cursor.shader = live_shader!(cx, self::shader_ray_cursor);
         
         if self.cursor_view.begin_view(cx, Layout::abs_origin_zero()).is_ok() {
             self._left_cursor_area = self.ray_cursor.draw_quad_rel(cx, Rect {

@@ -237,7 +237,7 @@ impl<'a> Parser<'a> {
                     }
                     style.shaders.insert(live_id, shader_ast);
                 }
-                Token::Ident(ident) if ident == Ident::new("ShaderLb") => {
+                Token::Ident(ident) if ident == Ident::new("ShaderLib") => {
                     // lets parse this shaaaader!
                     self.skip_token();
                     // lets make a new shader_ast
@@ -266,14 +266,18 @@ impl<'a> Parser<'a> {
                 Token::Lit(Lit::Int(_)) | Token::Lit(Lit::Float(_)) => {
                     let val = f32::de_tok(self) ?;
                     self.live_styles.get_style_mut(&current_style).floats.insert(live_id, val);
+                    self.expect_token(Token::Semi)?;
                 }
                 Token::Lit(Lit::Color(_)) => {
                     let val = Color::de_tok(self) ?;
                     self.live_styles.get_style_mut(&current_style).colors.insert(live_id, val);
+                    self.expect_token(Token::Semi)?;
                 }
-                _ => ()
+                token => {
+                    return Err(span.error(self, format!("Unexpected token {}", token)));
+                }
             }
-            self.accept_token(Token::Comma);
+            
         }
         Ok(())
     }

@@ -17,9 +17,9 @@ impl Cube {
     
     pub fn style(cx: &mut Cx) {
         
-        live!(cx, r#"self::shader: shader {
-            use crate::std::prelude::*;
-            use crate::std::geometry_3d::*;
+        live!(cx, r#"self::shader: Shader {
+            use crate::shader_std::prelude::*;
+            use crate::shader_std::geometry_3d::*;
             
             instance transform: mat4;
             instance color: vec4;
