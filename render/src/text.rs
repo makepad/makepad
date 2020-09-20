@@ -107,7 +107,7 @@ impl Text {
             fn pixel() -> vec4 {
                 let dx = dFdx(vec2(tex_coord1.x * 2048.0, 0.)).x;
                 let dp = 1.0 / 2048.0;
-                
+
                 // basic hardcoded mipmapping so it stops 'swimming' in VR
                 // mipmaps are stored in red/green/blue channel
                 let s = 1.0;
@@ -227,6 +227,7 @@ impl Text {
                 println!("GLYPHID OUT OF BOUNDS {} {} len is {}", unicode, glyph_id, font.glyphs.len());
                 continue;
             }
+
             let glyph = &font.glyphs[glyph_id];
             
             let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
@@ -274,7 +275,7 @@ impl Text {
                 });
                 
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id] = Some(
-                    cx.fonts_atlas.alloc_atlas_glyph(&cxfont.path, w, h)
+                    cx.fonts_atlas.alloc_atlas_glyph(&cxfont.file, w, h)
                 );
                 
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()

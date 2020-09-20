@@ -24,25 +24,6 @@ impl Cx {
         self.fonts_atlas.clear_buffer = true;
         self.redraw_child_area(Area::All);
     }
-    
-    pub fn load_font(&mut self, path: &str) -> Font {
-        let found = self.fonts.iter().position( | v | v.path == path);
-        if let Some(font_id) = found {
-            return Font {
-                font_id: Some(font_id),
-            }
-        }
-        
-        let font_id = self.fonts.len();
-        self.fonts.push(CxFont {
-            path: path.to_string(),
-            ..Default::default()
-        });
-        
-        return Font {
-            font_id: Some(font_id)
-        }
-    }
 }
 
 pub struct TrapezoidText {
@@ -345,15 +326,16 @@ impl CxAfterDraw {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct CxFont {
-    pub path: String,
+    pub file: String,
     pub font_loaded: Option<makepad_font::Font>,
     pub atlas_pages: Vec<CxFontAtlasPage>,
 }
 
 pub const ATLAS_SUBPIXEL_SLOTS: usize = 64;
 
+#[derive(Clone)]
 pub struct CxFontAtlasPage {
     pub dpi_factor: f32,
     pub font_size: f32,
@@ -448,7 +430,7 @@ impl CxFont {
             self.atlas_pages.len() - 1
         }
         else {
-            panic!("Font not loaded {}", self.path);
+            panic!("Font not loaded {}", self.file);
         }
     }
 }
