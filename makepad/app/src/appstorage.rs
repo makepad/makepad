@@ -16,7 +16,6 @@ pub struct AppSettings {
     pub build_on_save: bool,
     pub exec_when_done: bool,
     pub live_macros_on_self: bool,
-    pub style_options: StyleOptions,
     pub hub_server: HubServerConfig,
     pub builders: HashMap<String, HubBuilderConfig>,
     pub builds: Vec<BuildTarget>,
@@ -30,7 +29,6 @@ impl Default for AppSettings {
             exec_when_done: false,
             live_macros_on_self: true,
             build_on_save: true,
-            style_options: StyleOptions {scale: 1.0, dark: true},
             hub_server: HubServerConfig::Offline,
             builders: HashMap::new(),
             sync: HashMap::new(),
@@ -45,7 +43,6 @@ impl AppSettings {
             exec_when_done: false,
             build_on_save: true,
             live_macros_on_self: true,
-            style_options: StyleOptions {scale: 1.0, dark: true},
             hub_server: HubServerConfig::Offline,
             builders: {
                 let mut cfg = HashMap::new();
@@ -178,7 +175,7 @@ impl AppStorage {
             Ok(settings) => {
                 self.settings_old = self.settings.clone();
                 self.settings = settings;
-                self.settings.style_options.scale = self.settings.style_options.scale.min(3.0).max(0.3);
+                //self.settings.style_options.scale = self.settings.style_options.scale.min(3.0).max(0.3);
                 cx.send_signal(self.settings_changed, Self::status_settings_changed());
                 cx.live_macros_on_self = self.settings.live_macros_on_self;
                 // so now, here we restart our hub_server if need be.

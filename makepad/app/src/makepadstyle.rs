@@ -1,5 +1,5 @@
 use makepad_render::*;
-use makepad_widget::*;
+
 use crate::filetree::*;
 use crate::loglist::*;
 use crate::homepage::*;
@@ -7,15 +7,19 @@ use crate::codeicon::*;
 use crate::searchresults::*;
 use crate::itemdisplay::*;
 use crate::livemacro::*;
+use crate::colorpicker::*;
+use crate::floatslider::*;
+use crate::shaderview::*;
 
-pub fn set_makepad_style(cx: &mut Cx, opt:&StyleOptions) {
-    CodeIcon::style(cx, opt);
-    HomePage::style(cx, opt);
-    FileTree::style(cx, opt);
-    LogList::style(cx, opt);
-    SearchResults::style(cx, opt);
-    ItemDisplay::style(cx, opt);
-    ColorPicker::style(cx, opt);
-    FloatSlider::style(cx, opt);
-    LiveMacrosView::style(cx, opt);
+pub fn set_makepad_style(cx: &mut Cx) {
+    CodeIcon::style(cx);
+    HomePage::style(cx);
+    FileTree::style(cx);
+    LogList::style(cx);
+    SearchResults::style(cx);
+    ItemDisplay::style(cx);
+    ColorPicker::style(cx);
+    FloatSlider::style(cx);
+    LiveMacrosView::style(cx);
+    ShaderView::style(cx);
 }

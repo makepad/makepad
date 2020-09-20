@@ -42,9 +42,9 @@ impl MakepadApp {
     pub fn command_bring_all_to_front() -> CommandId {uid!()}
     
     pub fn new(cx: &mut Cx) -> Self {
-        let default_opt = StyleOptions {scale: 1.0, dark: true};
-        set_widget_style(cx, &default_opt);
-        set_makepad_style(cx, &default_opt);
+        
+        set_widget_style(cx);
+        set_makepad_style(cx);
         let ms = cx.new_signal();
         // set up the keyboard map
         Self::command_preferences().set_key(cx, KeyCode::Comma);
@@ -223,16 +223,21 @@ impl MakepadApp {
         }
     }
     
+    pub fn style(cx: &mut Cx){
+        set_widget_style(cx);
+        set_makepad_style(cx);
+    }
+    
     pub fn default_layout(&mut self, cx: &mut Cx) {
         self.state.windows = vec![self.app_window_state_template.clone()];
         self.windows = vec![self.app_window_template.clone()];
         cx.redraw_child_area(Area::All);
     }
-    
+    /*
     pub fn reload_style(&mut self, cx: &mut Cx) {
-        set_widget_style(cx, &self.storage.settings.style_options);
-        set_makepad_style(cx, &self.storage.settings.style_options);
-    }
+        set_widget_style(cx);
+        set_makepad_style(cx);
+    }*/
     
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
@@ -252,24 +257,28 @@ impl MakepadApp {
                     self.storage.reload_builders();
                 },
                 KeyCode::Key0 => if ke.modifiers.logo || ke.modifiers.control {
-                    self.storage.settings.style_options.scale = 1.0;
-                    self.reload_style(cx);
                     cx.reset_font_atlas_and_redraw();
-                    self.storage.save_settings(cx);
+                    println!("IMPLEMENT SCALE");
+                    //self.storage.settings.style_options.scale = 1.0;
+                    //self.reload_style(cx);
+                    //cx.reset_font_atlas_and_redraw();
+                    //self.storage.save_settings(cx);
                 },
                 KeyCode::Equals => if ke.modifiers.logo || ke.modifiers.control {
-                    let scale = self.storage.settings.style_options.scale * 1.1;
-                    self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
-                    self.reload_style(cx);
-                    cx.reset_font_atlas_and_redraw();
-                    self.storage.save_settings(cx);
+                    println!("IMPLEMENT SCALE");
+                    //let scale = self.storage.settings.style_options.scale * 1.1;
+                   // self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
+                    //self.reload_style(cx);
+                    //cx.reset_font_atlas_and_redraw();
+                    //self.storage.save_settings(cx);
                 },
                 KeyCode::Minus => if ke.modifiers.logo || ke.modifiers.control {
-                    let scale = self.storage.settings.style_options.scale / 1.1;
-                    self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
-                    self.reload_style(cx);
-                    cx.reset_font_atlas_and_redraw();
-                    self.storage.save_settings(cx);
+                    println!("IMPLEMENT SCALE");
+                    //let scale = self.storage.settings.style_options.scale / 1.1;
+                    //self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
+                    //self.reload_style(cx);
+                    //cx.reset_font_atlas_and_redraw();
+                    //self.storage.save_settings(cx);
                 },
                 _ => ()
             },
@@ -290,10 +299,11 @@ impl MakepadApp {
                     if self.storage.settings_old.builders != self.storage.settings.builders {
                         self.storage.reload_builders();
                     }
+                    /*
                     if self.storage.settings_old.style_options != self.storage.settings.style_options {
                         self.reload_style(cx);
                         cx.reset_font_atlas_and_redraw();
-                    }
+                    }*/
                     if self.storage.settings_old.builds != self.storage.settings.builds {
                         self.build_manager.restart_build(cx, &mut self.storage);
                     }

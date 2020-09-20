@@ -1,6 +1,4 @@
-use makepad_live_compiler::generate_metal;
 use makepad_live_compiler::analyse::ShaderCompileOptions;
-use makepad_live_compiler::shaderast::ShaderAst;
 use makepad_live_compiler::livetypes::{Geometry,live_str_to_id};
 use makepad_live_compiler::livestyles::{LiveStyles, LiveBody,};
 
@@ -38,20 +36,18 @@ macro_rules!live_id {
 
 fn main() {
     let mut cx = Cx {live_styles: LiveStyles::default()};
-    let x = live!(cx, r#"
+    live!(cx, r#"
         self::anim_default: Anim {
             play: Cut {duration: 0.1},
-            self::shader_bg::myinst: float_track {
-                ease: Lin,
-                0.0: 0.0,
-                1.0: 1.0
-            }
-        },
+            tracks:[
+                Float{keys:{0.0: 0.0, 1.0: 1.0}}
+            ]
+        }
         self::my_walk: Walk {
             width: Fix(10.),
             height: Fix(10.),
             margin: {l: -4., t: 0., r: 4., b: 0.}
-        },
+        }
         self::my_layout: Layout {
             align: all(0.5),
             walk: {
@@ -60,7 +56,7 @@ fn main() {
                 margin: all(1.0),
             },
             padding: {l: 16.0, t: 12.0, r: 16.0, b: 12.0},
-        },
+        }
         self::text_style_unscaled: TextStyle {
             font: "resources/Ubuntu-R.ttf",
             font_size: 8.0,
@@ -70,8 +66,9 @@ fn main() {
             top_drop: 1.2,
             height_factor: 1.3,
         }
-        self::mycolor: #ff0f,
-        self::myslider: 1.0,
+        self::mycolor: #ff0f;
+        self::mycolor2: self::mycolor;
+        self::myslider: 1.0;
         
         render::quad::shader: ShaderLib {
             struct Mp {
@@ -123,8 +120,8 @@ fn main() {
                 eprintln!("{}", err);
                 panic!()
             },
-            Ok(shader_ast) => {
-                eprintln!("HERE!");
+            Ok(_) => {
+                println!("OK!");
             }
         }
     })

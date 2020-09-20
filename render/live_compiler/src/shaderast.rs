@@ -364,8 +364,6 @@ pub enum ExprKind {
 
 #[derive(Clone, Copy, Debug)]
 pub enum MacroCallAnalysis {
-    Pick { r: f32, g: f32, b: f32, a: f32 },
-    Slide { v: f32 }
 }
 
 #[derive(Clone, Copy, Debug)]
