@@ -20,6 +20,8 @@ pub mod plaineditor;
 pub mod itemdisplay;
 pub mod livemacro;
 pub mod shaderview;
+pub mod colorpicker;
+pub mod floatslider;
 //mod rustcompiler;
 //pub use crate::rustcompiler::*;
 pub use makepad_render::*;

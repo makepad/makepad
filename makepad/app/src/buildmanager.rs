@@ -245,16 +245,16 @@ impl BuildManager {
                 },
                 ShaderCompileResult::Fail{err, ..}=>{
                     // lets turn line+col+len into a range.
-                    let path = format!("main/makepad/{}", err.path);
+                    let path = format!("main/makepad/{}", err.file);
                     // find the textbuffer
                     let atb = storage.text_buffer_from_path(cx, &path);
                     // we should be able to mape line+col into byte offset
-                    let off = atb.text_buffer.text_pos_to_offset(TextPos{row:err.line - 1,col:err.col - 1});
+                    let off = atb.text_buffer.text_pos_to_offset(TextPos{row:err.line - 1,col:err.column - 1});
                     let msg = LocMessage{
                         path:path,
                         line: err.line,
-                        col: err.col,
-                        body: err.msg.clone(),
+                        column: err.column,
+                        body: err.message.clone(),
                         range: Some((off, off+err.len)),
                         rendered:None,
                         explanation:None

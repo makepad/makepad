@@ -6,7 +6,7 @@ use crate::parse;
 use crate::env::Env;
 use crate::builtin::{self, Builtin};
 use crate::analyse::{ShaderAnalyser, ShaderCompileOptions};
-use crate::ident::{Ident};
+use crate::ident::{Ident, QualifiedIdentPath};
 use crate::livetypes::*;
 use crate::colors::Color;
 use std::fmt;
@@ -32,6 +32,7 @@ pub struct LiveBodyError {
 
 #[derive(Clone, Debug, Default)]
 pub struct LiveStyles {
+    pub collision_check: HashMap<LiveId, QualifiedIdentPath>,
     pub builtins: HashMap<Ident, Builtin>,
     pub live_bodies: Vec<LiveBody>,
     pub shader_libs: HashMap<LiveId, ShaderAst>,

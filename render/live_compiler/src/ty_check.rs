@@ -1,6 +1,5 @@
 use crate::shaderast::*;
 use crate::builtin::Builtin;
-use crate::colors::Color;
 use crate::env::{Env, Sym, VarKind};
 use crate::error::LiveError;
 use crate::ident::{Ident, IdentPath};
@@ -578,115 +577,10 @@ impl<'a, 'b> TyChecker<'a, 'b> {
     fn ty_check_macro_call_expr(
         &mut self,
         span: Span,
-        analysis: &Cell<Option<MacroCallAnalysis >>,
-        ident: Ident,
-        arg_exprs: &[Expr],
+        _analysis: &Cell<Option<MacroCallAnalysis >>,
+        _ident: Ident,
+        _arg_exprs: &[Expr],
     ) -> Result<Ty, LiveError> {
-        fn parse_color_channel(arg: &Expr, span: Span) -> Result<f32, LiveError> {
-            match arg.kind {
-                ExprKind::Lit {span, lit} => {
-                    if let Lit::Int(val) = lit {
-                        Ok(val as f32 / 255.0)
-                    } else if let Lit::Float(val) = lit {
-                        Ok(val)
-                    } else {
-                        Err(LiveError {
-                            span,
-                            message: "color channel invalid".into(),
-                        })
-                    }
-                }
-                _ => Err(LiveError {
-                    span,
-                    message: "color channel invalid".into(),
-                }),
-            }
-        }
-        
-        if ident == Ident::new("pick") {
-            if arg_exprs.len() == 1 {
-                let color = match arg_exprs[0].kind {
-                    ExprKind::Var {span, ident_path, ..} => {
-                        let ident = ident_path.get_single();
-                        if ident.is_none() {
-                            return Err(LiveError {
-                                span,
-                                message: "pick argument invalid!".into(),
-                            });
-                        }
-                        let ident = ident.unwrap();
-                        // lets dump this in the color parser
-                        let res = Color::parse_name(&ident.to_string());
-                        if let Err(()) = res {
-                            Err(span)
-                        } else {
-                            Ok(res.unwrap())
-                        }
-                    }
-                    ExprKind::Lit {span, lit} => {
-                        if let Lit::Color(val) = lit {
-                            Ok(val)
-                        } else {
-                            Err(span)
-                        }
-                    }
-                    _ => Err(span),
-                };
-                if let Err(span) = color {
-                    return Err(LiveError {
-                        span,
-                        message: "pick argument invalid!".into(),
-                    });
-                }
-                let color = color.unwrap();
-                analysis.set(Some(MacroCallAnalysis::Pick {
-                    r: color.r,
-                    g: color.g,
-                    b: color.b,
-                    a: color.a,
-                }));
-                return Ok(Ty::Vec4);
-            }
-            return Err(LiveError {
-                span,
-                message: "pick only supports single argument!".into(),
-            });
-        }
-        else if ident == Ident::new("slide") {
-            if arg_exprs.len() == 0 {
-                analysis.set(Some(MacroCallAnalysis::Slide {
-                    v: 1.0
-                }));
-                // its 1.0
-            }
-            else if arg_exprs.len() >= 1 {
-                // only use the first one
-                let value = match arg_exprs[0].kind {
-                    ExprKind::Lit {span, lit} => {
-                        if let Lit::Int(val) = lit {
-                            Ok(val as f32)
-                        }
-                        else if let Lit::Float(val) = lit {
-                            Ok(val)
-                        }
-                        else {
-                            Err(span)
-                        }
-                    }
-                    _ => Err(span),
-                };
-                if let Err(span) = value {
-                    return Err(LiveError {
-                        span,
-                        message: "slide argument invalid!".into(),
-                    });
-                }
-                analysis.set(Some(MacroCallAnalysis::Slide {
-                    v: value.unwrap()
-                }));
-            }
-            return Ok(Ty::Float);
-        }
         return Err(LiveError {
             span,
             message: "macro not found!".into(),

@@ -309,4 +309,3 @@ pub struct CxShader {
     pub platform: Option<CxPlatformShader>,
     pub mapping: CxShaderMapping
 }
-
