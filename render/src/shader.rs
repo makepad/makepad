@@ -231,7 +231,7 @@ impl CxShaderMapping {
                         Some(bi) if bi == Ident::new("pass") => {
                             pass_uniforms.push(prop_def);
                         }
-                        Some(bi) if bi == Ident::new("default") => {
+                        None => {
                             default_uniforms.push(prop_def);
                         }
                         _ => ()

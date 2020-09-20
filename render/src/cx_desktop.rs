@@ -198,31 +198,26 @@ impl Cx {
         0
     }
     
-    pub fn load_theme_fonts(&mut self) {
+    pub fn load_all_fonts(&mut self) {
+        
+        self.fonts.resize(self.live_styles.font_index.len(), CxFont::default());
         // lets load all fonts that aren't loaded yet
-        for cxfont in &mut self.fonts {
-            let path = cxfont.path.clone();
-            if cxfont.font_loaded.is_none() {
-                // load it
-                let file_result = File::open(&path);
-                if let Ok(mut file) = file_result {
-                    let mut buffer = Vec::<u8>::new();
-                    // read the whole file
-                    if file.read_to_end(&mut buffer).is_ok() {
-                        let mut font = CxFont::default();
-                        if font.load_from_ttf_bytes(&buffer).is_err() {
-                            println!("Error loading font {} ", path);
-                        }
-                        else {
-                            font.path = path.clone();
-                            *cxfont = font;
-                        }
+        for (file, font) in &self.live_styles.font_index{
+            let file = file.to_string();
+            let cxfont = &mut self.fonts[font.font_id];
+            if let Ok(mut file_handle) = File::open(&file) {
+                let mut buffer = Vec::<u8>::new();
+                if file_handle.read_to_end(&mut buffer).is_ok() {
+                    if cxfont.load_from_ttf_bytes(&buffer).is_err() {
+                        println!("Error loading font {} ", file);
+                    }
+                    else{
+                        cxfont.file = file;
                     }
                 }
-                else {
-                    println!("Error loading font {} ", path);
-                }
-                
+            }
+            else {
+                println!("Error loading font {} ", file);
             }
         }
     }
