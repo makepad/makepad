@@ -50,8 +50,8 @@ impl NormalButton {
             self::anim_over: Anim {
                 play: Cut {duration: 0.1},
                 tracks:[
-                    Float {keys:{1.0: 0.0}, live_id: self::shader_bg::down},
                     Float {keys:{0.0: 1.0, 1.0: 1.0}, live_id: self::shader_bg::hover},
+                    Float {keys:{1.0: 0.0}, live_id: self::shader_bg::down},
                     Color {keys:{0.0: #f}, live_id: makepad_render::text::shader::color}
                 ]
             }

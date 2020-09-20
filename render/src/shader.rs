@@ -203,7 +203,7 @@ impl CxShaderMapping {
                     let prop_def = PropDef {
                         name: decl.ident.to_string(),
                         ty: decl.ty_expr.ty.borrow().clone().unwrap(),
-                        live_id: shader_ast.qualified_ident_path.with_final_ident(decl.ident).to_live_id()
+                        live_id: decl.qualified_ident_path.to_live_id()
                     };
                     geometries.push(prop_def);
                 }
@@ -211,7 +211,7 @@ impl CxShaderMapping {
                     let prop_def = PropDef {
                         name: decl.ident.to_string(),
                         ty: decl.ty_expr.ty.borrow().clone().unwrap(),
-                        live_id: shader_ast.qualified_ident_path.with_final_ident(decl.ident).to_live_id()
+                        live_id: decl.qualified_ident_path.to_live_id()
                     };
                     instances.push(prop_def);
                 }
@@ -219,7 +219,7 @@ impl CxShaderMapping {
                     let prop_def = PropDef {
                         name: decl.ident.to_string(),
                         ty: decl.ty_expr.ty.borrow().clone().unwrap(),
-                        live_id: shader_ast.qualified_ident_path.with_final_ident(decl.ident).to_live_id()
+                        live_id: decl.qualified_ident_path.to_live_id()
                     };
                     match decl.block_ident {
                         Some(bi) if bi == Ident::new("draw") => {
@@ -241,7 +241,7 @@ impl CxShaderMapping {
                     let prop_def = PropDef {
                         name: decl.ident.to_string(),
                         ty: decl.ty_expr.ty.borrow().clone().unwrap(),
-                        live_id: shader_ast.qualified_ident_path.with_final_ident(decl.ident).to_live_id()
+                        live_id: decl.qualified_ident_path.to_live_id()
                     };
                     textures.push(prop_def);
                 }
