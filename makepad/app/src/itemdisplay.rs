@@ -53,18 +53,21 @@ impl ItemDisplay {
         editor
     }
     
-    pub fn style_text_editor() -> StyleId {uid!()}
-    pub fn text_color() -> ColorId {uid!()}
-    pub fn text_style_title() -> TextStyleId {uid!()}
-
-    pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
-        Self::text_style_title().set(cx, Theme::text_style_normal().get(cx));
-        Self::text_color().set(cx, Theme::color_text_deselected_focus().get(cx));
-        cx.begin_style(Self::style_text_editor());
-        TextEditor::gutter_width().set(cx, 10.);
-        TextEditor::padding_top().set(cx, 10.);
-        TextEditor::color_bg().set(cx, Theme::color_bg_odd().get(cx));
-        cx.end_style();
+    pub fn style(cx: &mut Cx) {
+        live!(cx, r#"
+            
+            self::text_style_title: TextStyle {
+                ..makepad_widget::widgetstyle::text_style_normal
+            }
+            
+            self::text_color: #82;
+            
+            self::style_text_editor: Style{
+                makepad_widget::texteditor::gutter_width: 10.;
+                makepad_widget::texteditor::padding_top: 10.;
+                makepad_widget::texteditor::color_bg: #25;
+            }
+        "#)
     }
     
     pub fn display_message(&mut self, cx: &mut Cx, loc_message: &LocMessage) {
@@ -205,14 +208,15 @@ impl ItemDisplay {
             }
             ItemDisplayType::PlainText {..} | ItemDisplayType::Message {..} => {
                 let text_buffer = &mut self.text_buffer;
-                cx.begin_style(Self::style_text_editor());
-                if self.text_disp.begin_text_editor(cx, text_buffer).is_err() {return cx.end_style();}
+                live_style_begin!(cx, self::style_text_editor);
+
+                if self.text_disp.begin_text_editor(cx, text_buffer).is_err() {return live_style_end!(cx, self::style_text_editor);}
                 
                 for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
                     self.text_disp.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.markers);
                 }
                 self.text_disp.end_text_editor(cx, text_buffer);
-                cx.end_style();
+                live_style_end!(cx, self::style_text_editor);
             },
         }
     }

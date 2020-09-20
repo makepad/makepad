@@ -47,51 +47,46 @@ impl HomePage {
         }
     }
     
-    pub fn text_color() -> ColorId {uid!()}
-    pub fn layout_main() -> LayoutId {uid!()}
-    pub fn text_style_heading() -> TextStyleId {uid!()}
-    pub fn text_style_body() -> TextStyleId {uid!()}
-    pub fn text_style_point() -> TextStyleId {uid!()}
-    pub fn walk_paragraph() -> WalkId {uid!()}
-    
-    pub fn style(cx: &mut Cx, opt: &StyleOptions) {
+    pub fn style(cx: &mut Cx) {
         
-        Self::text_style_heading().set(cx, TextStyle {
-            font_size: 28.0 * opt.scale,
-            line_spacing: 2.0,
-            ..Theme::text_style_normal().get(cx)
-        });
-        
-        Self::text_style_body().set(cx, TextStyle {
-            font_size: 10.0 * opt.scale,
-            height_factor: 2.0,
-            line_spacing: 3.0,
-            ..Theme::text_style_normal().get(cx)
-        });
-        
-        Self::text_style_point().set(cx, TextStyle {
-            font_size: 8.0 * opt.scale,
-            line_spacing: 2.5,
-            ..Theme::text_style_normal().get(cx)
-        });
-        
-        Self::text_color().set(cx, pick!(#b).get(cx));
-        Self::layout_main().set(cx, Layout {
-            padding: Padding {l: 10., t: 10., r: 10., b: 10.},
-            new_line_padding: 15.,
-            line_wrap: LineWrap::MaxSize(550.),
-            ..Layout::default()
-        });
+        live!(cx, r#"
+            self::text_style_heading: TextStyle {
+                font_size: 28.0,
+                line_spacing: 2.0,
+                ..makepad_widget::widgetstyle::text_style_normal
+            }
+            
+            self::text_style_body: TextStyle {
+                font_size: 10.0,
+                height_factor: 2.0,
+                line_spacing: 3.0,
+                ..makepad_widget::widgetstyle::text_style_normal
+            }
+            
+            self::text_style_point: TextStyle {
+                font_size: 8.0,
+                line_spacing: 2.5,
+                ..makepad_widget::widgetstyle::text_style_normal
+            }
+            
+            self::text_color: #b;
+            
+            self::layout_main: Layout {
+                padding: {l: 10., t: 10., r: 10., b: 10.},
+                new_line_padding: 15.,
+                line_wrap: MaxSize(550.),
+            }
+        "#)
     }
     
     pub fn handle_home_page(&mut self, cx: &mut Cx, event: &mut Event) {
         if let Event::Signal(sig) = event {
             if let Some(statusses) = sig.signals.get(&self.email_signal) {
-                for status in statusses{
-                    if *status == Cx::status_http_send_ok(){
+                for status in statusses {
+                    if *status == Cx::status_http_send_ok() {
                         self.email_state = EmailState::OkSending;
                     }
-                    else if *status == Cx::status_http_send_fail(){
+                    else if *status == Cx::status_http_send_fail() {
                         self.email_state = EmailState::ErrorSending;
                     }
                     self.view.redraw_view_area(cx);
@@ -125,7 +120,7 @@ impl HomePage {
             }
         }
         
-        for text_input in self.example_texts.iter(){
+        for text_input in self.example_texts.iter() {
             text_input.handle_text_input(cx, event);
         }
         
@@ -133,16 +128,16 @@ impl HomePage {
     }
     
     pub fn draw_home_page(&mut self, cx: &mut Cx) {
-        if self.view.begin_view(cx, Self::layout_main().get(cx)).is_err() {return};
+        if self.view.begin_view(cx, live_layout!(cx, self::layout_main)).is_err() {return};
         
         let t = &mut self.text;
         
-        t.color = Self::text_color().get(cx);
+        t.color = live_color!(cx, self::text_color);
         
-        t.text_style = Self::text_style_heading().get(cx);
+        t.text_style = live_text_style!(cx, self::text_style_heading);
         t.draw_text(cx, "Introducing Makepad\n");
         
-        t.text_style = Self::text_style_body().get(cx);
+        t.text_style = live_text_style!(cx, self::text_style_body);
         t.draw_text(cx, "\
             Makepad is a creative software development platform built around Rust. \
             We aim to make the creative software development process as fun as possible! \
@@ -180,67 +175,67 @@ impl HomePage {
             in a large code file!. To compile code yourself, you have to install \
             the native version. Right now makepad is set up to compile a simple WASM example you run in a browser from a localhost url.\n");
         
-        t.text_style = Self::text_style_heading().get(cx);
+        t.text_style = live_text_style!(cx, self::text_style_heading);
         t.draw_text(cx, "How to use\n");
         
-        t.text_style = Self::text_style_body().get(cx);
+        t.text_style = live_text_style!(cx, self::text_style_body);
         t.draw_text(cx, "\
             After install (see below) you can open the following file in makepad, and when you change the rust code, \
             the browser should live reload the wasm application as you type.\
             \n");
         
-        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+        self.example_texts.get_draw(cx).draw_text_input_static(cx, "\
             open this file the makepad editor UI: main/makepad/examples/webgl_example_wasm/src/sierpinski.rs \n\
             open this url in your browser: http://127.0.0.1:8000/makepad/examples/webgl_example_wasm/");
         cx.turtle_new_line();
         
-        t.text_style = Self::text_style_heading().get(cx);
+        t.text_style = live_text_style!(cx, self::text_style_heading);
         t.draw_text(cx, "How to install\n");
         
-        t.text_style = Self::text_style_body().get(cx);
+        t.text_style = live_text_style!(cx, self::text_style_body);
         t.draw_text(cx, "\
             On all platforms first install Rust. \
             On windows feel free to ignore the warnings about MSVC, makepad uses the gnu chain. \
             Copy this url to your favorite browser.\n");
-
-        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+        
+        self.example_texts.get_draw(cx).draw_text_input_static(cx, "\
             https://www.rust-lang.org/tools/install");
         cx.turtle_new_line();
         
-        t.text_style = Self::text_style_heading().get(cx);
+        t.text_style = live_text_style!(cx, self::text_style_heading);
         t.draw_text(cx, "MacOS\n");
         
-        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+        self.example_texts.get_draw(cx).draw_text_input_static(cx, "\
             git clone https://github.com/makepad/makepad\n\
             cd makepad\n\
             tools/macos_rustup.sh\n\
             cargo run -p makepad --release");
         cx.turtle_new_line();
-
-        t.text_style = Self::text_style_heading().get(cx);
+        
+        t.text_style = live_text_style!(cx, self::text_style_heading);
         t.draw_text(cx, "Windows\n");
-
-        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+        
+        self.example_texts.get_draw(cx).draw_text_input_static(cx, "\
             Clone this repo using either gitub desktop or commandline: https://github.com/makepad/makepad\n\
             Open a cmd.exe in the directory you just cloned. Gh desktop makes: Documents\\Github\\makepad\n\
             tools\\windows_rustup.bat\n\
             cargo run -p makepad --release --target x86_64-pc-windows-gnu");
         cx.turtle_new_line();
-
-        t.text_style = Self::text_style_heading().get(cx);
+        
+        t.text_style = live_text_style!(cx, self::text_style_heading);
         t.draw_text(cx, "Linux\n");
-
-        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+        
+        self.example_texts.get_draw(cx).draw_text_input_static(cx, "\
             git clone https://github.com/makepad/makepad\n\
             cd makepad\n\
             tools/linux_rustup.sh\n\
             cargo run -p makepad --release");
         cx.turtle_new_line();
         
-        t.text_style = Self::text_style_heading().get(cx);
-        t.draw_text(cx, "Troubleshooting\n"); 
-
-        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+        t.text_style = live_text_style!(cx, self::text_style_heading);
+        t.draw_text(cx, "Troubleshooting\n");
+        
+        self.example_texts.get_draw(cx).draw_text_input_static(cx, "\
             Delete old settings unix: rm *.ron\n\
             Delete old settings windows: del *.ron\n\
             Make sure you are on master: git checkout master\n\
@@ -250,7 +245,7 @@ impl HomePage {
             If gnu chain for some reason doesn't work on windows, use the msvc chain\n\
             Still have a problem? Report here: https://github.com/makepad/makepad/issues");
         cx.turtle_new_line();
-
+        
         self.shadow.draw_shadow_top(cx);
         self.view.end_view(cx);
     }

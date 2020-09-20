@@ -11,7 +11,7 @@ impl Cube {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             shader: live_shader!(cx, self::shader),
-            color: Color::parse_hex_str("#c").unwrap()
+            color: Color::parse_hex_str("c").unwrap()
         }
     }
     
@@ -29,7 +29,7 @@ impl Cube {
             varying lit_col: vec4;
             
             fn color_form_id() -> vec4 {
-                return pick!(#c);
+                return #c;
                 /*
             if geom_id>4.5{
             return pick!(red);

@@ -187,13 +187,28 @@ impl<'a> Parser<'a> {
             let span = self.begin_span();
             
             // at this level we expect a live_id
-            let qualified_ident_path = self.parse_ident_path() ? .qualify(&self.module_path);
+            let ident_path = self.parse_ident_path() ?;
+            let qualified_ident_path = ident_path.qualify(&self.module_path);
             
-            //if current_style.is_none() && (ident_path.len() != 2 || !ident_path.is_self_id()) {
-            //    return Err(span.error(self, format!("Ident not a self::id form `{}` override using a style block", ident_path)));
-            // }
+            if current_style.is_none() && !ident_path.is_self_id() {
+                return Err(span.error(self, format!("Ident not a self::id form `{}` override using a style block", ident_path)));
+            }
             
             let live_id = qualified_ident_path.to_live_id();
+
+            if !current_style.is_none(){ // check if the ident already exists
+                if self.live_styles.collision_check.get(&live_id).is_none(){
+                    return Err(span.error(self, format!("Ident override `{}` does not exist (yet)", ident_path)));
+                }
+            }
+            
+            if let Some(qip) = self.live_styles.collision_check.get(&live_id){
+                if *qip != qualified_ident_path{
+                    return Err(span.error(self, format!("Ident live_id hash collision between `{}` and `{}` rename one of them", qip, qualified_ident_path)));
+                }
+            }
+            self.live_styles.collision_check.insert(live_id, qualified_ident_path);
+
             self.expect_token(Token::Colon) ?;
             
             match self.peek_token() {
@@ -257,6 +272,44 @@ impl<'a> Parser<'a> {
                     self.skip_token();
                     let text_style = TextStyle::de_tok(self) ?;
                     self.live_styles.get_style_mut(&current_style).text_styles.insert(live_id, text_style);
+                }
+                Token::Ident(_)=>{
+                    let ref_ident_path = self.parse_ident_path()?;
+                    let ref_live_id = ref_ident_path.qualify(&self.module_path).to_live_id();
+                    
+                    // lets see what it is and follow the reference
+                    if let Some(v) = self.live_styles.base.floats.get(&ref_live_id){
+                        let v = *v;
+                        self.live_styles.get_style_mut(&current_style).floats.insert(live_id, v);
+                    }
+                    else if let Some(v) = self.live_styles.base.colors.get(&ref_live_id){
+                        let v = *v;
+                        self.live_styles.get_style_mut(&current_style).colors.insert(live_id, v);
+                    }
+                    else if let Some(v) = self.live_styles.base.text_styles.get(&ref_live_id){
+                        let v = *v;
+                        self.live_styles.get_style_mut(&current_style).text_styles.insert(live_id, v);
+                    }
+                    else if let Some(v) = self.live_styles.base.layouts.get(&ref_live_id){
+                        let v = *v;
+                        self.live_styles.get_style_mut(&current_style).layouts.insert(live_id, v);
+                    }
+                    else if let Some(v) = self.live_styles.base.walks.get(&ref_live_id){
+                        let v = *v;
+                        self.live_styles.get_style_mut(&current_style).walks.insert(live_id, v);
+                    }
+                    else if let Some(v) = self.live_styles.base.anims.get(&ref_live_id){
+                        let v = v.clone();
+                        self.live_styles.get_style_mut(&current_style).anims.insert(live_id, v);
+                    }
+                    else if let Some(v) = self.live_styles.base.shaders.get(&ref_live_id){
+                        let v = v.clone();
+                        self.live_styles.get_style_mut(&current_style).shaders.insert(live_id, v);
+                    }
+                    else{
+                         return Err(span.error(self, format!("Reference {} not found", ref_ident_path)));
+                    }
+                    self.expect_token(Token::Semi) ?;
                 }
                 Token::Lit(Lit::Int(_)) | Token::Lit(Lit::Float(_)) => {
                     let val = f32::de_tok(self) ?;
