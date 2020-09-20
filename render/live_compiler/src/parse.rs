@@ -1,6 +1,6 @@
 use crate::shaderast::*;
 use crate::error::LiveError;
-use crate::ident::{Ident, IdentPath, IdentPathWithSpan};
+use crate::ident::{Ident, IdentPath, IdentPathWithSpan, QualifiedIdentPath};
 use crate::lit::{Lit, TyLit};
 use crate::span::Span;
 use crate::token::{Token, TokenWithSpan};
@@ -299,7 +299,7 @@ impl<'a> Parser<'a> {
                 }
                 Token::Ident(ident) if ident == Ident::new("geometry") => {
                     self.skip_token();
-                    let decl = self.parse_geometry_decl() ?;
+                    let decl = self.parse_geometry_decl(shader_ast.qualified_ident_path) ?;
                     shader_ast.decls.push(Decl::Geometry(decl));
                 }
                 Token::Const => {
@@ -325,17 +325,17 @@ impl<'a> Parser<'a> {
                 }
                 Token::Ident(ident) if ident == Ident::new("instance") => {
                     self.skip_token();
-                    let decl = self.parse_instance_decl() ?;
+                    let decl = self.parse_instance_decl(shader_ast.qualified_ident_path) ?;
                     shader_ast.decls.push(Decl::Instance(decl));
                 }
                 Token::Ident(ident) if ident == Ident::new("texture") => {
                     self.skip_token();
-                    let decl = self.parse_texture_decl() ?;
+                    let decl = self.parse_texture_decl(shader_ast.qualified_ident_path) ?;
                     shader_ast.decls.push(Decl::Texture(decl));
                 }
                 Token::Ident(ident) if ident == Ident::new("uniform") => {
                     self.skip_token();
-                    let decl = self.parse_uniform_decl() ?;
+                    let decl = self.parse_uniform_decl(shader_ast.qualified_ident_path) ?;
                     shader_ast.decls.push(Decl::Uniform(decl));
                 }
                 Token::Ident(ident) if ident == Ident::new("varying") => {
@@ -368,19 +368,6 @@ impl<'a> Parser<'a> {
         return Err(self.error(format!("unexpected eof")))
     }
     
-    fn parse_geometry_decl(&mut self) -> Result<GeometryDecl, LiveError> {
-        let span = self.begin_span();
-        let ident = self.parse_ident() ?;
-        self.expect_token(Token::Colon) ?;
-        let ty_expr = self.parse_prim_ty_expr() ?;
-        self.expect_token(Token::Semi) ?;
-        Ok(span.end(self, | span | GeometryDecl {
-            is_used_in_fragment_shader: Cell::new(None),
-            span,
-            ident,
-            ty_expr,
-        }))
-    }
     
     fn parse_const_decl(&mut self) -> Result<ConstDecl, LiveError> {
         let span = self.begin_span();
@@ -475,7 +462,22 @@ impl<'a> Parser<'a> {
     }
     
     
-    fn parse_instance_decl(&mut self) -> Result<InstanceDecl, LiveError> {
+    fn parse_geometry_decl(&mut self, qualified_ident_path:QualifiedIdentPath) -> Result<GeometryDecl, LiveError> {
+        let span = self.begin_span();
+        let ident = self.parse_ident() ?;
+        self.expect_token(Token::Colon) ?;
+        let ty_expr = self.parse_prim_ty_expr() ?;
+        self.expect_token(Token::Semi) ?;
+        Ok(span.end(self, | span | GeometryDecl {
+            is_used_in_fragment_shader: Cell::new(None),
+            span,
+            ident,
+            ty_expr,
+            qualified_ident_path: qualified_ident_path.with_final_ident(ident),
+        }))
+    }
+    
+    fn parse_instance_decl(&mut self, qualified_ident_path:QualifiedIdentPath) -> Result<InstanceDecl, LiveError> {
         let span = self.begin_span();
         let ident = self.parse_ident() ?;
         self.expect_token(Token::Colon) ?;
@@ -486,8 +488,44 @@ impl<'a> Parser<'a> {
             span,
             ident,
             ty_expr,
+            qualified_ident_path: qualified_ident_path.with_final_ident(ident),
         }))
     }
+    
+    fn parse_texture_decl(&mut self, qualified_ident_path:QualifiedIdentPath) -> Result<TextureDecl, LiveError> {
+        let span = self.begin_span();
+        let ident = self.parse_ident() ?;
+        self.expect_token(Token::Colon) ?;
+        let ty_expr = self.parse_prim_ty_expr() ?;
+        self.expect_token(Token::Semi) ?;
+        Ok(span.end(self, | span | TextureDecl {
+            span,
+            ident,
+            ty_expr,
+            qualified_ident_path: qualified_ident_path.with_final_ident(ident),
+        }))
+    }
+    
+    fn parse_uniform_decl(&mut self, qualified_ident_path:QualifiedIdentPath) -> Result<UniformDecl, LiveError> {
+        let span = self.begin_span();
+        let ident = self.parse_ident() ?;
+        self.expect_token(Token::Colon) ?;
+        let ty_expr = self.parse_prim_ty_expr() ?;
+        let block_ident = if self.accept_ident("in") {
+            Some(self.parse_ident() ?)
+        } else {
+            None
+        };
+        self.expect_token(Token::Semi) ?;
+        Ok(span.end(self, | span | UniformDecl {
+            span,
+            ident,
+            ty_expr,
+            block_ident,
+            qualified_ident_path: qualified_ident_path.with_final_ident(ident),
+        }))
+    }
+    
     
     fn parse_struct_decl(&mut self) -> Result<StructDecl, LiveError> {
         let span = self.begin_span();
@@ -506,38 +544,6 @@ impl<'a> Parser<'a> {
             span,
             ident,
             fields,
-        }))
-    }
-    
-    fn parse_texture_decl(&mut self) -> Result<TextureDecl, LiveError> {
-        let span = self.begin_span();
-        let ident = self.parse_ident() ?;
-        self.expect_token(Token::Colon) ?;
-        let ty_expr = self.parse_prim_ty_expr() ?;
-        self.expect_token(Token::Semi) ?;
-        Ok(span.end(self, | span | TextureDecl {
-            span,
-            ident,
-            ty_expr,
-        }))
-    }
-    
-    fn parse_uniform_decl(&mut self) -> Result<UniformDecl, LiveError> {
-        let span = self.begin_span();
-        let ident = self.parse_ident() ?;
-        self.expect_token(Token::Colon) ?;
-        let ty_expr = self.parse_prim_ty_expr() ?;
-        let block_ident = if self.accept_ident("in") {
-            Some(self.parse_ident() ?)
-        } else {
-            None
-        };
-        self.expect_token(Token::Semi) ?;
-        Ok(span.end(self, | span | UniformDecl {
-            span,
-            ident,
-            ty_expr,
-            block_ident,
         }))
     }
     

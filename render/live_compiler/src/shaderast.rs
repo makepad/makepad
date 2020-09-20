@@ -15,12 +15,13 @@ pub struct ShaderAst {
     pub module_path: String,
     pub debug: bool,
     pub shader: Option<Shader>,
+    pub default_geometry: Option<IdentPathWithSpan>,
+    pub decls: Vec<Decl>,
+    pub uses: Vec<IdentPathWithSpan>,
+    // generated
     pub const_table: RefCell<Option<Vec<f32>>>,
     pub const_table_spans: RefCell<Option<Vec<(usize,Span)>>>,
     pub livestyle_uniform_deps: RefCell<Option<BTreeSet<(Ty,QualifiedIdentPath)>>>,
-    pub uses: Vec<IdentPathWithSpan>,
-    pub decls: Vec<Decl>,
-    pub default_geometry: Option<IdentPathWithSpan>
 }
 
 impl ShaderAst {
@@ -127,6 +128,7 @@ pub struct GeometryDecl {
     pub is_used_in_fragment_shader: Cell<Option<bool>>,
     pub span: Span,
     pub ident: Ident,
+    pub qualified_ident_path: QualifiedIdentPath,
     pub ty_expr: TyExpr,
 }
 
@@ -163,6 +165,7 @@ pub struct InstanceDecl {
     pub is_used_in_fragment_shader: Cell<Option<bool>>,
     pub span: Span,
     pub ident: Ident,
+    pub qualified_ident_path: QualifiedIdentPath,
     pub ty_expr: TyExpr,
 }
 
@@ -183,6 +186,7 @@ impl StructDecl {
 pub struct TextureDecl {
     pub span: Span,
     pub ident: Ident,
+    pub qualified_ident_path: QualifiedIdentPath,
     pub ty_expr: TyExpr,
 }
 
@@ -191,6 +195,7 @@ pub struct UniformDecl {
     pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
+    pub qualified_ident_path: QualifiedIdentPath,
     pub block_ident: Option<Ident>,
 }
 
