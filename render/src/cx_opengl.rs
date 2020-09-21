@@ -132,7 +132,7 @@ impl Cx {
                 
                 unsafe {
                     gl::UseProgram(shp.program);
-                    gl::BindVertexArray(draw_call.platform.vao.unwrap().vao);
+                    gl::BindVertexArray(draw_call.platform.vao.as_ref().unwrap().vao);
                     let instances = draw_call.instance.len() / sh.mapping.instance_props.total_slots;
                     
                     let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
@@ -657,15 +657,14 @@ impl Cx {
         shader_ast: ShaderAst,
         default_geometry: Option<Geometry>,
         options: ShaderCompileOptions,
-        opengl_cx: &OpenglCx,
+        _opengl_cx: &OpenglCx,
         live_styles: &LiveStyles
     ) -> ShaderCompileResult {
         
         // lets generate the vertexshader
         let vertex = generate_glsl::generate_vertex_shader(&shader_ast, live_styles, options);
         let fragment = generate_glsl::generate_fragment_shader(&shader_ast, live_styles, options);
-        let mapping = CxShaderMapping::from_shader_ast(shader_ast, options);
-        
+
         let vertex = format!("
             #version 100
             precision highp float;
@@ -679,11 +678,15 @@ impl Cx {
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             {}\0", fragment);
-        
+
         if shader_ast.debug {
             println!("--------------- Vertex shader {} --------------- \n{}\n---------------\n", shader_id, vertex);
             println!("--------------- Fragment shader {} --------------- \n{}\n---------------\n", shader_id, fragment);
         }
+        
+        let mapping = CxShaderMapping::from_shader_ast(shader_ast, options);
+        
+        
         
         if let Some(sh_platform) = &sh.platform {
             if sh_platform.vertex == vertex && sh_platform.fragment == fragment {
@@ -736,18 +739,9 @@ impl Cx {
             let instances = Self::opengl_get_attributes(program, "mpsc_packed_instance_", mapping.instance_props.total_slots);
             
             // lets fetch the uniform positions for our uniforms
+            sh.default_geometry = default_geometry;
             sh.platform = Some(CxPlatformShader {
                 program: program,
-                geom_ibuf: {
-                    let mut buf = OpenglBuffer::default();
-                    buf.update_with_u32_data(opengl_cx, &sh.shader_gen.geometry.indices);
-                    buf
-                },
-                geom_vbuf: {
-                    let mut buf = OpenglBuffer::default();
-                    buf.update_with_f32_data(opengl_cx, &sh.shader_gen.geometry.vertices);
-                    buf
-                },
                 geometries,
                 instances,
                 vertex,
@@ -755,6 +749,7 @@ impl Cx {
                 pass_uniforms: Self::opengl_get_uniforms(program, &mapping.pass_uniforms),
                 view_uniforms: Self::opengl_get_uniforms(program, &mapping.view_uniforms),
                 draw_uniforms: Self::opengl_get_uniforms(program, &mapping.draw_uniforms),
+                live_uniforms: Self::opengl_get_uniforms(program, &mapping.live_uniforms),
                 const_table_uniform: Self::opengl_get_uniform(program, "mpsc_const_table", 1),
                 user_uniforms: Self::opengl_get_uniforms(program, &mapping.user_uniforms),
             });
@@ -1176,7 +1171,7 @@ pub struct OpenglUniform {
 }
 
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CxPlatformGeometry {
     pub vb: OpenglBuffer,
     pub ib: OpenglBuffer,
