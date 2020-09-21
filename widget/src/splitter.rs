@@ -83,7 +83,7 @@ impl Splitter {
             }
             
             self::anim_down: Anim {
-                play: Cut {duration: 0.02}
+                play: Cut {duration: 0.2}
                 tracks: [
                     Color {keys: {0.0: self::color_peak, 1.0: self::color_drag}, live_id: makepad_render::quad::shader::color}
                 ]

@@ -84,7 +84,7 @@ impl Cx {
                 
                 let geometry = &mut self.geometries[draw_call.geometry_id];
                 
-                if geometry.dirty{
+                if geometry.dirty {
                     geometry.platform.geom_ibuf.update_with_u32_data(metal_cx, &geometry.indices);
                     geometry.platform.geom_vbuf.update_with_f32_data(metal_cx, &geometry.vertices);
                     geometry.dirty = false;
@@ -126,7 +126,7 @@ impl Cx {
                     let () = msg_send![encoder, setFragmentBytes: draw_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_uniforms.len() * 4) as u64 atIndex: 2u64];
                     let () = msg_send![encoder, setFragmentBytes: draw_call.uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.uniforms.len() * 4) as u64 atIndex: 3u64];
                     let () = msg_send![encoder, setFragmentBytes: sh.mapping.live_uniform_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniform_buf.len() * 4) as u64 atIndex: 4u64];
-
+                    
                     if let Some(ct) = &sh.mapping.const_table {
                         let () = msg_send![encoder, setVertexBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 7u64];
                         let () = msg_send![encoder, setFragmentBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 5u64];
@@ -780,13 +780,29 @@ impl Cx {
                 },
                 Ok((shader_ast, default_geometry)) => {
                     let shader_id = shader_ast.shader.unwrap().shader_id;
-                    Self::mtl_compile_shader(shader_id, &mut shaders[shader_id], shader_ast, default_geometry, options, metal_cx, live_styles);
+                    Self::mtl_compile_shader(
+                        shader_id,
+                        &mut shaders[shader_id],
+                        shader_ast,
+                        default_geometry,
+                        options,
+                        metal_cx,
+                        live_styles
+                    );
                 }
             }
         });
     }
     
-    pub fn mtl_compile_shader(shader_id: usize, sh: &mut CxShader, shader_ast: ShaderAst, default_geometry: Option<Geometry>, options: ShaderCompileOptions, metal_cx: &MetalCx, live_styles:&LiveStyles) -> ShaderCompileResult {
+    pub fn mtl_compile_shader(
+        shader_id: usize,
+        sh: &mut CxShader,
+        shader_ast: ShaderAst,
+        default_geometry: Option<Geometry>,
+        options: ShaderCompileOptions,
+        metal_cx: &MetalCx,
+        live_styles: &LiveStyles
+    ) -> ShaderCompileResult {
         
         let mtlsl = generate_metal::generate_shader(&shader_ast, live_styles, options);
         let debug = shader_ast.debug;

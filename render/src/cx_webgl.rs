@@ -1,6 +1,8 @@
 
 use crate::cx::*;
-use makepad_shader_compiler::generate_glsl;
+use makepad_live_compiler::generate_glsl;
+use makepad_live_compiler::analyse::ShaderCompileOptions;
+use makepad_live_compiler::shaderast::ShaderAst;
 
 impl Cx {
     pub fn render_view(
@@ -35,16 +37,18 @@ impl Cx {
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
                 
-                if draw_call.instance_dirty {
+                if draw_call.instance_dirty || draw_call.platform.inst_vb_id.is_none() {
                     draw_call.instance_dirty = false;
-                    // update the instance buffer data
-                    draw_call.platform.check_attached_vao(draw_call.shader_id, sh, &mut self.platform);
-                    
+                    if draw_call.platform.inst_vb_id.is_none() {
+                        draw_call.platform.inst_vb_id = Some(self.platform.vertex_buffers);
+                        self.platform.vertex_buffers += 1;
+                    }
                     self.platform.from_wasm.alloc_array_buffer(
-                        draw_call.platform.inst_vb_id,
+                        draw_call.platform.inst_vb_id.unwrap(),
                         draw_call.instance.len(),
                         draw_call.instance.as_ptr() as *const f32
                     );
+                    draw_call.instance_dirty = false;
                 }
                 
                 draw_call.set_zbias(*zbias);
@@ -62,20 +66,80 @@ impl Cx {
                     }
                 }
                 
+                // update geometry?
+                let geometry = &mut self.geometries[draw_call.geometry_id];
+                
+                if geometry.dirty || geometry.platform.vb_id.is_none() || geometry.platform.ib_id.is_none() {
+                    if geometry.platform.vb_id.is_none() {
+                        geometry.platform.vb_id = Some(self.platform.vertex_buffers);
+                        self.platform.vertex_buffers += 1;
+                    }
+                    if geometry.platform.ib_id.is_none() {
+                        geometry.platform.ib_id = Some(self.platform.index_buffers);
+                        self.platform.index_buffers += 1;
+                    }
+                    self.platform.from_wasm.alloc_array_buffer(
+                        geometry.platform.vb_id.unwrap(),
+                        geometry.vertices.len(),
+                        geometry.vertices.as_ptr() as *const f32
+                    );
+                    self.platform.from_wasm.alloc_index_buffer(
+                        geometry.platform.ib_id.unwrap(),
+                        geometry.indices.len(),
+                        geometry.indices.as_ptr() as *const u32
+                    );
+                    geometry.dirty = false;
+                }
+                
+                
+                // lets check if our vao is still valid
+                if draw_call.platform.vao.is_none() {
+                    draw_call.platform.vao = Some(CxPlatformDrawCallVao {
+                        vao_id: self.platform.vaos,
+                        shader_id: None,
+                        inst_vb_id: None,
+                        geom_vb_id: None,
+                        geom_ib_id: None,
+                    });
+                    self.platform.vaos += 1;
+                }
+                let vao = draw_call.platform.vao.as_mut().unwrap();
+                if vao.inst_vb_id != draw_call.platform.inst_vb_id
+                    || vao.geom_vb_id != geometry.platform.vb_id
+                    || vao.geom_ib_id != geometry.platform.ib_id
+                    || vao.shader_id != Some(draw_call.shader_id) {
+                    vao.shader_id = Some(draw_call.shader_id);
+                    vao.inst_vb_id = draw_call.platform.inst_vb_id;
+                    vao.geom_vb_id = geometry.platform.vb_id;
+                    vao.geom_ib_id = geometry.platform.ib_id;
+                    
+                    self.platform.from_wasm.alloc_vao(
+                        vao.vao_id,
+                        vao.shader_id.unwrap(),
+                        vao.geom_ib_id.unwrap(),
+                        vao.geom_vb_id.unwrap(),
+                        draw_call.platform.inst_vb_id.unwrap()
+                    );
+                }
+                
+                
                 let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
                 let view_uniforms = cxview.view_uniforms.as_slice();
                 let draw_uniforms = draw_call.draw_uniforms.as_slice();
                 
                 self.platform.from_wasm.draw_call(
                     draw_call.shader_id,
-                    draw_call.platform.vao_id,
+                    draw_call.platform.vao.as_ref().unwrap().vao_id,
                     pass_uniforms,
                     view_uniforms,
                     draw_uniforms,
                     &draw_call.uniforms,
+                    &sh.mapping.live_uniforms_buf,
                     &draw_call.textures_2d,
                     &sh.mapping.const_table
                 );
+                
+                
             }
         }
         if let Some(_) = &self.views[view_id].debug {
@@ -178,7 +242,7 @@ impl Cx {
             pass_id,
             view_id,
             Vec2::default(),
-            (Vec2{x:-50000.,y:-50000.},Vec2{x:50000.,y:50000.}),
+            (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
             &mut zbias,
             zbias_step
         );
@@ -186,36 +250,49 @@ impl Cx {
     
     
     pub fn webgl_compile_all_shaders(&mut self) {
-        for (shader_id, sh) in self.shaders.iter_mut().enumerate() {
-            let glsh = Self::webgl_compile_shader(shader_id, !self.platform.gpu_spec_is_low_on_uniforms, false, sh, &mut self.platform, &mut self.shader_inherit_cache);
-            if let ShaderCompileResult::Fail{err,..} = glsh {
-                self.platform.from_wasm.log(&format!("Got GLSL shader compile error: {}", err))
-            }
-        }
-    }
-    
-    pub fn webgl_compile_shader(shader_id: usize, gather_all_consts:bool, use_const_table: bool, sh: &mut CxShader, platform: &mut CxPlatform, shader_inherit_cache:&mut ShaderInheritCache) -> ShaderCompileResult{
-        let shader_ast = sh.shader_gen.lex_parse_analyse(gather_all_consts, use_const_table, shader_inherit_cache);
-        
-        let shader_ast = match shader_ast{
-            ShaderGenResult::Error(err)=>{
-                return ShaderCompileResult::Fail{id:shader_id, err:err}
-            },
-            ShaderGenResult::PatchedConstTable(const_table)=>{
-                sh.mapping.const_table = Some(const_table);
-                //platform.from_wasm.log("PATCHED");
-                return ShaderCompileResult::Nop{id:shader_id}
-            },
-            ShaderGenResult::ShaderAst(shader_ast)=>{
-               //platform.from_wasm.log("PARSED");
-                shader_ast
-            }
+        let options = ShaderCompileOptions {
+            gather_all: !self.platform.gpu_spec_is_low_on_uniforms,
+            create_const_table: false,
+            no_const_collapse: false
         };
         
-        let vertex = generate_glsl::generate_vertex_shader(&shader_ast,use_const_table);
-        let fragment = generate_glsl::generate_fragment_shader(&shader_ast,use_const_table);
-        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, if use_const_table{shader_ast.const_table.borrow_mut().take()} else {None});
+        let shaders = &mut self.shaders;
+        let live_styles = &mut self.live_styles;
+        let platform = &mut self.platform;
+        live_styles.enumerate_all_shaders( | shader_ast | {
+            match live_styles.collect_and_analyse_shader_ast(&shader_ast, options) {
+                Err(err) => {
+                    platform.from_wasm.log(&format!("{}", err))
+                },
+                Ok((shader_ast, default_geometry)) => {
+                    let shader_id = shader_ast.shader.unwrap().shader_id;
+                    Self::webgl_compile_shader(
+                        shader_id,
+                        &mut shaders[shader_id],
+                        shader_ast,
+                        default_geometry,
+                        options,
+                        platform,
+                        live_styles
+                    );
+                }
+            }
+        });
+    }
     
+    pub fn webgl_compile_shader(
+        shader_id: usize,
+        sh: &mut CxShader,
+        shader_ast: ShaderAst,
+        default_geometry: Option<Geometry>,
+        options: ShaderCompileOptions,
+        platform: &mut CxPlatform,
+        live_styles: &LiveStyles
+    ) -> ShaderCompileResult {
+        
+        let vertex = generate_glsl::generate_vertex_shader(&shader_ast, live_styles, options);
+        let fragment = generate_glsl::generate_fragment_shader(&shader_ast, live_styles, options);
+        
         let vertex = format!("
             precision highp float;
             precision highp int;
@@ -233,48 +310,36 @@ impl Cx {
             mat3 transpose(mat3 m){{return mat3(m[0][0],m[1][0],m[2][0],m[0][1],m[1][1],m[2][1],m[0][2],m[1][2],m[2][2]);}}
             mat2 transpose(mat2 m){{return mat2(m[0][0],m[1][0],m[0][1],m[1][1]);}}
             {}\0", fragment);
-
-        if shader_ast.debug{
+        
+        if shader_ast.debug {
             platform.from_wasm.log(&format!(
-                "--------------- Vertex shader {} --------------- \n{}\n---------------\n--------------- Fragment shader {} --------------- \n{}\n---------------\n", shader_id, vertex, shader_id, fragment
+                "--------------- Vertex shader {} --------------- \n{}\n---------------\n--------------- Fragment shader {} --------------- \n{}\n---------------\n",
+                shader_id,
+                vertex,
+                shader_id,
+                fragment
             ));
         }
-
-             
+        
+        let mapping = CxShaderMapping::from_shader_ast(shader_ast, options);
+        
         // lets check if we need to recompile the shader at all
-        if let Some(sh_platform) = &sh.platform{
-            if sh_platform.vertex == vertex && sh_platform.fragment == fragment{
+        if let Some(sh_platform) = &sh.platform {
+            if sh_platform.vertex == vertex && sh_platform.fragment == fragment {
                 sh.mapping = mapping;
-                return ShaderCompileResult::Nop{id:shader_id}
+                return ShaderCompileResult::Nop {id: shader_id}
             }
-        } 
+        }
         //let shader_id = self.compiled_shaders.len();
         platform.from_wasm.compile_webgl_shader(shader_id, &vertex, &fragment, &mapping);
-        
-        let geom_ib_id = platform.get_free_index_buffer();
-        let geom_vb_id = platform.get_free_index_buffer();
-        
-        platform.from_wasm.alloc_array_buffer(
-            geom_vb_id,
-            sh.shader_gen.geometry.vertices.len(),
-            sh.shader_gen.geometry.vertices.as_ptr() as *const f32
-        );
-        
-        platform.from_wasm.alloc_index_buffer(
-            geom_ib_id,
-            sh.shader_gen.geometry.indices.len(),
-            sh.shader_gen.geometry.indices.as_ptr() as *const u32
-        );
-        
+        sh.default_geometry = default_geometry;
         sh.mapping = mapping;
         sh.platform = Some(CxPlatformShader {
-            geom_vb_id: geom_vb_id,
-            geom_ib_id: geom_ib_id,
             vertex: vertex,
             fragment: fragment
         });
         
-        ShaderCompileResult::Ok{id:shader_id}
+        ShaderCompileResult::Ok {id: shader_id}
     }
     
 }
@@ -288,65 +353,37 @@ pub struct CxPlatformView {
 }
 
 #[derive(Default, Clone)]
-pub struct CxPlatformDrawCall {
-    pub resource_shader_id: Option<usize>,
+pub struct CxPlatformDrawCallVao {
     pub vao_id: usize,
-    pub inst_vb_id: usize
+    pub shader_id: Option<usize>,
+    pub inst_vb_id: Option<usize>,
+    pub geom_vb_id: Option<usize>,
+    pub geom_ib_id: Option<usize>,
+}
+
+#[derive(Default, Clone)]
+pub struct CxPlatformDrawCall {
+    pub vao: Option<CxPlatformDrawCallVao>,
+    pub inst_vb_id: Option<usize>,
 }
 
 #[derive(Clone)]
 pub struct CxPlatformShader {
     pub vertex: String,
     pub fragment: String,
-    pub geom_vb_id: usize,
-    pub geom_ib_id: usize,
 }
 
 #[derive(Clone, Default)]
 pub struct CxPlatformTexture {
 }
 
+#[derive(Clone, Default)]
+pub struct CxPlatformGeometry {
+    pub vb_id: Option<usize>,
+    pub ib_id: Option<usize>
+}
+
 impl CxPlatformDrawCall {
-    
-    pub fn check_attached_vao(&mut self, shader_id: usize, sh: &CxShader, platform: &mut CxPlatform) {
-        if self.resource_shader_id.is_none() || self.resource_shader_id.unwrap() != shader_id {
-            self.free(platform);
-            // dont reuse vaos accross shader ids
-            
-            // create the VAO
-            self.resource_shader_id = Some(shader_id);
-            
-            // get a free vao ID
-            self.vao_id = platform.get_free_vao();
-            self.inst_vb_id = platform.get_free_index_buffer();
-            
-            platform.from_wasm.alloc_array_buffer(
-                self.inst_vb_id,
-                0,
-                0 as *const f32
-            );
-            
-            platform.from_wasm.alloc_vao(
-                shader_id,
-                self.vao_id,
-                sh.platform.as_ref().unwrap().geom_ib_id,
-                sh.platform.as_ref().unwrap().geom_vb_id,
-                self.inst_vb_id,
-            );
-        }
-    }
-    
-    fn free(&mut self, platform: &mut CxPlatform) {
-        
-        if self.vao_id != 0 {
-            platform.vaos_free.push(self.vao_id);
-        }
-        if self.inst_vb_id != 0 {
-            platform.vertex_buffers_free.push(self.inst_vb_id);
-        }
-        self.vao_id = 0;
-        self.inst_vb_id = 0;
-    }
 }
 
 use std::process::{Child};

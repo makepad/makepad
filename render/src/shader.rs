@@ -177,13 +177,18 @@ impl UniformProps {
 #[derive(Debug, Default, Clone)]
 pub struct CxShaderMapping {
     pub rect_instance_props: RectInstanceProps,
-    pub default_uniform_props: UniformProps,
+    pub user_uniform_props: UniformProps,
     pub live_uniform_props: UniformProps,
     pub instance_props: InstanceProps,
     pub geometry_props: InstanceProps,
     pub textures: Vec<PropDef>,
     pub const_table: Option<Vec<f32 >>,
-    pub live_uniform_buf: Vec<f32>
+    pub live_uniforms_buf: Vec<f32>,
+    pub live_uniforms: Vec<PropDef>,
+    pub draw_uniforms: Vec<PropDef>,
+    pub view_uniforms: Vec<PropDef>,
+    pub pass_uniforms: Vec<PropDef>,
+    pub user_uniforms: Vec<PropDef>
 }
 
 impl CxShaderMapping {
@@ -191,7 +196,7 @@ impl CxShaderMapping {
         
         let mut instances = Vec::new();
         let mut geometries = Vec::new();
-        let mut default_uniforms = Vec::new();
+        let mut user_uniforms = Vec::new();
         let mut live_uniforms = Vec::new();
         let mut draw_uniforms = Vec::new();
         let mut view_uniforms = Vec::new();
@@ -232,7 +237,7 @@ impl CxShaderMapping {
                             pass_uniforms.push(prop_def);
                         }
                         None => {
-                            default_uniforms.push(prop_def);
+                            user_uniforms.push(prop_def);
                         }
                         _ => ()
                     }
@@ -251,7 +256,11 @@ impl CxShaderMapping {
         
          for (ty, qualified_ident_path) in shader_ast.livestyle_uniform_deps.borrow().as_ref().unwrap() {
             let prop_def = PropDef {
-                name: qualified_ident_path.to_string(),
+                name: {
+                    let mut out = format!("mpsc_live_");
+                    qualified_ident_path.write_underscored_ident(&mut out);
+                    out
+                },
                 ty: ty.clone(),
                 live_id: qualified_ident_path.to_live_id()
             };
@@ -260,12 +269,12 @@ impl CxShaderMapping {
         
         
         let live_uniform_props = UniformProps::construct(&live_uniforms);
-        let mut live_uniform_buf = Vec::new();
-        live_uniform_buf.resize(live_uniform_props.total_slots, 0.0);
+        let mut live_uniforms_buf = Vec::new();
+        live_uniforms_buf.resize(live_uniform_props.total_slots, 0.0);
         CxShaderMapping {
-            live_uniform_buf,
+            live_uniforms_buf,
             rect_instance_props: RectInstanceProps::construct(&instances),
-            default_uniform_props: UniformProps::construct(&default_uniforms),
+            user_uniform_props: UniformProps::construct(&user_uniforms),
             live_uniform_props: live_uniform_props,
             instance_props: InstanceProps::construct(&instances),
             geometry_props: InstanceProps::construct(&geometries),
@@ -275,7 +284,12 @@ impl CxShaderMapping {
             }
             else {
                 None
-            }
+            },
+            pass_uniforms,
+            view_uniforms,
+            draw_uniforms,
+            live_uniforms,
+            user_uniforms
         }
     }
     
@@ -286,15 +300,15 @@ impl CxShaderMapping {
                 Ty::Vec4 => { // color or anim
                     let color = live_styles.get_color(prop.live_id, &prop.name);
                     let o = prop.offset;
-                    self.live_uniform_buf[o + 0] = color.r;
-                    self.live_uniform_buf[o + 1] = color.g;
-                    self.live_uniform_buf[o + 2] = color.b;
-                    self.live_uniform_buf[o + 3] = color.a;
+                    self.live_uniforms_buf[o + 0] = color.r;
+                    self.live_uniforms_buf[o + 1] = color.g;
+                    self.live_uniforms_buf[o + 2] = color.b;
+                    self.live_uniforms_buf[o + 3] = color.a;
                 },
                 Ty::Float => { // float or anim
                     let float = live_styles.get_float(prop.live_id, &prop.name);
                     let o = prop.offset;
-                    self.live_uniform_buf[o] = float;
+                    self.live_uniforms_buf[o] = float;
                 },
                 _=>()
             }
