@@ -291,10 +291,10 @@ impl Cx {
                 sub_view_id: 0,
                 shader_id: shader_id,
                 shader_location_hash: shader.location_hash,
-                uniforms_required: sh.mapping.user_uniform_props.total_slots,
+                user_uniforms_required: sh.mapping.user_uniform_props.total_slots,
                 instance: Vec::new(),
                 draw_uniforms: DrawUniforms::default(),
-                uniforms: Vec::new(),
+                user_uniforms: Vec::new(),
                 textures_2d: Vec::new(),
                 current_instance_offset: 0,
                 instance_dirty: true,
@@ -310,13 +310,13 @@ impl Cx {
         dc.shader_id = shader_id;
         dc.geometry_id = geometry_id;
         dc.shader_location_hash = shader.location_hash;
-        dc.uniforms_required = sh.mapping.user_uniform_props.total_slots;
+        dc.user_uniforms_required = sh.mapping.user_uniform_props.total_slots;
         dc.sub_view_id = 0; // make sure its recognised as a draw call
         // truncate buffers and set update frame
         dc.redraw_id = self.redraw_id;
         dc.instance.truncate(0);
         dc.current_instance_offset = 0;
-        dc.uniforms.truncate(0);
+        dc.user_uniforms.truncate(0);
         dc.textures_2d.truncate(0);
         dc.instance_dirty = true;
         dc.uniforms_dirty = true;
@@ -433,8 +433,8 @@ pub struct DrawCall {
     
     pub draw_uniforms: DrawUniforms, // draw uniforms
     pub geometry_id: usize,
-    pub uniforms: Vec<f32>, // user uniforms
-    pub uniforms_required: usize,
+    pub user_uniforms: Vec<f32>, // user uniforms
+    pub user_uniforms_required: usize,
     
     pub do_v_scroll: bool,
     pub do_h_scroll: bool,
@@ -447,7 +447,7 @@ pub struct DrawCall {
 
 impl DrawCall {
     pub fn need_uniforms_now(&self) -> bool {
-        self.uniforms.len() < self.uniforms_required
+        self.user_uniforms.len() < self.user_uniforms_required
     }
     
     pub fn set_local_scroll(&mut self, scroll: Vec2, local_scroll: Vec2) {
