@@ -91,7 +91,6 @@ impl Cx {
                     geometry.dirty = false;
                 }
                 
-                
                 // lets check if our vao is still valid
                 if draw_call.platform.vao.is_none() {
                     draw_call.platform.vao = Some(CxPlatformDrawCallVao {
@@ -128,7 +127,7 @@ impl Cx {
                     self.passes[pass_id].pass_uniforms.as_slice(),
                     cxview.view_uniforms.as_slice(),
                     draw_call.draw_uniforms.as_slice(),
-                    &draw_call.uniforms,
+                    &draw_call.user_uniforms,
                     &sh.mapping.live_uniforms_buf,
                     &draw_call.textures_2d,
                     &sh.mapping.const_table

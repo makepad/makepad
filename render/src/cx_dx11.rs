@@ -10,7 +10,7 @@ use wio::com::ComPtr;
 use std::mem;
 use std::ptr;
 use std::ffi;
-
+
 use makepad_live_compiler::generate_hlsl;
 use makepad_live_compiler::analyse::ShaderCompileOptions;
 use makepad_live_compiler::shaderast::ShaderAst;
@@ -290,7 +290,6 @@ impl Cx {
     
     
     pub fn hlsl_compile_all_shaders(&mut self, d3d11_cx: &D3d11Cx) {
-        
         
         let options = ShaderCompileOptions {
             gather_all: false,
