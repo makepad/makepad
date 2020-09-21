@@ -10,7 +10,7 @@ use wio::com::ComPtr;
 use std::mem;
 use std::ptr;
 use std::ffi;
-
+
 use makepad_live_compiler::generate_hlsl;
 use makepad_live_compiler::analyse::ShaderCompileOptions;
 use makepad_live_compiler::shaderast::ShaderAst;
