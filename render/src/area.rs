@@ -249,7 +249,7 @@ impl Area{
         None
     }
 
-    pub fn get_uniform_offset(&self, cx:&Cx, live_id:LiveId, ty:Ty)->Option<usize>{
+    pub fn get_user_uniform_offset(&self, cx:&Cx, live_id:LiveId, ty:Ty)->Option<usize>{
         match self{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
@@ -327,7 +327,7 @@ impl Area{
         return None;
     }
 
-    pub fn get_uniform_write_ref<'a>(&self, cx:&'a mut Cx)->Option<&'a mut Vec<f32>>{
+    pub fn get_user_uniforms_write_ref<'a>(&self, cx:&'a mut Cx)->Option<&'a mut Vec<f32>>{
         match self{
             Area::Instance(inst)=>{
                 let cxview = &mut cx.views[inst.view_id];
@@ -338,7 +338,7 @@ impl Area{
                 cx.passes[cxview.pass_id].paint_dirty = true;
                 draw_call.uniforms_dirty = true;
                 return Some(
-                    &mut draw_call.uniforms
+                    &mut draw_call.user_uniforms
                 )
             }
             _=>(),
@@ -505,8 +505,8 @@ impl Area{
     }
 
     pub fn write_uniform_float(&self, cx:&mut Cx, live_id:LiveId, v:f32){
-        if let Some(uni_offset) = self.get_uniform_offset(cx, live_id, Ty::Float){
-            let write = self.get_uniform_write_ref(cx);
+        if let Some(uni_offset) = self.get_user_uniform_offset(cx, live_id, Ty::Float){
+            let write = self.get_user_uniforms_write_ref(cx);
             if let Some(write) = write{
                 while uni_offset >= write.len(){
                     write.push(0.);
@@ -680,69 +680,69 @@ impl InstanceArea{
     pub fn push_uniform_float(&self, cx:&mut Cx, v:f32){
         let cxview = &mut cx.views[self.view_id];
         let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
-        draw_call.uniforms.push(v);
+        draw_call.user_uniforms.push(v);
     }
 
     pub fn push_uniform_vec2(&self, cx:&mut Cx, v:Vec2){
         let cxview = &mut cx.views[self.view_id];
         let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
-        let left = draw_call.uniforms.len()&3;
+        let left = draw_call.user_uniforms.len()&3;
         if left > 2{ // align buffer
             for _ in 0..(4-left){
-                draw_call.uniforms.push(0.0);
+                draw_call.user_uniforms.push(0.0);
             }
         }
-        draw_call.uniforms.push(v.x);
-        draw_call.uniforms.push(v.y);
+        draw_call.user_uniforms.push(v.x);
+        draw_call.user_uniforms.push(v.y);
     }
 
     pub fn push_uniform_vec2f(&self, cx:&mut Cx,  x:f32, y:f32){
         let cxview = &mut cx.views[self.view_id];
         let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
-        let left = draw_call.uniforms.len()&3;
+        let left = draw_call.user_uniforms.len()&3;
         if left > 2{ // align buffer
             for _ in 0..(4-left){
-                draw_call.uniforms.push(0.0);
+                draw_call.user_uniforms.push(0.0);
             }
         }
-        draw_call.uniforms.push(x);
-        draw_call.uniforms.push(y);
+        draw_call.user_uniforms.push(x);
+        draw_call.user_uniforms.push(y);
     }
 
     pub fn push_uniform_vec3f(&mut self, cx:&mut Cx, x:f32, y:f32, z:f32){
         let cxview = &mut cx.views[self.view_id];
         let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
-        let left = draw_call.uniforms.len()&3;
+        let left = draw_call.user_uniforms.len()&3;
         if left > 1{ // align buffer
             for _ in 0..(4-left){
-                draw_call.uniforms.push(0.0);
+                draw_call.user_uniforms.push(0.0);
             }
         }
-        draw_call.uniforms.push(x);
-        draw_call.uniforms.push(y);
-        draw_call.uniforms.push(z);
+        draw_call.user_uniforms.push(x);
+        draw_call.user_uniforms.push(y);
+        draw_call.user_uniforms.push(z);
     }
 
     pub fn push_uniform_vec4f(&self, cx:&mut Cx, x:f32, y:f32, z:f32, w:f32){
         let cxview = &mut cx.views[self.view_id];
         let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
-        let left = draw_call.uniforms.len()&3;
+        let left = draw_call.user_uniforms.len()&3;
         if left > 0{ // align buffer
             for _ in 0..(4-left){
-                draw_call.uniforms.push(0.0);
+                draw_call.user_uniforms.push(0.0);
             }
         }
-        draw_call.uniforms.push(x);
-        draw_call.uniforms.push(y);
-        draw_call.uniforms.push(z);
-        draw_call.uniforms.push(w);
+        draw_call.user_uniforms.push(x);
+        draw_call.user_uniforms.push(y);
+        draw_call.user_uniforms.push(z);
+        draw_call.user_uniforms.push(w);
     }
 
     pub fn push_uniform_mat4(&self, cx:&mut Cx, v:&Mat4){
         let cxview = &mut cx.views[self.view_id];
         let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
         for i in 0..16{
-            draw_call.uniforms.push(v.v[i]);
+            draw_call.user_uniforms.push(v.v[i]);
         }
     }
 }

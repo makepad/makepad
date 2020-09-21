@@ -13,9 +13,9 @@ pub fn log_str(val:&str){
         _log_str(chars.as_ptr() as u32, chars.len() as u32);
     }
 }
-
+ 
 impl Cx {
-    
+     
     pub fn get_default_window_size(&self) -> Vec2 {
         return self.platform.window_geom.inner_size;
     }

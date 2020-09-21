@@ -122,17 +122,12 @@ impl Cx {
                     );
                 }
                 
-                
-                let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
-                let view_uniforms = cxview.view_uniforms.as_slice();
-                let draw_uniforms = draw_call.draw_uniforms.as_slice();
-                
                 self.platform.from_wasm.draw_call(
                     draw_call.shader_id,
                     draw_call.platform.vao.as_ref().unwrap().vao_id,
-                    pass_uniforms,
-                    view_uniforms,
-                    draw_uniforms,
+                    self.passes[pass_id].pass_uniforms.as_slice(),
+                    cxview.view_uniforms.as_slice(),
+                    draw_call.draw_uniforms.as_slice(),
                     &draw_call.uniforms,
                     &sh.mapping.live_uniforms_buf,
                     &draw_call.textures_2d,
