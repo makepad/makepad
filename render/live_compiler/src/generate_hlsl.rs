@@ -6,6 +6,7 @@ use {
         analyse::ShaderCompileOptions,
         generate::{BackendWriter, BlockGenerator, ExprGenerator},
         ident::{Ident,IdentPath},
+        livestyles::LiveStyles,
         lit::TyLit,
         ty::Ty,
     },
@@ -20,14 +21,15 @@ pub fn index_to_char(index: usize) -> char {
     std::char::from_u32(index as u32 + 65).unwrap()
 }
 
-pub fn generate_shader(shader: &ShaderAst, env: &Env, options:ShaderCompileOptions) -> String {
+pub fn generate_shader(shader: &ShaderAst, live_styles: &LiveStyles, options:ShaderCompileOptions) -> String {
     let mut string = String::new();
+    let env = Env::new(live_styles);
     ShaderGenerator {
         shader,
         create_const_table: options.create_const_table,
         string: &mut string,
-        env,
-        backend_writer: &HlslBackendWriter {env: env}
+        env: &env,
+        backend_writer: &HlslBackendWriter {env: &env}
     }
     .generate_shader();
     string
