@@ -185,7 +185,7 @@ pub struct CxShaderMapping {
     pub const_table: Option<Vec<f32 >>,
     pub geometries: Vec<PropDef>,
     pub instances: Vec<PropDef>,
-    pub live_uniforms_buf: Vec<f32>,
+    pub live_uniforms_buf: Vec<f32>, 
     pub live_uniforms: Vec<PropDef>,
     pub draw_uniforms: Vec<PropDef>,
     pub view_uniforms: Vec<PropDef>,
