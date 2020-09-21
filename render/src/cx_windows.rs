@@ -21,7 +21,7 @@ impl Cx {
         
         self.hlsl_compile_all_shaders(&d3d11_cx);
         
-        self.load_theme_fonts();
+        self.load_all_fonts();
         
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
@@ -250,13 +250,14 @@ impl Cx {
                 self.process_desktop_post_event(event);
             }
 
+            /*
             let mut shader_results = Vec::new();
             for shader_id in &self.shader_recompiles {
                 shader_results.push(Self::hlsl_compile_shader(*shader_id, true, &mut self.shaders[*shader_id], &d3d11_cx, &mut self.shader_inherit_cache));
             }
             self.shader_recompiles.truncate(0);
             self.call_shader_recompile_event(shader_results, &mut event_handler);
-
+            */
             if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
                 true
             } else {
