@@ -17,7 +17,7 @@ impl Cx {
         
         self.opengl_compile_all_shaders(&opengl_cx);
         
-        self.load_theme_fonts();
+        self.load_all_fonts();
         
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
@@ -230,14 +230,14 @@ impl Cx {
                     xlib_app.terminate_event_loop();
                 }
             }
-    
+    /*
             let mut shader_results = Vec::new();
             for shader_id in &self.shader_recompiles {
                 shader_results.push(Self::opengl_compile_shader(*shader_id, true, &mut self.shaders[*shader_id], &opengl_cx, &mut self.shader_inherit_cache));
             }
             self.shader_recompiles.truncate(0);
             self.call_shader_recompile_event(shader_results, &mut event_handler);
-            
+            */
             if !paint_dirty && self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
                 true
             } else {
