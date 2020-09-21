@@ -6,6 +6,7 @@ use {
         analyse::ShaderCompileOptions,
         generate::{BackendWriter, BlockGenerator, ExprGenerator},
         ident::{Ident, IdentPath},
+        livestyles::LiveStyles,
         lit::TyLit,
         swizzle::Swizzle,
         ty::Ty,
@@ -15,27 +16,29 @@ use {
     std::cell::Cell,
 };
 
-pub fn generate_vertex_shader(shader: &ShaderAst, env: &Env, options:ShaderCompileOptions) -> String {
+pub fn generate_vertex_shader(shader: &ShaderAst, live_styles: &LiveStyles, options:ShaderCompileOptions) -> String {
     let mut string = String::new();
+    let env = Env::new(live_styles);
     ShaderGenerator {
         shader,
-        env,
+        env: &env,
         create_const_table: options.create_const_table,
         string: &mut string,
-        backend_writer: &GlslBackendWriter {env: env}
+        backend_writer: &GlslBackendWriter {env: &env}
     }
     .generate_vertex_shader();
     string
 }
 
-pub fn generate_fragment_shader(shader: &ShaderAst, env: &Env, options:ShaderCompileOptions) -> String {
+pub fn generate_fragment_shader(shader: &ShaderAst, live_styles: &LiveStyles, options:ShaderCompileOptions) -> String {
     let mut string = String::new();
+    let env = Env::new(live_styles);
     ShaderGenerator {
         shader,
-        env,
+        env: &env,
         create_const_table: options.create_const_table,
         string: &mut string,
-        backend_writer: &GlslBackendWriter {env: env}
+        backend_writer: &GlslBackendWriter {env: &env}
     }
     .generate_fragment_shader();
     string

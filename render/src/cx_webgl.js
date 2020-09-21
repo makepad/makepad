@@ -106,7 +106,7 @@
         }
         
         init(info) {
-            let pos = this.fit(7);
+            let pos = this.fit(6);
             this.mu32[pos ++] = 3;
             this.mf32[pos ++] = info.width;
             this.mf32[pos ++] = info.height;
@@ -1639,7 +1639,8 @@
                 pass_uniforms: this.get_uniform_locations(program, ash.pass_uniforms),
                 view_uniforms: this.get_uniform_locations(program, ash.view_uniforms),
                 draw_uniforms: this.get_uniform_locations(program, ash.draw_uniforms),
-                uniforms: this.get_uniform_locations(program, ash.uniforms),
+                user_uniforms: this.get_uniform_locations(program, ash.user_uniforms),
+                live_uniforms: this.get_uniform_locations(program, ash.live_uniforms),
                 texture_slots: this.get_uniform_locations(program, ash.texture_slots),
                 instance_slots: ash.instance_slots,
                 const_table_uniform: gl.getUniformLocation(program, "mpsc_const_table"),
@@ -1682,10 +1683,8 @@
             this.textures[texture_id] = gl_tex;
         }
         
-        alloc_vao(shader_id, vao_id, geom_ib_id, geom_vb_id, inst_vb_id) {
+        alloc_vao(vao_id, shader_id, geom_ib_id, geom_vb_id, inst_vb_id) {
             let gl = this.gl;
-            
-            let shader = this.shaders[shader_id];
             
             let old_vao = this.vaos[vao_id];
             if (old_vao) {
@@ -1701,6 +1700,8 @@
             gl.OES_vertex_array_object.bindVertexArrayOES(vao)
             
             gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[geom_vb_id]);
+            
+            let shader = this.shaders[shader_id];
             
             for (let i = 0; i < shader.geom_attribs.length; i ++) {
                 let attr = shader.geom_attribs[i];
@@ -1734,7 +1735,8 @@
             pass_uniforms_ptr,
             view_uniforms_ptr,
             draw_uniforms_ptr,
-            uniforms_ptr,
+            user_uniforms_ptr,
+            live_uniforms_ptr,
             textures_ptr,
             const_table_ptr,
             const_table_len
@@ -1764,10 +1766,15 @@
                 let uni = draw_uniforms[i];
                 uni.fn(this, uni.loc, uni.offset + draw_uniforms_ptr);
             }
-            let uniforms = shader.uniforms;
-            for (let i = 0; i < uniforms.length; i ++) {
-                let uni = uniforms[i];
-                uni.fn(this, uni.loc, uni.offset + uniforms_ptr);
+            let user_uniforms = shader.user_uniforms;
+            for (let i = 0; i < user_uniforms.length; i ++) {
+                let uni = user_uniforms[i];
+                uni.fn(this, uni.loc, uni.offset + user_uniforms_ptr);
+            }
+            let live_uniforms = shader.live_uniforms;
+            for (let i = 0; i < live_uniforms.length; i ++) {
+                let uni = live_uniforms[i];
+                uni.fn(this, uni.loc, uni.offset + live_uniforms_ptr);
             }
             if (const_table_ptr !== 0) {
                 gl.uniform1fv(shader.const_table_uniform, new Float32Array(this.memory.buffer, const_table_ptr, const_table_len));
@@ -1839,7 +1846,8 @@
                 pass_uniforms: self.parse_shvarvec(),
                 view_uniforms: self.parse_shvarvec(),
                 draw_uniforms: self.parse_shvarvec(),
-                uniforms: self.parse_shvarvec(),
+                user_uniforms: self.parse_shvarvec(),
+                live_uniforms: self.parse_shvarvec(),
                 texture_slots: self.parse_shvarvec()
             }
             self.compile_webgl_shader(ash);
@@ -1859,30 +1867,32 @@
             self.alloc_index_buffer(index_buffer_id, array);
         },
         function alloc_vao_5(self) {
-            let shader_id = self.mu32[self.parse ++];
             let vao_id = self.mu32[self.parse ++];
+            let shader_id = self.mu32[self.parse ++];  
             let geom_ib_id = self.mu32[self.parse ++];
             let geom_vb_id = self.mu32[self.parse ++];
             let inst_vb_id = self.mu32[self.parse ++];
-            self.alloc_vao(shader_id, vao_id, geom_ib_id, geom_vb_id, inst_vb_id)
+            self.alloc_vao(vao_id, shader_id, geom_ib_id, geom_vb_id, inst_vb_id)
         },
         function draw_call_6(self) {
             let shader_id = self.mu32[self.parse ++];
             let vao_id = self.mu32[self.parse ++];
-            let uniforms_cx_ptr = self.mu32[self.parse ++];
-            let uniforms_dl_ptr = self.mu32[self.parse ++];
-            let uniforms_dr_ptr = self.mu32[self.parse ++];
-            let uniforms_ptr = self.mu32[self.parse ++];
+            let uniforms_pass_ptr = self.mu32[self.parse ++];
+            let uniforms_view_ptr = self.mu32[self.parse ++];
+            let uniforms_draw_ptr = self.mu32[self.parse ++];
+            let uniforms_user_ptr = self.mu32[self.parse ++];
+            let uniforms_live_ptr = self.mu32[self.parse ++];
             let textures = self.mu32[self.parse ++];
             let const_table_ptr = self.mu32[self.parse ++];
             let const_table_len = self.mu32[self.parse ++];
             self.draw_call(
                 shader_id,
                 vao_id,
-                uniforms_cx_ptr,
-                uniforms_dl_ptr,
-                uniforms_dr_ptr,
-                uniforms_ptr,
+                uniforms_pass_ptr,
+                uniforms_view_ptr,
+                uniforms_draw_ptr,
+                uniforms_user_ptr,
+                uniforms_live_ptr,
                 textures,
                 const_table_ptr,
                 const_table_len
