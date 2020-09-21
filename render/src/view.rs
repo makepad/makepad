@@ -291,7 +291,7 @@ impl Cx {
                 sub_view_id: 0,
                 shader_id: shader_id,
                 shader_location_hash: shader.location_hash,
-                uniforms_required: sh.mapping.default_uniform_props.total_slots,
+                uniforms_required: sh.mapping.user_uniform_props.total_slots,
                 instance: Vec::new(),
                 draw_uniforms: DrawUniforms::default(),
                 uniforms: Vec::new(),
@@ -310,7 +310,7 @@ impl Cx {
         dc.shader_id = shader_id;
         dc.geometry_id = geometry_id;
         dc.shader_location_hash = shader.location_hash;
-        dc.uniforms_required = sh.mapping.default_uniform_props.total_slots;
+        dc.uniforms_required = sh.mapping.user_uniform_props.total_slots;
         dc.sub_view_id = 0; // make sure its recognised as a draw call
         // truncate buffers and set update frame
         dc.redraw_id = self.redraw_id;

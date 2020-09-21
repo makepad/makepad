@@ -120,7 +120,7 @@ impl NormalButton {
         
         self.text.text_style = live_text_style!(cx, self::text_style_label);
         self.text.color = self.animator.last_color(cx, live_id!(makepad_render::text::shader::color));
-        self._text_area = self.text.draw_text2(cx, label);
+        self._text_area = self.text.draw_text(cx, label);
         
         self._bg_area = self.bg.end_quad(cx, bg_inst);
         self.animator.set_area(cx, self._bg_area);

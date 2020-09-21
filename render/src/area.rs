@@ -255,7 +255,7 @@ impl Area{
                 let cxview = &cx.views[inst.view_id];
                 let draw_call = &cxview.draw_calls[inst.draw_call_id];
                 let sh = &cx.shaders[draw_call.shader_id];
-                for prop in &sh.mapping.default_uniform_props.props{
+                for prop in &sh.mapping.user_uniform_props.props{
                     if prop.ty != ty{
                         return None
                     }

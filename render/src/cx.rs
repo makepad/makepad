@@ -858,6 +858,8 @@ macro_rules!wasm_app {
         #[export_name = "create_wasm_app"]
         pub extern "C" fn create_wasm_app() -> u32 {
             let mut cx = Box::new(Cx::default());
+            cx.style();
+            $app::style(&mut cx);
             let app = Box::new( $ app::new(&mut cx));
             let cxafterdraw = Box::new(CxAfterDraw::new(&mut cx));
             Box::into_raw(Box::new((Box::into_raw(app), Box::into_raw(cx), Box::into_raw(cxafterdraw)))) as u32
