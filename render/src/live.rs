@@ -70,6 +70,7 @@ macro_rules!live_shader {
         $ cx.live_styles.get_shader(
             live_str_to_id(module_path!(), stringify!( $ path)),
             live_location_hash(file!(), line!() as u64, column!() as u64),
+            module_path!(),
             stringify!( $ path)
         )
     }

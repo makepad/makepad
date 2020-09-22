@@ -1,7 +1,7 @@
 use crate::shaderast::*;
 use crate::error::LiveError;
 use crate::ident::{Ident, IdentPath, IdentPathWithSpan, QualifiedIdentPath};
-use crate::lit::{Lit, TyLit};
+use crate::lit::{Lit};
 use crate::span::Span;
 use crate::token::{Token, TokenWithSpan};
 use crate::livestyles::{LiveStyles};
@@ -359,7 +359,7 @@ impl<'a> Parser<'a> {
                     let decl = self.parse_const_decl() ?;
                     shader_ast.decls.push(Decl::Const(decl));
                 }
-                Token::Ident(ident) if ident == Ident::new("fn") => {
+                Token::Fn => {
                     let decl = self.parse_fn_decl(None) ?;
                     shader_ast.decls.push(Decl::Fn(decl));
                 }
@@ -441,7 +441,7 @@ impl<'a> Parser<'a> {
     
     fn parse_fn_decl(&mut self, prefix: Option<Ident>) -> Result<FnDecl, LiveError> {
         let span = self.begin_span();
-        self.expect_ident("fn") ?;
+        self.expect_token(Token::Fn) ?;
         let ident_path = if let Some(prefix) = prefix {
             IdentPath::from_two_idents(prefix, self.parse_ident() ?)
         } else {
@@ -454,7 +454,7 @@ impl<'a> Parser<'a> {
             
             if let Some(prefix) = prefix {
                 let span = self.begin_span();
-                let is_inout = self.accept_ident("inout");
+                let is_inout = self.accept_token(Token::Inout);
                 if self.accept_ident("self") {
                     params.push(span.end(self, | span | Param {
                         span,
@@ -615,7 +615,7 @@ impl<'a> Parser<'a> {
     
     fn parse_param(&mut self) -> Result<Param, LiveError> {
         let span = self.begin_span();
-        let is_inout = self.accept_ident("inout");
+        let is_inout = self.accept_token(Token::Inout);
         let ident = self.parse_ident() ?;
         self.expect_token(Token::Colon) ?;
         let ty_expr = self.parse_ty_expr() ?;
@@ -790,21 +790,21 @@ impl<'a> Parser<'a> {
     fn parse_prim_ty_expr(&mut self) -> Result<TyExpr, LiveError> {
         let span = self.begin_span();
         match self.peek_token() {
+            Token::TyLit(ty_lit)=>{
+                self.skip_token();
+                Ok(span.end(self, | span | TyExpr {
+                    ty: RefCell::new(None),
+                    kind: TyExprKind::Lit {span, ty_lit: ty_lit},
+                }))
+            }
             Token::Ident(ident) => {
                 self.skip_token();
-                if let Some(ty_lit) = TyLit::from_ident(ident) {
-                    Ok(span.end(self, | span | TyExpr {
-                        ty: RefCell::new(None),
-                        kind: TyExprKind::Lit {span, ty_lit: ty_lit},
-                    }))
-                }
-                else {
-                    Ok(span.end(self, | span | TyExpr {
-                        ty: RefCell::new(None),
-                        kind: TyExprKind::Var {span, ident},
-                    }))
-                }
-            }token => Err(span.error(self, format!("unexpected token `{}`", token).into())),
+                Ok(span.end(self, | span | TyExpr {
+                    ty: RefCell::new(None),
+                    kind: TyExprKind::Var {span, ident},
+                }))
+            }
+            token => Err(span.error(self, format!("unexpected token `{}`", token).into())),
         }
     }
     
@@ -1087,34 +1087,32 @@ impl<'a> Parser<'a> {
     fn parse_prim_expr(&mut self) -> Result<Expr, LiveError> {
         let span = self.begin_span();
         match self.peek_token() {
-            
-            Token::Ident(ident) => {
-                if let Some(ty_lit) = TyLit::from_ident(ident) {
-                    self.skip_token();
-                    self.expect_token(Token::LeftParen) ?;
-                    let mut arg_exprs = Vec::new();
-                    if !self.accept_token(Token::RightParen) {
-                        loop {
-                            arg_exprs.push(self.parse_expr() ?);
-                            if !self.accept_token(Token::Comma) {
-                                break;
-                            }
+            Token::TyLit(ty_lit)=>{
+                self.skip_token();
+                self.expect_token(Token::LeftParen) ?;
+                let mut arg_exprs = Vec::new();
+                if !self.accept_token(Token::RightParen) {
+                    loop {
+                        arg_exprs.push(self.parse_expr() ?);
+                        if !self.accept_token(Token::Comma) {
+                            break;
                         }
-                        self.expect_token(Token::RightParen) ?;
                     }
-                    return Ok(span.end(self, | span | Expr {
-                        span,
-                        ty: RefCell::new(None),
-                        const_val: RefCell::new(None),
-                        const_index: Cell::new(None),
-                        kind: ExprKind::ConsCall {
-                            span,
-                            ty_lit,
-                            arg_exprs,
-                        },
-                    }))
+                    self.expect_token(Token::RightParen) ?;
                 }
-                
+                return Ok(span.end(self, | span | Expr {
+                    span,
+                    ty: RefCell::new(None),
+                    const_val: RefCell::new(None),
+                    const_index: Cell::new(None),
+                    kind: ExprKind::ConsCall {
+                        span,
+                        ty_lit,
+                        arg_exprs,
+                    },
+                }))                
+            }
+            Token::Ident(ident) => {
                 let ident_path = self.parse_ident_path() ?;
                 match self.peek_token() {
                     Token::Not => {

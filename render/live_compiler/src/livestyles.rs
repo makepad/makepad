@@ -69,6 +69,7 @@ impl fmt::Display for LiveBodyError {
     }
 }
 
+
 impl LiveStyles {
     
     pub fn new() -> Self {
@@ -77,7 +78,7 @@ impl LiveStyles {
             ..Self::default()
         }
     }
-
+  
     
     pub fn get_style_mut(&mut self, live_id: &Option<LiveId>) -> &mut LiveStyle {
         if let Some(live_id) = live_id {
@@ -85,7 +86,7 @@ impl LiveStyles {
             let id = self.style_map.entry(*live_id).or_insert_with( || {
                 let id = style_list.len();
                 style_list.push(LiveStyle::default());
-                id
+                id 
             });
             &mut self.style_list[*id]
         }
@@ -94,7 +95,7 @@ impl LiveStyles {
         }
     }
     
-    pub fn get_shader(&self, live_id: LiveId, location_hash: u64, name: &str) -> Shader {
+    pub fn get_shader(&self, live_id: LiveId, location_hash: u64, module_path:&str,  name: &str) -> Shader {
         for style_index in &self.style_stack {
             if let Some(shader_ast) = self.style_list[*style_index].shaders.get(&live_id) {
                 if let Some(shader) = &shader_ast.shader {
@@ -105,6 +106,7 @@ impl LiveStyles {
                 }
             }
         }
+
         Shader {
             shader_id: self.base.shaders.get(&live_id)
                 .expect(&format!("Shader not found {}", name)).shader

@@ -52,7 +52,7 @@ impl LiveMacrosView {
     
     pub fn style(cx: &mut Cx) {
         live!(cx, r#"
-            self::layout_bg: Layout{
+            self::layout_bg: Layout {
                 align: all(0.5),
                 walk: {
                     width: Fill,
@@ -62,7 +62,7 @@ impl LiveMacrosView {
                 padding: {l: 16.0, t: 12.0, r: 16.0, b: 12.0},
             }
             
-            self::text_style_caption: TextStyle{
+            self::text_style_caption: TextStyle {
                 ..makepad_widget::widgetstyle::text_style_normal
             }
         "#)
@@ -141,7 +141,7 @@ impl LiveMacrosView {
         }
         if any_changed && all_in_place {
             atb.text_buffer.mark_clean();
-            atb.parse_live_macros(cx, true);
+            atb.parse_live_macros(cx);
         }
     }
     
@@ -155,14 +155,6 @@ impl LiveMacrosView {
             ..Layout::default()
         }).is_ok() {
             for (index, m) in atb.live_macros.macros.iter_mut().enumerate() {
-                // lets draw the title
-                // then we do the widget.
-                //float!(texteditor:gutter_width, 0.).get(cx)
-                
-                //let bgi = self.bg.begin_quad(cx, Self::layout_bg().get(cx));
-                //self.text.text_style = Self::text_style_caption().get(cx);
-                //self.bg.end_quad(cx, bgi);
-                
                 match m {
                     LiveMacro::Pick {hsva, ..} => {
                         self.color_pickers.get_draw(cx, index, | _, t | t.clone()).draw_color_picker(cx, *hsva);
@@ -193,16 +185,43 @@ impl fmt::Display for PrettyPrintedFloat3Decimals {
 
 
 impl AppTextBuffer {
-    pub fn parse_live_macros(&mut self, cx: &mut Cx, only_update_shaders: bool) {
+    pub fn parse_live_macros(&mut self, cx: &mut Cx) {
         let mut tp = TokenParser::new(&self.text_buffer.flat_text, &self.text_buffer.token_chunks);
         // lets reset the data
-        if !only_update_shaders {
-            self.live_macros.macros.truncate(0);
-        }
-        let mut shader_end = 0;
         while tp.advance() {
             match tp.cur_type() {
                 TokenType::Macro => {
+                    // we need to find our live!(cx, r#".."#)
+                    if tp.eat("live")
+                        && tp.eat("!") 
+                        && tp.eat("(") 
+                        && tp.eat_token(TokenType::Identifier) 
+                        && tp.eat(",")
+                        && tp.eat("r")
+                        && tp.eat("#"){
+                        // so on a remote target.. 
+                        // maybe we should ask the remote target for values?
+                        // and then we live edit it here and cycle through the remote parser?
+                        // 
+                        if tp.cur_type() == TokenType::ParenOpen {
+                            //shader_end = tp.cur_pair_offset();
+                            if let Some(_shader) = tp.cur_pair_as_string() {
+                                let _lc = tp.cur_line_col();
+                                /*
+                                cx.recompile_shader_sub(
+                                    &self.full_path["main/makepad/".len()..],
+                                    lc.0 + 1,
+                                    lc.1 - 8,
+                                    shader
+                                );*/
+                                //println!("{} {}:{}",self.full_path, lc.0, lc.1);
+                            }
+                            
+                            //tp.jump_to_pair();
+                        }
+                    }
+                
+                    /*
                     if !only_update_shaders && tp.eat("pick") && tp.eat("!") {
                         if tp.cur_type() == TokenType::ParenOpen {
                             let range = tp.cur_pair_range();
@@ -270,24 +289,7 @@ impl AppTextBuffer {
                             })
                         }
                     }
-                    else if tp.eat("shader") && tp.eat("!") && tp.eat("{") {
-                        if tp.cur_type() == TokenType::ParenOpen {
-                            shader_end = tp.cur_pair_offset();
-                            if let Some(_shader) = tp.cur_pair_as_string() {
-                                let _lc = tp.cur_line_col();
-                                /*
-                                cx.recompile_shader_sub(
-                                    &self.full_path["main/makepad/".len()..],
-                                    lc.0 + 1,
-                                    lc.1 - 8,
-                                    shader
-                                );*/
-                                //println!("{} {}:{}",self.full_path, lc.0, lc.1);
-                            }
-                            
-                            //tp.jump_to_pair();
-                        }
-                    }
+                    */
                 },
                 _ => ()
             }

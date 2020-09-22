@@ -272,7 +272,7 @@ impl ScrollBar {
                             Axis::Horizontal => if self.use_vertical_finger_scroll {fe.scroll.y}else {fe.scroll.x},
                             Axis::Vertical => fe.scroll.y
                         };
-                        if !self.smoothing.is_none() {
+                        if !self.smoothing.is_none() && fe.is_wheel {
                             let scroll_pos_target = self.get_scroll_target();
                             if self.set_scroll_target(cx, scroll_pos_target + scroll) {
                                 match self.axis {
