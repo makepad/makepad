@@ -195,7 +195,7 @@ pub enum TokenType {
     ParenClose,
     Operator,
     Namespace,
-    Splat,
+    Splat, 
     Delimiter,
     Colon,
     

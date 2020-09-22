@@ -1,6 +1,6 @@
 use crate::error::LiveError;
 use crate::ident::Ident;
-use crate::lit::{Lit,};
+use crate::lit::{Lit,TyLit};
 use crate::span::{Span,LiveBodyId};
 use crate::token::{Token, TokenWithSpan};
 use crate::colors::Color;
@@ -249,39 +249,40 @@ where
                 string.push(self.read_char());
                 self.read_chars_while(&mut string, |ch| ch.is_ascii_alphanumeric() || ch == '_');
                 match string.as_str() {
-                    //"bool" => Token::TyLit(TyLit::Bool),
+                    "bool" => Token::TyLit(TyLit::Bool),
                     "break" => Token::Break,
-                    //"bvec2" => Token::TyLit(TyLit::Bvec2),
-                    //"bvec3" => Token::TyLit(TyLit::Bvec3),
-                    //"bvec4" => Token::TyLit(TyLit::Bvec4),
+                    "bvec2" => Token::TyLit(TyLit::Bvec2),
+                    "bvec3" => Token::TyLit(TyLit::Bvec3),
+                    "bvec4" => Token::TyLit(TyLit::Bvec4),
+                    "texture2D" => Token::TyLit(TyLit::Texture2D),
                     "const" => Token::Const,
                     "continue" => Token::Continue,
                     "else" => Token::Else,
                     "false" => Token::Lit(Lit::Bool(false)),
-                    //"float" => Token::TyLit(TyLit::Float),
-                    //"fn" => Token::Fn,
+                    "float" => Token::TyLit(TyLit::Float),
+                    "fn" => Token::Fn,
                     "for" => Token::For,
                     //"from" => Token::From,
                     "if" => Token::If,
-                    //"impl" => Token::Ident(Ident::new("impl")),
+                    "impl" => Token::Ident(Ident::new("impl")),
                     //"in" => Token::In,
-                    //"inout" => Token::Inout,
-                    //"int" => Token::TyLit(TyLit::Int),
-                    //"ivec2" => Token::TyLit(TyLit::Ivec2),
-                    //"ivec3" => Token::TyLit(TyLit::Ivec3),
-                    //"ivec4" => Token::TyLit(TyLit::Ivec4),
+                    "inout" => Token::Inout,
+                    "int" => Token::TyLit(TyLit::Int),
+                    "ivec2" => Token::TyLit(TyLit::Ivec2),
+                    "ivec3" => Token::TyLit(TyLit::Ivec3),
+                    "ivec4" => Token::TyLit(TyLit::Ivec4),
                     "let" => Token::Let,
-                    //"mat2" => Token::TyLit(TyLit::Mat2),
-                    //"mat3" => Token::TyLit(TyLit::Mat3),
-                    //"mat4" => Token::TyLit(TyLit::Mat4),
+                    "mat2" => Token::TyLit(TyLit::Mat2),
+                    "mat3" => Token::TyLit(TyLit::Mat3),
+                    "mat4" => Token::TyLit(TyLit::Mat4),
                     "return" => Token::Return,
                     //"self" => Token::Self_,
                     //"crate"=>Token::Crate,
                     "struct" => Token::Struct,
                     //"to" => Token::To,
-                    //"vec2" => Token::TyLit(TyLit::Vec2),
-                    //"vec3" => Token::TyLit(TyLit::Vec3),
-                    //"vec4" => Token::TyLit(TyLit::Vec4),
+                    "vec2" => Token::TyLit(TyLit::Vec2),
+                    "vec3" => Token::TyLit(TyLit::Vec3),
+                    "vec4" => Token::TyLit(TyLit::Vec4),
                     "true" => Token::Lit(Lit::Bool(true)),
                     _ => Token::Ident(Ident::new(string)),
                 }
