@@ -3,6 +3,11 @@ use makepad_render::*;
 // Shader code itself
 
 fn shader(cx: &mut Cx) {live!(cx, r#"
+    self::color1: #f0f;
+    self::color2: #0ff;
+    self::color3: #f00;
+    self::color4: #00f;
+    
     self::shader: Shader {
         use makepad_render::quad::shader::*;
         use self::shader_inputs::*;
@@ -52,16 +57,16 @@ fn shader(cx: &mut Cx) {live!(cx, r#"
                 
                 let c = vec4(0.0);
                 if t.y == 0.0 || t.y == 1.0 {
-                    c += #9135B0;
+                    c += self::color1;
                 }
                 if t.y == 2.0 {
-                    c += #FF0000;
+                    c += self::color2;
                 }
                 if t.y == 3.0 {
-                    c += #0300DC;
+                    c += self::color3;
                 }
                 if t.y == 4.0 {
-                    c += #0000FF;
+                    c += self::color4;
                 }
                 
                 let ld = normalize(vec3(0.0, 0.0, 1.0));
