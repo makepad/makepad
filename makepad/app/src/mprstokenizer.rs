@@ -40,6 +40,14 @@ impl <'a>TokenParser<'a> {
         return true
     }
     
+    pub fn eat_token(&mut self, tt: TokenType) -> bool {
+        if self.tokens[self.index].token_type == tt{
+            self.advance();
+            return true
+        }
+        false
+    }
+    
     pub fn eat(&mut self, what: &str) -> bool {
         // eat as many ignorable tokens
         if !self.eat_should_ignore() {

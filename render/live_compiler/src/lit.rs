@@ -1,7 +1,6 @@
 use crate::ty::Ty;
 use crate::val::Val;
 use crate::colors::Color;
-use crate::ident::Ident;
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,7 +92,7 @@ impl TyLit {
             TyLit::Texture2D => Ty::Texture2D,
         }
     }
-    
+    /*
     pub fn from_ident(ident:Ident)->Option<TyLit>{
         if ident == Ident::new("bool"){return Some(TyLit::Bool)}
         if ident == Ident::new("int"){return Some(TyLit::Int)}
@@ -112,7 +111,7 @@ impl TyLit {
         if ident == Ident::new("ivec3"){return Some(TyLit::Ivec3)}
         if ident == Ident::new("ivec4"){return Some(TyLit::Ivec4)}
         None
-    }
+    }*/
 }
 
 impl fmt::Display for TyLit {
