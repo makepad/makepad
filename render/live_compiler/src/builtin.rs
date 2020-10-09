@@ -35,7 +35,7 @@ pub fn generate_builtins() -> HashMap<Ident, Builtin> {
             (Ty::Int) -> Ty::Int,
             (Ty::Ivec2) -> Ty::Ivec2,
             (Ty::Ivec3) -> Ty::Ivec3,
-            (Ty::Ivec4) -> Ty::Ivec4
+            (Ty::Ivec4) -> Ty::Ivec4 
         ]),
         builtin!(acos, [
             (Ty::Float) -> Ty::Float,
