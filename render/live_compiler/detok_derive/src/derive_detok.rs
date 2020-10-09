@@ -115,7 +115,7 @@ pub fn derive_de_tok_impl(input: TokenStream) -> TokenStream {
             tb.add("let ident = p . parse_ident ( ) ? ;");
             
             if !parser.open_brace() {
-                return parser.unexpected()
+                return parser.unexpected() 
             }
             while !parser.eat_eot() {
                 // parse ident

@@ -2,343 +2,295 @@ use crate::shaderast::*;
 use crate::error::LiveError;
 use crate::ident::{Ident, IdentPath, IdentPathWithSpan, QualifiedIdentPath};
 use crate::lit::{Lit};
-use crate::span::Span;
+use crate::span::{Span, LiveBodyId};
 use crate::token::{Token, TokenWithSpan};
-use crate::livestyles::{LiveStyles};
+use crate::livestyles::{LiveStyles, LiveTokensType, LiveTokens};
 use crate::livetypes::*;
 use crate::detok::*;
 use crate::colors::Color;
 
 use std::cell::{Cell, RefCell};
-use std::iter::Cloned;
-use std::slice::Iter;
-
-pub fn parse(tokens_with_span: &[TokenWithSpan], module_path: &str, live_styles: &mut LiveStyles, shader_alloc_start: &mut usize) -> Result<(), LiveError> {
+use std::collections::HashSet;
+/*
+pub fn parse(tokens_with_span: &[TokenWithSpan], module_path: &str, live_body_id:LiveBodyId, live_styles: &mut LiveStyles, shader_alloc_start: &mut usize) -> Result<(), LiveError> {
     let mut tokens_with_span = tokens_with_span.iter().cloned();
     let token_with_span = tokens_with_span.next().unwrap();
     Parser {
+        live_body_id,
         shader_alloc_start,
         live_styles: live_styles,
         module_path: module_path.to_string(),
         tokens_with_span,
         token_with_span,
+        token_storage:Vec::new(),
         end: 0,
     }
     .parse_live()
-}
+}*/
 
-struct Parser<'a> {
-    shader_alloc_start: &'a mut usize,
-    live_styles: &'a mut LiveStyles,
-    tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
-    token_with_span: TokenWithSpan,
-    module_path: String,
-    end: usize,
+struct LiveTokensParser<'a> {
+    parser: &'a dyn DeTokParser,
+    live_body_id: LiveBodyId,
 }
 
 // trait interface used by DeTok derive for auto parsing of rust structures in live code
 
-impl<'a> DeTokParser for Parser<'a> {
+impl<'a> LiveTokensParser<'a> {
     
-    fn peek_token(&self) -> Token {
-        self.token_with_span.token
-    }
-    
-    fn skip_token(&mut self) {
-        self.end = self.token_with_span.span.end;
-        self.token_with_span = self.tokens_with_span.next().unwrap();
-    }
-    
-    fn error(&mut self, message: String) -> LiveError {
-        LiveError {
-            span: Span {
-                live_body_id: self.token_with_span.span.live_body_id,
-                start: self.token_with_span.span.start,
-                end: self.token_with_span.span.end,
-            },
-            message,
-        }
-    }
-    
-    fn error_missing_prop(&mut self, what: &str) -> LiveError {
-        self.error(format!("Error missing property {}", what))
-    }
-    
-    fn error_not_splattable(&mut self, what: &str) -> LiveError {
-        self.error(format!("Error type {} not splattable", what))
-    }
-    
-    fn error_enum(&mut self, ident: Ident, what: &str) -> LiveError {
-        self.error(format!("Error missing {} for enum {}", ident.to_string(), what))
-    }
-    
-    
-    fn parse_ident(&mut self) -> Result<Ident, LiveError> {
-        match self.peek_token() {
-            Token::Ident(ident) => {
-                self.skip_token();
-                Ok(ident)
-            }
-            token => Err(self.error(format!("expected ident, unexpected token `{}`", token))),
-        }
-    }
-    
-    fn parse_ident_path(&mut self) -> Result<IdentPath, LiveError> {
-        let mut ident_path = IdentPath::default();
-        let span = self.begin_span();
-        match self.peek_token() {
-            
-            Token::Ident(ident) => {
-                self.skip_token();
-                ident_path.push(ident);
-            },
-            token => {
-                return Err(span.error(self, format!("expected ident_path, unexpected token `{}`", token).into()));
-            }
-        };
-        
-        loop {
-            if !self.accept_token(Token::PathSep) {
-                return Ok(ident_path);
-            }
-            match self.peek_token() {
-                Token::Ident(ident) => {
-                    self.skip_token();
-                    if !ident_path.push(ident) {
-                        return Err(span.error(self, format!("identifier too long `{}`", ident_path).into()));
+    fn parse_block_tokens(&mut self, live_id: LiveId) -> Result<Vec<TokenWithSpan>, LiveError> { // scans from { to }
+        self.parser.clear_token_storage();
+        let mut paren_stack = Vec::new();
+        let mut new_deps = HashSet::new();
+        self.parser.expect_token(Token::LeftBrace) ?;
+        while self.parser.peek_token() != Token::Eof {
+            match self.parser.peek_token() {
+                Token::Ident(_) => {
+                    let ident_path = self.parser.parse_ident_path() ?;
+                    if ident_path.len()>1 {
+                        let qualified_ident_path = self.parser.qualify_ident_path(&ident_path);
+                        let on_live_id = qualified_ident_path.to_live_id();
+                        new_deps.insert(on_live_id);
+                    }
+                },
+                Token::LeftParen => {
+                    self.parser.skip_token();
+                    paren_stack.push(Token::RightParen);
+                },
+                Token::LeftBrace => {
+                    self.parser.skip_token();
+                    paren_stack.push(Token::RightBrace);
+                },
+                Token::LeftBracket => {
+                    self.parser.skip_token();
+                    paren_stack.push(Token::RightBracket);
+                },
+                Token::RightParen | Token::RightBrace | Token::RightBracket => {
+                    let token = self.parser.peek_token();
+                    if paren_stack.len() == 0 {
+                        return Err(self.parser.error(format!("Unexpected {}", token)))
+                    }
+                    let last = paren_stack.pop().unwrap();
+                    if last != token {
+                        return Err(self.parser.error(format!("Mismatch, expected {} got {}", last, token)))
+                    }
+                    self.parser.skip_token();
+                    if paren_stack.len() == 0 {
+                        // lets remove old deps..
+                        self.parser.get_live_styles().update_deps(live_id, new_deps);
+                        return Ok(self.parser.get_token_storage());
                     }
                 },
                 _ => {
-                    return Ok(ident_path);
+                    self.parser.skip_token()
                 }
             }
         }
+        return Err(self.parser.error(format!("Unexpected eof parsing tokens block")))
     }
     
-    fn end(&self) -> usize {
-        self.end
-    }
-    
-    fn token_end(&self) -> usize {
-        self.token_with_span.span.end
-    }
-    
-    fn accept_token(&mut self, token: Token) -> bool {
-        if self.peek_token() != token {
-            return false;
-        }
-        self.skip_token();
-        true
-    }
-    
-    fn expect_token(&mut self, expected: Token) -> Result<(), LiveError> {
-        let actual = self.peek_token();
-        if actual != expected {
-            return Err(self.error(format!("expected {} unexpected token `{}`", expected, actual)));
-        }
-        self.skip_token();
-        Ok(())
-    }
-    
-    fn accept_ident(&mut self, ident_str: &str) -> bool {
-        if let Token::Ident(ident) = self.peek_token() {
-            if ident == Ident::new(ident_str) {
-                self.skip_token();
-                return true
-            }
-        }
-        false
-    }
-    
-    fn expect_ident(&mut self, ident_str: &str) -> Result<(), LiveError> {
-        let actual = self.peek_token();
-        if let Token::Ident(ident) = actual {
-            if ident == Ident::new(ident_str) {
-                self.skip_token();
-                return Ok(())
-            }
-        }
-        return Err(self.error(format!("expected {} unexpected token `{}`", ident_str, actual)));
-    }
-    
-    fn begin_span(&self) -> SpanTracker {
-        SpanTracker {
-            live_body_id: self.token_with_span.span.live_body_id,
-            start: self.token_with_span.span.start,
-        }
-    }
-    
-    fn ident_path_to_live_id(&self, ident_path: &IdentPath) -> LiveId {
-        ident_path.qualify(&self.module_path).to_live_id()
-    }
-    
-    fn get_live_styles(&mut self) -> &mut LiveStyles {
-        self.live_styles
-    }
-    
-}
-
-impl<'a> Parser<'a> {
-    // parse a live block
+    // parse a live block into live_tokens
     fn parse_live(&mut self) -> Result<(), LiveError> {
-        // ok we parse live,
-        let mut current_style = None;
-        while self.peek_token() != Token::Eof {
-            let span = self.begin_span();
+        
+        let mut new_body_contains = HashSet::new();
+        
+        while self.parser.peek_token() != Token::Eof {
+            let span = self.parser.begin_span();
             
             // at this level we expect a live_id
-            let ident_path = self.parse_ident_path() ?;
-            let qualified_ident_path = ident_path.qualify(&self.module_path);
-            
-            if current_style.is_none() && !ident_path.is_self_id() {
-                return Err(span.error(self, format!("Ident not a self::id form `{}` override using a style block", ident_path)));
-            }
-            
+            let ident_path = self.parser.parse_ident_path() ?;
+            let qualified_ident_path = self.parser.qualify_ident_path(&ident_path);
             let live_id = qualified_ident_path.to_live_id();
-
-            if !current_style.is_none(){ // check if the ident already exists
-                if self.live_styles.collision_check.get(&live_id).is_none(){
-                    return Err(span.error(self, format!("Ident override `{}` does not exist (yet)", ident_path)));
+            
+            new_body_contains.insert(live_id);
+            
+            if let Some(lstok) = self.parser.get_live_styles().tokens.get(&live_id) {
+                if lstok.qualified_ident_path != qualified_ident_path {
+                    return Err(span.error(self.parser, format!("Ident live_id hash collision between `{}` and `{}` rename one of them", lstok.qualified_ident_path, qualified_ident_path)));
                 }
             }
             
-            if let Some(qip) = self.live_styles.collision_check.get(&live_id){
-                if *qip != qualified_ident_path{
-                    return Err(span.error(self, format!("Ident live_id hash collision between `{}` and `{}` rename one of them", qip, qualified_ident_path)));
-                }
-            }
-            self.live_styles.collision_check.insert(live_id, qualified_ident_path);
-
-            self.expect_token(Token::Colon) ?;
+            self.parser.expect_token(Token::Colon) ?;
             
-            match self.peek_token() {
+            match self.parser.peek_token() {
+                Token::Ident(ident) {
+                    self.parser.skip_token();
+                    self.skip_token();
+                    let tokens = self.parse_block_tokens(live_id) ?;
+                    self.live_styles.tokens.insert(live_id, LiveTokens {
+                        qualified_ident_path,
+                        tokens,
+                        live_tokens_type: {
+                            if ident == Ident::new("Float") {
+                                LiveTokensType::Float
+                            }
+                            else if ident == Ident::new("Color"){
+                                LiveTokensType::Shader
+                            }
+                            else if ident == Ident::new("TextStyle"){
+                                LiveTokensType::TextStyle
+                            }
+                            else if ident == Ident::new("Layout"){
+                                LiveTokensType::Layout
+                            }
+                            else if ident == Ident::new("Walk"){
+                                LiveTokensType::Walk
+                            }
+                            else if ident == Ident::new("Anim"){
+                                LiveTokensType::Anim
+                            }
+                            else if ident == Ident::new("Style"){
+                                LiveTokensType::Style
+                            }
+                            else if ident == Ident::new("ShaderLib"){
+                                LiveTokensType::ShaderLib
+                            }
+                            else if ident == Ident::new("Shader"){
+                                LiveTokensType::Shader
+                            }
+                            else{
+                                return Err(span.error(self.parser, format!("Ident {} unexpected", ident)));
+                            }
+                        }
+                    });
+                }
+                /*
                 Token::Ident(ident) if ident == Ident::new("Style") => {
-                    if !current_style.is_none() {
-                        return Err(span.error(self, format!("Cannot nest styles")));
-                    }
                     // its a style.
-                    self.skip_token();
-                    self.expect_token(Token::LeftBrace) ?;
-                    current_style = Some(live_id);
-                }
-                Token::Ident(ident) if ident == Ident::new("Anim") => {
-                    self.skip_token();
-                    let anim = Anim::de_tok(self) ?;
-                    self.live_styles.get_style_mut(&current_style).anims.insert(live_id, anim);
+                    self.parser.skip_token();
+                    self.parser.expect_token(Token::LeftBrace) ?;
+                    // PARSE STYLE FORWARDS
                 }
                 Token::Ident(ident) if ident == Ident::new("Shader") => {
                     // lets parse this shaaaader!
-                    self.skip_token();
-                    // lets make a new shader_ast
+                    self.parser.skip_token();
+                    self.parser.clear_token_storage();
+                    // get current token
                     let mut shader_ast = ShaderAst::new();
                     shader_ast.qualified_ident_path = qualified_ident_path;
                     shader_ast.module_path = self.module_path.clone();
-                    self.parse_shader(&mut shader_ast) ?;
-                    let style = self.live_styles.get_style_mut(&current_style);
-                    if let Some(old_ast) = style.shaders.get(&live_id) {
-                        shader_ast.shader = old_ast.shader;
+                    
+                    self.parse_shader(live_id, &mut shader_ast) ?;
+                    
+                    if let Some(tokens) = self.live_styles.tokens.get(&live_id) {
+                        // already exists.
+                        // lets check if the type changed
+                        // lets walk all deps and clear things
                     }
-                    else {
+                    else { // new slot
                         shader_ast.shader = Some(Shader {
                             shader_id: *self.shader_alloc_start,
                             location_hash: 0
                         });
                         *self.shader_alloc_start += 1;
                     }
-                    style.shaders.insert(live_id, shader_ast);
+                    self.live_styles.shaders.insert(live_id, shader_ast);
+                    self.live_styles.tokens.insert(live_id, LiveTokens {
+                        qualified_ident_path,
+                        tokens: self.token_storage.clone(),
+                        live_tokens_type: LiveTokensType::Shader
+                    });
                 }
                 Token::Ident(ident) if ident == Ident::new("ShaderLib") => {
                     // lets parse this shaaaader!
                     self.skip_token();
+                    self.token_storage.truncate(0);
                     // lets make a new shader_ast
                     let mut shader_ast = ShaderAst::new();
                     shader_ast.qualified_ident_path = qualified_ident_path;
                     shader_ast.module_path = self.module_path.clone();
-                    self.parse_shader(&mut shader_ast) ?;
+                    self.parse_shader(live_id, &mut shader_ast) ?;
                     self.live_styles.shader_libs.insert(live_id, shader_ast);
+                    self.live_styles.tokens.insert(live_id, LiveTokens {
+                        qualified_ident_path,
+                        tokens: self.token_storage.clone(),
+                        live_tokens_type: LiveTokensType::ShaderLib
+                    });
+                }
+                Token::Ident(ident) if ident == Ident::new("Anim") => {
+                    self.skip_token();
+                    let tokens = self.parse_block_tokens(live_id) ?;
+                    self.live_styles.tokens.insert(live_id, LiveTokens {
+                        qualified_ident_path,
+                        tokens,
+                        live_tokens_type: LiveTokensType::Anim
+                    });
                 }
                 Token::Ident(ident) if ident == Ident::new("Layout") => { // lets parse these things
                     self.skip_token();
-                    // lets de_tok a layout
-                    let layout = Layout::de_tok(self) ?;
-                    self.live_styles.get_style_mut(&current_style).layouts.insert(live_id, layout);
+                    let tokens = self.parse_block_tokens(live_id) ?;
+                    self.live_styles.tokens.insert(live_id, LiveTokens {
+                        qualified_ident_path,
+                        tokens,
+                        live_tokens_type: LiveTokensType::Layout
+                    });
                 }
                 Token::Ident(ident) if ident == Ident::new("Walk") => { // lets parse these things
                     self.skip_token();
-                    let walk = Walk::de_tok(self) ?;
-                    self.live_styles.get_style_mut(&current_style).walks.insert(live_id, walk);
+                    let tokens = self.parse_block_tokens(live_id) ?;
+                    self.live_styles.tokens.insert(live_id, LiveTokens {
+                        qualified_ident_path,
+                        tokens,
+                        live_tokens_type: LiveTokensType::Walk
+                    });
                 }
                 Token::Ident(ident) if ident == Ident::new("TextStyle") => { // lets parse these things
                     self.skip_token();
-                    let text_style = TextStyle::de_tok(self) ?;
-                    self.live_styles.get_style_mut(&current_style).text_styles.insert(live_id, text_style);
-                }
-                Token::Ident(_)=>{
-                    let ref_ident_path = self.parse_ident_path()?;
-                    let ref_live_id = ref_ident_path.qualify(&self.module_path).to_live_id();
-                    
-                    // lets see what it is and follow the reference
-                    if let Some(v) = self.live_styles.base.floats.get(&ref_live_id){
-                        let v = *v;
-                        self.live_styles.get_style_mut(&current_style).floats.insert(live_id, v);
-                    }
-                    else if let Some(v) = self.live_styles.base.colors.get(&ref_live_id){
-                        let v = *v;
-                        self.live_styles.get_style_mut(&current_style).colors.insert(live_id, v);
-                    }
-                    else if let Some(v) = self.live_styles.base.text_styles.get(&ref_live_id){
-                        let v = *v;
-                        self.live_styles.get_style_mut(&current_style).text_styles.insert(live_id, v);
-                    }
-                    else if let Some(v) = self.live_styles.base.layouts.get(&ref_live_id){
-                        let v = *v;
-                        self.live_styles.get_style_mut(&current_style).layouts.insert(live_id, v);
-                    }
-                    else if let Some(v) = self.live_styles.base.walks.get(&ref_live_id){
-                        let v = *v;
-                        self.live_styles.get_style_mut(&current_style).walks.insert(live_id, v);
-                    }
-                    else if let Some(v) = self.live_styles.base.anims.get(&ref_live_id){
-                        let v = v.clone();
-                        self.live_styles.get_style_mut(&current_style).anims.insert(live_id, v);
-                    }
-                    else if let Some(v) = self.live_styles.base.shaders.get(&ref_live_id){
-                        let v = v.clone();
-                        self.live_styles.get_style_mut(&current_style).shaders.insert(live_id, v);
-                    }
-                    else{
-                         return Err(span.error(self, format!("Reference {} not found", ref_ident_path)));
-                    }
-                    self.expect_token(Token::Semi) ?;
-                }
+                    let tokens = self.parse_block_tokens(live_id) ?;
+                    self.live_styles.tokens.insert(live_id, LiveTokens {
+                        qualified_ident_path,
+                        tokens,
+                        live_tokens_type: LiveTokensType::TextStyle
+                    });
+                }*/
                 Token::Lit(Lit::Int(_)) | Token::Lit(Lit::Float(_)) => {
-                    let val = f32::de_tok(self) ?;
-                    self.live_styles.get_style_mut(&current_style).floats.insert(live_id, val);
+                    self.parser.clear_token_storage();
+                    self.parser.skip_token();
+                    //let value = f32::de_tok(self) ?;
+                    self.live_styles.tokens.insert(live_id, LiveTokens {
+                        qualified_ident_path,
+                        tokens:self.parser.get_token_storage(),
+                        live_tokens_type:LiveTokensType::Float
+                    })
+                    //self.live_styles.floats.insert(live_id, Float {value, ..Float::default()});
                     self.expect_token(Token::Semi) ?;
                 }
                 Token::Lit(Lit::Color(_)) => {
-                    let val = Color::de_tok(self) ?;
-                    self.live_styles.get_style_mut(&current_style).colors.insert(live_id, val);
-                    self.expect_token(Token::Semi) ?;
+                    self.parser.clear_token_storage();
+                    self.parser.skip_token();
+                    //let value = f32::de_tok(self) ?;
+                    self.live_styles.tokens.insert(live_id, LiveTokens {
+                        qualified_ident_path,
+                        tokens:self.parser.get_token_storage(),
+                        live_tokens_type:LiveTokensType::Color
+                    })
                 }
                 token => {
                     return Err(span.error(self, format!("Unexpected token {}", token)));
                 }
             }
             
-            if let Token::RightBrace = self.peek_token() {
-                self.skip_token();
-                if current_style.is_none() {
-                    return Err(span.error(self, format!("Unexpected }}")));
-                }
-                current_style = None;
-            }
-            
         }
+        // compare live_body_contains with the old one and cache_clear the missing ones.
+        if let Some(live_body_contains) = self.live_styles.live_bodies_contains.get(&self.live_body_id).cloned() {
+            for contains_live_id in live_body_contains {
+                if !new_body_contains.contains(&contains_live_id) {
+                    self.live_styles.clear_caches(contains_live_id);
+                }
+            }
+        }
+        self.live_styles.live_bodies_contains.insert(self.live_body_id, new_body_contains);
+        
         Ok(())
     }
+}
+
+struct ShaderParser<'a> {
+    parser: &'a dyn DeTokParser
+}
+
+impl<'a> ShaderParser<'a> {
     
-    fn parse_shader(&mut self, shader_ast: &mut ShaderAst) -> Result<(), LiveError> {
+    fn parse_shader(&mut self, shader_live_id: LiveId, shader_ast: &mut ShaderAst) -> Result<(), LiveError> {
         self.expect_token(Token::LeftBrace) ?;
         while self.peek_token() != Token::Eof {
             match self.peek_token() {
@@ -405,6 +357,8 @@ impl<'a> Parser<'a> {
                     self.skip_token();
                     let span = self.begin_span();
                     let ident_path = self.parse_ident_path() ?;
+                    // register dependency of this value to this shader in use
+                    
                     self.expect_token(Token::Star) ?;
                     self.expect_token(Token::Semi) ?;
                     shader_ast.uses.push(IdentPathWithSpan {span: span.end(self, | span | span), ident_path});
@@ -420,7 +374,6 @@ impl<'a> Parser<'a> {
         }
         return Err(self.error(format!("unexpected eof")))
     }
-    
     
     fn parse_const_decl(&mut self) -> Result<ConstDecl, LiveError> {
         let span = self.begin_span();
@@ -515,7 +468,7 @@ impl<'a> Parser<'a> {
     }
     
     
-    fn parse_geometry_decl(&mut self, qualified_ident_path:QualifiedIdentPath) -> Result<GeometryDecl, LiveError> {
+    fn parse_geometry_decl(&mut self, qualified_ident_path: QualifiedIdentPath) -> Result<GeometryDecl, LiveError> {
         let span = self.begin_span();
         let ident = self.parse_ident() ?;
         self.expect_token(Token::Colon) ?;
@@ -530,7 +483,7 @@ impl<'a> Parser<'a> {
         }))
     }
     
-    fn parse_instance_decl(&mut self, qualified_ident_path:QualifiedIdentPath) -> Result<InstanceDecl, LiveError> {
+    fn parse_instance_decl(&mut self, qualified_ident_path: QualifiedIdentPath) -> Result<InstanceDecl, LiveError> {
         let span = self.begin_span();
         let ident = self.parse_ident() ?;
         self.expect_token(Token::Colon) ?;
@@ -545,7 +498,7 @@ impl<'a> Parser<'a> {
         }))
     }
     
-    fn parse_texture_decl(&mut self, qualified_ident_path:QualifiedIdentPath) -> Result<TextureDecl, LiveError> {
+    fn parse_texture_decl(&mut self, qualified_ident_path: QualifiedIdentPath) -> Result<TextureDecl, LiveError> {
         let span = self.begin_span();
         let ident = self.parse_ident() ?;
         self.expect_token(Token::Colon) ?;
@@ -559,7 +512,7 @@ impl<'a> Parser<'a> {
         }))
     }
     
-    fn parse_uniform_decl(&mut self, qualified_ident_path:QualifiedIdentPath) -> Result<UniformDecl, LiveError> {
+    fn parse_uniform_decl(&mut self, qualified_ident_path: QualifiedIdentPath) -> Result<UniformDecl, LiveError> {
         let span = self.begin_span();
         let ident = self.parse_ident() ?;
         self.expect_token(Token::Colon) ?;
@@ -790,7 +743,7 @@ impl<'a> Parser<'a> {
     fn parse_prim_ty_expr(&mut self) -> Result<TyExpr, LiveError> {
         let span = self.begin_span();
         match self.peek_token() {
-            Token::TyLit(ty_lit)=>{
+            Token::TyLit(ty_lit) => {
                 self.skip_token();
                 Ok(span.end(self, | span | TyExpr {
                     ty: RefCell::new(None),
@@ -1087,7 +1040,7 @@ impl<'a> Parser<'a> {
     fn parse_prim_expr(&mut self) -> Result<Expr, LiveError> {
         let span = self.begin_span();
         match self.peek_token() {
-            Token::TyLit(ty_lit)=>{
+            Token::TyLit(ty_lit) => {
                 self.skip_token();
                 self.expect_token(Token::LeftParen) ?;
                 let mut arg_exprs = Vec::new();
@@ -1110,9 +1063,9 @@ impl<'a> Parser<'a> {
                         ty_lit,
                         arg_exprs,
                     },
-                }))                
+                }))
             }
-            Token::Ident(ident) => {
+            Token::Ident(_) => {
                 let ident_path = self.parse_ident_path() ?;
                 match self.peek_token() {
                     Token::Not => {

@@ -8,10 +8,10 @@ struct Cx {
 
 impl Cx {
     pub fn add_live_body(&mut self, live_body: LiveBody) {
-        let mut shader_alloc_start = 0;
-        if let Err(err) = self.live_styles.add_live_body(live_body, &mut shader_alloc_start) {
-            eprintln!("{:?}", err);
-        }
+        //if let Err(err) = 
+        self.live_styles.add_live_body(live_body);
+        //    eprintln!("{:?}", err);
+        //}
     }
 }
 
@@ -66,12 +66,13 @@ fn main() {
             top_drop: 1.2,
             height_factor: 1.3,
         }
-        self::mycolor: #ff0f;
-        self::mycolor2: self::mycolor;
         self::myslider: 1.0;
+
+        self::mycolor: #ff0f;
         
         render::quad::shader: ShaderLib {
-            struct Mp {
+            //use self::shader_bg::*;  
+            struct Mp { 
                 x: float
             }
             impl Mp {
@@ -84,7 +85,7 @@ fn main() {
             }
             fn pixel() -> vec4 {
                 return vec4(1.0, 0.0, 0.0, 1.0);
-            }
+            } 
         }
         
         self::shader_bg: Shader {
@@ -109,11 +110,15 @@ fn main() {
         Geometry{geometry_id:0}
     );
 
-    let options = ShaderCompileOptions {
+    let _options = ShaderCompileOptions {
         gather_all: false,
         create_const_table: false,
         no_const_collapse: false
     };
+
+    cx.live_styles.recompute_all();
+
+    /*
     cx.live_styles.enumerate_all_shaders( | shader_ast | {
         match cx.live_styles.collect_and_analyse_shader_ast(&shader_ast, options) {
             Err(err) => {
@@ -124,6 +129,6 @@ fn main() {
                 println!("OK!");
             }
         }
-    })
+    })*/
     
 }
