@@ -8,6 +8,14 @@ use crate::token::Token;
 use crate::ident::{Ident};
 use crate::error::LiveError;
 
+#[derive(Clone, Debug, Default)]
+pub struct Float {
+    pub value: f32,
+    pub min: Option<f32>,
+    pub max: Option<f32>,
+    pub step: Option<f32>,
+}
+
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct Shader {
     pub shader_id: usize,
@@ -66,7 +74,7 @@ impl Default for TextureDesc {
 }
 
 
-#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug, PartialOrd, Ord)]
 pub struct LiveId(pub u64);
 
 
@@ -99,8 +107,10 @@ impl DeTokSplat for TextStyle {
     fn de_tok_splat(p: &mut dyn DeTokParser) -> Result<Self,
     LiveError> {
         let ident_path = p.parse_ident_path() ?;
-        let live_id = p.ident_path_to_live_id(&ident_path);
-        if let Some(text_style) = p.get_live_styles().base.text_styles.get(&live_id) {
+        let qualified_ident_path = p.qualify_ident_path(&ident_path);
+        let live_id = qualified_ident_path.to_live_id();
+        //p.register_dependency(live_id);
+        if let Some(text_style) = p.get_live_styles().text_styles.get(&live_id) {
             return Ok(*text_style);
         }
         else{
@@ -352,13 +362,13 @@ impl Rect {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Anim {
     pub play: Play,
     pub tracks: Vec<Track>
 }
 
-#[derive(Clone, DeTok, Debug)]
+#[derive(Clone, DeTok, Debug, PartialEq)]
 pub enum Ease {
     Lin,
     InQuad,
@@ -741,7 +751,7 @@ impl Ease {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Track {
     Float {
         live_id: LiveId,
@@ -1027,7 +1037,7 @@ impl Anim {
     }
 }
 
-#[derive(Clone, DeTok, Debug)]
+#[derive(Clone, DeTok, Debug, PartialEq)]
 pub enum Play {
     Chain {duration: f64},
     Cut {duration: f64},
