@@ -1,17 +1,21 @@
-use crate::token::{Token};
+use crate::token::{Token, TokenWithSpan};
 use crate::error::LiveError;
-use crate::ident::{Ident, IdentPath};
+use crate::ident::{Ident, IdentPath, QualifiedIdentPath};
 use crate::span::{Span, LiveBodyId};
 use crate::lit::{Lit};
 use crate::colors::Color;
 use crate::math::*;
 use crate::livestyles::LiveStyles;
 use crate::livetypes::{Font, LiveId, Play, Anim, Ease, Track};
+use std::iter::Cloned;
+use std::slice::Iter;
+
 
 pub trait DeTokParser {
-    fn ident_path_to_live_id(&self, ident_path: &IdentPath) -> LiveId;
+    fn qualify_ident_path(&self, ident_path: &IdentPath) -> QualifiedIdentPath;
     fn end(&self) -> usize;
     fn token_end(&self) -> usize;
+    fn peek_span(&self) -> Span;
     fn peek_token(&self) -> Token;
     fn skip_token(&mut self);
     fn error(&mut self, msg: String) -> LiveError;
@@ -26,7 +30,187 @@ pub trait DeTokParser {
     fn error_missing_prop(&mut self, what: &str) -> LiveError;
     fn error_enum(&mut self, ident: Ident, what: &str) -> LiveError;
     fn begin_span(&self) -> SpanTracker;
+    fn clear_token_storage(&mut self);
+    fn get_token_storage(&mut self) -> Vec<TokenWithSpan>;
 }
+
+pub struct DeTokParserImpl<'a> {
+    pub live_styles: &'a mut LiveStyles,
+    pub token_storage: Vec<TokenWithSpan>,
+    pub tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
+    pub token_with_span: TokenWithSpan,
+    pub end: usize,
+}
+
+impl<'a> DeTokParserImpl<'a>{
+    pub fn new(tokens_with_span:&'a [TokenWithSpan], live_styles:&'a mut LiveStyles)->Self{
+        let mut tokens_with_span = tokens_with_span.iter().cloned();
+        let token_with_span = tokens_with_span.next().unwrap();
+        DeTokParserImpl {
+            live_styles: live_styles,
+            token_storage: Vec::new(),
+            tokens_with_span,
+            token_with_span,
+            end: 0,
+        }
+    }
+}
+
+impl<'a> DeTokParser for DeTokParserImpl<'a> {
+    
+    fn clear_token_storage(&mut self) {
+        self.token_storage.truncate(0);
+    }
+    
+    fn get_token_storage(&mut self) -> Vec<TokenWithSpan> {
+        let mut new_token_storage = Vec::new();
+        std::mem::swap(&mut new_token_storage, &mut self.token_storage);
+        return new_token_storage;
+    }
+     
+    fn peek_span(&self) -> Span{
+        self.token_with_span.span
+    } 
+     
+    fn peek_token(&self) -> Token {
+        self.token_with_span.token
+    }
+    
+    fn skip_token(&mut self) {
+        self.end = self.token_with_span.span.end;
+        self.token_storage.push(self.token_with_span);
+        self.token_with_span = self.tokens_with_span.next().unwrap();
+    }
+    
+    fn error(&mut self, message: String) -> LiveError {
+        LiveError {
+            span: Span {
+                live_body_id: self.token_with_span.span.live_body_id,
+                start: self.token_with_span.span.start,
+                end: self.token_with_span.span.end,
+            },
+            message,
+        }
+    }
+    
+    fn error_missing_prop(&mut self, what: &str) -> LiveError {
+        self.error(format!("Error missing property {}", what))
+    }
+    
+    fn error_not_splattable(&mut self, what: &str) -> LiveError {
+        self.error(format!("Error type {} not splattable", what))
+    }
+    
+    fn error_enum(&mut self, ident: Ident, what: &str) -> LiveError {
+        self.error(format!("Error missing {} for enum {}", ident.to_string(), what))
+    }
+    
+    
+    fn parse_ident(&mut self) -> Result<Ident, LiveError> {
+        match self.peek_token() {
+            Token::Ident(ident) => {
+                self.skip_token();
+                Ok(ident)
+            }
+            token => Err(self.error(format!("expected ident, unexpected token `{}`", token))),
+        }
+    }
+    
+    fn parse_ident_path(&mut self) -> Result<IdentPath, LiveError> {
+        let mut ident_path = IdentPath::default();
+        let span = self.begin_span();
+        match self.peek_token() {
+            
+            Token::Ident(ident) => {
+                self.skip_token();
+                ident_path.push(ident);
+            },
+            token => {
+                return Err(span.error(self, format!("expected ident_path, unexpected token `{}`", token).into()));
+            }
+        };
+        
+        loop {
+            if !self.accept_token(Token::PathSep) {
+                return Ok(ident_path);
+            }
+            match self.peek_token() {
+                Token::Ident(ident) => {
+                    self.skip_token();
+                    if !ident_path.push(ident) {
+                        return Err(span.error(self, format!("identifier too long `{}`", ident_path).into()));
+                    }
+                },
+                _ => {
+                    return Ok(ident_path);
+                }
+            }
+        }
+    }
+    
+    fn end(&self) -> usize {
+        self.end
+    }
+    
+    fn token_end(&self) -> usize {
+        self.token_with_span.span.end
+    }
+    
+    fn accept_token(&mut self, token: Token) -> bool {
+        if self.peek_token() != token {
+            return false;
+        }
+        self.skip_token();
+        true
+    }
+    
+    fn expect_token(&mut self, expected: Token) -> Result<(), LiveError> {
+        let actual = self.peek_token();
+        if actual != expected {
+            return Err(self.error(format!("expected {} unexpected token `{}`", expected, actual)));
+        }
+        self.skip_token();
+        Ok(())
+    }
+    
+    fn accept_ident(&mut self, ident_str: &str) -> bool {
+        if let Token::Ident(ident) = self.peek_token() {
+            if ident == Ident::new(ident_str) {
+                self.skip_token();
+                return true
+            }
+        }
+        false
+    }
+    
+    fn expect_ident(&mut self, ident_str: &str) -> Result<(), LiveError> {
+        let actual = self.peek_token();
+        if let Token::Ident(ident) = actual {
+            if ident == Ident::new(ident_str) {
+                self.skip_token();
+                return Ok(())
+            }
+        }
+        return Err(self.error(format!("expected {} unexpected token `{}`", ident_str, actual)));
+    }
+    
+    fn begin_span(&self) -> SpanTracker {
+        SpanTracker {
+            live_body_id: self.token_with_span.span.live_body_id,
+            start: self.token_with_span.span.start,
+        }
+    }
+    fn qualify_ident_path(&self, ident_path: &IdentPath) -> QualifiedIdentPath {
+        let module_path = &self.live_styles.live_bodies[self.token_with_span.span.live_body_id.0].module_path;
+        ident_path.qualify(&module_path)
+    }
+    
+    fn get_live_styles(&mut self) -> &mut LiveStyles {
+        self.live_styles
+    }
+}
+
+
 
 pub struct SpanTracker {
     pub live_body_id: LiveBodyId,
@@ -93,9 +277,11 @@ macro_rules!impl_de_tok_for_float {
                     },
                     Token::Ident(_) => { // try to parse ident path, and read from styles
                         let ident_path = p.parse_ident_path() ?;
-                        let live_id = p.ident_path_to_live_id(&ident_path);
-                        if let Some(float) = p.get_live_styles().base.floats.get(&live_id) {
-                            return Ok(*float as $ ty);
+                        let qualified_ident_path = p.qualify_ident_path(&ident_path);
+                        let live_id = qualified_ident_path.to_live_id();
+                        //p.register_dependency(live_id);
+                        if let Some(float) = p.get_live_styles().floats.get(&live_id) {
+                            return Ok(float.value as $ ty);
                         }
                         return Err(p.error(format!("Float {} not found", ident_path)));
                     },
@@ -233,8 +419,9 @@ impl DeTok for Color {
             },
             Token::Ident(_) => { // try to parse ident path, and read from styles
                 let ident_path = p.parse_ident_path() ?;
-                let live_id = p.ident_path_to_live_id(&ident_path);
-                if let Some(color) = p.get_live_styles().base.colors.get(&live_id) {
+                let qualified_ident_path = p.qualify_ident_path(&ident_path);
+                let live_id = qualified_ident_path.to_live_id();
+                if let Some(color) = p.get_live_styles().colors.get(&live_id) {
                     return Ok(*color);
                 }
                 return Err(p.error(format!("Color {} not found", ident_path)));
@@ -297,7 +484,9 @@ fn parse_track(p: &mut dyn DeTokParser, track: &mut Track) -> Result<(), LiveErr
                     p.skip_token();
                     p.expect_token(Token::Colon) ?;
                     let ident_path = p.parse_ident_path() ?;
-                    track.set_live_id(p.ident_path_to_live_id(&ident_path));
+                    let qualified_ident_path = p.qualify_ident_path(&ident_path);
+                    let live_id = qualified_ident_path.to_live_id();
+                    track.set_live_id(live_id);
                 }
                 else if ident == Ident::new("keys") {
                     p.skip_token();
@@ -321,7 +510,7 @@ fn parse_track(p: &mut dyn DeTokParser, track: &mut Track) -> Result<(), LiveErr
                                 p.skip_token();
                                 break;
                             },
-                            Token::Comma=>{
+                            Token::Comma => {
                                 p.skip_token();
                             },
                             token => {
@@ -338,7 +527,7 @@ fn parse_track(p: &mut dyn DeTokParser, track: &mut Track) -> Result<(), LiveErr
                 p.skip_token();
                 return Ok(());
             },
-            Token::Comma=>{
+            Token::Comma => {
                 p.skip_token();
             },
             token => {

@@ -32,7 +32,8 @@ macro_rules!live {
             module_path: module_path!().to_string(),
             line: line!() as usize,
             column: column!() as usize,
-            code: $ code.to_string()
+            code: $ code.to_string(),
+            tokens: None,
         })
     }
 }

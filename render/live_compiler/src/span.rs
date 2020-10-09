@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialOrd, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Hash, Eq, Ord, PartialOrd, PartialEq)]
 pub struct LiveBodyId(pub usize);
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialOrd, PartialEq)]
