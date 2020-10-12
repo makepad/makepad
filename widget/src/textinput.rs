@@ -41,28 +41,30 @@ impl TextInput {
         live!(cx, r#"
             self::color_empty_message: #666;
             
+            self::gutter_width: 0.0;
+            self::padding_top: 0.0;
+            self::layout_bg: Layout {
+                walk: {
+                    width: Compute,
+                    height: Compute,
+                    margin: {t: 4., l: 0., r: 0., b: 0.}
+                },
+                padding: all(7.),
+            }
+            self::shader_bg: Shader {
+                use makepad_render::quad::shader::*;
+                fn pixel() -> vec4 {
+                    let cx = Df::viewport(pos * vec2(w, h));
+                    cx.box(0., 0., w, h, 2.5);
+                    return cx.fill(color);
+                }
+            }
+            
             self::style_text_input: Style {
-                
-                crate::texteditor::gutter_width: 0.0;
-                crate::texteditor::padding_top: 0.0;
-                
-                crate::texteditor::layout_bg: Layout {
-                    walk: {
-                        width: Compute,
-                        height: Compute,
-                        margin: {t: 4., l: 0., r: 0., b: 0.}
-                    },
-                    padding: all(7.),
-                }
-                
-                crate::texteditor::shader_bg: Shader {
-                    use makepad_render::quad::shader::*;
-                    fn pixel() -> vec4 {
-                        let cx = Df::viewport(pos * vec2(w, h));
-                        cx.box(0., 0., w, h, 2.5);
-                        return cx.fill(color);
-                    }
-                }
+                crate::texteditor::gutter_width: self::gutter_width;
+                crate::texteditor::padding_top: self::padding_top;
+                crate::texteditor::layout_bg: self::layout_bg;
+                crate::texteditor::shader_bg: self::shader_bg;
             }
         "#)
     }

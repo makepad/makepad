@@ -839,6 +839,7 @@ macro_rules!main_app {
         let mut cx = Cx::default();
         cx.style();
         $app::style(&mut cx);
+        cx.init_live_styles();
         let mut app = $ app::new(&mut cx);
         let mut cxafterdraw = CxAfterDraw::new(&mut cx);
         cx.event_loop( | cx, mut event | {
@@ -860,6 +861,7 @@ macro_rules!wasm_app {
             let mut cx = Box::new(Cx::default());
             cx.style();
             $app::style(&mut cx);
+            cx.init_live_styles();
             let app = Box::new( $ app::new(&mut cx));
             let cxafterdraw = Box::new(CxAfterDraw::new(&mut cx));
             Box::into_raw(Box::new((Box::into_raw(app), Box::into_raw(cx), Box::into_raw(cxafterdraw)))) as u32
