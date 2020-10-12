@@ -466,7 +466,7 @@ impl LiveStyles {
                 },
                 LiveTokensType::Shader => {
                     if self.tokens_changed.contains(&live_id) {
-                        match DeTokParserImpl::new(&swap_live_tokens.tokens, self).parse_shader() {
+                        match DeTokParserImpl::new(&swap_live_tokens.tokens, self).parse_shader(swap_live_tokens.qualified_ident_path) {
                             Err(err) => {
                                 errors.push(self.live_error_to_live_body_error(err));
                             },
@@ -483,7 +483,7 @@ impl LiveStyles {
                 }
                 LiveTokensType::ShaderLib => {
                     if self.tokens_changed.contains(&live_id) {
-                        match DeTokParserImpl::new(&swap_live_tokens.tokens, self).parse_shader() {
+                        match DeTokParserImpl::new(&swap_live_tokens.tokens, self).parse_shader(swap_live_tokens.qualified_ident_path) {
                             Err(err) => {errors.push(self.live_error_to_live_body_error(err));},
                             Ok(v) => {self.shader_asts.insert(live_id, v);}
                         }
@@ -493,7 +493,6 @@ impl LiveStyles {
                     match DeTokParserImpl::new(&swap_live_tokens.tokens, self).parse_style() {
                         Err(err) => {errors.push(self.live_error_to_live_body_error(err));},
                         Ok(v) => {
-                            println!("{}", swap_live_tokens.qualified_ident_path);
                             // allocate style, write it
                             if let Some(existing) = self.style_alloc.get(&live_id) {
                                 self.style_list[existing.0] = v;

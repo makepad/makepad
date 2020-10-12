@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 
 impl<'a> DeTokParserImpl<'a>{
     
-    pub fn parse_shader(&mut self) -> Result<ShaderAst, LiveError> {
+    pub fn parse_shader(&mut self, qualified_ident_path:QualifiedIdentPath) -> Result<ShaderAst, LiveError> {
         self.skip_token();
         
         let mut shader_ast = ShaderAst::default();
@@ -29,7 +29,7 @@ impl<'a> DeTokParserImpl<'a>{
                 }
                 Token::Ident(ident) if ident == Ident::new("geometry") => {
                     self.skip_token();
-                    let decl = self.parse_geometry_decl(shader_ast.qualified_ident_path) ?;
+                    let decl = self.parse_geometry_decl(qualified_ident_path) ?;
                     shader_ast.decls.push(Decl::Geometry(decl));
                 }
                 Token::Const => {
@@ -55,17 +55,17 @@ impl<'a> DeTokParserImpl<'a>{
                 }
                 Token::Ident(ident) if ident == Ident::new("instance") => {
                     self.skip_token();
-                    let decl = self.parse_instance_decl(shader_ast.qualified_ident_path) ?;
+                    let decl = self.parse_instance_decl(qualified_ident_path) ?;
                     shader_ast.decls.push(Decl::Instance(decl));
                 }
                 Token::Ident(ident) if ident == Ident::new("texture") => {
                     self.skip_token();
-                    let decl = self.parse_texture_decl(shader_ast.qualified_ident_path) ?;
+                    let decl = self.parse_texture_decl(qualified_ident_path) ?;
                     shader_ast.decls.push(Decl::Texture(decl));
                 }
                 Token::Ident(ident) if ident == Ident::new("uniform") => {
                     self.skip_token();
-                    let decl = self.parse_uniform_decl(shader_ast.qualified_ident_path) ?;
+                    let decl = self.parse_uniform_decl(qualified_ident_path) ?;
                     shader_ast.decls.push(Decl::Uniform(decl));
                 }
                 Token::Ident(ident) if ident == Ident::new("varying") => {
