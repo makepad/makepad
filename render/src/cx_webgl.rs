@@ -250,16 +250,16 @@ impl Cx {
             no_const_collapse: false
         };
         
+        let platform = &mut self.platform;
         let shaders = &mut self.shaders;
         let live_styles = &mut self.live_styles;
-        let platform = &mut self.platform;
-        live_styles.enumerate_all_shaders( | shader_ast | {
-            match live_styles.collect_and_analyse_shader_ast(&shader_ast, options) {
+        for (live_id,_shader) in &live_styles.shader_alloc{
+            match live_styles.collect_and_analyse_shader(*live_id, options) {
                 Err(err) => {
                     platform.from_wasm.log(&format!("{}", err))
                 },
                 Ok((shader_ast, default_geometry)) => {
-                    let shader_id = shader_ast.shader.unwrap().shader_id;
+                    let shader_id = live_styles.shader_alloc.get(live_id).unwrap().shader_id;
                     Self::webgl_compile_shader(
                         shader_id,
                         &mut shaders[shader_id],
@@ -271,7 +271,7 @@ impl Cx {
                     );
                 }
             }
-        });
+        };
     }
     
     pub fn webgl_compile_shader(
