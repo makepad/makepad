@@ -10,7 +10,7 @@ use std::fmt;
 
 #[derive(Clone, Debug, Default)]
 pub struct ShaderAst {
-    pub qualified_ident_path: QualifiedIdentPath,
+    //pub qualified_ident_path: QualifiedIdentPath,
     pub live_body_id: LiveBodyId,
     pub debug: bool,
     pub default_geometry: Option<IdentPathWithSpan>,

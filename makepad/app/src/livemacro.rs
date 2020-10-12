@@ -210,11 +210,7 @@ impl AppTextBuffer {
                                     lc.1 - 8, 
                                     live_body 
                                 ); 
-
                             }
-
-
-
                             /*
                             if let Some(live_body) = tp.cur_pair_as_string() {
                                 let lc = tp.cur_line_col();
