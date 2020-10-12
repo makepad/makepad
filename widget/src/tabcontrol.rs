@@ -73,8 +73,9 @@ impl TabControl {
     pub fn style(cx: &mut Cx) {
         live!(cx, r#"
             self::color_bg_normal: #34;
+            self::bar_size: 8.0;
             self::tab_control_style: Style {
-                crate::scrollbar::bar_size: 8.0;
+                crate::scrollbar::bar_size: self::bar_size;
             }
             
         "#)

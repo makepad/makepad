@@ -2,7 +2,6 @@ use crate::shaderast::*;
 use crate::error::LiveError;
 use crate::ident::{Ident, IdentPath, IdentPathWithSpan, QualifiedIdentPath};
 use crate::lit::{Lit};
-use crate::livetypes::*;
 use crate::detok::*;
 use crate::span::{Span};
 use crate::token::{Token};
@@ -10,7 +9,13 @@ use std::cell::{Cell, RefCell};
 
 impl<'a> DeTokParserImpl<'a>{
     
-    pub fn parse_shader(&mut self, _shader_live_id: LiveId, shader_ast: &mut ShaderAst) -> Result<(), LiveError> {
+    pub fn parse_shader(&mut self) -> Result<ShaderAst, LiveError> {
+        self.skip_token();
+        
+        let mut shader_ast = ShaderAst::default();
+        shader_ast.live_body_id = self.peek_span().live_body_id;
+        
+        
         self.expect_token(Token::LeftBrace) ?;
         while self.peek_token() != Token::Eof {
             match self.peek_token() {
@@ -85,7 +90,7 @@ impl<'a> DeTokParserImpl<'a>{
                 }
                 Token::RightBrace => {
                     self.skip_token();
-                    return Ok(())
+                    return Ok(shader_ast);
                 },
                 token => {
                     return Err(self.error(format!("unexpected token while parsing shader `{}`", token)))

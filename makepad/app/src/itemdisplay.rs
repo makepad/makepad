@@ -61,11 +61,14 @@ impl ItemDisplay {
             }
             
             self::text_color: #82;
+            self::gutter_width: 10.;
+            self::padding_top: 10.;
+            self::color_bg: #25;
             
             self::style_text_editor: Style{
-                makepad_widget::texteditor::gutter_width: 10.;
-                makepad_widget::texteditor::padding_top: 10.;
-                makepad_widget::texteditor::color_bg: #25;
+                makepad_widget::texteditor::gutter_width: self::gutter_width;
+                makepad_widget::texteditor::padding_top: self::padding_top;
+                makepad_widget::texteditor::color_bg: self::color_bg;
             }
         "#)
     }

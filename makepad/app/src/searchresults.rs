@@ -63,17 +63,19 @@ impl SearchResults {
             self::color_bg_marked_over: #11466e;
             self::color_bg_selected: #28;
             
+            self::text_input_layout_bg:  Layout {
+                walk: Walk {
+                    width: Compute,
+                    height: Compute,
+                    margin: {t: 6., l: 0., r: 0., b: 0.}
+                },
+                padding: all(7.),
+            }
+            self::text_input_color_bg: #34;
+            
             self::style_text_input: Style {
-                makepad_widget::texteditor::layout_bg: Layout {
-                    walk: Walk {
-                        width: Compute,
-                        height: Compute,
-                        margin: {t: 6., l: 0., r: 0., b: 0.}
-                    },
-                    padding: all(7.),
-                }
-                
-                makepad_widget::texteditor::color_bg: #34;
+                makepad_widget::texteditor::layout_bg: self::text_input_layout_bg;
+                makepad_widget::texteditor::color_bg: self::text_input_color_bg;
             }
             
             self::layout_item_closed: Layout {
@@ -94,9 +96,11 @@ impl SearchResults {
                 ..makepad_widget::widgetstyle::text_style_normal
             }
             
+            self::texteditor_gutter_width: 10.;
+            self::texteditor_padding_top: 0.;
             self::style_text_editor: Style {
-                makepad_widget::texteditor::gutter_width: 10.;
-                makepad_widget::texteditor::padding_top: 0.;
+                makepad_widget::texteditor::gutter_width: self::texteditor_gutter_width;
+                makepad_widget::texteditor::padding_top: self::texteditor_padding_top;
             }
             
         "#)

@@ -4,10 +4,6 @@ use makepad_geometry::{AffineTransformation, Transform, Vector};
 use makepad_internal_iter::*;
 use makepad_path::PathIterator;
 
-#[derive(Clone, Copy, Default)]
-pub struct Font{pub font_id:Option<usize>}
-
-
 impl Cx {
     /*
     pub fn load_font_style(&mut self, style: &str) -> Font {
@@ -26,13 +22,13 @@ impl Cx {
     }
 }
 
+#[derive(Clone, Default)]
 pub struct TrapezoidText {
     trapezoidator: Trapezoidator
 }
 
 impl TrapezoidText {
-    pub fn style(cx: &mut Cx) -> Self {
-        
+    pub fn style(cx: &mut Cx){
         live!(cx, r#"
             self::trapezoid_shader: Shader{
                 use crate::shader_std::prelude::*;
@@ -132,9 +128,6 @@ impl TrapezoidText {
             }
         "#);
         
-        Self {
-            trapezoidator: Trapezoidator::default(),
-        }
     }
     
     // test api for directly drawing a glyph
@@ -286,7 +279,7 @@ impl CxAfterDraw {
         cx.fonts_atlas.texture_id = atlas_texture.texture_id;
         
         Self {
-            trapezoid_text: TrapezoidText::style(cx),
+            trapezoid_text: TrapezoidText::default(),
             atlas_pass: Pass::default(),
             atlas_view: View {
                 always_redraw: true,
