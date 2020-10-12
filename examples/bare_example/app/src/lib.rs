@@ -12,8 +12,8 @@ pub struct BareExampleApp {
 impl BareExampleApp {
     pub fn style(cx: &mut Cx){
         live!(cx, r#"
-            self::bg_color: #f00,
-            self::bg_color2: #00f,
+            self::bg_color: #f00;
+            self::bg_color2: #00f;
             self::bg_shader: Shader { 
                 use makepad_render::quad::shader::*;
 
@@ -57,8 +57,8 @@ impl BareExampleApp {
         self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(Color::rgb(32, 0, 0)));
         if self.main_view.begin_view(cx, Layout::default()).is_ok() {
             
-            self.quad.shader = shader!(cx, self::bg_shader);
-            self.quad.color = color!(cx, self::bg_color2);
+            self.quad.shader = live_shader!(cx, self::bg_shader);
+            self.quad.color = live_color!(cx, self::bg_color2);
             let k = self.quad.draw_quad_abs(cx, Rect {x: 100., y: 100., w: 200., h: 200.});
             k.push_float(cx, 10.);
             

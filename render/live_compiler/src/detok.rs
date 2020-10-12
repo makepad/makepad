@@ -5,7 +5,7 @@ use crate::span::{Span, LiveBodyId};
 use crate::lit::{Lit};
 use crate::colors::Color;
 use crate::math::*;
-use crate::livestyles::LiveStyles;
+use crate::livestyles::{LiveStyles, LiveStyle};
 use crate::livetypes::{Font, LiveId, Play, Anim, Ease, Track};
 use std::iter::Cloned;
 use std::slice::Iter;
@@ -30,13 +30,13 @@ pub trait DeTokParser {
     fn error_missing_prop(&mut self, what: &str) -> LiveError;
     fn error_enum(&mut self, ident: Ident, what: &str) -> LiveError;
     fn begin_span(&self) -> SpanTracker;
-    fn clear_token_storage(&mut self);
-    fn get_token_storage(&mut self) -> Vec<TokenWithSpan>;
+    fn clear_token_clone(&mut self);
+    fn get_token_clone(&mut self) -> Vec<TokenWithSpan>;
 }
 
 pub struct DeTokParserImpl<'a> {
     pub live_styles: &'a mut LiveStyles,
-    pub token_storage: Vec<TokenWithSpan>,
+    pub token_clone: Vec<TokenWithSpan>,
     pub tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
     pub token_with_span: TokenWithSpan,
     pub end: usize,
@@ -48,7 +48,7 @@ impl<'a> DeTokParserImpl<'a>{
         let token_with_span = tokens_with_span.next().unwrap();
         DeTokParserImpl {
             live_styles: live_styles,
-            token_storage: Vec::new(),
+            token_clone: Vec::new(),
             tokens_with_span,
             token_with_span,
             end: 0,
@@ -58,13 +58,17 @@ impl<'a> DeTokParserImpl<'a>{
 
 impl<'a> DeTokParser for DeTokParserImpl<'a> {
     
-    fn clear_token_storage(&mut self) {
-        self.token_storage.truncate(0);
+    fn clear_token_clone(&mut self) {
+        self.token_clone.truncate(0);
     }
     
-    fn get_token_storage(&mut self) -> Vec<TokenWithSpan> {
+    fn get_token_clone(&mut self) -> Vec<TokenWithSpan> {
         let mut new_token_storage = Vec::new();
-        std::mem::swap(&mut new_token_storage, &mut self.token_storage);
+        std::mem::swap(&mut new_token_storage, &mut self.token_clone);
+        new_token_storage.push(TokenWithSpan{
+            token:Token::Eof,
+            span:self.token_with_span.span
+        });
         return new_token_storage;
     }
      
@@ -78,7 +82,7 @@ impl<'a> DeTokParser for DeTokParserImpl<'a> {
     
     fn skip_token(&mut self) {
         self.end = self.token_with_span.span.end;
-        self.token_storage.push(self.token_with_span);
+        self.token_clone.push(self.token_with_span);
         self.token_with_span = self.tokens_with_span.next().unwrap();
     }
     
@@ -104,7 +108,6 @@ impl<'a> DeTokParser for DeTokParserImpl<'a> {
     fn error_enum(&mut self, ident: Ident, what: &str) -> LiveError {
         self.error(format!("Error missing {} for enum {}", ident.to_string(), what))
     }
-    
     
     fn parse_ident(&mut self) -> Result<Ident, LiveError> {
         match self.peek_token() {
@@ -538,8 +541,38 @@ fn parse_track(p: &mut dyn DeTokParser, track: &mut Track) -> Result<(), LiveErr
     }
 }
 
+
+impl DeTok for LiveStyle {
+    fn de_tok(p: &mut dyn DeTokParser) -> Result<LiveStyle, LiveError> {
+        let mut live_style = LiveStyle::default();
+        if let Token::Ident(ident) = p.peek_token(){
+            if ident == Ident::new("Style"){
+                p.skip_token();
+            }
+        }
+        p.expect_token(Token::LeftBrace) ?;
+        loop {
+            if p.accept_token(Token::RightBrace){
+                return Ok(live_style);
+            }
+            let from = p.parse_ident_path() ?;
+            let from_live_id = p.qualify_ident_path(&from).to_live_id();
+            p.expect_token(Token::Colon)?;
+            let to = p.parse_ident_path() ? ;
+            let to_live_id = p.qualify_ident_path(&to).to_live_id();
+            p.expect_token(Token::Semi)?;
+            live_style.remap.insert(from_live_id, to_live_id);
+        }
+    }
+}
+
 impl DeTok for Anim {
     fn de_tok(p: &mut dyn DeTokParser) -> Result<Anim, LiveError> {
+        if let Token::Ident(ident) = p.peek_token(){
+            if ident == Ident::new("Anim"){
+                p.skip_token();
+            }
+        }
         p.expect_token(Token::LeftBrace) ?;
         let mut play = Play::Cut {duration: 1.0};
         let mut tracks = Vec::new();

@@ -1,20 +1,18 @@
 use crate::env::VarKind;
 use crate::ident::{Ident, IdentPath, QualifiedIdentPath, IdentPathWithSpan};
-use crate::livetypes::Shader;
 use crate::lit::{Lit, TyLit};
-use crate::span::Span;
+use crate::span::{Span, LiveBodyId};
 use crate::ty::Ty;
 use crate::val::Val;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::fmt;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ShaderAst {
     pub qualified_ident_path: QualifiedIdentPath,
-    pub module_path: String,
+    pub live_body_id: LiveBodyId,
     pub debug: bool,
-    pub shader: Option<Shader>,
     pub default_geometry: Option<IdentPathWithSpan>,
     pub decls: Vec<Decl>,
     pub uses: Vec<IdentPathWithSpan>,
@@ -25,20 +23,6 @@ pub struct ShaderAst {
 }
 
 impl ShaderAst {
-    pub fn new() -> ShaderAst {
-        ShaderAst {
-            qualified_ident_path: QualifiedIdentPath::default(),
-            debug: false,
-            shader: None,
-            module_path: String::new(),
-            uses: Vec::new(), 
-            const_table: RefCell::new(None),
-            const_table_spans: RefCell::new(None),
-            livestyle_uniform_deps: RefCell::new(None),
-            decls: Vec::new(),
-            default_geometry: None
-        }
-    }
 
     pub fn find_geometry_decl(&self, ident: Ident) -> Option<&GeometryDecl> {
         self.decls.iter().find_map(|decl| {
