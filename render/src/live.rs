@@ -1,17 +1,32 @@
 use crate::cx::*;
 
 impl Cx {
+    pub fn init_live_styles(&mut self){
+        let errors = self.live_styles.recompute_all();
+        for error in &errors{
+            eprintln!("{}", error);
+        }
+        if errors.len()>0{
+            panic!();
+        }
+        self.ensure_live_style_shaders_allocated();
+    }
+    
+    pub fn ensure_live_style_shaders_allocated(&mut self){
+        for _ in self.shaders.len()..(self.live_styles.shader_alloc.len()) {
+            self.shaders.push(CxShader::default());
+        }
+    }
+    /*
     pub fn add_live_body(&mut self, live_body: LiveBody) {
+
         let mut shader_alloc_start = self.shaders.len();
         if let Err(err) = self.live_styles.add_live_body(live_body, &mut shader_alloc_start) {
             eprintln!("{}:{} {} - {}", err.file, err.line, err.column, err.message);
         }
         // lets add the required CxShader slots
-        for _ in self.shaders.len()..shader_alloc_start {
-            self.shaders.push(CxShader::default());
-        }
         // also add texture slots/require textures
-    }
+    }*/
 
 }
 
@@ -27,13 +42,12 @@ macro_rules!uid {
 #[macro_export]
 macro_rules!live {
     ( $ cx: ident, $ code: literal) => {
-        $ cx.add_live_body(LiveBody {
+        $ cx.live_styles.add_live_body(LiveBody {
             file: file!().to_string().replace("\\", ","),
             module_path: module_path!().to_string(),
             line: line!() as usize,
             column: column!() as usize,
             code: $ code.to_string(),
-            tokens: None,
         })
     }
 }

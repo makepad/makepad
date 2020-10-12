@@ -60,21 +60,23 @@ impl LogList {
             self::color_bg_selected_over: #3d;
             self::color_bg_odd_over: #38;
             
+            self::layout_bg: Layout {
+                walk: Walk {
+                    width: Compute,
+                    height: Compute,
+                    margin: {t: 4., l: 14., r: 0., b: 0.}
+                },
+                padding: all(7.),
+            }
+            
             self::style_text_input: Style {
-                makepad_widget::texteditor::layout_bg: Layout {
-                    walk: Walk {
-                        width: Compute,
-                        height: Compute,
-                        margin: {t: 4., l: 14., r: 0., b: 0.}
-                    },
-                    padding: all(7.),
-                }
+                makepad_widget::texteditor::layout_bg: self::layout_bg;
             }
             
         "#)
     }
- 
- 
+    
+    
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         let default_color = if marked {
             live_color!(cx, self::color_bg_marked)
@@ -122,7 +124,7 @@ impl LogList {
         }
     }
     
- 
+    
     pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage, bm: &mut BuildManager) -> LogListEvent {
         
         self.list.set_list_len(bm.log_items.len());

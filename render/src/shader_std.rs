@@ -3,10 +3,12 @@ use crate::quad::Quad;
 use crate::text::Text;
 use crate::blit::Blit;
 use crate::cube::Cube;
+use crate::fonts::TrapezoidText;
 
 impl Cx{
     pub fn style(&mut self){
         define_shader_stdlib(self);
+        TrapezoidText::style(self);
         Cube::style(self);
         Quad::style(self);
         Text::style(self);
