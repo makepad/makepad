@@ -309,8 +309,8 @@ impl MakepadApp {
                     }
                 }
             },
-            Event::ShaderRecompile(re) => {
-                self.build_manager.handle_shader_recompile_event(cx, re, &mut self.storage);
+            Event::LiveRecompile(re) => {
+                self.build_manager.handle_live_recompile_event(cx, re, &mut self.storage);
             },
             Event::FileRead(fr) => {
                 // lets see which file we loaded

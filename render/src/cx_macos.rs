@@ -238,6 +238,10 @@ impl Cx {
             }
             
             // show the timer
+            if self.live_styles.changed_live_bodies.len()>0{
+                let errors = self.mtl_update_all_shaders(&metal_cx);
+                self.call_live_recompile_event(errors , &mut event_handler);
+            }
             /*
             if self.shader_recompiles.len()>0{
                 

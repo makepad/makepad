@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, BTreeSet};
+use std::collections::{HashMap, HashSet, BTreeMap};
 use crate::shaderast::{ShaderAst};
 use crate::span::LiveBodyId;
 use crate::lex;
@@ -34,20 +34,27 @@ pub struct LiveBodyError {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LiveStyleId(usize);
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LiveChangeType {
+    Recompile,
+    UpdateValue,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct LiveStyles {
-    pub live_body_errors: Vec<LiveBodyError>,
-    
     pub file_to_live_bodies: HashMap<String, Vec<LiveBodyId >>,
     
-    pub recompute_dep: BTreeSet<LiveId>,
-    pub tokens_changed: HashSet<LiveId>,
+    // change sets
+    pub changed_live_bodies: HashSet<LiveBodyId>,
+    
+    pub changed_deps: BTreeMap<LiveId, LiveChangeType>,
+    pub changed_tokens: HashSet<LiveId>,
+    
+    pub changed_shaders: HashMap<LiveId, LiveChangeType>,
     
     pub builtins: HashMap<Ident, Builtin>,
     pub live_bodies: Vec<LiveBody>,
     pub live_bodies_contains: HashMap<LiveBodyId, HashSet<LiveId >>,
-    
     pub live_depends_on: HashMap<LiveId, HashSet<LiveId >>,
     pub depends_on_live: HashMap<LiveId, HashSet<LiveId >>,
     
@@ -159,45 +166,62 @@ impl LiveStyles {
         }
     }
     
-    pub fn add_recompute_when_tokens_different(&mut self, live_id: LiveId, tokens: &Vec<TokenWithSpan>) {
+    pub fn add_changed_deps(&mut self, live_id: LiveId, tokens: &Vec<TokenWithSpan>, live_tokens_type: LiveTokensType) {
+        
         if let Some(live_tokens) = self.tokens.get(&live_id) {
+            // if the type is
+            let live_dep_change = if live_tokens_type == LiveTokensType::Shader
+                || live_tokens_type == LiveTokensType::ShaderLib
+                || live_tokens.live_tokens_type != live_tokens_type {
+                LiveChangeType::Recompile
+            }
+            else {
+                LiveChangeType::UpdateValue
+            };
             if live_tokens.tokens.len() != tokens.len() {
-                self.tokens_changed.insert(live_id);
-                self.add_recompute_dep(live_id);
+                self.changed_tokens.insert(live_id);
+                self._add_changed_deps_recursive(live_id, live_dep_change);
             }
             else {
                 for i in 0..tokens.len() {
                     if tokens[i].token != live_tokens.tokens[i].token {
-                        self.tokens_changed.insert(live_id);
-                        self.add_recompute_dep(live_id);
+                        self.changed_tokens.insert(live_id);
+                        self._add_changed_deps_recursive(live_id, live_dep_change);
                         break;
                     }
                 }
             }
         }
         else {
-            self.tokens_changed.insert(live_id);
-            self.add_recompute_dep(live_id);
+            // its always a recompile
+            self.changed_tokens.insert(live_id);
+            self._add_changed_deps_recursive(live_id, LiveChangeType::Recompile);
         }
     }
     
     pub fn remove_live_id(&mut self, live_id: LiveId) {
-        self.add_recompute_dep(live_id);
-        // remove tokens
+        self._add_changed_deps_recursive(live_id, LiveChangeType::Recompile);
         self.tokens.remove(&live_id);
-        // clear other uses of the live_id if they exist
         self.style_alloc.remove(&live_id);
         self.shader_asts.remove(&live_id);
+        self.clear_computed_live_id(live_id);
     }
     
-    pub fn add_recompute_dep(&mut self, live_id: LiveId) {
+    pub fn _add_changed_deps_recursive(&mut self, live_id: LiveId, live_change_type: LiveChangeType) {
         if let Some(set) = self.depends_on_live.get(&live_id).cloned() {
             for dep_live in set {
-                self.add_recompute_dep(dep_live);
+                self._add_changed_deps_recursive(dep_live, live_change_type);
             }
         }
-        self.recompute_dep.insert(live_id);
-        
+        if let Some(prev_change) = self.changed_deps.get(&live_id) {
+            if *prev_change == LiveChangeType::Recompile {
+                return
+            }
+        }
+        self.changed_deps.insert(live_id, live_change_type);
+    }
+    
+    pub fn clear_computed_live_id(&mut self, live_id: LiveId) {
         if let Some(tokens) = self.tokens.get(&live_id) {
             match tokens.live_tokens_type {
                 LiveTokensType::Float => {
@@ -381,38 +405,63 @@ impl LiveStyles {
         }
     }
     
-    pub fn recompute_all(&mut self) -> Vec<LiveBodyError> {
+    pub fn process_changed_live_bodies(&mut self, errors: &mut Vec<LiveBodyError>) {
+        let mut changed_live_bodies = HashSet::new();
+        std::mem::swap(&mut changed_live_bodies, &mut self.changed_live_bodies);
+        
+        for live_body_id in changed_live_bodies {
+            // tokenize
+            let tokens = lex::lex(self.live_bodies[live_body_id.0].code.chars(), live_body_id).collect::<Result<Vec<_>, _ >> ();
+            if let Err(err) = tokens {
+                errors.push(self.live_error_to_live_body_error(err));
+                continue;
+            }
+            
+            // parse it into depstructures
+            let tokens = tokens.unwrap();
+            if let Err(err) = DeTokParserImpl::new(&tokens, self).parse_live() {
+                errors.push(self.live_error_to_live_body_error(err));
+                continue;
+            }
+        }
+    }
+    
+    pub fn process_changed_deps(&mut self, errors: &mut Vec<LiveBodyError>) {
         // flatten the recompute list by dependency
         let mut recompute_list = Vec::new();
         let mut recompute_map = HashMap::new();
-        for dep_live_id in &self.recompute_dep {
+        
+        // ok we have a bunch of changed deps,
+        // now what we need is to flatten it according to what depends on what.
+        for (dep_live_id, _) in &self.changed_deps {
             fn recur(
                 recompute_list: &mut Vec<Option<LiveId >>,
                 recompute_map: &mut HashMap<LiveId, usize>,
                 live_id: LiveId,
-                live_depends_on: &HashMap<LiveId, HashSet<LiveId >>
+                depens_on_live: &HashMap<LiveId, HashSet<LiveId >>
             ) {
                 if let Some(pos) = recompute_map.get(&live_id) {
                     recompute_list[*pos] = None;
                 }
                 recompute_map.insert(live_id, recompute_list.len());
                 recompute_list.push(Some(live_id));
-                if let Some(on_set) = live_depends_on.get(&live_id).cloned() {
+                if let Some(on_set) = depens_on_live.get(&live_id).cloned() {
                     for on_live_id in on_set {
-                        recur(recompute_list, recompute_map, on_live_id, live_depends_on);
+                        recur(recompute_list, recompute_map, on_live_id, depens_on_live);
                     }
                 }
             }
-            recur(&mut recompute_list, &mut recompute_map, *dep_live_id, &self.live_depends_on);
+            recur(&mut recompute_list, &mut recompute_map, *dep_live_id, &self.depends_on_live);
         }
-        let mut errors = Vec::new();
-        for live_id in recompute_list.iter().rev() {
+        
+        for live_id in recompute_list {
             // we have a list to recompile
             if live_id.is_none() {
                 continue;
             }
             let live_id = live_id.unwrap();
             
+            self.clear_computed_live_id(live_id);
             // this is needed for the borrowchecker.
             let mut swap_live_tokens = if let Some(tokens) = self.tokens.get_mut(&live_id) {
                 let mut t = Vec::new();
@@ -426,6 +475,9 @@ impl LiveStyles {
             else {
                 continue;
             };
+            
+            let live_change_type = *self.changed_deps.get(&live_id).unwrap();
+            
             match swap_live_tokens.live_tokens_type {
                 LiveTokensType::Float => {
                     // we have to parse a float..
@@ -465,7 +517,7 @@ impl LiveStyles {
                     }
                 },
                 LiveTokensType::Shader => {
-                    if self.tokens_changed.contains(&live_id) {
+                    if self.changed_tokens.contains(&live_id) {
                         match DeTokParserImpl::new(&swap_live_tokens.tokens, self).parse_shader(swap_live_tokens.qualified_ident_path) {
                             Err(err) => {
                                 errors.push(self.live_error_to_live_body_error(err));
@@ -480,9 +532,10 @@ impl LiveStyles {
                     if let Some(shader) = self.shader_alloc.get(&live_id) {
                         self.shaders.insert(live_id, *shader);
                     }
+                    self.changed_shaders.insert(live_id, live_change_type);
                 }
                 LiveTokensType::ShaderLib => {
-                    if self.tokens_changed.contains(&live_id) {
+                    if self.changed_tokens.contains(&live_id) {
                         match DeTokParserImpl::new(&swap_live_tokens.tokens, self).parse_shader(swap_live_tokens.qualified_ident_path) {
                             Err(err) => {errors.push(self.live_error_to_live_body_error(err));},
                             Ok(v) => {self.shader_asts.insert(live_id, v);}
@@ -513,42 +566,23 @@ impl LiveStyles {
             }
         }
         // clear the sets
-        self.tokens_changed.clear();
-        self.recompute_dep.clear();
-        
-        errors
+        self.changed_tokens.clear();
+        self.changed_deps.clear();
     }
+    
     
     pub fn add_live_body(&mut self, live_body: LiveBody) {
         let live_body_id = LiveBodyId(self.live_bodies.len());
         let v = self.file_to_live_bodies.entry(live_body.file.clone()).or_insert_with( || Vec::new());
         v.push(live_body_id);
         self.live_bodies.push(live_body);
-        
-        // tokenize
-        let tokens = lex::lex(self.live_bodies[live_body_id.0].code.chars(), live_body_id).collect::<Result<Vec<_>, _ >> ();
-        if let Err(err) = tokens {
-            eprintln!("{}", self.live_error_to_live_body_error(err));
-            panic!();
-        }
-        
-        // parse it into depstructures
-        let tokens = tokens.unwrap();
-        
-        if let Err(err) = DeTokParserImpl::new(&tokens, self).parse_live() {
-            eprintln!("{}", self.live_error_to_live_body_error(err));
-            panic!();
-        }
+        self.changed_live_bodies.insert(live_body_id);
     }
     
     // alright we got a new live body
-    pub fn update_live_body(&mut self, file: &str, line: usize, column: usize, _code: String) -> Result<(), LiveBodyError> {
+    pub fn update_live_body(&mut self, file: &str, line: usize, column: usize, code: String) -> Result<(), ()> {
         // find the body
-        
         if let Some(list) = self.file_to_live_bodies.get(file) {
-            if list.len() == 0 {
-                panic!()
-            }
             // find the nearest block
             let mut nearest = std::usize::MAX;
             let mut nearest_id = None;
@@ -560,16 +594,18 @@ impl LiveStyles {
                     nearest = dist;
                 }
             }
-            let _nearest = nearest_id.unwrap();
+            let nearest_id = nearest_id.unwrap();
+            let live_body = &mut self.live_bodies[nearest_id.0];
+            live_body.code = code;
+            live_body.line = line;
+            live_body.column = column;
+            self.changed_live_bodies.insert(*nearest_id);
+            return Ok(())
         }
-        return Err(LiveBodyError {
-            file: file.to_string(),
-            line,
-            column,
-            len: 0,
-            message: "Cannot update live block, file not found".to_string()
-        });
+        return Err(())
     }
+    
+    
     
     pub fn collect_and_analyse_shader(&self, live_id: LiveId, options: ShaderCompileOptions) -> Result<(ShaderAst, Option<Geometry>), LiveBodyError> {
         let mut out_ast = ShaderAst::default();

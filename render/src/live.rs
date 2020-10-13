@@ -2,13 +2,17 @@ use crate::cx::*;
 
 impl Cx {
     pub fn init_live_styles(&mut self){
-        let errors = self.live_styles.recompute_all();
+        let mut errors = Vec::new();
+        self.live_styles.process_changed_live_bodies(&mut errors);
+        self.live_styles.process_changed_deps(&mut errors);
+
         for error in &errors{
             eprintln!("{}", error);
         }
         if errors.len()>0{
             panic!();
         }
+
         self.ensure_live_style_shaders_allocated();
     }
     
@@ -17,17 +21,10 @@ impl Cx {
             self.shaders.push(CxShader::default());
         }
     }
-    /*
+    
     pub fn add_live_body(&mut self, live_body: LiveBody) {
-
-        let mut shader_alloc_start = self.shaders.len();
-        if let Err(err) = self.live_styles.add_live_body(live_body, &mut shader_alloc_start) {
-            eprintln!("{}:{} {} - {}", err.file, err.line, err.column, err.message);
-        }
-        // lets add the required CxShader slots
-        // also add texture slots/require textures
-    }*/
-
+        self.live_styles.add_live_body(live_body,);
+    }
 }
 
 #[macro_export]
@@ -42,7 +39,7 @@ macro_rules!uid {
 #[macro_export]
 macro_rules!live {
     ( $ cx: ident, $ code: literal) => {
-        $ cx.live_styles.add_live_body(LiveBody {
+        $ cx.add_live_body(LiveBody {
             file: file!().to_string().replace("\\", ","),
             module_path: module_path!().to_string(),
             line: line!() as usize,

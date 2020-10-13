@@ -199,17 +199,19 @@ impl AppTextBuffer {
                         && tp.eat(",")
                         && tp.eat("r")
                         && tp.eat("#"){
-
+                        
                         if tp.cur_type() == TokenType::ParenOpen {
                             //shader_end = tp.cur_pair_offset();
                             if let Some(live_body) = tp.cur_pair_as_string() {
                                 let lc = tp.cur_line_col();
-                                cx.live_styles.update_live_body(
+                                if cx.live_styles.update_live_body(
                                     &self.full_path["main/makepad/".len()..].to_string(),
                                     lc.0 + 1,
                                     lc.1 - 8, 
                                     live_body 
-                                ); 
+                                ).is_err(){
+                                    eprintln!("LiveBody not found");
+                                }; 
                             }
                             /*
                             if let Some(live_body) = tp.cur_pair_as_string() {
