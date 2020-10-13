@@ -770,28 +770,70 @@ impl Cx {
             no_const_collapse: false
         };
         
-        let shaders = &mut self.shaders;
-        let live_styles = &mut self.live_styles;
-        for (live_id,_shader) in &live_styles.shader_alloc{
-            match live_styles.collect_and_analyse_shader(*live_id, options) {
+        for (live_id, shader) in &self.live_styles.shader_alloc {
+            match self.live_styles.collect_and_analyse_shader(*live_id, options) {
                 Err(err) => {
                     eprintln!("{}", err);
                     panic!()
                 },
                 Ok((shader_ast, default_geometry)) => {
-                    let shader_id = live_styles.shader_alloc.get(live_id).unwrap().shader_id;
+                    let shader_id = shader.shader_id;
                     Self::mtl_compile_shader(
                         shader_id,
-                        &mut shaders[shader_id],
+                        &mut self.shaders[shader_id],
                         shader_ast,
                         default_geometry,
                         options,
                         metal_cx,
-                        live_styles
+                        &self.live_styles
                     );
                 }
             }
         };
+    }
+    
+    pub fn mtl_update_all_shaders(&mut self, metal_cx: &MetalCx) -> Vec<LiveBodyError> {
+        let mut errors = Vec::new();
+        
+        self.live_styles.process_changed_live_bodies(&mut errors);
+        self.live_styles.process_changed_deps(&mut errors);
+        // recompile shaders, and update values
+        
+        let options = ShaderCompileOptions {
+            gather_all: true,
+            create_const_table: true,
+            no_const_collapse: false
+        };
+        
+        for (live_id, change) in &self.live_styles.changed_shaders {
+            match change {
+                LiveChangeType::Recompile => {
+                    match self.live_styles.collect_and_analyse_shader(*live_id, options) {
+                        Err(err) => {
+                            errors.push(err);
+                        },
+                        Ok((shader_ast, default_geometry)) => {
+                            let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                            Self::mtl_compile_shader(
+                                shader_id,
+                                &mut self.shaders[shader_id],
+                                shader_ast,
+                                default_geometry,
+                                options,
+                                metal_cx,
+                                &self.live_styles
+                            );
+                        }
+                    }
+                }
+                LiveChangeType::UpdateValue => {
+                    let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                    self.shaders[shader_id].mapping.update_live_uniforms(&self.live_styles);
+                }
+            }
+        }
+        self.live_styles.changed_shaders.clear();
+        errors
     }
     
     pub fn mtl_compile_shader(
@@ -815,7 +857,7 @@ impl Cx {
         if let Some(sh_platform) = &sh.platform {
             if sh_platform.metal_shader == mtlsl {
                 sh.mapping = mapping;
-                return ShaderCompileResult::Nop {id: shader_id}
+                return ShaderCompileResult::Nop
             }
         }
         
@@ -881,6 +923,6 @@ impl Cx {
             },
             library: library,
         });
-        return ShaderCompileResult::Ok {id: shader_id};
+        return ShaderCompileResult::Ok
     }
 }

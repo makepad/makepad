@@ -4,6 +4,11 @@ use makepad_live_compiler::ident::Ident;
 use makepad_live_compiler::shaderast::{ShaderAst, Decl};
 use makepad_live_compiler::analyse::ShaderCompileOptions;
 
+pub enum ShaderCompileResult{
+    Nop,
+    Ok
+}
+
 #[derive(Debug, Clone, Hash, PartialEq)]
 pub struct PropDef {
     pub name: String,
