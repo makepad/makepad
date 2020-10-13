@@ -156,17 +156,9 @@ pub struct FileWriteEvent {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ShaderRecompileEvent {
-    pub results: Vec<ShaderCompileResult>
+pub struct LiveRecompileEvent {
+    pub errors: Vec<LiveBodyError>
 }
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum ShaderCompileResult{
-    Ok{id:usize},
-    Nop{id:usize},
-    Fail{id:usize, err:LiveBodyError},
-}
-
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyEvent {
@@ -291,7 +283,7 @@ pub enum Event {
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
     TextCopy(TextCopyEvent),
-    ShaderRecompile(ShaderRecompileEvent)
+    LiveRecompile(LiveRecompileEvent)
 }
 
 impl Default for Event {

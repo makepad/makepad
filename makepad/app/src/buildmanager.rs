@@ -223,7 +223,7 @@ impl BuildManager {
         cx.send_signal(self.signal, BuildManager::status_new_log_item());
     }
 
-    pub fn handle_shader_recompile_event(&mut self, cx:&mut Cx, re:&ShaderRecompileEvent, storage:&mut AppStorage){
+    pub fn handle_live_recompile_event(&mut self, cx:&mut Cx, re:&LiveRecompileEvent, storage:&mut AppStorage){
         // we are running in loopback mode
         // lets use the log list as an error list for loopback shadercoding.
         // first of all 
@@ -231,38 +231,29 @@ impl BuildManager {
         // lets just map it to /main/makepad and worry later
         self.clear_textbuffer_messages(cx, storage);
         self.log_items.truncate(0);
-        for item in &re.results{
-            match item{
-                ShaderCompileResult::Nop{id}=>{
-                    self.log_items.push(HubLogItem::Message(
-                        format!("Shader {} compiled OK - no change", id)
-                    ));
-                },
-                ShaderCompileResult::Ok{id}=>{
-                    self.log_items.push(HubLogItem::Message(
-                        format!("Shader {} compiled OK", id)
-                    ));
-                },
-                ShaderCompileResult::Fail{err, ..}=>{
-                    // lets turn line+col+len into a range.
-                    let path = format!("main/makepad/{}", err.file);
-                    // find the textbuffer
-                    let atb = storage.text_buffer_from_path(cx, &path);
-                    // we should be able to mape line+col into byte offset
-                    let off = atb.text_buffer.text_pos_to_offset(TextPos{row:err.line - 1,col:err.column - 1});
-                    let msg = LocMessage{
-                        path:path,
-                        line: err.line,
-                        column: err.column,
-                        body: err.message.clone(),
-                        range: Some((off, off+err.len)),
-                        rendered:None,
-                        explanation:None
-                    };
-                    self.process_loc_message_for_textbuffers(cx, &msg, TextBufferMessageLevel::Error, storage);
-                    self.log_items.push(HubLogItem::LocError(msg));
-                }
-            }
+        if re.errors.len() == 0{
+            self.log_items.push(HubLogItem::Message(
+                format!("Live block compiled OK")
+            ));
+        }
+        for err in &re.errors{
+            // lets turn line+col+len into a range.
+            let path = format!("main/makepad/{}", err.file);
+            // find the textbuffer
+            let atb = storage.text_buffer_from_path(cx, &path);
+            // we should be able to mape line+col into byte offset
+            let off = atb.text_buffer.text_pos_to_offset(TextPos{row:err.line - 1,col:err.column - 1});
+            let msg = LocMessage{
+                path:path,
+                line: err.line,
+                column: err.column,
+                body: err.message.clone(),
+                range: Some((off, off+err.len)),
+                rendered:None,
+                explanation:None
+            };
+            self.process_loc_message_for_textbuffers(cx, &msg, TextBufferMessageLevel::Error, storage);
+            self.log_items.push(HubLogItem::LocError(msg));
         }
     }
     
