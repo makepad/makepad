@@ -8,83 +8,83 @@ use std::collections::HashSet;
 use crate::livestyles::{LiveTokensType, LiveStyle, LiveTokens};
 use crate::colors::Color;
 
-impl<'a> DeTokParserImpl<'a>{
+impl<'a> DeTokParserImpl<'a> {
     
-    pub fn parse_float(&mut self)->Result<Float, LiveError>{
+    pub fn parse_float(&mut self) -> Result<Float, LiveError> {
         // check what we are up against.
-        match self.peek_token(){
-            Token::Lit(Lit::Int(v)) =>{
-                return Ok(Float{value:v as f32, ..Float::default()});
+        match self.peek_token() {
+            Token::Lit(Lit::Int(v)) => {
+                return Ok(Float {value: v as f32, ..Float::default()});
             }
             Token::Lit(Lit::Float(v)) => {
-                return Ok(Float{value:v, ..Float::default()});
+                return Ok(Float {value: v, ..Float::default()});
             },
             Token::Ident(ident) if ident == Ident::new("Float") => {
                 return Float::de_tok(self)
             },
-            _=> return Err(self.error(format!("Unexpected {} while parsing float",self.peek_token())))
+            _ => return Err(self.error(format!("Unexpected {} while parsing float", self.peek_token())))
         }
     }
     
-    pub fn parse_color(&mut self)->Result<Color, LiveError>{
+    pub fn parse_color(&mut self) -> Result<Color, LiveError> {
         // check what we are up against.
-        match self.peek_token(){
-            Token::Lit(Lit::Color(v)) =>{
+        match self.peek_token() {
+            Token::Lit(Lit::Color(v)) => {
                 return Ok(v);
             }
             Token::Ident(ident) if ident == Ident::new("Color") => {
                 return Color::de_tok(self)
             },
-            _=> return Err(self.error(format!("Unexpected {} while parsing color",self.peek_token())))
+            _ => return Err(self.error(format!("Unexpected {} while parsing color", self.peek_token())))
         }
     }
     
-    pub fn parse_text_style(&mut self)->Result<TextStyle, LiveError>{
+    pub fn parse_text_style(&mut self) -> Result<TextStyle, LiveError> {
         // check what we are up against.
-        match self.peek_token(){
+        match self.peek_token() {
             Token::Ident(ident) if ident == Ident::new("TextStyle") => {
                 return TextStyle::de_tok(self)
             },
-            _=> return Err(self.error(format!("Unexpected {} while parsing text_style",self.peek_token())))
+            _ => return Err(self.error(format!("Unexpected {} while parsing text_style", self.peek_token())))
         }
     }
     
-    pub fn parse_layout(&mut self)->Result<Layout, LiveError>{
+    pub fn parse_layout(&mut self) -> Result<Layout, LiveError> {
         // check what we are up against.
-        match self.peek_token(){
+        match self.peek_token() {
             Token::Ident(ident) if ident == Ident::new("Layout") => {
                 return Layout::de_tok(self)
             },
-            _=> return Err(self.error(format!("Unexpected {} while parsing layout",self.peek_token())))
+            _ => return Err(self.error(format!("Unexpected {} while parsing layout", self.peek_token())))
         }
     }
     
-    pub fn parse_walk(&mut self)->Result<Walk, LiveError>{
+    pub fn parse_walk(&mut self) -> Result<Walk, LiveError> {
         // check what we are up against.
-        match self.peek_token(){
+        match self.peek_token() {
             Token::Ident(ident) if ident == Ident::new("Walk") => {
                 return Walk::de_tok(self)
             },
-            _=> return Err(self.error(format!("Unexpected {} while parsing walk",self.peek_token())))
+            _ => return Err(self.error(format!("Unexpected {} while parsing walk", self.peek_token())))
         }
     }
     
-    pub fn parse_anim(&mut self)->Result<Anim, LiveError>{
+    pub fn parse_anim(&mut self) -> Result<Anim, LiveError> {
         // check what we are up against.
-        match self.peek_token(){
+        match self.peek_token() {
             Token::Ident(ident) if ident == Ident::new("Anim") => {
                 return Anim::de_tok(self)
             },
-            _=> return Err(self.error(format!("Unexpected {} while parsing anim",self.peek_token())))
+            _ => return Err(self.error(format!("Unexpected {} while parsing anim", self.peek_token())))
         }
     }
     
-    pub fn parse_style(&mut self) -> Result<LiveStyle, LiveError>{
-        match self.peek_token(){
+    pub fn parse_style(&mut self) -> Result<LiveStyle, LiveError> {
+        match self.peek_token() {
             Token::Ident(ident) if ident == Ident::new("Style") => {
                 return LiveStyle::de_tok(self)
             },
-            _=> return Err(self.error(format!("Unexpected {} while parsing style",self.peek_token())))
+            _ => return Err(self.error(format!("Unexpected {} while parsing style", self.peek_token())))
         }
     }
     
@@ -101,9 +101,9 @@ impl<'a> DeTokParserImpl<'a>{
                         let qualified_ident_path = self.qualify_ident_path(&ident_path);
                         let on_live_id = qualified_ident_path.to_live_id();
                         // lets query if this one somehow depends on me
-                        if self.live_styles.check_depends_on(live_id, on_live_id){
+                        if self.live_styles.check_depends_on(live_id, on_live_id) {
                             // cyclic dep
-                            return Err(self.error(format!("Cyclic dependency {}",ident_path)))
+                            return Err(self.error(format!("Cyclic dependency {}", ident_path)))
                         }
                         new_deps.insert(on_live_id);
                     }
@@ -174,49 +174,50 @@ impl<'a> DeTokParserImpl<'a>{
                 Token::Ident(ident) => {
                     let tokens = self.parse_block_tokens(live_id) ?;
                     // see if the tokens changed, ifso mark this thing dirty
-                    self.live_styles.add_recompute_when_tokens_different(live_id, &tokens);
+                    let live_tokens_type = {
+                        if ident == Ident::new("Float") {
+                            LiveTokensType::Float
+                        }
+                        else if ident == Ident::new("Color") {
+                            LiveTokensType::Shader
+                        }
+                        else if ident == Ident::new("TextStyle") {
+                            LiveTokensType::TextStyle
+                        }
+                        else if ident == Ident::new("Layout") {
+                            LiveTokensType::Layout
+                        }
+                        else if ident == Ident::new("Walk") {
+                            LiveTokensType::Walk
+                        }
+                        else if ident == Ident::new("Anim") {
+                            LiveTokensType::Anim
+                        }
+                        else if ident == Ident::new("Style") {
+                            LiveTokensType::Style
+                        }
+                        else if ident == Ident::new("ShaderLib") {
+                            LiveTokensType::ShaderLib
+                        }
+                        else if ident == Ident::new("Shader") {
+                            LiveTokensType::Shader
+                        }
+                        else {
+                            return Err(span.error(self, format!("Ident {} unexpected", ident)));
+                        }
+                    };
+                    self.live_styles.add_changed_deps(live_id, &tokens, live_tokens_type);
                     self.live_styles.tokens.insert(live_id, LiveTokens {
                         qualified_ident_path,
                         tokens,
-                        live_tokens_type: {
-                            if ident == Ident::new("Float") {
-                                LiveTokensType::Float
-                            }
-                            else if ident == Ident::new("Color") {
-                                LiveTokensType::Shader
-                            }
-                            else if ident == Ident::new("TextStyle") {
-                                LiveTokensType::TextStyle
-                            }
-                            else if ident == Ident::new("Layout") {
-                                LiveTokensType::Layout
-                            }
-                            else if ident == Ident::new("Walk") {
-                                LiveTokensType::Walk
-                            }
-                            else if ident == Ident::new("Anim") {
-                                LiveTokensType::Anim
-                            }
-                            else if ident == Ident::new("Style") {
-                                LiveTokensType::Style
-                            }
-                            else if ident == Ident::new("ShaderLib") {
-                                LiveTokensType::ShaderLib
-                            }
-                            else if ident == Ident::new("Shader") {
-                                LiveTokensType::Shader
-                            }
-                            else {
-                                return Err(span.error(self, format!("Ident {} unexpected", ident)));
-                            }
-                        }
+                        live_tokens_type
                     });
                 }
                 Token::Lit(Lit::Int(_)) | Token::Lit(Lit::Float(_)) => {
                     self.clear_token_clone();
                     self.skip_token();
                     let tokens = self.get_token_clone();
-                    self.live_styles.add_recompute_when_tokens_different(live_id, &tokens);
+                    self.live_styles.add_changed_deps(live_id, &tokens, LiveTokensType::Float);
                     self.live_styles.tokens.insert(live_id, LiveTokens {
                         qualified_ident_path,
                         tokens,
@@ -229,7 +230,7 @@ impl<'a> DeTokParserImpl<'a>{
                     self.skip_token();
                     //let value = f32::de_tok(self) ?;
                     let tokens = self.get_token_clone();
-                    self.live_styles.add_recompute_when_tokens_different(live_id, &tokens);
+                    self.live_styles.add_changed_deps(live_id, &tokens, LiveTokensType::Color);
                     self.live_styles.tokens.insert(live_id, LiveTokens {
                         qualified_ident_path,
                         tokens,
@@ -247,7 +248,7 @@ impl<'a> DeTokParserImpl<'a>{
         if let Some(live_body_contains) = self.live_styles.live_bodies_contains.get(&live_body_id).cloned() {
             for contains_live_id in live_body_contains {
                 if !new_body_contains.contains(&contains_live_id) {
-                   self.live_styles.remove_live_id(contains_live_id);
+                    self.live_styles.remove_live_id(contains_live_id);
                 }
             }
         }

@@ -748,14 +748,12 @@ impl Cx {
         }
     }
     
-    pub fn call_shader_recompile_event<F>(&mut self, results: Vec<ShaderCompileResult>, mut event_handler: F)
+    pub fn call_live_recompile_event<F>(&mut self, errors: Vec<LiveBodyError>, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
-        if results.len()>0 {
-            self.call_event_handler(&mut event_handler, &mut Event::ShaderRecompile(ShaderRecompileEvent {
-                results: results
-            }));
-        }
+        self.call_event_handler(&mut event_handler, &mut Event::LiveRecompile(LiveRecompileEvent {
+            errors
+        }));
     }
     
     pub fn status_http_send_ok() -> StatusId {uid!()}
