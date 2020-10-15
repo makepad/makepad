@@ -1,6 +1,6 @@
 use makepad_render::*; 
 use makepad_widget::*; 
-use crate::appstorage::*;
+use crate::makepadstorage::*;
 
 #[derive(Clone)]
 pub struct Keyboard {
@@ -48,17 +48,17 @@ impl Keyboard {
         }
     }
     
-    fn send_textbuffers_update(&mut self, cx: &mut Cx, app_storage: &mut AppStorage) {
+    fn send_textbuffers_update(&mut self, cx: &mut Cx, makepad_storage: &mut MakepadStorage) {
         // clear all files we missed
-        for atb in &mut app_storage.text_buffers {
-            atb.text_buffer.keyboard.modifiers = self.modifiers.clone();
-            atb.text_buffer.keyboard.key_down = self.key_down.clone();
-            atb.text_buffer.keyboard.key_up = self.key_up.clone();
-            cx.send_signal(atb.text_buffer.signal, TextBuffer::status_keyboard_update());
+        for mtb in &mut makepad_storage.text_buffers {
+            mtb.text_buffer.keyboard.modifiers = self.modifiers.clone();
+            mtb.text_buffer.keyboard.key_down = self.key_down.clone();
+            mtb.text_buffer.keyboard.key_up = self.key_up.clone();
+            cx.send_signal(mtb.text_buffer.signal, TextBuffer::status_keyboard_update());
         }
     }
     
-    pub fn handle_keyboard(&mut self, cx: &mut Cx, event: &mut Event, app_storage: &mut AppStorage) -> KeyboardEvent {
+    pub fn handle_keyboard(&mut self, cx: &mut Cx, event: &mut Event, makepad_storage: &mut MakepadStorage) -> KeyboardEvent {
         // do shit here
         if self.view.handle_scroll_view(cx, event) {
         }
@@ -109,7 +109,7 @@ impl Keyboard {
             }
         }
         if update_textbuffers {
-            self.send_textbuffers_update(cx, app_storage);
+            self.send_textbuffers_update(cx, makepad_storage);
         }
         
         KeyboardEvent::None

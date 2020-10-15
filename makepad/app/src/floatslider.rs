@@ -36,7 +36,7 @@ impl FloatSlider {
     }
     
     pub fn style(cx: &mut Cx) {
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::anim_default: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
@@ -101,7 +101,7 @@ impl FloatSlider {
         if scaled_value != self.scaled_value {
             self.scaled_value = scaled_value;
             self.norm_value = norm_value;
-            self.animator.area.write_float(cx, live_id!(self::shader_slider::norm_value), self.norm_value);
+            self.animator.area.write_float(cx, live_item_id!(self::shader_slider::norm_value), self.norm_value);
             changed = true;
         }
         if changed {
@@ -184,8 +184,8 @@ impl FloatSlider {
         });
         // lets put a hsv int here
         k.push_float(cx, self.norm_value);
-        k.push_last_float(cx, &self.animator, live_id!(self::shader_slider::hover));
-        k.push_last_float(cx, &self.animator, live_id!(self::shader_slider::down));
+        k.push_last_float(cx, &self.animator, live_item_id!(self::shader_slider::hover));
+        k.push_last_float(cx, &self.animator, live_item_id!(self::shader_slider::down));
         self.animator.set_area(cx, k.into());
     }
     

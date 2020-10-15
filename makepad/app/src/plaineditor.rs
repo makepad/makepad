@@ -1,7 +1,7 @@
 use makepad_render::*;
 use makepad_widget::*;
 use crate::searchindex::*;
-use crate::appstorage::*;
+use crate::makepadstorage::*;
 
 #[derive(Clone)]
 pub struct PlainEditor {
@@ -19,20 +19,20 @@ impl PlainEditor {
         editor 
     }
     
-    pub fn handle_plain_editor(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer) -> TextEditorEvent {
-        let ce = self.text_editor.handle_text_editor(cx, event, &mut atb.text_buffer);
+    pub fn handle_plain_editor(&mut self, cx: &mut Cx, event: &mut Event, mtb: &mut MakepadTextBuffer) -> TextEditorEvent {
+        let ce = self.text_editor.handle_text_editor(cx, event, &mut mtb.text_buffer);
         ce
     }
     
-    pub fn draw_plain_editor(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, search_index: Option<&mut SearchIndex>) {
-        PlainTokenizer::update_token_chunks(&mut atb.text_buffer, search_index);
-        if self.text_editor.begin_text_editor(cx, &mut atb.text_buffer).is_err() {return}
+    pub fn draw_plain_editor(&mut self, cx: &mut Cx, mtb: &mut MakepadTextBuffer, search_index: Option<&mut SearchIndex>) {
+        PlainTokenizer::update_token_chunks(&mut mtb.text_buffer, search_index);
+        if self.text_editor.begin_text_editor(cx, &mut mtb.text_buffer).is_err() {return}
         
-        for (index, token_chunk) in atb.text_buffer.token_chunks.iter_mut().enumerate() {
-            self.text_editor.draw_chunk(cx, index, &atb.text_buffer.flat_text, token_chunk, &atb.text_buffer.markers);
+        for (index, token_chunk) in mtb.text_buffer.token_chunks.iter_mut().enumerate() {
+            self.text_editor.draw_chunk(cx, index, &mtb.text_buffer.flat_text, token_chunk, &mtb.text_buffer.markers);
         }
         
-        self.text_editor.end_text_editor(cx, &mut atb.text_buffer);
+        self.text_editor.end_text_editor(cx, &mut mtb.text_buffer);
     }
 }
 

@@ -75,8 +75,11 @@ impl Default for TextureDesc {
 
 
 #[derive(PartialEq, Copy, Clone, Hash, Eq, Debug, PartialOrd, Ord)]
-pub struct LiveId(pub u64);
+pub struct LiveItemId(pub u64);
 
+impl LiveItemId {
+    fn as_index(&self) -> u64 {self.0}
+}
 
 #[derive(Clone, Debug, Copy, DeTok)]
 pub struct TextStyle {
@@ -108,12 +111,12 @@ impl DeTokSplat for TextStyle {
     LiveError> {
         let ident_path = p.parse_ident_path() ?;
         let qualified_ident_path = p.qualify_ident_path(&ident_path);
-        let live_id = qualified_ident_path.to_live_id();
+        let live_item_id = qualified_ident_path.to_live_item_id();
         //p.register_dependency(live_id);
-        if let Some(text_style) = p.get_live_styles().text_styles.get(&live_id) {
+        if let Some(text_style) = p.get_live_styles().text_styles.get(&live_item_id) {
             return Ok(*text_style);
         }
-        else{
+        else {
             return Err(p.error(format!("Textstyle {} not found in splat", ident_path)));
         }
     }
@@ -754,31 +757,31 @@ impl Ease {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Track {
     Float {
-        live_id: LiveId,
+        live_item_id: LiveItemId,
         ease: Ease,
         cut_init: Option<f32>,
         keys: Vec<(f64, f32)>
     },
     Vec2 {
-        live_id: LiveId,
+        live_item_id: LiveItemId,
         ease: Ease,
         cut_init: Option<Vec2>,
         keys: Vec<(f64, Vec2)>
     },
     Vec3 {
-        live_id: LiveId,
+        live_item_id: LiveItemId,
         ease: Ease,
         cut_init: Option<Vec3>,
         keys: Vec<(f64, Vec3)>
     },
     Vec4 {
-        live_id: LiveId,
+        live_item_id: LiveItemId,
         ease: Ease,
         cut_init: Option<Vec4>,
         keys: Vec<(f64, Vec4)>
     },
     Color {
-        live_id: LiveId,
+        live_item_id: LiveItemId,
         ease: Ease,
         cut_init: Option<Color>,
         keys: Vec<(f64, Color)>
@@ -926,41 +929,41 @@ impl Track {
         return lerp(*val1, val2.1, f)
     }
     
-    pub fn live_id(&self) -> LiveId {
+    pub fn live_item_id(&self) -> LiveItemId {
         match self {
-            Track::Float{live_id,..} => {
-                *live_id
+            Track::Float {live_item_id, ..} => {
+                *live_item_id
             },
-            Track::Vec2{live_id,..} => {
-                *live_id
+            Track::Vec2 {live_item_id, ..} => {
+                *live_item_id
             }
-            Track::Vec3{live_id,..} => {
-                *live_id
+            Track::Vec3 {live_item_id, ..} => {
+                *live_item_id
             }
-            Track::Vec4{live_id,..} => {
-                *live_id
+            Track::Vec4 {live_item_id, ..} => {
+                *live_item_id
             }
-            Track::Color{live_id,..} => {
-                *live_id
+            Track::Color {live_item_id, ..} => {
+                *live_item_id
             }
         }
     }
     
     pub fn reset_cut_init(&mut self) {
         match self {
-            Track::Color{cut_init,..} => {
+            Track::Color {cut_init, ..} => {
                 *cut_init = None;
             },
-            Track::Vec4{cut_init,..} => {
+            Track::Vec4 {cut_init, ..} => {
                 *cut_init = None;
             },
-            Track::Vec3{cut_init,..} => {
+            Track::Vec3 {cut_init, ..} => {
                 *cut_init = None;
             },
-            Track::Vec2{cut_init,..} => {
+            Track::Vec2 {cut_init, ..} => {
                 *cut_init = None;
             },
-            Track::Float{cut_init,..} => {
+            Track::Float {cut_init, ..} => {
                 *cut_init = None;
             }
         }
@@ -968,19 +971,19 @@ impl Track {
     
     pub fn ease(&self) -> &Ease {
         match self {
-            Track::Float{ease, ..} => {
+            Track::Float {ease, ..} => {
                 ease
             },
-            Track::Vec2{ease, ..} => {
+            Track::Vec2 {ease, ..} => {
                 ease
             }
-            Track::Vec3{ease, ..} => {
+            Track::Vec3 {ease, ..} => {
                 ease
             }
-            Track::Vec4{ease, ..} => {
+            Track::Vec4 {ease, ..} => {
                 ease
             }
-            Track::Color{ease, ..} => {
+            Track::Color {ease, ..} => {
                 ease
             }
         }
@@ -989,40 +992,40 @@ impl Track {
     
     pub fn set_ease(&mut self, new_ease: Ease) {
         match self {
-            Track::Float{ease, ..} => {
+            Track::Float {ease, ..} => {
                 *ease = new_ease
             },
-            Track::Vec2{ease, ..} => {
+            Track::Vec2 {ease, ..} => {
                 *ease = new_ease
             },
-            Track::Vec3{ease, ..} => {
+            Track::Vec3 {ease, ..} => {
                 *ease = new_ease
             },
-            Track::Vec4{ease, ..} => {
+            Track::Vec4 {ease, ..} => {
                 *ease = new_ease
             },
-            Track::Color{ease, ..} => {
+            Track::Color {ease, ..} => {
                 *ease = new_ease
             },
         }
     }
     
-    pub fn set_live_id(&mut self, new_live_id: LiveId) {
+    pub fn set_live_item_id(&mut self, new_live_item_id: LiveItemId) {
         match self {
-            Track::Float{live_id, ..} => {
-                *live_id = new_live_id
+            Track::Float {live_item_id, ..} => {
+                *live_item_id = new_live_item_id
             },
-            Track::Vec2{live_id, ..} => {
-                *live_id = new_live_id
+            Track::Vec2 {live_item_id, ..} => {
+                *live_item_id = new_live_item_id
             },
-            Track::Vec3{live_id, ..} => {
-                *live_id = new_live_id
+            Track::Vec3 {live_item_id, ..} => {
+                *live_item_id = new_live_item_id
             },
-            Track::Vec4{live_id, ..} => {
-                *live_id = new_live_id
+            Track::Vec4 {live_item_id, ..} => {
+                *live_item_id = new_live_item_id
             },
-            Track::Color{live_id, ..} => {
-                *live_id = new_live_id
+            Track::Color {live_item_id, ..} => {
+                *live_item_id = new_live_item_id
             },
         }
     }
@@ -1191,7 +1194,7 @@ pub const fn live_location_hash(path: &str, line: u64, col: u64) -> u64 {
     value
 }
 
-pub const fn live_str_to_id(modstr: &str, idstr: &str) -> LiveId {
+pub const fn live_str_to_id(modstr: &str, idstr: &str) -> LiveItemId {
     let modpath = modstr.as_bytes();
     let modpath_len = modpath.len();
     let id = idstr.as_bytes();
@@ -1218,7 +1221,7 @@ pub const fn live_str_to_id(modstr: &str, idstr: &str) -> LiveId {
             o += 1;
             i += 1;
         }
-        return LiveId(value)
+        return LiveItemId(value)
     }
     if id.len()>6
         && id[0] == 'c' as u8
@@ -1243,7 +1246,7 @@ pub const fn live_str_to_id(modstr: &str, idstr: &str) -> LiveId {
             o += 1;
             i += 1;
         }
-        return LiveId(value)
+        return LiveItemId(value)
     }
     let mut i = 0;
     let mut o = 0;
@@ -1252,6 +1255,6 @@ pub const fn live_str_to_id(modstr: &str, idstr: &str) -> LiveId {
         o += 1;
         i += 1;
     }
-        LiveId(value)
+        LiveItemId(value)
 }
 

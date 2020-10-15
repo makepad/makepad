@@ -68,7 +68,7 @@ impl Text {
     
     pub fn style(cx: &mut Cx) {
         
-        live!(cx, r#"self::shader: Shader {
+        live_body!(cx, r#"self::shader: Shader {
 
             use crate::shader_std::prelude::*;
             
@@ -408,11 +408,11 @@ impl Text {
     pub fn find_closest_offset(&self, cx: &Cx, area: &Area, pos: Vec2) -> usize {
         let scroll_pos = area.get_scroll_pos(cx);
         let spos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
-        let x_o = area.get_instance_offset(cx, live_id!(self::shader::base_x), Ty::Float).unwrap();
-        let y_o = area.get_instance_offset(cx, live_id!(self::shader::base_y), Ty::Float).unwrap();
-        let w_o = area.get_instance_offset(cx, live_id!(self::shader::w), Ty::Float).unwrap();
-        let font_size_o = area.get_instance_offset(cx, live_id!(self::shader::font_size), Ty::Float).unwrap();
-        let char_offset_o = area.get_instance_offset(cx, live_id!(self::shader::char_offset), Ty::Float).unwrap();
+        let x_o = area.get_instance_offset(cx, live_item_id!(self::shader::base_x), Ty::Float).unwrap();
+        let y_o = area.get_instance_offset(cx, live_item_id!(self::shader::base_y), Ty::Float).unwrap();
+        let w_o = area.get_instance_offset(cx, live_item_id!(self::shader::w), Ty::Float).unwrap();
+        let font_size_o = area.get_instance_offset(cx, live_item_id!(self::shader::font_size), Ty::Float).unwrap();
+        let char_offset_o = area.get_instance_offset(cx, live_item_id!(self::shader::char_offset), Ty::Float).unwrap();
         let read = area.get_read_ref(cx);
         let text_style = &self.text_style;
         let line_spacing = text_style.line_spacing;

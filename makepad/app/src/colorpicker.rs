@@ -17,7 +17,6 @@ pub struct ColorPicker {
     pub drag_mode: ColorPickerDragMode
 }
 
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum ColorPickerDragMode {
     Wheel,
@@ -59,15 +58,15 @@ impl ColorPicker {
         // lets update hue sat val directly
         let mut changed = false;
         if last_hue != self.hue {
-            self.animator.area.write_float(cx, live_id!(self::shader_wheel::hue), self.hue);
+            self.animator.area.write_float(cx, live_item_id!(self::shader_wheel::hue), self.hue);
             changed = true;
         }
         if last_sat != self.sat {
-            self.animator.area.write_float(cx, live_id!(self::shader_wheel::sat), self.sat);
+            self.animator.area.write_float(cx, live_item_id!(self::shader_wheel::sat), self.sat);
             changed = true;
         }
         if last_val != self.val {
-            self.animator.area.write_float(cx, live_id!(self::shader_wheel::val), self.val);
+            self.animator.area.write_float(cx, live_item_id!(self::shader_wheel::val), self.val);
             changed = true;
         }
         if changed {
@@ -159,14 +158,14 @@ impl ColorPicker {
         k.push_float(cx, self.sat);
         k.push_float(cx, self.val);
         
-        k.push_last_float(cx, &self.animator, live_id!(self::shader_wheel::hover()));
-        k.push_last_float(cx, &self.animator, live_id!(self::shader_wheel::hover()));
+        k.push_last_float(cx, &self.animator, live_item_id!(self::shader_wheel::hover()));
+        k.push_last_float(cx, &self.animator, live_item_id!(self::shader_wheel::hover()));
         
         self.animator.set_area(cx, k.into());
     }
 
     pub fn style(cx: &mut Cx) {
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::anim_default: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [

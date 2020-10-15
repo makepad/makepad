@@ -14,7 +14,7 @@ use crate::xrcontrol::*;
 
 pub fn set_widget_style(cx: &mut Cx) {
     
-    live!(cx, r#"
+    live_body!(cx, r#"
         self::text_style_unscaled: TextStyle{
             font: "resources/Ubuntu-R.ttf",
             font_size: 8.0,

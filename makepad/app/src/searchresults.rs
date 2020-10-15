@@ -2,7 +2,7 @@ use makepad_render::*;
 use makepad_widget::*;
 use crate::codeicon::*;
 use crate::searchindex::*;
-use crate::appstorage::*;
+use crate::makepadstorage::*;
 
 #[derive(Clone)]
 pub struct SearchResults {
@@ -11,7 +11,7 @@ pub struct SearchResults {
     pub list: ListLogic,
     pub search_input: TextInput,
     pub do_select_first: bool,
-    pub first_tbid: AppTextBufferId,
+    pub first_tbid: MakepadTextBufferId,
     pub results: Vec<SearchResult>
 }
 
@@ -27,11 +27,11 @@ pub struct SearchResultDraw {
 #[derive(Clone)]
 pub enum SearchResultEvent {
     DisplayFile {
-        text_buffer_id: AppTextBufferId,
+        text_buffer_id: MakepadTextBufferId,
         cursor: (usize, usize)
     },
     OpenFile {
-        text_buffer_id: AppTextBufferId,
+        text_buffer_id: MakepadTextBufferId,
         cursor: (usize, usize)
     },
     None,
@@ -40,7 +40,7 @@ pub enum SearchResultEvent {
 impl SearchResults {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            first_tbid: AppTextBufferId(0),
+            first_tbid: MakepadTextBufferId(0),
             search_input: TextInput::new(cx, TextInputOptions {multiline: false, read_only: false, empty_message: "search".to_string()}),
             result_draw: SearchResultDraw::new(cx),
             list: ListLogic {
@@ -54,7 +54,7 @@ impl SearchResults {
     }
     
     pub fn style(cx: &mut Cx) {
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::color_path: #9;
             self::color_message: #b;
             self::color_bg: #1e;
@@ -63,7 +63,7 @@ impl SearchResults {
             self::color_bg_marked_over: #11466e;
             self::color_bg_selected: #28;
             
-            self::text_input_layout_bg:  Layout {
+            self::text_input_layout_bg: Layout {
                 walk: Walk {
                     width: Compute,
                     height: Compute,
@@ -82,7 +82,7 @@ impl SearchResults {
                 walk: {width: ComputeFill, height: Fix(37.0)},
                 align: {fx: 0.0, fy: 0.0},
                 padding: {l: 5., t: 3., b: 2., r: 0.},
-                line_wrap:None,
+                line_wrap: None,
             }
             
             self::layout_item_open: Layout {
@@ -106,7 +106,13 @@ impl SearchResults {
         "#)
     }
     
-    pub fn set_search_input_value(&mut self, cx: &mut Cx, value: &str, first_tbid: AppTextBufferId, focus: bool) {
+    pub fn set_search_input_value(
+        &mut self,
+        cx: &mut Cx,
+        value: &str,
+        first_tbid: MakepadTextBufferId,
+        focus: bool
+    ) {
         self.search_input.set_value(cx, value);
         self.first_tbid = first_tbid;
         if focus {
@@ -115,22 +121,27 @@ impl SearchResults {
         self.search_input.select_all(cx);
     }
     
-    pub fn do_search(&mut self, cx: &mut Cx, search_index: &mut SearchIndex, storage: &mut AppStorage) -> Option<(AppTextBufferId, (usize, usize))> {
+    pub fn do_search(
+        &mut self,
+        cx: &mut Cx,
+        search_index: &mut SearchIndex,
+        makepad_storage: &mut MakepadStorage
+    ) -> Option<(MakepadTextBufferId, (usize, usize))> {
         let s = self.search_input.get_value();
         if s.len() > 0 {
             // lets search
-            self.results = search_index.search(&s, self.first_tbid, cx, storage);
+            self.results = search_index.search(&s, self.first_tbid, cx, makepad_storage);
             self.do_select_first = true;
         }
         else {
-            search_index.clear_markers(cx, storage);
+            search_index.clear_markers(cx, makepad_storage);
             self.results.truncate(0);
         }
         self.list.set_list_len(0);
         self.view.redraw_view_area(cx);
         if self.results.len()>0 {
             let result = &self.results[0];
-            let text_buffer = &mut storage.text_buffers[result.text_buffer_id.as_index()].text_buffer;
+            let text_buffer = &mut makepad_storage.text_buffers[result.text_buffer_id.as_index()].text_buffer;
             let tok = &text_buffer.token_chunks[result.token as usize];
             Some((result.text_buffer_id, (tok.offset + tok.len, tok.offset)))
         }
@@ -139,14 +150,20 @@ impl SearchResults {
         }
     }
     
-    pub fn handle_search_input(&mut self, cx: &mut Cx, event: &mut Event, search_index: &mut SearchIndex, storage: &mut AppStorage) -> bool {
+    pub fn handle_search_input(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        search_index: &mut SearchIndex,
+        makepad_storage: &mut MakepadStorage
+    ) -> bool {
         // if we have a text change, do a search.
         match self.search_input.handle_text_input(cx, event) {
             TextEditorEvent::KeyFocus => {
                 return true
             },
             TextEditorEvent::Change => {
-                self.do_search(cx, search_index, storage);
+                self.do_search(cx, search_index, makepad_storage);
                 return true
             },
             TextEditorEvent::Escape | TextEditorEvent::Search(_) => {
@@ -157,7 +174,13 @@ impl SearchResults {
         return false
     }
     
-    pub fn handle_search_results(&mut self, cx: &mut Cx, event: &mut Event, _search_index: &mut SearchIndex, storage: &mut AppStorage) -> SearchResultEvent {
+    pub fn handle_search_results(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        _search_index: &mut SearchIndex,
+        makepad_storage: &mut MakepadStorage
+    ) -> SearchResultEvent {
         
         self.list.set_list_len(self.results.len());
         
@@ -224,7 +247,7 @@ impl SearchResults {
             ListEvent::SelectSingle(select_index) => {
                 self.view.redraw_view_area(cx);
                 let result = &self.results[select_index];
-                let text_buffer = &mut storage.text_buffers[result.text_buffer_id.as_index()].text_buffer;
+                let text_buffer = &mut makepad_storage.text_buffers[result.text_buffer_id.as_index()].text_buffer;
                 if let Event::FingerDown(_) = event {
                     self.search_input.text_editor.set_key_focus(cx);
                 }
@@ -237,7 +260,7 @@ impl SearchResults {
             ListEvent::SelectDouble(select_index) => {
                 // we need to get a filepath
                 let result = &self.results[select_index];
-                let text_buffer = &mut storage.text_buffers[result.text_buffer_id.as_index()].text_buffer;
+                let text_buffer = &mut makepad_storage.text_buffers[result.text_buffer_id.as_index()].text_buffer;
                 let tok = &text_buffer.token_chunks[result.token as usize];
                 return SearchResultEvent::OpenFile {
                     text_buffer_id: result.text_buffer_id,
@@ -257,7 +280,7 @@ impl SearchResults {
         live_style_end!(cx, self::style_text_input);
     }
     
-    pub fn draw_search_results(&mut self, cx: &mut Cx, storage: &AppStorage) {
+    pub fn draw_search_results(&mut self, cx: &mut Cx, makepad_storage: &MakepadStorage) {
         
         self.list.set_list_len(self.results.len()); //bm.log_items.len());
         
@@ -278,7 +301,7 @@ impl SearchResults {
         for i in self.list.start_item..self.list.end_item {
             // lets get the path
             let result = &self.results[i];
-            let tb = &storage.text_buffers[result.text_buffer_id.as_index()];
+            let tb = &makepad_storage.text_buffers[result.text_buffer_id.as_index()];
             //println!("{} {}");
             self.result_draw.draw_result(
                 cx,
@@ -337,7 +360,7 @@ impl SearchResultDraw {
             play: Play::Chain {duration: 0.01},
             tracks: vec![
                 Track::Color {
-                    live_id: live_id!(makepad_render::quad::shader::color),
+                    live_item_id: live_item_id!(makepad_render::quad::shader::color),
                     ease: Ease::Lin,
                     keys: vec![(1.0, default_color)],
                     cut_init: None
@@ -363,7 +386,7 @@ impl SearchResultDraw {
             play: Play::Chain {duration: 0.02},
             tracks: vec![
                 Track::Color {
-                    live_id: live_id!(makepad_render::quad::shader::color),
+                    live_item_id: live_item_id!(makepad_render::quad::shader::color),
                     ease: Ease::Lin,
                     keys: vec![(0.0, over_color)],
                     cut_init: None
@@ -384,7 +407,7 @@ impl SearchResultDraw {
         let selected = list_item.is_selected;
         list_item.animator.init(cx, | cx | Self::get_default_anim(cx, selected));
         
-        self.item_bg.color = list_item.animator.last_color(cx, live_id!(makepad_render::quad::shader::color));
+        self.item_bg.color = list_item.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
         
         let bg_inst = self.item_bg.begin_quad(cx, if selected {
             live_layout!(cx, self::layout_item_open)

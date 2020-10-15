@@ -1,7 +1,7 @@
 use makepad_render::*;
 use makepad_widget::*;
 use makepad_hub::*;
-use crate::appstorage::*;
+use crate::makepadstorage::*;
 use crate::buildmanager::*;
 use crate::codeicon::*;
 
@@ -39,7 +39,7 @@ impl LogList {
     
     pub fn style(cx: &mut Cx) {
         
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::layout_item: Layout {
                 walk: Walk {width: Fill, height: Fix(20.)},
                 align: {fx: 0.0, fy: 0.5},
@@ -89,7 +89,7 @@ impl LogList {
             play: Play::Chain {duration: 0.01},
             tracks: vec![
                 Track::Color {
-                    live_id: live_id!(makepad_render::quad::shader::color),
+                    live_item_id: live_item_id!(makepad_render::quad::shader::color),
                     ease: Ease::Lin,
                     keys: vec![
                         (1.0, default_color)
@@ -112,7 +112,7 @@ impl LogList {
             play: Play::Cut {duration: 0.02},
             tracks: vec![
                 Track::Color {
-                    live_id: live_id!(makepad_render::quad::shader::color),
+                    live_item_id: live_item_id!(makepad_render::quad::shader::color),
                     ease: Ease::Lin,
                     keys: vec![
                         (0., over_color),
@@ -125,7 +125,7 @@ impl LogList {
     }
     
     
-    pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage, bm: &mut BuildManager) -> LogListEvent {
+    pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, makepad_storage: &mut MakepadStorage, bm: &mut BuildManager) -> LogListEvent {
         
         self.list.set_list_len(bm.log_items.len());
         
@@ -211,7 +211,7 @@ impl LogList {
                         }
                     }
                     
-                    let text_buffer = &storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path)).text_buffer;
+                    let text_buffer = &makepad_storage.text_buffer_from_path(cx, &makepad_storage.remap_sync_path(&loc_message.path)).text_buffer;
                     // check if we have a range:
                     let offset = if let Some((head, tail)) = loc_message.range {
                         if select_at_end {
@@ -343,7 +343,7 @@ impl LogItemDraw {
         
         list_item.animator.init(cx, | cx | LogList::get_default_anim(cx, index, false));
         
-        self.item_bg.color = list_item.animator.last_color(cx, live_id!(makepad_render::quad::shader::color));
+        self.item_bg.color = list_item.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
         
         let bg_inst = self.item_bg.begin_quad(cx, live_layout!(cx, self::layout_item)); //&self.get_line_layout());
         

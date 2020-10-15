@@ -1,6 +1,6 @@
 use crate::cx::*;
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{HashMap,BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct KeyModifiers {
@@ -157,6 +157,7 @@ pub struct FileWriteEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveRecompileEvent {
+    pub changed_live_bodies: BTreeSet<LiveBodyId>,
     pub errors: Vec<LiveBodyError>
 }
 
@@ -283,7 +284,7 @@ pub enum Event {
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
     TextCopy(TextCopyEvent),
-    LiveRecompile(LiveRecompileEvent)
+    LiveRecompile(LiveRecompileEvent),
 }
 
 impl Default for Event {

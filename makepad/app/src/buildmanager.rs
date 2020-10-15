@@ -1,7 +1,7 @@
 use makepad_render::*;
 use makepad_widget::*;
 use makepad_hub::*;
-use crate::appstorage::*;
+use crate::makepadstorage::*;
 use crate::searchindex::*;
 
 #[derive(Clone)]
@@ -21,17 +21,17 @@ impl BuildManager {
             signal: cx.new_signal(),
             exec_when_done: false,
             log_items: Vec::new(),
-            tail_log_items: true, 
+            tail_log_items: true,
             artifacts: Vec::new(),
             active_builds: Vec::new(),
             search_index: SearchIndex::new(),
         }
     }
     
-    pub fn status_new_log_item()->StatusId{uid!()}
-    pub fn status_new_artifact()->StatusId{uid!()}
-    pub fn status_cargo_end()->StatusId{uid!()}
-    pub fn status_program_end()->StatusId{uid!()}
+    pub fn status_new_log_item() -> StatusId {uid!()}
+    pub fn status_new_artifact() -> StatusId {uid!()}
+    pub fn status_cargo_end() -> StatusId {uid!()}
+    pub fn status_program_end() -> StatusId {uid!()}
 }
 
 #[derive(Clone)]
@@ -44,14 +44,14 @@ pub struct ActiveBuild {
 
 impl BuildManager {
     
-    fn clear_textbuffer_messages(&self, cx: &mut Cx, storage: &mut AppStorage) {
+    fn clear_textbuffer_messages(&self, cx: &mut Cx, makepad_storage: &mut MakepadStorage) {
         // clear all files we missed
-        for atb in &mut storage.text_buffers {
+        for mtb in &mut makepad_storage.text_buffers {
             //if atb.text_buffer.messages.gc_id != cx.event_id {
-                atb.text_buffer.markers.message_cursors.truncate(0);
-                atb.text_buffer.markers.message_bodies.truncate(0);
-                cx.send_signal(atb.text_buffer.signal, TextBuffer::status_message_update());
-           // }
+            mtb.text_buffer.markers.message_cursors.truncate(0);
+            mtb.text_buffer.markers.message_bodies.truncate(0);
+            cx.send_signal(mtb.text_buffer.signal, TextBuffer::status_message_update());
+            // }
             //else {
             //    cx.send_signal(atb.text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
             //}
@@ -88,11 +88,17 @@ impl BuildManager {
         return false
     }
     
-    pub fn process_loc_message_for_textbuffers(&self, cx: &mut Cx, loc_message:&LocMessage, level: TextBufferMessageLevel, storage: &mut AppStorage){
-        let atb = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
+    pub fn process_loc_message_for_textbuffers(
+        &self,
+        cx: &mut Cx,
+        loc_message: &LocMessage,
+        level: TextBufferMessageLevel,
+        makepad_storage: &mut MakepadStorage
+    ) {
+        let atb = makepad_storage.text_buffer_from_path(cx, &makepad_storage.remap_sync_path(&loc_message.path));
         let markers = &mut atb.text_buffer.markers;
         markers.mutation_id = atb.text_buffer.mutation_id.max(1);
-        if markers.message_cursors.len() > 100000{ // crash saftey
+        if markers.message_cursors.len() > 100000 { // crash saftey
             return
         }
         if let Some((head, tail)) = loc_message.range {
@@ -119,7 +125,7 @@ impl BuildManager {
                         head: head,
                         tail: tail,
                         max: 0
-                    }) 
+                    })
                 }
             }
             
@@ -134,17 +140,17 @@ impl BuildManager {
                 atb.text_buffer.markers.message_bodies.push(msg);
             }
             cx.send_signal(atb.text_buffer.signal, TextBuffer::status_message_update());
-        }        
+        }
     }
     
-    pub fn handle_log_item_limit(&mut self, cx:&mut Cx){
+    pub fn handle_log_item_limit(&mut self, cx: &mut Cx) {
         if self.log_items.len() >= 700000 { // out of memory safety
-            if self.tail_log_items{
+            if self.tail_log_items {
                 self.log_items.truncate(500000);
                 self.log_items.push(HubLogItem::Message("------------ Log truncated here -----------".to_string()));
             }
-            else{ // if not tailing, just throw it away
-                if self.log_items.len() != 700001{
+            else { // if not tailing, just throw it away
+                if self.log_items.len() != 700001 {
                     self.log_items.push(HubLogItem::Message("------------ Log skipping, press tail to resume -----------".to_string()));
                     cx.send_signal(self.signal, BuildManager::status_new_log_item());
                 }
@@ -153,11 +159,16 @@ impl BuildManager {
         }
     }
     
-    pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &FromHubMsg) {
+    pub fn handle_hub_msg(
+        &mut self,
+        cx: &mut Cx,
+        makepad_storage: &mut MakepadStorage,
+        htc: &FromHubMsg
+    ) {
         //let hub_ui = storage.hub_ui.as_mut().unwrap();
         match &htc.msg {
             HubMsg::ListBuildersResponse {..} => {
-                self.restart_build(cx, storage);
+                self.restart_build(cx, makepad_storage);
             },
             HubMsg::CargoBegin {uid} => if self.is_running_uid(uid) {
             },
@@ -175,7 +186,7 @@ impl BuildManager {
                         HubLogItem::Warning(_) => TextBufferMessageLevel::Warning,
                         HubLogItem::Message(_) => TextBufferMessageLevel::Log,
                     };
-                    self.process_loc_message_for_textbuffers(cx, loc_message, level, storage)
+                    self.process_loc_message_for_textbuffers(cx, loc_message, level, makepad_storage)
                 }
                 cx.send_signal(self.signal, BuildManager::status_new_log_item());
             },
@@ -200,7 +211,7 @@ impl BuildManager {
                     }
                 }
                 if !self.is_any_cargo_running() && self.exec_when_done {
-                    self.run_all_artifacts(storage)
+                    self.run_all_artifacts(makepad_storage)
                 }
                 cx.send_signal(self.signal, BuildManager::status_cargo_end());
             },
@@ -217,48 +228,53 @@ impl BuildManager {
         }
     }
     
-    pub fn add_log_message(&mut self, cx:&mut Cx, msg:String){
+    pub fn add_log_message(&mut self, cx: &mut Cx, msg: String) {
         self.handle_log_item_limit(cx);
         self.log_items.push(HubLogItem::Message(msg));
         cx.send_signal(self.signal, BuildManager::status_new_log_item());
     }
-
-    pub fn handle_live_recompile_event(&mut self, cx:&mut Cx, re:&LiveRecompileEvent, storage:&mut AppStorage){
+    
+    pub fn handle_live_recompile_event(
+        &mut self,
+        cx: &mut Cx,
+        re: &LiveRecompileEvent,
+        makepad_storage: &mut MakepadStorage
+    ) {
         // we are running in loopback mode
         // lets use the log list as an error list for loopback shadercoding.
-        // first of all 
+        // first of all
         // the problem is our path is not fully resolved
         // lets just map it to /main/makepad and worry later
-        self.clear_textbuffer_messages(cx, storage);
+        self.clear_textbuffer_messages(cx, makepad_storage);
         self.log_items.truncate(0);
-        if re.errors.len() == 0{
+        if re.errors.len() == 0 {
             self.log_items.push(HubLogItem::Message(
                 format!("Live block compiled OK")
             ));
         }
-        for err in &re.errors{
+        for err in &re.errors {
             // lets turn line+col+len into a range.
             let path = format!("main/makepad/{}", err.file);
             // find the textbuffer
-            let atb = storage.text_buffer_from_path(cx, &path);
+            let mtb = makepad_storage.text_buffer_from_path(cx, &path);
             // we should be able to mape line+col into byte offset
-            let off = atb.text_buffer.text_pos_to_offset(TextPos{row:err.line - 1,col:err.column - 1});
-            let msg = LocMessage{
-                path:path,
+            let off = mtb.text_buffer.text_pos_to_offset(TextPos {row: err.line - 1, col: err.column - 1});
+            let msg = LocMessage {
+                path: path,
                 line: err.line,
                 column: err.column,
                 body: err.message.clone(),
-                range: Some((off, off+err.len)),
-                rendered:None,
-                explanation:None
+                range: Some((off, off + err.len)),
+                rendered: None,
+                explanation: None
             };
-            self.process_loc_message_for_textbuffers(cx, &msg, TextBufferMessageLevel::Error, storage);
+            self.process_loc_message_for_textbuffers(cx, &msg, TextBufferMessageLevel::Error, makepad_storage);
             self.log_items.push(HubLogItem::LocError(msg));
         }
     }
     
-    pub fn run_all_artifacts(&mut self, storage: &mut AppStorage) {
-        let hub_ui = storage.hub_ui.as_mut().unwrap();
+    pub fn run_all_artifacts(&mut self, makepad_storage: &mut MakepadStorage) {
+        let hub_ui = makepad_storage.hub_ui.as_mut().unwrap();
         // otherwise execute all we have artifacts for
         for ab in &mut self.active_builds {
             if let Some(build_result) = &ab.build_result {
@@ -286,16 +302,16 @@ impl BuildManager {
         }
     }
     
-    pub fn artifact_run(&mut self, storage: &mut AppStorage) {
+    pub fn artifact_run(&mut self, makepad_storage: &mut MakepadStorage) {
         if self.is_any_cargo_running() {
             self.exec_when_done = true;
         }
         else {
-            self.run_all_artifacts(storage)
+            self.run_all_artifacts(makepad_storage)
         }
     }
     
-    pub fn restart_build(&mut self, cx: &mut Cx, storage: &mut AppStorage) {
+    pub fn restart_build(&mut self, cx: &mut Cx, makepad_storage: &mut MakepadStorage) {
         if !cx.platform_type.is_desktop() {
             return
         }
@@ -303,10 +319,10 @@ impl BuildManager {
         self.artifacts.truncate(0);
         self.log_items.truncate(0);
         //self.selection.truncate(0);
-        self.clear_textbuffer_messages(cx, storage);
+        self.clear_textbuffer_messages(cx, makepad_storage);
         
-        let hub_ui = storage.hub_ui.as_mut().unwrap();
-        self.exec_when_done = storage.settings.exec_when_done;
+        let hub_ui = makepad_storage.hub_ui.as_mut().unwrap();
+        self.exec_when_done = makepad_storage.settings.exec_when_done;
         for ab in &mut self.active_builds {
             ab.build_result = None;
             if let Some(build_uid) = ab.build_uid {
@@ -332,7 +348,7 @@ impl BuildManager {
         // lets reset active targets
         self.active_builds.truncate(0);
         
-        for build_target in &storage.settings.builds {
+        for build_target in &makepad_storage.settings.builds {
             let uid = hub_ui.route_send.alloc_uid();
             hub_ui.route_send.send(ToHubMsg {
                 to: HubMsgTo::Builder(build_target.builder.clone()),

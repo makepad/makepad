@@ -3,26 +3,26 @@ use makepad_render::*;
 use makepad_widget::*;
 use makepad_hub::*;
 use makepad_microserde::*;
-use crate::appwindow::*;
+use crate::makepadwindow::*;
 use crate::filetree::*;
 use crate::fileeditor::*;
 use crate::buildmanager::*;
 use std::collections::HashMap;
 use crate::builder;
-use crate::livemacro::*;
+use crate::liveitems::*;
 
 #[derive(Debug, Clone, SerRon, DeRon)]
-pub struct AppSettings { 
+pub struct MakepadSettings {
     pub build_on_save: bool,
     pub exec_when_done: bool,
     pub live_macros_on_self: bool,
     pub hub_server: HubServerConfig,
     pub builders: HashMap<String, HubBuilderConfig>,
     pub builds: Vec<BuildTarget>,
-    pub sync: HashMap<String, Vec<String>>,
+    pub sync: HashMap<String, Vec<String >>,
 }
 
-impl Default for AppSettings {
+impl Default for MakepadSettings {
     
     fn default() -> Self {
         Self {
@@ -37,7 +37,7 @@ impl Default for AppSettings {
     }
 }
 
-impl AppSettings {
+impl MakepadSettings {
     pub fn initial() -> Self {
         Self {
             exec_when_done: false,
@@ -81,7 +81,7 @@ pub struct BuildTarget {
     pub config: String
 }
 
-pub struct AppStorage {
+pub struct MakepadStorage {
     pub init_builders_counter: usize,
     pub builders_request_uid: HubUid,
     pub builder_sync_uid: HubUid,
@@ -91,35 +91,34 @@ pub struct AppStorage {
     pub hub_ui: Option<HubUI>,
     pub hub_ui_message: Signal,
     pub settings_changed: Signal,
-    pub settings_old: AppSettings,
-    pub settings: AppSettings,
+    pub settings_old: MakepadSettings,
+    pub settings: MakepadSettings,
     pub file_tree_file_read: FileRead,
     pub app_state_file_read: FileRead,
     pub app_settings_file_read: FileRead,
-    pub text_buffer_path_to_id: HashMap<String, AppTextBufferId>,
-    pub text_buffer_id_to_path: HashMap<AppTextBufferId, String>,
-    pub text_buffers: Vec<AppTextBuffer>,
+    pub text_buffer_path_to_id: HashMap<String, MakepadTextBufferId>,
+    pub text_buffer_id_to_path: HashMap<MakepadTextBufferId, String>,
+    pub text_buffers: Vec<MakepadTextBuffer>,
 }
 
-
-pub struct AppTextBuffer {
+pub struct MakepadTextBuffer {
     pub file_read: FileRead,
     pub read_msg: Option<ToHubMsg>,
     pub full_path: String,
     pub text_buffer: TextBuffer,
-    pub text_buffer_id: AppTextBufferId,
-    pub live_macros: LiveMacros
+    pub text_buffer_id: MakepadTextBufferId,
+    pub live_items_list: LiveItemsList
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
-pub struct AppTextBufferId(pub u16);
-impl AppTextBufferId{
-    pub fn as_index(&self )->usize{return self.0 as usize}
+pub struct MakepadTextBufferId(pub u16);
+impl MakepadTextBufferId {
+    pub fn as_index(&self) -> usize {return self.0 as usize}
 }
 
-impl AppStorage {
+impl MakepadStorage {
     pub fn new(cx: &mut Cx) -> Self {
-        AppStorage {
+        MakepadStorage {
             init_builders_counter: 2,
             builders_request_uid: HubUid::zero(),
             builder_sync_uid: HubUid::zero(),
@@ -129,8 +128,8 @@ impl AppStorage {
             hub_ui: None,
             hub_ui_message: cx.new_signal(),
             settings_changed: cx.new_signal(),
-            settings_old: AppSettings::default(),
-            settings: AppSettings::default(),
+            settings_old: MakepadSettings::default(),
+            settings: MakepadSettings::default(),
             //rust_compiler: RustCompiler::style(cx),
             text_buffer_path_to_id: HashMap::new(),
             text_buffer_id_to_path: HashMap::new(),
@@ -140,7 +139,7 @@ impl AppStorage {
             app_settings_file_read: FileRead::default()
         }
     }
-     
+    
     pub fn status_new_message() -> StatusId {uid!()}
     pub fn status_settings_changed() -> StatusId {uid!()}
     
@@ -229,8 +228,8 @@ impl AppStorage {
         digest
     }
     
-    pub fn save_state(&mut self, cx: &mut Cx, state: &AppState) {
-        let ron = state.serialize_ron();
+    pub fn save_state(&mut self, cx: &mut Cx, makepad_state: &MakepadState) {
+        let ron = makepad_state.serialize_ron();
         cx.file_write("makepad_state.ron", ron.as_bytes());
     }
     
@@ -247,8 +246,7 @@ impl AppStorage {
         path
     }
     
-    
-    pub fn text_buffer_from_path(&mut self, cx: &mut Cx, path: &str) -> &mut AppTextBuffer {
+    pub fn text_buffer_from_path(&mut self, cx: &mut Cx, path: &str) -> &mut MakepadTextBuffer {
         
         // if online, fallback to readfile
         if !cx.platform_type.is_desktop() || path.find('/').is_none() {
@@ -256,23 +254,22 @@ impl AppStorage {
                 &mut self.text_buffers[tb_id.0 as usize]
             }
             else {
-                let tb_id = AppTextBufferId(self.text_buffers.len() as u16);
+                let tb_id = MakepadTextBufferId(self.text_buffers.len() as u16);
                 self.text_buffer_path_to_id.insert(path.to_string(), tb_id);
                 self.text_buffer_id_to_path.insert(tb_id, path.to_string());
-                self.text_buffers.push(AppTextBuffer {
+                self.text_buffers.push(MakepadTextBuffer {
                     file_read: cx.file_read(
-                        if path.starts_with("main/makepad/"){
+                        if path.starts_with("main/makepad/") {
                             &path["main/makepad/".len()..]
                         }
-                        else{
+                        else {
                             path
                         }
                     ),
+                    live_items_list: LiveItemsList::new(cx),
                     read_msg: None,
                     full_path: path.to_string(),
                     text_buffer_id: tb_id,
-                    live_macros: LiveMacros::new(cx),
-                    // write_msg: None,
                     text_buffer: TextBuffer {
                         signal: cx.new_signal(),
                         ..TextBuffer::default()
@@ -300,16 +297,15 @@ impl AppStorage {
                 };
                 hub_ui.route_send.send(msg.clone());
                 
-                let tb_id = AppTextBufferId(self.text_buffers.len() as u16);
+                let tb_id = MakepadTextBufferId(self.text_buffers.len() as u16);
                 self.text_buffer_path_to_id.insert(path.to_string(), tb_id);
                 self.text_buffer_id_to_path.insert(tb_id, path.to_string());
-                self.text_buffers.push(AppTextBuffer {
+                self.text_buffers.push(MakepadTextBuffer {
                     file_read: FileRead::default(),
+                    live_items_list: LiveItemsList::new(cx),
                     read_msg: Some(msg),
                     full_path: path.to_string(),
                     text_buffer_id: tb_id,
-                    live_macros: LiveMacros::new(cx),
-                    // write_msg: None,
                     text_buffer: TextBuffer {
                         signal: cx.new_signal(),
                         ..TextBuffer::default()
@@ -373,6 +369,22 @@ impl AppStorage {
         }
     }
     
+    pub fn text_buffer_handle_file_read(&mut self, cx: &mut Cx, fr: &FileReadEvent) {
+        for atb in &mut self.text_buffers {
+            if let Some(utf8_data) = atb.file_read.resolve_utf8(fr) {
+                if let Ok(utf8_data) = utf8_data {
+                    atb.text_buffer.load_from_utf8(utf8_data);
+                    atb.text_buffer.send_textbuffer_loaded_signal(cx);
+                    break;
+                }
+            }
+        }
+    }
+    
+    pub fn handle_live_recompile_event(&mut self, cx: &mut Cx, re: &LiveRecompileEvent) {
+        
+    }
+    
     pub fn reload_builders(&mut self) {
         let hub_ui = self.hub_ui.as_mut().unwrap();
         let uid = hub_ui.route_send.alloc_uid();
@@ -383,7 +395,15 @@ impl AppStorage {
         self.builders_request_uid = uid;
     }
     
-    pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: &FromHubMsg, windows: &mut Vec<AppWindow>, state: &AppState, build_manager: &mut BuildManager) {
+    
+    pub fn handle_hub_msg(
+        &mut self,
+        cx: &mut Cx,
+        htc: &FromHubMsg,
+        makepad_windows: &mut Vec<MakepadWindow>,
+        makepad_state: &MakepadState,
+        build_manager: &mut BuildManager
+    ) {
         let hub_ui = self.hub_ui.as_mut().unwrap();
         // only in ConnectUI of ourselves do we list the workspaces
         match &htc.msg {
@@ -420,7 +440,7 @@ impl AppStorage {
                 }
                 self.builders_request_uid = uid;
                 // add all workspace nodes
-                for window in windows {
+                for window in makepad_windows {
                     window.file_panel.file_tree.root_node = FileNode::Folder {
                         name: "".to_string(),
                         draw: None,
@@ -451,7 +471,7 @@ impl AppStorage {
                 if let BuilderFileTreeNode::Folder {name, ..} = &tree {
                     let workspace = name.clone();
                     // insert each filetree at the right childnode
-                    for (window_index, window) in windows.iter_mut().enumerate() {
+                    for (window_index, window) in makepad_windows.iter_mut().enumerate() {
                         let mut paths = Vec::new();
                         if let FileNode::Folder {folder, ..} = &mut window.file_panel.file_tree.root_node {
                             for node in folder.iter_mut() {
@@ -467,22 +487,24 @@ impl AppStorage {
                         for path in &paths {
                             self.text_buffer_from_path(cx, path);
                         }
-                        window.file_panel.file_tree.load_open_folders(cx, &state.windows[window_index].open_folders);
+                        window.file_panel.file_tree.load_open_folders(cx, &makepad_state.windows[window_index].open_folders);
                     }
                 }
             },
             HubMsg::FileReadResponse {uid, data, ..} => {
                 for (path, tb_id) in &mut self.text_buffer_path_to_id {
-                    let atb = &mut self.text_buffers[tb_id.0 as usize];
-                    if let Some(cth_msg) = &atb.read_msg {
+                    let mtb = &mut self.text_buffers[tb_id.0 as usize];
+                    if let Some(cth_msg) = &mtb.read_msg {
                         if let HubMsg::FileReadRequest {uid: read_uid, ..} = &cth_msg.msg {
                             if *read_uid == *uid {
-                                atb.read_msg = None;
+                                mtb.read_msg = None;
                                 if let Some(data) = data {
                                     if let Ok(utf8_data) = std::str::from_utf8(data) {
-                                        atb.text_buffer.load_from_utf8(&utf8_data);
-                                        atb.text_buffer.send_textbuffer_loaded_signal(cx);
-                                        FileEditor::update_token_chunks(cx, &path, atb, &mut build_manager.search_index);
+                                        mtb.text_buffer.load_from_utf8(&utf8_data);
+                                        mtb.text_buffer.send_textbuffer_loaded_signal(cx);
+                                        // initialize the live blocks from the live-block target
+                                        mtb.update_live_items(cx);
+                                        FileEditor::update_token_chunks(cx, &path, mtb, &mut build_manager.search_index);
                                     }
                                 }
                                 else {
