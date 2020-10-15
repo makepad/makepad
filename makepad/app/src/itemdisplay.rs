@@ -54,7 +54,7 @@ impl ItemDisplay {
     }
     
     pub fn style(cx: &mut Cx) {
-        live!(cx, r#"
+        live_body!(cx, r#"
             
             self::text_style_title: TextStyle {
                 ..makepad_widget::widgetstyle::text_style_normal

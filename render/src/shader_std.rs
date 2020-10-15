@@ -19,14 +19,14 @@ impl Cx{
 pub fn define_shader_stdlib(cx: &mut Cx) {
     
     let g = Geometry::from_geometry_gen(cx, GeometryGen::from_quad_2d(0.0,0.0,1.0,1.0));
-    cx.live_styles.geometries.insert(live_id!(self::quad_2d), g);
+    cx.live_styles.geometries.insert(live_item_id!(self::quad_2d), g);
     
     let g = Geometry::from_geometry_gen(cx, GeometryGen::from_cube_3d(1.0,1.0,1.0,1,1,1));
-    cx.live_styles.geometries.insert(live_id!(self::cube_3d),g);
+    cx.live_styles.geometries.insert(live_item_id!(self::cube_3d),g);
     
     //Text::style(cx);
     
-    live!(cx, r#"
+    live_body!(cx, r#"
         
         self::geometry_3d: ShaderLib {
             geometry geom_pos: vec3;

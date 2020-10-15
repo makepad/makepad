@@ -1,6 +1,6 @@
 use makepad_render::*;
 use std::collections::{HashMap};
-use crate::appstorage::*;
+use crate::makepadstorage::*;
 use makepad_widget::*;
 
 #[derive(Clone)]
@@ -19,19 +19,19 @@ impl SearchIndex {
         }
     }
     
-    pub fn new_rust_token(&mut self, atb: &AppTextBuffer) {
+    pub fn new_rust_token(&mut self, mtb: &MakepadTextBuffer) {
         // pass it to the textindex
-        if atb.text_buffer.token_chunks.len() <= 1 {
+        if mtb.text_buffer.token_chunks.len() <= 1 {
             return
         }
-        let chunk_id = atb.text_buffer.token_chunks.len() - 2;
+        let chunk_id = mtb.text_buffer.token_chunks.len() - 2;
         // lets figure out if its a decl, an impl or a use
-        match atb.text_buffer.token_chunks[chunk_id].token_type {
+        match mtb.text_buffer.token_chunks[chunk_id].token_type {
             TokenType::Identifier | TokenType::Call | TokenType::Macro | TokenType::TypeName => {
                 let prev_tt = {
                     let mut i = if chunk_id > 0 {chunk_id - 1} else {0};
                     loop {
-                        let tt = atb.text_buffer.token_chunks[i].token_type;
+                        let tt = mtb.text_buffer.token_chunks[i].token_type;
                         if i == 0 || !tt.should_ignore() {
                             break tt;
                         }
@@ -41,22 +41,22 @@ impl SearchIndex {
                 let (next_tt, next_char) = {
                     let mut i = chunk_id + 1;
                     loop {
-                        if i >= atb.text_buffer.token_chunks.len() {
+                        if i >= mtb.text_buffer.token_chunks.len() {
                             break (TokenType::Unexpected, '\0');
                         }
-                        let tt = atb.text_buffer.token_chunks[i].token_type;
+                        let tt = mtb.text_buffer.token_chunks[i].token_type;
                         if !tt.should_ignore() {
-                            break (tt, atb.text_buffer.flat_text[atb.text_buffer.token_chunks[i].offset]);
+                            break (tt, mtb.text_buffer.flat_text[mtb.text_buffer.token_chunks[i].offset]);
                         }
                         i = i + 1;
                     }
                 };
-                let offset = atb.text_buffer.token_chunks[chunk_id].offset;
-                let len = atb.text_buffer.token_chunks[chunk_id].len;
-                let chars = &atb.text_buffer.flat_text[offset..(offset + len)];
-                let mut_id = (atb.text_buffer.mutation_id & 0xffff) as u16;
+                let offset = mtb.text_buffer.token_chunks[chunk_id].offset;
+                let len = mtb.text_buffer.token_chunks[chunk_id].len;
+                let chars = &mtb.text_buffer.flat_text[offset..(offset + len)];
+                let mut_id = (mtb.text_buffer.mutation_id & 0xffff) as u16;
                 
-                let prio = match atb.text_buffer.token_chunks[chunk_id].token_type {
+                let prio = match mtb.text_buffer.token_chunks[chunk_id].token_type {
                     TokenType::Identifier => {
                         match prev_tt {
                             TokenType::Keyword => 1,
@@ -88,10 +88,10 @@ impl SearchIndex {
                     },
                     _ => 4
                 };
-
+                
                 self.identifiers.write(
                     chars,
-                    atb.text_buffer_id,
+                    mtb.text_buffer_id,
                     mut_id,
                     prio,
                     chunk_id as u32
@@ -100,8 +100,8 @@ impl SearchIndex {
             _ => ()
         }
     }
-     
-    pub fn clear_markers(&mut self, cx: &mut Cx, storage: &mut AppStorage) {
+    
+    pub fn clear_markers(&mut self, cx: &mut Cx, storage: &mut MakepadStorage) {
         for atb in &mut storage.text_buffers {
             if atb.text_buffer.markers.search_cursors.len()>0 {
                 cx.send_signal(atb.text_buffer.signal, TextBuffer::status_search_update());
@@ -110,12 +110,12 @@ impl SearchIndex {
         }
     }
     
-    pub fn search(&mut self, what: &str, first_tbid:AppTextBufferId, cx: &mut Cx, storage: &mut AppStorage) -> Vec<SearchResult> {
+    pub fn search(&mut self, what: &str, first_tbid: MakepadTextBufferId, cx: &mut Cx, makepad_storage: &mut MakepadStorage) -> Vec<SearchResult> {
         let mut out = Vec::new();
         
-        self.clear_markers(cx, storage);
+        self.clear_markers(cx, makepad_storage);
         
-        self.identifiers.search(what, first_tbid, storage, &mut out);
+        self.identifiers.search(what, first_tbid, makepad_storage, &mut out);
         
         // sort it
         out.sort_by( | a, b | {
@@ -128,9 +128,9 @@ impl SearchIndex {
                 return tb
             }
             return prio
-        }); 
+        });
         
-        for atb in &mut storage.text_buffers {
+        for atb in &mut makepad_storage.text_buffers {
             atb.text_buffer.markers.search_cursors.sort_by( | a, b | {
                 a.tail.cmp(&b.tail)
             });
@@ -138,15 +138,15 @@ impl SearchIndex {
                 cx.send_signal(atb.text_buffer.signal, TextBuffer::status_search_update());
             }
         }
-
-        out 
+        
+        out
     }
 }
 
 
 #[derive(Clone, Default)]
 pub struct SearchResult {
-    pub text_buffer_id: AppTextBufferId,
+    pub text_buffer_id: MakepadTextBufferId,
     pub prio: u16,
     pub token: u32,
 }
@@ -162,7 +162,7 @@ pub struct TextIndexNode {
     stem: [char; 6],
     used: usize,
     map: HashMap<char, usize>,
-    end: HashMap<(AppTextBufferId, u32), TextIndexEntry>
+    end: HashMap<(MakepadTextBufferId, u32), TextIndexEntry>
 }
 
 #[derive(Clone)]
@@ -178,7 +178,7 @@ impl TextIndex {
         }
     }
     
-    pub fn write(&mut self, what: &[char], text_buffer_id: AppTextBufferId, mut_id: u16, prio: u16, token: u32) {
+    pub fn write(&mut self, what: &[char], text_buffer_id: MakepadTextBufferId, mut_id: u16, prio: u16, token: u32) {
         let mut o = 0;
         let mut id = 0;
         loop {
@@ -239,7 +239,7 @@ impl TextIndex {
         self.nodes[id].end.insert((text_buffer_id, token), TextIndexEntry {mut_id, prio});
     }
     
-    pub fn _write_str(&mut self, what: &str, text_buffer_id: AppTextBufferId, mut_id: u16, prio: u16, token: u32) {
+    pub fn _write_str(&mut self, what: &str, text_buffer_id: MakepadTextBufferId, mut_id: u16, prio: u16, token: u32) {
         let mut whatv = Vec::new();
         for c in what.chars() {
             whatv.push(c);
@@ -247,7 +247,13 @@ impl TextIndex {
         self.write(&whatv, text_buffer_id, mut_id, prio, token);
     }
     
-    pub fn search(&mut self, what: &str, first_tbid:AppTextBufferId, storage: &mut AppStorage, out: &mut Vec<SearchResult>) {
+    pub fn search(
+        &mut self,
+        what: &str,
+        first_tbid: MakepadTextBufferId,
+        makepad_storage: &mut MakepadStorage,
+        out: &mut Vec<SearchResult>
+    ) {
         // ok so if i type a beginning of a word, i'd want all the endpoints
         
         let mut node_id = 0;
@@ -283,26 +289,26 @@ impl TextIndex {
         
         let mut nexts = Vec::new();
         let mut cleanup = Vec::new();
-
-        loop { 
+        
+        loop {
             for (_key, next) in &self.nodes[node_id].map {
                 nexts.push(*next);
             }
             cleanup.truncate(0);
             for ((text_buffer_id, token), entry) in &self.nodes[node_id].end {
-                let tb = &mut storage.text_buffers[text_buffer_id.as_index()].text_buffer;
+                let tb = &mut makepad_storage.text_buffers[text_buffer_id.as_index()].text_buffer;
                 if (tb.mutation_id & 0xffff) as u16 == entry.mut_id {
                     out.push(SearchResult {
                         text_buffer_id: *text_buffer_id,
                         token: *token,
-                        prio: if entry.prio == 1{
-                            if *text_buffer_id == first_tbid{
+                        prio: if entry.prio == 1 {
+                            if *text_buffer_id == first_tbid {
                                 0
                             }
-                            else{
+                            else {
                                 1
                             }
-                        }else{entry.prio}
+                        }else {entry.prio}
                         
                     });
                     // lets output a result cursor int he textbuffer

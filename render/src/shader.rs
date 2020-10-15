@@ -13,7 +13,7 @@ pub enum ShaderCompileResult{
 pub struct PropDef {
     pub name: String,
     pub ty: Ty,
-    pub live_id: LiveId,
+    pub live_item_id: LiveItemId,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -52,7 +52,7 @@ impl RectInstanceProps {
 #[derive(Debug, Clone)]
 pub struct InstanceProp {
     pub name: String,
-    pub live_id: LiveId,
+    pub live_item_id: LiveItemId,
     pub ty: Ty,
     pub offset: usize,
     pub slots: usize
@@ -67,7 +67,7 @@ pub struct InstanceProps {
 #[derive(Debug, Clone)]
 pub struct UniformProp {
     pub name: String,
-    pub live_id: LiveId,
+    pub live_item_id: LiveItemId,
     pub ty: Ty,
     pub offset: usize,
     pub slots: usize
@@ -122,7 +122,7 @@ impl InstanceProps {
         for prop in in_props {
             let slots = prop.ty.size();
             out_props.push(InstanceProp {
-                live_id: prop.live_id,
+                live_item_id: prop.live_item_id,
                 ty: prop.ty.clone(),
                 name: prop.name.clone(),
                 offset: offset,
@@ -152,7 +152,7 @@ impl UniformProps {
                 panic!("Please re-order uniform {} to be size-2 aligned", prop.name);
             }
             out_props.push(UniformProp {
-                live_id: prop.live_id,
+                live_item_id: prop.live_item_id,
                 ty: prop.ty.clone(),
                 name: prop.name.clone(),
                 offset: offset,
@@ -215,7 +215,7 @@ impl CxShaderMapping {
                     let prop_def = PropDef {
                         name: decl.ident.to_string(),
                         ty: decl.ty_expr.ty.borrow().clone().unwrap(),
-                        live_id: decl.qualified_ident_path.to_live_id()
+                        live_item_id: decl.qualified_ident_path.to_live_item_id()
                     };
                     geometries.push(prop_def);
                 }
@@ -223,7 +223,7 @@ impl CxShaderMapping {
                     let prop_def = PropDef {
                         name: decl.ident.to_string(),
                         ty: decl.ty_expr.ty.borrow().clone().unwrap(),
-                        live_id: decl.qualified_ident_path.to_live_id()
+                        live_item_id: decl.qualified_ident_path.to_live_item_id()
                     };
                     instances.push(prop_def);
                 }
@@ -231,7 +231,7 @@ impl CxShaderMapping {
                     let prop_def = PropDef {
                         name: decl.ident.to_string(),
                         ty: decl.ty_expr.ty.borrow().clone().unwrap(),
-                        live_id: decl.qualified_ident_path.to_live_id()
+                        live_item_id: decl.qualified_ident_path.to_live_item_id()
                     };
                     match decl.block_ident {
                         Some(bi) if bi == Ident::new("draw") => {
@@ -253,7 +253,7 @@ impl CxShaderMapping {
                     let prop_def = PropDef {
                         name: decl.ident.to_string(),
                         ty: decl.ty_expr.ty.borrow().clone().unwrap(),
-                        live_id: decl.qualified_ident_path.to_live_id()
+                        live_item_id: decl.qualified_ident_path.to_live_item_id()
                     };
                     textures.push(prop_def);
                 }
@@ -269,7 +269,7 @@ impl CxShaderMapping {
                     out
                 },
                 ty: ty.clone(),
-                live_id: qualified_ident_path.to_live_id()
+                live_item_id: qualified_ident_path.to_live_item_id()
             };
             live_uniforms.push(prop_def)
         }
@@ -307,7 +307,7 @@ impl CxShaderMapping {
         for prop in &self.live_uniform_props.props {
             match prop.ty {
                 Ty::Vec4 => { // color or anim
-                    let color = live_styles.get_color(prop.live_id, &prop.name);
+                    let color = live_styles.get_color(prop.live_item_id, &prop.name);
                     let o = prop.offset;
                     self.live_uniforms_buf[o + 0] = color.r;
                     self.live_uniforms_buf[o + 1] = color.g;
@@ -315,7 +315,7 @@ impl CxShaderMapping {
                     self.live_uniforms_buf[o + 3] = color.a;
                 },
                 Ty::Float => { // float or anim
-                    let float = live_styles.get_float(prop.live_id, &prop.name);
+                    let float = live_styles.get_float(prop.live_item_id, &prop.name);
                     let o = prop.offset;
                     self.live_uniforms_buf[o] = float;
                 },

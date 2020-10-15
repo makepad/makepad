@@ -61,7 +61,7 @@ impl Splitter {
     
     pub fn style(cx: &mut Cx) {
         
-        live!(cx, r#"
+        live_body!(cx, r#"
             
             self::color_bg: #19;
             self::color_over: #5;
@@ -282,7 +282,7 @@ impl Splitter {
         let rect = cx.get_turtle_rect();
         let origin = cx.get_turtle_origin();
         self.bg.shader = live_shader!(cx, self::shader_bg);
-        self.bg.color = self.animator.last_color(cx, live_id!(makepad_render::quad::shader::color));
+        self.bg.color = self.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
         match self.axis {
             Axis::Horizontal => {
                 cx.set_turtle_pos(Vec2 {x: origin.x, y: origin.y + self._calc_pos});

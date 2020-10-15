@@ -4,7 +4,7 @@ use makepad_widget::*;
 use makepad_microserde::*;
 use std::collections::HashMap;
 
-use crate::appstorage::*;
+use crate::makepadstorage::*;
 use crate::fileeditor::*;
 use crate::filetree::*;
 use crate::filepanel::*;
@@ -32,7 +32,7 @@ pub enum Panel {
 }
 
 #[derive(Clone)]
-pub struct AppWindow {
+pub struct MakepadWindow {
     pub desktop_window: DesktopWindow,
     pub file_panel: FilePanel,
     pub home_page: HomePage,
@@ -47,7 +47,7 @@ pub struct AppWindow {
 }
 
 #[derive(Clone, SerRon, DeRon)]
-pub struct AppWindowState {
+pub struct MakepadWindowState {
     pub open_folders: Vec<String>,
     pub window_position: Vec2,
     pub window_inner_size: Vec2,
@@ -55,11 +55,11 @@ pub struct AppWindowState {
 }
 
 #[derive(Default, Clone, SerRon, DeRon)]
-pub struct AppState {
-    pub windows: Vec<AppWindowState>
+pub struct MakepadState {
+    pub windows: Vec<MakepadWindowState>
 }
 
-impl AppWindow {
+impl MakepadWindow {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             desktop_window: DesktopWindow {
@@ -85,7 +85,15 @@ impl AppWindow {
         }
     }
     
-    pub fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, state: &mut AppState, storage: &mut AppStorage, build_manager: &mut BuildManager) {
+    pub fn handle_app_window(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        window_index: usize,
+        makepad_state: &mut MakepadState,
+        makepad_storage: &mut MakepadStorage,
+        build_manager: &mut BuildManager
+    ) {
         match self.desktop_window.handle_desktop_window(cx, event) {
             DesktopWindowEvent::EventForOtherWindow => {
                 return
@@ -94,11 +102,11 @@ impl AppWindow {
                 return
             }
             DesktopWindowEvent::WindowGeomChange(wc) => {
-                if !storage.app_state_file_read.is_pending() {
+                if !makepad_storage.app_state_file_read.is_pending() {
                     // store our new window geom
-                    state.windows[window_index].window_position = wc.new_geom.position;
-                    state.windows[window_index].window_inner_size = wc.new_geom.inner_size;
-                    storage.save_state(cx, state);
+                    makepad_state.windows[window_index].window_position = wc.new_geom.position;
+                    makepad_state.windows[window_index].window_inner_size = wc.new_geom.inner_size;
+                    makepad_storage.save_state(cx, makepad_state);
                 }
                 if wc.old_geom.xr_is_presenting && !wc.new_geom.xr_is_presenting {
                     self.desktop_window.main_view.set_view_transform(cx, &Mat4::identity());
@@ -110,15 +118,29 @@ impl AppWindow {
         match event {
             Event::XRUpdate(xu) => { // handle all VR updates here.
                 let mut events = self.xr_control.handle_xr_control(cx, xu, &self.desktop_window.main_view);
-                for event in &mut events{
-                    match event{
-                        Event::FingerHover(fe)=>{
+                for event in &mut events {
+                    match event {
+                        Event::FingerHover(fe) => {
                             let digit = fe.digit;
-                            self.handle_app_window(cx, event, window_index, state, storage, build_manager);
+                            self.handle_app_window(
+                                cx,
+                                event,
+                                window_index,
+                                makepad_state,
+                                makepad_storage,
+                                build_manager
+                            );
                             cx.fingers[digit]._over_last = cx.fingers[digit].over_last;
                         },
-                        _=>{
-                            self.handle_app_window(cx, event, window_index, state, storage, build_manager);
+                        _ => {
+                            self.handle_app_window(
+                                cx,
+                                event,
+                                window_index,
+                                makepad_state,
+                                makepad_storage,
+                                build_manager
+                            );
                         }
                     }
                 }
@@ -126,7 +148,7 @@ impl AppWindow {
             Event::KeyDown(ke) => match ke.key_code {
                 KeyCode::Backtick => if ke.modifiers.logo || ke.modifiers.control {
                     if build_manager.active_builds.len() == 0 {
-                        build_manager.restart_build(cx, storage);
+                        build_manager.restart_build(cx, makepad_storage);
                     }
                     let mut clear = true;
                     for ab in &build_manager.active_builds {
@@ -138,19 +160,19 @@ impl AppWindow {
                         build_manager.tail_log_items = true;
                         build_manager.log_items.truncate(0);
                     }
-                    build_manager.artifact_run(storage);
-                    self.show_log_tab(cx, window_index, state);
+                    build_manager.artifact_run(makepad_storage);
+                    self.show_log_tab(cx, window_index, makepad_state);
                 }
                 _ => ()
             }
             _ => ()
         }
         
-        if self.search_results.handle_search_input(cx, event, &mut build_manager.search_index, storage) {
-            self.show_search_tab(cx, window_index, state);
+        if self.search_results.handle_search_input(cx, event, &mut build_manager.search_index, makepad_storage) {
+            self.show_search_tab(cx, window_index, makepad_state);
         }
         
-        let dock_items = &mut state.windows[window_index].dock_items;
+        let dock_items = &mut makepad_state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         let mut file_tree_event = FileTreeEvent::None;
         //let mut text_editor_event = TextEditorEvent::None;
@@ -162,13 +184,13 @@ impl AppWindow {
         while let Some(item) = dock_walker.walk_handle_dock(cx, event) {
             match item {
                 Panel::LogList => {
-                    match self.log_list.handle_log_list(cx, event, storage, build_manager) {
+                    match self.log_list.handle_log_list(cx, event, makepad_storage, build_manager) {
                         LogListEvent::SelectLocMessage {loc_message, jump_to_offset} => {
                             // just make it open an editor
                             if loc_message.path.len()>0 {
                                 // ok so. lets lookup the path in our remap list
                                 //println!("TRYING TO SELECT FILE {} ")
-                                file_tree_event = FileTreeEvent::SelectFile {path: storage.remap_sync_path(&loc_message.path)};
+                                file_tree_event = FileTreeEvent::SelectFile {path: makepad_storage.remap_sync_path(&loc_message.path)};
                             }
                             self.item_display.display_message(cx, &loc_message);
                             set_last_cursor = Some((jump_to_offset, jump_to_offset));
@@ -188,13 +210,13 @@ impl AppWindow {
                     self.item_display.handle_item_display(cx, event);
                 }
                 Panel::SearchResults => {
-                    match self.search_results.handle_search_results(cx, event, &mut build_manager.search_index, storage) {
+                    match self.search_results.handle_search_results(cx, event, &mut build_manager.search_index, makepad_storage) {
                         SearchResultEvent::DisplayFile {text_buffer_id, cursor} => {
                             set_last_cursor = Some(cursor);
                             do_display_rust_file = Some(text_buffer_id);
                         },
                         SearchResultEvent::OpenFile {text_buffer_id, cursor} => {
-                            let path = storage.text_buffer_id_to_path.get(&text_buffer_id).expect("Path not found").clone();
+                            let path = makepad_storage.text_buffer_id_to_path.get(&text_buffer_id).expect("Path not found").clone();
                             file_tree_event = FileTreeEvent::SelectFile {path: path};
                             set_last_cursor = Some(cursor);
                         },
@@ -202,7 +224,7 @@ impl AppWindow {
                     }
                 }
                 Panel::Keyboard => {
-                    self.keyboard.handle_keyboard(cx, event, storage);
+                    self.keyboard.handle_keyboard(cx, event, makepad_storage);
                 }
                 Panel::FileEditorTarget => {
                     self.home_page.handle_home_page(cx, event);
@@ -213,25 +235,25 @@ impl AppWindow {
                 Panel::FileEditor {path, scroll_pos, editor_id} => {
                     if let Some(file_editor) = &mut self.file_editors.editors.get_mut(editor_id) {
                         
-                        let atb = storage.text_buffer_from_path(cx, path);
+                        let mtb = makepad_storage.text_buffer_from_path(cx, path);
                         
-                        match file_editor.handle_file_editor(cx, event, atb, Some(&mut build_manager.search_index)) {
+                        match file_editor.handle_file_editor(cx, event, mtb, Some(&mut build_manager.search_index)) {
                             TextEditorEvent::Search(search) => {
-                                do_search = Some((Some(search), atb.text_buffer_id, true, false));
+                                do_search = Some((Some(search), mtb.text_buffer_id, true, false));
                             }
                             TextEditorEvent::Decl(search) => {
-                                do_search = Some((Some(search), atb.text_buffer_id, false, false));
+                                do_search = Some((Some(search), mtb.text_buffer_id, false, false));
                             }
                             TextEditorEvent::Escape => {
-                                do_search = Some((Some("".to_string()), atb.text_buffer_id, false, true));
+                                do_search = Some((Some("".to_string()), mtb.text_buffer_id, false, true));
                             }
                             TextEditorEvent::Change => {
-                                do_search = Some((None, AppTextBufferId(0), false, false));
+                                do_search = Some((None, MakepadTextBufferId(0), false, false));
                             }
                             TextEditorEvent::LagChange => {
-                                storage.text_buffer_file_write(cx, path);
-                                if storage.settings.build_on_save {
-                                    build_manager.restart_build(cx, storage);
+                                makepad_storage.text_buffer_file_write(cx, path);
+                                if makepad_storage.settings.build_on_save {
+                                    build_manager.restart_build(cx, makepad_storage);
                                 }
                             },
                             _ => ()
@@ -247,12 +269,12 @@ impl AppWindow {
             if let Some(search) = search {
                 self.search_results.set_search_input_value(cx, &search, first_tbid, focus);
             }
-            let first_result = self.search_results.do_search(cx, &mut build_manager.search_index, storage);
+            let first_result = self.search_results.do_search(cx, &mut build_manager.search_index, makepad_storage);
             if escape {
-                self.show_files_tab(cx, window_index, state);
+                self.show_files_tab(cx, window_index, makepad_state);
             }
             if focus {
-                self.show_search_tab(cx, window_index, state);
+                self.show_search_tab(cx, window_index, makepad_state);
             }
             else {
                 if let Some((tbid, cursor)) = first_result {
@@ -263,14 +285,14 @@ impl AppWindow {
         }
         
         if show_item_display_tab {
-            self.show_item_display_tab(cx, window_index, state);
+            self.show_item_display_tab(cx, window_index, makepad_state);
         }
         
         if let Some(tbid) = do_display_rust_file {
-            let path = storage.text_buffer_id_to_path.get(&tbid).unwrap();
-            if self.open_preview_editor_tab(cx, window_index, state, &path, set_last_cursor) {
-                storage.save_state(cx, state);
-                self.ensure_unique_tab_title_for_file_editors(cx, window_index, state);
+            let path = makepad_storage.text_buffer_id_to_path.get(&tbid).unwrap();
+            if self.open_preview_editor_tab(cx, window_index, makepad_state, &path, set_last_cursor) {
+                makepad_storage.save_state(cx, makepad_state);
+                self.ensure_unique_tab_title_for_file_editors(cx, window_index, makepad_state);
             }
         }
         
@@ -291,30 +313,30 @@ impl AppWindow {
                     tabs.push(self.new_file_editor_tab(cx, &path, None, false, true));
                 }
                 self.dock.dock_drag_end(cx, fe, tabs);
-                self.ensure_unique_tab_title_for_file_editors(cx, window_index, state);
+                self.ensure_unique_tab_title_for_file_editors(cx, window_index, makepad_state);
             }
             FileTreeEvent::SelectFile {path} => {
                 // search for the tabcontrol with the maximum amount of editors
-                if self.focus_or_new_editor(cx, window_index, state, &path, set_last_cursor) {
-                    storage.save_state(cx, state);
-                    self.ensure_unique_tab_title_for_file_editors(cx, window_index, state);
+                if self.focus_or_new_editor(cx, window_index, makepad_state, &path, set_last_cursor) {
+                    makepad_storage.save_state(cx, makepad_state);
+                    self.ensure_unique_tab_title_for_file_editors(cx, window_index, makepad_state);
                 }
             }
             FileTreeEvent::SelectFolder {..} => {
-                state.windows[window_index].open_folders = self.file_panel.file_tree.save_open_folders();
-                storage.save_state(cx, state);
+                makepad_state.windows[window_index].open_folders = self.file_panel.file_tree.save_open_folders();
+                makepad_storage.save_state(cx, makepad_state);
             }
             _ => {}
         }
         
-        let dock_items = &mut state.windows[window_index].dock_items;
+        let dock_items = &mut makepad_state.windows[window_index].dock_items;
         match self.dock.handle_dock(cx, event, dock_items) {
             DockEvent::DockChanged => { // thats a bit bland event. lets let the thing know which file closed
-                storage.save_state(cx, state);
+                makepad_storage.save_state(cx, makepad_state);
             }
             DockEvent::DockTabClosed => {
-                self.ensure_unique_tab_title_for_file_editors(cx, window_index, state);
-                storage.save_state(cx, state);
+                self.ensure_unique_tab_title_for_file_editors(cx, window_index, makepad_state);
+                makepad_storage.save_state(cx, makepad_state);
             }
             DockEvent::DockTabCloned {tab_control_id, tab_id} => {
                 // lets change up our editor_id
@@ -338,7 +360,7 @@ impl AppWindow {
                         _ => ()
                     }
                 }
-                storage.save_state(cx, state);
+                makepad_storage.save_state(cx, makepad_state);
             },
             _ => ()
         }
@@ -349,8 +371,8 @@ impl AppWindow {
         cx: &mut Cx,
         menu: &Menu,
         window_index: usize,
-        state: &mut AppState,
-        storage: &mut AppStorage,
+        makepad_state: &mut MakepadState,
+        makepad_storage: &mut MakepadStorage,
         build_manager: &mut BuildManager
     ) {
         
@@ -359,7 +381,7 @@ impl AppWindow {
         
         self.dock.draw_dock(cx);
         
-        let dock_items = &mut state.windows[window_index].dock_items;
+        let dock_items = &mut makepad_state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         let file_panel = &mut self.file_panel;
         let search_results = &mut self.search_results;
@@ -392,7 +414,7 @@ impl AppWindow {
                     self.log_list.draw_log_list(cx, build_manager);
                 }
                 Panel::SearchResults => {
-                    search_results.draw_search_results(cx, storage);
+                    search_results.draw_search_results(cx, makepad_storage);
                 }
                 Panel::ItemDisplay => {
                     item_display.draw_item_display(cx);
@@ -407,7 +429,7 @@ impl AppWindow {
                     file_panel.draw_file_panel(cx);
                 }
                 Panel::FileEditor {path, scroll_pos, editor_id} => {
-                    let text_buffer = storage.text_buffer_from_path(cx, path);
+                    let text_buffer = makepad_storage.text_buffer_from_path(cx, path);
                     let (file_editor, is_new) = self.file_editors.get_file_editor_for_path(path, *editor_id);
                     if is_new {
                         file_editor.set_scroll_pos_on_load(*scroll_pos);
@@ -416,17 +438,17 @@ impl AppWindow {
                 }
             }
         }
-        if self.desktop_window.window.xr_is_presenting(cx){
+        if self.desktop_window.window.xr_is_presenting(cx) {
             self.xr_control.draw_xr_control(cx);
         }
         self.desktop_window.end_desktop_window(cx);
     }
     
-    pub fn ensure_unique_tab_title_for_file_editors(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState) {
+    pub fn ensure_unique_tab_title_for_file_editors(&mut self, cx: &mut Cx, window_index: usize, makepad_state: &mut MakepadState) {
         // we walk through the dock collecting tab titles, if we run into a collision
         // we need to find the shortest uniqueness
-        let mut collisions: HashMap<String, Vec<(String, usize, usize)>> = HashMap::new();
-        let dock_items = &mut state.windows[window_index].dock_items;
+        let mut collisions: HashMap<String, Vec<(String, usize, usize) >> = HashMap::new();
+        let dock_items = &mut makepad_state.windows[window_index].dock_items;
         // enumerate dockspace and collect all names
         let mut dock_walker = self.dock.walker(dock_items);
         while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
@@ -519,8 +541,8 @@ impl AppWindow {
         }
     }
     
-    pub fn show_log_tab(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState) {
-        let mut dock_walker = self.dock.walker(&mut state.windows[window_index].dock_items);
+    pub fn show_log_tab(&mut self, cx: &mut Cx, window_index: usize, makepad_state: &mut MakepadState) {
+        let mut dock_walker = self.dock.walker(&mut makepad_state.windows[window_index].dock_items);
         while let Some((_ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
             if let DockItem::TabControl {current, tabs, ..} = dock_item {
                 for (id, tab) in tabs.iter().enumerate() {
@@ -535,8 +557,8 @@ impl AppWindow {
         }
     }
     
-    pub fn show_files_tab(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState) {
-        let mut dock_walker = self.dock.walker(&mut state.windows[window_index].dock_items);
+    pub fn show_files_tab(&mut self, cx: &mut Cx, window_index: usize, makepad_state: &mut MakepadState) {
+        let mut dock_walker = self.dock.walker(&mut makepad_state.windows[window_index].dock_items);
         while let Some((_ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
             if let DockItem::TabControl {current, tabs, ..} = dock_item {
                 for (id, tab) in tabs.iter().enumerate() {
@@ -551,8 +573,8 @@ impl AppWindow {
         }
     }
     
-    pub fn show_search_tab(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState) {
-        let mut dock_walker = self.dock.walker(&mut state.windows[window_index].dock_items);
+    pub fn show_search_tab(&mut self, cx: &mut Cx, window_index: usize, makepad_state: &mut MakepadState) {
+        let mut dock_walker = self.dock.walker(&mut makepad_state.windows[window_index].dock_items);
         while let Some((_ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
             if let DockItem::TabControl {current, tabs, ..} = dock_item {
                 for (id, tab) in tabs.iter().enumerate() {
@@ -567,8 +589,13 @@ impl AppWindow {
         }
     }
     
-    pub fn show_item_display_tab(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState) {
-        let mut dock_walker = self.dock.walker(&mut state.windows[window_index].dock_items);
+    pub fn show_item_display_tab(
+        &mut self,
+        cx: &mut Cx,
+        window_index: usize,
+        makepad_state: &mut MakepadState
+    ) {
+        let mut dock_walker = self.dock.walker(&mut makepad_state.windows[window_index].dock_items);
         while let Some((_ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
             if let DockItem::TabControl {current, tabs, ..} = dock_item {
                 for (id, tab) in tabs.iter().enumerate() {
@@ -583,9 +610,16 @@ impl AppWindow {
         }
     }
     
-    pub fn focus_or_new_editor(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState, file_path: &str, set_last_cursor: Option<(usize, usize)>) -> bool {
+    pub fn focus_or_new_editor(
+        &mut self,
+        cx: &mut Cx,
+        window_index: usize,
+        makepad_state: &mut MakepadState,
+        file_path: &str,
+        set_last_cursor: Option<(usize, usize)>
+    ) -> bool {
         let mut target_ctrl_id = None;
-        let mut dock_walker = self.dock.walker(&mut state.windows[window_index].dock_items);
+        let mut dock_walker = self.dock.walker(&mut makepad_state.windows[window_index].dock_items);
         while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
             if let DockItem::TabControl {current, tabs, ..} = dock_item {
                 let mut item_ctrl_id = None;
@@ -624,7 +658,7 @@ impl AppWindow {
         }
         if let Some(target_ctrl_id) = target_ctrl_id { // open a new one
             let new_tab = self.new_file_editor_tab(cx, file_path, set_last_cursor, false, true);
-            let mut dock_walker = self.dock.walker(&mut state.windows[window_index].dock_items);
+            let mut dock_walker = self.dock.walker(&mut makepad_state.windows[window_index].dock_items);
             while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
                 if ctrl_id == target_ctrl_id {
                     if let DockItem::TabControl {current, tabs, ..} = dock_item {
@@ -639,11 +673,11 @@ impl AppWindow {
         return false
     }
     
-    pub fn open_preview_editor_tab(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState, file_path: &str, set_last_cursor: Option<(usize, usize)>) -> bool {
+    pub fn open_preview_editor_tab(&mut self, cx: &mut Cx, window_index: usize, makepad_state: &mut MakepadState, file_path: &str, set_last_cursor: Option<(usize, usize)>) -> bool {
         
         let mut target_ctrl_id = None;
         let mut target_tab_after = 0;
-        let mut dock_walker = self.dock.walker(&mut state.windows[window_index].dock_items);
+        let mut dock_walker = self.dock.walker(&mut makepad_state.windows[window_index].dock_items);
         while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
             if let DockItem::TabControl {tabs, ..} = dock_item {
                 for (id, tab) in tabs.iter().enumerate() {
@@ -658,7 +692,7 @@ impl AppWindow {
             }
         }
         if let Some(target_ctrl_id) = target_ctrl_id { // open a new one
-            let mut dock_walker = self.dock.walker(&mut state.windows[window_index].dock_items);
+            let mut dock_walker = self.dock.walker(&mut makepad_state.windows[window_index].dock_items);
             while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
                 if ctrl_id == target_ctrl_id {
                     if let DockItem::TabControl {current, tabs, ..} = dock_item {
@@ -688,7 +722,7 @@ impl AppWindow {
         
         if let Some(target_ctrl_id) = target_ctrl_id { // open a new one
             let new_tab = self.new_file_editor_tab(cx, file_path, set_last_cursor, true, false);
-            let mut dock_walker = self.dock.walker(&mut state.windows[window_index].dock_items);
+            let mut dock_walker = self.dock.walker(&mut makepad_state.windows[window_index].dock_items);
             while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
                 if ctrl_id == target_ctrl_id {
                     if let DockItem::TabControl {current, tabs, ..} = dock_item {

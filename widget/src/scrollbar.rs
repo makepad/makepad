@@ -65,7 +65,7 @@ impl ScrollBar {
     
     pub fn style(cx: &mut Cx) {
         
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::bar_size: 12.0;
             
             self::color_base: #5;
@@ -150,7 +150,7 @@ impl ScrollBar {
     // writes the norm_scroll value into the shader
     pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
         let (norm_scroll, _) = self.get_normalized_scroll_pos();
-        self._bg_area.write_float(cx, live_id!(self::shader_bg::norm_scroll), norm_scroll);
+        self._bg_area.write_float(cx, live_item_id!(self::shader_bg::norm_scroll), norm_scroll);
     }
     
     // turns scroll_pos into an event on this.event
@@ -386,7 +386,7 @@ impl ScrollBar {
     pub fn draw_scroll_bar(&mut self, cx: &mut Cx, axis: Axis, view_area: Area, view_rect: Rect, view_total: Vec2) -> f32 {
         self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
         self.bg.shader = live_shader!(cx, self::shader_bg);
-        self.bg.color = self.animator.last_color(cx, live_id!(makepad_render::quad::shader::color));
+        self.bg.color = self.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
         self._bg_area = Area::Empty;
         self._view_area = view_area;
         self.axis = axis;

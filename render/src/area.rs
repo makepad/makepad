@@ -229,14 +229,14 @@ impl Area{
          }
     }
 
-    pub fn get_instance_offset(&self, cx:&Cx, live_id:LiveId, ty:Ty)->Option<usize>{
+    pub fn get_instance_offset(&self, cx:&Cx, live_item_id:LiveItemId, ty:Ty)->Option<usize>{
         match self{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
                 let draw_call = &cxview.draw_calls[inst.draw_call_id];
                 let sh = &cx.shaders[draw_call.shader_id];
                 for prop in &sh.mapping.instance_props.props{
-                    if prop.live_id == live_id{
+                    if prop.live_item_id == live_item_id{
                         if prop.ty != ty{
                             panic!("Type wrong of live_id fetch in shader:{}, passed as arg: {}", prop.ty, ty);
                         }
@@ -249,7 +249,7 @@ impl Area{
         None
     }
 
-    pub fn get_user_uniform_offset(&self, cx:&Cx, live_id:LiveId, ty:Ty)->Option<usize>{
+    pub fn get_user_uniform_offset(&self, cx:&Cx, live_item_id:LiveItemId, ty:Ty)->Option<usize>{
         match self{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
@@ -259,7 +259,7 @@ impl Area{
                     if prop.ty != ty{
                         return None
                     }
-                    if prop.live_id == live_id{
+                    if prop.live_item_id == live_item_id{
                         return Some(prop.offset)
                     }
                 }
@@ -346,8 +346,8 @@ impl Area{
         return None;
     }
 
-    pub fn write_float(&self, cx:&mut Cx, live_id:LiveId, value:f32){
-        if let Some(inst_offset) = self.get_instance_offset(cx, live_id, Ty::Float){
+    pub fn write_float(&self, cx:&mut Cx, live_item_id:LiveItemId, value:f32){
+        if let Some(inst_offset) = self.get_instance_offset(cx, live_item_id, Ty::Float){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
@@ -357,8 +357,8 @@ impl Area{
         }
     }
 
-    pub fn read_float(&self, cx:&Cx, live_id:LiveId)->f32{
-        if let Some(inst_offset) = self.get_instance_offset(cx, live_id, Ty::Float){
+    pub fn read_float(&self, cx:&Cx, live_item_id:LiveItemId)->f32{
+        if let Some(inst_offset) = self.get_instance_offset(cx, live_item_id, Ty::Float){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
                 return read.buffer[read.offset + inst_offset]
@@ -367,8 +367,8 @@ impl Area{
         0.0
     }
 
-   pub fn write_vec2(&self, cx:&mut Cx, live_id:LiveId, value:Vec2){
-        if let Some(inst_offset) = self.get_instance_offset(cx, live_id, Ty::Vec2){
+   pub fn write_vec2(&self, cx:&mut Cx, live_item_id:LiveItemId, value:Vec2){
+        if let Some(inst_offset) = self.get_instance_offset(cx, live_item_id, Ty::Vec2){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
@@ -379,8 +379,8 @@ impl Area{
         }
    }
 
-    pub fn read_vec2(&self, cx:&Cx, live_id:LiveId)->Vec2{
-        if let Some(inst_offset) = self.get_instance_offset(cx, live_id, Ty::Vec2){
+    pub fn read_vec2(&self, cx:&Cx, live_item_id:LiveItemId)->Vec2{
+        if let Some(inst_offset) = self.get_instance_offset(cx, live_item_id, Ty::Vec2){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
                 return Vec2{
@@ -392,8 +392,8 @@ impl Area{
         Vec2::default()
     }
 
-   pub fn write_vec3(&self, cx:&mut Cx, live_id:LiveId, value:Vec3){
-        if let Some(inst_offset) = self.get_instance_offset(cx, live_id, Ty::Vec3){
+   pub fn write_vec3(&self, cx:&mut Cx, live_item_id:LiveItemId, value:Vec3){
+        if let Some(inst_offset) = self.get_instance_offset(cx, live_item_id, Ty::Vec3){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
@@ -405,8 +405,8 @@ impl Area{
         }
     }
 
-    pub fn read_vec3(&self, cx:&Cx, live_id:LiveId)->Vec3{
-        if let Some(inst_offset) = self.get_instance_offset(cx, live_id, Ty::Vec3){
+    pub fn read_vec3(&self, cx:&Cx, live_item_id:LiveItemId)->Vec3{
+        if let Some(inst_offset) = self.get_instance_offset(cx, live_item_id, Ty::Vec3){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
                 return Vec3{
@@ -419,8 +419,8 @@ impl Area{
         Vec3::default()
     }
 
-   pub fn write_vec4(&self, cx:&mut Cx, live_id:LiveId, value:Vec4){
-        if let Some(inst_offset) = self.get_instance_offset(cx, live_id, Ty::Vec4){
+   pub fn write_vec4(&self, cx:&mut Cx, live_item_id:LiveItemId, value:Vec4){
+        if let Some(inst_offset) = self.get_instance_offset(cx, live_item_id, Ty::Vec4){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
@@ -433,8 +433,8 @@ impl Area{
         }
    }
 
-    pub fn read_vec4(&self, cx:&Cx, live_id:LiveId)->Vec4{
-        if let Some(inst_offset) = self.get_instance_offset(cx, live_id, Ty::Vec4){
+    pub fn read_vec4(&self, cx:&Cx, live_item_id:LiveItemId)->Vec4{
+        if let Some(inst_offset) = self.get_instance_offset(cx, live_item_id, Ty::Vec4){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
                 return Vec4{
@@ -448,8 +448,8 @@ impl Area{
         Vec4::default()
     }
 
-    pub fn write_color(&self, cx:&mut Cx, live_id:LiveId, value:Color){
-        if let Some(inst_offset) = self.get_instance_offset(cx, live_id, Ty::Vec4){
+    pub fn write_color(&self, cx:&mut Cx, live_item_id:LiveItemId, value:Color){
+        if let Some(inst_offset) = self.get_instance_offset(cx, live_item_id, Ty::Vec4){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
@@ -462,8 +462,8 @@ impl Area{
         }
    }
 
-    pub fn read_color(&self, cx:&Cx, live_id:LiveId)->Color{
-        if let Some(inst_offset) = self.get_instance_offset(cx, live_id, Ty::Vec4){
+    pub fn read_color(&self, cx:&Cx, live_item_id:LiveItemId)->Color{
+        if let Some(inst_offset) = self.get_instance_offset(cx, live_item_id, Ty::Vec4){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
                 return Color{
@@ -477,8 +477,8 @@ impl Area{
         Color::default()
     }
     
-    pub fn write_mat4(&self, cx:&mut Cx, live_id:LiveId, value:&Mat4){
-        if let Some(inst_offset) = self.get_instance_offset(cx, live_id, Ty::Mat4){
+    pub fn write_mat4(&self, cx:&mut Cx, live_item_id:LiveItemId, value:&Mat4){
+        if let Some(inst_offset) = self.get_instance_offset(cx, live_item_id, Ty::Mat4){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
@@ -490,8 +490,8 @@ impl Area{
         }
    }
 
-    pub fn read_mat4(&self, cx:&Cx, live_id:LiveId)->Mat4{
-        if let Some(inst_offset) = self.get_instance_offset(cx, live_id, Ty::Mat4){
+    pub fn read_mat4(&self, cx:&Cx, live_item_id:LiveItemId)->Mat4{
+        if let Some(inst_offset) = self.get_instance_offset(cx, live_item_id, Ty::Mat4){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
                 let mut ret = Mat4::default();
@@ -504,8 +504,8 @@ impl Area{
         Mat4::default()
     }
 
-    pub fn write_uniform_float(&self, cx:&mut Cx, live_id:LiveId, v:f32){
-        if let Some(uni_offset) = self.get_user_uniform_offset(cx, live_id, Ty::Float){
+    pub fn write_uniform_float(&self, cx:&mut Cx, live_item_id:LiveItemId, v:f32){
+        if let Some(uni_offset) = self.get_user_uniform_offset(cx, live_item_id, Ty::Float){
             let write = self.get_user_uniforms_write_ref(cx);
             if let Some(write) = write{
                 while uni_offset >= write.len(){
@@ -580,8 +580,8 @@ impl InstanceArea{
         draw_call.instance.extend_from_slice(data);
     }
 
-    pub fn push_last_float(&self, cx:&mut Cx, animator:&Animator, ident:LiveId)->f32{
-        let ret = animator.last_float(cx, ident);
+    pub fn push_last_float(&self, cx:&mut Cx, animator:&Animator, live_item_id:LiveItemId)->f32{
+        let ret = animator.last_float(cx, live_item_id);
         self.push_float(cx, ret);
         ret
     }
@@ -593,8 +593,8 @@ impl InstanceArea{
         draw_call.instance.push(value);
     }
 
-    pub fn push_last_vec2(&self, cx:&mut Cx, animator:&Animator, ident:LiveId)->Vec2{
-        let ret =  animator.last_vec2(cx, ident);
+    pub fn push_last_vec2(&self, cx:&mut Cx, animator:&Animator, live_item_id:LiveItemId)->Vec2{
+        let ret =  animator.last_vec2(cx, live_item_id);
         self.push_vec2(cx, ret);
         ret
     }
@@ -607,8 +607,8 @@ impl InstanceArea{
         draw_call.instance.push(value.y);
     }
 
-    pub fn push_last_vec3(&self, cx:&mut Cx, animator:&Animator, ident:LiveId)->Vec3{
-        let ret = animator.last_vec3(cx, ident);
+    pub fn push_last_vec3(&self, cx:&mut Cx, animator:&Animator, live_item_id:LiveItemId)->Vec3{
+        let ret = animator.last_vec3(cx, live_item_id);
         self.push_vec3(cx, ret);
         ret
     }
@@ -621,8 +621,8 @@ impl InstanceArea{
         draw_call.instance.push(value.z);
     }
 
-    pub fn push_last_vec4(&self, cx:&mut Cx, animator:&Animator, ident:LiveId)->Vec4{
-        let ret = animator.last_vec4(cx, ident);
+    pub fn push_last_vec4(&self, cx:&mut Cx, animator:&Animator, live_item_id:LiveItemId)->Vec4{
+        let ret = animator.last_vec4(cx, live_item_id);
         self.push_vec4(cx, ret);
         ret
     }
@@ -636,8 +636,8 @@ impl InstanceArea{
         draw_call.instance.push(value.w);
     }
 
-    pub fn push_last_color(&self, cx:&mut Cx, animator:&Animator, ident:LiveId)->Color{
-        let ret = animator.last_color(cx, ident);
+    pub fn push_last_color(&self, cx:&mut Cx, animator:&Animator, live_item_id:LiveItemId)->Color{
+        let ret = animator.last_color(cx, live_item_id);
         self.push_color(cx, ret);
         ret
     }

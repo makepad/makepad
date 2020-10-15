@@ -6,7 +6,7 @@ use crate::lit::{Lit};
 use crate::colors::Color;
 use crate::math::*;
 use crate::livestyles::{LiveStyles, LiveStyle};
-use crate::livetypes::{Font, LiveId, Play, Anim, Ease, Track};
+use crate::livetypes::{Font, LiveItemId, Play, Anim, Ease, Track};
 use std::iter::Cloned;
 use std::slice::Iter;
 
@@ -281,9 +281,9 @@ macro_rules!impl_de_tok_for_float {
                     Token::Ident(_) => { // try to parse ident path, and read from styles
                         let ident_path = p.parse_ident_path() ?;
                         let qualified_ident_path = p.qualify_ident_path(&ident_path);
-                        let live_id = qualified_ident_path.to_live_id();
+                        let live_item_id = qualified_ident_path.to_live_item_id();
                         //p.register_dependency(live_id);
-                        if let Some(float) = p.get_live_styles().floats.get(&live_id) {
+                        if let Some(float) = p.get_live_styles().floats.get(&live_item_id) {
                             return Ok(float.value as $ ty);
                         }
                         return Err(p.error(format!("Float {} not found", ident_path)));
@@ -423,8 +423,8 @@ impl DeTok for Color {
             Token::Ident(_) => { // try to parse ident path, and read from styles
                 let ident_path = p.parse_ident_path() ?;
                 let qualified_ident_path = p.qualify_ident_path(&ident_path);
-                let live_id = qualified_ident_path.to_live_id();
-                if let Some(color) = p.get_live_styles().colors.get(&live_id) {
+                let live_item_id = qualified_ident_path.to_live_item_id();
+                if let Some(color) = p.get_live_styles().colors.get(&live_item_id) {
                     return Ok(*color);
                 }
                 return Err(p.error(format!("Color {} not found", ident_path)));
@@ -488,8 +488,8 @@ fn parse_track(p: &mut dyn DeTokParser, track: &mut Track) -> Result<(), LiveErr
                     p.expect_token(Token::Colon) ?;
                     let ident_path = p.parse_ident_path() ?;
                     let qualified_ident_path = p.qualify_ident_path(&ident_path);
-                    let live_id = qualified_ident_path.to_live_id();
-                    track.set_live_id(live_id);
+                    let live_item_id = qualified_ident_path.to_live_item_id();
+                    track.set_live_item_id(live_item_id);
                 }
                 else if ident == Ident::new("keys") {
                     p.skip_token();
@@ -556,12 +556,12 @@ impl DeTok for LiveStyle {
                 return Ok(live_style);
             }
             let from = p.parse_ident_path() ?;
-            let from_live_id = p.qualify_ident_path(&from).to_live_id();
+            let from_live_item_id = p.qualify_ident_path(&from).to_live_item_id();
             p.expect_token(Token::Colon)?;
             let to = p.parse_ident_path() ? ;
-            let to_live_id = p.qualify_ident_path(&to).to_live_id();
+            let to_live_item_id = p.qualify_ident_path(&to).to_live_item_id();
             p.expect_token(Token::Semi)?;
-            live_style.remap.insert(from_live_id, to_live_id);
+            live_style.remap.insert(from_live_item_id, to_live_item_id);
         }
     }
 }
@@ -608,7 +608,7 @@ impl DeTok for Anim {
                     
                     if ident == Ident::new("Float") {
                         let mut track = Track::Float {
-                            live_id: LiveId(tracks.len() as u64),
+                            live_item_id: LiveItemId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
                             keys: Vec::new()
@@ -618,7 +618,7 @@ impl DeTok for Anim {
                     }
                     else if ident == Ident::new("Vec2") {
                         let mut track = Track::Vec2 {
-                            live_id: LiveId(tracks.len() as u64),
+                            live_item_id: LiveItemId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
                             keys: Vec::new()
@@ -628,7 +628,7 @@ impl DeTok for Anim {
                     }
                     else if ident == Ident::new("Vec3") {
                         let mut track = Track::Vec3 {
-                            live_id: LiveId(tracks.len() as u64),
+                            live_item_id: LiveItemId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
                             keys: Vec::new()
@@ -638,7 +638,7 @@ impl DeTok for Anim {
                     }
                     else if ident == Ident::new("Vec4") {
                         let mut track = Track::Vec4 {
-                            live_id: LiveId(tracks.len() as u64),
+                            live_item_id: LiveItemId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
                             keys: Vec::new()
@@ -648,7 +648,7 @@ impl DeTok for Anim {
                     }
                     else if ident == Ident::new("Color") {
                         let mut track = Track::Color {
-                            live_id: LiveId(tracks.len() as u64),
+                            live_item_id: LiveItemId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
                             keys: Vec::new()

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, BTreeMap};
+use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
 use crate::shaderast::{ShaderAst};
 use crate::span::LiveBodyId;
 use crate::lex;
@@ -45,40 +45,41 @@ pub struct LiveStyles {
     pub file_to_live_bodies: HashMap<String, Vec<LiveBodyId >>,
     
     // change sets
-    pub changed_live_bodies: HashSet<LiveBodyId>,
+    pub changed_live_bodies: BTreeSet<LiveBodyId>,
     
-    pub changed_deps: BTreeMap<LiveId, LiveChangeType>,
-    pub changed_tokens: HashSet<LiveId>,
+    pub changed_deps: BTreeMap<LiveItemId, LiveChangeType>,
+    pub changed_tokens: HashSet<LiveItemId>,
     
-    pub changed_shaders: HashMap<LiveId, LiveChangeType>,
+    pub changed_shaders: HashMap<LiveItemId, LiveChangeType>,
     
     pub builtins: HashMap<Ident, Builtin>,
     pub live_bodies: Vec<LiveBody>,
-    pub live_bodies_contains: HashMap<LiveBodyId, HashSet<LiveId >>,
-    pub live_depends_on: HashMap<LiveId, HashSet<LiveId >>,
-    pub depends_on_live: HashMap<LiveId, HashSet<LiveId >>,
+    pub live_bodies_contains: HashMap<LiveBodyId, HashSet<LiveItemId >>,
+    pub live_bodies_items: HashMap<LiveBodyId, Vec<LiveItemId >>,
+    pub live_depends_on: HashMap<LiveItemId, HashSet<LiveItemId >>,
+    pub depends_on_live: HashMap<LiveItemId, HashSet<LiveItemId >>,
     
-    pub tokens: HashMap<LiveId, LiveTokens>,
+    pub tokens: HashMap<LiveItemId, LiveTokens>,
     
     // cached values from tokens
-    pub floats: HashMap<LiveId, Float>,
-    pub colors: HashMap<LiveId, Color>,
-    pub text_styles: HashMap<LiveId, TextStyle>,
-    pub layouts: HashMap<LiveId, Layout>,
-    pub walks: HashMap<LiveId, Walk>,
-    pub anims: HashMap<LiveId, Anim>,
-    pub styles: HashMap<LiveId, LiveStyleId>,
-    pub shaders: HashMap<LiveId, Shader>,
+    pub floats: HashMap<LiveItemId, Float>,
+    pub colors: HashMap<LiveItemId, Color>,
+    pub text_styles: HashMap<LiveItemId, TextStyle>,
+    pub layouts: HashMap<LiveItemId, Layout>,
+    pub walks: HashMap<LiveItemId, Walk>,
+    pub anims: HashMap<LiveItemId, Anim>,
+    pub styles: HashMap<LiveItemId, LiveStyleId>,
+    pub shaders: HashMap<LiveItemId, Shader>,
     
     // things that stay around
-    pub shader_alloc: HashMap<LiveId, Shader>,
+    pub shader_alloc: HashMap<LiveItemId, Shader>,
     
-    pub style_alloc: HashMap<LiveId, LiveStyleId>,
+    pub style_alloc: HashMap<LiveItemId, LiveStyleId>,
     pub style_list: Vec<LiveStyle>,
     pub style_stack: Vec<LiveStyleId>,
-    pub shader_asts: HashMap<LiveId, ShaderAst>,
+    pub shader_asts: HashMap<LiveItemId, ShaderAst>,
     
-    pub geometries: HashMap<LiveId, Geometry>,
+    pub geometries: HashMap<LiveItemId, Geometry>,
     
     pub font_index: HashMap<Ident, Font>
 }
@@ -106,7 +107,7 @@ pub enum LiveTokensType {
 
 #[derive(Clone, Debug, Default)]
 pub struct LiveStyle {
-    pub remap: HashMap<LiveId, LiveId>,
+    pub remap: HashMap<LiveItemId, LiveItemId>,
 }
 
 impl fmt::Display for LiveBodyError {
@@ -132,13 +133,13 @@ impl LiveStyles {
     }
     
     // we have to check if live_id exists in the on_live_id dependency tree
-    pub fn check_depends_on(&self, live_id: LiveId, on_live_id: LiveId) -> bool {
-        if let Some(deps) = self.live_depends_on.get(&on_live_id) {
-            if deps.contains(&live_id) {
+    pub fn check_depends_on(&self, live_item_id: LiveItemId, on_live_item_id: LiveItemId) -> bool {
+        if let Some(deps) = self.live_depends_on.get(&on_live_item_id) {
+            if deps.contains(&live_item_id) {
                 return true
             }
             for dep_live_id in deps {
-                if self.check_depends_on(live_id, *dep_live_id) {
+                if self.check_depends_on(live_item_id, *dep_live_id) {
                     return true
                 }
             }
@@ -146,29 +147,29 @@ impl LiveStyles {
         return false
     }
     
-    pub fn update_deps(&mut self, live_id: LiveId, new_deps: HashSet<LiveId>) {
-        if let Some(old_deps) = self.live_depends_on.get_mut(&live_id) {
-            for on_live_id in old_deps.clone() {
-                if !new_deps.contains(&on_live_id) {
-                    old_deps.remove(&on_live_id);
-                    if let Some(set) = self.depends_on_live.get_mut(&on_live_id) {
-                        set.remove(&live_id);
+    pub fn update_deps(&mut self, live_item_id: LiveItemId, new_deps: HashSet<LiveItemId>) {
+        if let Some(old_deps) = self.live_depends_on.get_mut(&live_item_id) {
+            for on_live_item_id in old_deps.clone() {
+                if !new_deps.contains(&on_live_item_id) {
+                    old_deps.remove(&on_live_item_id);
+                    if let Some(set) = self.depends_on_live.get_mut(&on_live_item_id) {
+                        set.remove(&live_item_id);
                     }
                 }
             }
         }
         // add new deps
-        let live_depends_on = self.live_depends_on.entry(live_id).or_insert_with( || HashSet::new());
+        let live_depends_on = self.live_depends_on.entry(live_item_id).or_insert_with( || HashSet::new());
         for on_live_id in new_deps {
             live_depends_on.insert(on_live_id);
             let v = self.depends_on_live.entry(on_live_id).or_insert_with( || HashSet::new());
-            v.insert(live_id);
+            v.insert(live_item_id);
         }
     }
     
-    pub fn add_changed_deps(&mut self, live_id: LiveId, tokens: &Vec<TokenWithSpan>, live_tokens_type: LiveTokensType) {
+    pub fn add_changed_deps(&mut self, live_item_id: LiveItemId, tokens: &Vec<TokenWithSpan>, live_tokens_type: LiveTokensType) {
         
-        if let Some(live_tokens) = self.tokens.get(&live_id) {
+        if let Some(live_tokens) = self.tokens.get(&live_item_id) {
             // if the type is
             let live_dep_change = if live_tokens_type == LiveTokensType::Shader
                 || live_tokens_type == LiveTokensType::ShaderLib
@@ -179,14 +180,14 @@ impl LiveStyles {
                 LiveChangeType::UpdateValue
             };
             if live_tokens.tokens.len() != tokens.len() {
-                self.changed_tokens.insert(live_id);
-                self._add_changed_deps_recursive(live_id, live_dep_change);
+                self.changed_tokens.insert(live_item_id);
+                self._add_changed_deps_recursive(live_item_id, live_dep_change);
             }
             else {
                 for i in 0..tokens.len() {
                     if tokens[i].token != live_tokens.tokens[i].token {
-                        self.changed_tokens.insert(live_id);
-                        self._add_changed_deps_recursive(live_id, live_dep_change);
+                        self.changed_tokens.insert(live_item_id);
+                        self._add_changed_deps_recursive(live_item_id, live_dep_change);
                         break;
                     }
                 }
@@ -194,59 +195,59 @@ impl LiveStyles {
         }
         else {
             // its always a recompile
-            self.changed_tokens.insert(live_id);
-            self._add_changed_deps_recursive(live_id, LiveChangeType::Recompile);
+            self.changed_tokens.insert(live_item_id);
+            self._add_changed_deps_recursive(live_item_id, LiveChangeType::Recompile);
         }
     }
     
-    pub fn remove_live_id(&mut self, live_id: LiveId) {
-        self._add_changed_deps_recursive(live_id, LiveChangeType::Recompile);
-        self.tokens.remove(&live_id);
-        self.style_alloc.remove(&live_id);
-        self.shader_asts.remove(&live_id);
-        self.clear_computed_live_id(live_id);
+    pub fn remove_live_id(&mut self, live_item_id: LiveItemId) {
+        self._add_changed_deps_recursive(live_item_id, LiveChangeType::Recompile);
+        self.tokens.remove(&live_item_id);
+        self.style_alloc.remove(&live_item_id);
+        self.shader_asts.remove(&live_item_id);
+        self.clear_computed_live_id(live_item_id);
     }
     
-    pub fn _add_changed_deps_recursive(&mut self, live_id: LiveId, live_change_type: LiveChangeType) {
-        if let Some(set) = self.depends_on_live.get(&live_id).cloned() {
+    pub fn _add_changed_deps_recursive(&mut self, live_item_id: LiveItemId, live_change_type: LiveChangeType) {
+        if let Some(set) = self.depends_on_live.get(&live_item_id).cloned() {
             for dep_live in set {
                 self._add_changed_deps_recursive(dep_live, live_change_type);
             }
         }
-        if let Some(prev_change) = self.changed_deps.get(&live_id) {
+        if let Some(prev_change) = self.changed_deps.get(&live_item_id) {
             if *prev_change == LiveChangeType::Recompile {
                 return
             }
         }
-        self.changed_deps.insert(live_id, live_change_type);
+        self.changed_deps.insert(live_item_id, live_change_type);
     }
     
-    pub fn clear_computed_live_id(&mut self, live_id: LiveId) {
-        if let Some(tokens) = self.tokens.get(&live_id) {
+    pub fn clear_computed_live_id(&mut self, live_item_id: LiveItemId) {
+        if let Some(tokens) = self.tokens.get(&live_item_id) {
             match tokens.live_tokens_type {
                 LiveTokensType::Float => {
-                    self.floats.remove(&live_id);
+                    self.floats.remove(&live_item_id);
                 },
                 LiveTokensType::Color => {
-                    self.colors.remove(&live_id);
+                    self.colors.remove(&live_item_id);
                 },
                 LiveTokensType::TextStyle => {
-                    self.text_styles.remove(&live_id);
+                    self.text_styles.remove(&live_item_id);
                 },
                 LiveTokensType::Layout => {
-                    self.layouts.remove(&live_id);
+                    self.layouts.remove(&live_item_id);
                 },
                 LiveTokensType::Walk => {
-                    self.walks.remove(&live_id);
+                    self.walks.remove(&live_item_id);
                 },
                 LiveTokensType::Anim => {
-                    self.anims.remove(&live_id);
+                    self.anims.remove(&live_item_id);
                 },
                 LiveTokensType::Shader => {
-                    self.shaders.remove(&live_id);
+                    self.shaders.remove(&live_item_id);
                 },
                 LiveTokensType::Style => { // what to do here
-                    self.styles.remove(&live_id);
+                    self.styles.remove(&live_item_id);
                 },
                 LiveTokensType::ShaderLib => { // dont do anything..
                 },
@@ -254,90 +255,90 @@ impl LiveStyles {
         }
     }
     
-    pub fn get_float(&self, live_id: LiveId, name: &str) -> f32 {
-        let mut get_live_id = live_id;
+    pub fn get_float(&self, live_item_id: LiveItemId, name: &str) -> f32 {
+        let mut get_live_item_id = live_item_id;
         for style_index in &self.style_stack {
-            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_id) {
-                get_live_id = *fwd;
+            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_item_id) {
+                get_live_item_id = *fwd;
                 break;
             }
         }
-        self.floats.get(&get_live_id).expect(&format!("Float not found {}", name)).value
+        self.floats.get(&get_live_item_id).expect(&format!("Float not found {}", name)).value
     }
     
-    pub fn get_color(&self, live_id: LiveId, name: &str) -> Color {
-        let mut get_live_id = live_id;
+    pub fn get_color(&self, live_item_id: LiveItemId, name: &str) -> Color {
+        let mut get_live_item_id = live_item_id;
         for style_index in &self.style_stack {
-            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_id) {
-                get_live_id = *fwd;
+            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_item_id) {
+                get_live_item_id = *fwd;
                 break;
             }
         }
-        *self.colors.get(&get_live_id).expect(&format!("Color not found {}", name))
+        *self.colors.get(&get_live_item_id).expect(&format!("Color not found {}", name))
     }
     
     
-    pub fn get_text_style(&self, live_id: LiveId, name: &str) -> TextStyle {
-        let mut get_live_id = live_id;
+    pub fn get_text_style(&self, live_item_id: LiveItemId, name: &str) -> TextStyle {
+        let mut get_live_item_id = live_item_id;
         for style_index in &self.style_stack {
-            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_id) {
-                get_live_id = *fwd;
+            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_item_id) {
+                get_live_item_id = *fwd;
                 break;
             }
         }
-        *self.text_styles.get(&get_live_id).expect(&format!("TextStyle not found {}", name))
+        *self.text_styles.get(&get_live_item_id).expect(&format!("TextStyle not found {}", name))
     }
     
-    pub fn get_layout(&self, live_id: LiveId, name: &str) -> Layout {
-        let mut get_live_id = live_id;
+    pub fn get_layout(&self, live_item_id: LiveItemId, name: &str) -> Layout {
+        let mut get_live_item_id = live_item_id;
         for style_index in &self.style_stack {
-            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_id) {
-                get_live_id = *fwd;
+            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_item_id) {
+                get_live_item_id = *fwd;
                 break;
             }
         }
-        *self.layouts.get(&get_live_id).expect(&format!("Anim not found {}", name))
+        *self.layouts.get(&get_live_item_id).expect(&format!("Anim not found {}", name))
     }
     
-    pub fn get_walk(&self, live_id: LiveId, name: &str) -> Walk {
-        let mut get_live_id = live_id;
+    pub fn get_walk(&self, live_item_id: LiveItemId, name: &str) -> Walk {
+        let mut get_live_item_id = live_item_id;
         for style_index in &self.style_stack {
-            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_id) {
-                get_live_id = *fwd;
+            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_item_id) {
+                get_live_item_id = *fwd;
                 break;
             }
         }
-        *self.walks.get(&get_live_id).expect(&format!("Walk not found {}", name))
+        *self.walks.get(&get_live_item_id).expect(&format!("Walk not found {}", name))
     }
     
-    pub fn get_anim(&self, live_id: LiveId, name: &str) -> Anim {
-        let mut get_live_id = live_id;
+    pub fn get_anim(&self, live_item_id: LiveItemId, name: &str) -> Anim {
+        let mut get_live_item_id = live_item_id;
         for style_index in &self.style_stack {
-            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_id) {
-                get_live_id = *fwd;
+            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_item_id) {
+                get_live_item_id = *fwd;
                 break;
             }
         }
-        self.anims.get(&get_live_id).expect(&format!("Anim not found {}", name)).clone()
+        self.anims.get(&get_live_item_id).expect(&format!("Anim not found {}", name)).clone()
     }
     
-    pub fn get_shader(&self, live_id: LiveId, location_hash: u64, _module_path: &str, name: &str) -> Shader {
-        let mut get_live_id = live_id;
+    pub fn get_shader(&self, live_item_id: LiveItemId, location_hash: u64, _module_path: &str, name: &str) -> Shader {
+        let mut get_live_item_id = live_item_id;
         for style_index in &self.style_stack {
-            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_id) {
-                get_live_id = *fwd;
+            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_item_id) {
+                get_live_item_id = *fwd;
                 break;
             }
         }
         
         Shader {
-            shader_id: self.shaders.get(&get_live_id)
+            shader_id: self.shaders.get(&get_live_item_id)
                 .expect(&format!("Shader not found {}", name)).shader_id,
             location_hash
         }
     }
     
-    pub fn style_begin(&mut self, style_id: LiveId, name: &str) {
+    pub fn style_begin(&mut self, style_id: LiveItemId, name: &str) {
         // lets fetch the style, if it doesnt exist allocate it
         if let Some(index) = self.styles.get(&style_id) {
             self.style_stack.push(*index);
@@ -347,7 +348,7 @@ impl LiveStyles {
         }
     }
     
-    pub fn style_end(&mut self, style_id: LiveId, name: &str) {
+    pub fn style_end(&mut self, style_id: LiveItemId, name: &str) {
         // lets fetch the style, if it doesnt exist allocate it
         if let Some(index) = self.styles.get(&style_id) {
             if self.style_stack.len() == 0 {
@@ -362,7 +363,7 @@ impl LiveStyles {
         }
     }
     
-    pub fn get_geometry(&self, live_id: LiveId, name: &str) -> Geometry {
+    pub fn get_geometry(&self, live_id: LiveItemId, name: &str) -> Geometry {
         if let Some(geometry) = self.geometries.get(&live_id) {
             return *geometry
         }
@@ -406,7 +407,7 @@ impl LiveStyles {
     }
     
     pub fn process_changed_live_bodies(&mut self, errors: &mut Vec<LiveBodyError>) {
-        let mut changed_live_bodies = HashSet::new();
+        let mut changed_live_bodies = BTreeSet::new();
         std::mem::swap(&mut changed_live_bodies, &mut self.changed_live_bodies);
         
         for live_body_id in changed_live_bodies {
@@ -435,10 +436,10 @@ impl LiveStyles {
         // now what we need is to flatten it according to what depends on what.
         for (dep_live_id, _) in &self.changed_deps {
             fn recur(
-                recompute_list: &mut Vec<Option<LiveId >>,
-                recompute_map: &mut HashMap<LiveId, usize>,
-                live_id: LiveId,
-                depens_on_live: &HashMap<LiveId, HashSet<LiveId >>
+                recompute_list: &mut Vec<Option<LiveItemId >>,
+                recompute_map: &mut HashMap<LiveItemId, usize>,
+                live_id: LiveItemId,
+                depens_on_live: &HashMap<LiveItemId, HashSet<LiveItemId >>
             ) {
                 if let Some(pos) = recompute_map.get(&live_id) {
                     recompute_list[*pos] = None;
@@ -596,10 +597,12 @@ impl LiveStyles {
             }
             let nearest_id = nearest_id.unwrap();
             let live_body = &mut self.live_bodies[nearest_id.0];
-            live_body.code = code;
+            if live_body.code != code{
+                self.changed_live_bodies.insert(*nearest_id);
+                live_body.code = code;
+            }
             live_body.line = line;
             live_body.column = column;
-            self.changed_live_bodies.insert(*nearest_id);
             return Ok(())
         }
         return Err(())
@@ -607,16 +610,16 @@ impl LiveStyles {
     
     
     
-    pub fn collect_and_analyse_shader(&self, live_id: LiveId, options: ShaderCompileOptions) -> Result<(ShaderAst, Option<Geometry>), LiveBodyError> {
+    pub fn collect_and_analyse_shader(&self, live_item_id: LiveItemId, options: ShaderCompileOptions) -> Result<(ShaderAst, Option<Geometry>), LiveBodyError> {
         let mut out_ast = ShaderAst::default();
         let mut visited = Vec::new();
         
-        let in_ast = self.shader_asts.get(&live_id).expect("shader expected to exist");
+        let in_ast = self.shader_asts.get(&live_item_id).expect("shader expected to exist");
         
-        fn recur(visited: &mut Vec<LiveId>, in_ast: &ShaderAst, out_ast: &mut ShaderAst, live_styles: &LiveStyles) -> Result<(), LiveBodyError> {
+        fn recur(visited: &mut Vec<LiveItemId>, in_ast: &ShaderAst, out_ast: &mut ShaderAst, live_styles: &LiveStyles) -> Result<(), LiveBodyError> {
             for use_ipws in &in_ast.uses {
                 let module_path = &live_styles.live_bodies[in_ast.live_body_id.0].module_path;
-                let use_live_id = use_ipws.ident_path.qualify(module_path).to_live_id();
+                let use_live_id = use_ipws.ident_path.qualify(module_path).to_live_item_id();
                 
                 if !visited.contains(&use_live_id) {
                     
@@ -645,7 +648,7 @@ impl LiveStyles {
         let mut env = Env::new(self);
         
         let default_geometry = if let Some(geom_ipws) = out_ast.default_geometry {
-            let live_id = geom_ipws.to_live_id(self);
+            let live_id = geom_ipws.to_live_item_id(self);
             match self.geometries.get(&live_id) {
                 None => {
                     return Err(self.live_error_to_live_body_error(LiveError {
