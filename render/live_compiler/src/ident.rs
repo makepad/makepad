@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Once;
 use crate::span::Span;
-use crate::livetypes::LiveId;
+use crate::livetypes::LiveItemId;
 use crate::livestyles::LiveStyles;
 use std::fmt::Write;
 
@@ -106,14 +106,14 @@ pub struct IdentPathWithSpan{
 }
 
 impl IdentPathWithSpan{
-    pub fn to_live_id(&self, live_styles:&LiveStyles)->LiveId{
-        self.ident_path.qualify(&live_styles.live_bodies[self.span.live_body_id.0].module_path).to_live_id()
+    pub fn to_live_item_id(&self, live_styles:&LiveStyles)->LiveItemId{
+        self.ident_path.qualify(&live_styles.live_bodies[self.span.live_body_id.0].module_path).to_live_item_id()
     }
 }
 
 impl QualifiedIdentPath{
 
-    pub fn to_live_id(&self) -> LiveId {
+    pub fn to_live_item_id(&self) -> LiveItemId {
         // lets add the other segs
         let mut value = 0u64;
         let mut o = 0;
@@ -132,7 +132,7 @@ impl QualifiedIdentPath{
                 }
             })
         }
-        LiveId(value)
+        LiveItemId(value)
     }    
 
 

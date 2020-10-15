@@ -6,7 +6,7 @@ use {
         ident::{Ident, IdentPath},
         lit::{Lit, TyLit},
         span::Span,
-        livetypes::LiveId
+        livetypes::LiveItemId
     },
     std::cell::Cell,
 };
@@ -198,7 +198,7 @@ impl<'a,'b> LhsChecker<'a,'b> {
         &mut self,
         span: Span,
         _kind: &Cell<Option<VarKind>>,
-        _id:LiveId,
+        _id:LiveItemId,
         _ident: Ident,
     ) -> Result<(), LiveError> {
         return Err(LiveError {

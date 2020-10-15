@@ -4,7 +4,7 @@ use crate::ident::{Ident,IdentPath};
 use crate::lit::{Lit, TyLit};
 use crate::span::Span;
 use crate::ty::Ty;
-use crate::livetypes::LiveId;
+use crate::livetypes::LiveItemId;
 use std::cell::Cell;
 
 #[derive(Clone, Debug)]
@@ -228,7 +228,7 @@ impl<'a,'b> DepAnalyser<'a,'b> {
         }
     }
 
-    fn dep_analyse_live_id_expr(&mut self, _span: Span, _kind: &Cell<Option<VarKind>>, _id:LiveId, _ident: Ident) {
+    fn dep_analyse_live_id_expr(&mut self, _span: Span, _kind: &Cell<Option<VarKind>>, _id:LiveItemId, _ident: Ident) {
 
     }
 

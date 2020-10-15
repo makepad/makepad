@@ -16,7 +16,7 @@ impl ScrollShadow {
     
     pub fn style(cx: &mut Cx) {
         
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::shadow_size: 4.0;
             self::shader_bg: Shader{
                 use makepad_render::quad::shader::*;

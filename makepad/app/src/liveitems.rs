@@ -1,33 +1,25 @@
 use makepad_render::*;
 use makepad_widget::*;
 use crate::mprstokenizer::*;
-use crate::appstorage::*;
+use crate::makepadstorage::*;
 use crate::colorpicker::*;
 use crate::floatslider::*;
 use std::fmt;
 
-pub enum LiveMacro {
-    Pick {range: (usize, usize), hsva: Vec4, in_shader: bool},
-    Slide {range: (usize, usize), value: f32, min: f32, max: f32, step: f32, in_shader: bool},
-    Shader
+
+#[derive(Clone, Default)]
+pub struct LiveItemsList{
+    pub items: Vec<LiveItemId>
 }
 
-pub struct LiveMacros {
-    pub changed: Signal,
-    pub macros: Vec<LiveMacro>
-}
-
-impl LiveMacros {
-    pub fn new(cx: &mut Cx) -> Self {
-        Self {
-            changed: cx.new_signal(),
-            macros: Vec::new()
-        }
-    }
+impl LiveItemsList{
+    pub fn new(_cx:&mut Cx)->Self{
+        LiveItemsList::default()
+    }    
 }
 
 #[derive(Clone)]
-pub struct LiveMacrosView {
+pub struct LiveItemsView {
     pub bg: Quad,
     pub text: Text,
     pub scroll_view: ScrollView,
@@ -36,7 +28,7 @@ pub struct LiveMacrosView {
     pub float_sliders: Elements<usize, FloatSlider, FloatSlider>
 }
 
-impl LiveMacrosView {
+impl LiveItemsView {
     pub fn macro_changed() -> StatusId {uid!()}
     
     pub fn new(cx: &mut Cx) -> Self {
@@ -51,7 +43,7 @@ impl LiveMacrosView {
     }
     
     pub fn style(cx: &mut Cx) {
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::layout_bg: Layout {
                 align: all(0.5),
                 walk: {
@@ -68,11 +60,12 @@ impl LiveMacrosView {
         "#)
     }
     
-    pub fn handle_live_macros(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, text_editor: &mut TextEditor) {
+    pub fn handle_live_items(&mut self, cx: &mut Cx, event: &mut Event, mtb: &mut MakepadTextBuffer, text_editor: &mut TextEditor) {
+        /*
         match event {
             Event::Signal(se) => {
                 // process network messages for hub_ui
-                if let Some(_) = se.signals.get(&atb.live_macros.changed) {
+                if let Some(_) = se.signals.get(&mtb.live_macros.changed) {
                     self.scroll_view.redraw_view_area(cx);
                 }
             },
@@ -87,7 +80,7 @@ impl LiveMacrosView {
         let mut range_delta: isize = 0;
         let mut any_changed = false;
         let mut all_in_place = true;
-        for (index, live_macro) in atb.live_macros.macros.iter_mut().enumerate() {
+        for (index, live_macro) in mtb.live_macros.macros.iter_mut().enumerate() {
             match live_macro {
                 LiveMacro::Pick {range, hsva, ..} => {
                     range.0 = (range.0 as isize + range_delta) as usize;
@@ -140,20 +133,33 @@ impl LiveMacrosView {
             }
         }
         if any_changed && all_in_place {
-            atb.text_buffer.mark_clean();
-            atb.parse_live_macros(cx);
+            mtb.text_buffer.mark_clean();
+            mtb.parse_live_macros(cx);
         }
+        */
     }
     
     pub fn draw_heading(&mut self, _cx: &mut Cx) {
         
     }
     
-    pub fn draw_live_macros(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, _text_editor: &mut TextEditor) {
+    pub fn draw_live_items(&mut self, cx: &mut Cx, atb: &mut MakepadTextBuffer, _text_editor: &mut TextEditor) {
+        /*
         if self.scroll_view.begin_view(cx, Layout {
+            
             direction: Direction::Down,
             ..Layout::default()
         }).is_ok() {
+            // we have a list of live_blocks here
+            // then we query those on our cx.live_styles
+            // and iterate all the items in the list.
+            // lets fetch the livebodyids
+            
+            let path = &atb.full_path["main/makepad/".len()..];
+            
+            let mut uid = 0;
+            for (index, live_id) in atb.live_macros.live_items{
+            }
             for (index, m) in atb.live_macros.macros.iter_mut().enumerate() {
                 match m {
                     LiveMacro::Pick {hsva, ..} => {
@@ -168,6 +174,7 @@ impl LiveMacrosView {
             }
             self.scroll_view.end_view(cx);
         }
+        */
     }
 }
 
@@ -184,8 +191,13 @@ impl fmt::Display for PrettyPrintedFloat3Decimals {
 }
 
 
-impl AppTextBuffer {
-    pub fn parse_live_macros(&mut self, cx: &mut Cx) {
+impl MakepadTextBuffer {
+    pub fn update_live_items(&mut self, cx: &mut Cx){
+        // read the live body items from live styles and store it
+        
+    }
+    
+    pub fn parse_live_bodies(&mut self, cx: &mut Cx) {
         let mut tp = TokenParser::new(&self.text_buffer.flat_text, &self.text_buffer.token_chunks);
         // lets reset the data
         while tp.advance() {
@@ -204,6 +216,9 @@ impl AppTextBuffer {
                             //shader_end = tp.cur_pair_offset();
                             if let Some(live_body) = tp.cur_pair_as_string() {
                                 let lc = tp.cur_line_col();
+                                
+                                // lets list this live_body in our macro list.
+                                
                                 if cx.live_styles.update_live_body(
                                     &self.full_path["main/makepad/".len()..].to_string(),
                                     lc.0 + 1,
@@ -213,31 +228,6 @@ impl AppTextBuffer {
                                     eprintln!("LiveBody not found");
                                 }; 
                             }
-                            /*
-                            if let Some(live_body) = tp.cur_pair_as_string() {
-                                let lc = tp.cur_line_col();
-                                // ok so. 
-                                // dependent values.
-                                // how to do it.
-                                // we need to record all dependencies
-                                cx.live_styles.update_live_body(
-                                    &self.full_path["main/makepad/".len()..]
-                                    lc.0 + 1,
-                                    lc.1 - 8,
-                                    live_body 
-                                ); 
-                                
-                                /*
-                                cx.recompile_shader_sub(
-                                    &self.full_path["main/makepad/".len()..],
-                                    lc.0 + 1,
-                                    lc.1 - 8,
-                                    shader
-                                );*/
-                                //println!("{} {}:{}",self.full_path, lc.0, lc.1);
-                            }*/
-                            
-                            //tp.jump_to_pair();
                         }
                     }
                 
@@ -314,7 +304,7 @@ impl AppTextBuffer {
                 _ => ()
             }
         }
-        cx.send_signal(self.live_macros.changed, LiveMacrosView::macro_changed());
+        //cx.send_signal(self.live_macros.changed, LiveMacrosView::macro_changed());
     }
 }
 

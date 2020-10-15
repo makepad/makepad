@@ -29,7 +29,7 @@ pub struct TrapezoidText {
 
 impl TrapezoidText {
     pub fn style(cx: &mut Cx){
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::trapezoid_shader: Shader{
                 use crate::shader_std::prelude::*;
                 default_geometry: crate::shader_std::quad_2d;

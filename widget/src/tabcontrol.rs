@@ -71,7 +71,7 @@ impl TabControl {
     }
     
     pub fn style(cx: &mut Cx) {
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::color_bg_normal: #34;
             self::bar_size: 8.0;
             self::tab_control_style: Style {

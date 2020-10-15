@@ -36,7 +36,7 @@ impl CodeIcon {
     }
     
     pub fn style(cx: &mut Cx) {
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::walk: Walk {
                 width: Fix(14.0),
                 height: Fix(14.0),

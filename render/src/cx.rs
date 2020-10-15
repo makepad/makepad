@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeSet};
 use std::fmt::Write;
 
 pub use makepad_live_compiler::livetypes::*;
 pub use makepad_live_compiler::livestyles::*;
+pub use makepad_live_compiler::span::LiveBodyId;
 pub use makepad_live_compiler::math::*;
 pub use makepad_live_compiler::colors::*;
 pub use makepad_live_compiler::ty::Ty;
@@ -748,10 +749,11 @@ impl Cx {
         }
     }
     
-    pub fn call_live_recompile_event<F>(&mut self, errors: Vec<LiveBodyError>, mut event_handler: F)
+    pub fn call_live_recompile_event<F>(&mut self, changed_live_bodies:BTreeSet<LiveBodyId>, errors: Vec<LiveBodyError>, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
         self.call_event_handler(&mut event_handler, &mut Event::LiveRecompile(LiveRecompileEvent {
+            changed_live_bodies,
             errors
         }));
     }

@@ -58,7 +58,7 @@ impl Tab {
 
     pub fn style(cx: &mut Cx) {
         
-        live!(cx, r#"
+        live_body!(cx, r#"
             
             self::color_bg_selected: #28;
             self::color_bg_normal: #34;
@@ -135,19 +135,19 @@ impl Tab {
                 Track::Color {
                     ease: Ease::Lin,
                     keys: vec![(1.0, self.get_bg_color(cx))],
-                    live_id: live_id!(makepad_render::quad::shader::color),
+                    live_item_id: live_item_id!(makepad_render::quad::shader::color),
                     cut_init: None
                 },
                 Track::Color {
                     ease: Ease::Lin,
                     keys: vec![(1.0, live_color!(cx, self::color_bg_selected))],
-                    live_id: live_id!(self::shader_bg::border_color),
+                    live_item_id: live_item_id!(self::shader_bg::border_color),
                     cut_init: None
                 },
                 Track::Color {
                     ease: Ease::Lin,
                     keys: vec![(1.0, self.get_text_color(cx))],
-                    live_id: live_id!(makepad_render::text::shader::color),
+                    live_item_id: live_item_id!(makepad_render::text::shader::color),
                     cut_init: None
                 },
             ]
@@ -173,7 +173,7 @@ impl Tab {
             play: Play::Single {duration: 0.1, cut: true, term: true, end: 1.0},
             tracks: vec![
                 Track::Float{
-                    live_id: live_id!(self::tab_closing),
+                    live_item_id: live_item_id!(self::tab_closing),
                     ease: Ease::OutExp,
                     keys: vec![(0.0, 1.0), (1.0, 0.0)],
                     cut_init: None
@@ -219,7 +219,7 @@ impl Tab {
             Event::Animate(ae) => {
                 // its playing the term anim, run a redraw
                 if self.animator.term_anim_playing() {
-                    self.animator.calc_float(cx, live_id!(self::tab_closing), ae.time);
+                    self.animator.calc_float(cx, live_item_id!(self::tab_closing), ae.time);
                     cx.redraw_child_area(self._bg_area);
                 }
                 else {
@@ -308,7 +308,7 @@ impl Tab {
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.shader = live_shader!(cx, self::shader_bg);
         self.bg.z = self.z;
-        self.bg.color = self.animator.last_color(cx, live_id!(makepad_render::quad::shader::color));
+        self.bg.color = self.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
         
         // check if we are closing
         if self.animator.term_anim_playing() {
@@ -316,11 +316,11 @@ impl Tab {
             let bg_inst = self.bg.draw_quad(
                 cx,
                 Walk::wh(
-                    Width::Fix(self._close_anim_rect.w * self.animator.last_float(cx, live_id!(self::tab_closing))),
+                    Width::Fix(self._close_anim_rect.w * self.animator.last_float(cx, live_item_id!(self::tab_closing))),
                     Height::Fix(self._close_anim_rect.h),
                 )
             );
-            bg_inst.push_last_color(cx, &self.animator, live_id!(self::shader_bg::border_color));
+            bg_inst.push_last_color(cx, &self.animator, live_item_id!(self::shader_bg::border_color));
             self._bg_area = bg_inst.into();
             self.animator.set_area(cx, self._bg_area);
             return Err(())
@@ -333,7 +333,7 @@ impl Tab {
                 live_layout!(cx, self::layout_bg)
             };
             let bg_inst = self.bg.begin_quad(cx, layout);
-            bg_inst.push_last_color(cx, &self.animator, live_id!(self::shader_bg::border_color));
+            bg_inst.push_last_color(cx, &self.animator, live_item_id!(self::shader_bg::border_color));
             if self.is_closeable {
                 self.tab_close.draw_tab_close(cx);
                 cx.turtle_align_y();
@@ -341,7 +341,7 @@ impl Tab {
             // push the 2 vars we added to bg shader
             self.text.z = self.z;
             self.text.text_style = live_text_style!(cx, self::text_style_title);
-            self.text.color = self.animator.last_color(cx, live_id!(makepad_render::text::shader::color));
+            self.text.color = self.animator.last_color(cx, live_item_id!(makepad_render::text::shader::color));
             self._text_area = self.text.draw_text(cx, &self.label);
             
             cx.turtle_align_y();

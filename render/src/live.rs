@@ -37,7 +37,7 @@ macro_rules!uid {
 
 
 #[macro_export]
-macro_rules!live {
+macro_rules!live_body {
     ( $ cx: ident, $ code: literal) => {
         $ cx.add_live_body(LiveBody {
             file: file!().to_string().replace("\\", ","),
@@ -50,7 +50,7 @@ macro_rules!live {
 }
 
 #[macro_export]
-macro_rules!live_id {
+macro_rules!live_item_id {
     ( $ path: path) => {
         live_str_to_id(module_path!(), stringify!( $ path))
     }

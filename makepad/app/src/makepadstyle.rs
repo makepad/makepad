@@ -6,7 +6,7 @@ use crate::homepage::*;
 use crate::codeicon::*;
 use crate::searchresults::*;
 use crate::itemdisplay::*;
-use crate::livemacro::*;
+use crate::liveitems::*;
 use crate::colorpicker::*;
 use crate::floatslider::*;
 use crate::shaderview::*;
@@ -20,6 +20,6 @@ pub fn set_makepad_style(cx: &mut Cx) {
     ItemDisplay::style(cx);
     ColorPicker::style(cx);
     FloatSlider::style(cx);
-    LiveMacrosView::style(cx);
+    LiveItemsView::style(cx);
     ShaderView::style(cx);
 }

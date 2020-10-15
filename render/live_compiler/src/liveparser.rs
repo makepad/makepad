@@ -88,7 +88,7 @@ impl<'a> DeTokParserImpl<'a> {
         }
     }
     
-    fn parse_block_tokens(&mut self, live_id: LiveId) -> Result<Vec<TokenWithSpan>, LiveError> { // scans from { to }
+    fn parse_block_tokens(&mut self, live_item_id: LiveItemId) -> Result<Vec<TokenWithSpan>, LiveError> { // scans from { to }
         self.clear_token_clone();
         let mut paren_stack = Vec::new();
         let mut new_deps = HashSet::new();
@@ -99,9 +99,9 @@ impl<'a> DeTokParserImpl<'a> {
                     let ident_path = self.parse_ident_path() ?;
                     if ident_path.len()>1 {
                         let qualified_ident_path = self.qualify_ident_path(&ident_path);
-                        let on_live_id = qualified_ident_path.to_live_id();
+                        let on_live_id = qualified_ident_path.to_live_item_id();
                         // lets query if this one somehow depends on me
-                        if self.live_styles.check_depends_on(live_id, on_live_id) {
+                        if self.live_styles.check_depends_on(live_item_id, on_live_id) {
                             // cyclic dep
                             return Err(self.error(format!("Cyclic dependency {}", ident_path)))
                         }
@@ -132,7 +132,7 @@ impl<'a> DeTokParserImpl<'a> {
                     self.skip_token();
                     if paren_stack.len() == 0 {
                         // lets remove old deps..
-                        self.live_styles.update_deps(live_id, new_deps);
+                        self.live_styles.update_deps(live_item_id, new_deps);
                         return Ok(self.get_token_clone());
                     }
                 },
@@ -148,7 +148,7 @@ impl<'a> DeTokParserImpl<'a> {
     pub fn parse_live(&mut self) -> Result<(), LiveError> {
         
         let mut new_body_contains = HashSet::new();
-        
+        let mut body_items = Vec::new();
         let live_body_id = self.peek_span().live_body_id;
         
         while self.peek_token() != Token::Eof {
@@ -157,11 +157,12 @@ impl<'a> DeTokParserImpl<'a> {
             // at this level we expect a live_id
             let ident_path = self.parse_ident_path() ?;
             let qualified_ident_path = self.qualify_ident_path(&ident_path);
-            let live_id = qualified_ident_path.to_live_id();
+            let live_item_id = qualified_ident_path.to_live_item_id();
             
-            new_body_contains.insert(live_id);
+            new_body_contains.insert(live_item_id);
+            body_items.push(live_item_id);
             
-            if let Some(lstok) = self.live_styles.tokens.get(&live_id) {
+            if let Some(lstok) = self.live_styles.tokens.get(&live_item_id) {
                 if lstok.qualified_ident_path != qualified_ident_path {
                     let msg = format!("Ident live_id hash collision between `{}` and `{}` rename one of them", lstok.qualified_ident_path, qualified_ident_path);
                     return Err(span.error(self, msg));
@@ -172,7 +173,7 @@ impl<'a> DeTokParserImpl<'a> {
             
             match self.peek_token() {
                 Token::Ident(ident) => {
-                    let tokens = self.parse_block_tokens(live_id) ?;
+                    let tokens = self.parse_block_tokens(live_item_id) ?;
                     // see if the tokens changed, ifso mark this thing dirty
                     let live_tokens_type = {
                         if ident == Ident::new("Float") {
@@ -206,8 +207,8 @@ impl<'a> DeTokParserImpl<'a> {
                             return Err(span.error(self, format!("Ident {} unexpected", ident)));
                         }
                     };
-                    self.live_styles.add_changed_deps(live_id, &tokens, live_tokens_type);
-                    self.live_styles.tokens.insert(live_id, LiveTokens {
+                    self.live_styles.add_changed_deps(live_item_id, &tokens, live_tokens_type);
+                    self.live_styles.tokens.insert(live_item_id, LiveTokens {
                         qualified_ident_path,
                         tokens,
                         live_tokens_type
@@ -217,8 +218,8 @@ impl<'a> DeTokParserImpl<'a> {
                     self.clear_token_clone();
                     self.skip_token();
                     let tokens = self.get_token_clone();
-                    self.live_styles.add_changed_deps(live_id, &tokens, LiveTokensType::Float);
-                    self.live_styles.tokens.insert(live_id, LiveTokens {
+                    self.live_styles.add_changed_deps(live_item_id, &tokens, LiveTokensType::Float);
+                    self.live_styles.tokens.insert(live_item_id, LiveTokens {
                         qualified_ident_path,
                         tokens,
                         live_tokens_type: LiveTokensType::Float
@@ -230,8 +231,8 @@ impl<'a> DeTokParserImpl<'a> {
                     self.skip_token();
                     //let value = f32::de_tok(self) ?;
                     let tokens = self.get_token_clone();
-                    self.live_styles.add_changed_deps(live_id, &tokens, LiveTokensType::Color);
-                    self.live_styles.tokens.insert(live_id, LiveTokens {
+                    self.live_styles.add_changed_deps(live_item_id, &tokens, LiveTokensType::Color);
+                    self.live_styles.tokens.insert(live_item_id, LiveTokens {
                         qualified_ident_path,
                         tokens,
                         live_tokens_type: LiveTokensType::Color
@@ -253,7 +254,7 @@ impl<'a> DeTokParserImpl<'a> {
             }
         }
         self.live_styles.live_bodies_contains.insert(live_body_id, new_body_contains);
-        
+        self.live_styles.live_bodies_items.insert(live_body_id, body_items);
         Ok(())
     }
 }

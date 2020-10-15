@@ -17,7 +17,7 @@ impl Quad {
     }
     
     pub fn style(cx: &mut Cx) {
-        live!(cx, r#"self::shader: Shader {
+        live_body!(cx, r#"self::shader: Shader {
 
             use crate::shader_std::prelude::*;
             
