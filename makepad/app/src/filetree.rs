@@ -54,7 +54,7 @@ impl FileTree {
     
     pub fn style(cx: &mut Cx) {
         
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::shadow_size: 6.0;
             self::color_tree_folder: #f;
             self::color_tree_file: #9d;
@@ -148,7 +148,7 @@ impl FileTree {
             play: Play::Chain {duration: 0.01},
             tracks: vec![
                 Track::Color {
-                    live_id: live_id!(makepad_render::quad::shader::color),
+                    live_item_id: live_item_id!(makepad_render::quad::shader::color),
                     ease: Ease::Lin,
                     keys: vec![(1.0, default_color)],
                     cut_init: None
@@ -169,7 +169,7 @@ impl FileTree {
             play: Play::Cut {duration: 0.02},
             tracks: vec![
                 Track::Color {
-                    live_id: live_id!(makepad_render::quad::shader::color),
+                    live_item_id: live_item_id!(makepad_render::quad::shader::color),
                     ease: Ease::Lin,
                     keys: vec![(0., over_color), (1., over_color)],
                     cut_init: None
@@ -489,7 +489,7 @@ impl FileTree {
             node_draw.animator.init(cx, | cx | Self::get_default_anim(cx, counter, false));
             // if we are NOT animating, we need to get change a default color.
             
-            self.item_draw.node_bg.color = node_draw.animator.last_color(cx, live_id!(makepad_render::quad::shader::color));
+            self.item_draw.node_bg.color = node_draw.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
             
             let mut node_layout = self.item_draw.node_layout.clone();
             node_layout.walk.height = Height::Fix(self.item_draw.row_height * scale as f32);

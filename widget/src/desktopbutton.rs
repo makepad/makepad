@@ -43,7 +43,7 @@ impl DesktopButton {
     
     pub fn style(cx: &mut Cx) {
         
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::anim_default: Anim {
                 play: Cut {duration: 0.1}
                 tracks: [
@@ -183,8 +183,8 @@ impl DesktopButton {
         };
         self.bg.shader = live_shader!(cx, self::shader_bg);
         let bg_inst = self.bg.draw_quad(cx, Walk::wh(Width::Fix(w), Height::Fix(h)));
-        bg_inst.push_last_float(cx, &self.animator, live_id!(self::shader_bg::down));
-        bg_inst.push_last_float(cx, &self.animator, live_id!(self::shader_bg::hover));
+        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::down));
+        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::hover));
         bg_inst.push_float(cx, ty.shader_float());
         self._bg_area = bg_inst.into();
         self.animator.set_area(cx, self._bg_area); // if our area changed, update animation

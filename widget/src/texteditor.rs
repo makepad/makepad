@@ -279,7 +279,7 @@ impl TextEditor {
     
     pub fn style(cx: &mut Cx) {
         
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::layout_bg: Layout {}
             self::shadow_size: 6.0;
             self::gutter_width: 45.0;
@@ -541,7 +541,7 @@ impl TextEditor {
         cx.stop_timer(&mut self._cursor_blink_timer);
         self._cursor_blink_timer = cx.start_timer(self.cursor_blink_speed * 0.5, false);
         self._cursor_blink_flipflop = 0.;
-        self._cursor_area.write_uniform_float(cx, live_id!(self::shader_cursor::blink), self._cursor_blink_flipflop);
+        self._cursor_area.write_uniform_float(cx, live_item_id!(self::shader_cursor::blink), self._cursor_blink_flipflop);
     }
     
     fn handle_finger_down(&mut self, cx: &mut Cx, fe: &FingerDownEvent, text_buffer: &mut TextBuffer) {
@@ -995,7 +995,7 @@ impl TextEditor {
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
                 self._undo_id += 1;
                 self._highlight_visibility = 1.0;
-                self._cursor_area.write_uniform_float(cx, live_id!(self::shader_cursor::blink), self._cursor_blink_flipflop);
+                self._cursor_area.write_uniform_float(cx, live_item_id!(self::shader_cursor::blink), self._cursor_blink_flipflop);
                 //if self.highlight_area_on {
                 //    self._highlight_area.write_uniform_float(cx, Self::highlight_visible(), self._highlight_visibility);
                 //}
@@ -2023,7 +2023,7 @@ impl TextEditor {
                 self._line_geometry[self._last_cursor_pos.row].indent_id
             }else {0.};
             let area: Area = indent_inst.clone().into();
-            area.write_uniform_float(cx, live_id!(self::shader_indent_lines::indent_sel), indent_id);
+            area.write_uniform_float(cx, live_item_id!(self::shader_indent_lines::indent_sel), indent_id);
         }
     }
     

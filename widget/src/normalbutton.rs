@@ -26,7 +26,7 @@ impl NormalButton {
         }
     }
     pub fn style(cx: &mut Cx) {
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::layout_bg: Layout {
                 align: all(0.5),
                 walk: Walk {
@@ -115,11 +115,11 @@ impl NormalButton {
         
         let bg_inst = self.bg.begin_quad(cx, live_layout!(cx, self::layout_bg));
         
-        bg_inst.push_last_float(cx, &self.animator, live_id!(self::shader_bg::hover));
-        bg_inst.push_last_float(cx, &self.animator, live_id!(self::shader_bg::down));
+        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::hover));
+        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::down));
         
         self.text.text_style = live_text_style!(cx, self::text_style_label);
-        self.text.color = self.animator.last_color(cx, live_id!(makepad_render::text::shader::color));
+        self.text.color = self.animator.last_color(cx, live_item_id!(makepad_render::text::shader::color));
         self._text_area = self.text.draw_text(cx, label);
         
         self._bg_area = self.bg.end_quad(cx, bg_inst);

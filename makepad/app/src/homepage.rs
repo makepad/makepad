@@ -49,7 +49,7 @@ impl HomePage {
     
     pub fn style(cx: &mut Cx) {
         
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::text_style_heading: TextStyle {
                 font_size: 28.0,
                 line_spacing: 2.0,

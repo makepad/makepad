@@ -50,7 +50,7 @@ impl XRControl {
     
     pub fn style(cx: &mut Cx) {
         // lets define the shader
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::shader_ray_cube: Shader {
                 use makepad_render::cube::shader::*;
             }
@@ -87,8 +87,8 @@ impl XRControl {
         self.ray_view.set_view_transform(cx, &Mat4::identity());
         self.last_xr_update = Some(xr_event.clone());
         
-        self._left_ray_area.write_mat4(cx, live_id!(makepad_render::cube::shader::transform), &self._left_ray_mat);
-        self._right_ray_area.write_mat4(cx, live_id!(makepad_render::cube::shader::transform), &self._right_ray_mat);
+        self._left_ray_area.write_mat4(cx, live_item_id!(makepad_render::cube::shader::transform), &self._left_ray_mat);
+        self._right_ray_area.write_mat4(cx, live_item_id!(makepad_render::cube::shader::transform), &self._right_ray_mat);
         
         // we have 2 points, 0,0,0 and 0,0,1? pointing straight back
         // then, we transform those with our left input ray
@@ -107,10 +107,10 @@ impl XRControl {
         self._right_cursor_pt = window_plane.intersect_line(right_origin.to_vec3(), right_vector.to_vec3()).to_vec2();
         self._left_cursor_pt = window_plane.intersect_line(left_origin.to_vec3(), left_vector.to_vec3()).to_vec2();
         
-        self._right_cursor_area.write_float(cx, live_id!(makepad_render::quad::shader::x), self._right_cursor_pt.x - 0.5 * self.cursor_size);
-        self._right_cursor_area.write_float(cx, live_id!(makepad_render::quad::shader::y), self._right_cursor_pt.y - 0.5 * self.cursor_size);
-        self._left_cursor_area.write_float(cx, live_id!(makepad_render::quad::shader::x), self._left_cursor_pt.x - 0.5 * self.cursor_size);
-        self._left_cursor_area.write_float(cx, live_id!(makepad_render::quad::shader::y), self._left_cursor_pt.y - 0.5 * self.cursor_size);
+        self._right_cursor_area.write_float(cx, live_item_id!(makepad_render::quad::shader::x), self._right_cursor_pt.x - 0.5 * self.cursor_size);
+        self._right_cursor_area.write_float(cx, live_item_id!(makepad_render::quad::shader::y), self._right_cursor_pt.y - 0.5 * self.cursor_size);
+        self._left_cursor_area.write_float(cx, live_item_id!(makepad_render::quad::shader::x), self._left_cursor_pt.x - 0.5 * self.cursor_size);
+        self._left_cursor_area.write_float(cx, live_item_id!(makepad_render::quad::shader::y), self._left_cursor_pt.y - 0.5 * self.cursor_size);
         
         let mut events = Vec::new();
         

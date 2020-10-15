@@ -25,7 +25,7 @@ impl Blit {
     }
     
     pub fn style(cx: &mut Cx) {
-        live!(cx, r#"self::shader: Shader {
+        live_body!(cx, r#"self::shader: Shader {
             use crate::shader_std::prelude::*;
 
             default_geometry: crate::shader_std::quad_2d;

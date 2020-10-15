@@ -2,7 +2,7 @@ use makepad_render::*;
 
 // Shader code itself
 
-fn shader(cx: &mut Cx) {live!(cx, r#"
+fn shader(cx: &mut Cx) {live_body!(cx, r#"
     self::color1: #f0f;
     self::color2: #0ff;
     self::color3: #f00;
@@ -250,24 +250,24 @@ impl ShaderView {
             Event::Frame(ae) => {
                 //self.time += 1.0/60.0;
                 self.time = ae.time as f32;
-                self.area.write_float(cx, live_id!(self::shader_inputs::time), self.time);
+                self.area.write_float(cx, live_item_id!(self::shader_inputs::time), self.time);
                 cx.next_frame(self.area);
             },
             Event::FingerMove(fm) => {
                 self.finger_move = fm.rel;
-                self.area.write_vec2(cx, live_id!(self::shader_inputs::finger_move), self.finger_move);
+                self.area.write_vec2(cx, live_item_id!(self::shader_inputs::finger_move), self.finger_move);
             },
             Event::FingerHover(fm) => {
                 self.finger_hover = fm.rel;
-                self.area.write_vec2(cx, live_id!(self::shader_inputs::finger_hover), self.finger_hover);
+                self.area.write_vec2(cx, live_item_id!(self::shader_inputs::finger_hover), self.finger_hover);
             },
             Event::FingerDown(_fd) => {
                 self.finger_down = 1.0;
-                self.area.write_float(cx, live_id!(self::shader_inputs::finger_down), self.finger_down);
+                self.area.write_float(cx, live_item_id!(self::shader_inputs::finger_down), self.finger_down);
             },
             Event::FingerUp(_fu) => {
                 self.finger_down = 0.0;
-                self.area.write_float(cx, live_id!(self::shader_inputs::finger_down), self.finger_down);
+                self.area.write_float(cx, live_item_id!(self::shader_inputs::finger_down), self.finger_down);
             },
             _ => ()
         }

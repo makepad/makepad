@@ -19,7 +19,7 @@ impl TabClose {
     
     pub fn style(cx: &mut Cx) {
         
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::color_selected_focus: #f;
             self::color_deselected_focus: #9d;
             
@@ -120,10 +120,10 @@ impl TabClose {
     pub fn draw_tab_close(&mut self, cx: &mut Cx) {
         self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
         self.bg.shader = live_shader!(cx, self::shader_bg);
-        self.bg.color = self.animator.last_color(cx, live_id!(makepad_render::quad::shader::color));
+        self.bg.color = self.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
         let bg_inst = self.bg.draw_quad(cx, live_walk!(cx, self::walk));
-        bg_inst.push_last_float(cx, &self.animator, live_id!(self::shader_bg::hover));
-        bg_inst.push_last_float(cx, &self.animator, live_id!(self::shader_bg::down));
+        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::hover));
+        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::down));
         self._bg_area = bg_inst.into();
         self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
     }

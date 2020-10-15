@@ -38,7 +38,7 @@ impl TextInput {
     
     pub fn style(cx: &mut Cx) {
         
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::color_empty_message: #666;
             
             self::gutter_width: 0.0;
