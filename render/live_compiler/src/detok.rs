@@ -483,13 +483,13 @@ fn parse_track(p: &mut dyn DeTokParser, track: &mut Track) -> Result<(), LiveErr
                     p.expect_token(Token::Colon) ?;
                     track.set_ease(Ease::de_tok(p) ?);
                 }
-                else if ident == Ident::new("live_id") {
+                else if ident == Ident::new("bind_to") {
                     p.skip_token();
                     p.expect_token(Token::Colon) ?;
                     let ident_path = p.parse_ident_path() ?;
                     let qualified_ident_path = p.qualify_ident_path(&ident_path);
                     let live_item_id = qualified_ident_path.to_live_item_id();
-                    track.set_live_item_id(live_item_id);
+                    track.set_bind_to(live_item_id);
                 }
                 else if ident == Ident::new("keys") {
                     p.skip_token();
@@ -608,7 +608,7 @@ impl DeTok for Anim {
                     
                     if ident == Ident::new("Float") {
                         let mut track = Track::Float {
-                            live_item_id: LiveItemId(tracks.len() as u64),
+                            bind_to: LiveItemId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
                             keys: Vec::new()
@@ -618,7 +618,7 @@ impl DeTok for Anim {
                     }
                     else if ident == Ident::new("Vec2") {
                         let mut track = Track::Vec2 {
-                            live_item_id: LiveItemId(tracks.len() as u64),
+                            bind_to: LiveItemId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
                             keys: Vec::new()
@@ -628,7 +628,7 @@ impl DeTok for Anim {
                     }
                     else if ident == Ident::new("Vec3") {
                         let mut track = Track::Vec3 {
-                            live_item_id: LiveItemId(tracks.len() as u64),
+                            bind_to: LiveItemId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
                             keys: Vec::new()
@@ -638,7 +638,7 @@ impl DeTok for Anim {
                     }
                     else if ident == Ident::new("Vec4") {
                         let mut track = Track::Vec4 {
-                            live_item_id: LiveItemId(tracks.len() as u64),
+                            bind_to: LiveItemId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
                             keys: Vec::new()
@@ -648,7 +648,7 @@ impl DeTok for Anim {
                     }
                     else if ident == Ident::new("Color") {
                         let mut track = Track::Color {
-                            live_item_id: LiveItemId(tracks.len() as u64),
+                            bind_to: LiveItemId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
                             keys: Vec::new()

@@ -1,7 +1,7 @@
 use makepad_render::*;
 
 pub enum ColorPickerEvent {
-    Change {hsva: Vec4},
+    Change {rgba: Color},
     DoneChanging,
     None
 }
@@ -70,11 +70,15 @@ impl ColorPicker {
             changed = true;
         }
         if changed {
-            ColorPickerEvent::Change {hsva: Vec4 {x: self.hue, y: self.sat, z: self.val, w: 1.0}}
+            ColorPickerEvent::Change {rgba: self.to_rgba()}
         }
         else {
             ColorPickerEvent::None
         }
+    }
+    
+    pub fn to_rgba(&self)->Color{
+        Color::from_hsva(Vec4{x: self.hue, y: self.sat, z: self.val, w: 1.0})
     }
     
     pub fn handle_color_picker(&mut self, cx: &mut Cx, event: &mut Event) -> ColorPickerEvent {
@@ -120,11 +124,11 @@ impl ColorPicker {
                         self.animator.play_anim(cx, live_anim!(cx, self::anim_hover));
                     }
                     else {
-                        self.animator.play_anim(cx, live_anim!(cx, Self::anim_default));
+                        self.animator.play_anim(cx, live_anim!(cx, self::anim_default));
                     }
                 }
                 else {
-                    self.animator.play_anim(cx, live_anim!(cx, Self::anim_default));
+                    self.animator.play_anim(cx, live_anim!(cx, self::anim_default));
                 }
                 self.drag_mode = ColorPickerDragMode::None;
                 return ColorPickerEvent::DoneChanging;
@@ -138,20 +142,25 @@ impl ColorPicker {
         ColorPickerEvent::None
     }
     
-    pub fn draw_color_picker(&mut self, cx: &mut Cx, hsva: Vec4) {
+    pub fn draw_color_picker(&mut self, cx: &mut Cx, rgba:Color,  height_scale: f32) {
         self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
         if self.drag_mode == ColorPickerDragMode::None {
-            self.hue = hsva.x;
-            self.sat = hsva.y;
-            self.val = hsva.z;
+            // lets convert to rgba
+            let old_rgba  = self.to_rgba();
+            if !rgba.is_equal_enough(&old_rgba){
+                let hsva = rgba.to_hsva();
+                self.hue = hsva.x;
+                self.sat = hsva.y;
+                self.val = hsva.z;
+            }
         }
         self.wheel.shader = live_shader!(cx, self::shader_wheel);
         // i wanna draw a wheel with 'width' set but height a fixed height.
         self.size = cx.get_turtle_rect().w;
         let k = self.wheel.draw_quad(cx, Walk {
-            margin: Margin::bottom(10.),
+            margin: Margin::bottom(10.*height_scale),
             width: Width::Fill,
-            height: Height::Fix(self.size * 1.0)
+            height: Height::Fix(self.size * height_scale)
         });
         // lets put a hsv int here
         k.push_float(cx, self.hue);
@@ -169,24 +178,24 @@ impl ColorPicker {
             self::anim_default: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {live_id: self::shader_wheel::hover, keys: {1.0: 0.0}},
-                    Float {live_id: self::shader_wheel::down, keys: {1.0: 0.0}}
+                    Float {bind_to: self::shader_wheel::hover, keys: {1.0: 0.0}},
+                    Float {bind_to: self::shader_wheel::down, keys: {1.0: 0.0}}
                 ]
             }
             
             self::anim_hover: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {live_id: self::shader_wheel::hover, keys: {0.0: 1.0}},
-                    Float {live_id: self::shader_wheel::down, keys: {1.0: 0.0}}
+                    Float {bind_to: self::shader_wheel::hover, keys: {0.0: 1.0}},
+                    Float {bind_to: self::shader_wheel::down, keys: {1.0: 0.0}}
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {live_id: self::shader_wheel::hover, keys: {1.0: 1.0}},
-                    Float {live_id: self::shader_wheel::down, keys: {0.0: 0.0, 1.0: 1.0}}
+                    Float {bind_to: self::shader_wheel::hover, keys: {1.0: 1.0}},
+                    Float {bind_to: self::shader_wheel::down, keys: {0.0: 0.0, 1.0: 1.0}}
                 ]
             }
             

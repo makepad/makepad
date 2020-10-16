@@ -507,14 +507,6 @@ impl Signal {
     pub fn is_empty(&self) -> bool {
         self.signal_id == 0
     }
-    
-    pub fn send(&self, cx:&mut Cx, status:StatusId){
-        cx.send_signal(*self, status);
-    }
-
-    pub fn post(&self, status:StatusId){
-        Cx::post_signal(*self, status);
-    }
 }
 
 

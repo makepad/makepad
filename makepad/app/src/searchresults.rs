@@ -360,7 +360,7 @@ impl SearchResultDraw {
             play: Play::Chain {duration: 0.01},
             tracks: vec![
                 Track::Color {
-                    live_item_id: live_item_id!(makepad_render::quad::shader::color),
+                    bind_to: live_item_id!(makepad_render::quad::shader::color),
                     ease: Ease::Lin,
                     keys: vec![(1.0, default_color)],
                     cut_init: None
@@ -386,7 +386,7 @@ impl SearchResultDraw {
             play: Play::Chain {duration: 0.02},
             tracks: vec![
                 Track::Color {
-                    live_item_id: live_item_id!(makepad_render::quad::shader::color),
+                    bind_to: live_item_id!(makepad_render::quad::shader::color),
                     ease: Ease::Lin,
                     keys: vec![(0.0, over_color)],
                     cut_init: None

@@ -210,9 +210,9 @@ impl DesktopWindow {
                     self.close_btn.draw_desktop_button(cx, DesktopButtonType::WindowsClose);
                     
                     // change alignment
-                    cx.change_turtle_align_x(0.5); //Align::center());
+                    cx.change_turtle_align_x_cab(0.5); //Align::center());
                     cx.compute_turtle_height();
-                    cx.change_turtle_align_y(0.5); //Align::center());
+                    cx.change_turtle_align_y_cab(0.5); //Align::center());
                     cx.reset_turtle_pos();
                     cx.move_turtle(50., 0.);
                     // we need to store our caption rect somewhere.
