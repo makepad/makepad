@@ -792,11 +792,8 @@ impl Cx {
         };
     }
     
-    pub fn mtl_update_all_shaders(&mut self, metal_cx: &MetalCx) -> Vec<LiveBodyError> {
-        let mut errors = Vec::new();
-        
-        self.live_styles.process_changed_live_bodies(&mut errors);
-        self.live_styles.process_changed_deps(&mut errors);
+    pub fn mtl_update_all_shaders(&mut self, metal_cx: &MetalCx, errors:&mut Vec<LiveBodyError>)  {
+      
         // recompile shaders, and update values
         
         let options = ShaderCompileOptions {
@@ -833,7 +830,7 @@ impl Cx {
             }
         }
         self.live_styles.changed_shaders.clear();
-        errors
+
     }
     
     pub fn mtl_compile_shader(

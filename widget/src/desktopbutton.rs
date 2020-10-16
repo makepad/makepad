@@ -47,24 +47,24 @@ impl DesktopButton {
             self::anim_default: Anim {
                 play: Cut {duration: 0.1}
                 tracks: [
-                    Float {keys: {1.0: 0.0}, live_id: self::shader_bg::hover}
-                    Float {keys: {1.0: 0.0}, live_id: self::shader_bg::down}
+                    Float {keys: {1.0: 0.0}, bind_to: self::shader_bg::hover}
+                    Float {keys: {1.0: 0.0}, bind_to: self::shader_bg::down}
                 ]
             }
             
             self::anim_over: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {keys: {1.0: 0.0}, live_id: self::shader_bg::down},
-                    Float {keys: {0.0: 1.0, 1.0: 1.0}, live_id: self::shader_bg::hover},
+                    Float {keys: {1.0: 0.0}, bind_to: self::shader_bg::down},
+                    Float {keys: {0.0: 1.0, 1.0: 1.0}, bind_to: self::shader_bg::hover},
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {keys: {0.0: 1.0, 1.0: 1.0}, live_id: self::shader_bg::down},
-                    Float {keys: {1.0: 1.0}, live_id: self::shader_bg::hover},
+                    Float {keys: {0.0: 1.0, 1.0: 1.0}, bind_to: self::shader_bg::down},
+                    Float {keys: {1.0: 1.0}, bind_to: self::shader_bg::hover},
                 ]
             }
             

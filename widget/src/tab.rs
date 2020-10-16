@@ -135,19 +135,19 @@ impl Tab {
                 Track::Color {
                     ease: Ease::Lin,
                     keys: vec![(1.0, self.get_bg_color(cx))],
-                    live_item_id: live_item_id!(makepad_render::quad::shader::color),
+                    bind_to: live_item_id!(makepad_render::quad::shader::color),
                     cut_init: None
                 },
                 Track::Color {
                     ease: Ease::Lin,
                     keys: vec![(1.0, live_color!(cx, self::color_bg_selected))],
-                    live_item_id: live_item_id!(self::shader_bg::border_color),
+                    bind_to: live_item_id!(self::shader_bg::border_color),
                     cut_init: None
                 },
                 Track::Color {
                     ease: Ease::Lin,
                     keys: vec![(1.0, self.get_text_color(cx))],
-                    live_item_id: live_item_id!(makepad_render::text::shader::color),
+                    bind_to: live_item_id!(makepad_render::text::shader::color),
                     cut_init: None
                 },
             ]
@@ -173,7 +173,7 @@ impl Tab {
             play: Play::Single {duration: 0.1, cut: true, term: true, end: 1.0},
             tracks: vec![
                 Track::Float{
-                    live_item_id: live_item_id!(self::tab_closing),
+                    bind_to: live_item_id!(self::tab_closing),
                     ease: Ease::OutExp,
                     keys: vec![(0.0, 1.0), (1.0, 0.0)],
                     cut_init: None

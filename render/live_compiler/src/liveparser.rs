@@ -160,6 +160,9 @@ impl<'a> DeTokParserImpl<'a> {
             let live_item_id = qualified_ident_path.to_live_item_id();
             
             new_body_contains.insert(live_item_id);
+            
+            self.live_styles.item_in_live_body.insert(live_item_id, live_body_id);
+            
             body_items.push(live_item_id);
             
             if let Some(lstok) = self.live_styles.tokens.get(&live_item_id) {
@@ -209,6 +212,7 @@ impl<'a> DeTokParserImpl<'a> {
                     };
                     self.live_styles.add_changed_deps(live_item_id, &tokens, live_tokens_type);
                     self.live_styles.tokens.insert(live_item_id, LiveTokens {
+                        ident_path,
                         qualified_ident_path,
                         tokens,
                         live_tokens_type
@@ -220,6 +224,7 @@ impl<'a> DeTokParserImpl<'a> {
                     let tokens = self.get_token_clone();
                     self.live_styles.add_changed_deps(live_item_id, &tokens, LiveTokensType::Float);
                     self.live_styles.tokens.insert(live_item_id, LiveTokens {
+                        ident_path,
                         qualified_ident_path,
                         tokens,
                         live_tokens_type: LiveTokensType::Float
@@ -233,6 +238,7 @@ impl<'a> DeTokParserImpl<'a> {
                     let tokens = self.get_token_clone();
                     self.live_styles.add_changed_deps(live_item_id, &tokens, LiveTokensType::Color);
                     self.live_styles.tokens.insert(live_item_id, LiveTokens {
+                        ident_path,
                         qualified_ident_path,
                         tokens,
                         live_tokens_type: LiveTokensType::Color

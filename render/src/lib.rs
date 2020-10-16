@@ -3,7 +3,7 @@
 #[macro_use]
 mod cx;
 #[macro_use]
-mod live;
+mod livemacros;
 
 #[cfg(all(not(feature="ipc"),target_os = "linux"))]
 mod cx_opengl;

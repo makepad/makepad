@@ -11,10 +11,10 @@ pub struct FloatSlider {
     pub scaled_value: f32,
     pub norm_value: f32,
     pub animator: Animator,
-    pub min: f32,
-    pub max: f32,
-    pub step: f32,
-    pub size: f32,
+    pub min: Option<f32>,
+    pub max: Option<f32>,
+    pub step: Option<f32>,
+    pub _size: f32,
     pub slider: Quad,
     pub dragging: bool
 }
@@ -26,10 +26,10 @@ impl FloatSlider {
             norm_value: 0.0,
             scaled_value: 0.0,
             animator: Animator::default(),
-            min: 0.0,
-            max: 1.0,
-            step: 0.0,
-            size: 0.0,
+            min: None,
+            max: None,
+            step: None,
+            _size: 0.0,
             slider: Quad::new(cx),
             dragging: false
         }
@@ -40,24 +40,24 @@ impl FloatSlider {
             self::anim_default: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {live_id: self::shader_slider::hover, keys: {1.0: 0.0}},
-                    Float {live_id: self::shader_slider::down, keys: {1.0: 0.0}}
+                    Float {bind_to: self::shader_slider::hover, keys: {1.0: 0.0}},
+                    Float {bind_to: self::shader_slider::down, keys: {1.0: 0.0}}
                 ]
             }
             
             self::anim_hover: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {live_id: self::shader_slider::hover, keys: {0.0: 1.0}},
-                    Float {live_id: self::shader_slider::down, keys: {1.0: 0.0}}
+                    Float {bind_to: self::shader_slider::hover, keys: {0.0: 1.0}},
+                    Float {bind_to: self::shader_slider::down, keys: {1.0: 0.0}}
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {live_id: self::shader_slider::hover, keys: {1.0: 1.0}},
-                    Float {live_id: self::shader_slider::down, keys: {0.0: 0.0, 1.0: 1.0}}
+                    Float {bind_to: self::shader_slider::hover, keys: {1.0: 1.0}},
+                    Float {bind_to: self::shader_slider::down, keys: {0.0: 0.0, 1.0: 1.0}}
                 ]
             }
             
@@ -72,17 +72,17 @@ impl FloatSlider {
                     let df = Df::viewport(pos * vec2(w, h));
                     
                     let cy = h * 0.5;
-                    let height = 5.;
-                    df.box(4., cy - 0.5 * height, w - 10., height, 1.);
-                    
+                    let height = 2.;
+                    df.box(1., cy - 0.5 * height, w - 1., height, 1.);
+                     
                     df.fill(#4);
                     
                     let bheight = 15.;
-                    let bwidth = 10.;
+                    let bwidth = 7.;
                     
-                    df.box((w - bwidth) * norm_value, cy - 0.5 * bheight, bwidth, bheight, 2.);
+                    df.box((w - bwidth) * norm_value, cy - 0.5 * bheight, bwidth, bheight, 1.);
                     ////
-                    let color = mix(mix(#5, #B, hover), #F, down);
+                    let color = mix(mix(#7, #B, hover), #F, down);
                     df.fill(color);
                     
                     return df.result;
@@ -92,10 +92,10 @@ impl FloatSlider {
     }
     
     pub fn handle_finger(&mut self, cx: &mut Cx, rel: Vec2) -> FloatSliderEvent {
-        let norm_value = (rel.x / self.size).max(0.0).min(1.0);
-        let mut scaled_value = norm_value * (self.max - self.min) + self.min;
-        if self.step > 0.0 {
-            scaled_value = (scaled_value / self.step).round() * self.step;
+        let norm_value = (rel.x / self._size).max(0.0).min(1.0);
+        let mut scaled_value = norm_value * (self.max.unwrap_or(1.0) - self.min.unwrap_or(0.0)) + self.min.unwrap_or(0.0);
+        if self.step.unwrap_or(0.0) > 0.0 {
+            scaled_value = (scaled_value / self.step.unwrap_or(1.0)).round() * self.step.unwrap_or(1.0);
         }
         let mut changed = false;
         if scaled_value != self.scaled_value {
@@ -161,14 +161,22 @@ impl FloatSlider {
         FloatSliderEvent::None
     }
     
-    pub fn draw_float_slider(&mut self, cx: &mut Cx, scaled_value: f32, min: f32, max: f32, step: f32) {
+    pub fn draw_float_slider(
+        &mut self,
+        cx: &mut Cx,
+        scaled_value: f32,
+        min: Option<f32>,
+        max: Option<f32>,
+        step: Option<f32>,
+        height_scale: f32
+    ) {
         self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
         if !self.dragging {
             self.scaled_value = scaled_value;
             self.min = min;
             self.max = max;
             self.step = step;
-            self.norm_value = (scaled_value - min) / (max - min);
+            self.norm_value = (scaled_value - min.unwrap_or(0.0)) / (max.unwrap_or(1.0) - min.unwrap_or(0.0));
         }
         
         self.slider.shader = live_shader!(cx, self::shader_slider);
@@ -176,11 +184,11 @@ impl FloatSlider {
         
         let pad = 10.;
         
-        self.size = cx.get_turtle_rect().w - 2. * pad;
+        self._size = cx.get_turtle_rect().w - 2. * pad;
         let k = self.slider.draw_quad(cx, Walk {
             margin: Margin::left(pad),
             width: Width::FillPad(pad),
-            height: Height::Fix(20.0)
+            height: Height::Fix(20.0 * height_scale)
         });
         // lets put a hsv int here
         k.push_float(cx, self.norm_value);
@@ -190,4 +198,4 @@ impl FloatSlider {
     }
     
 }
-   
+

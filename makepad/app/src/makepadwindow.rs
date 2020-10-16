@@ -102,7 +102,7 @@ impl MakepadWindow {
                 return
             }
             DesktopWindowEvent::WindowGeomChange(wc) => {
-                if !makepad_storage.app_state_file_read.is_pending() {
+                if !makepad_storage.state_file_read.is_pending() {
                     // store our new window geom
                     makepad_state.windows[window_index].window_position = wc.new_geom.position;
                     makepad_state.windows[window_index].window_inner_size = wc.new_geom.inner_size;

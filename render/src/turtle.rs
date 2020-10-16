@@ -556,8 +556,18 @@ impl Cx {
         }
     }
     
+    // used for a<>b layouts horizontally
+    pub fn change_turtle_align_x_ab(&mut self, fx: f32) {
+        self.change_turtle_align_x(fx, false);
+    }
+    
     // used for a<b>c layouts horizontally
-    pub fn change_turtle_align_x(&mut self, fx: f32) {
+    pub fn change_turtle_align_x_cab(&mut self, fx: f32) {
+        self.change_turtle_align_x(fx, true);
+    }
+    
+    // used for a<b>c layouts horizontally
+    pub fn change_turtle_align_x(&mut self, fx: f32, width_used:bool) {
         let (dx, align_origin_x) = if let Some(turtle) = self.turtles.last_mut() {
             (Self::compute_align_turtle_x(&turtle), turtle.align_list_x)
         }
@@ -571,13 +581,23 @@ impl Cx {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.align_list_x = self.align_list.len();
             turtle.layout.align.fx = fx;
-            turtle.width_used = turtle.bound_right_bottom.x - turtle.origin.x;
+            turtle.width_used = if width_used{turtle.bound_right_bottom.x - turtle.origin.x}else{0.0};
             turtle.bound_right_bottom.x = std::f32::NEG_INFINITY;
         }
     }
     
+    // used for a<>b layouts horizontally
+    pub fn change_turtle_align_y_ab(&mut self, fx: f32) {
+        self.change_turtle_align_y(fx, false);
+    }
+    
+    // used for a<b>c layouts horizontally
+    pub fn change_turtle_align_y_cab(&mut self, fx: f32) {
+        self.change_turtle_align_y(fx, true);
+    }
+
     // used for a<b>c layouts vertically
-    pub fn change_turtle_align_y(&mut self, fy: f32) {
+    pub fn change_turtle_align_y(&mut self, fy: f32, height_used:bool) {
         let (dy, align_origin_y) = if let Some(turtle) = self.turtles.last_mut() {
             (Self::compute_align_turtle_y(&turtle), turtle.align_list_y)
         }
@@ -591,7 +611,7 @@ impl Cx {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.align_list_y = self.align_list.len();
             turtle.layout.align.fy = fy;
-            turtle.height_used = turtle.bound_right_bottom.y - turtle.origin.y;
+            turtle.height_used = if height_used{turtle.bound_right_bottom.y - turtle.origin.y}else{0.0};
             turtle.bound_right_bottom.y = std::f32::NEG_INFINITY;
         }
     }
@@ -604,10 +624,7 @@ impl Cx {
         else {
             return
         };
-        self.change_turtle_align_y(fy);
-        if let Some(turtle) = self.turtles.last_mut() {
-            turtle.height_used = 0.;
-        }
+        self.change_turtle_align_y(fy, false);
     }
     
     pub fn turtle_align_x(&mut self) {
@@ -617,10 +634,7 @@ impl Cx {
         else {
             return
         };
-        self.change_turtle_align_x(fx);
-        if let Some(turtle) = self.turtles.last_mut() {
-            turtle.width_used = 0.;
-        }
+        self.change_turtle_align_x(fx, false);
     }
     
     pub fn reset_turtle_bounds(&mut self) {
