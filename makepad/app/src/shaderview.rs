@@ -3,11 +3,11 @@ use makepad_render::*;
 // Shader code itself
 
 fn shader(cx: &mut Cx) {live_body!(cx, r#"
-    self::color1: #f0f;
-    self::color2: #0ff;
-    self::color3: #f00;
+    self::color1: #FE00FF; 
+    self::color2: #FF0020;
+    self::color3: #B8FF00;
     self::color4: #00f;
-    
+     
     self::shader: Shader {
         use makepad_render::quad::shader::*;
         use self::shader_inputs::*;

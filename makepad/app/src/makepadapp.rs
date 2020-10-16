@@ -42,9 +42,6 @@ impl MakepadApp {
     pub fn command_bring_all_to_front() -> CommandId {uid!()}
     
     pub fn new(cx: &mut Cx) -> Self {
-        
-        set_widget_style(cx);
-        set_makepad_style(cx);
         let ms = cx.new_signal();
         // set up the keyboard map
         Self::command_preferences().set_key(cx, KeyCode::Comma);
@@ -340,7 +337,7 @@ impl MakepadApp {
                         }
                     }
                 }
-                else if let Some(utf8_data) = self.makepad_storage.app_state_file_read.resolve_utf8(fr) {
+                else if let Some(utf8_data) = self.makepad_storage.state_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
                         if let Ok(app_state) = DeRon::deserialize_ron(utf8_data) {
                             self.makepad_state = app_state;
@@ -383,7 +380,7 @@ impl MakepadApp {
                         window.ensure_unique_tab_title_for_file_editors(cx, window_index, &mut self.makepad_state);
                     }
                 }
-                else if let Some(utf8_data) = self.makepad_storage.app_settings_file_read.resolve_utf8(fr) {
+                else if let Some(utf8_data) = self.makepad_storage.settings_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
                         self.makepad_storage.load_settings(cx, utf8_data);
                     }

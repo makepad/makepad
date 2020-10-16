@@ -7,7 +7,7 @@ use crate::makepadwindow::*;
 use crate::filetree::*;
 use crate::fileeditor::*;
 use crate::buildmanager::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeSet};
 use crate::builder;
 use crate::liveitems::*;
 
@@ -15,7 +15,7 @@ use crate::liveitems::*;
 pub struct MakepadSettings {
     pub build_on_save: bool,
     pub exec_when_done: bool,
-    pub live_macros_on_self: bool,
+    pub live_on_self: bool,
     pub hub_server: HubServerConfig,
     pub builders: HashMap<String, HubBuilderConfig>,
     pub builds: Vec<BuildTarget>,
@@ -27,7 +27,7 @@ impl Default for MakepadSettings {
     fn default() -> Self {
         Self {
             exec_when_done: false,
-            live_macros_on_self: true,
+            live_on_self: true,
             build_on_save: true,
             hub_server: HubServerConfig::Offline,
             builders: HashMap::new(),
@@ -42,7 +42,7 @@ impl MakepadSettings {
         Self {
             exec_when_done: false,
             build_on_save: true,
-            live_macros_on_self: true,
+            live_on_self: true,
             hub_server: HubServerConfig::Offline,
             builders: {
                 let mut cfg = HashMap::new();
@@ -94,8 +94,8 @@ pub struct MakepadStorage {
     pub settings_old: MakepadSettings,
     pub settings: MakepadSettings,
     pub file_tree_file_read: FileRead,
-    pub app_state_file_read: FileRead,
-    pub app_settings_file_read: FileRead,
+    pub state_file_read: FileRead,
+    pub settings_file_read: FileRead,
     pub text_buffer_path_to_id: HashMap<String, MakepadTextBufferId>,
     pub text_buffer_id_to_path: HashMap<MakepadTextBufferId, String>,
     pub text_buffers: Vec<MakepadTextBuffer>,
@@ -135,8 +135,8 @@ impl MakepadStorage {
             text_buffer_id_to_path: HashMap::new(),
             text_buffers: Vec::new(),
             file_tree_file_read: FileRead::default(),
-            app_state_file_read: FileRead::default(),
-            app_settings_file_read: FileRead::default()
+            state_file_read: FileRead::default(),
+            settings_file_read: FileRead::default()
         }
     }
     
@@ -146,8 +146,8 @@ impl MakepadStorage {
     pub fn init(&mut self, cx: &mut Cx) {
         if cx.platform_type.is_desktop() {
             
-            self.app_state_file_read = cx.file_read("makepad_state.ron");
-            self.app_settings_file_read = cx.file_read("makepad_settings.ron");
+            self.state_file_read = cx.file_read("makepad_state.ron");
+            self.settings_file_read = cx.file_read("makepad_settings.ron");
             
             // lets start the router
             let mut hub_router = HubRouter::start_hub_router(HubLog::None);
@@ -176,7 +176,7 @@ impl MakepadStorage {
                 self.settings = settings;
                 //self.settings.style_options.scale = self.settings.style_options.scale.min(3.0).max(0.3);
                 cx.send_signal(self.settings_changed, Self::status_settings_changed());
-                cx.live_macros_on_self = self.settings.live_macros_on_self;
+
                 // so now, here we restart our hub_server if need be.
                 if cx.platform_type.is_desktop() {
                     if self.settings_old.hub_server != self.settings.hub_server {
@@ -246,6 +246,20 @@ impl MakepadStorage {
         path
     }
     
+    pub fn file_path_to_live_path(fp:&str)->String{
+        if fp.starts_with("main/makepad/") {
+            fp["main/makepad/".len()..].to_string()
+        }
+        else {
+            fp.to_string()
+        }
+    }
+    
+    pub fn live_path_to_file_path(lp:&str)->String{
+        format!("main/makepad/{}", lp)
+    }
+    
+    
     pub fn text_buffer_from_path(&mut self, cx: &mut Cx, path: &str) -> &mut MakepadTextBuffer {
         
         // if online, fallback to readfile
@@ -259,12 +273,7 @@ impl MakepadStorage {
                 self.text_buffer_id_to_path.insert(tb_id, path.to_string());
                 self.text_buffers.push(MakepadTextBuffer {
                     file_read: cx.file_read(
-                        if path.starts_with("main/makepad/") {
-                            &path["main/makepad/".len()..]
-                        }
-                        else {
-                            path
-                        }
+                        &Self::file_path_to_live_path(path)
                     ),
                     live_items_list: LiveItemsList::new(cx),
                     read_msg: None,
@@ -382,7 +391,20 @@ impl MakepadStorage {
     }
     
     pub fn handle_live_recompile_event(&mut self, cx: &mut Cx, re: &LiveRecompileEvent) {
-        
+        let mut tb_set = BTreeSet::new();
+        for live_body_id in &re.changed_live_bodies{
+            // lets get the actual path 
+            if let Some(path) = cx.live_styles.live_body_to_file.get(live_body_id){
+                let fp = Self::live_path_to_file_path(path);
+                if let Some(tbid) = self.text_buffer_path_to_id.get(&fp){
+                    tb_set.insert(tbid);
+                }
+            }
+        }
+        for tbid in tb_set{
+            let mtb = &mut self.text_buffers[tbid.as_index()];
+            mtb.update_live_items(cx);
+        }
     }
     
     pub fn reload_builders(&mut self) {

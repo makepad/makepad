@@ -11,6 +11,7 @@ use crate::desktopbutton::*;
 use crate::splitter::*;
 use crate::tabcontrol::*;
 use crate::xrcontrol::*;
+use crate::foldcaption::*;
 
 pub fn set_widget_style(cx: &mut Cx) {
     
@@ -42,7 +43,7 @@ pub fn set_widget_style(cx: &mut Cx) {
         self::color_drop_quad: #a;
         
     "#);
-
+    FoldCaption::style(cx);
     TabClose::style(cx);
     DesktopWindow::style(cx);
     NormalButton::style(cx);

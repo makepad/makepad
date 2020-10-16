@@ -6,7 +6,7 @@ use crate::analyse::{ShaderCompileOptions, ShaderAnalyser};
 use crate::env::Env;
 use crate::token::{TokenWithSpan};
 use crate::builtin::{self, Builtin};
-use crate::ident::{Ident, QualifiedIdentPath};
+use crate::ident::{Ident, IdentPath, QualifiedIdentPath};
 use crate::livetypes::*;
 use crate::detok::{DeTokParserImpl};
 use crate::colors::Color;
@@ -43,7 +43,7 @@ pub enum LiveChangeType {
 #[derive(Clone, Debug, Default)]
 pub struct LiveStyles {
     pub file_to_live_bodies: HashMap<String, Vec<LiveBodyId >>,
-    
+    pub live_body_to_file: HashMap<LiveBodyId, String>,
     // change sets
     pub changed_live_bodies: BTreeSet<LiveBodyId>,
     
@@ -55,6 +55,7 @@ pub struct LiveStyles {
     pub builtins: HashMap<Ident, Builtin>,
     pub live_bodies: Vec<LiveBody>,
     pub live_bodies_contains: HashMap<LiveBodyId, HashSet<LiveItemId >>,
+    pub item_in_live_body: HashMap<LiveItemId, LiveBodyId>,
     pub live_bodies_items: HashMap<LiveBodyId, Vec<LiveItemId >>,
     pub live_depends_on: HashMap<LiveItemId, HashSet<LiveItemId >>,
     pub depends_on_live: HashMap<LiveItemId, HashSet<LiveItemId >>,
@@ -86,6 +87,7 @@ pub struct LiveStyles {
 
 #[derive(Clone, Debug)]
 pub struct LiveTokens {
+    pub ident_path: IdentPath,
     pub qualified_ident_path: QualifiedIdentPath,
     pub tokens: Vec<TokenWithSpan>,
     pub live_tokens_type: LiveTokensType
@@ -167,7 +169,12 @@ impl LiveStyles {
         }
     }
     
-    pub fn add_changed_deps(&mut self, live_item_id: LiveItemId, tokens: &Vec<TokenWithSpan>, live_tokens_type: LiveTokensType) {
+    // a changed direct value doesn't update the tokens
+    pub fn add_changed_direct_value(&mut self, live_item_id: LiveItemId){
+        
+    }
+    
+    pub fn add_changed_deps(&mut self, live_item_id: LiveItemId, new_tokens: &Vec<TokenWithSpan>, live_tokens_type: LiveTokensType) {
         
         if let Some(live_tokens) = self.tokens.get(&live_item_id) {
             // if the type is
@@ -179,13 +186,13 @@ impl LiveStyles {
             else {
                 LiveChangeType::UpdateValue
             };
-            if live_tokens.tokens.len() != tokens.len() {
+            if live_tokens.tokens.len() != new_tokens.len() {
                 self.changed_tokens.insert(live_item_id);
                 self._add_changed_deps_recursive(live_item_id, live_dep_change);
             }
             else {
-                for i in 0..tokens.len() {
-                    if tokens[i].token != live_tokens.tokens[i].token {
+                for i in 0..new_tokens.len() {
+                    if new_tokens[i].token != live_tokens.tokens[i].token {
                         self.changed_tokens.insert(live_item_id);
                         self._add_changed_deps_recursive(live_item_id, live_dep_change);
                         break;
@@ -198,6 +205,23 @@ impl LiveStyles {
             self.changed_tokens.insert(live_item_id);
             self._add_changed_deps_recursive(live_item_id, LiveChangeType::Recompile);
         }
+    }
+    
+    // return all the live items for a certain file, in order
+    pub fn get_live_items_for_file(&self, file:&str)->Vec<LiveItemId>{
+        //println!("get_live_items_for_file {}", file);
+        let mut ret = Vec::new();
+        if let Some(live_bodies_id) = self.file_to_live_bodies.get(file){
+            //println!("HERE {}", live_bodies_id.len());
+            for live_body_id in live_bodies_id{
+                if let Some(live_items) = self.live_bodies_items.get(live_body_id){
+                    for live_item_id in live_items{
+                        ret.push(*live_item_id);
+                    }
+                }
+            }
+        }
+        ret
     }
     
     pub fn remove_live_id(&mut self, live_item_id: LiveItemId) {
@@ -468,6 +492,7 @@ impl LiveStyles {
                 let mut t = Vec::new();
                 std::mem::swap(&mut t, &mut tokens.tokens);
                 LiveTokens {
+                    ident_path: tokens.ident_path,
                     qualified_ident_path: tokens.qualified_ident_path,
                     tokens: t,
                     live_tokens_type: tokens.live_tokens_type
@@ -574,14 +599,29 @@ impl LiveStyles {
     
     pub fn add_live_body(&mut self, live_body: LiveBody) {
         let live_body_id = LiveBodyId(self.live_bodies.len());
-        let v = self.file_to_live_bodies.entry(live_body.file.clone()).or_insert_with( || Vec::new());
-        v.push(live_body_id);
+        let file_live_bodies = self.file_to_live_bodies.entry(live_body.file.clone()).or_insert_with( || Vec::new());
+        
+        let seek_line = live_body.line;
+        let live_bodies = &self.live_bodies;
+        match file_live_bodies.binary_search_by(|probe|{
+            live_bodies[probe.as_index()].line.cmp(&seek_line)
+        }){
+            Err(pos)=>{ // not found
+                file_live_bodies.insert(pos, live_body_id)
+            }
+            Ok(_pos)=>{
+                panic!("Called add_live_body twice for the same body! {} {}", live_body.file, live_body.line)
+            }
+        }
+        
+        self.live_body_to_file.insert(live_body_id, live_body.file.clone());
+        
         self.live_bodies.push(live_body);
         self.changed_live_bodies.insert(live_body_id);
     }
     
     // alright we got a new live body
-    pub fn update_live_body(&mut self, file: &str, line: usize, column: usize, code: String) -> Result<(), ()> {
+    pub fn update_live_body(&mut self, file: &str, line: usize, column: usize, code: String) -> Result<LiveBodyId, ()> {
         // find the body
         if let Some(list) = self.file_to_live_bodies.get(file) {
             // find the nearest block
@@ -603,7 +643,7 @@ impl LiveStyles {
             }
             live_body.line = line;
             live_body.column = column;
-            return Ok(())
+            return Ok(*nearest_id)
         }
         return Err(())
     }

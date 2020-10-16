@@ -947,13 +947,14 @@ impl TextEditor {
         self.scroll_last_cursor_visible(cx, text_buffer, 0.);
         self.view.redraw_view_area(cx);
         self.reset_cursor_blinker(cx);
+        /*
         // do inplace update so we don't need to re-tokenize possibly
         if what.len() == range.1 - range.0 {
             for (index, c) in what.chars().enumerate() {
                 text_buffer.flat_text[range.0 + index] = c;
             }
             return true
-        }
+        }*/
         return false
     }
     

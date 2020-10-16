@@ -44,27 +44,27 @@ impl NormalButton {
             self::anim_default: Anim {
                 play: Cut {duration: 0.1}
                 tracks:[
-                    Float {keys:{1.0: 0.0}, live_id: self::shader_bg::hover}
-                    Float {keys:{1.0: 0.0}, live_id: self::shader_bg::down}
-                    Color {keys:{1.0: #9}, live_id: makepad_render::text::shader::color}
+                    Float {keys:{1.0: 0.0}, bind_to: self::shader_bg::hover}
+                    Float {keys:{1.0: 0.0}, bind_to: self::shader_bg::down}
+                    Color {keys:{1.0: #9}, bind_to: makepad_render::text::shader::color}
                 ]
             }
             
             self::anim_over: Anim {
                 play: Cut {duration: 0.1},
                 tracks:[
-                    Float {keys:{0.0: 1.0, 1.0: 1.0}, live_id: self::shader_bg::hover},
-                    Float {keys:{1.0: 0.0}, live_id: self::shader_bg::down},
-                    Color {keys:{0.0: #f}, live_id: makepad_render::text::shader::color}
+                    Float {keys:{0.0: 1.0, 1.0: 1.0}, bind_to: self::shader_bg::hover},
+                    Float {keys:{1.0: 0.0}, bind_to: self::shader_bg::down},
+                    Color {keys:{0.0: #f}, bind_to: makepad_render::text::shader::color}
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.2},
                 tracks:[
-                    Float {keys:{0.0: 1.0, 1.0: 1.0}, live_id: self::shader_bg::down},
-                    Float {keys:{1.0: 1.0}, live_id: self::shader_bg::hover},
-                    Color {keys:{0.0: #c}, live_id: makepad_render::text::shader::color},
+                    Float {keys:{0.0: 1.0, 1.0: 1.0}, bind_to: self::shader_bg::down},
+                    Float {keys:{1.0: 1.0}, bind_to: self::shader_bg::hover},
+                    Color {keys:{0.0: #c}, bind_to: makepad_render::text::shader::color},
                 ]
             }
             

@@ -1,7 +1,6 @@
 // MacOS specific loop
 use crate::cx_cocoa::*;
 use crate::cx::*;
-use crate::shader_std::*;
 
 impl Cx {
     
@@ -17,8 +16,6 @@ impl Cx {
         let mut metal_cx = MetalCx::new();
         
         let mut metal_windows: Vec<MetalWindow> = Vec::new();
-
-        define_shader_stdlib(self);
         
         self.mtl_compile_all_shaders(&metal_cx);
 
@@ -238,9 +235,10 @@ impl Cx {
             }
             
             // show the timer
-            if self.live_styles.changed_live_bodies.len()>0{
+            if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_shaders.len() > 0{
                 let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
-                let errors = self.mtl_update_all_shaders(&metal_cx);
+                let mut errors = self.process_live_styles_changes();
+                self.mtl_update_all_shaders(&metal_cx, &mut errors);
                 self.call_live_recompile_event(changed_live_bodies, errors ,&mut event_handler);
             }
             /*

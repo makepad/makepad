@@ -1,10 +1,16 @@
 use crate::cx::*;
 
 impl Cx {
-    pub fn init_live_styles(&mut self){
+    pub fn process_live_styles_changes(&mut self) -> Vec<LiveBodyError>{
         let mut errors = Vec::new();
         self.live_styles.process_changed_live_bodies(&mut errors);
         self.live_styles.process_changed_deps(&mut errors);
+        self.ensure_live_style_shaders_allocated();
+        errors
+    }
+    
+    pub fn init_live_styles(&mut self){
+        let errors = self.process_live_styles_changes();
 
         for error in &errors{
             eprintln!("{}", error);
@@ -12,8 +18,6 @@ impl Cx {
         if errors.len()>0{
             panic!();
         }
-
-        self.ensure_live_style_shaders_allocated();
     }
     
     pub fn ensure_live_style_shaders_allocated(&mut self){
