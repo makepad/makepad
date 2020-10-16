@@ -757,31 +757,31 @@ impl Ease {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Track {
     Float {
-        live_item_id: LiveItemId,
+        bind_to: LiveItemId,
         ease: Ease,
         cut_init: Option<f32>,
         keys: Vec<(f64, f32)>
     },
     Vec2 {
-        live_item_id: LiveItemId,
+        bind_to: LiveItemId,
         ease: Ease,
         cut_init: Option<Vec2>,
         keys: Vec<(f64, Vec2)>
     },
     Vec3 {
-        live_item_id: LiveItemId,
+        bind_to: LiveItemId,
         ease: Ease,
         cut_init: Option<Vec3>,
         keys: Vec<(f64, Vec3)>
     },
     Vec4 {
-        live_item_id: LiveItemId,
+        bind_to: LiveItemId,
         ease: Ease,
         cut_init: Option<Vec4>,
         keys: Vec<(f64, Vec4)>
     },
     Color {
-        live_item_id: LiveItemId,
+        bind_to: LiveItemId,
         ease: Ease,
         cut_init: Option<Color>,
         keys: Vec<(f64, Color)>
@@ -929,22 +929,22 @@ impl Track {
         return lerp(*val1, val2.1, f)
     }
     
-    pub fn live_item_id(&self) -> LiveItemId {
+    pub fn bind_id(&self) -> LiveItemId {
         match self {
-            Track::Float {live_item_id, ..} => {
-                *live_item_id
+            Track::Float {bind_to, ..} => {
+                *bind_to
             },
-            Track::Vec2 {live_item_id, ..} => {
-                *live_item_id
+            Track::Vec2 {bind_to, ..} => {
+                *bind_to
             }
-            Track::Vec3 {live_item_id, ..} => {
-                *live_item_id
+            Track::Vec3 {bind_to, ..} => {
+                *bind_to
             }
-            Track::Vec4 {live_item_id, ..} => {
-                *live_item_id
+            Track::Vec4 {bind_to, ..} => {
+                *bind_to
             }
-            Track::Color {live_item_id, ..} => {
-                *live_item_id
+            Track::Color {bind_to, ..} => {
+                *bind_to
             }
         }
     }
@@ -1010,22 +1010,22 @@ impl Track {
         }
     }
     
-    pub fn set_live_item_id(&mut self, new_live_item_id: LiveItemId) {
+    pub fn set_bind_to(&mut self, new_bind_id: LiveItemId) {
         match self {
-            Track::Float {live_item_id, ..} => {
-                *live_item_id = new_live_item_id
+            Track::Float {bind_to, ..} => {
+                *bind_to = new_bind_id
             },
-            Track::Vec2 {live_item_id, ..} => {
-                *live_item_id = new_live_item_id
+            Track::Vec2 {bind_to, ..} => {
+                *bind_to = new_bind_id
             },
-            Track::Vec3 {live_item_id, ..} => {
-                *live_item_id = new_live_item_id
+            Track::Vec3 {bind_to, ..} => {
+                *bind_to = new_bind_id
             },
-            Track::Vec4 {live_item_id, ..} => {
-                *live_item_id = new_live_item_id
+            Track::Vec4 {bind_to, ..} => {
+                *bind_to = new_bind_id
             },
-            Track::Color {live_item_id, ..} => {
-                *live_item_id = new_live_item_id
+            Track::Color {bind_to, ..} => {
+                *bind_to = new_bind_id
             },
         }
     }

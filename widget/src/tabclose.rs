@@ -32,27 +32,27 @@ impl TabClose {
             self::anim_default: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Color {keys: {1.0: self::color_deselected_focus}, live_id: makepad_render::quad::shader::color},
-                    Float {keys: {1.0: 0.0}, live_id: self::shader_bg::hover},
-                    Float {keys: {1.0: 0.0}, live_id: self::shader_bg::down},
+                    Color {keys: {1.0: self::color_deselected_focus}, bind_to: makepad_render::quad::shader::color},
+                    Float {keys: {1.0: 0.0}, bind_to: self::shader_bg::hover},
+                    Float {keys: {1.0: 0.0}, bind_to: self::shader_bg::down},
                 ]
             }
             
             self::anim_over: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Color {keys: {0.0: self::color_selected_focus}, live_id: makepad_render::quad::shader::color},
-                    Float {keys: {1.0: 1.0}, live_id: self::shader_bg::hover},
-                    Float {keys: {1.0: 0.0}, live_id: self::shader_bg::down},
+                    Color {keys: {0.0: self::color_selected_focus}, bind_to: makepad_render::quad::shader::color},
+                    Float {keys: {1.0: 1.0}, bind_to: self::shader_bg::hover},
+                    Float {keys: {1.0: 0.0}, bind_to: self::shader_bg::down},
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.2}
                 tracks: [
-                    Color {keys: {0.0: self::color_selected_focus}, live_id: makepad_render::quad::shader::color},
-                    Float {keys: {1.0: 1.0}, live_id: self::shader_bg::hover},
-                    Float {keys: {0.0: 0.0, 1.0: 0.0}, live_id: self::shader_bg::down},
+                    Color {keys: {0.0: self::color_selected_focus}, bind_to: makepad_render::quad::shader::color},
+                    Float {keys: {1.0: 1.0}, bind_to: self::shader_bg::hover},
+                    Float {keys: {0.0: 0.0, 1.0: 0.0}, bind_to: self::shader_bg::down},
                 ]
             }
             

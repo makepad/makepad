@@ -45,5 +45,8 @@ pub use crate::tokentype::*;
 mod xrcontrol;
 pub use crate::xrcontrol::*;
 
+mod foldcaption;
+pub use crate::foldcaption::*;
+
 //mod texteditor;
 //pub use crate::texteditor::*;

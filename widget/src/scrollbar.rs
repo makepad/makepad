@@ -75,21 +75,21 @@ impl ScrollBar {
             self::anim_default: Anim {
                 play: Cut {duration: 0.5}
                 tracks: [
-                    Color {keys: {1.0: self::color_base}, live_id: makepad_render::quad::shader::color}
+                    Color {keys: {1.0: self::color_base}, bind_to: makepad_render::quad::shader::color}
                 ]
             }
             
             self::anim_over: Anim {
                 play: Cut {duration: 0.05}
                 tracks: [
-                    Color {keys: {1.0: self::color_over}, live_id: makepad_render::quad::shader::color}
+                    Color {keys: {1.0: self::color_over}, bind_to: makepad_render::quad::shader::color}
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.05}
                 tracks: [
-                    Color {keys: {1.0: self::color_down}, live_id: makepad_render::quad::shader::color}
+                    Color {keys: {1.0: self::color_down}, bind_to: makepad_render::quad::shader::color}
                 ]
             }
             

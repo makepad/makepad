@@ -5,176 +5,241 @@ use crate::makepadstorage::*;
 use crate::colorpicker::*;
 use crate::floatslider::*;
 use std::fmt;
+use std::collections::HashMap;
 
 
 #[derive(Clone, Default)]
-pub struct LiveItemsList{
-    pub items: Vec<LiveItemId>
+pub struct LiveItemsList {
+    pub changed: Signal,
+    pub items: Vec<LiveItemId>,
+    pub live_bodies: HashMap<LiveBodyId, usize>
 }
 
-impl LiveItemsList{
-    pub fn new(_cx:&mut Cx)->Self{
-        LiveItemsList::default()
-    }    
+impl LiveItemsList {
+    pub fn new(cx: &mut Cx) -> Self {
+        LiveItemsList {
+            changed: cx.new_signal(),
+            live_bodies: HashMap::new(),
+            items: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct LiveItemsView {
-    pub bg: Quad,
-    pub text: Text,
+    pub view_bg: Quad,
     pub scroll_view: ScrollView,
     pub undo_id: u64,
+    pub color_swatch: Quad,
+    pub value_text: Text,
+    pub fold_captions: Elements<usize, FoldCaption, FoldCaption>,
     pub color_pickers: Elements<usize, ColorPicker, ColorPicker>,
     pub float_sliders: Elements<usize, FloatSlider, FloatSlider>
 }
 
 impl LiveItemsView {
-    pub fn macro_changed() -> StatusId {uid!()}
+    pub fn items_changed() -> StatusId {uid!()}
     
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             scroll_view: ScrollView::new(cx),
             undo_id: 0,
+            value_text: Text {
+                shader: live_shader!(cx, makepad_render::text::shader),
+                ..Text::new(cx)
+            },
+            color_swatch: Quad::new(cx),
+            fold_captions: Elements::new(FoldCaption::new(cx)),
             color_pickers: Elements::new(ColorPicker::new(cx)),
             float_sliders: Elements::new(FloatSlider::new(cx)),
-            bg: Quad::new(cx),
-            text: Text::new(cx),
+            view_bg: Quad::new(cx),
         }
     }
     
     pub fn style(cx: &mut Cx) {
         live_body!(cx, r#"
-            self::layout_bg: Layout {
-                align: all(0.5),
-                walk: {
-                    width: Fill,
-                    height: Compute,
-                    margin: all(1.0),
-                },
-                padding: {l: 16.0, t: 12.0, r: 16.0, b: 12.0},
-            }
+            self::color_bg: #28;
             
-            self::text_style_caption: TextStyle {
+            self::text_style_value: TextStyle {
                 ..makepad_widget::widgetstyle::text_style_normal
             }
+            
+            self::shader_color_swatch: Shader {
+                use makepad_render::quad::shader::*;
+                
+                fn pixel() -> vec4 {
+                    let df = Df::viewport(pos * vec2(w, h));
+                    df.box(0., 0., w, h, 1.);
+                    df.fill(color);
+                    return df.result;
+                }
+            }
+            
+            self::walk_color_swatch: Walk {
+                margin: all(0.),
+                width: Fix(12.),
+                height: Fix(12.)
+            }
+            
+            
         "#)
     }
     
     pub fn handle_live_items(&mut self, cx: &mut Cx, event: &mut Event, mtb: &mut MakepadTextBuffer, text_editor: &mut TextEditor) {
-        /*
+        
+        self.scroll_view.handle_scroll_view(cx, event);
+        
         match event {
             Event::Signal(se) => {
                 // process network messages for hub_ui
-                if let Some(_) = se.signals.get(&mtb.live_macros.changed) {
+                if let Some(_) = se.signals.get(&mtb.live_items_list.changed) {
                     self.scroll_view.redraw_view_area(cx);
                 }
             },
             _ => ()
         }
-        
-        // instead of enumerating these things, i could enumerate the live_macros instead.
-        // then look up the widget by ID, and process any changes.
-        
-        self.scroll_view.handle_scroll_view(cx, event);
-        
-        let mut range_delta: isize = 0;
-        let mut any_changed = false;
-        let mut all_in_place = true;
-        for (index, live_macro) in mtb.live_macros.macros.iter_mut().enumerate() {
-            match live_macro {
-                LiveMacro::Pick {range, hsva, ..} => {
-                    range.0 = (range.0 as isize + range_delta) as usize;
-                    range.1 = (range.1 as isize + range_delta) as usize;
-                    if let Some(color_picker) = self.color_pickers.get(index) {
-                        match color_picker.handle_color_picker(cx, event) {
-                            ColorPickerEvent::Change {hsva: new_hsva} => {
-                                any_changed = true;
-                                let color = Color::from_hsva(new_hsva);
-                                *hsva = new_hsva;
-                                let new_string = format!("#{}", color.to_hex());
-                                let in_place = text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, self.undo_id);
-                                if !in_place {
-                                    range_delta += new_string.len() as isize - (range.1 - range.0) as isize;
-                                    *range = (range.0, range.0 + new_string.len());
-                                    all_in_place = false;
-                                }
-                            },
-                            ColorPickerEvent::DoneChanging => {
-                                self.undo_id += 1;
-                            },
-                            _ => ()
+        let mut any_caption_down = None;
+        let mut do_open = false;
+        for (index, live_item_id) in mtb.live_items_list.items.iter().enumerate() {
+            // get tokens
+            if let Some(tok) = cx.live_styles.tokens.get(live_item_id) {
+                let live_tokens_type = tok.live_tokens_type;
+                let start = tok.tokens[0].span.start;
+                let end = tok.tokens[0].span.end;
+                
+                if let Some(fold_caption) = self.fold_captions.get(index) {
+                    if fold_caption.handle_fold_caption(cx, event) == ButtonEvent::Down {
+                        any_caption_down = Some(index);
+                        do_open = fold_caption.open_state.is_open();
+                    };
+                }
+                let mut update_span = None;
+                match live_tokens_type {
+                    LiveTokensType::Float => {
+                        if let Some(f) = self.float_sliders.get(index) {
+                            f.handle_float_slider(cx, event);
                         }
-                    }
-                },
-                LiveMacro::Slide {range, value, ..} => {
-                    range.0 = (range.0 as isize + range_delta) as usize;
-                    range.1 = (range.1 as isize + range_delta) as usize;
-                    if let Some(float_slider) = self.float_sliders.get(index) {
-                        match float_slider.handle_float_slider(cx, event) {
-                            FloatSliderEvent::Change {scaled_value} => {
-                                *value = scaled_value;
-                                any_changed = true;
-                                let new_string = format!("{}", PrettyPrintedFloat3Decimals(scaled_value));
-                                let in_place = text_editor.handle_live_replace(cx, *range, &new_string, &mut atb.text_buffer, self.undo_id);
-                                if !in_place {
-                                    range_delta += new_string.len() as isize - (range.1 - range.0) as isize;
-                                    *range = (range.0, range.0 + new_string.len());
-                                    all_in_place = false;
-                                }
+                    },
+                    LiveTokensType::Color => {
+                        if let Some(f) = self.color_pickers.get(index) {
+                            match f.handle_color_picker(cx, event){
+                                ColorPickerEvent::Change{rgba}=>{
+                                    // how do we find WHERE to change this valuein our editor
+                                    if let Some(live_body_id) = cx.live_styles.item_in_live_body.get(&live_item_id){
+                                        if let Some(offset) = mtb.live_items_list.live_bodies.get(&live_body_id){
+                                            let new_string = format!("#{}", rgba.to_hex());
+                                            update_span = Some(new_string.len());
+                                            // ok so we have a tok which for us is jsut sa span
+                                            text_editor.handle_live_replace(cx, (start + offset, end + offset), &new_string, &mut mtb.text_buffer, self.undo_id);
+                                        }
+                                    }
+                                },
+                                ColorPickerEvent::DoneChanging => {
+                                    self.undo_id += 1;
+                                },
+                                _=>()
                             }
-                            FloatSliderEvent::DoneChanging => {
-                                self.undo_id += 1;
-                            },
-                            _ => ()
                         }
+                    },
+                    _ => ()
+                }
+                if let Some(update_span) = update_span{
+                    if let Some(tok) = cx.live_styles.tokens.get_mut(live_item_id) {
+                        tok.tokens[0].span.end = start+update_span;                    
                     }
-                },
-                _ => ()
+                }
             }
         }
-        if any_changed && all_in_place {
-            mtb.text_buffer.mark_clean();
-            mtb.parse_live_macros(cx);
-        }
-        */
-    }
-    
-    pub fn draw_heading(&mut self, _cx: &mut Cx) {
         
+        // handle the grouped caption folding
+        if let Some(down_index) = any_caption_down {
+            if let Event::FingerDown(fe) = event {
+                if fe.modifiers.control || fe.modifiers.logo {
+                    for index in 0..mtb.live_items_list.items.len() {
+                        if let Some(fold_caption) = self.fold_captions.get(index) {
+                            if fe.modifiers.control {
+                                if index != down_index{
+                                    fold_caption.open_state.do_close();
+                                }
+                            }
+                            else {
+                                if do_open {
+                                    fold_caption.open_state.do_open();
+                                }
+                                else {
+                                    fold_caption.open_state.do_close();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     
-    pub fn draw_live_items(&mut self, cx: &mut Cx, atb: &mut MakepadTextBuffer, _text_editor: &mut TextEditor) {
-        /*
+    pub fn draw_live_items(&mut self, cx: &mut Cx, mtb: &mut MakepadTextBuffer, _text_editor: &mut TextEditor) {
+        
         if self.scroll_view.begin_view(cx, Layout {
-            
             direction: Direction::Down,
             ..Layout::default()
         }).is_ok() {
-            // we have a list of live_blocks here
-            // then we query those on our cx.live_styles
-            // and iterate all the items in the list.
-            // lets fetch the livebodyids
+            self.view_bg.color = live_color!(cx, self::color_bg);
+            let bg_inst = self.view_bg.begin_quad_fill(cx);
+            bg_inst.set_do_scroll(cx, false, false);
             
-            let path = &atb.full_path["main/makepad/".len()..];
+            //let layout_caption_bg = live_layout!(cx, self::layout_caption_bg);
+            self.value_text.text_style = live_text_style!(cx, self::text_style_value);
+            self.color_swatch.shader = live_shader!(cx, self::shader_color_swatch);
             
-            let mut uid = 0;
-            for (index, live_id) in atb.live_macros.live_items{
-            }
-            for (index, m) in atb.live_macros.macros.iter_mut().enumerate() {
-                match m {
-                    LiveMacro::Pick {hsva, ..} => {
-                        self.color_pickers.get_draw(cx, index, | _, t | t.clone()).draw_color_picker(cx, *hsva);
-                    },
-                    LiveMacro::Slide {value, min, max, step, ..} => {
-                        self.float_sliders.get_draw(cx, index, | _, t | t.clone())
-                            .draw_float_slider(cx, *value, *min, *max, *step);
+            for (index, live_id) in mtb.live_items_list.items.iter().enumerate() {
+                // get tokens
+                if let Some(tok) = cx.live_styles.tokens.get(live_id) {
+                    let ip = tok.ident_path.clone();
+                    let live_tokens_type = tok.live_tokens_type;
+                    //let wleft = cx.get_width_left() - 10.;
+                    //self.caption_text.wrapping = Wrapping::Ellipsis(wleft);
+                    
+                    //let first_tok = tok.tokens[0];
+                    match live_tokens_type {
+                        LiveTokensType::Float => {
+                            if let Some(f) = cx.live_styles.floats.get(live_id).cloned() {
+                                let fold_caption = self.fold_captions.get_draw(cx, index, | _, t | t.clone());
+                                let height_scale = fold_caption.begin_fold_caption(cx);
+                                // draw our float value
+                                //cx.change_turtle_align_x_ab(1.0);
+                                //cx.move_turtle(5., 0.);
+                                self.value_text.draw_text(cx, &format!("{}", PrettyPrintedFloat3Decimals(f.value)));
+                                // draw our value right aligned
+                                ip.segs[1].with( | s | {
+                                    fold_caption.end_fold_caption(cx, s);
+                                });
+                                self.float_sliders.get_draw(cx, index, | _, t | t.clone())
+                                    .draw_float_slider(cx, f.value, f.min, f.max, f.step, height_scale);
+                            }
+                        },
+                        LiveTokensType::Color => {
+                            if let Some(c) = cx.live_styles.colors.get(live_id).cloned() {
+                                let fold_caption = self.fold_captions.get_draw(cx, index, | _, t | t.clone());
+                                let height_scale = fold_caption.begin_fold_caption(cx);
+                                // we need to draw a little color swatch.
+                                self.color_swatch.color = c;
+                                self.color_swatch.draw_quad(cx, live_walk!(cx, self::walk_color_swatch));
+                                
+                                ip.segs[1].with( | s | {
+                                    fold_caption.end_fold_caption(cx, s);
+                                });
+                                self.color_pickers.get_draw(cx, index, | _, t | t.clone()).draw_color_picker(cx, c, height_scale);
+                            }
+                        },
+                        _ => ()
                     }
-                    _ => ()
                 }
             }
+            
+            self.view_bg.end_quad_fill(cx, &bg_inst);
+            
             self.scroll_view.end_view(cx);
         }
-        */
     }
 }
 
@@ -192,9 +257,9 @@ impl fmt::Display for PrettyPrintedFloat3Decimals {
 
 
 impl MakepadTextBuffer {
-    pub fn update_live_items(&mut self, cx: &mut Cx){
-        // read the live body items from live styles and store it
-        
+    pub fn update_live_items(&mut self, cx: &mut Cx) {
+        self.live_items_list.items = cx.live_styles.get_live_items_for_file(&MakepadStorage::file_path_to_live_path(&self.full_path));
+        cx.send_signal(self.live_items_list.changed, LiveItemsView::items_changed())
     }
     
     pub fn parse_live_bodies(&mut self, cx: &mut Cx) {
@@ -204,33 +269,38 @@ impl MakepadTextBuffer {
             match tp.cur_type() {
                 TokenType::Macro => {
                     // we need to find our live!(cx, r#".."#)
-                    if tp.eat("live")
-                        && tp.eat("!") 
-                        && tp.eat("(") 
-                        && tp.eat_token(TokenType::Identifier) 
+                    if tp.eat("live_body")
+                        && tp.eat("!")
+                        && tp.eat("(")
+                        && tp.eat_token(TokenType::Identifier)
                         && tp.eat(",")
                         && tp.eat("r")
-                        && tp.eat("#"){
+                        && tp.eat("#") {
+                        // ok so this is where live body X starts.
+                        // we can use that to map a live_style token to our editor
                         
                         if tp.cur_type() == TokenType::ParenOpen {
                             //shader_end = tp.cur_pair_offset();
+                            
                             if let Some(live_body) = tp.cur_pair_as_string() {
                                 let lc = tp.cur_line_col();
                                 
                                 // lets list this live_body in our macro list.
-                                
-                                if cx.live_styles.update_live_body(
-                                    &self.full_path["main/makepad/".len()..].to_string(),
+                                if let Ok(live_body_id) = cx.live_styles.update_live_body(
+                                    &MakepadStorage::file_path_to_live_path(&self.full_path),
                                     lc.0 + 1,
-                                    lc.1 - 8, 
-                                    live_body 
-                                ).is_err(){
+                                    lc.1 - 8,
+                                    live_body
+                                ){
+                                    self.live_items_list.live_bodies.insert(live_body_id, tp.cur_offset() + 1);
+                                }
+                                else{
                                     eprintln!("LiveBody not found");
-                                }; 
+                                };
                             }
                         }
                     }
-                
+                    
                     /*
                     if !only_update_shaders && tp.eat("pick") && tp.eat("!") {
                         if tp.cur_type() == TokenType::ParenOpen {

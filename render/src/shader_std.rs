@@ -17,7 +17,7 @@ impl Cx{
 }
 
 pub fn define_shader_stdlib(cx: &mut Cx) {
-    
+
     let g = Geometry::from_geometry_gen(cx, GeometryGen::from_quad_2d(0.0,0.0,1.0,1.0));
     cx.live_styles.geometries.insert(live_item_id!(self::quad_2d), g);
     

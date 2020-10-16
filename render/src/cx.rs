@@ -17,13 +17,13 @@ pub use crate::pass::*;
 pub use crate::geometry::*;
 pub use crate::texture::*;
 pub use crate::text::*;
-pub use crate::live::*;
+pub use crate::livemacros::*;
 pub use crate::events::*;
 pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::menu::*;
 pub use crate::shader::*;
-pub use crate::live::*;
+pub use crate::livemacros::*;
 pub use crate::geometrygen::*;
 pub use crate::uid;
 
@@ -101,9 +101,6 @@ pub struct Cx {
     pub geometries: Vec<CxGeometry>,
 
     pub shaders: Vec<CxShader>,
-    //pub shader_recompiles: Vec<Shader>,
-
-    pub live_macros_on_self: bool,
 
     pub is_in_redraw_cycle: bool,
     pub default_dpi_factor: f32,
@@ -211,8 +208,6 @@ impl Default for Cx {
             //shader_recompiles: Vec::new(),
 
             geometries: Vec::new(),
-            
-            live_macros_on_self: true,
             
             default_dpi_factor: 1.0,
             current_dpi_factor: 1.0,
