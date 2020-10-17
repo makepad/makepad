@@ -110,7 +110,9 @@ impl HttpServer {
         write_bytes_to_tcp_stream_no_error(tcp_stream, response_ack.as_bytes());
         
         let mut web_socket = WebSocket::new();
-        // do the websocket protocol.
+        // start a thread for the write side
+        
+        // do the websocket read proto here
         loop {
             let mut data = [0u8; 1024];
             match tcp_stream.read(&mut data) {

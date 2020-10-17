@@ -35,9 +35,7 @@ pub struct WebSocket {
     is_ping: bool,
     is_pong: bool,
     is_partial: bool,
-    is_binary: bool,
     is_masked: bool,
-    last_opcode: usize,
     state: WebSocketState
 }
 
@@ -59,12 +57,10 @@ impl WebSocket {
             data_len: 0,
             input_read: 0,
             mask_counter: 0,
-            last_opcode: 0,
             is_ping: false,
             is_pong: false,
             is_masked: false,
             is_partial: false,
-            is_binary: false,
             state: WebSocketState::Opcode
         }
     }
@@ -95,8 +91,11 @@ impl WebSocket {
         loop {
             match self.state {
                 WebSocketState::Opcode => {
+                    // clean up the side-statespace
                     self.is_ping = false;
                     self.is_pong = false;
+                    self.is_partial = false;
+                    self.is_masked = false;
                     if self.parse_head(input) {
                         break;
                     }
@@ -104,11 +103,7 @@ impl WebSocket {
                     let opcode = self.head[0] & 15;
                     if opcode <= 2 {
                         self.is_partial = frame != 0;
-                        self.is_binary = opcode == 2 || opcode == 0 && self.last_opcode == 2;
                         self.to_state(WebSocketState::Len1);
-                        if opcode != 0 {
-                            self.last_opcode = 2;
-                        }
                     }
                     else if opcode == 8 {
                         results.push(WebSocketResult::Close);
