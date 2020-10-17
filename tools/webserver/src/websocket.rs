@@ -6,21 +6,17 @@ pub enum WebSocketState {
     Len1,
     Len2,
     Len8,
-    Ping,
-    Pong,
     Data,
     Mask
 }
 
 impl WebSocketState{
-    fn expected(&self)->usize{
+    fn head_expected(&self)->usize{
         match self{
             WebSocketState::Opcode=>1,
             WebSocketState::Len1=>1,
             WebSocketState::Len2=>2,
             WebSocketState::Len8=>8,
-            WebSocketState::Ping=>1,
-            WebSocketState::Pong=>1,
             WebSocketState::Data=>0,
             WebSocketState::Mask=>4
         }
@@ -36,6 +32,8 @@ pub struct WebSocket {
     data_len: usize,
     input_read: usize,
     mask_counter: usize,
+    is_ping: bool,
+    is_pong: bool,
     is_partial: bool,
     is_binary: bool,
     is_masked: bool,
@@ -43,8 +41,10 @@ pub struct WebSocket {
     state: WebSocketState
 }
 
-pub enum WebSocketParseResult {
-    Continue,
+pub enum WebSocketResult {
+    Ping(Vec<u8>),
+    Pong(Vec<u8>),
+    Data(Vec<u8>),
     Error(String),
     Close
 }
@@ -60,6 +60,8 @@ impl WebSocket {
             input_read: 0,
             mask_counter: 0,
             last_opcode: 0,
+            is_ping: false,
+            is_pong: false,
             is_masked: false,
             is_partial: false,
             is_binary: false,
@@ -82,16 +84,19 @@ impl WebSocket {
     
     fn to_state(&mut self, state:WebSocketState){
         self.head_written = 0;
-        self.head_expected = state.expected();
+        self.head_expected = state.head_expected();
         self.state = state;
     }
     
-    pub fn parse(&mut self, input: &[u8]) -> WebSocketParseResult {
+    pub fn parse(&mut self, input: &[u8]) -> Vec<WebSocketResult> {
         self.input_read = 0;
+        let mut results = Vec::new();
         // parse a header
         loop {
             match self.state {
                 WebSocketState::Opcode => {
+                    self.is_ping = false;
+                    self.is_pong = false;
                     if self.parse_head(input) {
                         break;
                     }
@@ -106,16 +111,20 @@ impl WebSocket {
                         }
                     }
                     else if opcode == 8 {
-                        return WebSocketParseResult::Close;
+                        results.push(WebSocketResult::Close);
+                        break;
                     }
                     else if opcode == 9 {
-                        self.to_state(WebSocketState::Ping);
+                        self.is_ping = true;
+                        self.to_state(WebSocketState::Len1);
                     }
                     else if opcode == 10 {
-                        self.to_state(WebSocketState::Pong);
+                        self.is_pong = true;
+                        self.to_state(WebSocketState::Len1);
                     }
                     else {
-                        return WebSocketParseResult::Error(format!("Opcode not supported {}", opcode))
+                        results.push(WebSocketResult::Error(format!("Opcode not supported {}", opcode)));
+                        break;
                     }
                 },
                 WebSocketState::Len1 => {
@@ -125,16 +134,21 @@ impl WebSocket {
                     self.is_masked = (self.head[0] & 128) > 0;
                     let len_type = self.head[0] & 127;
                     if len_type < 126 {
-                        self.data_len = len_type as usize;
-                        if !self.is_masked {
-                            self.to_state(WebSocketState::Data);
+                        if len_type == 0{
+                            self.to_state(WebSocketState::Opcode)
                         }
-                        else {
-                            self.to_state(WebSocketState::Mask);
+                        else{
+                            self.data_len = len_type as usize;
+                            if !self.is_masked {
+                                self.to_state(WebSocketState::Data);
+                            }
+                            else {
+                                self.to_state(WebSocketState::Mask);
+                            }
                         }
                     }
                     else if len_type == 126 {
-                        self.to_state(WebSocketState::Len1);
+                        self.to_state(WebSocketState::Len2);
                     }
                     else if len_type == 127 {
                         self.to_state(WebSocketState::Len8);
@@ -172,14 +186,9 @@ impl WebSocket {
                     if self.parse_head(input) {
                         break;
                     }
-                    if self.data_len == 0{
-                        self.to_state(WebSocketState::Opcode);
-                    }
-                    else{
-                        self.mask_counter = 0;
-                        self.data.truncate(0);
-                        self.to_state(WebSocketState::Data);
-                    }
+                    self.mask_counter = 0;
+                    self.data.truncate(0);
+                    self.to_state(WebSocketState::Data);
                 },
                 WebSocketState::Data=>{
                     if self.is_masked{
@@ -199,20 +208,27 @@ impl WebSocket {
                         break;
                     }
                     else{
-                        if self.is_binary{
-                            eprintln!("implement partial binary")
+                        // TODO add support for partials 
+                        if self.is_ping{
+                            results.push(WebSocketResult::Ping(self.data.clone()))
+                        }
+                        else if self.is_pong{
+                            results.push(WebSocketResult::Pong(self.data.clone()))
                         }
                         else{
-                            let s = std::str::from_utf8(&self.data);
-                            println!("GOT DATA #{}#", s.unwrap());
+                            results.push(WebSocketResult::Data(self.data.clone()));
                         }
+                        
+                        let s = std::str::from_utf8(&self.data);
+                        println!("GOT DATA #{}#", s.unwrap());
+
                         self.to_state(WebSocketState::Opcode);
                     }
                 },
                 _ => ()
             }
         }
-        return WebSocketParseResult::Continue;
+        return results;
     }
     
 }
