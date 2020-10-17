@@ -218,9 +218,6 @@ impl WebSocket {
                         else{
                             results.push(WebSocketResult::Data(self.data.clone()));
                         }
-                        
-                        let s = std::str::from_utf8(&self.data);
-                        println!("GOT DATA #{}#", s.unwrap());
 
                         self.to_state(WebSocketState::Opcode);
                     }

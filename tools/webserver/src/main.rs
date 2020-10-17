@@ -14,7 +14,7 @@ use deflate::write::ZlibEncoder;
 mod digest;
 use crate::digest::websocket_create_ack;
 mod websocket;
-use crate::websocket::WebSocket;
+use crate::websocket::{WebSocket, WebSocketResult};
 
 fn main() {
     // config params
@@ -115,7 +115,18 @@ impl HttpServer {
             let mut data = [0u8; 1024];
             match tcp_stream.read(&mut data) {
                 Ok(n) => {
-                    web_socket.parse(&data[0..n]);
+                    for result in web_socket.parse(&data[0..n]){
+                        match result{
+                            WebSocketResult::Ping(_)=>{},
+                            WebSocketResult::Pong(_)=>{},
+                            WebSocketResult::Data(data)=>{
+                                let s = std::str::from_utf8(&data);
+                                println!("GOT DATA #{}#", s.unwrap());
+                            },
+                            WebSocketResult::Error(_)=>{},
+                            WebSocketResult::Close=>{}
+                        }
+                    }
                 }
                 Err(_) => {
                     println!("Websocket disconnect");
