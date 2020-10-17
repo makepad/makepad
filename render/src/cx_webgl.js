@@ -1685,7 +1685,6 @@
         
         alloc_vao(vao_id, shader_id, geom_ib_id, geom_vb_id, inst_vb_id) {
             let gl = this.gl;
-            
             let old_vao = this.vaos[vao_id];
             if (old_vao) {
                 gl.OES_vertex_array_object.deleteVertexArrayOES(old_vao);
@@ -2214,7 +2213,7 @@
             if (!wasmfile) continue
             function fetch_wasm(wasmfile) {
                 let webasm = null;
-                function _log_str(chars_ptr, len) {
+                function _console_log(chars_ptr, len) {
                     let out = "";
                     let array = new Uint32Array(webasm.instance.exports.memory.buffer, chars_ptr, len);
                     for(let i = 0; i < len; i++){
@@ -2226,7 +2225,7 @@
                 fetch(wasmfile)
                     .then(response => response.arrayBuffer())
                     .then(bytes => WebAssembly.instantiate(bytes, {env: {
-                    _log_str
+                    _console_log
                 }}))
                     .then(results => {
                     webasm = results

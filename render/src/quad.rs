@@ -40,6 +40,7 @@ impl Quad {
             
             fn vertex() -> vec4 {
                 let scr = scroll();
+                
                 let clipped: vec2 = clamp(
                     geom * vec2(w, h) + vec2(x, y) - scr,
                     draw_clip.xy,

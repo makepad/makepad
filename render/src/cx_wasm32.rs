@@ -4,13 +4,13 @@ use std::alloc;
 use crate::cx::*;
 
 extern "C" {
-    fn _log_str(chars:u32, len:u32);
+    fn _console_log(chars:u32, len:u32);
 }
 
-pub fn log_str(val:&str){
+pub fn console_log(val:&str){
     unsafe{
         let chars = val.chars().collect::<Vec<char>>();
-        _log_str(chars.as_ptr() as u32, chars.len() as u32);
+        _console_log(chars.as_ptr() as u32, chars.len() as u32);
     }
 }
  
@@ -515,6 +515,12 @@ impl Cx {
         
         // lets check our recompile queue
         if !is_animation_frame {
+            if self.live_styles.changed_live_bodies.len()>0{
+                let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
+                let mut errors = self.process_live_styles_changes();
+                self.webgl_update_all_shaders(&mut errors);
+                self.call_live_recompile_event(changed_live_bodies, errors ,&mut event_handler);
+            }
             /*
             let mut shader_results = Vec::new();
             for shader_id in &self.shader_recompiles {
