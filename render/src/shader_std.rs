@@ -261,7 +261,8 @@ pub fn define_shader_stdlib(cx: &mut Cx) {
                 
                 fn circle(inout self, x: float, y: float, r: float) {
                     let c = self.pos - vec2(x, y);
-                    self.field = (length(c.xy) - r) / self.scale;
+                    let len = sqrt(c.x*c.x+c.y*c.y);
+                    self.field = (len - r) / self.scale;
                     self.old_shape = self.shape;
                     self.shape = min(self.shape, self.field);
                 }

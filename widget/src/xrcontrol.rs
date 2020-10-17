@@ -207,6 +207,18 @@ impl XRControl {
         self.ray_cube.shader = live_shader!(cx, self::shader_ray_cube);
         self.ray_cursor.shader = live_shader!(cx, self::shader_ray_cursor);
         
+        // THIS HAS A VERY STRANGE BUG. if i reverse these, the dots are broken on wasm+quest
+        if self.ray_view.begin_view(cx, Layout::abs_origin_zero()).is_ok() {
+            
+            let ray_size = Vec3 {x: 0.02, y: 0.02, z: 0.12};
+            let ray_pos = Vec3 {x: 0., y: 0., z: 0.0};
+            
+            self._left_ray_area = self.ray_cube.draw_cube(cx, ray_size, ray_pos, &self._left_ray_mat).into();
+            self._right_ray_area = self.ray_cube.draw_cube(cx, ray_size, ray_pos, &self._right_ray_mat).into();
+            
+            self.ray_view.end_view(cx);
+        }
+        
         if self.cursor_view.begin_view(cx, Layout::abs_origin_zero()).is_ok() {
             self._left_cursor_area = self.ray_cursor.draw_quad_rel(cx, Rect {
                 x: self._left_cursor_pt.x - 0.5 * self.cursor_size,
@@ -221,17 +233,6 @@ impl XRControl {
                 h: self.cursor_size
             }).into();
             self.cursor_view.end_view(cx);
-        }
-        
-        // if let Some(xr_event) = &self.last_xr_update{
-        if self.ray_view.begin_view(cx, Layout::abs_origin_zero()).is_ok() {
-            let ray_size = Vec3 {x: 0.02, y: 0.02, z: 0.12};
-            let ray_pos = Vec3 {x: 0., y: 0., z: 0.0};
-            
-            self._left_ray_area = self.ray_cube.draw_cube(cx, ray_size, ray_pos, &self._left_ray_mat).into();
-            self._right_ray_area = self.ray_cube.draw_cube(cx, ray_size, ray_pos, &self._right_ray_mat).into();
-            
-            self.ray_view.end_view(cx);
         }
         
     }
