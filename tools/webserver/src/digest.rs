@@ -1,13 +1,4 @@
-// super simple dep free websocket ack
-
-pub fn websocket_create_ack(key: &str) -> String {
-    let to_hash = format!("{}258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);
-    let mut sha1 = Sha1::new();
-    sha1.update(to_hash.as_bytes());
-    let out_bytes = sha1.finalise();
-    let base64 = base64_encode(&out_bytes);
-    base64
-}
+// depfree sha1
 
 pub struct Sha1 {
     state: [u32; STATE_LEN],
@@ -17,7 +8,7 @@ pub struct Sha1 {
 }
 
 impl Sha1 {
-    fn new() -> Sha1 {
+    pub fn new() -> Sha1 {
         Self {
             state: SHA1_INIT_STATE.clone(),
             block: [0u8; U8_BLOCK_LEN],
@@ -26,7 +17,7 @@ impl Sha1 {
         }
     }
     
-    fn update(&mut self, bytes: &[u8]) {
+    pub fn update(&mut self, bytes: &[u8]) {
         // first write bytes into block,
         for i in 0..bytes.len() {
             self.block[self.in_block] = bytes[i];
@@ -40,7 +31,7 @@ impl Sha1 {
         }
     }
     
-    fn finalise(mut self) -> [u8; U8_STATE_LEN] {
+    pub fn finalise(mut self) -> [u8; U8_STATE_LEN] {
         
         let bits = (self.total as u64 + (self.in_block as u64)) * 8;
         let extra = bits.to_be_bytes();

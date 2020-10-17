@@ -1,5 +1,7 @@
 use std::convert::TryInto;
- 
+use crate::digest::{Sha1, base64_encode};
+
+
 #[derive(Debug)]
 pub enum WebSocketState {
     Opcode,
@@ -48,6 +50,7 @@ pub enum WebSocketResult {
 }
 
 impl WebSocket {
+
     pub fn new() -> Self {
         Self {
             head: [0u8; 8],
@@ -63,6 +66,19 @@ impl WebSocket {
             is_partial: false,
             state: WebSocketState::Opcode
         }
+    }
+    
+    pub fn create_upgrade_response(key: &str) -> String {
+        let to_hash = format!("{}258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);
+        let mut sha1 = Sha1::new();
+        sha1.update(to_hash.as_bytes());
+        let out_bytes = sha1.finalise();
+        let base64 = base64_encode(&out_bytes);
+        let response_ack = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+            base64
+        );
+        response_ack
     }
     
     fn parse_head(&mut self, input: &[u8]) -> bool {
