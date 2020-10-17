@@ -1,8 +1,7 @@
 use std::convert::TryInto;
 use crate::digest::{Sha1, base64_encode};
 
-
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum WebSocketState {
     Opcode,
     Len1,
@@ -25,7 +24,6 @@ impl WebSocketState{
     }
 }
 
-#[allow(dead_code)]
 pub struct WebSocket {
     head: [u8; 8],
     head_expected: usize,
@@ -95,6 +93,10 @@ impl WebSocket {
     }
     
     fn to_state(&mut self, state:WebSocketState){
+        if state == WebSocketState::Data{
+            self.mask_counter = 0;
+            self.data.truncate(0);
+        }
         self.head_written = 0;
         self.head_expected = state.head_expected();
         self.state = state;
@@ -197,8 +199,6 @@ impl WebSocket {
                     if self.parse_head(input) {
                         break;
                     }
-                    self.mask_counter = 0;
-                    self.data.truncate(0);
                     self.to_state(WebSocketState::Data);
                 },
                 WebSocketState::Data=>{
