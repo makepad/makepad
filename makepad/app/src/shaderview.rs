@@ -3,10 +3,11 @@ use makepad_render::*;
 // Shader code itself
 
 fn shader(cx: &mut Cx) {live_body!(cx, r#"
-    self::color1: #FE00FF; 
-    self::color2: #FF0020;
-    self::color3: #B8FF00;
+    self::color1: #f0f; 
+    self::color2: #0ff;
+    self::color3: #f00;
     self::color4: #00f;
+    self::slider: 1.000;  
      
     self::shader: Shader {
         use makepad_render::quad::shader::*;
@@ -162,7 +163,7 @@ fn shader(cx: &mut Cx) {live_body!(cx, r#"
         }
         
         fn displace(p: vec3, d: vec2) -> vec2 {
-            return vec2((0.05 + 0.2) * sin(10.0 * p.x) * sin(10.0 * p.y) * sin(10.0 * p.z) + d.x, d.y);
+            return vec2((0.05 + 0.2*self::slider) * sin(10.0 * p.x) * sin(10.0 * p.y) * sin(10.0 * p.z) + d.x, d.y);
         }
         
         fn difference(d1: vec2, d2: vec2) -> vec2 {

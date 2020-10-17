@@ -117,7 +117,22 @@ impl LiveItemsView {
                 match live_tokens_type {
                     LiveTokensType::Float => {
                         if let Some(f) = self.float_sliders.get(index) {
-                            f.handle_float_slider(cx, event);
+                            match f.handle_float_slider(cx, event){
+                                FloatSliderEvent::Change{scaled_value}=>{
+                                    if let Some(live_body_id) = cx.live_styles.item_in_live_body.get(&live_item_id){
+                                        if let Some(offset) = mtb.live_items_list.live_bodies.get(&live_body_id){
+                                            let new_string = format!("{}", PrettyPrintedFloat3Decimals(scaled_value));
+                                            update_span = Some(new_string.len());
+                                            // ok so we have a tok which for us is jsut sa span
+                                            text_editor.handle_live_replace(cx, (start + offset, end + offset), &new_string, &mut mtb.text_buffer, self.undo_id);
+                                        }
+                                    }
+                                },
+                                FloatSliderEvent::DoneChanging=>{
+                                    self.undo_id += 1;
+                                },
+                                _=>()
+                            }
                         }
                     },
                     LiveTokensType::Color => {
@@ -133,7 +148,7 @@ impl LiveItemsView {
                                             text_editor.handle_live_replace(cx, (start + offset, end + offset), &new_string, &mut mtb.text_buffer, self.undo_id);
                                         }
                                     }
-                                },
+                                }, 
                                 ColorPickerEvent::DoneChanging => {
                                     self.undo_id += 1;
                                 },

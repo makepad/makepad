@@ -107,6 +107,7 @@ impl Cx {
                     || vao.geom_vb_id != geometry.platform.vb_id
                     || vao.geom_ib_id != geometry.platform.ib_id
                     || vao.shader_id != Some(draw_call.shader_id) {
+                        
                     vao.shader_id = Some(draw_call.shader_id);
                     vao.inst_vb_id = draw_call.platform.inst_vb_id;
                     vao.geom_vb_id = geometry.platform.vb_id;
@@ -139,7 +140,7 @@ impl Cx {
         if let Some(_) = &self.views[view_id].debug {
             let mut s = String::new();
             self.debug_draw_tree_recur(false, &mut s, view_id, 0);
-            log_str(&s);
+            console_log(&s);
         }
     }
     
@@ -250,28 +251,63 @@ impl Cx {
             no_const_collapse: false
         };
         
-        let platform = &mut self.platform;
-        let shaders = &mut self.shaders;
-        let live_styles = &mut self.live_styles;
-        for (live_id,_shader) in &live_styles.shader_alloc{
-            match live_styles.collect_and_analyse_shader(*live_id, options) {
+        for (live_id,_shader) in &self.live_styles.shader_alloc{
+            match self.live_styles.collect_and_analyse_shader(*live_id, options) {
                 Err(err) => {
-                    platform.from_wasm.log(&format!("{}", err))
+                    self.platform.from_wasm.log(&format!("{}", err))
                 },
                 Ok((shader_ast, default_geometry)) => {
-                    let shader_id = live_styles.shader_alloc.get(live_id).unwrap().shader_id;
+                    let shader_id = self.live_styles.shader_alloc.get(live_id).unwrap().shader_id;
                     Self::webgl_compile_shader(
                         shader_id,
-                        &mut shaders[shader_id],
+                        &mut self.shaders[shader_id],
                         shader_ast,
                         default_geometry,
                         options,
-                        platform,
-                        live_styles
+                        &mut self.platform,
+                        &self.live_styles
                     );
                 }
             }
         };
+        self.live_styles.changed_shaders.clear();
+    }
+    
+    pub fn webgl_update_all_shaders(&mut self, errors:&mut Vec<LiveBodyError>)  {
+        let options = ShaderCompileOptions {
+            gather_all: !self.platform.gpu_spec_is_low_on_uniforms,
+            create_const_table: true,
+            no_const_collapse: false
+        };
+        
+        for (live_id, change) in &self.live_styles.changed_shaders {
+            match change {
+                LiveChangeType::Recompile => {
+                    match self.live_styles.collect_and_analyse_shader(*live_id, options) {
+                        Err(err) => {
+                            errors.push(err);
+                        },
+                        Ok((shader_ast, default_geometry)) => {
+                            let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                            Self::webgl_compile_shader(
+                                shader_id,
+                                &mut self.shaders[shader_id],
+                                shader_ast,
+                                default_geometry,
+                                options,
+                                &mut self.platform,
+                                &self.live_styles
+                            );
+                        }
+                    }
+                }
+                LiveChangeType::UpdateValue => {
+                    let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                    self.shaders[shader_id].mapping.update_live_uniforms(&self.live_styles);
+                }
+            }
+        }
+        self.live_styles.changed_shaders.clear();
     }
     
     pub fn webgl_compile_shader(
@@ -315,13 +351,13 @@ impl Cx {
             ));
         }
         
-        let mapping = CxShaderMapping::from_shader_ast(shader_ast, options);
-        
+        let mut mapping = CxShaderMapping::from_shader_ast(shader_ast, options);
+        mapping.update_live_uniforms(live_styles);
         // lets check if we need to recompile the shader at all
         if let Some(sh_platform) = &sh.platform {
             if sh_platform.vertex == vertex && sh_platform.fragment == fragment {
                 sh.mapping = mapping;
-                return ShaderCompileResult::Nop {id: shader_id}
+                return ShaderCompileResult::Nop
             }
         }
         //let shader_id = self.compiled_shaders.len();
@@ -333,7 +369,7 @@ impl Cx {
             fragment: fragment
         });
         
-        ShaderCompileResult::Ok {id: shader_id}
+        ShaderCompileResult::Ok 
     }
     
 }

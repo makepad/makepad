@@ -790,6 +790,7 @@ impl Cx {
                 }
             }
         };
+        self.live_styles.changed_shaders.clear();
     }
     
     pub fn mtl_update_all_shaders(&mut self, metal_cx: &MetalCx, errors:&mut Vec<LiveBodyError>)  {
