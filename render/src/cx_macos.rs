@@ -235,7 +235,7 @@ impl Cx {
             }
             
             // show the timer
-            if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_shaders.len() > 0{
+            if self.live_styles.changed_live_bodies.len()>0{
                 let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
                 let mut errors = self.process_live_styles_changes();
                 self.mtl_update_all_shaders(&metal_cx, &mut errors);
@@ -252,7 +252,6 @@ impl Cx {
                 self.shader_recompiles.truncate(0);
                 self.call_shader_recompile_event(shader_results, &mut event_handler);
             }*/
-                
             
             if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
                 true

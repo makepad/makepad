@@ -20,6 +20,7 @@ impl Cube {
         live_body!(cx, r#"self::shader: Shader {
             use crate::shader_std::prelude::*;
             use crate::shader_std::geometry_3d::*;
+            default_geometry: crate::shader_std::cube_3d;
             
             instance transform: mat4;
             instance color: vec4;

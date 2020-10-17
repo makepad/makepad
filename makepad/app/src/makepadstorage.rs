@@ -379,11 +379,12 @@ impl MakepadStorage {
     }
     
     pub fn text_buffer_handle_file_read(&mut self, cx: &mut Cx, fr: &FileReadEvent) {
-        for atb in &mut self.text_buffers {
-            if let Some(utf8_data) = atb.file_read.resolve_utf8(fr) {
+        for mtb in &mut self.text_buffers {
+            if let Some(utf8_data) = mtb.file_read.resolve_utf8(fr) {
                 if let Ok(utf8_data) = utf8_data {
-                    atb.text_buffer.load_from_utf8(utf8_data);
-                    atb.text_buffer.send_textbuffer_loaded_signal(cx);
+                    mtb.text_buffer.load_from_utf8(utf8_data);
+                    mtb.text_buffer.send_textbuffer_loaded_signal(cx);
+                    mtb.update_live_items(cx);
                     break;
                 }
             }

@@ -226,10 +226,10 @@ impl LiveStyles {
     
     pub fn remove_live_id(&mut self, live_item_id: LiveItemId) {
         self._add_changed_deps_recursive(live_item_id, LiveChangeType::Recompile);
+        self.clear_computed_live_id(live_item_id);
         self.tokens.remove(&live_item_id);
         self.style_alloc.remove(&live_item_id);
         self.shader_asts.remove(&live_item_id);
-        self.clear_computed_live_id(live_item_id);
     }
     
     pub fn _add_changed_deps_recursive(&mut self, live_item_id: LiveItemId, live_change_type: LiveChangeType) {

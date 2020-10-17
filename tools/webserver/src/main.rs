@@ -11,19 +11,24 @@ use std::io::Write;
 use deflate::Compression;
 use deflate::write::ZlibEncoder;
 
+mod digest;
+use crate::digest::websocket_create_ack;
+mod websocket;
+use crate::websocket::WebSocket;
+
 fn main() {
     // config params
     let base_path = "";
-    let calc_path = "./";
+    let calc_path = "./test";
     let exts = [".rs", ".js", ".toml", ".html", ".js", ".wasm", ".ttf", ".ron"];
     let ex_file = ["bindings.rs"];
     let ex_dirs = ["deps", "build", "edit_repo"];
-     
+    
     let brotli_filecache = Arc::new(Mutex::new(None));
     let zlib_filecache = Arc::new(Mutex::new(None));
     
     let http_server = HttpServer::start_http_server(
-        SocketAddr::from(([0, 0, 0, 0], 80)),
+        SocketAddr::from(([0, 0, 0, 0], 8001)),
         brotli_filecache.clone(),
         zlib_filecache.clone(),
     ).expect("Can't start server");
@@ -32,7 +37,7 @@ fn main() {
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
         let mut iter = stdin.lock().lines();
-        loop{
+        loop {
             let mut new_zlib_filecache = HashMap::new();
             println!("Starting zlib compression");
             let mut total_size = 0;
@@ -41,7 +46,7 @@ fn main() {
             if let Ok(mut fc) = zlib_filecache.lock() {
                 *fc = Some(Arc::new(new_zlib_filecache));
             }
-
+            
             if let Ok(mut fc) = brotli_filecache.lock() {
                 *fc = None;
             }
@@ -55,6 +60,7 @@ fn main() {
                 *fc = Some(Arc::new(new_brotli_filecache));
             }
             println!("Press return to reload");
+            return
             iter.next();
         }
     });
@@ -65,6 +71,9 @@ fn main() {
 pub struct HttpServer {
     pub listen_thread: Option<std::thread::JoinHandle<() >>,
     pub listen_address: Option<SocketAddr>,
+}
+
+pub struct WebSocketServer {
 }
 
 impl HttpServer {
@@ -86,6 +95,35 @@ impl HttpServer {
             },
             _ => return error_out(tcp_stream, 500)
         }
+    }
+    
+    fn handle_websocket(
+        tcp_stream: &mut TcpStream,
+        _url: &str,
+        key: &str
+    ) {
+        let websocket_ack = websocket_create_ack(key);
+        let response_ack = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+            websocket_ack
+        );
+        write_bytes_to_tcp_stream_no_error(tcp_stream, response_ack.as_bytes());
+        
+        let mut web_socket = WebSocket::new();
+        // do the websocket protocol.
+        loop {
+            let mut data = [0u8; 1024];
+            match tcp_stream.read(&mut data) {
+                Ok(n) => {
+                    web_socket.parse(&data[0..n]);
+                }
+                Err(_) => {
+                    println!("Websocket disconnect");
+                    return
+                }
+            }
+        }
+        
     }
     
     fn handle_get(
@@ -130,7 +168,7 @@ impl HttpServer {
             }
         }
         
-        if accept_encoding.contains("gzip") || accept_encoding.contains("deflate"){
+        if accept_encoding.contains("gzip") || accept_encoding.contains("deflate") {
             if let Some(zlib_filecache) = zlib_filecache {
                 if let Some(data) = zlib_filecache.get(&url) {
                     let header = format!(
@@ -139,7 +177,7 @@ impl HttpServer {
                             Cache-Control: max-age:0\r\n\
                             Content-Length: {}\r\n\
                             Connection: close\r\n\r\n",
-                        mime_type, 
+                        mime_type,
                         data.len()
                     );
                     write_bytes_to_tcp_stream_no_error(tcp_stream, header.as_bytes());
@@ -233,7 +271,7 @@ impl HttpServer {
                         println!("Incoming stream failure");
                         continue
                     };
-
+                    
                     let zlib_filecache = if let Ok(v) = zlib_filecache.lock() {
                         if let Some(v) = v.as_ref() {
                             Some(v.clone())
@@ -266,7 +304,7 @@ impl HttpServer {
                         let mut header = Vec::new();
                         let mut content_length = None;
                         let mut accept_encoding = None;
-                        
+                        let mut upgrade_to_websocket = None;
                         let mut line = String::new();
                         while let Ok(_) = reader.read_line(&mut line) { // TODO replace this with a non-line read
                             if line == "\r\n" { // the newline
@@ -280,13 +318,24 @@ impl HttpServer {
                             if let Some(v) = split_header_line(&line, "Accept-Encoding: ") {
                                 accept_encoding = Some(v.to_string());
                             }
+                            if let Some(v) = split_header_line(&line, "sec-websocket-key: ") {
+                                upgrade_to_websocket = Some(v.to_string());
+                            }
                             if line.len() > 4096 || header.len() > 4096 { // some overflow protection
                                 return error_out(&mut tcp_stream, 500);
                             }
                             header.push(line.clone());
                             line.truncate(0);
                         }
-                        
+                        if let Some(key) = upgrade_to_websocket {
+                            // lets hash the thing
+                            if let Some(url) = split_header_line(&header[0], "GET ") {
+                                return Self::handle_websocket(&mut tcp_stream, url, &key);
+                            }
+                            else {
+                                return error_out(&mut tcp_stream, 500);
+                            }
+                        }
                         if header.len() < 2 {
                             return error_out(&mut tcp_stream, 500);
                         }
@@ -318,7 +367,7 @@ impl HttpServer {
                             // ok we have the data. Jump to the post handler
                             return Self::handle_post(&mut tcp_stream, url, body);
                         }
-
+                        
                         if let Some(url) = split_header_line(&header[0], "GET ") {
                             if let Some(accept_encoding) = accept_encoding {
                                 return Self::handle_get(&mut tcp_stream, url, accept_encoding, zlib_filecache, brotli_filecache)
