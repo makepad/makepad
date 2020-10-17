@@ -12,7 +12,6 @@ use deflate::Compression;
 use deflate::write::ZlibEncoder;
 
 mod digest;
-use crate::digest::websocket_create_ack;
 mod websocket;
 use crate::websocket::{WebSocket, WebSocketResult};
 
@@ -102,12 +101,10 @@ impl HttpServer {
         _url: &str,
         key: &str
     ) {
-        let websocket_ack = websocket_create_ack(key);
-        let response_ack = format!(
-            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
-            websocket_ack
-        );
-        write_bytes_to_tcp_stream_no_error(tcp_stream, response_ack.as_bytes());
+
+        let upgrade_response = WebSocket::create_upgrade_response(key);
+
+        write_bytes_to_tcp_stream_no_error(tcp_stream, upgrade_response.as_bytes());
         
         let mut web_socket = WebSocket::new();
         // start a thread for the write side
