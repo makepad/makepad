@@ -502,7 +502,7 @@ impl WebSocketChannels{
             let url = in_url.to_string();
             let thread = std::thread::spawn(move || {
                 // we should collect all the messages we can in 50ms and then send it out together in 1 message
-                let max_wait = Duration::from_millis(50);
+                let max_wait = Duration::from_millis(16);
                 let mut last_start = Instant::now();
                 let mut msg_stack = Vec::new();
                 loop{
