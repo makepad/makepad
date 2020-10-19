@@ -186,7 +186,7 @@ impl DesktopWindow {
             self.caption_bg.color = live_color!(cx, self::color_bg_selected_over); //cx.colors[self.caption_bg_color];
             // alright here we draw our platform buttons.
             match cx.platform_type {
-                PlatformType::Linux | PlatformType::Windows => {
+                PlatformType::Linux | PlatformType::Windows | PlatformType::Unknown => {
                     
                     let bg_inst = self.caption_bg.begin_quad(cx, Layout {
                         align: Align::right_top(),
@@ -239,7 +239,7 @@ impl DesktopWindow {
                     self.caption_bg.end_quad(cx, bg_inst);
                     cx.turtle_new_line();
                 },
-                PlatformType::WASM => {
+                PlatformType::Web{..} => {
                     if self.window.is_fullscreen(cx) { // put a bar at the top
                         let bg_inst = self.caption_bg.begin_quad(cx, Layout {
                             align: Align::center(),

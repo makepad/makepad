@@ -250,6 +250,12 @@ pub struct XRUpdateEvent {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct WebSocketMessageEvent{
+    pub url: String, 
+    pub result: Result<Vec<u8>, String>
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     None,
     Construct,
@@ -285,6 +291,7 @@ pub enum Event {
     TextInput(TextInputEvent),
     TextCopy(TextCopyEvent),
     LiveRecompile(LiveRecompileEvent),
+    WebSocketMessage(WebSocketMessageEvent),
 }
 
 impl Default for Event {

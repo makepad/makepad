@@ -41,9 +41,54 @@
         }
         
         fetch_deps(caps) {
-            let pos = this.fit(2);
+            let port;
+            if(!location.port){
+                if(location.proto == "https:"){
+                    port = 443;
+                }
+                else{
+                    port = 80;
+                }
+            }
+            else{
+                port = parseInt(location.port);
+            }
+            let pos = this.fit(3);
             this.mu32[pos ++] = 1;
             this.mu32[pos ++] = caps.gpu_spec_is_low_on_uniforms? 1: 0;
+            this.mu32[pos ++] = port;
+            this.send_string(location.protocol);
+            this.send_string(location.hostname);
+            this.send_string(location.pathname);
+            this.send_string(location.search);
+            this.send_string(location.hash);
+        }
+        
+        // i forgot how to do memcpy with typed arrays. so, we'll do this.
+        copy_to_wasm(input_buffer, output_ptr) {
+            let u8len = input_buffer.byteLength;
+            
+            if ((u8len & 3) != 0 || (output_ptr & 3) != 0) { // not u32 aligned, do a byte copy
+                var u8out = new Uint8Array(this.exports.memory.buffer, output_ptr, u8len)
+                var u8in = new Uint8Array(input_buffer)
+                for (let i = 0; i < u8len; i ++) {
+                    u8out[i] = u8in[i];
+                }
+            }
+            else { // do a u32 copy
+                let u32len = u8len >> 2; //4 bytes at a time.
+                var u32out = new Uint32Array(this.exports.memory.buffer, output_ptr, u32len)
+                var u32in = new Uint32Array(input_buffer)
+                for (let i = 0; i < u32len; i ++) {
+                    u32out[i] = u32in[i];
+                }
+            }
+        }
+        
+        alloc_wasm_vec(vec_len){
+            let ret = this.exports.alloc_wasm_vec(vec_len);
+            this.update_refs();
+            return ret
         }
         
         send_string(str) {
@@ -295,6 +340,24 @@
             this.mu32[pos ++] = success? 1: 2;
         }
         
+        websocket_message(url, data){
+            let vec_len = data.byteLength;
+            let vec_ptr = this.alloc_wasm_vec(vec_len);
+            this.copy_to_wasm(data, vec_ptr);
+            let pos = this.fit(3);
+            this.mu32[pos++] = 23;
+            this.mu32[pos++] = vec_ptr;
+            this.mu32[pos++] = vec_len;
+            this.send_string(url);
+        }
+        
+        websocket_error(url, error){
+            let pos = this.fit(1);
+            this.mu32[pos++] = 24;
+            this.send_string(url);
+            this.send_string(error);
+        }
+        
         end() {
             let pos = this.fit(1);
             this.mu32[pos] = 0;
@@ -320,6 +383,7 @@
             this.resources = [];
             this.req_anim_frame_id = 0;
             this.text_copy_response = "";
+            this.websockets = {};
             this.init_webgl_context();
             this.run_async_webxr_check();
             this.bind_mouse_and_touch();
@@ -357,8 +421,8 @@
                     var result = results[i]
                     // allocate pointer, do +8 because of the u64 length at the head of the buffer
                     let vec_len = result.buffer.byteLength;
-                    let vec_ptr = this.exports.alloc_wasm_vec(vec_len);
-                    this.copy_to_wasm(result.buffer, vec_ptr);
+                    let vec_ptr = this.to_wasm.alloc_wasm_vec(vec_len);
+                    this.to_wasm.copy_to_wasm(result.buffer, vec_ptr);
                     deps.push({
                         name: result.name,
                         vec_ptr: vec_ptr,
@@ -463,7 +527,6 @@
                 data[u8_pos + 1] = (u32 >> 8) & 0xff;
                 data[u8_pos + 2] = (u32 >> 16) & 0xff;
             }
-            console.log(data);
             return data
         }
         
@@ -484,26 +547,7 @@
             }
             return vars
         }
-        // i forgot how to do memcpy with typed arrays. so, we'll do this.
-        copy_to_wasm(input_buffer, output_ptr) {
-            let u8len = input_buffer.byteLength;
-            
-            if ((u8len & 3) != 0 || (output_ptr & 3) != 0) { // not u32 aligned, do a byte copy
-                var u8out = new Uint8Array(this.memory.buffer, output_ptr, u8len)
-                var u8in = new Uint8Array(input_buffer)
-                for (let i = 0; i < u8len; i ++) {
-                    u8out[i] = u8in[i];
-                }
-            }
-            else { // do a u32 copy
-                let u32len = u8len >> 2; //4 bytes at a time.
-                var u32out = new Uint32Array(this.memory.buffer, output_ptr, u32len)
-                var u32in = new Uint32Array(input_buffer)
-                for (let i = 0; i < u32len; i ++) {
-                    u32out[i] = u32in[i];
-                }
-            }
-        }
+        
         
         load_deps(deps) {
             for (var i = 0; i < deps.length; i ++) {
@@ -1050,8 +1094,8 @@
             
             fetch_path(file_path).then(result => {
                 let byte_len = result.buffer.byteLength
-                let output_ptr = this.exports.alloc_wasm_vec(byte_len);
-                this.copy_to_wasm(result.buffer, output_ptr);
+                let output_ptr = this.to_wasm.alloc_wasm_vec(byte_len);
+                this.to_wasm.copy_to_wasm(result.buffer, output_ptr);
                 this.to_wasm.read_file_data(id, output_ptr, byte_len)
                 this.do_wasm_io();
             }, err => {
@@ -1129,6 +1173,43 @@
             req.open(verb, proto + "://" + domain + ":" + port + path, true);
             console.log(verb, proto + "://" + domain + ":" + port + path, body);
             req.send(body.buffer);
+        }
+        
+        websocket_send(url, data){
+            let socket = this.websockets[url];
+            if(!socket){
+                let socket = new WebSocket(url);
+                this.websockets[url] = socket;
+                socket.send_stack = [data];
+                socket.addEventListener('close', event=>{
+                    this.websockets[url] = null;
+                })
+                socket.addEventListener('error', event=>{
+                    this.to_wasm.websocket_error(url, ""+event);
+                    this.do_wasm_io();
+                })
+                socket.addEventListener('message', event=>{
+                    event.data.arrayBuffer().then(data=>{
+                        this.to_wasm.websocket_message(url, data);
+                        this.do_wasm_io();
+                    })
+                })
+                socket.addEventListener('open', event=>{
+                    let send_stack = socket.send_stack;
+                    socket.send_stack = null;
+                    for(data of send_stack){
+                        socket.send(data);
+                    }
+                })
+            }
+            else{
+                if(socket.send_stack){
+                    socket.send_stack.push(data);
+                }
+                else{
+                    socket.send(data);
+                }
+            }
         }
         
         can_fullscreen() {
@@ -2009,6 +2090,11 @@
         function normalscreen_29(self) {
             self.normalscreen();
         }, 
+        function websocket_send(self){
+            let url = self.parse_string();
+            let data = self.parse_u8slice();
+            self.websocket_send(url, data);
+        }
     ]
     
     WasmApp.prototype.uniform_fn_table = {

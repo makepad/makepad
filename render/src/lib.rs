@@ -30,36 +30,13 @@ mod cx_windows;
 
 #[cfg(all(not(feature="ipc"),target_arch = "wasm32"))]
 mod cx_webgl;
+#[macro_use]
 #[cfg(all(not(feature="ipc"),target_arch = "wasm32"))]
 mod cx_wasm32;
 
-
+#[macro_use]
 #[cfg(all(not(feature="ipc"),any(target_os = "linux", target_os="macos", target_os="windows")))]
 mod cx_desktop;
-
-#[cfg(feature="ipc")]
-mod cx_ipc_child;
-
-#[cfg(feature="ipc")]
-pub use crate::cx_ipc_child::*;
-
-#[cfg(all(feature="ipc",target_arch = "wasm32"))]
-mod cx_ipc_wasm32;
-
-#[cfg(all(feature="ipc",target_arch = "wasm32"))]
-pub use crate::cx_ipc_wasm32::*;
-
-#[cfg(all(feature="ipc",any(target_os = "linux", target_os = "macos")))]
-mod cx_ipc_posix;
-
-#[cfg(all(feature="ipc",any(target_os = "linux", target_os = "macos")))]
-pub use crate::cx_ipc_posix::*;
-
-#[cfg(all(feature="ipc",target_os = "windows"))]
-mod cx_ipc_win32;
-
-#[cfg(all(feature="ipc",target_os = "windows"))]
-pub use crate::cx_ipc_win32::*;
 
 mod turtle;
 mod fonts;

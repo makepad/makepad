@@ -11,15 +11,15 @@ pub enum WebSocketState {
     Mask
 }
 
-impl WebSocketState{
-    fn head_expected(&self)->usize{
-        match self{
-            WebSocketState::Opcode=>1,
-            WebSocketState::Len1=>1,
-            WebSocketState::Len2=>2,
-            WebSocketState::Len8=>8,
-            WebSocketState::Data=>0,
-            WebSocketState::Mask=>4
+impl WebSocketState {
+    fn head_expected(&self) -> usize {
+        match self {
+            WebSocketState::Opcode => 1,
+            WebSocketState::Len1 => 1,
+            WebSocketState::Len2 => 2,
+            WebSocketState::Len8 => 8,
+            WebSocketState::Data => 0,
+            WebSocketState::Mask => 4
         }
     }
 }
@@ -47,8 +47,47 @@ pub enum WebSocketResult {
     Close
 }
 
-impl WebSocket {
+pub struct WebSocketMessage{
+    check_len: usize,
+    data:Vec<u8>
+}
 
+impl WebSocketMessage{
+    pub fn new_binary(len: usize)->WebSocketMessage{
+        let mut data = Vec::new();
+        let check_len;
+        data.push(128 | 2); // binary single message
+        if len < 126{
+            data.push(len as u8);
+            check_len = len + 2;
+        }
+        else if len < 65536{
+            data.push(126); 
+            data.extend_from_slice(&(len as u16).to_be_bytes());
+            check_len = len + 4;
+        }
+        else{
+            data.push(12);
+            data.extend_from_slice(&(len as u64).to_be_bytes());
+            check_len = len + 10;
+        }
+        WebSocketMessage{data, check_len}
+    }
+    
+    pub fn append(&mut self, data:&[u8]){
+        self.data.extend_from_slice(data);
+    }
+    
+    pub fn take(self)->Vec<u8>{
+        if self.check_len != self.data.len(){
+            panic!();
+        }
+        self.data
+    }
+}
+
+impl WebSocket {
+    
     pub fn new() -> Self {
         Self {
             head: [0u8; 8],
@@ -92,10 +131,19 @@ impl WebSocket {
         return self.head_expected != 0
     }
     
-    fn to_state(&mut self, state:WebSocketState){
-        if state == WebSocketState::Data{
-            self.mask_counter = 0;
-            self.data.truncate(0);
+    fn to_state(&mut self, state: WebSocketState) {
+        match state {
+            WebSocketState::Data => {
+                self.mask_counter = 0;
+                self.data.truncate(0);
+            }
+            WebSocketState::Opcode => {
+                self.is_ping = false;
+                self.is_pong = false;
+                self.is_partial = false;
+                self.is_masked = false;
+            },
+            _ => ()
         }
         self.head_written = 0;
         self.head_expected = state.head_expected();
@@ -109,18 +157,12 @@ impl WebSocket {
         loop {
             match self.state {
                 WebSocketState::Opcode => {
-                    // clean up the side-statespace
-                    self.is_ping = false;
-                    self.is_pong = false;
-                    self.is_partial = false;
-                    self.is_masked = false;
                     if self.parse_head(input) {
                         break;
                     }
-                    let frame = self.head[0] & 128;
                     let opcode = self.head[0] & 15;
                     if opcode <= 2 {
-                        self.is_partial = frame != 0;
+                        self.is_partial = (self.head[0] & 128) != 0;
                         self.to_state(WebSocketState::Len1);
                     }
                     else if opcode == 8 {
@@ -147,10 +189,12 @@ impl WebSocket {
                     self.is_masked = (self.head[0] & 128) > 0;
                     let len_type = self.head[0] & 127;
                     if len_type < 126 {
-                        if len_type == 0{
+                        if len_type == 0 {
+                            // emit a size 0 datapacket
+                            results.push(WebSocketResult::Data(Vec::new()));
                             self.to_state(WebSocketState::Opcode)
                         }
-                        else{
+                        else {
                             self.data_len = len_type as usize;
                             if !self.is_masked {
                                 self.to_state(WebSocketState::Data);
@@ -174,66 +218,64 @@ impl WebSocket {
                     self.data_len = u16::from_be_bytes(
                         self.head[0..2].try_into().unwrap()
                     ) as usize;
-                    if self.is_masked{
+                    if self.is_masked {
                         self.to_state(WebSocketState::Mask);
                     }
-                    else{
+                    else {
                         self.to_state(WebSocketState::Data);
                     }
                 },
-                WebSocketState::Len8=>{
+                WebSocketState::Len8 => {
                     if self.parse_head(input) {
                         break;
                     }
-                    self.data_len = u32::from_be_bytes(
-                        self.head[0..4].try_into().unwrap()
+                    self.data_len = u64::from_be_bytes(
+                        self.head[0..8].try_into().unwrap()
                     ) as usize;
-                    if self.is_masked{
+                    if self.is_masked {
                         self.to_state(WebSocketState::Mask);
                     }
-                    else{
+                    else {
                         self.to_state(WebSocketState::Data);
                     }
                 },
-                WebSocketState::Mask=>{
+                WebSocketState::Mask => {
                     if self.parse_head(input) {
                         break;
                     }
                     self.to_state(WebSocketState::Data);
                 },
-                WebSocketState::Data=>{
-                    if self.is_masked{
-                        while self.data.len() < self.data_len && self.input_read < input.len(){
+                WebSocketState::Data => {
+                    if self.is_masked {
+                        while self.data.len() < self.data_len && self.input_read < input.len() {
                             self.data.push(input[self.input_read] ^ self.head[self.mask_counter]);
-                            self.mask_counter = (self.mask_counter + 1)&3;
+                            self.mask_counter = (self.mask_counter + 1) & 3;
                             self.input_read += 1;
                         }
                     }
-                    else{
-                        while self.data.len() < self.data_len && self.input_read < input.len(){
+                    else {
+                        while self.data.len() < self.data_len && self.input_read < input.len() {
                             self.data.push(input[self.input_read]);
                             self.input_read += 1;
                         }
                     }
-                    if self.data.len() < self.data_len{ // not enough data yet
+                    if self.data.len() < self.data_len { // not enough data yet
                         break;
                     }
-                    else{
-                        // TODO add support for partials 
-                        if self.is_ping{
+                    else {
+                        if self.is_ping {
                             results.push(WebSocketResult::Ping(self.data.clone()))
                         }
-                        else if self.is_pong{
+                        else if self.is_pong {
                             results.push(WebSocketResult::Pong(self.data.clone()))
                         }
-                        else{
+                        else {
                             results.push(WebSocketResult::Data(self.data.clone()));
                         }
-
+                        
                         self.to_state(WebSocketState::Opcode);
                     }
                 },
-                _ => ()
             }
         }
         return results;

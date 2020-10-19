@@ -74,8 +74,8 @@ impl Default for TextureDesc {
 }
 
 
-#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug, PartialOrd, Ord)]
-pub struct LiveItemId(pub u64);
+#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug, PartialOrd, Ord, SerBin, DeBin)]
+pub struct LiveItemId(pub u64); 
 
 impl LiveItemId {
     fn as_index(&self) -> u64 {self.0}
