@@ -127,6 +127,9 @@ impl LiveItemsView {
                                             text_editor.handle_live_replace(cx, (start + offset, end + offset), &new_string, &mut mtb.text_buffer, self.undo_id);
                                         }
                                     }
+                                    MakepadStorage::send_websocket_message(cx, MakepadWebSocketMessage::ChangeFloat{
+                                        live_item_id:*live_item_id, float:Float{value:scaled_value,..Float::default()},
+                                    })
                                 },
                                 FloatSliderEvent::DoneChanging=>{
                                     self.undo_id += 1;
