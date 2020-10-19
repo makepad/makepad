@@ -1,5 +1,6 @@
 use std::collections::{HashMap};
 use std::hash::Hash;
+use std::convert::TryInto;
 
 pub trait SerBin {
     fn serialize_bin(&self)->Vec<u8>{
@@ -21,23 +22,30 @@ pub trait DeBin:Sized {
 
 
 pub struct DeBinErr{
+    pub msg: String,
     pub o:usize,
     pub l: usize,
     pub s: usize
 }
 
-impl std::fmt::Debug for DeBinErr {
+impl std::fmt::Display for DeBinErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Bin deserialize error at:{} wanted:{} bytes but max size is {}", self.o, self.l, self.s)
+        write!(f, "Bin deserialize error in:{}, at:{} wanted:{} bytes but max size is {}", self.msg, self.o, self.l, self.s)
     }
 }
+
+impl std::fmt::Debug for DeBinErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Bin deserialize error in:{}, at:{} wanted:{} bytes but max size is {}", self.msg, self.o, self.l, self.s)
+    }
+}
+
 
 macro_rules! impl_ser_de_bin_for {
     ($ty:ident) => {
         impl SerBin for $ty {
             fn ser_bin(&self, s: &mut Vec<u8>) {
-                let du8 = unsafe {std::mem::transmute::<&$ty, &[u8; std::mem::size_of::<$ty>()]>(&self)};
-                s.extend_from_slice(du8);
+                s.extend_from_slice(&self.to_le_bytes());
             }
         }
         
@@ -45,12 +53,11 @@ macro_rules! impl_ser_de_bin_for {
             fn de_bin(o:&mut usize, d:&[u8]) -> Result<$ty, DeBinErr> {
                 let l = std::mem::size_of::<$ty>();
                 if *o + l > d.len(){
-                    return Err(DeBinErr{o:*o, l:l, s:d.len()})
-                } 
-                let mut m = [0 as $ty];
-                unsafe {std::ptr::copy_nonoverlapping(d.as_ptr().offset(*o as isize) as *const $ty, m.as_mut_ptr() as *mut $ty, 1)}
+                    return Err(DeBinErr{o:*o, l:l, s:d.len(), msg:format!("{}", stringify!($ty))})
+                }
+                let ret = $ty::from_le_bytes(d[*o..*o+l].try_into().unwrap());
                 *o += l;
-                Ok(m[0])
+                Ok(ret)
             }
         }
     };
@@ -67,9 +74,7 @@ impl_ser_de_bin_for!(i16);
 
 impl SerBin for usize {
     fn ser_bin(&self, s: &mut Vec<u8>) {
-        let u64usize = *self as u64;
-        let du8 = unsafe {std::mem::transmute::<&u64, &[u8; std::mem::size_of::<u64>()]>(&u64usize)};
-        s.extend_from_slice(du8);
+        s.extend_from_slice(&(*self as u64).to_le_bytes());
     }
 }
 
@@ -77,19 +82,18 @@ impl DeBin for usize {
     fn de_bin(o:&mut usize, d:&[u8]) -> Result<usize, DeBinErr> {
         let l = std::mem::size_of::<u64>();
         if *o + l > d.len(){
-            return Err(DeBinErr{o:*o, l:l, s:d.len()})
-        } 
-        let mut m = [0 as u64];
-        unsafe {std::ptr::copy_nonoverlapping(d.as_ptr().offset(*o as isize) as *const u64, m.as_mut_ptr() as *mut u64, 1)}
+            return Err(DeBinErr{o:*o, l:l, s:d.len(), msg:format!("usize")})
+        }
+        let ret = u64::from_le_bytes(d[*o..*o+l].try_into().unwrap()) as usize;
         *o += l;
-        Ok(m[0] as usize)
+        Ok(ret)
     }
 }
 
 impl DeBin for u8 {
     fn de_bin(o:&mut usize, d:&[u8]) -> Result<u8,DeBinErr> {
         if *o + 1 > d.len(){
-            return Err(DeBinErr{o:*o, l:1, s:d.len()})
+            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:format!("u8")})
         } 
         let m = d[*o];
         *o += 1;
@@ -112,7 +116,7 @@ impl SerBin for bool {
 impl DeBin for bool {
     fn de_bin(o:&mut usize, d:&[u8]) -> Result<bool, DeBinErr> {
         if *o + 1 > d.len(){
-            return Err(DeBinErr{o:*o, l:1, s:d.len()})
+            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:format!("bool")})
         } 
         let m = d[*o];
         *o += 1;
@@ -130,19 +134,19 @@ impl SerBin for String {
 
 impl DeBin for String {
     fn de_bin(o:&mut usize, d:&[u8])->Result<String, DeBinErr> {
-        let len:usize = DeBin::de_bin(o,d)?;
-        if *o + len > d.len(){
-            return Err(DeBinErr{o:*o, l:1, s:d.len()})
+        let len:u64 = DeBin::de_bin(o,d)?;
+        if *o + (len as usize) > d.len(){
+            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:format!("String")})
         } 
-        let r = std::str::from_utf8(&d[*o..(*o+len)]).unwrap().to_string();
-        *o += len;
+        let r = std::str::from_utf8(&d[*o..(*o+(len as usize))]).unwrap().to_string();
+        *o += len as usize;
         Ok(r)
     }
 }
 
 impl<T> SerBin for Vec<T> where T: SerBin {
     fn ser_bin(&self, s: &mut Vec<u8>) {
-        let len = self.len();
+        let len = self.len() as u64;
         len.ser_bin(s);
         for item in self {
             item.ser_bin(s);
@@ -152,7 +156,7 @@ impl<T> SerBin for Vec<T> where T: SerBin {
 
 impl<T> DeBin for Vec<T> where T:DeBin{
     fn de_bin(o:&mut usize, d:&[u8])->Result<Vec<T>, DeBinErr> {
-        let len:usize = DeBin::de_bin(o,d)?;
+        let len:u64 = DeBin::de_bin(o,d)?;
         let mut out = Vec::new();
         for _ in 0..len{
             out.push(DeBin::de_bin(o,d)?)
@@ -176,7 +180,7 @@ impl<T> SerBin for Option<T> where T: SerBin {
 impl<T> DeBin for Option<T> where T:DeBin{
     fn de_bin(o:&mut usize, d:&[u8])->Result<Option<T>, DeBinErr> {
         if *o + 1 > d.len(){
-            return Err(DeBinErr{o:*o, l:1, s:d.len()})
+            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:format!("Option<T>")})
         } 
         let m = d[*o];
         *o += 1;
@@ -264,7 +268,7 @@ impl<A,B,C,D> DeBin for (A,B,C,D) where A:DeBin, B:DeBin, C:DeBin, D:DeBin{
 impl<K, V> SerBin for HashMap<K, V> where K: SerBin,
 V: SerBin {
     fn ser_bin(&self, s: &mut Vec<u8>) {
-        let len = self.len();
+        let len = self.len() as u64;
         len.ser_bin(s);
         for (k, v) in self {
             k.ser_bin(s);
@@ -276,7 +280,7 @@ V: SerBin {
 impl<K, V> DeBin for HashMap<K, V> where K: DeBin + Eq + Hash,
 V: DeBin {
     fn de_bin(o:&mut usize, d:&[u8])->Result<Self, DeBinErr>{
-        let len:usize = DeBin::de_bin(o,d)?;
+        let len:u64 = DeBin::de_bin(o,d)?;
         let mut h = HashMap::new();
         for _ in 0..len{
             let k = DeBin::de_bin(o,d)?;

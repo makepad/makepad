@@ -114,7 +114,7 @@ pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
             if let Some(types) = types{
                 tb.add("(");
                 for _ in 0..types.len(){
-                     tb.add("DeBin :: de_bin ( o , d ) ?");
+                     tb.add("DeBin :: de_bin ( o , d ) ? ,");
                 }
                 tb.add(")");
             }
@@ -183,7 +183,7 @@ pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
                 }
             } 
             tb.add("_ => std :: result :: Result :: Err ( makepad_microserde :: DeBinErr { o : * o , l :");
-            tb.unsuf_usize(1).add(", s : d . len ( ) } )");
+            tb.unsuf_usize(1).add(", s : d . len ( ) , msg : ").string(&name).add(". to_string ( ) } )");
             tb.add("} } } ;");
             return tb.end();
         }

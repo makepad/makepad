@@ -110,6 +110,18 @@ pub struct MakepadTextBuffer {
     pub live_items_list: LiveItemsList
 }
 
+#[derive(Clone, Debug, SerBin, DeBin, PartialEq)]
+pub enum MakepadWebSocketMessage{
+    Connect,
+    ChangeColor{live_item_id:LiveItemId, color:Color}
+}
+
+#[derive(Debug, DeBin)]
+pub struct MakepadWebSocketMessageWrap{
+    ids: Vec<u32>,
+    messages: Vec<(u32, MakepadWebSocketMessage)>
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
 pub struct MakepadTextBufferId(pub u16);
 impl MakepadTextBufferId {
@@ -199,6 +211,49 @@ impl MakepadStorage {
             atb.text_buffer.send_textbuffer_loaded_signal(cx);
         }
         cx.file_write(path, utf8_data.as_bytes());
+    }
+    
+    pub fn send_websocket_message(cx:&mut Cx, mm: MakepadWebSocketMessage){
+        // serialize mm and send it over
+        let data = mm.serialize_bin();
+        // lets get the right URL here.
+        if let PlatformType::Web{protocol, hostname, port, hash, ..} = cx.platform_type.clone(){
+            let proto = if protocol == "https:"{"wss:"}else{"ws:"};
+            let url = format!("{}//{}:{}/channel/{}",proto, hostname, port, hash);
+            cx.websocket_send(&url, &data);
+        }
+    }
+    
+    pub fn handle_websocket_message(&mut self, cx:&mut Cx, wm:&WebSocketMessageEvent){
+        // parse binary buffer 
+        if let Ok(data) = &wm.result{
+            // lets parse the channel headers
+            // u32 num sockets
+            // num_sockets * u32 sockets
+            // num messages
+            match MakepadWebSocketMessageWrap::deserialize_bin(&data){
+                Ok(wsm)=>{
+                    let my_id = wsm.ids[0];
+                    for (id,m) in wsm.messages{
+                        if id != my_id{
+                           match m{
+                               MakepadWebSocketMessage::ChangeColor{live_item_id, color}=>{
+                                   // lets change color.
+                                   cx.live_styles.colors.insert(live_item_id, color);
+                                   cx.live_styles.add_direct_value_change(live_item_id);
+                               },
+                               _=>()
+                           } 
+                        }
+                    }
+                    //log!("Parsed {:?}", wsm);
+                }
+                Err(err)=>{
+                    log!("Parse error {}", err);
+                },
+                
+            }
+        }
     }
     
     pub fn restart_hub_server(&mut self) {
