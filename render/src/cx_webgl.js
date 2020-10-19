@@ -43,7 +43,7 @@
         fetch_deps(caps) {
             let port;
             if(!location.port){
-                if(location.proto == "https:"){
+                if(location.protocol == "https:"){
                     port = 443;
                 }
                 else{
