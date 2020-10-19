@@ -6,6 +6,7 @@ use crate::colorpicker::*;
 use crate::floatslider::*;
 use std::fmt;
 use std::collections::HashMap;
+use makepad_microserde::*;
 
 
 #[derive(Clone, Default)]
@@ -85,6 +86,77 @@ impl LiveItemsView {
         "#)
     }
     
+    pub fn handle_changed_float(
+        cx: &mut Cx,
+        live_item_id: LiveItemId,
+        float: Float,
+        live_bodies: &HashMap<LiveBodyId, usize>,
+        text_buffer: &mut TextBuffer,
+        text_editor: &mut TextEditor,
+        undo_id: u64,
+        direct: bool
+    ) {
+        if direct && !cx.platform_type.is_desktop() {
+            MakepadStorage::send_websocket_message(cx, MakepadWebSocketMessage::ChangeFloat {
+                live_item_id: live_item_id,
+                float: float,
+            });
+            return
+        }
+        
+        if let Some(tok) = cx.live_styles.tokens.get(&live_item_id) {
+            let start = tok.tokens[0].span.start;
+            let end = tok.tokens[0].span.end;
+            if let Some(live_body_id) = cx.live_styles.item_in_live_body.get(&live_item_id) {
+                if let Some(offset) = live_bodies.get(&live_body_id) {
+                    let new_string = format!("{}", PrettyPrintedFloat3Decimals(float.value));
+                    if let Some(tok) = cx.live_styles.tokens.get_mut(&live_item_id) {
+                        tok.tokens[0].span.end = start + new_string.len();
+                    }
+                    // ok so we have a tok which for us is jsut sa span
+                    text_editor.handle_live_replace(cx, (start + offset, end + offset), &new_string, text_buffer, undo_id);
+                }
+            }
+        }
+        
+    }
+    
+    pub fn handle_changed_color(
+        cx: &mut Cx,
+        live_item_id: LiveItemId,
+        rgba: Color,
+        live_bodies: &HashMap<LiveBodyId, usize>,
+        text_buffer: &mut TextBuffer,
+        text_editor: &mut TextEditor,
+        undo_id: u64,
+        direct: bool
+    ) {
+        
+        if direct && !cx.platform_type.is_desktop() {
+            MakepadStorage::send_websocket_message(cx, MakepadWebSocketMessage::ChangeColor {
+                live_item_id: live_item_id,
+                rgba: rgba,
+            });
+            return
+        }
+        
+        // how do we find WHERE to change this valuein our editor
+        if let Some(tok) = cx.live_styles.tokens.get(&live_item_id) {
+            let start = tok.tokens[0].span.start;
+            let end = tok.tokens[0].span.end;
+            if let Some(live_body_id) = cx.live_styles.item_in_live_body.get(&live_item_id) {
+                if let Some(offset) = live_bodies.get(&live_body_id) {
+                    let new_string = format!("#{}", rgba.to_hex());
+                    if let Some(tok) = cx.live_styles.tokens.get_mut(&live_item_id) {
+                        tok.tokens[0].span.end = start + new_string.len();
+                    }
+                    // ok so we have a tok which for us is jsut sa span
+                    text_editor.handle_live_replace(cx, (start + offset, end + offset), &new_string, text_buffer, undo_id);
+                }
+            }
+        }
+    }
+    
     pub fn handle_live_items(&mut self, cx: &mut Cx, event: &mut Event, mtb: &mut MakepadTextBuffer, text_editor: &mut TextEditor) {
         
         self.scroll_view.handle_scroll_view(cx, event);
@@ -96,16 +168,65 @@ impl LiveItemsView {
                     self.scroll_view.redraw_view_area(cx);
                 }
             },
+            Event::WebSocketMessage(wm) => {
+                // parse binary buffer
+                if let Ok(data) = &wm.result {
+                    // lets parse the channel headers
+                    // u32 num sockets
+                    // num_sockets * u32 sockets
+                    // num messages
+                    match MakepadWebSocketMessageWrap::deserialize_bin(&data) {
+                        Ok(wsm) => {
+                            for (id, m) in wsm.messages {
+                                match m {
+                                    MakepadWebSocketMessage::ChangeColor {live_item_id, rgba} => {
+                                        Self::handle_changed_color(
+                                            cx,
+                                            live_item_id,
+                                            rgba,
+                                            &mtb.live_items_list.live_bodies,
+                                            &mut mtb.text_buffer,
+                                            text_editor,
+                                            self.undo_id,
+                                            false
+                                        );
+                                    },
+                                    MakepadWebSocketMessage::ChangeFloat {live_item_id, float} => {
+                                        // lets change color.
+                                        Self::handle_changed_float(
+                                            cx,
+                                            live_item_id,
+                                            float,
+                                            &mtb.live_items_list.live_bodies,
+                                            &mut mtb.text_buffer,
+                                            text_editor,
+                                            self.undo_id,
+                                            false
+                                        );
+                                    },
+                                    _ => ()
+                                }
+                            }
+                            //log!("Parsed {:?}", wsm);
+                        }
+                        Err(err) => {
+                            log!("Parse error {}", err);
+                        },
+                        
+                    }
+                }
+            }
             _ => ()
         }
         let mut any_caption_down = None;
         let mut do_open = false;
         for (index, live_item_id) in mtb.live_items_list.items.iter().enumerate() {
+            let live_item_id = live_item_id.clone();
             // get tokens
-            if let Some(tok) = cx.live_styles.tokens.get(live_item_id) {
+            if let Some(tok) = cx.live_styles.tokens.get(&live_item_id) {
                 let live_tokens_type = tok.live_tokens_type;
-                let start = tok.tokens[0].span.start;
-                let end = tok.tokens[0].span.end;
+                //let start = tok.tokens[0].span.start;
+                //let end = tok.tokens[0].span.end;
                 
                 if let Some(fold_caption) = self.fold_captions.get(index) {
                     if fold_caption.handle_fold_caption(cx, event) == ButtonEvent::Down {
@@ -113,64 +234,54 @@ impl LiveItemsView {
                         do_open = fold_caption.open_state.is_open();
                     };
                 }
-                let mut update_span = None;
                 match live_tokens_type {
                     LiveTokensType::Float => {
                         if let Some(f) = self.float_sliders.get(index) {
-                            match f.handle_float_slider(cx, event){
-                                FloatSliderEvent::Change{scaled_value}=>{
-                                    if let Some(live_body_id) = cx.live_styles.item_in_live_body.get(&live_item_id){
-                                        if let Some(offset) = mtb.live_items_list.live_bodies.get(&live_body_id){
-                                            let new_string = format!("{}", PrettyPrintedFloat3Decimals(scaled_value));
-                                            update_span = Some(new_string.len());
-                                            // ok so we have a tok which for us is jsut sa span
-                                            text_editor.handle_live_replace(cx, (start + offset, end + offset), &new_string, &mut mtb.text_buffer, self.undo_id);
-                                        }
-                                    }
-                                    MakepadStorage::send_websocket_message(cx, MakepadWebSocketMessage::ChangeFloat{
-                                        live_item_id:*live_item_id, float:Float{value:scaled_value,..Float::default()},
-                                    })
+                            match f.handle_float_slider(cx, event) {
+                                FloatSliderEvent::Change {scaled_value} => {
+                                    Self::handle_changed_float(
+                                        cx,
+                                        live_item_id,
+                                        Float {value: scaled_value, ..Float::default()},
+                                        &mtb.live_items_list.live_bodies,
+                                        &mut mtb.text_buffer,
+                                        text_editor,
+                                        self.undo_id,
+                                        true
+                                    );
                                 },
-                                FloatSliderEvent::DoneChanging=>{
+                                FloatSliderEvent::DoneChanging => {
                                     self.undo_id += 1;
                                 },
-                                _=>()
+                                _ => ()
                             }
                         }
                     },
                     LiveTokensType::Color => {
                         if let Some(f) = self.color_pickers.get(index) {
-                            match f.handle_color_picker(cx, event){
-                                ColorPickerEvent::Change{rgba}=>{
-                                    // how do we find WHERE to change this valuein our editor
-                                    if let Some(live_body_id) = cx.live_styles.item_in_live_body.get(&live_item_id){
-                                        if let Some(offset) = mtb.live_items_list.live_bodies.get(&live_body_id){
-                                            let new_string = format!("#{}", rgba.to_hex());
-                                            update_span = Some(new_string.len());
-                                            // ok so we have a tok which for us is jsut sa span
-                                            text_editor.handle_live_replace(cx, (start + offset, end + offset), &new_string, &mut mtb.text_buffer, self.undo_id);
-                                        }
-                                    }
-                                    // post it on our websocket
-                                    MakepadStorage::send_websocket_message(cx, MakepadWebSocketMessage::ChangeColor{
-                                        live_item_id:*live_item_id, color:rgba,
-                                    })
-                                    
-                                }, 
+                            match f.handle_color_picker(cx, event) {
+                                ColorPickerEvent::Change {rgba} => {
+                                    Self::handle_changed_color(
+                                        cx,
+                                        live_item_id,
+                                        rgba,
+                                        &mtb.live_items_list.live_bodies,
+                                        &mut mtb.text_buffer,
+                                        text_editor,
+                                        self.undo_id,
+                                        true
+                                    );
+                                },
                                 ColorPickerEvent::DoneChanging => {
                                     self.undo_id += 1;
                                 },
-                                _=>()
+                                _ => ()
                             }
                         }
                     },
                     _ => ()
                 }
-                if let Some(update_span) = update_span{
-                    if let Some(tok) = cx.live_styles.tokens.get_mut(live_item_id) {
-                        tok.tokens[0].span.end = start+update_span;                    
-                    }
-                }
+                
             }
         }
         
@@ -181,7 +292,7 @@ impl LiveItemsView {
                     for index in 0..mtb.live_items_list.items.len() {
                         if let Some(fold_caption) = self.fold_captions.get(index) {
                             if fe.modifiers.control {
-                                if index != down_index{
+                                if index != down_index {
                                     fold_caption.open_state.do_close();
                                 }
                             }
@@ -314,10 +425,10 @@ impl MakepadTextBuffer {
                                     lc.0 + 1,
                                     lc.1 - 8,
                                     live_body
-                                ){
+                                ) {
                                     self.live_items_list.live_bodies.insert(live_body_id, tp.cur_offset() + 1);
                                 }
-                                else{
+                                else {
                                     eprintln!("LiveBody not found");
                                 };
                             }
