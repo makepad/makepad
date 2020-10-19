@@ -8,7 +8,7 @@ use crate::token::Token;
 use crate::ident::{Ident};
 use crate::error::LiveError;
 
-#[derive(Clone, Debug, Default, DeTok, DeTokSplat)]
+#[derive(Clone, Debug, Default, DeTok, SerBin, DeBin, DeTokSplat)]
 pub struct Float {
     pub value: f32,
     pub min: Option<f32>,

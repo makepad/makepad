@@ -110,10 +110,11 @@ pub struct MakepadTextBuffer {
     pub live_items_list: LiveItemsList
 }
 
-#[derive(Clone, Debug, SerBin, DeBin, PartialEq)]
+#[derive(Clone, Debug, SerBin, DeBin)]
 pub enum MakepadWebSocketMessage{
     Connect,
-    ChangeColor{live_item_id:LiveItemId, color:Color}
+    ChangeColor{live_item_id:LiveItemId, color:Color},
+    ChangeFloat{live_item_id:LiveItemId, float:Float}
 }
 
 #[derive(Debug, DeBin)]
@@ -240,6 +241,11 @@ impl MakepadStorage {
                                MakepadWebSocketMessage::ChangeColor{live_item_id, color}=>{
                                    // lets change color.
                                    cx.live_styles.colors.insert(live_item_id, color);
+                                   cx.live_styles.add_direct_value_change(live_item_id);
+                               },
+                               MakepadWebSocketMessage::ChangeFloat{live_item_id, float}=>{
+                                   // lets change color.
+                                   cx.live_styles.floats.insert(live_item_id, float);
                                    cx.live_styles.add_direct_value_change(live_item_id);
                                },
                                _=>()
