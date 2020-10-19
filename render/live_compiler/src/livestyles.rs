@@ -169,11 +169,6 @@ impl LiveStyles {
         }
     }
     
-    // a changed direct value doesn't update the tokens
-    pub fn add_changed_direct_value(&mut self, live_item_id: LiveItemId){
-        
-    }
-    
     pub fn add_changed_deps(&mut self, live_item_id: LiveItemId, new_tokens: &Vec<TokenWithSpan>, live_tokens_type: LiveTokensType) {
         
         if let Some(live_tokens) = self.tokens.get(&live_item_id) {
@@ -230,6 +225,14 @@ impl LiveStyles {
         self.tokens.remove(&live_item_id);
         self.style_alloc.remove(&live_item_id);
         self.shader_asts.remove(&live_item_id);
+    }
+    
+    pub fn add_direct_value_change(&mut self, live_item_id: LiveItemId){
+        if let Some(set) = self.depends_on_live.get(&live_item_id).cloned() {
+            for dep_live in set {
+                self._add_changed_deps_recursive(dep_live, LiveChangeType::UpdateValue);
+            }
+        }
     }
     
     pub fn _add_changed_deps_recursive(&mut self, live_item_id: LiveItemId, live_change_type: LiveChangeType) {

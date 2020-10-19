@@ -63,20 +63,23 @@ pub use crate::cx_ipc_posix::*;
 #[cfg(all(feature = "ipc", target_os = "windows"))]
 pub use crate::cx_ipc_win32::*;
 
+#[derive(Clone)]
 pub enum PlatformType {
+    Unknown,
     Windows,
     OSX,
     Linux,
-    WASM
+    Web{protocol:String, hostname:String, port:u16, pathname:String, search:String, hash:String}
 }
 
 impl PlatformType {
     pub fn is_desktop(&self) -> bool {
         match self {
+            PlatformType::Unknown =>true,
             PlatformType::Windows => true,
             PlatformType::OSX => true,
             PlatformType::Linux => true,
-            PlatformType::WASM => false
+            PlatformType::Web{..} => false
         }
     }
 }
@@ -191,7 +194,7 @@ impl Default for Cx {
         
         Self {
             counter: 0,
-            platform_type: PlatformType::Windows,
+            platform_type: PlatformType::Unknown,
             running: true,
 
             windows: Vec::new(),
@@ -818,13 +821,6 @@ pub enum StyleValue {
     Color(Color),
     Font(String),
     Size(f64)
-}
-
-#[macro_export]
-macro_rules!log {
-    ( $ ( $ arg: tt) *) => ({
-        $ crate::Cx::write_log(&format!("[{}:{}:{}] {}\n", file!(), line!(), column!(), &format!( $ ( $ arg) *)))
-    })
 }
 
 #[macro_export]

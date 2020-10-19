@@ -242,9 +242,14 @@ impl MakepadApp {
             Event::Construct => {
                 self.makepad_storage.init(cx);
                 if !cx.platform_type.is_desktop() {
+                    // lets connect our websocket
+                    MakepadStorage::send_websocket_message(cx, MakepadWebSocketMessage::Connect);
                     self.default_layout(cx);
                 }
             },
+            Event::WebSocketMessage(wm) =>{
+                self.makepad_storage.handle_websocket_message(cx, wm);
+            }
             Event::KeyDown(ke) => match ke.key_code {
                 KeyCode::KeyD => if ke.modifiers.logo || ke.modifiers.control {
                     //let size = self.build_manager.search_index.calc_total_size();

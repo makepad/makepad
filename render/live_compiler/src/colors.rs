@@ -1,6 +1,7 @@
 use crate::math::*;
+use makepad_microserde::*;
 
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, SerBin, DeBin, PartialEq)]
 pub struct Color {
     pub r: f32,
     pub g: f32,

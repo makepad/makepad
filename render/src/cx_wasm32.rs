@@ -3,17 +3,6 @@ use std::ptr;
 use std::alloc;
 use crate::cx::*;
 
-extern "C" {
-    fn _console_log(chars:u32, len:u32);
-}
-
-pub fn console_log(val:&str){
-    unsafe{
-        let chars = val.chars().collect::<Vec<char>>();
-        _console_log(chars.as_ptr() as u32, chars.len() as u32);
-    }
-}
- 
 impl Cx {
      
     pub fn get_default_window_size(&self) -> Vec2 {
@@ -31,7 +20,6 @@ impl Cx {
             for _i in 0..10 {
                 self.platform.fingers_down.push(false);
             }
-            self.platform_type = PlatformType::WASM;
         }
         
         //let root_view = unsafe {&mut *(self.platform.root_view_ptr as *mut View<NoScrollBar>)};
@@ -48,7 +36,14 @@ impl Cx {
                 },
                 1 => { // fetch_deps
                     self.platform.gpu_spec_is_low_on_uniforms = to_wasm.mu32() > 0;
-                    
+                    self.platform_type = PlatformType::Web{
+                         port:to_wasm.mu32() as u16,
+                         protocol:to_wasm.parse_string(),
+                         hostname:to_wasm.parse_string(),
+                         pathname:to_wasm.parse_string(),
+                         search:to_wasm.parse_string(),
+                         hash:to_wasm.parse_string(),
+                    };
                     // send the UI our deps, overlap with shadercompiler
                     let mut load_deps = Vec::<String>::new();
                     
@@ -417,6 +412,22 @@ impl Cx {
                         _ => Cx::status_http_send_fail()
                     }]);
                 },
+                23 =>{ // websocket message 
+                    let vec_ptr = to_wasm.mu32() as *mut u8;
+                    let vec_len = to_wasm.mu32() as usize;
+                    let url = to_wasm.parse_string();
+                    let data = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
+                    self.call_event_handler(&mut event_handler, &mut Event::WebSocketMessage(
+                        WebSocketMessageEvent{url, result:Ok(data)}
+                    ));
+                }
+                24 =>{ // websocket error 
+                    let url = to_wasm.parse_string();
+                    let err = to_wasm.parse_string();
+                    self.call_event_handler(&mut event_handler, &mut Event::WebSocketMessage(
+                        WebSocketMessageEvent{url, result:Err(err)}
+                    ));
+                }
                 _ => {
                     panic!("Message unknown")
                 }
@@ -515,7 +526,7 @@ impl Cx {
         
         // lets check our recompile queue
         if !is_animation_frame {
-            if self.live_styles.changed_live_bodies.len()>0{
+            if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0{
                 let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
                 let mut errors = self.process_live_styles_changes();
                 self.webgl_update_all_shaders(&mut errors);
@@ -529,6 +540,7 @@ impl Cx {
             self.shader_recompiles.truncate(0);
             self.call_shader_recompile_event(shader_results, &mut event_handler);*/
         }
+        
         // mark the end of the message
         self.platform.from_wasm.end();
         
@@ -593,9 +605,12 @@ impl Cx {
     pub fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         self.platform.from_wasm.http_send(verb, path, proto, domain, port, content_type, body, signal);
     }
+
+    pub fn websocket_send(&mut self, url:&str, data:&[u8]){
+        self.platform.from_wasm.websocket_send(url,data);
+    }
     
     pub fn update_menu(&mut self, _menu: &Menu) {
-        
     }
 }
 
@@ -1200,7 +1215,7 @@ impl FromWasm {
         self.check();
     }
     
-    fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
+    pub fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         self.fit(3);
         self.mu32(27);
         self.mu32(port as u32);
@@ -1211,6 +1226,13 @@ impl FromWasm {
         self.add_string(domain);
         self.add_string(content_type);
         self.add_u8slice(body);
+    }
+    
+    pub fn websocket_send(&mut self, url: &str, data:&[u8]) {
+        self.fit(1);
+        self.mu32(30);
+        self.add_string(url);
+        self.add_u8slice(data);
     }
     
     pub fn fullscreen(&mut self) {
@@ -1348,3 +1370,22 @@ pub unsafe extern "C" fn dealloc_wasm_message(in_buf: u32) {
     let bytes = buf.read() as usize;
     std::alloc::dealloc(buf as *mut u8, std::alloc::Layout::from_size_align(bytes as usize, mem::align_of::<u64>()).unwrap());
 }
+
+extern "C" {
+    pub fn _console_log(chars:u32, len:u32);
+}
+
+pub fn console_log(val:&str){
+    unsafe{
+        let chars = val.chars().collect::<Vec<char>>();
+        _console_log(chars.as_ptr() as u32, chars.len() as u32);
+    }
+}
+
+#[macro_export]
+macro_rules!log {
+    ( $ ( $t: tt) *) => {
+        console_log(&format!("{}:{} - {}",file!(),line!(),format!($($t)*)))
+    }
+}
+ 

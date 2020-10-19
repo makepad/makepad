@@ -448,6 +448,7 @@ impl TokenParser {
         if self.open_paren(){
             let mut ret = Vec::new();
             while !self.eat_eot(){
+                self.eat_ident("pub");
                 if let Some(tt) = self.eat_type(){
                     ret.push(tt);
                     self.eat_punct(',');
@@ -475,6 +476,15 @@ impl TokenParser {
             }
             tb.add("]");
             return Some(tb.end())
+        }
+        else if self.open_paren(){ // tuple type
+            tb.add("(");
+            while !self.eat_eot(){
+                tb.stream(self.eat_type());
+                self.eat_punct(',');
+            }
+            tb.add(")");
+            return Some(tb.end());
         }
         else if let Some(ty) = self.eat_any_ident() {
             tb.ident(&ty);
