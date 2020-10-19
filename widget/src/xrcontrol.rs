@@ -6,6 +6,7 @@ pub struct XRControl {
     pub cursor_view: View,
     pub ray_view: View,
     pub ray_cube: Cube,
+    pub sky_box: Cube,
     pub ray_cursor: Quad,
     pub animator: Animator,
     pub last_xr_update: Option<XRUpdateEvent>,
@@ -30,6 +31,7 @@ impl XRControl {
             ray_view: View::new(cx),
             cursor_view: View::new(cx),
             ray_cube: Cube::new(cx),
+            sky_box: Cube::new(cx),
             ray_cursor: Quad {
                 z: 3.0,
                 ..Quad::new(cx)
@@ -54,6 +56,54 @@ impl XRControl {
             self::shader_ray_cube: Shader {
                 use makepad_render::cube::shader::*;
             }
+            
+            self::shader_sky_box: Shader {
+                use makepad_render::cube::shader::*;
+                fn color_form_id() -> vec4 {
+                    if geom_id>4.5 {
+                        return #f00;
+                    }
+                    if geom_id>3.5 {
+                        return #0f0;
+                    }
+                    if geom_id>2.5 {
+                        return #00f;
+                    }
+                    if geom_id>1.5 {
+                        return #0ff;
+                    }
+                    return #f0f;
+                }
+                
+                fn vertex() -> vec4 {
+                    let model_view = camera_view * view_transform * transform;
+                    //let normal_matrix = mat3(model_view);
+                    //let normal = normalize(normal_matrix * geom_normal);
+                    //let dp = abs(normal.z);
+                    //let color = color_form_id();
+                    //lit_col = color; // vec4(color.rgb * dp, color.a);
+                    return camera_projection * (model_view * vec4(geom_pos.x * size.x + pos.x, geom_pos.y * size.y + pos.y, geom_pos.z * size.z + pos.z + draw_zbias, 1.));
+                }
+                
+                fn pixel() -> vec4 {
+                    if geom_id>4.5 {
+                        return #f00;
+                    }
+                    if geom_id>3.5 {
+                        return #0f0;
+                    }
+                    if geom_id>2.5 {
+                        // gray with little crosses
+                        return mix(#3, #f, abs(sin(geom_pos.x)));
+                        //return #3;
+                    }
+                    if geom_id>1.5 {
+                        return #0ff;
+                    }
+                    return #f0f;
+                }
+            }
+            
             
             self::shader_ray_cursor: Shader {
                 use makepad_render::quad::shader::*;
@@ -209,6 +259,11 @@ impl XRControl {
         
         // THIS HAS A VERY STRANGE BUG. if i reverse these, the dots are broken on wasm+quest
         if self.ray_view.begin_view(cx, Layout::abs_origin_zero()).is_ok() {
+            // alright lets add a skycube
+            // a floor plane
+            // and render all the other participants in the channel with their respective head and hands
+            self.sky_box.shader = live_shader!(cx, self::shader_sky_box);
+            self.sky_box.draw_cube(cx, Vec3 {x: 1000.0, y: 100.0, z: 1000.0}, Vec3 {x: 0.0, y: 25.0, z: 0.0}, &Mat4::identity());
             
             let ray_size = Vec3 {x: 0.02, y: 0.02, z: 0.12};
             let ray_pos = Vec3 {x: 0., y: 0., z: 0.0};
@@ -234,6 +289,5 @@ impl XRControl {
             }).into();
             self.cursor_view.end_view(cx);
         }
-        
     }
 }
