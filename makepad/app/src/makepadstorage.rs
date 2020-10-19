@@ -113,14 +113,14 @@ pub struct MakepadTextBuffer {
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum MakepadWebSocketMessage{
     Connect,
-    ChangeColor{live_item_id:LiveItemId, color:Color},
+    ChangeColor{live_item_id:LiveItemId, rgba:Color},
     ChangeFloat{live_item_id:LiveItemId, float:Float}
 }
 
 #[derive(Debug, DeBin)]
 pub struct MakepadWebSocketMessageWrap{
-    ids: Vec<u32>,
-    messages: Vec<(u32, MakepadWebSocketMessage)>
+    pub ids: Vec<u32>,
+    pub messages: Vec<(u32, MakepadWebSocketMessage)>
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
@@ -224,7 +224,7 @@ impl MakepadStorage {
             cx.websocket_send(&url, &data);
         }
     }
-    
+    /*
     pub fn handle_websocket_message(&mut self, cx:&mut Cx, wm:&WebSocketMessageEvent){
         // parse binary buffer 
         if let Ok(data) = &wm.result{
@@ -260,7 +260,7 @@ impl MakepadStorage {
                 
             }
         }
-    }
+    }*/
     
     pub fn restart_hub_server(&mut self) {
         if let Some(hub_server) = &mut self.hub_server {
