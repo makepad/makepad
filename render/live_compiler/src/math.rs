@@ -21,7 +21,10 @@ pub struct Vec2 {
 }
 
 impl Vec2 {
-    
+    pub fn all(x:f32)->Vec2{
+        Vec2{x:x, y:x}
+    }
+
     pub fn distance(&self, other: &Vec2) -> f32 {
         let dx = self.x - other.x;
         let dy = self.y - other.y;
@@ -41,6 +44,10 @@ pub struct Vec3 {
 }
 
 impl Vec3 {
+    pub fn all(x:f32)->Vec3{
+        Vec3{x:x, y:x, z:x}
+    }
+
     pub fn to_vec2(&self) -> Vec2{
         Vec2{x:self.x, y:self.y}
     }

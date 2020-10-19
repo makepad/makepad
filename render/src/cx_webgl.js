@@ -1185,6 +1185,7 @@
                     this.websockets[url] = null;
                 })
                 socket.addEventListener('error', event=>{
+                    this.websockets[url] = null;
                     this.to_wasm.websocket_error(url, ""+event);
                     this.do_wasm_io();
                 })
