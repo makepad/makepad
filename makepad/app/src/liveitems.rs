@@ -148,6 +148,11 @@ impl LiveItemsView {
                                             text_editor.handle_live_replace(cx, (start + offset, end + offset), &new_string, &mut mtb.text_buffer, self.undo_id);
                                         }
                                     }
+                                    // post it on our websocket
+                                    MakepadStorage::send_websocket_message(cx, MakepadWebSocketMessage::ChangeColor{
+                                        live_item_id:*live_item_id, color:rgba,
+                                    })
+                                    
                                 }, 
                                 ColorPickerEvent::DoneChanging => {
                                     self.undo_id += 1;

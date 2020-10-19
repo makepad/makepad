@@ -5,6 +5,13 @@ use std::io;
 use std::net::TcpStream;
 //use time::precise_time_ns;
 
+#[macro_export]
+macro_rules!log {
+    ( $ ( $t: tt) *) => {
+        println!(&format!("{}:{} - {}",file!(),line!(),format!($($t)*)))
+    }
+}
+
 #[derive(Clone)]
 pub struct CxDesktop {
     pub repaint_via_scroll_event: bool,
@@ -202,7 +209,7 @@ impl Cx {
         
         self.fonts.resize(self.live_styles.font_index.len(), CxFont::default());
         // lets load all fonts that aren't loaded yet
-        for (file, font) in &self.live_styles.font_index{
+        for (file, font) in &self.live_styles.font_index {
             let file = file.to_string();
             let cxfont = &mut self.fonts[font.font_id];
             if let Ok(mut file_handle) = File::open(&file) {
@@ -211,7 +218,7 @@ impl Cx {
                     if cxfont.load_from_ttf_bytes(&buffer).is_err() {
                         println!("Error loading font {} ", file);
                     }
-                    else{
+                    else {
                         cxfont.file = file;
                     }
                 }
@@ -233,7 +240,11 @@ impl Cx {
         let _ = io::stdout().flush();
     }
     
-    pub fn http_send(&self, verb: &str, path: &str, _proto:&str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
+    pub fn websocket_send(&self, _url: &str, _data: &[u8]) {
+        // nop
+    }
+    
+    pub fn http_send(&self, verb: &str, path: &str, _proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         
         fn write_bytes_to_tcp_stream(tcp_stream: &mut TcpStream, bytes: &[u8]) -> bool {
             let bytes_total = bytes.len();
