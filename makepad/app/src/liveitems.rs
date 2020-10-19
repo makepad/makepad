@@ -137,7 +137,7 @@ impl LiveItemsView {
                 live_item_id: live_item_id,
                 rgba: rgba,
             });
-            return
+            //return
         }
         
         // how do we find WHERE to change this valuein our editor
