@@ -456,7 +456,6 @@ impl WebSocketChannels{
         let _write_thread = std::thread::spawn(move || {
             // we have a bus we read from, which we hand to our websocket server.
             while let Ok(data) = rx_socket.recv(){
-                println!("SENDING DATA {:?}", data);
                 write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &data);
             }
             let _ = write_tcp_stream.shutdown(Shutdown::Both);
@@ -473,7 +472,6 @@ impl WebSocketChannels{
                             WebSocketResult::Pong(_)=>{},
                             WebSocketResult::Data(data)=>{
                                 // we have to send this to the websocket server
-                                println!("GOT DATA #{:?}#", data);
                                 tx_bus.send((socket_id.clone(),data)).unwrap();
                                 //let s = std::str::from_utf8(&data);
                             },
