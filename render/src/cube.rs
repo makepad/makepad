@@ -31,20 +31,6 @@ impl Cube {
             
             fn color_form_id() -> vec4 {
                 return #c;
-                /*
-            if geom_id>4.5{
-            return pick!(red);
-            }
-            if geom_id>3.5{
-            return pick!(green);
-            }
-            if geom_id>2.5{
-            return pick!(blue);
-            }
-            if geom_id>1.5{
-            return pick!(orange);
-            }
-            return pick!(yellow);*/
             }
             
             fn vertex() -> vec4 {
