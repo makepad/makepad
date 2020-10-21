@@ -34,13 +34,13 @@ impl Cube {
             }
             
             fn vertex() -> vec4 {
-                let model_view = camera_view * view_transform * transform;
+                let model_view =  view_transform * transform;
                 let normal_matrix = mat3(model_view);
                 let normal = normalize(normal_matrix * geom_normal);
                 let dp = abs(normal.z);
                 let color = color_form_id();
                 lit_col = vec4(color.rgb * dp, color.a);
-                return camera_projection * (model_view * vec4(geom_pos.x * size.x + pos.x, geom_pos.y * size.y + pos.y, geom_pos.z * size.z + pos.z + draw_zbias, 1.));
+                return camera_projection * (camera_view * model_view * vec4(geom_pos.x * size.x + pos.x, geom_pos.y * size.y + pos.y, geom_pos.z * size.z + pos.z + draw_zbias, 1.));
             }
             
             fn pixel() -> vec4 {

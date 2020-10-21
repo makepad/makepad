@@ -1487,9 +1487,11 @@
                             
                             let inputs = [];
                             for (let input of xr_session.inputSources) {
-                                
                                 let grip_pose = xr_frame.getPose(input.gripSpace, this.xr_reference_space);
                                 let ray_pose = xr_frame.getPose(input.targetRaySpace, this.xr_reference_space);
+                                if(grip_pose == null || ray_pose == null){
+                                    continue;
+                                }
                                 inputs.push({
                                     grip_transform: grip_pose.transform,
                                     ray_transform: ray_pose.transform,
@@ -1501,7 +1503,7 @@
                             this.to_wasm.xr_update(
                                 time / 1000.0,
                                 this.xr_pose.transform,
-                                inputs,
+                                inputs, 
                             );
                             //let perf_start = performance.now();
                             this.do_wasm_io();
@@ -2367,7 +2369,7 @@
             if (req.status === 200) {
                 var msg = JSON.parse(req.response);
                 if (msg.type == "file_change") {
-                    location.href = location.href
+                    //location.href = location.href
                 }
                 if (msg.type == "build_start") {
                     let note = "Rebuilding application..."

@@ -117,7 +117,12 @@ impl MakepadWindow {
         
         match event {
             Event::XRUpdate(xu) => { // handle all VR updates here.
-                let mut events = self.xr_control.handle_xr_control(cx, xu, &self.desktop_window.main_view);
+                let mut events = self.xr_control.handle_xr_control(
+                    cx,
+                    xu,
+                    &mut makepad_storage.xr_channel,
+                    &self.desktop_window.main_view
+                );
                 for event in &mut events {
                     match event {
                         Event::FingerHover(fe) => {
@@ -236,6 +241,7 @@ impl MakepadWindow {
                     if let Some(file_editor) = &mut self.file_editors.editors.get_mut(editor_id) {
                         
                         let mtb = makepad_storage.text_buffer_from_path(cx, path);
+                        let mut temporary_change_hook = false;
                         
                         match file_editor.handle_file_editor(cx, event, mtb, Some(&mut build_manager.search_index)) {
                             TextEditorEvent::Search(search) => {
@@ -248,6 +254,9 @@ impl MakepadWindow {
                                 do_search = Some((Some("".to_string()), mtb.text_buffer_id, false, true));
                             }
                             TextEditorEvent::Change => {
+                                // lets post a new file to our local thing
+                                temporary_change_hook = true;
+                                // and send over the cursor change
                                 do_search = Some((None, MakepadTextBufferId(0), false, false));
                             }
                             TextEditorEvent::LagChange => {
@@ -256,9 +265,26 @@ impl MakepadWindow {
                                     build_manager.restart_build(cx, makepad_storage);
                                 }
                             },
+                            TextEditorEvent::CursorMove => {
+                                // lets send over the cursor set.
+                                temporary_change_hook = true;
+                            },
                             _ => ()
                         }
                         *scroll_pos = file_editor.get_scroll_pos(cx);
+                        if temporary_change_hook {
+                            let mtb = makepad_storage.text_buffer_from_path(cx, path);
+                            let mm = MakepadChannelMessage::ChangeAll {
+                                path: path.to_string(),
+                                code: mtb.text_buffer.get_as_string(),
+                                cursors: file_editor.get_text_editor().cursors.clone()
+                            };
+                            
+                            makepad_storage.websocket_channels.send_directly(
+                                "/channel/index.html",
+                                mm.serialize_bin()
+                            );
+                        }
                     }
                 }
             }

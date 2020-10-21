@@ -3,7 +3,7 @@ use makepad_render::*;
 // Shader code itself
 
 fn shader(cx: &mut Cx) {live_body!(cx, r#"
-    self::color1: #f0f; 
+    self::color1: #f0f;
     self::color2: #0ff;
     self::color3: #f00;
     self::color4: #00f;
@@ -15,7 +15,7 @@ fn shader(cx: &mut Cx) {live_body!(cx, r#"
         
         varying camera_vec: vec3;
         
-        fn vertex() -> vec4 {
+        fn vertex() -> vec4 { 
             // return vec4(geom.x-0.5, geom.y, 0., 1.);
             let scr = scroll();
             let clipped: vec2 = clamp(

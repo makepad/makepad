@@ -4,6 +4,7 @@ use crate::span::LiveBodyId;
 use crate::lex;
 use crate::analyse::{ShaderCompileOptions, ShaderAnalyser};
 use crate::env::Env;
+use crate::span::Span;
 use crate::token::{TokenWithSpan};
 use crate::builtin::{self, Builtin};
 use crate::ident::{Ident, IdentPath, QualifiedIdentPath};
@@ -358,10 +359,20 @@ impl LiveStyles {
             }
         }
         
-        Shader {
-            shader_id: self.shaders.get(&get_live_item_id)
-                .expect(&format!("Shader not found {}", name)).shader_id,
-            location_hash
+        let shader = self.shaders.get(&get_live_item_id);
+        if let Some(shader) = shader{
+            Shader {
+                shader_id: shader.shader_id,
+                location_hash
+            }
+        }
+        else{
+            eprintln!("Shader not found {}", name);
+            Shader {
+                shader_id: 0,
+                location_hash
+            }
+            
         }
     }
     
@@ -657,7 +668,15 @@ impl LiveStyles {
         let mut out_ast = ShaderAst::default();
         let mut visited = Vec::new();
         
-        let in_ast = self.shader_asts.get(&live_item_id).expect("shader expected to exist");
+        let in_ast = match self.shader_asts.get(&live_item_id){
+            Some(ast)=>ast,
+            None=>{
+                return Err(self.live_error_to_live_body_error(LiveError {
+                    span: Span::default(),
+                    message: format!("Cannot find library or shader")
+                }))
+            }
+        };
         
         fn recur(visited: &mut Vec<LiveItemId>, in_ast: &ShaderAst, out_ast: &mut ShaderAst, live_styles: &LiveStyles) -> Result<(), LiveBodyError> {
             for use_ipws in &in_ast.uses {

@@ -60,6 +60,7 @@ impl SearchResults {
             self::color_bg: #1e;
             self::color_bg_marked: #11466e;
             self::color_bg_odd: #25;
+            self::color_bg_odd_over: #3;
             self::color_bg_marked_over: #11466e;
             self::color_bg_selected: #28;
             
@@ -68,7 +69,7 @@ impl SearchResults {
                     width: Compute,
                     height: Compute,
                     margin: {t: 6., l: 0., r: 0., b: 0.}
-                },
+                }, 
                 padding: all(7.),
             }
             self::text_input_color_bg: #34;

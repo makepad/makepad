@@ -1,11 +1,12 @@
 use std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
 use std::sync::{mpsc, Arc, Mutex};
 use std::io::prelude::*;
-use std::io::BufReader;
 use std::str;
 use std::time::Duration;
 use std::collections::HashMap;
 use makepad_microserde::*;
+use makepad_http::httputil::*;
+use makepad_http::channel::*;
 
 #[derive(Debug, Clone, SerBin, DeBin, PartialEq, SerRon, DeRon)]
 pub enum HttpServerConfig {
@@ -25,13 +26,17 @@ pub struct HttpServerShared {
 
 #[derive(Default)]
 pub struct HttpServer {
-    pub listen_thread: Option<std::thread::JoinHandle<()>>,
+    pub listen_thread: Option<std::thread::JoinHandle<() >>,
     pub listen_address: Option<SocketAddr>,
-    pub shared: Arc<Mutex<HttpServerShared>>,
+    pub shared: Arc<Mutex<HttpServerShared >>,
 }
 
 impl HttpServer {
-    pub fn start_http_server(config: &HttpServerConfig, workspaces_arc: Arc<Mutex<HashMap<String, String>>>) -> Option<HttpServer> {
+    pub fn start_http_server(
+        config: &HttpServerConfig,
+        websocket_channels: WebSocketChannels,
+        workspaces_arc: Arc<Mutex<HashMap<String, String >> >
+    ) -> Option<HttpServer> {
         
         let listen_address = match config {
             HttpServerConfig::Offline => return None,
@@ -55,31 +60,25 @@ impl HttpServer {
                     }
                     let mut tcp_stream = tcp_stream.expect("Incoming stream failure");
                     let (tx_write, rx_write) = mpsc::channel::<String>();
-                    let mut reader = BufReader::new(tcp_stream.try_clone().expect("Cannot clone tcp stream"));
                     let workspaces = Arc::clone(&workspaces);
                     let shared = Arc::clone(&shared);
+                    let websocket_channels = websocket_channels.clone();
                     let _read_thread = std::thread::spawn(move || {
+                        let header = HttpHeader::from_tcp_stream(tcp_stream.try_clone().expect("Cannot clone tcp stream"));
+                        if header.is_none() {
+                            return http_error_out(tcp_stream, 500)
+                        }
+                        let header = header.unwrap();
                         
-                        let mut line = String::new();
-                        reader.read_line(&mut line).expect("http read line fail");
-                        if !line.starts_with("GET /") || line.len() < 10 {
-                            let _ = tcp_stream.shutdown(Shutdown::Both);
-                            return
+                        if let Some(key) = header.sec_websocket_key {
+                            return websocket_channels.handle_websocket(&mut tcp_stream, &header.path, &key);
                         }
                         
-                        let line = &line[5..];
-                        let space = line.find(' ').expect("http space fail");
-                        let mut url = line[0..space].to_string();
-                        if url.ends_with("/"){
-                            url.push_str("index.html");
+                        if header.path.ends_with("/key.ron") || header.path.find("..").is_some() || header.path_no_slash.starts_with("/") {
+                            return http_error_out(tcp_stream, 500)
                         }
-                        let url_lc = url.clone();
-                        url_lc.to_lowercase();
-                        if url_lc.ends_with("/key.ron") || url.find("..").is_some() || url.starts_with("/") {
-                            let _ = tcp_stream.shutdown(Shutdown::Both);
-                            return
-                        }
-                        if url_lc.starts_with("$watch") { // its a watcher wait for the finish
+                        
+                        if header.path.starts_with("/$watch") { // its a watcher wait for the finish
                             let mut watcher_id = 0;
                             if let Ok(mut shared) = shared.lock() {
                                 shared.watcher_id += 1;
@@ -96,7 +95,7 @@ impl HttpServer {
                                     let _ = tcp_stream.shutdown(Shutdown::Both);
                                 }
                             }
-
+                            
                             if let Ok(mut shared) = shared.lock() {
                                 for i in 0..shared.watch_pending.len() {
                                     let (id, _) = &shared.watch_pending[i];
@@ -108,16 +107,16 @@ impl HttpServer {
                             };
                             return
                         }
-
-                        if url.ends_with("favicon.ico"){
-                            let header =  "HTTP/1.1 200 OK\r\nContent-Type: image/x-icon\r\nTransfer-encoding: identity\r\nContent-Length: 0\r\n: close\r\n\r\n";
+                        
+                        if header.path.ends_with("favicon.ico") {
+                            let header = "HTTP/1.1 200 OK\r\nContent-Type: image/x-icon\r\nTransfer-encoding: identity\r\nContent-Length: 0\r\n: close\r\n\r\n";
                             write_bytes_to_tcp_stream_no_error(&mut tcp_stream, header.as_bytes());
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                             return
                         }
 
-                        let file_path = if let Some(file_pos) = url.find('/') {
-                            let (workspace, rest) = url.split_at(file_pos);
+                        let file_path = if let Some(file_pos) = header.path_no_slash.find('/') {
+                            let (workspace, rest) = header.path_no_slash.split_at(file_pos);
                             let (_, rest) = rest.split_at(1);
                             if let Ok(workspaces) = workspaces.lock() {
                                 if let Some(abs_path) = workspaces.get(workspace) {
@@ -128,29 +127,29 @@ impl HttpServer {
                             else {None}
                         }
                         else {None};
-                        
+
                         if file_path.is_none() {
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                             return
                         }
                         let file_path = file_path.unwrap();
-                        let file_path = if file_path.ends_with("/"){
+                        let file_path = if file_path.ends_with("/") {
                             format!("{}/{}", file_path, "index.html")
                         }
-                        else{
+                        else {
                             file_path
                         };
-
+                        
                         if let Ok(mut shared) = shared.lock() {
-                            if shared.files_read.iter().find( | v | **v == url).is_none() {
-                                shared.files_read.push(url.to_string());
+                            if shared.files_read.iter().find( | v | **v == header.path_no_slash).is_none() {
+                                shared.files_read.push(header.path_no_slash.to_string());
                             }
                         };
                         
                         if let Ok(data) = std::fs::read(&file_path) {
-                            let mime_type = if url.ends_with(".html") {"text/html"}
-                            else if url.ends_with(".wasm") {"application/wasm"}
-                            else if url.ends_with(".js") {"text/javascript"}
+                            let mime_type = if file_path.ends_with(".html") {"text/html"}
+                            else if file_path.ends_with(".wasm") {"application/wasm"}
+                            else if file_path.ends_with(".js") {"text/javascript"}
                             else {"application/octet-stream"};
                             
                             // write the header
