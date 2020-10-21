@@ -155,6 +155,7 @@ pub struct XRAvatar {
     angle: f32,
     ui: XRCube,
     ui_rect: Rect,
+    last_xr_event: Option<XRUpdateEvent>
 }
 
 impl XRAvatar {
@@ -163,6 +164,7 @@ impl XRAvatar {
             state: XRAvatarState::Joining(1.0),
             left_hand: XRCube::new(cx),
             right_hand: XRCube::new(cx),
+            last_xr_event: None,
             angle: 180.0,
             head: XRCube::new(cx),
             ui: XRCube::new(cx),
@@ -170,7 +172,7 @@ impl XRAvatar {
         }
     }
     
-    fn update_avatar(&mut self, cx: &mut Cx, xr_event: &XRUpdateEvent, ui_mat: Mat4, ui_rect: Rect) {
+    fn update_avatar(&mut self, cx: &mut Cx, xr_event: Option<&XRUpdateEvent>, ui_mat: Mat4, ui_rect: Rect) {
         
         let personal_mat = Mat4::from_mul(
             &Mat4::scale_translate(self.state.get_space(), 0.0, 0.0, 0.0),
@@ -181,6 +183,12 @@ impl XRAvatar {
                 Vec3 {x: 0.0, y: 0.0, z: -1.5},
             )
         );
+        let xr_event = if let Some(xe) = xr_event {
+            self.last_xr_event = Some(xe.clone());
+            xe
+        } else {
+            if let Some(xe) = &self.last_xr_event {xe} else {return}
+        };
         
         self.left_hand.set_mat(cx, Mat4::from_mul(&Mat4::from_transform(xr_event.left_input.ray), &personal_mat));
         self.right_hand.set_mat(cx, Mat4::from_mul(&Mat4::from_transform(xr_event.right_input.ray), &personal_mat));
@@ -359,15 +367,14 @@ impl XRControl {
                 self.xr_avatars.insert(*id, XRAvatar::new(cx));
                 self.space_view.redraw_view_area(cx);
             }
-            if let Some(xa) = self.xr_avatars.get_mut(id) {
-                
-                xa.update_avatar(cx, xe, ui_mat, ui_rect);
-                xa.state.tick();
-            }
         }
         
         let mut remove = Vec::new();
         for (id, xa) in &mut self.xr_avatars {
+            
+            xa.update_avatar(cx, xr_channel.users.get(id), ui_mat, ui_rect);
+            xa.state.tick();
+            
             if xr_channel.users.get(id).is_none() {
                 xa.state.leave();
             }
