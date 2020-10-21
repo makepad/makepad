@@ -9,6 +9,7 @@ pub struct XRUserId(pub u32);
 pub struct XRChannel {
     pub self_id: XRUserId,
     pub users: HashMap<XRUserId, XRUpdateEvent>,
+    pub last_times: HashMap<XRUserId, f64>
 }
 
 #[derive(Clone)]
@@ -83,7 +84,7 @@ pub enum XRAvatarState {
 }
 
 impl XRAvatarState {
-    fn left(&self) -> bool {
+    fn gone(&self) -> bool {
         match self {
             Self::Gone => true,
             _ => false
@@ -114,7 +115,7 @@ impl XRAvatarState {
                     *self = Self::Gone;
                 }
                 else {
-                    *self = Self::Leaving(*f * 0.99);
+                    *self = Self::Leaving(*f * 0.9);
                 }
             },
             _ => ()
@@ -378,13 +379,14 @@ impl XRControl {
             if xr_channel.users.get(id).is_none() {
                 xa.state.leave();
             }
-            if xa.state.left() {
+            if xa.state.gone() {
                 remove.push(*id);
                 self.space_view.redraw_view_area(cx);
             }
         }
         for id in remove {
             self.xr_avatars.remove(&id);
+            self.space_view.redraw_view_area(cx);
         }
     }
     
