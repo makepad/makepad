@@ -293,38 +293,19 @@ impl MakepadStorage {
         if let Ok(data) = &wm.result {
             match MakepadChannelMessageWrap::deserialize_bin(&data) {
                 Ok(wsm) => {
-                    for (_id, m) in wsm.messages {
+                    for (id, m) in wsm.messages {
+                        if id == wsm.ids[0]{
+                            continue;
+                        }
                         match m {
                             MakepadChannelMessage::XRUpdate {event} => {
-                                let self_id = XRUserId(wsm.ids[0]);
-                                self.xr_channel.self_id = self_id;
+                                let xr_id = XRUserId(id);
+                                self.xr_channel.users.insert(xr_id, event.clone());
+                            
+                                // clean up our user set
                                 let mut user_set = HashSet::new();
                                 for id in &wsm.ids { 
-                                    let xr_id = XRUserId(*id);
-                                    if xr_id != self_id {
-                                        user_set.insert(xr_id);
-                                        self.xr_channel.users.insert(xr_id, event.clone());
-                                    }
-                                    
-                                    if false{
-                                        let xr1_id = XRUserId(*id+1);
-                                        let xr2_id = XRUserId(*id+2);
-                                        let xr3_id = XRUserId(*id+3);
-                                        //log!("{}",cx.anim_time);
-                                        if cx.anim_time > 10.0{
-                                            user_set.insert(xr1_id);
-                                            self.xr_channel.users.insert(xr1_id, event.clone());
-                                        }
-                                        if cx.anim_time > 20.0{
-                                            user_set.insert(xr2_id);
-                                            self.xr_channel.users.insert(xr2_id, event.clone());
-                                        }
-                                        if cx.anim_time > 30.0{ 
-                                            user_set.insert(xr3_id);
-                                            self.xr_channel.users.insert(xr3_id, event.clone());
-                                        }
-                                    }
-                                    
+                                    user_set.insert(XRUserId(*id));
                                 }
                                 let mut removed = Vec::new();
                                 for (id, _xr) in &self.xr_channel.users {
