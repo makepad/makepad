@@ -3,11 +3,12 @@ use makepad_render::*;
 use makepad_widget::*;
 use makepad_hub::*;
 use makepad_microserde::*;
+use makepad_http::channel::WebSocketChannels;
 use crate::makepadwindow::*;
 use crate::filetree::*;
 use crate::fileeditor::*;
 use crate::buildmanager::*;
-use std::collections::{HashMap, BTreeSet};
+use std::collections::{HashMap, HashSet, BTreeSet};
 use crate::builder;
 use crate::liveitems::*;
 
@@ -85,6 +86,7 @@ pub struct MakepadStorage {
     pub init_builders_counter: usize,
     pub builders_request_uid: HubUid,
     pub builder_sync_uid: HubUid,
+    pub websocket_channels: WebSocketChannels,
     pub hub_router: Option<HubRouter>,
     pub hub_server: Option<HubServer>,
     pub builder_route_send: Option<HubRouteSend>,
@@ -99,6 +101,7 @@ pub struct MakepadStorage {
     pub text_buffer_path_to_id: HashMap<String, MakepadTextBufferId>,
     pub text_buffer_id_to_path: HashMap<MakepadTextBufferId, String>,
     pub text_buffers: Vec<MakepadTextBuffer>,
+    pub xr_channel: XRChannel,
 }
 
 pub struct MakepadTextBuffer {
@@ -110,23 +113,25 @@ pub struct MakepadTextBuffer {
     pub live_items_list: LiveItemsList
 }
 
-#[derive(Clone, Debug, SerBin, DeBin)]
-pub enum MakepadWebSocketMessage{
+#[derive(Clone, SerBin, DeBin)]
+pub enum MakepadChannelMessage {
     Connect,
-    ChangeColor{live_item_id:LiveItemId, rgba:Color},
-    ChangeFloat{live_item_id:LiveItemId, float:Float}
+    XRUpdate {event: XRUpdateEvent},
+    ChangeAll {path: String, code: String, cursors: TextCursorSet},
+    ChangeColor {live_item_id: LiveItemId, rgba: Color},
+    ChangeFloat {live_item_id: LiveItemId, float: Float},
 }
 
-#[derive(Debug, DeBin)]
-pub struct MakepadWebSocketMessageWrap{
+#[derive(DeBin)]
+pub struct MakepadChannelMessageWrap {
     pub ids: Vec<u32>,
-    pub messages: Vec<(u32, MakepadWebSocketMessage)>
+    pub messages: Vec<(u32, MakepadChannelMessage)>
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
-pub struct MakepadTextBufferId(pub u16);
+pub struct MakepadTextBufferId(pub usize); //(u16);
 impl MakepadTextBufferId {
-    pub fn as_index(&self) -> usize {return self.0 as usize}
+    pub fn as_index(&self) -> usize {return self.0}
 }
 
 impl MakepadStorage {
@@ -136,6 +141,7 @@ impl MakepadStorage {
             builders_request_uid: HubUid::zero(),
             builder_sync_uid: HubUid::zero(),
             builder_route_send: None,
+            websocket_channels: WebSocketChannels::default(),
             hub_router: None,
             hub_server: None,
             hub_ui: None,
@@ -143,13 +149,13 @@ impl MakepadStorage {
             settings_changed: cx.new_signal(),
             settings_old: MakepadSettings::default(),
             settings: MakepadSettings::default(),
-            //rust_compiler: RustCompiler::style(cx),
             text_buffer_path_to_id: HashMap::new(),
             text_buffer_id_to_path: HashMap::new(),
             text_buffers: Vec::new(),
             file_tree_file_read: FileRead::default(),
             state_file_read: FileRead::default(),
-            settings_file_read: FileRead::default()
+            settings_file_read: FileRead::default(),
+            xr_channel: XRChannel::default(),
         }
     }
     
@@ -172,7 +178,7 @@ impl MakepadStorage {
                 }
             });
             
-            let send = HubBuilder::run_builder_direct("main", &mut hub_router, | ws, htc | {builder::builder(ws, htc)});
+            let send = HubBuilder::run_builder_direct("main", self.websocket_channels.clone(), &mut hub_router, | ws, htc | {builder::builder(ws, htc)});
             self.builder_route_send = Some(send);
             self.hub_router = Some(hub_router);
             self.hub_ui = Some(hub_ui);
@@ -189,7 +195,7 @@ impl MakepadStorage {
                 self.settings = settings;
                 //self.settings.style_options.scale = self.settings.style_options.scale.min(3.0).max(0.3);
                 cx.send_signal(self.settings_changed, Self::status_settings_changed());
-
+                
                 // so now, here we restart our hub_server if need be.
                 if cx.platform_type.is_desktop() {
                     if self.settings_old.hub_server != self.settings.hub_server {
@@ -207,60 +213,156 @@ impl MakepadStorage {
         let utf8_data = self.settings.serialize_ron();
         let path = "makepad_settings.ron";
         if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
-            let atb = &mut self.text_buffers[tb_id.0 as usize];
+            let atb = &mut self.text_buffers[tb_id.as_index()];
             atb.text_buffer.load_from_utf8(&utf8_data);
             atb.text_buffer.send_textbuffer_loaded_signal(cx);
         }
         cx.file_write(path, utf8_data.as_bytes());
     }
     
-    pub fn send_websocket_message(cx:&mut Cx, mm: MakepadWebSocketMessage){
+    pub fn send_websocket_message(cx: &mut Cx, mm: MakepadChannelMessage) {
         // serialize mm and send it over
         let data = mm.serialize_bin();
         // lets get the right URL here.
-        if let PlatformType::Web{protocol, hostname, port, hash, ..} = cx.platform_type.clone(){
-            let proto = if protocol == "https:"{"wss:"}else{"ws:"};
-            let url = format!("{}//{}:{}/channel/{}",proto, hostname, port, hash);
+        if let PlatformType::Web {protocol, hostname, port, hash, ..} = cx.platform_type.clone() {
+            let proto = if protocol == "https:" {"wss:"}else {"ws:"};
+            let url = format!("{}//{}:{}/channel/{}", proto, hostname, port, hash);
             cx.websocket_send(&url, &data);
         }
     }
-    /*
-    pub fn handle_websocket_message(&mut self, cx:&mut Cx, wm:&WebSocketMessageEvent){
-        // parse binary buffer 
-        if let Ok(data) = &wm.result{
-            // lets parse the channel headers
-            // u32 num sockets
-            // num_sockets * u32 sockets
-            // num messages
-            match MakepadWebSocketMessageWrap::deserialize_bin(&data){
-                Ok(wsm)=>{
-                    let my_id = wsm.ids[0];
-                    for (id,m) in wsm.messages{
-                        if id != my_id{
-                           match m{
-                               MakepadWebSocketMessage::ChangeColor{live_item_id, color}=>{
-                                   // lets change color.
-                                   cx.live_styles.colors.insert(live_item_id, color);
-                                   cx.live_styles.add_direct_value_change(live_item_id);
-                               },
-                               MakepadWebSocketMessage::ChangeFloat{live_item_id, float}=>{
-                                   // lets change color.
-                                   cx.live_styles.floats.insert(live_item_id, float);
-                                   cx.live_styles.add_direct_value_change(live_item_id);
-                               },
-                               _=>()
-                           } 
+    
+    pub fn handle_changed_float(
+        cx: &mut Cx,
+        live_item_id: LiveItemId,
+        float: Float,
+        live_bodies: &HashMap<LiveBodyId, usize>,
+        text_buffer: &mut TextBuffer,
+    ) {
+        if let Some(tok) = cx.live_styles.tokens.get(&live_item_id) {
+            let start = tok.tokens[0].span.start;
+            let end = tok.tokens[0].span.end;
+            if let Some(live_body_id) = cx.live_styles.item_in_live_body.get(&live_item_id) {
+                if let Some(offset) = live_bodies.get(&live_body_id) {
+                    let new_string = format!("{}", PrettyPrintedFloat3Decimals(float.value));
+                    if let Some(tok) = cx.live_styles.tokens.get_mut(&live_item_id) {
+                        tok.tokens[0].span.end = start + new_string.len();
+                    }
+                    text_buffer.live_edit(start + offset, end + offset, &new_string);
+                    cx.send_signal(text_buffer.signal, TextBuffer::status_data_update());
+                }
+            }
+        }
+        
+    }
+    
+    pub fn handle_changed_color(
+        cx: &mut Cx,
+        live_item_id: LiveItemId,
+        rgba: Color,
+        live_bodies: &HashMap<LiveBodyId, usize>,
+        text_buffer: &mut TextBuffer,
+    ) {
+        // how do we find WHERE to change this valuein our editor
+        if let Some(tok) = cx.live_styles.tokens.get(&live_item_id) {
+            let start = tok.tokens[0].span.start;
+            let end = tok.tokens[0].span.end;
+            if let Some(live_body_id) = cx.live_styles.item_in_live_body.get(&live_item_id) {
+                if let Some(offset) = live_bodies.get(&live_body_id) {
+                    let new_string = format!("#{}", rgba.to_hex());
+                    if let Some(tok) = cx.live_styles.tokens.get_mut(&live_item_id) {
+                        tok.tokens[0].span.end = start + new_string.len();
+                    }
+                    text_buffer.live_edit(start + offset, end + offset, &new_string);
+                    cx.send_signal(text_buffer.signal, TextBuffer::status_data_update());
+                }
+            }
+        }
+    }
+    
+    pub fn get_textbuffer_id_from_live_item_id(&self, cx: &Cx, live_item_id: LiveItemId) -> Option<MakepadTextBufferId> {
+        if let Some(lb) = cx.live_styles.item_in_live_body.get(&live_item_id) {
+            if let Some(file) = cx.live_styles.live_body_to_file.get(lb) {
+                let path = Self::live_path_to_file_path(file);
+                return self.text_buffer_path_to_id.get(&path).cloned()
+            }
+        }
+        return None
+    }
+    
+    pub fn handle_websocket_message(&mut self, cx: &mut Cx, build_manager: &mut BuildManager, wm: &WebSocketMessageEvent) {
+        if let Ok(data) = &wm.result {
+            match MakepadChannelMessageWrap::deserialize_bin(&data) {
+                Ok(wsm) => {
+                    for (_id, m) in wsm.messages {
+                        match m {
+                            MakepadChannelMessage::XRUpdate {event} => {
+                                let self_id = XRUserId(wsm.ids[0]);
+                                self.xr_channel.self_id = self_id;
+                                let mut user_set = HashSet::new();
+                                for id in &wsm.ids {
+                                    let xr_id = XRUserId(*id);
+                                    //if xr_id != self_id {
+                                        user_set.insert(xr_id);
+                                        self.xr_channel.users.insert(xr_id, event.clone());
+                                    //}
+                                }
+                                let mut removed = Vec::new();
+                                for (id, _xr) in &self.xr_channel.users {
+                                    if !user_set.contains(&id) {
+                                        removed.push(*id);
+                                    }
+                                }
+                                for id in removed {
+                                    self.xr_channel.users.remove(&id);
+                                }
+                            },
+                            MakepadChannelMessage::ChangeAll {path, code, ..} => {
+                                if let Some(mtb_id) = self.text_buffer_path_to_id.get(&path).cloned() {
+                                    let mtb = &mut self.text_buffers[mtb_id.as_index()];
+                                    mtb.text_buffer.load_from_utf8(&code);
+                                    cx.send_signal(mtb.text_buffer.signal, TextBuffer::status_data_update());
+                                    FileEditor::update_token_chunks(cx, &mtb.full_path.clone(), mtb, &mut build_manager.search_index);
+                                }
+                            },
+                            MakepadChannelMessage::ChangeColor {live_item_id, rgba} => {
+                                if let Some(mtb_id) = self.get_textbuffer_id_from_live_item_id(cx, live_item_id) {
+                                    let mtb = &mut self.text_buffers[mtb_id.as_index()];
+                                    Self::handle_changed_color(
+                                        cx,
+                                        live_item_id,
+                                        rgba,
+                                        &mtb.live_items_list.live_bodies,
+                                        &mut mtb.text_buffer,
+                                    );
+                                    FileEditor::update_token_chunks(cx, &mtb.full_path.clone(), mtb, &mut build_manager.search_index);
+                                }
+                            },
+                            MakepadChannelMessage::ChangeFloat {live_item_id, float} => {
+                                // lets change color.
+                                if let Some(mtb_id) = self.get_textbuffer_id_from_live_item_id(cx, live_item_id) {
+                                    let mtb = &mut self.text_buffers[mtb_id.as_index()];
+                                    Self::handle_changed_float(
+                                        cx,
+                                        live_item_id,
+                                        float,
+                                        &mtb.live_items_list.live_bodies,
+                                        &mut mtb.text_buffer,
+                                    );
+                                    FileEditor::update_token_chunks(cx, &mtb.full_path.clone(), mtb, &mut build_manager.search_index);
+                                }
+                            },
+                            _ => ()
                         }
                     }
                     //log!("Parsed {:?}", wsm);
                 }
-                Err(err)=>{
+                Err(err) => {
                     log!("Parse error {}", err);
                 },
                 
             }
         }
-    }*/
+    }
     
     pub fn restart_hub_server(&mut self) {
         if let Some(hub_server) = &mut self.hub_server {
@@ -307,7 +409,7 @@ impl MakepadStorage {
         path
     }
     
-    pub fn file_path_to_live_path(fp:&str)->String{
+    pub fn file_path_to_live_path(fp: &str) -> String {
         if fp.starts_with("main/makepad/") {
             fp["main/makepad/".len()..].to_string()
         }
@@ -316,7 +418,7 @@ impl MakepadStorage {
         }
     }
     
-    pub fn live_path_to_file_path(lp:&str)->String{
+    pub fn live_path_to_file_path(lp: &str) -> String {
         format!("main/makepad/{}", lp)
     }
     
@@ -326,10 +428,10 @@ impl MakepadStorage {
         // if online, fallback to readfile
         if !cx.platform_type.is_desktop() || path.find('/').is_none() {
             if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
-                &mut self.text_buffers[tb_id.0 as usize]
+                &mut self.text_buffers[tb_id.as_index()]
             }
             else {
-                let tb_id = MakepadTextBufferId(self.text_buffers.len() as u16);
+                let tb_id = MakepadTextBufferId(self.text_buffers.len());
                 self.text_buffer_path_to_id.insert(path.to_string(), tb_id);
                 self.text_buffer_id_to_path.insert(tb_id, path.to_string());
                 self.text_buffers.push(MakepadTextBuffer {
@@ -345,13 +447,13 @@ impl MakepadStorage {
                         ..TextBuffer::default()
                     }
                 });
-                &mut self.text_buffers[tb_id.0 as usize]
+                &mut self.text_buffers[tb_id.as_index()]
             }
         }
         else {
             let hub_ui = self.hub_ui.as_mut().unwrap();
             if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
-                &mut self.text_buffers[tb_id.0 as usize]
+                &mut self.text_buffers[tb_id.as_index()]
             }
             else {
                 let builder_pos = path.find('/').unwrap();
@@ -367,7 +469,7 @@ impl MakepadStorage {
                 };
                 hub_ui.route_send.send(msg.clone());
                 
-                let tb_id = MakepadTextBufferId(self.text_buffers.len() as u16);
+                let tb_id = MakepadTextBufferId(self.text_buffers.len());
                 self.text_buffer_path_to_id.insert(path.to_string(), tb_id);
                 self.text_buffer_id_to_path.insert(tb_id, path.to_string());
                 self.text_buffers.push(MakepadTextBuffer {
@@ -382,7 +484,7 @@ impl MakepadStorage {
                     }
                     
                 });
-                &mut self.text_buffers[tb_id.0 as usize]
+                &mut self.text_buffers[tb_id.as_index()]
             }
         }
     }
@@ -391,7 +493,7 @@ impl MakepadStorage {
         if cx.platform_type.is_desktop() {
             if path.find('/').is_some() {
                 if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
-                    let atb = &self.text_buffers[tb_id.0 as usize];
+                    let atb = &self.text_buffers[tb_id.as_index()];
                     let hub_ui = self.hub_ui.as_mut().unwrap();
                     let utf8_data = atb.text_buffer.get_as_string();
                     fn send_file_write_request(hub_ui: &HubUI, uid: HubUid, path: &str, data: &Vec<u8>) {
@@ -427,7 +529,7 @@ impl MakepadStorage {
             }
             else { // its not a workspace, its a system (settings) file
                 if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
-                    let atb = &self.text_buffers[tb_id.0 as usize];
+                    let atb = &self.text_buffers[tb_id.as_index()];
                     let utf8_data = atb.text_buffer.get_as_string();
                     cx.file_write(path, utf8_data.as_bytes());
                     // if its the settings, load it
@@ -454,16 +556,16 @@ impl MakepadStorage {
     
     pub fn handle_live_recompile_event(&mut self, cx: &mut Cx, re: &LiveRecompileEvent) {
         let mut tb_set = BTreeSet::new();
-        for live_body_id in &re.changed_live_bodies{
-            // lets get the actual path 
-            if let Some(path) = cx.live_styles.live_body_to_file.get(live_body_id){
+        for live_body_id in &re.changed_live_bodies {
+            // lets get the actual path
+            if let Some(path) = cx.live_styles.live_body_to_file.get(live_body_id) {
                 let fp = Self::live_path_to_file_path(path);
-                if let Some(tbid) = self.text_buffer_path_to_id.get(&fp){
+                if let Some(tbid) = self.text_buffer_path_to_id.get(&fp) {
                     tb_set.insert(tbid);
                 }
             }
         }
-        for tbid in tb_set{
+        for tbid in tb_set {
             let mtb = &mut self.text_buffers[tbid.as_index()];
             mtb.update_live_items(cx);
         }
@@ -577,7 +679,7 @@ impl MakepadStorage {
             },
             HubMsg::FileReadResponse {uid, data, ..} => {
                 for (path, tb_id) in &mut self.text_buffer_path_to_id {
-                    let mtb = &mut self.text_buffers[tb_id.0 as usize];
+                    let mtb = &mut self.text_buffers[tb_id.as_index()];
                     if let Some(cth_msg) = &mtb.read_msg {
                         if let HubMsg::FileReadRequest {uid: read_uid, ..} = &cth_msg.msg {
                             if *read_uid == *uid {

@@ -20,8 +20,8 @@ pub fn write_bytes_to_tcp_stream_no_error(tcp_stream: &mut TcpStream, bytes: &[u
     }
 }
 
-pub fn http_error_out(tcp_stream: &mut TcpStream, code: usize) {
-    write_bytes_to_tcp_stream_no_error(tcp_stream, format!("HTTP/1.1 {}\r\n\r\n", code).as_bytes());
+pub fn http_error_out(mut tcp_stream: TcpStream, code: usize) {
+    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, format!("HTTP/1.1 {}\r\n\r\n", code).as_bytes());
     let _ = tcp_stream.shutdown(Shutdown::Both);
 }
 
@@ -37,7 +37,7 @@ pub fn split_header_line<'a>(inp: &'a str, what: &str) -> Option<&'a str> {
     None
 }
 
-pub fn parse_url_file(url: &str) -> Option<String> {
+pub fn parse_url_path(url: &str) -> Option<(String, Option<String>)> {
     
     // find the end_of_name skipping everything else
     let end_of_name = url.find(' ');
@@ -45,7 +45,9 @@ pub fn parse_url_file(url: &str) -> Option<String> {
         return None;
     }
     let end_of_name = end_of_name.unwrap();
+    let mut search = None;
     let end_of_name = if let Some(q) = url.find('?') {
+        search = Some(url[q..].to_string());
         end_of_name.min(q)
     }else {end_of_name};
     
@@ -55,11 +57,15 @@ pub fn parse_url_file(url: &str) -> Option<String> {
         url.push_str("index.html");
     }
     
-    Some(url)
+    Some((url, search))
 }
 
 pub struct HttpHeader {
     pub lines: Vec<String>,
+    pub verb: String,
+    pub path: String,
+    pub path_no_slash:String,
+    pub search: Option<String>,
     pub content_length: Option<u64>,
     pub accept_encoding: Option<String>,
     pub sec_websocket_key: Option<String>
@@ -96,8 +102,37 @@ impl HttpHeader {
             lines.push(line.clone());
             line.truncate(0);
         }
-        
+        let verb;
+        let path;
+        if let Some(v) = split_header_line(&lines[0], "GET ") {
+            verb = "GET";
+            path = parse_url_path(v)
+        }
+        else if let Some(v) = split_header_line(&lines[0], "POST ") {
+            verb = "POST";
+            path = parse_url_path(v)
+        }
+        else if let Some(v) = split_header_line(&lines[0], "PUT ") {
+            verb = "PUT";
+            path = parse_url_path(v)
+        }
+        else if let Some(v) = split_header_line(&lines[0], "DELETE ") {
+            verb = "DELETE";
+            path = parse_url_path(v)
+        }
+        else{
+            return None
+        }
+        if path.is_none(){
+            return None
+        }
+        let path = path.unwrap();
+
         return Some(HttpHeader {
+            verb: verb.to_string(),
+            path_no_slash: path.0[1..].to_string(),
+            path: path.0,
+            search: path.1,
             lines,
             content_length,
             accept_encoding,

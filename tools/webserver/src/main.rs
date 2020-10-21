@@ -87,7 +87,7 @@ pub struct HttpServer {
 
 impl HttpServer {
     
-    fn handle_post(tcp_stream: &mut TcpStream, url: &str, mut body: Vec<u8>) {
+    fn handle_post(tcp_stream: TcpStream, url: &str, mut body: Vec<u8>) {
         match url {
             "/subscribe" => {
                 let mut file = OpenOptions::new()
@@ -108,7 +108,7 @@ impl HttpServer {
     
     
     fn handle_get(
-        tcp_stream: &mut TcpStream,
+        mut tcp_stream: TcpStream,
         url: &str,
         accept_encoding: String,
         zlib_filecache: FileCache,
@@ -138,8 +138,8 @@ impl HttpServer {
                         mime_type,
                         data.len()
                     );
-                    write_bytes_to_tcp_stream_no_error(tcp_stream, header.as_bytes());
-                    write_bytes_to_tcp_stream_no_error(tcp_stream, &data);
+                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, header.as_bytes());
+                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, &data);
                     let _ = tcp_stream.shutdown(Shutdown::Both);
                 }
                 else {
@@ -160,8 +160,8 @@ impl HttpServer {
                         mime_type,
                         data.len()
                     );
-                    write_bytes_to_tcp_stream_no_error(tcp_stream, header.as_bytes());
-                    write_bytes_to_tcp_stream_no_error(tcp_stream, &data);
+                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, header.as_bytes());
+                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, &data);
                     let _ = tcp_stream.shutdown(Shutdown::Both);
                     return
                 }
@@ -273,7 +273,7 @@ impl HttpServer {
                         let header = HttpHeader::from_tcp_stream(tcp_stream.try_clone().expect("Cannot clone tcp stream"));
                         
                         if header.is_none(){
-                            return http_error_out(&mut tcp_stream, 500);
+                            return http_error_out(tcp_stream, 500);
                         }
                         let header = header.unwrap();
                         
@@ -283,17 +283,17 @@ impl HttpServer {
                                 return websocket_channels.handle_websocket(&mut tcp_stream, url, &key);
                             }
                             else {
-                                return http_error_out(&mut tcp_stream, 500);
+                                return http_error_out(tcp_stream, 500);
                             }
                         }
                         if header.lines.len() < 2 {
-                            return http_error_out(&mut tcp_stream, 500);
+                            return http_error_out(tcp_stream, 500);
                         }
                         
                         if let Some(url) = split_header_line(&header.lines[0], "POST ") {
                             // we have to have a content-length or bust
                             if header.content_length.is_none() {
-                                return http_error_out(&mut tcp_stream, 500);
+                                return http_error_out(tcp_stream, 500);
                             }
                             let content_length = header.content_length.unwrap();
                             
@@ -306,25 +306,25 @@ impl HttpServer {
                                 let buf = &mut body[(bytes_total - bytes_left)..bytes_total];
                                 let bytes_read = tcp_stream.read(buf);
                                 if bytes_read.is_err(){
-                                    return http_error_out(&mut tcp_stream, 500);
+                                    return http_error_out(tcp_stream, 500);
                                 }
                                 let bytes_read = bytes_read.unwrap();
                                 if bytes_read == 0 {
-                                    return http_error_out(&mut tcp_stream, 500);
+                                    return http_error_out(tcp_stream, 500);
                                 }
                                 bytes_left -= bytes_read;
                             }
 
-                            return Self::handle_post(&mut tcp_stream, url, body);
+                            return Self::handle_post(tcp_stream, url, body);
                         }
                         
                         if let Some(url) = split_header_line(&header.lines[0], "GET ") {
                             if let Some(accept_encoding) = header.accept_encoding {
-                                return Self::handle_get(&mut tcp_stream, url, accept_encoding, zlib_filecache, brotli_filecache)
+                                return Self::handle_get(tcp_stream, url, accept_encoding, zlib_filecache, brotli_filecache)
                             }
                         }
                         
-                        return http_error_out(&mut tcp_stream, 500);
+                        return http_error_out(tcp_stream, 500);
                     });
                 }
             })

@@ -1,4 +1,5 @@
 use crate::cx::*;
+use makepad_microserde::*;
 use std::any::TypeId;
 use std::collections::{HashMap,BTreeSet};
 
@@ -220,13 +221,13 @@ pub struct WindowDragQueryEvent {
     pub response: WindowDragQueryResponse,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, SerBin, DeBin, PartialEq)]
 pub struct XRButton {
     pub value:f32,
     pub pressed:bool
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, SerBin, DeBin,PartialEq)]
 pub struct XRInput {
     pub active: bool,
     pub grip: Transform,
@@ -237,7 +238,7 @@ pub struct XRInput {
     pub axes: [f32;8],
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, SerBin, DeBin, PartialEq)]
 pub struct XRUpdateEvent {
     // alright what data are we stuffing in 
     pub time: f64,

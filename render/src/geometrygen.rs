@@ -117,9 +117,8 @@ impl GeometryGen {
                 self.vertices.push(0.0);
                 self.vertices[off + w as usize] = if depth > 0.0 {1.0} else {-1.0};
                 
-                self.vertices.push((ix as f32) / (grid_x1 as f32));
-                self.vertices.push(1.0 - (iy as f32) / (grid_y1 as f32));
-                
+                self.vertices.push((ix as f32) / (grid_x as f32));
+                self.vertices.push(1.0 - (iy as f32) / (grid_y as f32));
             }
         }
         

@@ -22,6 +22,18 @@ pub struct WebSocketChannels{
 }
 
 impl WebSocketChannels{
+    pub fn send_directly(
+        &self, 
+        url: &str,
+        data:Vec<u8>
+    ){
+        if let Ok(mut channels) = self.channels.lock(){
+            if let Some(channel) = channels.get_mut(url){
+                let socket_id = WebSocketId(0);
+                let _ = channel.tx_bus.send((socket_id, data));
+            }
+        }
+    }
     
     pub fn handle_websocket(
         self,
@@ -94,14 +106,14 @@ impl WebSocketChannels{
             let thread = std::thread::spawn(move || {
                 // we should collect all the messages we can in 50ms and then send it out together in 1 message
                 let max_wait = Duration::from_millis(16);
-                let mut last_start = Instant::now();
+                let mut _last_start = Instant::now();
                 let mut msg_stack = Vec::new();
                 loop{
                     // do the message pump, but combine messages to not overflow the sockets
                     if let Ok((websocket_id,msg)) = rx_bus.recv_timeout(max_wait) {
                         msg_stack.push((websocket_id,msg));
                     }
-                    if last_start.elapsed() > max_wait{ 
+                    //if last_start.elapsed() > max_wait{ 
                         if msg_stack.len() > 0{ // send it out all together
                             // lets push out a little header: numclients, nummsgs
                             
@@ -135,7 +147,7 @@ impl WebSocketChannels{
                                 head.extend_from_slice(&(msg_stack.len() as u64).to_le_bytes());
                                 
                                 let mut ws_msg  = WebSocketMessage::new_binary(head.len() + all_msg_len);
-                                ws_msg.append(&head);
+                                ws_msg.append(&head); 
                                 
                                 for (websocket_id,msg) in &mut msg_stack{
                                     ws_msg.append(&(websocket_id.0 as u32).to_le_bytes());
@@ -148,12 +160,12 @@ impl WebSocketChannels{
                             
                             msg_stack.truncate(0);
                         }
-                        last_start = Instant::now()
-                    }
+                        _last_start = Instant::now()
+                    //} 
                 }
             });
             channels.insert(in_url.to_string(), WebSocketChannel{
-                id_alloc: 0,
+                id_alloc: 1,
                 out_sockets:HashMap::new(),
                 tx_bus: tx_bus,
                 bus_thread: thread

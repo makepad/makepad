@@ -874,9 +874,9 @@ impl Cx {
             options: mtl_compile_options
             error: &mut err
         ]};
-        
         if library == nil {
             let err_str: id = unsafe {msg_send![err, localizedDescription]};
+            eprintln!("{}", nsstring_to_string(err_str));
             panic!("{}", nsstring_to_string(err_str));
             //return Err(SlErr {msg: nsstring_to_string(err_str)})
         }
