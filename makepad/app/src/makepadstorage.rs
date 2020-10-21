@@ -324,6 +324,9 @@ impl MakepadStorage {
                                 }
                             },
                             MakepadChannelMessage::ChangeAll {path, code, ..} => {
+                                if id == wsm.ids[0]{
+                                    continue
+                                }
                                 if let Some(mtb_id) = self.text_buffer_path_to_id.get(&path).cloned() {
                                     let mtb = &mut self.text_buffers[mtb_id.as_index()];
                                     mtb.text_buffer.load_from_utf8(&code);
@@ -332,6 +335,9 @@ impl MakepadStorage {
                                 }
                             },
                             MakepadChannelMessage::ChangeColor {live_item_id, rgba} => {
+                                if id == wsm.ids[0]{
+                                    continue
+                                }
                                 if let Some(mtb_id) = self.get_textbuffer_id_from_live_item_id(cx, live_item_id) {
                                     let mtb = &mut self.text_buffers[mtb_id.as_index()];
                                     Self::handle_changed_color(
