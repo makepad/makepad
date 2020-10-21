@@ -8,7 +8,7 @@ pub struct Mat4 {
     pub v: [f32; 16],
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, SerBin, DeBin, PartialEq, Debug)]
 pub struct Transform {
     pub orientation: Vec4,
     pub position: Vec3
@@ -36,7 +36,7 @@ pub fn vec2(x:f32, y:f32)->Vec2{
     Vec2{x:x, y:y}
 }*/
 
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, SerBin, DeBin, PartialEq, Debug)]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
@@ -138,7 +138,7 @@ impl Plane {
 
 
 
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, SerBin, DeBin, PartialEq)]
 pub struct Vec4 {
     pub x: f32,
     pub y: f32,

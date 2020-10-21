@@ -765,7 +765,8 @@ impl<'a, 'b> BackendWriter for MetalBackendWriter<'a, 'b> {
             },
             _ => ()
         }
-        write!(string, "{}", ident_path.get_single().expect("unexpected")).unwrap()
+        self.write_ident(string, ident_path.get_single().expect("unexpected"));
+        //write!(string, "{}", ident_path.get_single().expect("unexpected")).unwrap()
     }
     
     fn needs_mul_fn_for_matrix_multiplication(&self) -> bool {
@@ -972,11 +973,11 @@ impl<'a, 'b> BackendWriter for MetalBackendWriter<'a, 'b> {
                         "device" => "mpsc_device",
                         "dfdx" => "mpsc_dfdx",
                         "dfdy" => "mpsc_dfdy",
+                        "coord" => "mpsc_coord",
                         "using" => "mpsc_using",
                         "union" => "mpsc_union",
                         "namespace" => "mpsc_namespace",
-                        "sampler" => "mpsc_sampler",
-                        "coord" => "mpsc_coord",
+                        "sampler" => "mpsc_sampler", 
                         "address" => "mpsc_address",
                         "filter" => "mpsc_filter",
                         "mag_filter" => "mpsc_mag_filter",

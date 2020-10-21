@@ -282,11 +282,14 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
         }
         
         if self.create_const_table {
-            writeln!(
-                self.string,
-                "uniform float mpsc_const_table[{}];",
-                self.shader.const_table.borrow().as_ref().unwrap().len()
-            ).unwrap();
+            let const_table_len = self.shader.const_table.borrow().as_ref().unwrap().len();
+            if const_table_len != 0{
+                writeln!(
+                    self.string,
+                    "uniform float mpsc_const_table[{}];",
+                    const_table_len
+                ).unwrap();
+            }
         }
         
         for decl in &self.shader.decls {
@@ -841,7 +844,7 @@ impl<'a, 'b> BackendWriter for GlslBackendWriter<'a, 'b> {
             qualified.write_underscored_ident(string);
         }
         else {
-            write!(string, "{}", ident_path.get_single().expect("unexpected")).unwrap()
+            self.write_ident(string, ident_path.get_single().expect("unexpected"));
         }
     }
     

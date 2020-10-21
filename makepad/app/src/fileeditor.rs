@@ -84,6 +84,14 @@ impl FileEditor {
         }
     }
     
+    pub fn get_text_editor(&mut self)->&TextEditor {
+        match self {
+            FileEditor::Rust(re) => &re.text_editor,
+            FileEditor::JS(re) => &re.text_editor,
+            FileEditor::Plain(re) => &re.text_editor,
+        }
+    }
+    
     pub fn update_token_chunks(cx:&mut Cx, path: &str,  mtb: &mut MakepadTextBuffer, search_index: &mut SearchIndex) {
         // check which file extension we have to spawn a new editor
         if path.ends_with(".rs") || path.ends_with(".toml") || path.ends_with(".ron") {
