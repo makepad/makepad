@@ -791,7 +791,7 @@ impl<'a, 'b> BackendWriter for HlslBackendWriter<'a, 'b> {
             _ => {}
         }
         
-        write!(string, "{}", ident_path.get_single().expect("unexpected")).unwrap();
+        self.write_ident(string, ident_path.get_single().expect("unexpected"));
     }
     
     fn needs_mul_fn_for_matrix_multiplication(&self) -> bool {

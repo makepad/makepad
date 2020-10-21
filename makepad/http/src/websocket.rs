@@ -48,8 +48,8 @@ pub enum WebSocketResult {
 }
 
 pub struct WebSocketMessage{
-    check_len: usize,
-    data:Vec<u8>
+    pub check_len: usize,
+    pub data:Vec<u8>
 }
 
 impl WebSocketMessage{
@@ -67,7 +67,7 @@ impl WebSocketMessage{
             check_len = len + 4;
         }
         else{
-            data.push(12);
+            data.push(127);
             data.extend_from_slice(&(len as u64).to_be_bytes());
             check_len = len + 10;
         }

@@ -109,6 +109,7 @@ pub struct TextEditor {
 #[derive(Clone, PartialEq)]
 pub enum TextEditorEvent {
     None,
+    CursorMove,
     AutoFormat,
     LagChange,
     Change,
@@ -549,7 +550,6 @@ impl TextEditor {
         // give us the focus
         self.set_key_focus(cx);
         self._undo_id += 1;
-        
         let offset;
         //let scroll_pos = self._bg_area.get_scroll_pos(cx);
         if fe.rel.x < self.line_number_width - self.line_number_click_margin {
@@ -661,7 +661,7 @@ impl TextEditor {
         self.reset_cursor_blinker(cx);
     }
     
-    fn handle_key_down(&mut self, cx: &mut Cx, ke: &KeyEvent, text_buffer: &mut TextBuffer) {
+    fn handle_key_down(&mut self, cx: &mut Cx, ke: &KeyEvent, text_buffer: &mut TextBuffer) -> bool{
         let cursor_moved = match ke.key_code {
             KeyCode::KeyE => {
                 if ke.modifiers.logo || ke.modifiers.control {
@@ -886,6 +886,7 @@ impl TextEditor {
             self.view.redraw_view_area(cx);
             self.reset_cursor_blinker(cx);
         }
+        cursor_moved
     }
     
     fn handle_text_input(&mut self, cx: &mut Cx, te: &TextInputEvent, text_buffer: &mut TextBuffer) {
@@ -1049,6 +1050,7 @@ impl TextEditor {
             },
             _ => ()
         }
+        let mut cursor_moved = false;
         // editor local
         match event.hits(cx, self.view.get_view_area(cx), HitOpt::default()) {
             Event::KeyFocus(_kf) => {
@@ -1107,7 +1109,7 @@ impl TextEditor {
                 if ke.key_code == KeyCode::Return && (ke.modifiers.logo || ke.modifiers.control) {
                     return TextEditorEvent::AutoFormat
                 }
-                self.handle_key_down(cx, &ke, text_buffer);
+                cursor_moved = self.handle_key_down(cx, &ke, text_buffer);
             },
             Event::KeyUp(ke) => {
                 match ke.key_code {
@@ -1137,7 +1139,12 @@ impl TextEditor {
             TextEditorEvent::Change
         }
         else {
-            TextEditorEvent::None
+            if cursor_moved{
+                TextEditorEvent::CursorMove
+            }
+            else{
+                TextEditorEvent::None
+            }
         }
     }
     

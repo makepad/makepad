@@ -8,7 +8,7 @@ use std::net::TcpStream;
 #[macro_export]
 macro_rules!log {
     ( $ ( $t: tt) *) => {
-        println!(&format!("{}:{} - {}",file!(),line!(),format!($($t)*)))
+        println!("{}:{} - {}",file!(),line!(),format!($($t)*))
     }
 }
 

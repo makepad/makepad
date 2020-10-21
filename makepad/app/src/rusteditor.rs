@@ -31,15 +31,14 @@ impl RustEditor {
             text_editor: TextEditor::new(cx),
         };
         //tab.animator.default = tab.anim_default(cx);
-        editor
+        editor 
     }
     
     pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, mtb: &mut MakepadTextBuffer, search_index: Option<&mut SearchIndex>) -> TextEditorEvent {
         
-        self.live_items_view.handle_live_items(cx, event, mtb, &mut self.text_editor);
-        
-        let has_live_macros = true;//mtb.live_macros.macros.len() != 0;
-        if has_live_macros{
+        self.live_items_view.handle_live_items(cx, event, mtb);
+          
+        if mtb.live_items_list.visible_editors{
             match self.splitter.handle_splitter(cx, event) {
                 SplitterEvent::Moving {..} => {
                     self.view.redraw_view_parent_area(cx);
@@ -68,13 +67,10 @@ impl RustEditor {
             return
         }; 
         
-        //self.view.set_view_debug(cx, CxViewDebug::DrawTree);
-        let has_live_macros = true;//mtb.live_macros.macros.len() != 0;
-        
-        if has_live_macros{ 
+        if mtb.live_items_list.visible_editors{ 
             self.splitter.begin_splitter(cx); 
             
-            self.live_items_view.draw_live_items(cx, mtb, &mut self.text_editor);
+            self.live_items_view.draw_live_items(cx, mtb, &mut self.text_editor);  
             
             self.splitter.mid_splitter(cx);
             
@@ -89,7 +85,7 @@ impl RustEditor {
             
             self.text_editor.end_text_editor(cx, &mut mtb.text_buffer);
         }
-        if has_live_macros{
+        if mtb.live_items_list.visible_editors{
             self.splitter.end_splitter(cx);
         }
         self.view.end_view(cx);

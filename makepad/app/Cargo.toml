@@ -6,6 +6,9 @@ edition = "2018"
 description = "Makepad app"
 license = "MIT"
 
+[dependencies.makepad-http]
+path="../http"
+
 [dependencies.makepad-microserde]
 path="../../render/microserde"
 

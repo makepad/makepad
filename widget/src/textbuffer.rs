@@ -38,8 +38,6 @@ impl TextBuffer {
     pub fn status_keyboard_update() -> StatusId {uid!()}
 }
 
-
-
 #[derive(Clone, Default)]
 pub struct TextBufferKeyboard {
     pub modifiers: KeyModifiers,
@@ -589,6 +587,16 @@ impl TextBuffer {
     
     pub fn save_buffer(&mut self) {
         //let out = self.lines.join("\n");
+    }
+    
+    pub fn live_edit(&mut self, start:usize, end:usize, value:&str){
+        let op = self.replace_lines_with_string(start, end - start, &value);
+        self.undo_stack.push(TextUndo{
+            ops:vec![op],
+            grouping: TextUndoGrouping::LiveEdit(0),
+            cursors:TextCursorSet{set:vec![TextCursor{head:0,tail:0,max:0}], last_cursor:0, insert_undo_group:0, last_clamp_range:None}
+        });
+        
     }
     
     pub fn undoredo(&mut self, mut text_undo: TextUndo, cursor_set: &mut TextCursorSet) -> TextUndo {

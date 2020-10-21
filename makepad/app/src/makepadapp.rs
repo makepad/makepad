@@ -171,8 +171,9 @@ impl MakepadApp {
                                 },
                                 DockTab {
                                     closeable: false,
-                                    title: "shaderview.rs".to_string(),
-                                    item: Panel::FileEditor {path: "main/makepad/makepad/app/src/shaderview.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
+                                    title: "shaderview.rs".to_string(), 
+                                    //item: Panel::FileEditor {path: "main/makepad/makepad/app/src/shaderview.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
+                                    item: Panel::FileEditor {path: "main/makepad/widget/src/xrcontrol.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
                                 },
                                 
                             ],
@@ -243,11 +244,13 @@ impl MakepadApp {
                 self.makepad_storage.init(cx);
                 if !cx.platform_type.is_desktop() {
                     // lets connect our websocket
-                    MakepadStorage::send_websocket_message(cx, MakepadWebSocketMessage::Connect);
+                    MakepadStorage::send_websocket_message(cx, MakepadChannelMessage::Connect);
                     self.default_layout(cx);
                 }
             },
-
+            Event::WebSocketMessage(wm) => {
+                self.makepad_storage.handle_websocket_message(cx, &mut self.build_manager, wm);
+            }
             Event::KeyDown(ke) => match ke.key_code {
                 KeyCode::KeyD => if ke.modifiers.logo || ke.modifiers.control {
                     //let size = self.build_manager.search_index.calc_total_size();

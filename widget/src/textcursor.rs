@@ -1,9 +1,10 @@
 use makepad_render::*;
+use makepad_microserde::*;
 
 use crate::textbuffer::*;
 use crate::tokentype::*;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, SerBin, DeBin)]
 pub struct TextCursor {
     pub head: usize,
     pub tail: usize,
@@ -115,7 +116,7 @@ impl TextCursor {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, SerBin, DeBin)]
 pub struct TextCursorSet {
     pub set: Vec<TextCursor>,
     pub last_cursor: usize,
