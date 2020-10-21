@@ -246,13 +246,13 @@ impl Mat4 {
             m6,
             m10,
             0.0,
-            t2.x + (m0 * t1.x + m1 * t1.y + m1 * t1.z),
+            t2.x + (m0 * t1.x + m1 * t1.y + m2 * t1.z),
             t2.y + (m4 * t1.x + m5 * t1.y + m6 * t1.z),
             t2.z + (m8 * t1.x + m9 * t1.y + m10 * t1.z),
             1.0
         ]}
     }
-    
+
     pub fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
         let f = 1.0 / f32::tan(fov_y / 2.0);
         let nf = 1.0 / (near - far);
