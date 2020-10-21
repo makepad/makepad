@@ -641,8 +641,8 @@ impl FileTree {
                 while let Some((_depth, _index, _len, node)) = file_walker.walk() {
                     let node_draw = if let Some(node_draw) = node.get_draw() {node_draw}else {continue};
                     if node_draw.marked != 0 {
-                        self.drag_bg.z = 10.0;
-                        self.item_draw.tree_text.z = 10.0;
+                        //self.drag_bg.z = 10.0;
+                        //self.item_draw.tree_text.z = 10.0;
                         self.drag_bg.color = live_color!(cx, self::color_drag_bg);
                         let inst = self.drag_bg.begin_quad(cx, live_layout!(cx, self::layout_drag_bg));
                         self.item_draw.tree_text.color = live_color!(cx, self::color_tree_folder);
