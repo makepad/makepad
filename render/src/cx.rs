@@ -125,6 +125,7 @@ pub struct Cx {
     pub timer_id: u64,
     pub signal_id: usize,
     pub live_update_id: u64,
+    pub anim_time: f64,
     
     pub prev_key_focus: Area,
     pub next_key_focus: Area,
@@ -232,6 +233,7 @@ impl Default for Cx {
             timer_id: 1,
             signal_id: 1,
             live_update_id: 1,
+            anim_time: 0.0,
             
             next_key_focus: Area::Empty,
             prev_key_focus: Area::Empty,
