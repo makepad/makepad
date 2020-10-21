@@ -536,8 +536,8 @@ impl FileTree {
                     }
                 }
             };
-            self.item_draw.filler.z = 0.;
-            self.item_draw.tree_text.z = 0.;
+            //self.item_draw.filler.z = 0.;
+            //self.item_draw.tree_text.z = 0.;
             //self.item_draw.tree_text.font_size = self.font_size;
             self.item_draw.tree_text.font_scale = scale as f32;
             match node {
@@ -820,15 +820,15 @@ impl<'a> FileWalker<'a> {
 impl FileTreeItemDraw {
     fn new(cx: &mut Cx) -> Self {
         Self {
-            tree_text: Text {z: 0.001, ..Text::new(cx)},
+            tree_text: Text {z: 0.1, ..Text::new(cx)},
             node_bg: Quad::new(cx),
             //node_layout: LayoutFileTreeNode::id(),
             filler: Quad {
-                z: 0.001,
+                z: 0.2,
                 ..Quad::new(cx)
             },
             shadow: ScrollShadow {
-                z: 0.01,
+                z: 0.25,
                 ..ScrollShadow::new(cx)
             },
             node_layout: Layout::default(),

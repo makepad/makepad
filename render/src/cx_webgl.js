@@ -2369,7 +2369,7 @@
             if (req.status === 200) {
                 var msg = JSON.parse(req.response);
                 if (msg.type == "file_change") {
-                    //location.href = location.href
+                    location.href = location.href
                 }
                 if (msg.type == "build_start") {
                     let note = "Rebuilding application..."

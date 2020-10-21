@@ -134,6 +134,7 @@ impl Cx {
                 5 => { // animation_frame
                     is_animation_frame = true;
                     let time = to_wasm.mf64();
+                    self.anim_time = time;
                     //log!(self, "{} o clock",time);
                     if self.playing_anim_areas.len() != 0 {
                         self.call_animation_event(&mut event_handler, time);

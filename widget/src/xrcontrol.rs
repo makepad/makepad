@@ -6,7 +6,7 @@ use std::collections::{HashMap, BTreeMap};
 pub struct XRUserId(pub u32);
 
 #[derive(Clone, Default)]
-pub struct XRChannel{
+pub struct XRChannel {
     pub self_id: XRUserId,
     pub users: HashMap<XRUserId, XRUpdateEvent>,
 }
@@ -75,73 +75,73 @@ impl XRCursor {
 }
 
 #[derive(Clone)]
-pub enum XRAvatarState{
+pub enum XRAvatarState {
     Joining(f32),
     Leaving(f32),
-    Left,
-    Joined
+    Gone,
+    Present
 }
 
-impl XRAvatarState{
-    fn left(&self)->bool{
-        match self{
-            Left=>true,
-            _=>false
+impl XRAvatarState {
+    fn left(&self) -> bool {
+        match self {
+            Self::Gone => true,
+            _ => false
         }
     }
     
-    fn get_space(&self)->f32{
-        match self{
-            Self::Joining(v)=>1.0-*v,
-            Self::Leaving(v)=>*v,
-            Self::Left=>0.0,
-            Self::Joined=>1.0
+    fn get_space(&self) -> f32 {
+        match self {
+            Self::Joining(v) => 1.0 - *v,
+            Self::Leaving(v) => *v,
+            Self::Gone => 0.0,
+            Self::Present => 1.0
         }
     }
     
-    fn tick(&mut self){
-        match self{
-            Self::Joining(f)=>{
-                if *f < 0.001{
-                    *self = Self::Joined;
+    fn tick(&mut self) {
+        match self {
+            Self::Joining(f) => {
+                if *f < 0.001 {
+                    *self = Self::Present;
                 }
-                else{
-                    *self = Self::Joining(*f*0.6);
+                else {
+                    *self = Self::Joining(*f * 0.99);
                 }
             }
-            Self::Leaving(f)=>{
-                if *f < 0.001{
-                    *self = Self::Left;
+            Self::Leaving(f) => {
+                if *f < 0.001 {
+                    *self = Self::Gone;
                 }
-                else{
-                    *self = Self::Leaving(*f*0.6);
+                else {
+                    *self = Self::Leaving(*f * 0.99);
                 }
             },
-            _=>()
+            _ => ()
         }
     }
     
-    fn leave(&mut self){
-        match self{
-            Self::Joined=>{
+    fn leave(&mut self) {
+        match self {
+            Self::Present => {
                 *self = Self::Leaving(1.0);
             }
-            Self::Joining(f)=>{
-                *self = Self::Leaving(1.0-*f);
+            Self::Joining(f) => {
+                *self = Self::Leaving(1.0 - *f);
             }
-            _=>()
+            _ => ()
         }
     }
     
-    fn join(&mut self){
-        match self{
-            Self::Left=>{
+    fn join(&mut self) {
+        match self {
+            Self::Gone => {
                 *self = Self::Joining(1.0);
             }
-            Self::Leaving(f)=>{
-                *self = Self::Joining(1.0-*f);
+            Self::Leaving(f) => {
+                *self = Self::Joining(1.0 - *f);
             }
-            _=>()
+            _ => ()
         }
     }
 }
@@ -151,40 +151,61 @@ pub struct XRAvatar {
     state: XRAvatarState,
     left_hand: XRCube,
     right_hand: XRCube,
-    head: XRCube
+    head: XRCube,
+    angle: f32,
+    ui: XRCube,
+    ui_rect: Rect,
 }
 
 impl XRAvatar {
-    fn new(cx:&mut Cx)->Self{
-        Self{
-            state:XRAvatarState::Joining(1.0),
-            left_hand:XRCube::new(cx),
-            right_hand:XRCube::new(cx),
-            head:XRCube::new(cx),
-        }    
+    fn new(cx: &mut Cx) -> Self {
+        Self {
+            state: XRAvatarState::Joining(1.0),
+            left_hand: XRCube::new(cx),
+            right_hand: XRCube::new(cx),
+            angle: 180.0,
+            head: XRCube::new(cx),
+            ui: XRCube::new(cx),
+            ui_rect: Rect::default()
+        }
     }
     
-    fn update_avatar(&mut self, cx: &mut Cx, xr_event:&XRUpdateEvent){
-        let rotate_mat = Mat4::rotate_tsrt(
-            Vec3 {x: 0., y: 3.0, z: 0.0},
-            1.0,
-            Vec3 {x: 0.0, y: -180.0, z: 0.0},
-            Vec3 {x: 0.0, y: 0.0, z: 0.0},
+    fn update_avatar(&mut self, cx: &mut Cx, xr_event: &XRUpdateEvent, ui_mat: Mat4, ui_rect: Rect) {
+        
+        let personal_mat = Mat4::from_mul(
+            &Mat4::scale_translate(self.state.get_space(), 0.0, 0.0, 0.0),
+            &Mat4::rotate_tsrt(
+                Vec3 {x: 0.0, y: 0.0, z: 1.5},
+                1.0,
+                Vec3 {x: 0.0, y: self.angle, z: 0.0},
+                Vec3 {x: 0.0, y: 0.0, z: -1.5},
+            )
         );
         
-        self.left_hand.set_mat(cx, Mat4::from_mul(&Mat4::from_transform(xr_event.left_input.ray), &rotate_mat));
-        self.right_hand.set_mat(cx, Mat4::from_mul(&Mat4::from_transform(xr_event.right_input.ray), &rotate_mat));
+        self.left_hand.set_mat(cx, Mat4::from_mul(&Mat4::from_transform(xr_event.left_input.ray), &personal_mat));
+        self.right_hand.set_mat(cx, Mat4::from_mul(&Mat4::from_transform(xr_event.right_input.ray), &personal_mat));
+        self.head.set_mat(cx, Mat4::from_mul(&Mat4::from_transform(xr_event.head_transform), &personal_mat));
+        self.ui.set_mat(cx, Mat4::from_mul(&ui_mat, &personal_mat));
+        self.ui_rect = ui_rect;
     }
     
-    fn draw_avatar(&mut self, cx: &mut Cx){
+    fn draw_avatar(&mut self, cx: &mut Cx) {
         self.left_hand.cube.shader = live_shader!(cx, self::shader_hand);
         self.right_hand.cube.shader = live_shader!(cx, self::shader_hand);
         self.head.cube.shader = live_shader!(cx, self::shader_hand);
         let hand_size = Vec3 {x: 0.02, y: 0.02, z: 0.12};
         let hand_pos = Vec3 {x: 0., y: 0., z: 0.0};
+        
         self.left_hand.draw_cube(cx, hand_size, hand_pos);
         self.right_hand.draw_cube(cx, hand_size, hand_pos);
-       
+        
+        let head_pos = Vec3 {x: 0., y: 0., z: 0.0};
+        let head_size = Vec3 {x: 0.20, y: 0.08, z: 0.10};
+        self.head.draw_cube(cx, head_size, head_pos);
+        
+        let ui_pos = Vec3 {x: self.ui_rect.x + 0.5 * self.ui_rect.w, y: self.ui_rect.y + 0.5 * self.ui_rect.h, z: 0.};
+        let ui_size = Vec3 {x: self.ui_rect.w, y: self.ui_rect.h, z: 25.0};
+        self.ui.draw_cube(cx, ui_size, ui_pos);
     }
 }
 
@@ -293,29 +314,69 @@ impl XRControl {
         "#)
     }
     
-    pub fn process_avatar_state(&mut self, cx:&mut Cx, xr_channel:&XRChannel){
+    pub fn process_avatar_state(&mut self, cx: &mut Cx, xr_channel: &XRChannel, ui_mat: Mat4, ui_rect: Rect) {
+        
+        // compute ordered circle
+        let mut circle = Vec::new();
+        let mut insert = false;
+        for (id, _) in &mut self.xr_avatars {
+            if *id == xr_channel.self_id {
+                insert = true
+            }
+            else if insert {
+                circle.push(*id);
+            }
+        }
+        for (id, _) in &mut self.xr_avatars {
+            if *id == xr_channel.self_id {
+                break
+            }
+            circle.push(*id);
+        }
+        
+        // compute space circle takes up
+        let mut total_space = 1.0;
+        for id in &circle {
+            if let Some(xa) = self.xr_avatars.get(id) {
+                total_space += xa.state.get_space();
+            }
+        }
+        
+        let mut angle = 0.0;
+        for id in &circle {
+            if let Some(xa) = self.xr_avatars.get_mut(id) {
+                angle += (360.0 / total_space) * xa.state.get_space();
+                xa.angle = angle;
+            }
+        }
+        
         // ok lets update the states
-        for (id, xe) in &xr_channel.users{
-            if let Some(xa) = self.xr_avatars.get_mut(id){
+        for (id, xe) in &xr_channel.users {
+            if let Some(xa) = self.xr_avatars.get_mut(id) {
                 xa.state.join();
             }
-            else{
+            else {
                 self.xr_avatars.insert(*id, XRAvatar::new(cx));
                 self.space_view.redraw_view_area(cx);
             }
-            self.xr_avatars.get_mut(id).unwrap().update_avatar(cx, xe);
+            if let Some(xa) = self.xr_avatars.get_mut(id) {
+                
+                xa.update_avatar(cx, xe, ui_mat, ui_rect);
+                xa.state.tick();
+            }
         }
+        
         let mut remove = Vec::new();
-        for (id, xa) in &mut self.xr_avatars{
-            xa.state.tick();
-            if xr_channel.users.get(id).is_none(){
+        for (id, xa) in &mut self.xr_avatars {
+            if xr_channel.users.get(id).is_none() {
                 xa.state.leave();
             }
-            if xa.state.left(){
+            if xa.state.left() {
                 remove.push(*id);
+                self.space_view.redraw_view_area(cx);
             }
         }
-        for id in remove{
+        for id in remove {
             self.xr_avatars.remove(&id);
         }
     }
@@ -326,12 +387,7 @@ impl XRControl {
         xr_event: &XRUpdateEvent,
         xr_channel: &XRChannel,
         window_view: &View
-    ) -> Vec<Event> { 
-        
-        // lets make a test with just us.
-        
-        
-        self.process_avatar_state(cx, xr_channel);
+    ) -> Vec<Event> {
         
         // lets send our avatar over the socket
         let view_rect = window_view.get_rect(cx);
@@ -339,10 +395,14 @@ impl XRControl {
         let window_mat = Mat4::rotate_tsrt(
             Vec3 {x: 0., y: -view_rect.h, z: 0.0},
             -0.0005,
-            Vec3 {x: -0.0, y: -180.0, z: 0.0},
-            Vec3 {x: -0.20, y: -0.15, z: -0.3},
+            Vec3 {x: 50.0, y: -180.0, z: 0.0},
+            Vec3 {x: -0.20, y: -0.45, z: -0.3},
         );
+        
         let inv_window_mat = window_mat.invert();
+        
+        // lets make a test with just us.
+        self.process_avatar_state(cx, xr_channel, window_mat, view_rect);
         
         window_view.set_view_transform(cx, &window_mat);
         self.space_view.set_view_transform(cx, &Mat4::identity());
@@ -481,7 +541,7 @@ impl XRControl {
             self.left_hand.draw_cube(cx, hand_size, hand_pos);
             self.right_hand.draw_cube(cx, hand_size, hand_pos);
             
-            for (_id, avatar) in &mut self.xr_avatars{
+            for (_id, avatar) in &mut self.xr_avatars {
                 avatar.draw_avatar(cx);
             }
             
