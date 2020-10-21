@@ -294,14 +294,15 @@ impl MakepadStorage {
             match MakepadChannelMessageWrap::deserialize_bin(&data) {
                 Ok(wsm) => {
                     for (id, m) in wsm.messages {
-                        if id == wsm.ids[0]{
-                            continue;
-                        }
                         match m {
                             MakepadChannelMessage::XRUpdate {event} => {
-                                let xr_id = XRUserId(id);
-                                self.xr_channel.users.insert(xr_id, event.clone());
-                            
+                                if id != wsm.ids[0]{
+                                    let xr_id = XRUserId(id);
+                                    self.xr_channel.users.insert(xr_id, event.clone());
+                                    self.xr_channel.last_times.insert(xr_id, cx.anim_time);
+                                }
+                                // maybe we can remove users if we havent heard from them for like 10 seconds.
+                                
                                 // clean up our user set
                                 let mut user_set = HashSet::new();
                                 for id in &wsm.ids { 
@@ -311,6 +312,11 @@ impl MakepadStorage {
                                 for (id, _xr) in &self.xr_channel.users {
                                     if !user_set.contains(&id) {
                                         removed.push(*id);
+                                    }
+                                    if let Some(time) = self.xr_channel.last_times.get(id){
+                                        if cx.anim_time - time > 10.{
+                                            removed.push(*id);
+                                        } 
                                     }
                                 }
                                 for id in removed {
