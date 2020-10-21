@@ -40,7 +40,7 @@ impl Tab {
             z: 0.,
             bg: Quad ::new(cx),
             tab_close: TabClose::new(cx),
-            text: Text::new(cx),
+            text: Text{z:0.1,..Text::new(cx)},
             animator: Animator::default(),
             abs_origin: None,
             _is_selected: false,

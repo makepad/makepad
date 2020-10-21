@@ -98,8 +98,12 @@ impl FoldCaption {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             button: ButtonLogic::default(),
-            bg: Quad::new(cx),
+            bg: Quad{
+                z: 0.5,
+                ..Quad::new(cx)
+             },
             text: Text{
+                z: 1.0,
                 shader: live_shader!(cx, makepad_render::text::shader),
                 ..Text::new(cx)
             },

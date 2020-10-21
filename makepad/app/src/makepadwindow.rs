@@ -117,6 +117,7 @@ impl MakepadWindow {
         
         match event {
             Event::XRUpdate(xu) => { // handle all VR updates here.
+                MakepadStorage::send_websocket_message(cx, MakepadChannelMessage::XRUpdate{event:xu.clone()});
                 let mut events = self.xr_control.handle_xr_control(
                     cx,
                     xu,
