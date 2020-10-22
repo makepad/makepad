@@ -102,6 +102,9 @@ impl HttpHeader {
             lines.push(line.clone());
             line.truncate(0);
         }
+        if lines.len() <2{
+            return None;
+        }
         let verb;
         let path;
         if let Some(v) = split_header_line(&lines[0], "GET ") {
