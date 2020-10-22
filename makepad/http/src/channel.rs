@@ -106,14 +106,14 @@ impl WebSocketChannels{
             let thread = std::thread::spawn(move || {
                 // we should collect all the messages we can in 50ms and then send it out together in 1 message
                 let max_wait = Duration::from_millis(16);
-                let mut _last_start = Instant::now();
+                let mut last_start = Instant::now();
                 let mut msg_stack = Vec::new();
                 loop{
                     // do the message pump, but combine messages to not overflow the sockets
                     if let Ok((websocket_id,msg)) = rx_bus.recv_timeout(max_wait) {
                         msg_stack.push((websocket_id,msg));
                     }
-                    //if last_start.elapsed() > max_wait{ 
+                    if last_start.elapsed() > max_wait{ 
                         if msg_stack.len() > 0{ // send it out all together
                             // lets push out a little header: numclients, nummsgs
                             
@@ -160,8 +160,8 @@ impl WebSocketChannels{
                             
                             msg_stack.truncate(0);
                         }
-                        _last_start = Instant::now()
-                    //} 
+                        last_start = Instant::now()
+                    } 
                 }
             });
             channels.insert(in_url.to_string(), WebSocketChannel{
