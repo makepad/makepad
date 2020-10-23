@@ -2,6 +2,9 @@
 use makepad_render::*;
 use makepad_widget::*;
 use makepad_microserde::*;
+
+use makepad_worlds::worldview::WorldView;
+
 use std::collections::HashMap;
 
 use crate::makepadstorage::*;
@@ -17,7 +20,6 @@ use crate::searchresults::*;
 use crate::rusteditor::*;
 use crate::jseditor::*;
 use crate::plaineditor::*;
-use crate::shaderview::*;
 
 #[derive(Debug, Clone, SerRon, DeRon)]
 pub enum Panel {
@@ -25,10 +27,11 @@ pub enum Panel {
     SearchResults,
     ItemDisplay,
     Keyboard,
-    ShaderView,
     FileTree,
     FileEditorTarget,
-    FileEditor {path: String, scroll_pos: Vec2, editor_id: u64}
+    FileEditor {path: String, scroll_pos: Vec2, editor_id: u64},
+    WorldSelect,
+    WorldView
 }
 
 #[derive(Clone)]
@@ -39,10 +42,10 @@ pub struct MakepadWindow {
     pub item_display: ItemDisplay,
     pub log_list: LogList,
     pub search_results: SearchResults,
-    pub shader_view: ShaderView,
     pub keyboard: Keyboard,
     pub file_editors: FileEditors,
     pub xr_control: XRControl,
+    pub world_view: WorldView,
     pub dock: Dock<Panel>,
 }
 
@@ -73,7 +76,6 @@ impl MakepadWindow {
                 plain_editor: PlainEditor::new(cx),
                 editors: HashMap::new(),
             },
-            shader_view: ShaderView::new(cx),
             home_page: HomePage::new(cx),
             keyboard: Keyboard::new(cx),
             item_display: ItemDisplay::new(cx),
@@ -81,6 +83,7 @@ impl MakepadWindow {
             search_results: SearchResults::new(cx),
             file_panel: FilePanel::new(cx),
             xr_control: XRControl::new(cx),
+            world_view: WorldView::new(cx),
             dock: Dock ::new(cx),
         }
     }
@@ -209,8 +212,11 @@ impl MakepadWindow {
                         _ => ()
                     }
                 }
-                Panel::ShaderView => {
-                    self.shader_view.handle_shader_view(cx, event)
+                Panel::WorldView => {
+                    self.world_view.handle_world_view(cx, event);
+                },
+                Panel::WorldSelect => {
+                    self.world_view.handle_world_select(cx, event);
                 },
                 Panel::ItemDisplay => {
                     self.item_display.handle_item_display(cx, event);
@@ -406,6 +412,8 @@ impl MakepadWindow {
         
         if self.desktop_window.begin_desktop_window(cx, Some(menu)).is_err() {return}
         
+        if true{// !self.desktop_window.window.xr_is_presenting(cx){ 
+        
         self.dock.draw_dock(cx);
         
         let dock_items = &mut makepad_state.windows[window_index].dock_items;
@@ -434,9 +442,12 @@ impl MakepadWindow {
             }
         }) {
             match item {
-                Panel::ShaderView => {
-                    self.shader_view.draw_shader_view(cx);
+                Panel::WorldView => {
+                    self.world_view.draw_world_view(cx);
                 },
+                Panel::WorldSelect => {
+                    self.world_view.draw_world_select(cx);
+                }
                 Panel::LogList => {
                     self.log_list.draw_log_list(cx, build_manager);
                 }
@@ -464,6 +475,7 @@ impl MakepadWindow {
                     file_editor.draw_file_editor(cx, text_buffer, &mut build_manager.search_index);
                 }
             }
+        }
         }
         if self.desktop_window.window.xr_is_presenting(cx) {
             self.xr_control.draw_xr_control(cx);

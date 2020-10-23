@@ -123,6 +123,37 @@ macro_rules!live_float {
 }
 
 #[macro_export]
+macro_rules!live_vec2 {
+    ( $ cx: ident, $ path: path) => {
+        $ cx.live_styles.get_vec2(
+            live_str_to_id(module_path!(), stringify!( $ path)),
+            stringify!( $ path)
+        )
+    }
+}
+
+#[macro_export]
+macro_rules!live_vec3{
+    ( $ cx: ident, $ path: path) => {
+        $ cx.live_styles.get_vec3(
+            live_str_to_id(module_path!(), stringify!( $ path)),
+            stringify!( $ path)
+        )
+    }
+}
+
+#[macro_export]
+macro_rules!live_vec4{
+    ( $ cx: ident, $ path: path) => {
+        $ cx.live_styles.get_vec4(
+            live_str_to_id(module_path!(), stringify!( $ path)),
+            stringify!( $ path)
+        )
+    }
+}
+
+
+#[macro_export]
 macro_rules!live_text_style {
     ( $ cx: ident, $ path: path) => {
         $ cx.live_styles.get_text_style(

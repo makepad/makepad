@@ -21,3 +21,5 @@ path="../../render"
 [dependencies.makepad-hub]
 path="../hub"
 
+[dependencies.makepad-worlds]
+path="../../worlds"
