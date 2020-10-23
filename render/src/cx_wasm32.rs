@@ -545,7 +545,7 @@ impl Cx {
             self.shader_recompiles.truncate(0);
             self.call_shader_recompile_event(shader_results, &mut event_handler);*/
         }
-        
+        self.process_live_style_errors();
         // mark the end of the message
         self.platform.from_wasm.end();
         

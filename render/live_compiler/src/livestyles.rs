@@ -14,6 +14,7 @@ use crate::colors::Color;
 use crate::math::*;
 use std::fmt;
 use crate::error::LiveError;
+use std::cell::RefCell;
 
 #[derive(Clone, Debug)]
 pub struct LiveBody {
@@ -46,6 +47,9 @@ pub enum LiveChangeType {
 pub struct LiveStyles {
     pub file_to_live_bodies: HashMap<String, Vec<LiveBodyId >>,
     pub live_body_to_file: HashMap<LiveBodyId, String>,
+    
+    pub live_access_errors: RefCell<Vec<String>>,
+    
     // change sets
     pub changed_live_bodies: BTreeSet<LiveBodyId>,
     
@@ -310,48 +314,91 @@ impl LiveStyles {
     
     pub fn get_float(&self, live_item_id: LiveItemId, name: &str) -> f32 {
         let live_item_id = self.find_remap(live_item_id);
-        self.floats.get(&live_item_id).expect(&format!("Float not found {}", name)).value
+        if let Some(v) = self.floats.get(&live_item_id){
+            return v.value;
+        }
+        self.live_access_errors.borrow_mut().push(format!("Float not found {}", name));
+        return 0.0;
     }
 
     pub fn get_vec2(&self, live_item_id: LiveItemId, name: &str) -> Vec2 {
         let live_item_id = self.find_remap(live_item_id);
-        *self.vec2s.get(&live_item_id).expect(&format!("Vec2 not found {}", name))
+        if let Some(v) = self.vec2s.get(&live_item_id){
+            return *v;
+        }
+        self.live_access_errors.borrow_mut().push(format!("Vec2 not found {}", name));
+        return Vec2::all(0.);
     }
 
     pub fn get_vec3(&self, live_item_id: LiveItemId, name: &str) -> Vec3 {
         let live_item_id = self.find_remap(live_item_id);
-        *self.vec3s.get(&live_item_id).expect(&format!("Vec3 not found {}", name))
+        if let Some(v) = self.vec3s.get(&live_item_id){
+            return *v
+        }
+        self.live_access_errors.borrow_mut().push(format!("Vec3 not found {}", name));
+        return Vec3::all(0.);
     }
 
     pub fn get_vec4(&self, live_item_id: LiveItemId, name: &str) -> Vec4 {
         let live_item_id = self.find_remap(live_item_id);
-        *self.vec4s.get(&live_item_id).expect(&format!("Vec3 not found {}", name))
+        if let Some(v) = self.vec4s.get(&live_item_id){
+            return *v
+        }
+        self.live_access_errors.borrow_mut().push(format!("Vec4 not found {}", name));
+        return Vec4::all(0.);
     }
 
     pub fn get_color(&self, live_item_id: LiveItemId, name: &str) -> Color {
         let live_item_id = self.find_remap(live_item_id);
-        *self.colors.get(&live_item_id).expect(&format!("Color not found {}", name))
+        if let Some(v) = self.colors.get(&live_item_id){
+            return *v
+        }
+        self.live_access_errors.borrow_mut().push(format!("Color not found {}", name));
+        return Color{r:1.0,g:0.0,b:1.0,a:1.0};
     }
-    
     
     pub fn get_text_style(&self, live_item_id: LiveItemId, name: &str) -> TextStyle {
         let live_item_id = self.find_remap(live_item_id);
-        *self.text_styles.get(&live_item_id).expect(&format!("TextStyle not found {}", name))
+        if let Some(v) = self.text_styles.get(&live_item_id){
+            return *v
+        }
+        self.live_access_errors.borrow_mut().push(format!("Color not found {}", name));
+        return TextStyle{
+            font:Font{font_id:0},
+            font_size: 8.0,
+            brightness: 1.0,
+            curve: 0.6,
+            line_spacing: 1.4,
+            top_drop: 1.2,
+            height_factor: 1.3,
+        }
     }
     
     pub fn get_layout(&self, live_item_id: LiveItemId, name: &str) -> Layout {
         let live_item_id = self.find_remap(live_item_id);
-        *self.layouts.get(&live_item_id).expect(&format!("Anim not found {}", name))
+        if let Some(v) = self.layouts.get(&live_item_id){
+            return *v
+        }
+        self.live_access_errors.borrow_mut().push(format!("Layout not found {}", name));
+        return Layout::default()
     }
     
     pub fn get_walk(&self, live_item_id: LiveItemId, name: &str) -> Walk {
         let live_item_id = self.find_remap(live_item_id);
-        *self.walks.get(&live_item_id).expect(&format!("Walk not found {}", name))
+        if let Some(v) = self.walks.get(&live_item_id){
+            return *v
+        }
+        self.live_access_errors.borrow_mut().push(format!("Walk not found {}", name));
+        return Walk::default();
     }
     
     pub fn get_anim(&self, live_item_id: LiveItemId, name: &str) -> Anim {
         let live_item_id = self.find_remap(live_item_id);
-        self.anims.get(&live_item_id).expect(&format!("Anim not found {}", name)).clone()
+        if let Some(v) = self.anims.get(&live_item_id){
+            return v.clone()
+        }
+        self.live_access_errors.borrow_mut().push(format!("Anim not found {}", name));
+        return Anim::default()
     }
     
     pub fn get_shader(&self, live_item_id: LiveItemId, location_hash: u64, _module_path: &str, name: &str) -> Shader {
@@ -369,7 +416,6 @@ impl LiveStyles {
                 shader_id: 0,
                 location_hash
             }
-            
         }
     }
     

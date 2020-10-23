@@ -241,6 +241,9 @@ impl Cx {
                 self.mtl_update_all_shaders(&metal_cx, &mut errors);
                 self.call_live_recompile_event(changed_live_bodies, errors ,&mut event_handler);
             }
+            
+            self.process_live_style_errors();
+            
             /*
             if self.shader_recompiles.len()>0{
                 

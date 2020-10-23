@@ -39,6 +39,9 @@ impl View {
     pub fn set_view_transform(&self, cx:&mut Cx, mat:&Mat4){
         
         fn set_view_transform_recur(view_id:usize, cx:&mut Cx, mat:&Mat4){
+            if cx.views[view_id].block_set_view_transform{
+                return
+            }
             cx.views[view_id].uniform_view_transform(mat);
             let draw_calls_len = cx.views[view_id].draw_calls_len;
             for draw_call_id in 0..draw_calls_len {
@@ -81,7 +84,7 @@ impl View {
         let nesting_view_id = if cx.view_stack.len() > 0 {
             *cx.view_stack.last().unwrap()
         }
-        else { // return the root draw list
+        else { // return the root draw list 
             0
         };
         
@@ -110,7 +113,10 @@ impl View {
             main_view_id
         }
         else {
-            if let Some(last_view_id) = cx.view_stack.last() {
+            if is_root_for_pass{
+                view_id
+            }
+            else if let Some(last_view_id) = cx.view_stack.last() {
                 *last_view_id
             }
             else { // we have no parent
@@ -213,6 +219,13 @@ impl View {
             return cxview.get_view_transform()
         }
         Mat4::default()
+    }
+    
+    pub fn block_set_view_transform(&self, cx:&mut Cx){
+         if let Some(view_id) = self.view_id {
+            let cxview = &mut cx.views[view_id];
+            return cxview.block_set_view_transform = true;
+        }
     }
     
    pub fn set_view_debug(&self, cx:&mut Cx, view_debug:CxViewDebug){
@@ -342,7 +355,7 @@ impl Cx {
                     dc.current_instance_offset = dc.instance.len();
                     let slot_align = dc.instance.len() % sh.mapping.instance_props.total_slots;
                     if slot_align != 0 {
-                        panic!("Instance offset disaligned! shader: {} misalign: {} slots: {}", shader_id, slot_align, sh.mapping.instance_props.total_slots);
+                        eprintln!("Instance offset disaligned! shader: {} misalign: {} slots: {}", shader_id, slot_align, sh.mapping.instance_props.total_slots);
                     }
                     return dc.get_current_instance_area(instance_count);
                 }
@@ -529,6 +542,7 @@ pub struct CxView {
     pub nesting_view_id: usize, // the id of the parent we nest in, codeflow wise
     pub redraw_id: u64,
     pub pass_id: usize,
+    pub block_set_view_transform: bool,
     pub do_v_scroll: bool, // this means we
     pub do_h_scroll: bool,
     pub draw_calls: Vec<DrawCall>,

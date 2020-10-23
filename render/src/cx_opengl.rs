@@ -231,70 +231,24 @@ impl Cx {
         }
         let window;
         let view_rect;
-        if full_repaint {
-            opengl_window.xlib_window.hide_child_windows();
-            
-            window = opengl_window.xlib_window.window.unwrap();
-            
-            let pass_size = self.passes[pass_id].pass_size;
-            self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
-            
-            let pix_width = opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor;
-            let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
-            
-            unsafe {
-                glx_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
-                gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
-            }
-            view_rect = Rect::default();
-        }
-        else {
-            if view_bounds.max_x == std::f32::NEG_INFINITY
-                || view_bounds.max_y == std::f32::NEG_INFINITY
-                || view_bounds.min_x == std::f32::INFINITY
-                || view_bounds.min_x == std::f32::INFINITY
-                || view_bounds.min_x == view_bounds.max_x
-                || view_bounds.min_y == view_bounds.max_y {
-                return false
-            }
-            /*
-            unsafe {
-                glx_sys::glXMakeCurrent(xlib_app.display, opengl_window.xlib_window.window.unwrap(), opengl_cx.context);
-                gl::Viewport(
-                    0,
-                    0,
-                    (opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor) as i32,
-                    (opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor) as i32
-                );
-                gl::ClearColor(0.0, 1.0, 0.0, 0.0);
-                gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
-                glx_sys::glXSwapBuffers(xlib_app.display, opengl_window.xlib_window.window.unwrap());
-            }*/
-            
-            let pix_width = (view_bounds.max_x - view_bounds.min_x) * opengl_window.window_geom.dpi_factor;
-            let pix_height = (view_bounds.max_y - view_bounds.min_y) * opengl_window.window_geom.dpi_factor;
-            
-            window = opengl_window.xlib_window.alloc_child_window(
-                (view_bounds.min_x * opengl_window.window_geom.dpi_factor) as i32,
-                (view_bounds.min_y * opengl_window.window_geom.dpi_factor) as i32,
-                pix_width as u32,
-                pix_height as u32
-            ).unwrap();
-            
-            //let pass_size = self.passes[pass_id].pass_size;
-            self.passes[pass_id].set_ortho_matrix(
-                Vec2 {x: view_bounds.min_x, y: view_bounds.min_y},
-                Vec2 {x: pix_width / opengl_window.window_geom.dpi_factor, y: pix_height / opengl_window.window_geom.dpi_factor}
-            );
-            
-            unsafe {
-                glx_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
-                gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
-            }
-            view_rect = Rect {x: view_bounds.min_x, y: view_bounds.min_y, w: view_bounds.max_x - view_bounds.min_x, h: view_bounds.max_y - view_bounds.min_y}
-        }
+
+        opengl_window.xlib_window.hide_child_windows();
         
-        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
+        window = opengl_window.xlib_window.window.unwrap();
+        
+        let pass_size = self.passes[pass_id].pass_size;
+        self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
+        
+        let pix_width = opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor;
+        let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
+        
+        unsafe {
+            glx_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
+            gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
+        }
+        view_rect = Rect::default();
+
+        //self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         // set up the
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
@@ -348,8 +302,7 @@ impl Cx {
     ) {
         
         let pass_size = self.passes[pass_id].pass_size;
-        self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
-        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
+        self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
         self.passes[pass_id].paint_dirty = false;
         
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {

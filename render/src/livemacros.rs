@@ -1,4 +1,5 @@
 use crate::cx::*;
+use crate::log;
 
 impl Cx {
     pub fn process_live_styles_changes(&mut self) -> Vec<LiveBodyError>{
@@ -28,6 +29,14 @@ impl Cx {
     
     pub fn add_live_body(&mut self, live_body: LiveBody) {
         self.live_styles.add_live_body(live_body,);
+    }
+    
+    pub fn process_live_style_errors(&self){
+        let mut ae = self.live_styles.live_access_errors.borrow_mut();
+        for err in ae.iter(){
+            log!("{}", err);
+        }
+        ae.truncate(0)
     }
 }
 

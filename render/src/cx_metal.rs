@@ -179,9 +179,8 @@ impl Cx {
     
     pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: id, pass_id: usize, inherit_dpi_factor: f32, first_texture: Option<id>, metal_cx: &MetalCx) {
         let pass_size = self.passes[pass_id].pass_size;
-        
-        self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
-        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
+
+        self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
         self.passes[pass_id].paint_dirty = false;
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor
