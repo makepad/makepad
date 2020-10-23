@@ -1,5 +1,5 @@
 use crate::error::LiveError;
-use crate::lit::{Lit};
+use crate::lit::{Lit, TyLit};
 use crate::ident::{Ident};
 use crate::token::{Token, TokenWithSpan};
 use crate::livetypes::*;
@@ -7,6 +7,7 @@ use crate::detok::*;
 use std::collections::HashSet;
 use crate::livestyles::{LiveTokensType, LiveStyle, LiveTokens};
 use crate::colors::Color;
+use crate::math::*;
 
 impl<'a> DeTokParserImpl<'a> {
     
@@ -23,6 +24,36 @@ impl<'a> DeTokParserImpl<'a> {
                 return Float::de_tok(self)
             },
             _ => return Err(self.error(format!("Unexpected {} while parsing float", self.peek_token())))
+        }
+    }
+    
+    pub fn parse_vec2(&mut self) -> Result<Vec2, LiveError> {
+        // check what we are up against.
+        match self.peek_token() {
+            Token::TyLit(tylit) if tylit == TyLit::Vec2 => {
+                return Vec2::de_tok(self)
+            },
+            _ => return Err(self.error(format!("Unexpected {} while parsing vec2", self.peek_token())))
+        }
+    }
+    
+    pub fn parse_vec3(&mut self) -> Result<Vec3, LiveError> {
+        // check what we are up against.
+        match self.peek_token() {
+            Token::TyLit(tylit) if tylit == TyLit::Vec3 => {
+                return Vec3::de_tok(self)
+            },
+            _ => return Err(self.error(format!("Unexpected {} while parsing vec3", self.peek_token())))
+        }
+    }
+    
+    pub fn parse_vec4(&mut self) -> Result<Vec4, LiveError> {
+        // check what we are up against.
+        match self.peek_token() {
+            Token::TyLit(tylit) if tylit == TyLit::Vec4 => {
+                return Vec4::de_tok(self)
+            },
+            _ => return Err(self.error(format!("Unexpected {} while parsing vec4", self.peek_token())))
         }
     }
     
@@ -175,6 +206,31 @@ impl<'a> DeTokParserImpl<'a> {
             self.expect_token(Token::Colon) ?;
             
             match self.peek_token() {
+                Token::TyLit(tylit) => {
+                    let tokens = self.parse_block_tokens(live_item_id) ?;
+                    let live_tokens_type = match tylit {
+                        TyLit::Vec2 => {
+                            LiveTokensType::Vec2
+                        }
+                        TyLit::Vec3 => {
+                            LiveTokensType::Vec3
+                        }
+                        TyLit::Vec4 => {
+                            LiveTokensType::Vec4
+                        }
+                        _ => {
+                            return Err(span.error(self, format!("Tylit {} unexpected", tylit)));
+                        }
+                    };
+                    self.live_styles.add_changed_deps(live_item_id, &tokens, live_tokens_type);
+                    self.live_styles.tokens.insert(live_item_id, LiveTokens {
+                        ident_path,
+                        qualified_ident_path,
+                        tokens,
+                        live_tokens_type
+                    });
+                    self.expect_token(Token::Semi) ?;
+                },
                 Token::Ident(ident) => {
                     let tokens = self.parse_block_tokens(live_item_id) ?;
                     // see if the tokens changed, ifso mark this thing dirty
@@ -246,7 +302,7 @@ impl<'a> DeTokParserImpl<'a> {
                     self.expect_token(Token::Semi) ?;
                 }
                 token => {
-                    return Err(span.error(self, format!("Unexpected token {}", token)));
+                    return Err(span.error(self, format!("Unexpected token in parse_live {:?}", token)));
                 }
             }
             

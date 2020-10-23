@@ -2,7 +2,7 @@ use crate::token::{Token, TokenWithSpan};
 use crate::error::LiveError;
 use crate::ident::{Ident, IdentPath, QualifiedIdentPath};
 use crate::span::{Span, LiveBodyId};
-use crate::lit::{Lit};
+use crate::lit::{Lit, TyLit};
 use crate::colors::Color;
 use crate::math::*;
 use crate::livestyles::{LiveStyles, LiveStyle};
@@ -370,7 +370,7 @@ impl<T> DeTok for Option<T> where T: DeTok {
 
 impl DeTok for Vec2 {
     fn de_tok(p: &mut dyn DeTokParser) -> Result<Vec2, LiveError> {
-        p.expect_token(Token::Ident(Ident::new("vec2"))) ?;
+       p.expect_token(Token::TyLit(TyLit::Vec2)) ?;
         p.expect_token(Token::LeftParen) ?;
         let x = f32::de_tok(p) ?;
         p.expect_token(Token::Comma) ?;
@@ -383,7 +383,7 @@ impl DeTok for Vec2 {
 
 impl DeTok for Vec3 {
     fn de_tok(p: &mut dyn DeTokParser) -> Result<Vec3, LiveError> {
-        p.expect_token(Token::Ident(Ident::new("vec3"))) ?;
+        p.expect_token(Token::TyLit(TyLit::Vec3)) ?;
         p.expect_token(Token::LeftParen) ?;
         let x = f32::de_tok(p) ?;
         p.expect_token(Token::Comma) ?;
@@ -398,7 +398,7 @@ impl DeTok for Vec3 {
 
 impl DeTok for Vec4 {
     fn de_tok(p: &mut dyn DeTokParser) -> Result<Vec4, LiveError> {
-        p.expect_token(Token::Ident(Ident::new("vec4"))) ?;
+        p.expect_token(Token::TyLit(TyLit::Vec4)) ?;
         p.expect_token(Token::LeftParen) ?;
         let x = f32::de_tok(p) ?;
         p.expect_token(Token::Comma) ?;
