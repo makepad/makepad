@@ -402,7 +402,6 @@ impl XRControl {
             }
             
             if input.buttons[0].pressed != last_input.buttons[0].pressed {
-                log!("INPUT BUTTON PRESSED");
                 // we have finger up or down
                 if input.buttons[0].pressed {
                     events.push(Event::FingerDown(FingerDownEvent {
