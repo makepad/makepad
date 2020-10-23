@@ -225,9 +225,7 @@ pub struct XRControl {
     pub last_xr_update: Option<XRUpdateEvent>,
     
     pub xr_avatars: BTreeMap<XRUserId, XRAvatar>,
-    
-    pub sky_box: XRCube,
-    
+
     pub left_hand: XRCube,
     pub right_hand: XRCube,
     pub left_cursor: XRCursor,
@@ -244,7 +242,6 @@ impl XRControl {
             space_view: View::new(cx),
             cursor_view: View::new(cx),
             last_xr_update: None,
-            sky_box: XRCube::new(cx),
             left_hand: XRCube::new(cx),
             right_hand: XRCube::new(cx),
             left_cursor: XRCursor::new(cx),
@@ -258,59 +255,6 @@ impl XRControl {
         live_body!(cx, r#"
             self::shader_hand: Shader {
                 use makepad_render::cube::shader::*;
-            }
-            
-            self::sky_color: #0;
-            self::edge_color: #1;
-            self::floor_color: #8;
-            
-            self::shader_sky_box: Shader {
-                use makepad_render::cube::shader::*;
-                fn color_form_id() -> vec4 {
-                    if geom_id>4.5 {
-                        return #f00;
-                    }
-                    if geom_id>3.5 {
-                        return #0f0;
-                    }
-                    if geom_id>2.5 {
-                        return #00f;
-                    }
-                    if geom_id>1.5 {
-                        return #0ff;
-                    }
-                    return #f0f;
-                }
-                
-                fn vertex() -> vec4 {
-                    let model_view = camera_view * view_transform * transform;
-                    return camera_projection * (model_view * vec4(geom_pos.x * size.x + pos.x, geom_pos.y * size.y + pos.y, geom_pos.z * size.z + pos.z + draw_zbias, 1.));
-                }
-                
-                fn pixel() -> vec4 {
-                    let x = geom_uv.x;
-                    let y = geom_uv.y;
-                    // walls
-                    let sky = self::sky_color;
-                    let edge = self::edge_color;
-                    if geom_id>4.5 || geom_id > 3.5 || geom_id < 1.5 {
-                        return mix(edge, sky, y);
-                    }
-                    // floor
-                    if geom_id>2.5 {
-                        let coord = geom_uv * 150.0;
-                        let grid = abs(
-                            fract(coord - 0.5) - 0.5
-                        ) / (abs(dFdx(coord)) + abs(dFdy(coord)));
-                        let line = min(grid.x, grid.y);
-                        let grid2 = self::floor_color + 0.4 * vec4(vec3(1.0 - min(line, 1.0)), 1.0);
-                        let uv2 = abs(2.0 * geom_uv - 1.0);
-                        return mix(grid2, edge, min(max(uv2.x, uv2.y) + 0.7, 1.0));
-                    }
-                    if geom_id>1.5 { // ceiling
-                        return sky;
-                    }
-                }
             }
             
             self::shader_cursor: Shader {
@@ -410,12 +354,10 @@ impl XRControl {
         );
         
         let inv_window_mat = window_mat.invert();
+        window_view.set_view_transform(cx, &window_mat);
         
         // lets make a test with just us.
         self.process_avatar_state(cx, xr_channel, window_mat, view_rect);
-        
-        window_view.set_view_transform(cx, &window_mat);
-        self.space_view.set_view_transform(cx, &Mat4::identity());
         
         // lets set the left_input matrix
         self.left_hand.set_mat(cx, Mat4::from_transform(xr_event.left_input.ray));
@@ -460,6 +402,7 @@ impl XRControl {
             }
             
             if input.buttons[0].pressed != last_input.buttons[0].pressed {
+                log!("INPUT BUTTON PRESSED");
                 // we have finger up or down
                 if input.buttons[0].pressed {
                     events.push(Event::FingerDown(FingerDownEvent {
@@ -533,16 +476,10 @@ impl XRControl {
         self.right_hand.cube.shader = live_shader!(cx, self::shader_hand);
         self.left_cursor.quad.shader = live_shader!(cx, self::shader_cursor);
         self.right_cursor.quad.shader = live_shader!(cx, self::shader_cursor);
-        self.sky_box.cube.shader = live_shader!(cx, self::shader_sky_box);
         
         // THIS HAS A VERY STRANGE BUG. if i reverse these, the dots are broken on wasm+quest
         if self.space_view.begin_view(cx, Layout::abs_origin_zero()).is_ok() {
-            self.sky_box.draw_cube(
-                cx,
-                Vec3 {x: 200.0, y: 100.0, z: 200.0},
-                Vec3 {x: 0.0, y: 49.0, z: 0.0},
-            );
-            
+            self.space_view.block_set_view_transform(cx);
             let hand_size = Vec3 {x: 0.02, y: 0.02, z: 0.12};
             let hand_pos = Vec3 {x: 0., y: 0., z: 0.0};
             

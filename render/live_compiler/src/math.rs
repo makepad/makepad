@@ -31,6 +31,9 @@ impl Vec2 {
         (dx * dx + dy * dy).sqrt()
     }
 }
+
+const TORAD: f32 = 0.017453292519943295;
+
 /*
 pub fn vec2(x:f32, y:f32)->Vec2{
     Vec2{x:x, y:y}
@@ -160,6 +163,9 @@ impl fmt::Display for Vec4 {
 }
 
 impl Vec4 {
+    pub fn all(v:f32)->Self{
+        Self{x:v, y:v, z:v, w:v}
+    }
     pub fn to_vec3(&self)->Vec3{
         Vec3 {x: self.x, y: self.y, z: self.z}
     }
@@ -217,7 +223,7 @@ impl Mat4 {
     }
     
     pub fn rotate_tsrt(t1: Vec3, s: f32, r: Vec3, t2: Vec3) -> Mat4 {
-        const TORAD: f32 = 0.017453292519943295;
+
         let cx = f32::cos(r.x * TORAD);
         let cy = f32::cos(r.y * TORAD);
         let cz = f32::cos(r.z * TORAD);
@@ -254,7 +260,7 @@ impl Mat4 {
     }
 
     pub fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
-        let f = 1.0 / f32::tan(fov_y / 2.0);
+        let f = 1.0 / f32::tan(fov_y * TORAD / 2.0);
         let nf = 1.0 / (near - far);
         return Mat4 {v: [
             f / aspect,

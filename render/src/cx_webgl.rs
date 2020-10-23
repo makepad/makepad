@@ -36,7 +36,7 @@ impl Cx {
                 let cxview = &mut self.views[view_id];
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
-                
+
                 if draw_call.instance_dirty || draw_call.platform.inst_vb_id.is_none() {
                     draw_call.instance_dirty = false;
                     if draw_call.platform.inst_vb_id.is_none() {
@@ -55,6 +55,7 @@ impl Cx {
                 draw_call.set_local_scroll(scroll, local_scroll);
                 draw_call.set_clip(clip);
                 *zbias += zbias_step;
+
                 
                 // update/alloc textures?
                 for texture_id in &draw_call.textures_2d {
@@ -83,11 +84,13 @@ impl Cx {
                         geometry.vertices.len(),
                         geometry.vertices.as_ptr() as *const f32
                     );
+
                     self.platform.from_wasm.alloc_index_buffer(
                         geometry.platform.ib_id.unwrap(),
                         geometry.indices.len(),
                         geometry.indices.as_ptr() as *const u32
                     );
+
                     geometry.dirty = false;
                 }
                 
@@ -146,8 +149,7 @@ impl Cx {
     
     pub fn setup_render_pass(&mut self, pass_id: usize, inherit_dpi_factor: f32) {
         let pass_size = self.passes[pass_id].pass_size;
-        self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
-        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
+        self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
         self.passes[pass_id].paint_dirty = false;
         
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {

@@ -72,6 +72,9 @@ impl Pass {
     }
     
     pub fn set_size(&mut self, cx: &mut Cx, pass_size: Vec2) {
+        let mut pass_size = pass_size;
+        if pass_size.x < 1.0{pass_size.x = 1.0};
+        if pass_size.y < 1.0{pass_size.y = 1.0};
         let cxpass = &mut cx.passes[self.pass_id.unwrap()];
         cxpass.pass_size = pass_size;
     }
@@ -98,6 +101,11 @@ impl Pass {
         cxpass.clear_depth = clear_depth;
     }
     
+    pub fn set_matrix_mode(&mut self, cx: &mut Cx, pmm: PassMatrixMode){
+        let pass_id = self.pass_id.expect("Please call set_matrix_mode after begin_pass");
+        let cxpass = &mut cx.passes[pass_id];
+        cxpass.matrix_mode = pmm;
+    }
     
     pub fn end_pass(&mut self, cx: &mut Cx) {
         cx.pass_stack.pop();
@@ -157,7 +165,14 @@ impl PassUniforms{
 }
 
 #[derive(Clone)]
+pub enum PassMatrixMode{
+    Ortho,
+    Projection{fov_y:f32, near:f32, far:f32, cam:Mat4}
+}
+
+#[derive(Clone)]
 pub struct CxPass {
+    pub matrix_mode: PassMatrixMode,
     pub color_textures: Vec<CxPassColorTexture>,
     pub depth_texture: Option<usize>,
     pub clear_depth: ClearDepth,
@@ -176,6 +191,7 @@ pub struct CxPass {
 impl Default for CxPass {
     fn default() -> Self {
         CxPass {
+            matrix_mode: PassMatrixMode::Ortho,
             zbias_step: 0.001,
             pass_uniforms: PassUniforms::default(),
             color_textures: Vec::new(),
@@ -223,21 +239,38 @@ impl CxPass {
         self.pass_uniforms.dpi_dilate = dpi_dilate;
     }
     
-    pub fn set_ortho_matrix(&mut self, offset: Vec2, size: Vec2) {
-        let ortho_matrix = Mat4::ortho(
-            offset.x,
-            offset.x + size.x,
-            offset.y,
-            offset.y + size.y,
-            100.,
-            -100.,
-            1.0,
-            1.0
-        );
-        
-        //println!("{} {}", ortho_matrix.v[10], ortho_matrix.v[14]);
-        //println!("CHECK {} {} {:?}", size.x, size.y,ortho_matrix.transform_vec4(Vec4{x:200.,y:300.,z:100.,w:1.0}));
-        self.uniform_camera_projection(&ortho_matrix);
+    pub fn set_matrix(&mut self, offset: Vec2, size: Vec2) {
+         match self.matrix_mode{
+            PassMatrixMode::Ortho=>{
+                let ortho = Mat4::ortho(
+                    offset.x,
+                    offset.x + size.x,
+                    offset.y,
+                    offset.y + size.y,
+                    100.,
+                    -100.,
+                    1.0,
+                    1.0
+                );
+                self.uniform_camera_projection(&ortho);
+                self.uniform_camera_view(&Mat4::identity());
+            }
+            PassMatrixMode::Projection{fov_y, near, far, cam}=>{
+                let proj = Mat4::perspective(fov_y, size.x / size.y, near, far);
+                self.uniform_camera_projection(&proj);
+                self.uniform_camera_view(&cam);
+                
+                /*Mat4::ortho(
+                    offset.x,
+                    offset.x + size.x,
+                    offset.y,
+                    offset.y + size.y,
+                    100.,
+                    -100.,
+                    1.0,
+                    1.0)*/
+            }
+        };
         //self.set_matrix(cx, &ortho_matrix);
     }
     
