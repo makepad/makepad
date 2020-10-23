@@ -330,6 +330,29 @@ impl Cx {
     pub fn compute_passes_to_repaint(&mut self, passes_todo: &mut Vec<usize>, windows_need_repaint: &mut usize) {
         passes_todo.truncate(0);
         
+        loop{
+            let mut altered = false; // yes this is horrible but im tired and i dont know why recursion fails
+            for pass_id in 0..self.passes.len(){
+                if self.passes[pass_id].paint_dirty{
+                    let other = match self.passes[pass_id].dep_of{
+                         CxPassDepOf::Pass(dep_of_pass_id) => {
+                             Some(dep_of_pass_id)
+                         }
+                         _=>None
+                    };
+                    if let Some(other) =other{
+                        if !self.passes[other].paint_dirty{
+                            self.passes[other].paint_dirty = true;
+                            altered = true;
+                        }
+                    }
+                }
+            }
+            if ! altered{
+                break
+            }
+        }
+        
         for (pass_id, cxpass) in self.passes.iter().enumerate() {
             if cxpass.paint_dirty {
                 let mut inserted = false;
@@ -338,6 +361,9 @@ impl Cx {
                         *windows_need_repaint += 1
                     },
                     CxPassDepOf::Pass(dep_of_pass_id) => {
+                        if pass_id == dep_of_pass_id{
+                            eprintln!("WHAAAT");
+                        }
                         for insert_before in 0..passes_todo.len() {
                             if passes_todo[insert_before] == dep_of_pass_id {
                                 passes_todo.insert(insert_before, pass_id);

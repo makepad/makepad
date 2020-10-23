@@ -181,6 +181,8 @@ impl MakepadWindow {
             self.show_search_tab(cx, window_index, makepad_state);
         }
         
+        self.world_view.handle_world_view(cx, event);
+        
         let dock_items = &mut makepad_state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         let mut file_tree_event = FileTreeEvent::None;
@@ -408,12 +410,9 @@ impl MakepadWindow {
         makepad_storage: &mut MakepadStorage,
         build_manager: &mut BuildManager
     ) {
-        
-        
         if self.desktop_window.begin_desktop_window(cx, Some(menu)).is_err() {return}
         
-        if true{// !self.desktop_window.window.xr_is_presenting(cx){ 
-        
+         
         self.dock.draw_dock(cx);
         
         let dock_items = &mut makepad_state.windows[window_index].dock_items;
@@ -443,7 +442,8 @@ impl MakepadWindow {
         }) {
             match item {
                 Panel::WorldView => {
-                    self.world_view.draw_world_view(cx);
+                    let xr_is_presenting = self.desktop_window.window.xr_is_presenting(cx);
+                    self.world_view.draw_world_view_2d(cx, xr_is_presenting);
                 },
                 Panel::WorldSelect => {
                     self.world_view.draw_world_select(cx);
@@ -476,13 +476,14 @@ impl MakepadWindow {
                 }
             }
         }
-        }
+        
         if self.desktop_window.window.xr_is_presenting(cx) {
+            self.world_view.draw_world_view_3d(cx);
             self.xr_control.draw_xr_control(cx);
         }
         self.desktop_window.end_desktop_window(cx);
-    }
-    
+    } 
+     
     pub fn ensure_unique_tab_title_for_file_editors(&mut self, cx: &mut Cx, window_index: usize, makepad_state: &mut MakepadState) {
         // we walk through the dock collecting tab titles, if we run into a collision
         // we need to find the shortest uniqueness

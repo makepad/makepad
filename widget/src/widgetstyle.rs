@@ -1,17 +1,4 @@
 use makepad_render::*;
-use crate::normalbutton::*;
-use crate::tab::*;
-use crate::desktopwindow::*;
-use crate::tabclose::*;
-use crate::texteditor::*;
-use crate::textinput::*;
-use crate::scrollbar::*;
-use crate::scrollshadow::*;
-use crate::desktopbutton::*;
-use crate::splitter::*;
-use crate::tabcontrol::*;
-use crate::xrcontrol::*;
-use crate::foldcaption::*;
 
 pub fn set_widget_style(cx: &mut Cx) {
     
@@ -43,19 +30,20 @@ pub fn set_widget_style(cx: &mut Cx) {
         self::color_drop_quad: #a;
         
     "#);
-    FoldCaption::style(cx);
-    TabClose::style(cx);
-    DesktopWindow::style(cx);
-    NormalButton::style(cx);
-    Tab::style(cx);
-    TextEditor::style(cx);
-    TextInput::style(cx);
-    ScrollBar::style(cx);
-    ScrollShadow::style(cx);
-    DesktopButton::style(cx);
-    Splitter::style(cx);
-    TabControl::style(cx);
-    XRControl::style(cx);
+    crate::foldcaption::FoldCaption::style(cx);
+    crate::tabclose::TabClose::style(cx);
+    crate::desktopwindow::DesktopWindow::style(cx);
+    crate::normalbutton::NormalButton::style(cx);
+    crate::tab::Tab::style(cx);
+    crate::texteditor::TextEditor::style(cx);
+    crate::textinput::TextInput::style(cx);
+    crate::scrollbar::ScrollBar::style(cx);
+    crate::scrollshadow::ScrollShadow::style(cx);
+    crate::desktopbutton::DesktopButton::style(cx);
+    crate::splitter::Splitter::style(cx);
+    crate::tabcontrol::TabControl::style(cx);
+    crate::xrcontrol::XRControl::style(cx);
+    crate::viewport3d::Viewport3D::style(cx);
 }
 
   /*

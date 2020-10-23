@@ -80,6 +80,14 @@ pub fn define_shader_stdlib(cx: &mut Cx) {
                 field: float
             }
             
+            impl Math{
+                fn rotate_2d(v: vec2, a: float)->vec2 {
+                    let ca = cos(a);
+                    let sa = sin(a);
+                    return vec2(v.x * ca - v.y * sa, v.x * sa + v.y * ca);
+                }
+            }
+            
             impl Pal {
                 fn iq(t: float, a: vec3, b: vec3, c: vec3, d: vec3) -> vec3 {
                     return a + b * cos(6.28318 * (c * t + d));

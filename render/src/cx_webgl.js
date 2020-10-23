@@ -337,13 +337,13 @@
                 this.send_pose_transform(ray_pose.transform)
                 let buttons = input.gamepad.buttons;
                 let axes = input.gamepad.axes;
-                let button_len = buttons.length;
+                let buttons_len = buttons.length;
                 let axes_len = axes.length;
                 
-                pos = this.fit(3 + button_len * 2 + axes_len);
+                pos = this.fit(3 + buttons_len * 2 + axes_len);
                 this.mu32[pos ++] = input.handedness == "left"? 1: input.handedness == "right"? 2: 0;
-                this.mu32[pos ++] = button_len;
-                for (let i = 0; i < button_len; i ++) {
+                this.mu32[pos ++] = buttons_len;
+                for (let i = 0; i < buttons_len; i ++) {
                     this.mu32[pos ++] = buttons[i].pressed? 1: 0;
                     this.mf32[pos ++] = buttons[i].value;
                 }
@@ -694,7 +694,7 @@
                 mf.y = e.pageY;
                 mf.digit = e.button;
                 mf.time = e.timeStamp / 1000.0;
-                mf.modifers = pack_key_modifier(e);
+                mf.modifiers = pack_key_modifier(e);
                 mf.touch = false;
                 return mf
             }
@@ -1605,7 +1605,7 @@
         
         set_depth_target(texture_id, init_only, depth) {
             this.clear_depth = depth;
-            console.log("IMPLEMENT DEPTH TEXTURE TARGETS ON WEBGL")
+            //console.log("IMPLEMENT DEPTH TEXTURE TARGETS ON WEBGL")
         }
         
         end_render_targets() {
@@ -1730,35 +1730,30 @@
         alloc_array_buffer(array_buffer_id, array) {
             var gl = this.gl;
             let buf = this.array_buffers[array_buffer_id];
-            let type = gl.STATIC_DRAW;
             if(buf === undefined){
                 buf = this.array_buffers[array_buffer_id] = {
                     gl_buf: gl.createBuffer(),
-                    length: array.length
                 };
             }
-            else{
-                type = gl.DYNAMIC_DRAW;
-                buf.length = array.length;
-            }
+            buf.length = array.length;
             gl.bindBuffer(gl.ARRAY_BUFFER, buf.gl_buf);
-            gl.bufferData(gl.ARRAY_BUFFER, array, type);
+            gl.bufferData(gl.ARRAY_BUFFER, array, gl.STATIC_DRAW);
+            gl.bindBuffer(gl.ARRAY_BUFFER, null);
         }
         
         alloc_index_buffer(index_buffer_id, array) {
             var gl = this.gl;
+    
             let buf = this.index_buffers[index_buffer_id];
             if(buf === undefined){
                 buf = this.index_buffers[index_buffer_id] = {
-                    gl_buf: gl.createBuffer(),
-                    length: array.length
+                    gl_buf: gl.createBuffer()
                 };
-            }
-            else{
-                buf.length = array.length;
-            }
+            };
+            buf.length = array.length;
             gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buf.gl_buf);
             gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, array, gl.STATIC_DRAW);
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
         }
         
         alloc_texture(texture_id, width, height, data_ptr) {
@@ -1818,8 +1813,7 @@
             }
             
             gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.index_buffers[geom_ib_id].gl_buf);
-            //gl.OES_vertex_array_object.bindVertexArrayOES(0);
-            
+            this.OES_vertex_array_object.bindVertexArrayOES(null);
         }
         
         draw_call(
@@ -1840,6 +1834,7 @@
             gl.useProgram(shader.program);
             
             let vao = this.vaos[vao_id];
+
             this.OES_vertex_array_object.bindVertexArrayOES(vao.gl_vao);
             
             let index_buffer = this.index_buffers[vao.geom_ib_id];
@@ -1885,7 +1880,6 @@
             let instances = instance_buffer.length / shader.instance_slots;
             // lets do a drawcall!
             
-            
             if (this.is_main_canvas && this.xr_is_presenting) {
                 for (let i = 3; i < pass_uniforms.length; i ++) {
                     let uni = pass_uniforms[i];
@@ -1916,9 +1910,8 @@
                 }
                 this.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
             }
+            this.OES_vertex_array_object.bindVertexArrayOES(null); 
         }
-        
-        
     }
     
     // array of function id's wasm can call on us, self is pointer to WasmApp
@@ -2323,10 +2316,6 @@
         })
     }
     
-    function start_wasm(canvas, results){
-        new WasmApp(canvas, results)
-    }
-    
     function init() {
         var canvasses = document.getElementsByClassName('cx_webgl')
         for (let i = 0; i < canvasses.length; i ++) {
@@ -2351,7 +2340,8 @@
                     _console_log
                 }}))
                     .then(results => {
-                        start_wasm(canvas, results);
+                        webasm = results;
+                        new WasmApp(canvas, results);
                 }, errors => {
                     console.log("Error compiling wasm file", errors);
                 });

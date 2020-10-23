@@ -70,7 +70,7 @@ impl Blit {
     }
     
     pub fn begin_blit(&mut self, cx: &mut Cx, texture: Texture, layout: Layout) -> InstanceArea {
-        let inst = self.draw_blit(cx, texture, Rect::default());
+        let inst = self.draw_blit_rel(cx, texture, Rect::default());
         let area = inst.clone().into();
         cx.begin_turtle(layout, area);
         inst
@@ -83,14 +83,26 @@ impl Blit {
         area
     }
     
-    pub fn draw_blit_walk(&mut self, cx: &mut Cx, texture: Texture, walk: Walk) -> InstanceArea {
+     pub fn begin_blit_fill(&mut self, cx: &mut Cx, texture: Texture) -> InstanceArea {
+        let inst = self.draw_blit_rel(cx, texture, Rect::default());
+        inst
+    }
+    
+    pub fn end_blit_fill(&mut self, cx: &mut Cx, inst: &InstanceArea) -> Area {
+        let area: Area = inst.clone().into();
+        let pos = cx.get_turtle_origin();
+        area.set_rect(cx, &Rect {x: pos.x, y: pos.y, w: cx.get_width_total(), h: cx.get_height_total()});
+        area
+    }
+    
+    pub fn draw_blit(&mut self, cx: &mut Cx, texture: Texture, walk: Walk) -> InstanceArea {
         let geom = cx.walk_turtle(walk);
         let inst = self.draw_blit_abs(cx, texture, geom);
         cx.align_instance(inst);
         inst
     }
     
-    pub fn draw_blit(&mut self, cx: &mut Cx, texture: Texture, rect: Rect) -> InstanceArea {
+    pub fn draw_blit_rel(&mut self, cx: &mut Cx, texture: Texture, rect: Rect) -> InstanceArea {
         let pos = cx.get_turtle_origin();
         let inst = self.draw_blit_abs(cx, texture, Rect {x: rect.x + pos.x, y: rect.y + pos.y, w: rect.w, h: rect.h});
         cx.align_instance(inst);

@@ -365,10 +365,16 @@ impl Rect {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone,  Debug, PartialEq)]
 pub struct Anim {
     pub play: Play,
     pub tracks: Vec<Track>
+}
+
+impl Default for Anim{
+    fn default()->Anim{
+        Anim{play:Play::Cut{duration:0.0}, tracks:Vec::new()}
+    }
 }
 
 #[derive(Clone, DeTok, Debug, PartialEq)]
