@@ -314,6 +314,20 @@ pub struct HitOpt {
 
 impl Event {
     
+    pub fn is_frame_event(&self, cx:&mut Cx, area: Area)->Event{
+         match self {
+            Event::Frame(_) => {
+                for frame_area in &cx._frame_callbacks {
+                    if *frame_area == area {
+                        return self.clone()
+                    }
+                }
+            }
+            _=>()
+        }
+        Event::None
+    }
+    
     pub fn hits(&mut self, cx: &mut Cx, area: Area, opt: HitOpt) -> Event {
         match self {
             Event::KeyFocus(kf) => {
