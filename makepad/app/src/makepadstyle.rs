@@ -9,7 +9,6 @@ use crate::itemdisplay::*;
 use crate::liveitems::*;
 use crate::colorpicker::*;
 use crate::floatslider::*;
-use crate::shaderview::*;
 
 pub fn set_makepad_style(cx: &mut Cx) {
     CodeIcon::style(cx);
@@ -21,5 +20,4 @@ pub fn set_makepad_style(cx: &mut Cx) {
     ColorPicker::style(cx);
     FloatSlider::style(cx);
     LiveItemsView::style(cx);
-    ShaderView::style(cx);
 }

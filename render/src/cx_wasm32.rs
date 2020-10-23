@@ -358,6 +358,10 @@ impl Cx {
                     let mut right_input = XRInput::default();
                     let mut other_inputs = Vec::new();
                     for _ in 0..inputs_len {
+                        let skip = to_wasm.mu32();
+                        if skip == 0{
+                            continue;
+                        }
                         let mut input = XRInput::default();
                         input.active = true;
                         input.grip = to_wasm.parse_transform();
