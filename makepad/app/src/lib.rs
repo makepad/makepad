@@ -19,7 +19,6 @@ pub mod jseditor;
 pub mod plaineditor;
 pub mod itemdisplay;
 pub mod liveitems;
-pub mod shaderview;
 pub mod colorpicker;
 pub mod floatslider;
 //mod rustcompiler;

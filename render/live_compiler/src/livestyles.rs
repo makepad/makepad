@@ -11,6 +11,7 @@ use crate::ident::{Ident, IdentPath, QualifiedIdentPath};
 use crate::livetypes::*;
 use crate::detok::{DeTokParserImpl};
 use crate::colors::Color;
+use crate::math::*;
 use std::fmt;
 use crate::error::LiveError;
 
@@ -65,6 +66,9 @@ pub struct LiveStyles {
     
     // cached values from tokens
     pub floats: HashMap<LiveItemId, Float>,
+    pub vec2s: HashMap<LiveItemId, Vec2>,
+    pub vec3s: HashMap<LiveItemId, Vec3>,
+    pub vec4s: HashMap<LiveItemId, Vec4>,
     pub colors: HashMap<LiveItemId, Color>,
     pub text_styles: HashMap<LiveItemId, TextStyle>,
     pub layouts: HashMap<LiveItemId, Layout>,
@@ -98,6 +102,9 @@ pub struct LiveTokens {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LiveTokensType {
     Float,
+    Vec2,
+    Vec3,
+    Vec4,
     Color,
     TextStyle,
     Layout,
@@ -256,6 +263,15 @@ impl LiveStyles {
                 LiveTokensType::Float => {
                     self.floats.remove(&live_item_id);
                 },
+                LiveTokensType::Vec2 => {
+                    self.vec2s.remove(&live_item_id);
+                },
+                LiveTokensType::Vec3 => {
+                    self.vec3s.remove(&live_item_id);
+                },
+                LiveTokensType::Vec4 => {
+                    self.vec4s.remove(&live_item_id);
+                },
                 LiveTokensType::Color => {
                     self.colors.remove(&live_item_id);
                 },
@@ -282,84 +298,65 @@ impl LiveStyles {
             }
         }
     }
-    
-    pub fn get_float(&self, live_item_id: LiveItemId, name: &str) -> f32 {
-        let mut get_live_item_id = live_item_id;
+
+    pub fn find_remap(&self, live_item_id:LiveItemId)->LiveItemId{
         for style_index in &self.style_stack {
             if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_item_id) {
-                get_live_item_id = *fwd;
-                break;
+                return *fwd;
             }
         }
-        self.floats.get(&get_live_item_id).expect(&format!("Float not found {}", name)).value
+        live_item_id
     }
     
+    pub fn get_float(&self, live_item_id: LiveItemId, name: &str) -> f32 {
+        let live_item_id = self.find_remap(live_item_id);
+        self.floats.get(&live_item_id).expect(&format!("Float not found {}", name)).value
+    }
+
+    pub fn get_vec2(&self, live_item_id: LiveItemId, name: &str) -> Vec2 {
+        let live_item_id = self.find_remap(live_item_id);
+        *self.vec2s.get(&live_item_id).expect(&format!("Vec2 not found {}", name))
+    }
+
+    pub fn get_vec3(&self, live_item_id: LiveItemId, name: &str) -> Vec3 {
+        let live_item_id = self.find_remap(live_item_id);
+        *self.vec3s.get(&live_item_id).expect(&format!("Vec3 not found {}", name))
+    }
+
+    pub fn get_vec4(&self, live_item_id: LiveItemId, name: &str) -> Vec4 {
+        let live_item_id = self.find_remap(live_item_id);
+        *self.vec4s.get(&live_item_id).expect(&format!("Vec3 not found {}", name))
+    }
+
     pub fn get_color(&self, live_item_id: LiveItemId, name: &str) -> Color {
-        let mut get_live_item_id = live_item_id;
-        for style_index in &self.style_stack {
-            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_item_id) {
-                get_live_item_id = *fwd;
-                break;
-            }
-        }
-        *self.colors.get(&get_live_item_id).expect(&format!("Color not found {}", name))
+        let live_item_id = self.find_remap(live_item_id);
+        *self.colors.get(&live_item_id).expect(&format!("Color not found {}", name))
     }
     
     
     pub fn get_text_style(&self, live_item_id: LiveItemId, name: &str) -> TextStyle {
-        let mut get_live_item_id = live_item_id;
-        for style_index in &self.style_stack {
-            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_item_id) {
-                get_live_item_id = *fwd;
-                break;
-            }
-        }
-        *self.text_styles.get(&get_live_item_id).expect(&format!("TextStyle not found {}", name))
+        let live_item_id = self.find_remap(live_item_id);
+        *self.text_styles.get(&live_item_id).expect(&format!("TextStyle not found {}", name))
     }
     
     pub fn get_layout(&self, live_item_id: LiveItemId, name: &str) -> Layout {
-        let mut get_live_item_id = live_item_id;
-        for style_index in &self.style_stack {
-            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_item_id) {
-                get_live_item_id = *fwd;
-                break;
-            }
-        }
-        *self.layouts.get(&get_live_item_id).expect(&format!("Anim not found {}", name))
+        let live_item_id = self.find_remap(live_item_id);
+        *self.layouts.get(&live_item_id).expect(&format!("Anim not found {}", name))
     }
     
     pub fn get_walk(&self, live_item_id: LiveItemId, name: &str) -> Walk {
-        let mut get_live_item_id = live_item_id;
-        for style_index in &self.style_stack {
-            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_item_id) {
-                get_live_item_id = *fwd;
-                break;
-            }
-        }
-        *self.walks.get(&get_live_item_id).expect(&format!("Walk not found {}", name))
+        let live_item_id = self.find_remap(live_item_id);
+        *self.walks.get(&live_item_id).expect(&format!("Walk not found {}", name))
     }
     
     pub fn get_anim(&self, live_item_id: LiveItemId, name: &str) -> Anim {
-        let mut get_live_item_id = live_item_id;
-        for style_index in &self.style_stack {
-            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_item_id) {
-                get_live_item_id = *fwd;
-                break;
-            }
-        }
-        self.anims.get(&get_live_item_id).expect(&format!("Anim not found {}", name)).clone()
+        let live_item_id = self.find_remap(live_item_id);
+        self.anims.get(&live_item_id).expect(&format!("Anim not found {}", name)).clone()
     }
     
     pub fn get_shader(&self, live_item_id: LiveItemId, location_hash: u64, _module_path: &str, name: &str) -> Shader {
-        let mut get_live_item_id = live_item_id;
-        for style_index in &self.style_stack {
-            if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_item_id) {
-                get_live_item_id = *fwd;
-                break;
-            }
-        }
-        
-        let shader = self.shaders.get(&get_live_item_id);
+        let live_item_id = self.find_remap(live_item_id);
+        let shader = self.shaders.get(&live_item_id);
         if let Some(shader) = shader{
             Shader {
                 shader_id: shader.shader_id,
@@ -520,10 +517,27 @@ impl LiveStyles {
             
             match swap_live_tokens.live_tokens_type {
                 LiveTokensType::Float => {
-                    // we have to parse a float..
                     match DeTokParserImpl::new(&swap_live_tokens.tokens, self).parse_float() {
                         Err(err) => {errors.push(self.live_error_to_live_body_error(err));},
                         Ok(v) => {self.floats.insert(live_id, v);}
+                    }
+                },
+                LiveTokensType::Vec2 => {
+                    match DeTokParserImpl::new(&swap_live_tokens.tokens, self).parse_vec2() {
+                        Err(err) => {errors.push(self.live_error_to_live_body_error(err));},
+                        Ok(v) => {self.vec2s.insert(live_id, v);}
+                    }
+                },
+                LiveTokensType::Vec3=> {
+                    match DeTokParserImpl::new(&swap_live_tokens.tokens, self).parse_vec3() {
+                        Err(err) => {errors.push(self.live_error_to_live_body_error(err));},
+                        Ok(v) => {self.vec3s.insert(live_id, v);}
+                    }
+                },
+                LiveTokensType::Vec4 => {
+                    match DeTokParserImpl::new(&swap_live_tokens.tokens, self).parse_vec4() {
+                        Err(err) => {errors.push(self.live_error_to_live_body_error(err));},
+                        Ok(v) => {self.vec4s.insert(live_id, v);}
                     }
                 },
                 LiveTokensType::Color => {

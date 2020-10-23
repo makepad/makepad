@@ -28,7 +28,7 @@ pub struct XRCursor {
 }
 
 impl XRCube {
-    fn new(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         Self {
             cube: Cube::new(cx),
             _area: Area::Empty,
@@ -36,12 +36,12 @@ impl XRCube {
         }
     }
     
-    fn set_mat(&mut self, cx: &mut Cx, mat: Mat4) {
+    pub fn set_mat(&mut self, cx: &mut Cx, mat: Mat4) {
         self._mat = mat;
         self._area.write_mat4(cx, live_item_id!(makepad_render::cube::shader::transform), &mat);
     }
     
-    fn draw_cube(&mut self, cx: &mut Cx, size: Vec3, pos: Vec3) {
+    pub fn draw_cube(&mut self, cx: &mut Cx, size: Vec3, pos: Vec3) {
         self._area = self.cube.draw_cube(cx, size, pos, &self._mat).into();
     }
 }
@@ -263,6 +263,7 @@ impl XRControl {
             self::sky_color: #0;
             self::edge_color: #1;
             self::floor_color: #8;
+            
             self::shader_sky_box: Shader {
                 use makepad_render::cube::shader::*;
                 fn color_form_id() -> vec4 {
@@ -360,7 +361,7 @@ impl XRControl {
         }
         
         // ok lets update the states
-        for (id, xe) in &xr_channel.users {
+        for (id, _xe) in &xr_channel.users {
             if let Some(xa) = self.xr_avatars.get_mut(id) {
                 xa.state.join();
             }
@@ -419,8 +420,6 @@ impl XRControl {
         // lets set the left_input matrix
         self.left_hand.set_mat(cx, Mat4::from_transform(xr_event.left_input.ray));
         self.right_hand.set_mat(cx, Mat4::from_transform(xr_event.right_input.ray));
-        
-        self.space_view.set_view_transform(cx, &Mat4::identity());
         self.last_xr_update = Some(xr_event.clone());
         
         fn get_intersect_pt(window_plane: &Plane, inv_window_mat: &Mat4, ray_mat: &Mat4) -> Vec2 {

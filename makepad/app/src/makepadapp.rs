@@ -2,6 +2,7 @@
 use makepad_render::*;
 use makepad_widget::*;
 use makepad_microserde::*;
+use makepad_worlds::set_worlds_style;
 use crate::makepadwindow::*;
 use crate::makepadstorage::*;
 use crate::filetree::*;
@@ -124,6 +125,7 @@ impl MakepadApp {
                     axis: Axis::Vertical,
                     align: SplitterAlign::First,
                     pos: 200.0,
+
                     first: Box::new(DockItem::Splitter {
                         axis: Axis::Horizontal,
                         align: SplitterAlign::Last,
@@ -150,8 +152,8 @@ impl MakepadApp {
                             tabs: vec![
                                 DockTab {
                                     closeable: false,
-                                    title: "ShaderView".to_string(),
-                                    item: Panel::ShaderView
+                                    title: "WorldView".to_string(),
+                                    item: Panel::WorldView
                                 },
                             ],
                         }),
@@ -171,9 +173,9 @@ impl MakepadApp {
                                 },
                                 DockTab {
                                     closeable: false,
-                                    title: "shaderview.rs".to_string(), 
+                                    title: "treeworld.rs".to_string(), 
                                     //item: Panel::FileEditor {path: "main/makepad/makepad/app/src/shaderview.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
-                                    item: Panel::FileEditor {path: "main/makepad/widget/src/xrcontrol.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
+                                    item: Panel::FileEditor {path: "main/makepad/worlds/src/treeworld.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
                                 },
                                 
                             ],
@@ -194,9 +196,14 @@ impl MakepadApp {
                                 ]
                             }),
                             last: Box::new(DockItem::TabControl {
-                                current: 1,
+                                current: 0,
                                 previous: 0,
                                 tabs: vec![
+                                    DockTab {
+                                        closeable: false,
+                                        title: "WorldSelect".to_string(),
+                                        item: Panel::WorldSelect
+                                    },
                                     DockTab {
                                         closeable: false,
                                         title: "Item".to_string(),
@@ -224,6 +231,7 @@ impl MakepadApp {
     pub fn style(cx: &mut Cx) {
         set_widget_style(cx);
         set_makepad_style(cx);
+        set_worlds_style(cx);
     }
     
     pub fn default_layout(&mut self, cx: &mut Cx) {
