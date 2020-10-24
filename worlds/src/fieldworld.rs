@@ -3,13 +3,13 @@ use makepad_render::*;
 use crate::skybox::SkyBox;
 
 #[derive(Clone)]
-pub struct TreeWorld {
+pub struct FieldWorld {
     pub view: View,
     pub area: Area,
     pub sky_box: SkyBox
 }
 
-impl TreeWorld {
+impl FieldWorld {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             view: View::new(cx),
@@ -20,14 +20,14 @@ impl TreeWorld {
     
     pub fn style(cx: &mut Cx) {
         live_body!(cx, r#"
-            
             self::color: #E27D3A;
             self::leaf_1: #C1FF00;
             self::leaf_2: #009713;
             self::angle: 0.5;
             self::width: 0.3;
             self::alpha: 0.114;
-            self::shader: Shader { 
+            self::shader: Shader {
+                
                 use makepad_render::shader_std::prelude::*;
                 use makepad_worlds::worldview::uniforms::*;
                 
@@ -47,9 +47,8 @@ impl TreeWorld {
                     let nodesize = vec2(1.);
                     let z = 0.0;
                     let last_z = 0.0;
-                    let z_base = -1.5;
                     for i from 0 to 14 {
-                        if float(i) >= depth { 
+                        if float(i) >= depth {
                             break;
                         }
                          
@@ -60,7 +59,7 @@ impl TreeWorld {
                         if (turn_right > 0.) {
                             angle = -1.0 * angle;
                         }
-                        if(turn_fwd > 3.){ 
+                        if(turn_fwd > 3.){
                             z += 0.4 * scale.x;  
                         }
                         else{
@@ -68,15 +67,6 @@ impl TreeWorld {
                         }
                         z += sin(time + 10. * pos.x)*0.01;
                         angle += sin(time + 10. * pos.x) * 5.;
-                         
-                        let d_left = max(0.2 - length(left_input_pos - vec3(pos, z_base + z)), 0.) * 150.0;
-                        let d_right = max(0.2 - length(right_input_pos - vec3(pos, z_base + z)), 0.) * 150.0;
-                        //if depth > 11.{
-                         //   d_left *= 3.0;
-                         //   d_right *= 3.0;
-                       // }
-                        angle -= d_left;
-                        angle += d_right;
                         
                         dir = Math::rotate_2d(dir, angle * TORAD);
                         pos += dir * scale;
@@ -91,11 +81,11 @@ impl TreeWorld {
                             dir.y,
                             dir.x
                         ) 
-                    );  
+                    ); 
 
                     let v = vec4(
                         m * scale.xy + pos.xy,
-                        z_base + mix(last_z, z, geom.y),
+                        -1.5+mix(last_z, z, geom.y),
                         1.
                     ); 
                     
@@ -108,7 +98,7 @@ impl TreeWorld {
                         color = mix(self::leaf_1,self::leaf_2,sin(0.01*in_path));
                     }
                     else{
-                        color = self::color;//vec4(abs(right_input_pos.x),abs(right_input_pos.y), abs(right_input_pos.z), 1.0);//self::color;
+                        color = self::color;
                     }
                     return vec4(color.xyz * self::alpha, self::alpha); 
                 }
@@ -116,28 +106,26 @@ impl TreeWorld {
         "#)
     }
     
-    pub fn handle_tree_world(&mut self, _cx: &mut Cx, _event: &mut Event) {
+    pub fn handle_field_world(&mut self, _cx: &mut Cx, _event: &mut Event) {
         // lets see.
         
     }
     
-    pub fn draw_tree_world(&mut self, cx: &mut Cx) {
+    pub fn draw_field_world(&mut self, cx: &mut Cx) {
         self.sky_box.draw_sky_box(cx);
         
         let shader = live_shader!(cx, self::shader);
-        self.area = cx.new_instance(shader, None, 0).into();
+        /*
+        self.field_area = cx.new_instance(shader, None, 0).into();
         
-        fn recur(shader: Shader, pself: &mut TreeWorld, cx: &mut Cx, path: f32, depth: f32, max_depth: f32) {
-            let inst = cx.new_instance(shader, None, 1);
-            let data = [path, depth, 0.0];
-            inst.push_slice(cx, &data);
-            let inst = cx.new_instance(shader, None, 1);
-            let data = [path, depth, 1.0];
-            inst.push_slice(cx, &data);
-            if depth > max_depth {return}
-            recur(shader, pself, cx, path, depth + 1.0, max_depth);
-            recur(shader, pself, cx, path + (2.0f32).powf(depth), depth + 1.0, max_depth);
-        }
-        recur(shader, self, cx, 0., 0., 11.0);
+        // lets draw a grid of x times y quads.
+        
+        for let y in 0..500{
+            for let x in 0..500{
+                let inst = cx.new_instance(shader, None, 1);
+                let data = [x, y];
+                inst.push_slice(cx, &data);
+            }
+        }*/
     }
 }
