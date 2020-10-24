@@ -222,23 +222,86 @@ impl Mat4 {
         ]}
     }
     
-    pub fn rotate_tsrt(t1: Vec3, s: f32, r: Vec3, t2: Vec3) -> Mat4 {
+    pub fn rotate_txyz_s_ry_rx_txyz(t1: Vec3, s: f32, ry: f32, rx:f32, t2: Vec3) -> Mat4 {
 
-        let cx = f32::cos(r.x * TORAD);
-        let cy = f32::cos(r.y * TORAD);
-        let cz = f32::cos(r.z * TORAD);
-        let sx = f32::sin(r.x * TORAD);
-        let sy = f32::sin(r.y * TORAD);
-        let sz = f32::sin(r.z * TORAD);
+        let cx = f32::cos(rx * TORAD);
+        let cy = f32::cos(ry * TORAD);
+        //let cz = f32::cos(r.z * TORAD);
+        let sx = f32::sin(rx * TORAD);
+        let sy = f32::sin(ry * TORAD);
+        //let sz = f32::sin(r.z * TORAD);
+        // y first, then x, then z
+
+        // Y
+        // |  cy,  0,  sy  |
+        // |  0,   1,  0  |
+        // | -sy,  0,  cy  |
+
+        // X:
+        // |  1,  0,  0  |
+        // |  0,  cx, -sx  |
+        // |  0,  sx,  cx  |
+        
+        // Z:
+        // |  cz, -sz,  0  |
+        // |  sz,  cz,  0  |
+        // |  0,    0,  1  |
+
+        // X * Y
+        // | cy,           0,    sy |
+        // | -sx*-sy,     cx,   -sx*cy  |
+        // | -sy * cx,    sx,  cx*cy  |
+
+        // Z * X * Y
+        // | cz * cy + -sz * -sx *-sy,   -sz * cx,    sy *cz + -sz * -sx * cy |
+        // | sz * cy + -sx*-sy * cz,     sz * cx,   sy * sz + cz * -sz * cy  |
+        // | -sy * cx,    sx,  cx*cy  |
+        
+        
+        // Y * X * Z 
+        // | c*c,  c, s*s   |
+        // |   0,  c,  -s   |
+        // |  -s,  c*s, c*c |
+        
+         /*       
+        let m0 = s * (cz * cy + (-sz) * (-sx) *(-sy));
+        let m1 = s * (-sz * cx);
+        let m2 = s * (sy *cz + (-sz) * (-sx) * cy);
+        
+        let m4 = s * (sz * cy + (-sx)*(-sy) * cz);
+        let m5 = s * (sz * cx);
+        let m6 = s * (sy * sz + cz * (-sx) * cy);
+        
+        let m8 = s * (-sy*cx);
+        let m9 = s * (sx);
+        let m10 = s * (cx * cy);
+        */
+        
+        let m0 = s * (cy);
+        let m1 = s * (0.0);
+        let m2 = s * (sy);
+        
+        let m4 = s * (-sx*-sy);
+        let m5 = s * (cx);
+        let m6 = s * (-sx*cy);
+        
+        let m8 = s * (-sy*cx);
+        let m9 = s * (sx);
+        let m10 = s * (cx * cy);
+        
+        /*
         let m0 = s * (cy * cz + sx * sy * sz);
         let m1 = s * (-sz * cy + cz * sx * sy);
         let m2 = s * (sy * cx);
+        
         let m4 = s * (sz * cx);
         let m5 = s * (cx * cz);
         let m6 = s * (-sx);
+        
         let m8 = s * (-sy * cz + cy * sx * sz);
         let m9 = s * (sy * sz + cy * sx * cz);
         let m10 = s * (cx * cy);
+        */
         return Mat4 {v: [
             m0,
             m4,

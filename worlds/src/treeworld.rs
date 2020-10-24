@@ -21,9 +21,11 @@ impl TreeWorld {
     pub fn style(cx: &mut Cx) {
         live_body!(cx, r#"
             self::color: #f00;
+            self::leaf_1: #0f0;
+            self::leaf_2: #fff;
             self::angle: 0.5;
-            self::alpha: 0.1;
-            self::max_depth: 12.0; // careful here. set it too high and it will hang.
+            self::alpha: 0.114;
+            self::max_depth: 11.0; // careful here. set it too high and it will hang.
             self::shader: Shader {
                 
                 use makepad_render::shader_std::prelude::*;
@@ -34,7 +36,8 @@ impl TreeWorld {
                 
                 instance in_path: float;
                 instance depth: float;
-                
+                instance axis: float;
+                varying color: vec4;
                 fn vertex() -> vec4 {
                     let pos = vec2(0.0, -0.5);
                     let scale = vec2(0.2, 0.2);
@@ -43,19 +46,21 @@ impl TreeWorld {
                     let path = in_path;
                     let nodesize = vec2(1.);
                     let z = 0.0;
+                    let last_z = 0.0;
                     for i from 0 to 14 {
                         if float(i) >= depth {
                             break;
                         }
-                        
+                         
                         let turn_right = mod (path, 2.);
                         let angle = 50.*self::angle;
+                        last_z = z;
                         if (turn_right > 0.) {
                             angle = -1.0 * angle;
-                            z += 0.1 * scale.x;
+                            z += 0.4 * scale.x;
                         }
                         else{
-                            z -= 0.1 * scale.x;
+                            z -= 0.4 * scale.x;
                         }
                         angle += sin(time + 10. * pos.x) * 5.;
                         
@@ -73,10 +78,10 @@ impl TreeWorld {
                             dir.x
                         ) 
                     ); 
-                    
+
                     let v = vec4(
                         m * scale.xy + pos.xy,
-                        -1.5+z,
+                        -1.5+mix(last_z, z, geom.y),
                         1.
                     ); 
                     
@@ -84,7 +89,14 @@ impl TreeWorld {
                 }
                 
                 fn pixel() -> vec4 {
-                    return vec4(self::color.xyz * self::alpha, self::alpha);
+                    let color = vec4(0.);
+                    if depth > 11.{
+                        color = mix(self::leaf_1,self::leaf_2,sin(0.01*in_path));
+                    }
+                    else{
+                        color = self::color;
+                    }
+                    return vec4(color.xyz * self::alpha, self::alpha); 
                 }
             }
         "#)
@@ -103,7 +115,10 @@ impl TreeWorld {
         
         fn recur(shader: Shader, pself: &mut TreeWorld, cx: &mut Cx, path: f32, depth: f32, max_depth: f32) {
             let inst = cx.new_instance(shader, None, 1);
-            let data = [path, depth];
+            let data = [path, depth, 0.0];
+            inst.push_slice(cx, &data);
+            let inst = cx.new_instance(shader, None, 1);
+            let data = [path, depth, 1.0];
             inst.push_slice(cx, &data);
             if depth > max_depth {return}
             recur(shader, pself, cx, path, depth + 1.0, max_depth);

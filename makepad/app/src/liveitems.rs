@@ -260,7 +260,7 @@ impl LiveItemsView {
                 }
             }
             
-            self.view_bg.end_quad_fill(cx, &bg_inst);
+            self.view_bg.end_quad_fill(cx, bg_inst);
             
             self.scroll_view.end_view(cx);
         }

@@ -215,7 +215,7 @@ impl MakepadWindow {
                     }
                 }
                 Panel::WorldView => {
-                    self.world_view.handle_world_view(cx, event);
+                    
                 },
                 Panel::WorldSelect => {
                     self.world_view.handle_world_select(cx, event);
@@ -442,8 +442,7 @@ impl MakepadWindow {
         }) {
             match item {
                 Panel::WorldView => {
-                    let xr_is_presenting = self.desktop_window.window.xr_is_presenting(cx);
-                    self.world_view.draw_world_view_2d(cx, xr_is_presenting);
+                    self.world_view.draw_world_view_2d(cx);
                 },
                 Panel::WorldSelect => {
                     self.world_view.draw_world_select(cx);
