@@ -177,10 +177,11 @@ impl XRAvatar {
         
         let personal_mat = Mat4::from_mul(
             &Mat4::scale_translate(self.state.get_space(), 0.0, 0.0, 0.0),
-            &Mat4::rotate_tsrt(
+            &Mat4::rotate_txyz_s_ry_rx_txyz(
                 Vec3 {x: 0.0, y: 0.0, z: 1.5},
                 1.0,
-                Vec3 {x: 0.0, y: self.angle, z: 0.0},
+                self.angle,
+                0.0,
                 Vec3 {x: 0.0, y: 0.0, z: -1.5},
             )
         );
@@ -346,10 +347,11 @@ impl XRControl {
         // lets send our avatar over the socket
         let view_rect = window_view.get_rect(cx);
         
-        let window_mat = Mat4::rotate_tsrt(
+        let window_mat = Mat4::rotate_txyz_s_ry_rx_txyz(
             Vec3 {x: 0., y: -view_rect.h, z: 0.0},
             -0.0005,
-            Vec3 {x: 50.0, y: -180.0, z: 0.0},
+            -180.0,
+            -50.0,
             Vec3 {x: -0.20, y: -0.45, z: -0.3},
         );
         

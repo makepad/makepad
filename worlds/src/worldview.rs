@@ -42,6 +42,8 @@ pub struct WorldView {
     pub select_view: ScrollView,
     pub buttons: Elements<WorldType, NormalButton, NormalButton>,
     pub view: View,
+    pub bg: Quad,
+    pub xr_is_presenting: bool,
     pub viewport_3d: Viewport3D,
     pub world_type: WorldType,
     pub tree_world: TreeWorld
@@ -51,18 +53,21 @@ impl WorldView {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             view: View::new(cx),
+            bg: Quad::new(cx),
             select_view: ScrollView::new(cx),
             viewport_3d: Viewport3D::new(cx),
             buttons: Elements::new(NormalButton {
                 ..NormalButton::new(cx)
             }),
             world_type: WorldType::TreeWorld,
+            xr_is_presenting: false,
             tree_world: TreeWorld::new(cx)
         }
     }
     
     pub fn style(cx: &mut Cx) {
         live_body!(cx, r#"
+            self::color_bg: #3;
             self::uniforms: ShaderLib {
                 uniform time:float;
             }
@@ -88,7 +93,9 @@ impl WorldView {
     
     pub fn draw_world_select(&mut self, cx: &mut Cx) {
         if self.select_view.begin_view(cx, Layout::default()).is_err() {return}
-        
+        self.bg.color = live_color!(cx, self::color_bg);
+        let inst = self.bg.begin_quad_fill(cx);
+       
         let world_types = vec![WorldType::TreeWorld];
         
         for world_type in world_types {
@@ -97,33 +104,36 @@ impl WorldView {
             }).draw_normal_button(cx, &world_type.name());
         }
         
+        self.bg.end_quad_fill(cx, inst);
         self.select_view.end_view(cx);
     }
     
     pub fn handle_world_view(&mut self, cx: &mut Cx, event: &mut Event) {
-        // do shit here
-        
-        match event.is_frame_event(cx, self.view.get_view_area(cx)) {
-            Event::Frame(ae) => {
-                // lets update the shaders
-                let areas = match &self.world_type {
-                    WorldType::TreeWorld => {
-                        vec![self.tree_world.tree_area]
-                    }
-                };
-                for area in areas{ // lets find some uniforms
-                    area.write_uniform_float(cx, live_item_id!(self::uniforms::time), ae.time as f32);
-                }
-                cx.next_frame(self.view.get_view_area(cx));
-            },
-            _ => ()
+        // do 2D camera interaction.
+        if !self.xr_is_presenting{
+            self.viewport_3d.handle_viewport_2d(cx, event);
         }
+        
+        if let Some(ae) = event.is_frame_event(cx, self.view.get_view_area(cx)) {
+            // lets update the shaders
+            let areas = match &self.world_type {
+                WorldType::TreeWorld => {
+                    vec![self.tree_world.tree_area]
+                }
+            };
+            for area in areas{ // lets find some uniforms
+                area.write_uniform_float(cx, live_item_id!(self::uniforms::time), ae.time as f32);
+            }
+            cx.next_frame(self.view.get_view_area(cx));
+        }
+
         match event {
             Event::LiveRecompile(_) => {
-                self.viewport_3d.main_view.redraw_view_area(cx);
+                self.viewport_3d.view_3d.redraw_view_area(cx);
             },
             _ => ()
         }
+        
         match &self.world_type {
             WorldType::TreeWorld => {
                 self.tree_world.handle_tree_world(cx, event);
@@ -131,10 +141,14 @@ impl WorldView {
         }
     }
     
-    pub fn draw_world_view_2d(&mut self, cx: &mut Cx, xr_is_presenting: bool) {
+    pub fn draw_world_view_2d(&mut self, cx: &mut Cx) {
         // we need to draw our wold view in a 3D window here
-        if xr_is_presenting {
+        self.xr_is_presenting = cx.is_xr_presenting();
+        if self.xr_is_presenting {
             // just do some gray rect
+            self.bg.color = live_color!(cx, self::color_bg);
+            let inst = self.bg.begin_quad_fill(cx);
+            self.bg.end_quad_fill(cx, inst);
             return
         }
         

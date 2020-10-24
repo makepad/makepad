@@ -486,6 +486,16 @@ impl Cx {
         self.redraw_parent_areas.push(area);
     }
     
+    pub fn is_xr_presenting(&mut self)->bool{
+        if !self.is_in_redraw_cycle{
+            panic!("Cannot call is_xr_presenting outside of redraw flow");
+        }
+        if self.window_stack.len() == 0{
+            panic!("Can only call is_xr_presenting inside of a window");
+        }
+        self.windows[*self.window_stack.last().unwrap()].window_geom.xr_is_presenting
+    }
+    
     pub fn redraw_previous_areas(&mut self) {
         for area in self._redraw_child_areas.clone() {
             self.redraw_child_area(area);
