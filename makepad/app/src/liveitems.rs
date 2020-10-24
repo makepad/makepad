@@ -47,10 +47,14 @@ impl LiveItemsView {
             scroll_view: ScrollView::new(cx),
             undo_id: 0,
             value_text: Text {
+                z:1.0,
                 shader: live_shader!(cx, makepad_render::text::shader),
                 ..Text::new(cx)
             },
-            color_swatch: Quad::new(cx),
+            color_swatch: Quad{
+                z: 1.0,
+               ..Quad::new(cx)
+            },
             fold_captions: Elements::new(FoldCaption::new(cx)),
             color_pickers: Elements::new(ColorPicker::new(cx)),
             float_sliders: Elements::new(FloatSlider::new(cx)),
