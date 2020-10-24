@@ -361,6 +361,9 @@ impl MakepadStorage {
                             },
                             MakepadChannelMessage::ChangeFloat {live_item_id, float} => {
                                 // lets change color.
+                                if id == wsm.ids[0]{
+                                    continue
+                                }
                                 if let Some(mtb_id) = self.get_textbuffer_id_from_live_item_id(cx, live_item_id) {
                                     let mtb = &mut self.text_buffers[mtb_id.as_index()];
                                     Self::handle_changed_float(
