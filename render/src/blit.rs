@@ -88,7 +88,7 @@ impl Blit {
         inst
     }
     
-    pub fn end_blit_fill(&mut self, cx: &mut Cx, inst: &InstanceArea) -> Area {
+    pub fn end_blit_fill(&mut self, cx: &mut Cx, inst: InstanceArea) -> Area {
         let area: Area = inst.clone().into();
         let pos = cx.get_turtle_origin();
         area.set_rect(cx, &Rect {x: pos.x, y: pos.y, w: cx.get_width_total(), h: cx.get_height_total()});

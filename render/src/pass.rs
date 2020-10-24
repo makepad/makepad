@@ -102,9 +102,11 @@ impl Pass {
     }
     
     pub fn set_matrix_mode(&mut self, cx: &mut Cx, pmm: PassMatrixMode){
-        let pass_id = self.pass_id.expect("Please call set_matrix_mode after begin_pass");
-        let cxpass = &mut cx.passes[pass_id];
-        cxpass.matrix_mode = pmm;
+        if let Some(pass_id) = self.pass_id{
+            let cxpass = &mut cx.passes[pass_id];
+            cxpass.paint_dirty = true;
+            cxpass.matrix_mode = pmm;
+        }
     }
     
     pub fn end_pass(&mut self, cx: &mut Cx) {

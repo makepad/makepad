@@ -1810,7 +1810,7 @@ impl TextEditor {
         self.place_ime_and_draw_cursor_row(cx);
         self.set_indent_line_highlight_id(cx);
         self.draw_shadows(cx);
-        self.bg.end_quad_fill(cx, &self._bg_inst.take().unwrap());
+        self.bg.end_quad_fill(cx, self._bg_inst.take().unwrap());
         
         self.view.end_view(cx);
         

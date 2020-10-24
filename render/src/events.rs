@@ -314,18 +314,18 @@ pub struct HitOpt {
 
 impl Event {
     
-    pub fn is_frame_event(&self, cx:&mut Cx, area: Area)->Event{
+    pub fn is_frame_event(&self, cx:&mut Cx, area: Area)->Option<FrameEvent>{
          match self {
-            Event::Frame(_) => {
+            Event::Frame(fe) => {
                 for frame_area in &cx._frame_callbacks {
                     if *frame_area == area {
-                        return self.clone()
-                    }
+                        return Some(fe.clone())
+                    }  
                 }
             }
             _=>()
         }
-        Event::None
+        None
     }
     
     pub fn hits(&mut self, cx: &mut Cx, area: Area, opt: HitOpt) -> Event {
