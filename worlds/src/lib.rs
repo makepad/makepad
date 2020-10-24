@@ -1,6 +1,7 @@
 pub mod skybox;
 pub mod worldview;
 pub mod treeworld;
+pub mod fieldworld;
 
 use makepad_render::*;
 pub fn set_worlds_style(cx:&mut Cx){

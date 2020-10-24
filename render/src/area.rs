@@ -256,26 +256,18 @@ impl Area{
                 let draw_call = &cxview.draw_calls[inst.draw_call_id];
                 let sh = &cx.shaders[draw_call.shader_id];
                 for prop in &sh.mapping.user_uniform_props.props{
-                    if prop.ty != ty{
-                        return None
-                    }
                     if prop.live_item_id == live_item_id{
+                        if prop.ty != ty{
+                            return None
+                        }
                         return Some(prop.offset)
                     }
                 }
-                /*
-                let mut dbg = String::new();
-                for prop in &sh.mapping.uniform_props.props{
-                    dbg.push_str(&format!("name:{} offset:{}, ", prop.name, prop.offset));
-                }
-                println!("get_uniform_offset not found in [{}]", dbg);*/
             }
             _=>(),
         }
-        //println!("get_uniform_offset {} called on invalid prop", prop_name);
         None
     }
-
 
     pub fn get_read_ref<'a>(&self, cx:&'a Cx)->Option<InstanceReadRef<'a>>{
         match self{
@@ -512,6 +504,20 @@ impl Area{
                     write.push(0.);
                 }
                 write[uni_offset] = v;
+            }
+        }
+    }
+    
+    pub fn write_uniform_vec3(&self, cx:&mut Cx, live_item_id:LiveItemId, v:Vec3){
+        if let Some(uni_offset) = self.get_user_uniform_offset(cx, live_item_id, Ty::Vec3){
+            let write = self.get_user_uniforms_write_ref(cx);
+            if let Some(write) = write{
+                while uni_offset + 2 >= write.len(){
+                    write.push(0.);
+                }
+                write[uni_offset+0] = v.x;
+                write[uni_offset+1] = v.y;
+                write[uni_offset+2] = v.z;
             }
         }
     }
