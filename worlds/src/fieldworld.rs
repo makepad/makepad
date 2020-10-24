@@ -115,17 +115,17 @@ impl FieldWorld {
         self.sky_box.draw_sky_box(cx);
         
         let shader = live_shader!(cx, self::shader);
-        /*
-        self.field_area = cx.new_instance(shader, None, 0).into();
+        
+        self.area = cx.new_instance(shader, None, 0).into();
         
         // lets draw a grid of x times y quads.
         
-        for let y in 0..500{
-            for let x in 0..500{
+        for y in 0..500{
+            for x in 0..500{
                 let inst = cx.new_instance(shader, None, 1);
-                let data = [x, y];
+                let data = [x as f32, y as f32];
                 inst.push_slice(cx, &data);
             }
-        }*/
+        }
     }
 }

@@ -69,8 +69,8 @@ impl TreeWorld {
                         z += sin(time + 10. * pos.x)*0.01;
                         angle += sin(time + 10. * pos.x) * 5.;
                           
-                        let d_left = max(0.1 - length(left_input_pos - vec3(pos, z_base + z)), 0.) * 450.0;
-                        let d_right = max(0.1 - length(right_input_pos - vec3(pos, z_base + z)), 0.) * 450.0;
+                        let d_left = max(0.1 - length(left_input_pos - vec3(pos, z_base + z)), 0.) * 300.0;
+                        let d_right = max(0.1 - length(right_input_pos - vec3(pos, z_base + z)), 0.) * 300.0;
                         //if depth > 11.{
                          //   d_left *= 3.0;
                          //   d_right *= 3.0; 
