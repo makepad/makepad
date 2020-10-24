@@ -125,7 +125,7 @@ impl MakepadApp {
                     axis: Axis::Vertical,
                     align: SplitterAlign::First,
                     pos: 200.0,
-
+                    
                     first: Box::new(DockItem::Splitter {
                         axis: Axis::Horizontal,
                         align: SplitterAlign::Last,
@@ -161,29 +161,47 @@ impl MakepadApp {
                     last: Box::new(DockItem::Splitter {
                         axis: Axis::Horizontal,
                         align: SplitterAlign::Last,
-                        pos: 150.0,
-                        first: Box::new(DockItem::TabControl {
-                            current: 1,
-                            previous: 0,
-                            tabs: vec![
-                                DockTab {
-                                    closeable: false,
-                                    title: "Edit".to_string(),
-                                    item: Panel::FileEditorTarget
-                                },
-                                DockTab {
-                                    closeable: false,
-                                    title: "treeworld.rs".to_string(), 
-                                    //item: Panel::FileEditor {path: "main/makepad/makepad/app/src/shaderview.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
-                                    item: Panel::FileEditor {path: "main/makepad/worlds/src/treeworld.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
-                                },
-                                
-                            ],
+                        pos: 50.0,
+                        first: Box::new(DockItem::Splitter {
+                            axis: Axis::Vertical,
+                            align: SplitterAlign::Weighted,
+                            pos: 0.5,
+                            first: Box::new(DockItem::TabControl {
+                                current: 1,
+                                previous: 0,
+                                tabs: vec![
+                                    DockTab {
+                                        closeable: false,
+                                        title: "Edit".to_string(),
+                                        item: Panel::FileEditorTarget
+                                    },
+                                    DockTab {
+                                        closeable: true,
+                                        title: "treeworld.rs".to_string(),
+                                        //item: Panel::FileEditor {path: "main/makepad/makepad/app/src/shaderview.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
+                                        item: Panel::FileEditor {path: "main/makepad/worlds/src/treeworld.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
+                                    },
+                                    
+                                ],
+                            }),
+                            last:Box::new(DockItem::TabControl {
+                                current: 0,
+                                previous: 0,
+                                tabs: vec![
+                                    DockTab {
+                                        closeable: true,
+                                        title: "skybox.rs".to_string(),
+                                        //item: Panel::FileEditor {path: "main/makepad/makepad/app/src/shaderview.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
+                                        item: Panel::FileEditor {path: "main/makepad/worlds/src/skybox.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 3}
+                                    },
+                                    
+                                ],
+                            }),
                         }),
                         last: Box::new(DockItem::Splitter {
                             axis: Axis::Vertical,
                             align: SplitterAlign::Last,
-                            pos: 100.0,
+                            pos: 100.0, 
                             first: Box::new(DockItem::TabControl {
                                 current: 0,
                                 previous: 0,
