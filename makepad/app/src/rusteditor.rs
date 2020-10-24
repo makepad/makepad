@@ -19,7 +19,7 @@ impl RustEditor {
             view: View::new(cx),
             live_items_view: LiveItemsView::new(cx),
             splitter: Splitter {
-                pos: 120.0,
+                pos: 100.0,
                 _hit_state_margin: Some(Margin {
                     l: 3.,
                     t: 0.,
