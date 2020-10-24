@@ -20,12 +20,12 @@ impl TreeWorld {
     
     pub fn style(cx: &mut Cx) {
         live_body!(cx, r#"
-            self::color: #f00;
-            self::leaf_1: #0f0;
-            self::leaf_2: #fff;
+            self::color: #E27D3A;
+            self::leaf_1: #C1FF00;
+            self::leaf_2: #009713;
             self::angle: 0.5;
+            self::width: 0.3;
             self::alpha: 0.114;
-            self::max_depth: 11.0; // careful here. set it too high and it will hang.
             self::shader: Shader {
                 
                 use makepad_render::shader_std::prelude::*;
@@ -53,15 +53,19 @@ impl TreeWorld {
                         }
                          
                         let turn_right = mod (path, 2.);
+                        let turn_fwd = mod (path, 8.);
                         let angle = 50.*self::angle;
-                        last_z = z;
+                        last_z = z; 
                         if (turn_right > 0.) {
                             angle = -1.0 * angle;
-                            z += 0.4 * scale.x;
+                        }
+                        if(turn_fwd > 3.){
+                            z += 0.4 * scale.x;  
                         }
                         else{
-                            z -= 0.4 * scale.x;
+                             z -= 0.4 * scale.x;
                         }
+                        z += sin(time + 10. * pos.x)*0.01;
                         angle += sin(time + 10. * pos.x) * 5.;
                         
                         dir = Math::rotate_2d(dir, angle * TORAD);
@@ -72,7 +76,7 @@ impl TreeWorld {
                     let size = vec2(0.01, 0.01);
                     
                     let m = Math::rotate_2d(
-                        vec2(1.0, 0.2) * (geom.xy * nodesize - vec2(1.0, 0.5)),
+                        vec2(1.0, self::width) * (geom.xy * nodesize - vec2(1.0, 0.5)),
                         atan(
                             dir.y,
                             dir.x
@@ -124,6 +128,6 @@ impl TreeWorld {
             recur(shader, pself, cx, path, depth + 1.0, max_depth);
             recur(shader, pself, cx, path + (2.0f32).powf(depth), depth + 1.0, max_depth);
         }
-        recur(shader, self, cx, 0., 0., live_float!(cx, self::max_depth));
+        recur(shader, self, cx, 0., 0., 11.0);
     }
 }
