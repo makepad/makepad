@@ -147,7 +147,7 @@ pub struct TimerEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignalEvent {
-    pub signals: HashMap<Signal, Vec<StatusId>>
+    pub signals: HashMap<Signal, BTreeSet<StatusId>>
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -535,7 +535,7 @@ impl Signal {
 // Status
 
 
-#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
+#[derive(PartialEq, Ord, PartialOrd, Copy, Clone, Hash, Eq, Debug)]
 pub struct StatusId(pub TypeId);
 
 impl Into<StatusId> for TypeId {

@@ -36,6 +36,7 @@ impl TextBuffer {
     pub fn status_search_update() -> StatusId {uid!()}
     pub fn status_data_update() -> StatusId {uid!()}
     pub fn status_keyboard_update() -> StatusId {uid!()}
+    pub fn token_chunks_changed() -> StatusId {uid!()}
 }
 
 #[derive(Clone, Default)]
@@ -589,14 +590,23 @@ impl TextBuffer {
         //let out = self.lines.join("\n");
     }
     
-    pub fn live_edit(&mut self, start:usize, end:usize, value:&str){
+    pub fn live_edit(&mut self, start:usize, end:usize, value:&str)->bool{
+        let was_dirty = self.token_chunks_id != self.mutation_id;
         let op = self.replace_lines_with_string(start, end - start, &value);
         self.undo_stack.push(TextUndo{
             ops:vec![op],
             grouping: TextUndoGrouping::LiveEdit(0),
             cursors:TextCursorSet{set:vec![TextCursor{head:0,tail:0,max:0}], last_cursor:0, insert_undo_group:0, last_clamp_range:None}
         });
-        
+        // check if we can hotpatch tokenchunks
+        if !was_dirty && value.len() == end - start{
+            for (index, c) in value.chars().enumerate() {
+                self.flat_text[start + index] = c;
+            }
+            self.token_chunks_id = self.mutation_id;
+            return true;
+        }
+        return false;
     }
     
     pub fn undoredo(&mut self, mut text_undo: TextUndo, cursor_set: &mut TextCursorSet) -> TextUndo {

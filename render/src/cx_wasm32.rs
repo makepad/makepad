@@ -2,6 +2,7 @@ use std::mem;
 use std::ptr;
 use std::alloc;
 use crate::cx::*;
+use std::collections::BTreeSet;
 
 impl Cx {
      
@@ -412,10 +413,12 @@ impl Cx {
                 22 => { //http_send_response
                     let signal_id = to_wasm.mu32();
                     let success = to_wasm.mu32();
-                    self.signals.insert(Signal {signal_id: signal_id as usize}, vec![match success {
+                    let mut new_set = BTreeSet::new();
+                    new_set.insert(match success {
                         1 => Cx::status_http_send_ok(),
                         _ => Cx::status_http_send_fail()
-                    }]);
+                    });
+                    self.signals.insert(Signal {signal_id: signal_id as usize}, new_set);
                 },
                 23 =>{ // websocket message 
                     let vec_ptr = to_wasm.mu32() as *mut u8;

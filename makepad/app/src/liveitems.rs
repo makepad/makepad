@@ -97,6 +97,11 @@ impl LiveItemsView {
                 if let Some(_) = se.signals.get(&mtb.live_items_list.changed) {
                     self.scroll_view.redraw_view_area(cx);
                 }
+                if let Some(ids) = se.signals.get(&mtb.text_buffer.signal){
+                    if ids.contains(&TextBuffer::token_chunks_changed()){
+                        mtb.parse_live_bodies(cx);
+                    }
+                }
             },
             _ => ()
         }
@@ -309,7 +314,7 @@ impl MakepadTextBuffer {
                         && tp.eat("#") {
                         // ok so this is where live body X starts.
                         // we can use that to map a live_style token to our editor
-                        
+                         
                         if tp.cur_type() == TokenType::ParenOpen {
                             //shader_end = tp.cur_pair_offset();
                             
@@ -323,10 +328,6 @@ impl MakepadTextBuffer {
                                     lc.1 - 8,
                                     live_body
                                 ) {
-                                    // would be nice to see if it changed..
-                                    // and then broadcast it.
-                                    
-                                    
                                     self.live_items_list.live_bodies.insert(live_body_id, tp.cur_offset() + 1);
                                 }
                                 else {
@@ -409,7 +410,7 @@ impl MakepadTextBuffer {
                 _ => ()
             }
         }
-        //cx.send_signal(self.live_macros.changed, LiveMacrosView::macro_changed());
+        cx.send_signal(self.live_items_list.changed, LiveItemsView::items_changed());
     }
 }
 
