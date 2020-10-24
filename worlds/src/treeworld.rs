@@ -5,7 +5,7 @@ use crate::skybox::SkyBox;
 #[derive(Clone)]
 pub struct TreeWorld {
     pub view: View,
-    pub tree_area: Area,
+    pub area: Area,
     pub sky_box: SkyBox
 }
 
@@ -13,7 +13,7 @@ impl TreeWorld {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             view: View::new(cx),
-            tree_area: Area::Empty,
+            area: Area::Empty,
             sky_box: SkyBox::new(cx),
         }
     }
@@ -125,7 +125,7 @@ impl TreeWorld {
         self.sky_box.draw_sky_box(cx);
         
         let shader = live_shader!(cx, self::shader);
-        self.tree_area = cx.new_instance(shader, None, 0).into();
+        self.area = cx.new_instance(shader, None, 0).into();
         
         fn recur(shader: Shader, pself: &mut TreeWorld, cx: &mut Cx, path: f32, depth: f32, max_depth: f32) {
             let inst = cx.new_instance(shader, None, 1);
