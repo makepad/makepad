@@ -105,7 +105,7 @@ impl WorldView {
         self.bg.color = live_color!(cx, self::color_bg);
         let inst = self.bg.begin_quad_fill(cx);
        
-        let world_types = vec![WorldType::TreeWorld];
+        let world_types = vec![WorldType::TreeWorld, WorldType::FieldWorld];
         
         for world_type in world_types {
             self.buttons.get_draw(cx, world_type.clone(), | _cx, templ | {
@@ -160,7 +160,7 @@ impl WorldView {
             WorldType::FieldWorld => {
                 self.field_world.handle_field_world(cx, event);
             },
-        }
+        } 
     }
     
     pub fn draw_world_view_2d(&mut self, cx: &mut Cx) {
@@ -172,7 +172,7 @@ impl WorldView {
             let inst = self.bg.begin_quad_fill(cx);
             self.bg.end_quad_fill(cx, inst);
             return
-        }
+        } 
         
         if self.viewport_3d.begin_viewport_3d(cx).is_ok() {
             self.draw_world_view_3d(cx);
