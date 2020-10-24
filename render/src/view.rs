@@ -288,7 +288,7 @@ impl Cx {
                 geometry.geometry_id
             }
             else{
-                println!("HERE {}", sh.name);
+                println!("Shader has no default geometry {}", sh.name);
                 panic!("Shader has no default geometry {}", sh.name);
             }
         };

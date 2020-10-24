@@ -247,8 +247,13 @@ impl MakepadStorage {
                     if let Some(tok) = cx.live_styles.tokens.get_mut(&live_item_id) {
                         tok.tokens[0].span.end = start + new_string.len();
                     }
-                    text_buffer.live_edit(start + offset, end + offset, &new_string);
-                    cx.send_signal(text_buffer.signal, TextBuffer::status_data_update());
+                    if text_buffer.live_edit(start + offset, end + offset, &new_string){
+                        cx.send_signal(text_buffer.signal, TextBuffer::token_chunks_changed());
+                    }
+                    else{
+                        cx.send_signal(text_buffer.signal, TextBuffer::status_data_update());
+                    }
+                
                 }
             }
         }
@@ -272,8 +277,12 @@ impl MakepadStorage {
                     if let Some(tok) = cx.live_styles.tokens.get_mut(&live_item_id) {
                         tok.tokens[0].span.end = start + new_string.len();
                     }
-                    text_buffer.live_edit(start + offset, end + offset, &new_string);
-                    cx.send_signal(text_buffer.signal, TextBuffer::status_data_update());
+                    if text_buffer.live_edit(start + offset, end + offset, &new_string){
+                        cx.send_signal(text_buffer.signal, TextBuffer::token_chunks_changed());
+                    }
+                    else{
+                        cx.send_signal(text_buffer.signal, TextBuffer::status_data_update());
+                    }
                 }
             }
         }
