@@ -44,6 +44,7 @@ pub struct WorldView {
     pub view: View,
     pub bg: Quad,
     pub xr_is_presenting: bool,
+    pub last_xr_update_event: Option<XRUpdateEvent>,
     pub viewport_3d: Viewport3D,
     pub world_type: WorldType,
     pub tree_world: TreeWorld
@@ -61,6 +62,7 @@ impl WorldView {
             }),
             world_type: WorldType::TreeWorld,
             xr_is_presenting: false,
+            last_xr_update_event: None, 
             tree_world: TreeWorld::new(cx)
         }
     }
@@ -70,6 +72,8 @@ impl WorldView {
             self::color_bg: #2;
             self::uniforms: ShaderLib {
                 uniform time:float;
+                uniform left_input_pos: vec3;
+                uniform right_input_pos: vec3;
             }
         "#);
     }
@@ -120,14 +124,21 @@ impl WorldView {
                 WorldType::TreeWorld => {
                     vec![self.tree_world.tree_area]
                 }
-            };
+            }; 
             for area in areas{ // lets find some uniforms
                 area.write_uniform_float(cx, live_item_id!(self::uniforms::time), ae.time as f32);
-            }
+                if let Some(xu) = &self.last_xr_update_event{
+                    area.write_uniform_vec3(cx, live_item_id!(self::uniforms::left_input_pos), xu.left_input.ray.position);
+                    area.write_uniform_vec3(cx, live_item_id!(self::uniforms::right_input_pos), xu.right_input.ray.position);
+                }  
+            }  
             cx.next_frame(self.view.get_view_area(cx));
         }
 
         match event {
+            Event::XRUpdate(xu)=>{
+               self.last_xr_update_event = Some(xu.clone());
+            },
             Event::LiveRecompile(_) => {
                 self.viewport_3d.view_3d.redraw_view_area(cx);
             },
