@@ -236,8 +236,8 @@ impl FoldCaption {
         cx.reset_turtle_pos();
         
         self.text.text_style = live_text_style!(cx, self::text_style_label);
-        let wleft = cx.get_width_left()-10.;
-        self.text.wrapping = Wrapping::Ellipsis(wleft);
+        let wleft = cx.get_width_left();
+        self.text.wrapping = Wrapping::Ellipsis(wleft - 10.0);
         self.text.color = self.animator.last_color(cx, live_item_id!(makepad_render::text::shader::color));
         self._text_area = self.text.draw_text(cx, label);
 
