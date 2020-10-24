@@ -2,6 +2,7 @@
 use makepad_render::*;
 use makepad_widget::*;
 use crate::treeworld::TreeWorld;
+use crate::fieldworld::FieldWorld;
 
 #[derive(Clone)]
 pub struct WorldSelect {
@@ -16,12 +17,14 @@ pub enum WorldSelectEvent {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Hash, Ord)]
 pub enum WorldType {
     TreeWorld,
+    FieldWorld,
 }
 
 impl WorldType {
     fn name(&self) -> String {
         match self {
             Self::TreeWorld => "TreeWorld".to_string(),
+            Self::FieldWorld => "FieldWorld".to_string(),
         }
     }
 }
@@ -47,7 +50,8 @@ pub struct WorldView {
     pub last_xr_update_event: Option<XRUpdateEvent>,
     pub viewport_3d: Viewport3D,
     pub world_type: WorldType,
-    pub tree_world: TreeWorld
+    pub tree_world: TreeWorld,
+    pub field_world: FieldWorld,
 }
 
 impl WorldView {
@@ -63,7 +67,8 @@ impl WorldView {
             world_type: WorldType::TreeWorld,
             xr_is_presenting: false,
             last_xr_update_event: None, 
-            tree_world: TreeWorld::new(cx)
+            tree_world: TreeWorld::new(cx),
+            field_world: FieldWorld::new(cx)
         }
     }
     
@@ -122,7 +127,10 @@ impl WorldView {
             // lets update the shaders
             let areas = match &self.world_type {
                 WorldType::TreeWorld => {
-                    vec![self.tree_world.tree_area]
+                    vec![self.tree_world.area]
+                }
+                WorldType::FieldWorld => {
+                    vec![self.field_world.area]
                 }
             }; 
             for area in areas{ // lets find some uniforms
@@ -148,6 +156,9 @@ impl WorldView {
         match &self.world_type {
             WorldType::TreeWorld => {
                 self.tree_world.handle_tree_world(cx, event);
+            },
+            WorldType::FieldWorld => {
+                self.field_world.handle_field_world(cx, event);
             },
         }
     }
@@ -185,12 +196,15 @@ impl WorldView {
             WorldType::TreeWorld => {
                 self.tree_world.draw_tree_world(cx);
             }
+            WorldType::FieldWorld => {
+                self.field_world.draw_field_world(cx);
+            }
         }
         
         self.view.end_view(cx,);
         cx.next_frame(self.view.get_view_area(cx));
     }
     
-}
+} 
 
 
