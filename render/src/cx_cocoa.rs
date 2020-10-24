@@ -1,7 +1,7 @@
 //  Life is too short for leaky abstractions.
 // Gleaned/learned/templated from https://github.com/tomaka/winit/blob/master/src/platform/macos/
 
-use std::collections::HashMap;
+use std::collections::{HashMap,BTreeSet};
 use crate::cx_apple::*;
 use std::os::raw::c_void;
 use std::sync::{Mutex};
@@ -677,7 +677,9 @@ impl CocoaApp {
     
     pub fn send_signal_event(&mut self, signal: Signal, status: StatusId) {
         let mut signals = HashMap::new();
-        signals.insert(signal, vec![status]);
+        let mut new_set = BTreeSet::new();
+        new_set.insert(status);
+        signals.insert(signal, new_set);
         self.do_callback(&mut vec![
             Event::Signal(SignalEvent {
                 signals: signals,

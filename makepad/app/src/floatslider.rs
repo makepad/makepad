@@ -156,6 +156,13 @@ impl FloatSlider {
                 return self.handle_finger(cx, fe.rel)
                 
             },
+            Event::FingerScroll(fs) => {
+                self.norm_value += fs.scroll.x / 1000.0;
+                self.norm_value = self.norm_value.min(1.0).max(0.0);
+                self.scaled_value = self.norm_value * (self.max.unwrap_or(1.0) - self.min.unwrap_or(0.0)) + self.min.unwrap_or(0.0);
+                self.animator.area.write_float(cx, live_item_id!(self::shader_slider::norm_value), self.norm_value);
+                return FloatSliderEvent::Change {scaled_value: self.scaled_value};
+            },
             _ => ()
         }
         FloatSliderEvent::None

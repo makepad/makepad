@@ -144,7 +144,7 @@ pub struct Cx {
     pub frame_callbacks: Vec<Area>,
     pub _frame_callbacks: Vec<Area>,
     
-    pub signals: HashMap<Signal, Vec<StatusId >>,
+    pub signals: HashMap<Signal, BTreeSet<StatusId >>,
     
     pub live_styles: LiveStyles,
     
@@ -747,11 +747,13 @@ impl Cx {
         }
         if let Some(statusses) = self.signals.get_mut(&signal) {
             if statusses.iter().find( | s | **s == status).is_none() {
-                statusses.push(status);
+                statusses.insert(status);
             }
         }
         else {
-            self.signals.insert(signal, vec![status]);
+            let mut new_set = BTreeSet::new();
+            new_set.insert(status);
+            self.signals.insert(signal, new_set);
         }
     }
     
