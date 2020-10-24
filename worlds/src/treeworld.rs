@@ -75,7 +75,7 @@ impl TreeWorld {
                          //   d_left *= 3.0;
                          //   d_right *= 3.0;
                        // }
-                        angle += d_left;
+                        angle -= d_left;
                         angle += d_right;
                         
                         dir = Math::rotate_2d(dir, angle * TORAD);
