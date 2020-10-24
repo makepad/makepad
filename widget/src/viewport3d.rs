@@ -76,7 +76,7 @@ impl Viewport3D {
     pub fn pass_set_matrix_mode(&mut self, cx: &mut Cx) {
         self.pass.set_matrix_mode(cx, PassMatrixMode::Projection {
             fov_y: 40.0,
-            near: 1.0,
+            near: 0.1,
             far: 1000.0,
             cam: Mat4::rotate_txyz_s_ry_rx_txyz(
                 Vec3 {
