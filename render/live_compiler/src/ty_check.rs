@@ -639,8 +639,8 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                         message: format!(
                             "too many components for call to constructor `{}`: expected {}, got {}",
                             ty_lit,
-                            actual_size,
                             expected_size,
+                            actual_size,
                         )
                             .into(),
                     });

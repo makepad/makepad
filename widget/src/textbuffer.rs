@@ -564,7 +564,6 @@ impl TextBuffer {
         }
     }
     
-    
     pub fn replace_line_with_string(&mut self, start: usize, row: usize, col: usize, len: usize, string: &str) -> TextOp {
         let rep_line: Vec<char> = string.chars().collect();
         let rep_line_chars = rep_line.len();
