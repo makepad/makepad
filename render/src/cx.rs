@@ -25,6 +25,7 @@ pub use crate::menu::*;
 pub use crate::shader::*;
 pub use crate::livemacros::*;
 pub use crate::geometrygen::*;
+pub use crate::gpuinfo::*;
 pub use crate::uid;
 
 #[cfg(all(not(feature = "ipc"), target_os = "linux"))]
@@ -69,17 +70,17 @@ pub enum PlatformType {
     Windows,
     OSX,
     Linux,
-    Web{protocol:String, hostname:String, port:u16, pathname:String, search:String, hash:String}
+    Web {protocol: String, hostname: String, port: u16, pathname: String, search: String, hash: String}
 }
 
 impl PlatformType {
     pub fn is_desktop(&self) -> bool {
         match self {
-            PlatformType::Unknown =>true,
+            PlatformType::Unknown => true,
             PlatformType::Windows => true,
             PlatformType::OSX => true,
             PlatformType::Linux => true,
-            PlatformType::Web{..} => false
+            PlatformType::Web {..} => false
         }
     }
 }
@@ -88,7 +89,7 @@ pub struct Cx {
     pub running: bool,
     pub counter: usize,
     pub platform_type: PlatformType,
-    
+    pub gpu_info: GpuInfo,
     pub windows: Vec<CxWindow>,
     pub windows_free: Vec<usize>,
     pub passes: Vec<CxPass>,
@@ -102,9 +103,9 @@ pub struct Cx {
     pub textures_free: Vec<usize>,
     
     pub geometries: Vec<CxGeometry>,
-
+    
     pub shaders: Vec<CxShader>,
-
+    
     pub is_in_redraw_cycle: bool,
     pub default_dpi_factor: f32,
     pub current_dpi_factor: f32,
@@ -152,7 +153,7 @@ pub struct Cx {
     
     pub panic_now: bool,
     pub panic_redraw: bool,
-
+    
     pub platform: CxPlatform,
 }
 
@@ -196,8 +197,9 @@ impl Default for Cx {
         Self {
             counter: 0,
             platform_type: PlatformType::Unknown,
+            gpu_info: GpuInfo::default(),
             running: true,
-
+            
             windows: Vec::new(),
             windows_free: Vec::new(),
             passes: Vec::new(),
@@ -210,7 +212,7 @@ impl Default for Cx {
             textures_free: Vec::new(),
             shaders: Vec::new(),
             //shader_recompiles: Vec::new(),
-
+            
             geometries: Vec::new(),
             
             default_dpi_factor: 1.0,
@@ -262,7 +264,7 @@ impl Default for Cx {
             panic_redraw: false,
             
             platform: CxPlatform {..Default::default()},
-
+            
         }
     }
 }
@@ -330,25 +332,25 @@ impl Cx {
     pub fn compute_passes_to_repaint(&mut self, passes_todo: &mut Vec<usize>, windows_need_repaint: &mut usize) {
         passes_todo.truncate(0);
         
-        loop{
+        loop {
             let mut altered = false; // yes this is horrible but im tired and i dont know why recursion fails
-            for pass_id in 0..self.passes.len(){
-                if self.passes[pass_id].paint_dirty{
-                    let other = match self.passes[pass_id].dep_of{
-                         CxPassDepOf::Pass(dep_of_pass_id) => {
-                             Some(dep_of_pass_id)
-                         }
-                         _=>None
+            for pass_id in 0..self.passes.len() {
+                if self.passes[pass_id].paint_dirty {
+                    let other = match self.passes[pass_id].dep_of {
+                        CxPassDepOf::Pass(dep_of_pass_id) => {
+                            Some(dep_of_pass_id)
+                        }
+                        _ => None
                     };
-                    if let Some(other) =other{
-                        if !self.passes[other].paint_dirty{
+                    if let Some(other) = other {
+                        if !self.passes[other].paint_dirty {
                             self.passes[other].paint_dirty = true;
                             altered = true;
                         }
                     }
                 }
             }
-            if ! altered{
+            if !altered {
                 break
             }
         }
@@ -361,7 +363,7 @@ impl Cx {
                         *windows_need_repaint += 1
                     },
                     CxPassDepOf::Pass(dep_of_pass_id) => {
-                        if pass_id == dep_of_pass_id{
+                        if pass_id == dep_of_pass_id {
                             eprintln!("WHAAAT");
                         }
                         for insert_before in 0..passes_todo.len() {
@@ -486,11 +488,11 @@ impl Cx {
         self.redraw_parent_areas.push(area);
     }
     
-    pub fn is_xr_presenting(&mut self)->bool{
-        if !self.is_in_redraw_cycle{
+    pub fn is_xr_presenting(&mut self) -> bool {
+        if !self.is_in_redraw_cycle {
             panic!("Cannot call is_xr_presenting outside of redraw flow");
         }
-        if self.window_stack.len() == 0{
+        if self.window_stack.len() == 0 {
             panic!("Can only call is_xr_presenting inside of a window");
         }
         self.windows[*self.window_stack.last().unwrap()].window_geom.xr_is_presenting
@@ -787,7 +789,7 @@ impl Cx {
         }
     }
     
-    pub fn call_live_recompile_event<F>(&mut self, changed_live_bodies:BTreeSet<LiveBodyId>, errors: Vec<LiveBodyError>, mut event_handler: F)
+    pub fn call_live_recompile_event<F>(&mut self, changed_live_bodies: BTreeSet<LiveBodyId>, errors: Vec<LiveBodyError>, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
         self.call_event_handler(&mut event_handler, &mut Event::LiveRecompile(LiveRecompileEvent {
@@ -798,7 +800,7 @@ impl Cx {
     
     pub fn status_http_send_ok() -> StatusId {uid!()}
     pub fn status_http_send_fail() -> StatusId {uid!()}
-
+    
     
     pub fn debug_draw_tree_recur(&mut self, dump_instances: bool, s: &mut String, view_id: usize, depth: usize) {
         if view_id >= self.views.len() {
@@ -869,7 +871,7 @@ macro_rules!main_app {
         //TODO do this with a macro to generate both entrypoints for App and Cx
         let mut cx = Cx::default();
         cx.style();
-        $app::style(&mut cx);
+        $ app::style(&mut cx);
         cx.init_live_styles();
         let mut app = $ app::new(&mut cx);
         let mut cxafterdraw = CxAfterDraw::new(&mut cx);
@@ -891,7 +893,7 @@ macro_rules!wasm_app {
         pub extern "C" fn create_wasm_app() -> u32 {
             let mut cx = Box::new(Cx::default());
             cx.style();
-            $app::style(&mut cx);
+            $ app::style(&mut cx);
             cx.init_live_styles();
             let app = Box::new( $ app::new(&mut cx));
             let cxafterdraw = Box::new(CxAfterDraw::new(&mut cx));
