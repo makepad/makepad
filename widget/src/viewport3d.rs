@@ -22,7 +22,7 @@ impl Viewport3D {
         Self {
             pass: Pass::default(),
             camera_center: Vec3 {x: 0.0, y: 0.0, z: 1.1 + 1.5},
-            camera_pos: Vec3 {x: 0.0, y: 0.0, z: -1.1},
+            camera_pos: Vec3 {x: 0.0, y: -0.5, z: -1.1},
             camera_rot: Vec3 {x: 0.0, y: 0.0, z: 0.0},
             camera_start: None,
             clear_color: Color::parse_hex_str("040").unwrap(),
