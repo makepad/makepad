@@ -19,7 +19,8 @@ impl RustEditor {
             view: View::new(cx),
             live_items_view: LiveItemsView::new(cx),
             splitter: Splitter {
-                pos: 100.0,
+                pos: 125.0,
+                align: SplitterAlign::Last,
                 _hit_state_margin: Some(Margin {
                     l: 3.,
                     t: 0.,
@@ -69,11 +70,6 @@ impl RustEditor {
         
         if mtb.live_items_list.visible_editors{ 
             self.splitter.begin_splitter(cx); 
-            
-            self.live_items_view.draw_live_items(cx, mtb, &mut self.text_editor);  
-            
-            self.splitter.mid_splitter(cx);
-            
         }
             
         Self::update_token_chunks(cx, mtb, search_index);
@@ -86,6 +82,11 @@ impl RustEditor {
             self.text_editor.end_text_editor(cx, &mut mtb.text_buffer);
         }
         if mtb.live_items_list.visible_editors{
+            
+            self.splitter.mid_splitter(cx);
+
+            self.live_items_view.draw_live_items(cx, mtb, &mut self.text_editor);  
+
             self.splitter.end_splitter(cx);
         }
         self.view.end_view(cx);

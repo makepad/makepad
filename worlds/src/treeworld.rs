@@ -36,7 +36,7 @@ impl TreeWorld {
                 
                 instance in_path: float;
                 instance depth: float;
-                instance axis: float;
+
                 varying color: vec4;
                 fn vertex() -> vec4 {
                     let pos = vec2(0.0, -0.5);
@@ -71,10 +71,7 @@ impl TreeWorld {
                           
                         let d_left = max(0.1 - length(left_input_pos - vec3(pos, z_base + z)), 0.) * 300.0;
                         let d_right = max(0.1 - length(right_input_pos - vec3(pos, z_base + z)), 0.) * 300.0;
-                        //if depth > 11.{
-                         //   d_left *= 3.0;
-                         //   d_right *= 3.0; 
-                       // }
+
                         angle -= d_left;
                         angle += d_right;
                         
@@ -104,7 +101,7 @@ impl TreeWorld {
                 
                 fn pixel() -> vec4 {
                     let color = vec4(0.);
-                    if depth > 11.{
+                    if depth > 12.{ 
                         color = mix(self::leaf_1,self::leaf_2,sin(0.01*in_path));
                     }
                     else{
@@ -129,15 +126,12 @@ impl TreeWorld {
         
         fn recur(shader: Shader, pself: &mut TreeWorld, cx: &mut Cx, path: f32, depth: f32, max_depth: f32) {
             let inst = cx.new_instance(shader, None, 1);
-            let data = [path, depth, 0.0];
-            inst.push_slice(cx, &data);
-            let inst = cx.new_instance(shader, None, 1);
-            let data = [path, depth, 1.0];
+            let data = [path, depth];
             inst.push_slice(cx, &data);
             if depth > max_depth {return}
             recur(shader, pself, cx, path, depth + 1.0, max_depth);
             recur(shader, pself, cx, path + (2.0f32).powf(depth), depth + 1.0, max_depth);
         }
-        recur(shader, self, cx, 0., 0., 11.0);
+        recur(shader, self, cx, 0., 0., 12.0);
     }
 }
