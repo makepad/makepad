@@ -248,7 +248,7 @@ impl Cx {
     
     pub fn webgl_compile_all_shaders(&mut self) {
         let options = ShaderCompileOptions {
-            gather_all: !self.platform.gpu_spec_is_low_on_uniforms,
+            gather_all: !self.gpu_info.is_low_on_uniform_vectors(),
             create_const_table: false,
             no_const_collapse: false
         };
@@ -277,7 +277,7 @@ impl Cx {
     
     pub fn webgl_update_all_shaders(&mut self, errors:&mut Vec<LiveBodyError>)  {
         let options = ShaderCompileOptions {
-            gather_all: !self.platform.gpu_spec_is_low_on_uniforms,
+            gather_all: !self.gpu_info.is_low_on_uniform_vectors(),
             create_const_table: true,
             no_const_collapse: false
         };

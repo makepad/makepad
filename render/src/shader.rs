@@ -3,6 +3,7 @@ use makepad_live_compiler::ty::Ty;
 use makepad_live_compiler::ident::Ident;
 use makepad_live_compiler::shaderast::{ShaderAst, Decl};
 use makepad_live_compiler::analyse::ShaderCompileOptions;
+use std::collections::HashMap;
 
 pub enum ShaderCompileResult{
     Nop,
@@ -60,6 +61,7 @@ pub struct InstanceProp {
 
 #[derive(Debug, Default, Clone)]
 pub struct InstanceProps {
+    pub prop_map: HashMap<LiveItemId, usize>,
     pub props: Vec<InstanceProp>,
     pub total_slots: usize,
 }
@@ -75,6 +77,7 @@ pub struct UniformProp {
 
 #[derive(Debug, Default, Clone)]
 pub struct UniformProps {
+    pub prop_map: HashMap<LiveItemId, usize>,
     pub props: Vec<UniformProp>,
     pub total_slots: usize,
 }
@@ -119,8 +122,10 @@ impl InstanceProps {
     pub fn construct(in_props: &Vec<PropDef>) -> InstanceProps {
         let mut offset = 0;
         let mut out_props = Vec::new();
+        let mut prop_map = HashMap::new();
         for prop in in_props {
             let slots = prop.ty.size();
+            prop_map.insert(prop.live_item_id, out_props.len());
             out_props.push(InstanceProp {
                 live_item_id: prop.live_item_id,
                 ty: prop.ty.clone(),
@@ -131,6 +136,7 @@ impl InstanceProps {
             offset += slots
         };
         InstanceProps {
+            prop_map,
             props: out_props,
             total_slots: offset
         }
@@ -140,6 +146,7 @@ impl InstanceProps {
 impl UniformProps {
     pub fn construct(in_props: &Vec<PropDef>) -> UniformProps {
         let mut out_props = Vec::new();
+        let mut prop_map = HashMap::new();
         let mut offset = 0;
         
         for prop in in_props {
@@ -151,6 +158,7 @@ impl UniformProps {
             if slots == 2 && (offset & 1) != 0 {
                 panic!("Please re-order uniform {} to be size-2 aligned", prop.name);
             }
+            prop_map.insert(prop.live_item_id, out_props.len());
             out_props.push(UniformProp {
                 live_item_id: prop.live_item_id,
                 ty: prop.ty.clone(),
@@ -164,6 +172,7 @@ impl UniformProps {
             offset += 4 - (offset & 3);
         }
         UniformProps {
+            prop_map,
             props: out_props,
             total_slots: offset
         }

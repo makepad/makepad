@@ -36,7 +36,11 @@ impl Cx {
                     break;
                 },
                 1 => { // fetch_deps
-                    self.platform.gpu_spec_is_low_on_uniforms = to_wasm.mu32() > 0;
+                    self.gpu_info.init_from_info(
+                        to_wasm.mu32(), // min_uniforms
+                        to_wasm.parse_string(), // min_uniforms
+                        to_wasm.parse_string() // min_uniforms
+                    );
                     self.platform_type = PlatformType::Web{
                          port:to_wasm.mu32() as u16,
                          protocol:to_wasm.parse_string(),
@@ -765,7 +769,6 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
 #[derive(Clone)]
 pub struct CxPlatform {
     pub is_initialized: bool,
-    pub gpu_spec_is_low_on_uniforms: bool,
     pub window_geom: WindowGeom,
     pub from_wasm: FromWasm,
     pub vertex_buffers: usize,
@@ -781,7 +784,6 @@ impl Default for CxPlatform {
     fn default() -> CxPlatform {
         CxPlatform {
             is_initialized: false,
-            gpu_spec_is_low_on_uniforms: false,
             window_geom: WindowGeom::default(),
             from_wasm: FromWasm::new(),
             vertex_buffers: 0,

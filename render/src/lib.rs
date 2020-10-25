@@ -58,6 +58,7 @@ mod geometry;
 mod shader;
 mod cube;
 mod shader_std;
+mod gpuinfo;
 
 pub use crate::cx::*;
 pub use crate::quad::*;

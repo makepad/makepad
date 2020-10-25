@@ -52,8 +52,6 @@ impl Cube {
     
     pub fn draw_cube(&mut self, cx: &mut Cx, size: Vec3, pos: Vec3, transform: &Mat4) -> InstanceArea {
         let inst = cx.new_instance(self.shader, None, 1);
-        if inst.need_uniforms_now(cx) {
-        }
         //println!("{:?} {}", area, cx.current_draw_list_id);
         inst.push_slice(cx, &transform.v);
         let data = [
