@@ -235,13 +235,13 @@ impl Area{
                 let cxview = &cx.views[inst.view_id];
                 let draw_call = &cxview.draw_calls[inst.draw_call_id];
                 let sh = &cx.shaders[draw_call.shader_id];
-                for prop in &sh.mapping.instance_props.props{
-                    if prop.live_item_id == live_item_id{
-                        if prop.ty != ty{
-                            panic!("Type wrong of live_id fetch in shader:{}, passed as arg: {}", prop.ty, ty);
-                        }
-                        return Some(prop.offset)
+
+                if let Some(prop_id) = sh.mapping.instance_props.prop_map.get(&live_item_id){
+                    let prop = &sh.mapping.instance_props.props[*prop_id];
+                    if prop.ty != ty{
+                        return None;//panic!("Type wrong of live_id fetch in shader:{}, passed as arg: {}", prop.ty, ty);
                     }
+                    return Some(prop.offset)
                 }
             }
             _=>(),
@@ -255,13 +255,12 @@ impl Area{
                 let cxview = &cx.views[inst.view_id];
                 let draw_call = &cxview.draw_calls[inst.draw_call_id];
                 let sh = &cx.shaders[draw_call.shader_id];
-                for prop in &sh.mapping.user_uniform_props.props{
-                    if prop.live_item_id == live_item_id{
-                        if prop.ty != ty{
-                            return None
-                        }
-                        return Some(prop.offset)
+                if let Some(prop_id) = sh.mapping.user_uniform_props.prop_map.get(&live_item_id){
+                    let prop = &sh.mapping.user_uniform_props.props[*prop_id];
+                    if prop.ty != ty{
+                        return None
                     }
+                    return Some(prop.offset)
                 }
             }
             _=>(),
@@ -500,9 +499,6 @@ impl Area{
         if let Some(uni_offset) = self.get_user_uniform_offset(cx, live_item_id, Ty::Float){
             let write = self.get_user_uniforms_write_ref(cx);
             if let Some(write) = write{
-                while uni_offset >= write.len(){
-                    write.push(0.);
-                }
                 write[uni_offset] = v;
             }
         }
@@ -512,63 +508,12 @@ impl Area{
         if let Some(uni_offset) = self.get_user_uniform_offset(cx, live_item_id, Ty::Vec3){
             let write = self.get_user_uniforms_write_ref(cx);
             if let Some(write) = write{
-                while uni_offset + 2 >= write.len(){
-                    write.push(0.);
-                }
                 write[uni_offset+0] = v.x;
                 write[uni_offset+1] = v.y;
                 write[uni_offset+2] = v.z;
             }
         }
     } 
-/*
-    pub fn push_uniform_vec2f(&self, cx:&mut Cx,  x:f32, y:f32){
-        let draw_list = &mut cx.draw_lists[self.draw_list_id];
-        if draw_list.redraw_id != self.redraw_id {
-            println!("uniform_vec2f called on invalid area pointer, use mark/sweep correctly!");
-            return
-        }
-        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
-        draw_call.uniforms.push(x);
-        draw_call.uniforms.push(y);
-    }
-
-    pub fn push_uniform_vec3f(&mut self, cx:&mut Cx, x:f32, y:f32, z:f32){
-        let draw_list = &mut cx.draw_lists[self.draw_list_id];
-        if draw_list.redraw_id != self.redraw_id {
-            println!("uniform_vec3f called on invalid area pointer, use mark/sweep correctly!");
-            return
-        }
-        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
-        draw_call.uniforms.push(x);
-        draw_call.uniforms.push(y);
-        draw_call.uniforms.push(z);
-    }
-
-    pub fn push_uniform_vec4f(&self, cx:&mut Cx, x:f32, y:f32, z:f32, w:f32){
-        let draw_list = &mut cx.draw_lists[self.draw_list_id];
-        if draw_list.redraw_id != self.redraw_id {
-            println!("uniform_vec4f called on invalid area pointer, use mark/sweep correctly!");
-            return
-        }
-        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
-        draw_call.uniforms.push(x);
-        draw_call.uniforms.push(y);
-        draw_call.uniforms.push(z);
-        draw_call.uniforms.push(w);
-    }
-
-    pub fn push_uniform_mat4(&self, cx:&mut Cx, v:&Mat4){
-        let draw_list = &mut cx.draw_lists[self.draw_list_id];
-        if draw_list.redraw_id != self.redraw_id {
-            println!("uniform_mat4 called on invalid area pointer, use mark/sweep correctly!");
-            return
-        }
-        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
-        for i in 0..16{
-            draw_call.uniforms.push(v.v[i]);
-        }
-    }    */
 }
 
 impl Into<Area> for InstanceArea{
@@ -664,6 +609,57 @@ impl InstanceArea{
         draw_call.do_v_scroll = ver;
     }
 
+    pub fn is_first_instance(&self)->bool{
+        self.instance_offset == 0
+    }
+
+    pub fn get_user_uniform_offset(sh:&CxShader, live_item_id:LiveItemId, ty:Ty)->Option<usize>{
+        if let Some(prop_id) = sh.mapping.user_uniform_props.prop_map.get(&live_item_id){
+            let prop = &sh.mapping.user_uniform_props.props[*prop_id];
+            if prop.ty != ty{
+                return None
+            }
+            return Some(prop.offset)
+        }
+        None
+    }
+    
+    pub fn write_uniform_float(&self, cx:&mut Cx, live_item_id:LiveItemId, v:f32){
+        let cxview = &mut cx.views[self.view_id];
+        let draw_call = &mut cxview.draw_calls[self.draw_call_id];
+        let sh = &cx.shaders[draw_call.shader_id];
+
+        if let Some(uni_offset) = Self::get_user_uniform_offset(sh, live_item_id, Ty::Float){
+            draw_call.user_uniforms[uni_offset] = v;
+        }
+    }
+    
+    pub fn get_texture_offset(sh:&CxShader, live_item_id:LiveItemId, ty:Ty)->Option<usize>{
+        for (index, prop) in sh.mapping.textures.iter().enumerate(){
+            if prop.live_item_id == live_item_id{
+                return Some(index)
+            }
+        }
+        None
+    }
+    
+    pub fn write_texture_2d_id(&self, cx:&mut Cx, live_item_id:LiveItemId, texture_id: usize){
+        let cxview = &mut cx.views[self.view_id];
+        let draw_call = &mut cxview.draw_calls[self.draw_call_id];
+        let sh = &cx.shaders[draw_call.shader_id];
+
+        if let Some(tex_offset) = Self::get_texture_offset(sh, live_item_id, Ty::Float){
+            draw_call.textures_2d[tex_offset] = texture_id as u32;
+        }
+    }
+
+    pub fn write_texture_2d(&self, cx:&mut Cx, live_item_id:LiveItemId, texture: Texture){
+        self.write_texture_2d_id(cx, live_item_id, texture.texture_id);
+    }
+
+
+
+/*
     pub fn need_uniforms_now(&self, cx:&mut Cx)->bool{
         let cxview = &mut cx.views[self.view_id];
         let draw_call = &mut cxview.draw_calls[self.draw_call_id];
@@ -750,5 +746,5 @@ impl InstanceArea{
         for i in 0..16{
             draw_call.user_uniforms.push(v.v[i]);
         }
-    }
+    }*/
 }

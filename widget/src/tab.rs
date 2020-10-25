@@ -6,9 +6,9 @@ use crate::tabclose::*;
 pub struct Tab {
     pub bg: Quad,
     pub text: Text,
-    pub tab_close: TabClose,
+   // pub tab_close: TabClose,
     pub label: String,
-    pub is_closeable: bool,
+    //pub is_closeable: bool,
     pub animator: Animator,
     pub z: f32,
     pub abs_origin: Option<Vec2>,
@@ -36,10 +36,10 @@ impl Tab {
     pub fn new(cx: &mut Cx) -> Self {
         let mut tab = Self {
             label: "Tab".to_string(),
-            is_closeable: true,
+            //is_closeable: true,
             z: 0.,
             bg: Quad ::new(cx),
-            tab_close: TabClose::new(cx),
+            //tab_close: TabClose::new(cx),
             text: Text{z:0.1,..Text::new(cx)},
             animator: Animator::default(),
             abs_origin: None,
@@ -202,8 +202,13 @@ impl Tab {
         self.animator.set_anim_as_last_values(&self.anim_default(cx));
     }
     
+    pub fn close_tab(&mut self, cx: &mut Cx){
+        self._close_anim_rect = self._bg_area.get_rect(cx);
+        self.animator.play_anim(cx, self.anim_close(cx));
+    }
+    
     pub fn handle_tab(&mut self, cx: &mut Cx, event: &mut Event) -> TabEvent {
-        
+        /*
         if !self.animator.term_anim_playing() {
             match self.tab_close.handle_tab_close(cx, event) {
                 ButtonEvent::Down => {
@@ -213,7 +218,7 @@ impl Tab {
                 },
                 _ => ()
             }
-        }
+        }*/
         
         match event.hits(cx, self._bg_area, HitOpt::default()) {
             Event::Animate(ae) => {
@@ -334,10 +339,11 @@ impl Tab {
             };
             let bg_inst = self.bg.begin_quad(cx, layout);
             bg_inst.push_last_color(cx, &self.animator, live_item_id!(self::shader_bg::border_color));
+            /*
             if self.is_closeable {
                 self.tab_close.draw_tab_close(cx);
                 cx.turtle_align_y();
-            }
+            }*/
             // push the 2 vars we added to bg shader
             self.text.z = self.z;
             self.text.text_style = live_text_style!(cx, self::text_style_title);

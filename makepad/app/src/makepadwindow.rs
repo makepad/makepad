@@ -428,20 +428,20 @@ impl MakepadWindow {
             // this draws the tabs, so we can customimze it
             match tab.item {
                 Panel::FileTree => {
-                    let tab = tab_control.get_draw_tab(cx, &tab.title, selected, tab.closeable);
+                    let tab = tab_control.get_draw_tab(cx, &tab.title, selected/*, tab.closeable*/);
                     if tab.begin_tab(cx).is_ok() {
                         file_panel.draw_file_panel_tab(cx);
                         tab.end_tab(cx);
                     };
                 }
                 Panel::SearchResults => {
-                    let tab = tab_control.get_draw_tab(cx, &tab.title, selected, tab.closeable);
+                    let tab = tab_control.get_draw_tab(cx, &tab.title, selected/*, tab.closeable*/);
                     if tab.begin_tab(cx).is_ok() {
                         search_results.draw_search_result_tab(cx, &build_manager.search_index);
                         tab.end_tab(cx);
                     };
                 }
-                _ => tab_control.draw_tab(cx, &tab.title, selected, tab.closeable)
+                _ => tab_control.draw_tab(cx, &tab.title, selected/*, tab.closeable*/)
             }
         }) {
             match item {
@@ -476,6 +476,8 @@ impl MakepadWindow {
                         file_editor.set_scroll_pos_on_load(*scroll_pos);
                     }
                     file_editor.draw_file_editor(cx, text_buffer, &mut build_manager.search_index);
+                    // draw the little editor close button over it
+                    
                 }
             }
         }

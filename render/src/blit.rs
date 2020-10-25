@@ -111,11 +111,10 @@ impl Blit {
     
     pub fn draw_blit_abs(&mut self, cx: &mut Cx, texture: Texture, rect: Rect) -> InstanceArea {
         let inst = cx.new_instance_draw_call(self.shader, None, 1);
-        if inst.need_uniforms_now(cx) {
-            inst.push_uniform_float(cx, if self.do_scroll {1.0}else {0.0});
-            inst.push_uniform_float(cx, self.alpha);
-            inst.push_uniform_texture_2d(cx, texture);
-        }
+        
+        inst.write_uniform_float(cx, live_item_id!(self::shader::alpha), self.alpha);
+        inst.write_texture_2d(cx, live_item_id!(self::shader::texturez), texture);
+
         //println!("{:?} {}", area, cx.current_draw_list_id);
         let data = [
             /*x,y,w,h*/rect.x,

@@ -800,6 +800,7 @@ impl HubBuilder {
                                 }
                             }
                             else {
+                                println!("GOT ERRORS {:}", errors.len());
                                 build_result = BuildResult::Error;
                             }
                         }

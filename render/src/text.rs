@@ -181,10 +181,10 @@ impl Text {
         let text_style = &self.text_style;
         let brightness = text_style.brightness;
         let curve = text_style.curve;
-        if aligned.inst.need_uniforms_now(cx) {
-            aligned.inst.push_uniform_texture_2d_id(cx, cx.fonts_atlas.texture_id);
-            aligned.inst.push_uniform_float(cx, brightness);
-            aligned.inst.push_uniform_float(cx, curve);
+        if aligned.inst.is_first_instance() {
+            aligned.inst.write_texture_2d_id(cx, live_item_id!(self::shader::texturez), cx.fonts_atlas.texture_id);
+            aligned.inst.write_uniform_float(cx, live_item_id!(self::shader::brightness), brightness);
+            aligned.inst.write_uniform_float(cx, live_item_id!(self::shader::curve), curve);
         }
         return aligned
     }
