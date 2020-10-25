@@ -19,7 +19,7 @@ impl SkyBox{
             self::floor_color: #8;
 
             self::size: vec3(200.0, 100.0, 200.0);
-            self::pos: vec3(0.0, 49.0, 0.);
+            self::pos: vec3(0.0, 50.0, 0.);
 
             self::shader_sky_box: Shader {
                 use makepad_render::cube::shader::*;
