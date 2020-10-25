@@ -3,7 +3,7 @@ use makepad_microserde::*;
 use std::fmt;
 
 
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, SerBin, DeBin, PartialEq, Debug)]
 pub struct Mat4 {
     pub v: [f32; 16],
 }
@@ -199,7 +199,7 @@ impl Mat4 {
         ]}
     }
     
-    pub fn from_transform(transform: Transform) -> Mat4 {
+    pub fn transformation(transform: Transform) -> Mat4 {
         let q = transform.orientation;
         let t = transform.position;
         return Mat4 {v: [
@@ -222,7 +222,7 @@ impl Mat4 {
         ]}
     }
     
-    pub fn rotate_txyz_s_ry_rx_txyz(t1: Vec3, s: f32, ry: f32, rx:f32, t2: Vec3) -> Mat4 {
+    pub fn txyz_s_ry_rx_txyz(t1: Vec3, s: f32, ry: f32, rx:f32, t2: Vec3) -> Mat4 {
 
         let cx = f32::cos(rx * TORAD);
         let cy = f32::cos(ry * TORAD);
@@ -345,7 +345,29 @@ impl Mat4 {
         ]}
     }
     
-    pub fn scale_translate(s: f32, x: f32, y: f32, z: f32) -> Mat4 {
+    pub fn translation(x: f32, y: f32, z: f32) -> Mat4 {
+        return Mat4 {v: [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            x,
+            y,
+            z,
+            1.0
+        ]}
+        
+    }
+    
+    pub fn scaled_translation(s: f32, x: f32, y: f32, z: f32) -> Mat4 {
         return Mat4 {v: [
             s,
             0.0,
@@ -367,7 +389,7 @@ impl Mat4 {
         
     }
     
-    pub fn rotate(rx: f32, ry: f32, rz: f32) -> Mat4 {
+    pub fn rotation(rx: f32, ry: f32, rz: f32) -> Mat4 {
         const TORAD: f32 = 0.017453292519943295;
         let cx = f32::cos(rx * TORAD);
         let cy = f32::cos(ry * TORAD);
@@ -444,7 +466,7 @@ impl Mat4 {
         }
     }
     
-    pub fn from_mul(a: &Mat4, b: &Mat4) -> Mat4 {
+    pub fn mul(a: &Mat4, b: &Mat4) -> Mat4 {
         // this is probably stupid. Programmed JS for too long.
         let a = &a.v;
         let b = &b.v;

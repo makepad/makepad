@@ -1,14 +1,24 @@
 
 use makepad_render::*;
+use makepad_microserde::*;
 use std::collections::{HashMap, BTreeMap};
 
 #[derive(Clone, Eq, Copy, Ord, PartialOrd, PartialEq, Hash, Default)]
 pub struct XRUserId(pub u32);
 
+#[derive(Clone, Default, SerBin, DeBin)]
+pub struct XRChannelUser {
+    head_transform: Transform,
+    left_input: XRInput,
+    right_input: XRInput,
+    window_mat: Mat4,
+}
+
 #[derive(Clone, Default)]
 pub struct XRChannel {
     pub self_id: XRUserId,
-    pub users: HashMap<XRUserId, XRUpdateEvent>,
+    pub self_user: XRChannelUser,
+    pub users: HashMap<XRUserId, XRChannelUser>,
     pub last_times: HashMap<XRUserId, f64>
 }
 
@@ -156,7 +166,7 @@ pub struct XRAvatar {
     angle: f32,
     ui: XRCube,
     ui_rect: Rect,
-    last_xr_event: Option<XRUpdateEvent>
+    last_user: Option<XRChannelUser>
 }
 
 impl XRAvatar {
@@ -165,7 +175,7 @@ impl XRAvatar {
             state: XRAvatarState::Joining(1.0),
             left_hand: XRCube::new(cx),
             right_hand: XRCube::new(cx),
-            last_xr_event: None,
+            last_user: None,
             angle: 180.0,
             head: XRCube::new(cx),
             ui: XRCube::new(cx),
@@ -173,11 +183,12 @@ impl XRAvatar {
         }
     }
     
-    fn update_avatar(&mut self, cx: &mut Cx, xr_event: Option<&XRUpdateEvent>, ui_mat: Mat4, ui_rect: Rect) {
+    
+    fn update_avatar(&mut self, cx: &mut Cx, user: Option<&XRChannelUser>, ui_rect: Rect) {
         
-        let personal_mat = Mat4::from_mul(
-            &Mat4::scale_translate(self.state.get_space(), 0.0, 0.0, 0.0),
-            &Mat4::rotate_txyz_s_ry_rx_txyz(
+        let personal_mat = Mat4::mul(
+            &Mat4::scaled_translation(self.state.get_space(), 0.0, 0.0, 0.0),
+            &Mat4::txyz_s_ry_rx_txyz(
                 Vec3 {x: 0.0, y: 0.0, z: 1.5},
                 1.0,
                 self.angle,
@@ -185,17 +196,17 @@ impl XRAvatar {
                 Vec3 {x: 0.0, y: 0.0, z: -1.5},
             )
         );
-        let xr_event = if let Some(xe) = xr_event {
-            self.last_xr_event = Some(xe.clone());
+        let user = if let Some(xe) = user {
+            self.last_user = Some(xe.clone());
             xe
         } else {
-            if let Some(xe) = &self.last_xr_event {xe} else {return}
+            if let Some(xe) = &self.last_user {xe} else {return}
         };
         
-        self.left_hand.set_mat(cx, Mat4::from_mul(&Mat4::from_transform(xr_event.left_input.ray), &personal_mat));
-        self.right_hand.set_mat(cx, Mat4::from_mul(&Mat4::from_transform(xr_event.right_input.ray), &personal_mat));
-        self.head.set_mat(cx, Mat4::from_mul(&Mat4::from_transform(xr_event.head_transform), &personal_mat));
-        self.ui.set_mat(cx, Mat4::from_mul(&ui_mat, &personal_mat));
+        self.left_hand.set_mat(cx, Mat4::mul(&Mat4::transformation(user.left_input.ray), &personal_mat));
+        self.right_hand.set_mat(cx, Mat4::mul(&Mat4::transformation(user.right_input.ray), &personal_mat));
+        self.head.set_mat(cx, Mat4::mul(&Mat4::transformation(user.head_transform), &personal_mat));
+        self.ui.set_mat(cx, Mat4::mul(&user.window_mat, &personal_mat));
         self.ui_rect = ui_rect;
     }
     
@@ -226,11 +237,14 @@ pub struct XRControl {
     pub last_xr_update: Option<XRUpdateEvent>,
     
     pub xr_avatars: BTreeMap<XRUserId, XRAvatar>,
-
+    
     pub left_hand: XRCube,
     pub right_hand: XRCube,
     pub left_cursor: XRCursor,
     pub right_cursor: XRCursor,
+    
+    pub window_mat: Option<Mat4>,
+    
 }
 
 pub enum XRControlEvent {
@@ -248,7 +262,20 @@ impl XRControl {
             left_cursor: XRCursor::new(cx),
             right_cursor: XRCursor::new(cx),
             xr_avatars: BTreeMap::new(),
+            window_mat: None,
         }
+    }
+    
+    fn get_window_matrix(view_rect: Rect, align: Vec2, translate: Vec3) -> Mat4 {
+        Mat4::txyz_s_ry_rx_txyz(
+            Vec3 {x: -view_rect.w * align.x, y: -view_rect.h * align.y, z: 0.0},
+            -0.0005,
+            -180.0,
+            -30.0,
+            // this is the position. lets make it 0
+            translate
+            //Vec3 {x: -0.20, y: -0.45, z: -0.3},
+        )
     }
     
     pub fn style(cx: &mut Cx) {
@@ -269,7 +296,7 @@ impl XRControl {
         "#)
     }
     
-    pub fn process_avatar_state(&mut self, cx: &mut Cx, xr_channel: &XRChannel, ui_mat: Mat4, ui_rect: Rect) {
+    pub fn process_avatar_state(&mut self, cx: &mut Cx, xr_channel: &XRChannel, ui_rect: Rect) {
         
         // compute ordered circle
         let mut circle = Vec::new();
@@ -319,7 +346,7 @@ impl XRControl {
         let mut remove = Vec::new();
         for (id, xa) in &mut self.xr_avatars {
             
-            xa.update_avatar(cx, xr_channel.users.get(id), ui_mat, ui_rect);
+            xa.update_avatar(cx, xr_channel.users.get(id), ui_rect);
             xa.state.tick();
             
             if xr_channel.users.get(id).is_none() {
@@ -340,30 +367,66 @@ impl XRControl {
         &mut self,
         cx: &mut Cx,
         xr_event: &XRUpdateEvent,
-        xr_channel: &XRChannel,
+        xr_channel: &mut XRChannel,
         window_view: &View
     ) -> Vec<Event> {
         
         // lets send our avatar over the socket
         let view_rect = window_view.get_rect(cx);
+        // lets set the left_input matrix
+        self.left_hand.set_mat(cx, Mat4::transformation(xr_event.left_input.ray));
+        self.right_hand.set_mat(cx, Mat4::transformation(xr_event.right_input.ray));
         
-        let window_mat = Mat4::rotate_txyz_s_ry_rx_txyz(
-            Vec3 {x: 0., y: -view_rect.h, z: 0.0},
-            -0.0005,
-            -180.0,
-            -50.0,
-            Vec3 {x: -0.20, y: -0.45, z: -0.3},
-        );
+        if xr_event.left_input.buttons[1].pressed {
+            self.window_mat = Some(Mat4::mul(
+                &Self::get_window_matrix(
+                    view_rect,
+                    Vec2 {x: 0.25, y: 0.6},
+                    Vec3 {x: 0.0, y: 0.0, z: -0.1}
+                ),
+                &Mat4::transformation(
+                    xr_event.left_input.ray
+                ),
+            )); 
+        }
+        else if xr_event.right_input.buttons[1].pressed {
+            self.window_mat = Some(Mat4::mul(
+                &Self::get_window_matrix(
+                    view_rect,
+                    Vec2 {x: 0.75, y: 0.6},
+                    Vec3 {x: 0.0, y: 0.0, z: -0.1}
+                ),
+                &Mat4::transformation(
+                    xr_event.right_input.ray
+                ),
+            )); 
+        }
+        else if self.window_mat.is_none() {
+            self.window_mat = Some(Self::get_window_matrix(
+                view_rect,
+                Vec2 {x: 0.0, y: 1.0},
+                Vec3 {x: -0.20, y: -0.45, z: -0.3}
+            ));
+        }
         
+        // we do a scale 
+        if xr_event.left_input.buttons[1].pressed && xr_event.right_input.buttons[1].pressed{
+            // check if last had both, ifnot we mark beginning of scaling
+            
+        }
+        
+        let window_mat = self.window_mat.unwrap();
         let inv_window_mat = window_mat.invert();
         window_view.set_view_transform(cx, &window_mat);
         
-        // lets make a test with just us.
-        self.process_avatar_state(cx, xr_channel, window_mat, view_rect);
+        xr_channel.self_user.left_input = xr_event.left_input.clone();
+        xr_channel.self_user.right_input = xr_event.right_input.clone();
+        xr_channel.self_user.head_transform = xr_event.head_transform.clone();
+        xr_channel.self_user.window_mat = window_mat;
         
-        // lets set the left_input matrix
-        self.left_hand.set_mat(cx, Mat4::from_transform(xr_event.left_input.ray));
-        self.right_hand.set_mat(cx, Mat4::from_transform(xr_event.right_input.ray));
+        // lets make a test with just us.
+        self.process_avatar_state(cx, xr_channel, view_rect);
+        
         self.last_xr_update = Some(xr_event.clone());
         
         fn get_intersect_pt(window_plane: &Plane, inv_window_mat: &Mat4, ray_mat: &Mat4) -> Vec2 {

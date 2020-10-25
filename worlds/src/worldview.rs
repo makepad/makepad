@@ -159,7 +159,7 @@ impl WorldView {
             },
             WorldType::FieldWorld => {
                 self.field_world.handle_field_world(cx, event);
-            },
+            }, 
         } 
     }
     

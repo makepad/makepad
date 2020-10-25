@@ -195,7 +195,7 @@ impl FloatSlider {
         let k = self.slider.draw_quad(cx, Walk {
             margin: Margin::left(pad),
             width: Width::FillPad(pad),
-            height: Height::Fix(20.0 * height_scale)
+            height: Height::Fix(35.0 * height_scale)
         });
         // lets put a hsv int here
         k.push_float(cx, self.norm_value);

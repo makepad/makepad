@@ -520,7 +520,7 @@ impl Area{
                 write[uni_offset+2] = v.z;
             }
         }
-    }
+    } 
 /*
     pub fn push_uniform_vec2f(&self, cx:&mut Cx,  x:f32, y:f32){
         let draw_list = &mut cx.draw_lists[self.draw_list_id];

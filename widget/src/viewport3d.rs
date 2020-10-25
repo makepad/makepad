@@ -78,7 +78,7 @@ impl Viewport3D {
             fov_y: 40.0,
             near: 0.1,
             far: 1000.0,
-            cam: Mat4::rotate_txyz_s_ry_rx_txyz(
+            cam: Mat4::txyz_s_ry_rx_txyz(
                 Vec3 {
                     x: self.camera_pos.x + self.camera_center.x,
                     y: self.camera_pos.y + self.camera_center.y,

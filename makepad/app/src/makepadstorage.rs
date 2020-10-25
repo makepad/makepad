@@ -116,7 +116,7 @@ pub struct MakepadTextBuffer {
 #[derive(Clone, SerBin, DeBin)]
 pub enum MakepadChannelMessage {
     Connect,
-    XRUpdate {event: XRUpdateEvent},
+    XRChannelUpdate {self_user: XRChannelUser},
     ChangeAll {path: String, code: String, cursors: TextCursorSet},
     ChangeColor {live_item_id: LiveItemId, rgba: Color},
     ChangeFloat {live_item_id: LiveItemId, float: Float},
@@ -304,10 +304,10 @@ impl MakepadStorage {
                 Ok(wsm) => {
                     for (id, m) in wsm.messages {
                         match m {
-                            MakepadChannelMessage::XRUpdate {event} => {
+                            MakepadChannelMessage::XRChannelUpdate {self_user} => {
                                 if id != wsm.ids[0]{
                                     let xr_id = XRUserId(id);
-                                    self.xr_channel.users.insert(xr_id, event.clone());
+                                    self.xr_channel.users.insert(xr_id, self_user.clone());
                                     self.xr_channel.last_times.insert(xr_id, cx.anim_time);
                                 }
                                 // maybe we can remove users if we havent heard from them for like 10 seconds.
