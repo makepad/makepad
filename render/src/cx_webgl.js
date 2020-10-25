@@ -46,7 +46,7 @@
             return pos;
         }
         
-        fetch_deps(caps) {
+        fetch_deps(gpu_info) {
             let port;
             if (!location.port) {
                 if (location.protocol == "https:") {
@@ -59,9 +59,13 @@
             else {
                 port = parseInt(location.port);
             }
-            let pos = this.fit(3);
+            let pos = this.fit(2);
             this.mu32[pos ++] = 1;
-            this.mu32[pos ++] = caps.gpu_spec_is_low_on_uniforms? 1: 0;
+            this.mu32[pos ++] = gpu_info.min_uniforms;
+            this.send_string(gpu_info.vendor);
+            this.send_string(gpu_info.renderer);
+
+            pos = this.fit(1);
             this.mu32[pos ++] = port;
             this.send_string(location.protocol);
             this.send_string(location.hostname);
@@ -388,7 +392,6 @@
             let pos = this.fit(1);
             this.mu32[pos] = 0;
         }
-        
     }
     
     
@@ -425,10 +428,10 @@
             // create initial to_wasm
             this.to_wasm = new ToWasm(this);
             
+            
+            
             // fetch dependencies
-            this.to_wasm.fetch_deps({
-                gpu_spec_is_low_on_uniforms: this.gpu_spec_is_low_on_uniforms
-            });
+            this.to_wasm.fetch_deps(this.gpu_info);
             
             this.do_wasm_io();
             
@@ -1396,12 +1399,18 @@
             // check uniform count
             var max_vertex_uniforms = gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS);
             var max_fragment_uniforms = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS);
-            if (max_vertex_uniforms < 512 || max_fragment_uniforms < 512) {
-                this.gpu_spec_is_low_on_uniforms = true
+            this.gpu_info = {
+                min_uniforms: Math.min(max_vertex_uniforms, max_fragment_uniforms),
+                vendor: "unknown",
+                renderer: "unknown"
             }
-            else {
-                this.gpu_spec_is_low_on_uniforms = false
+            let debug_info = gl.getExtension('WEBGL_debug_renderer_info');
+
+            if(debug_info){
+                this.gpu_info.vendor = gl.getParameter(debug_info.UNMASKED_VENDOR_WEBGL);
+                this.gpu_info.renderer = gl.getParameter(debug_info.UNMASKED_RENDERER_WEBGL);
             }
+            
             //gl.EXT_blend_minmax = gl.getExtension('EXT_blend_minmax')
             //gl.OES_texture_half_float_linear = gl.getExtension('OES_texture_half_float_linear')
             //gl.OES_texture_float_linear = gl.getExtension('OES_texture_float_linear')
@@ -1533,6 +1542,9 @@
                 let xr_webgllayer = this.xr_session.renderState.baseLayer;
                 this.gl.bindFramebuffer(gl.FRAMEBUFFER, xr_webgllayer.framebuffer);
                 gl.viewport(0, 0, xr_webgllayer.framebufferWidth, xr_webgllayer.framebufferHeight);
+                
+                // quest 1 is 3648
+                // quest 2 is 4096
                 
                 let left_view = this.xr_pose.views[0];
                 let right_view = this.xr_pose.views[1];

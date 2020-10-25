@@ -1847,8 +1847,8 @@ impl TextEditor {
                 self.cursor.z = rc.z + 0.1;
                 
                 let inst = self.cursor.draw_quad_rel(cx, Rect {x: rc.x - origin.x, y: rc.y - origin.y, w: rc.w, h: rc.h});
-                if inst.need_uniforms_now(cx) {
-                    inst.push_uniform_float(cx, self._cursor_blink_flipflop);
+                if inst.is_first_instance() {
+                    inst.write_uniform_float(cx, live_item_id!(self::shader_cursor::blink), self._cursor_blink_flipflop);
                     //blink
                 }
             }

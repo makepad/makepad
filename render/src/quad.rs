@@ -99,8 +99,7 @@ impl Quad {
     
     pub fn draw_quad_abs(&mut self, cx: &mut Cx, rect: Rect) -> InstanceArea {
         let inst = cx.new_instance(self.shader, None, 1);
-        if inst.need_uniforms_now(cx) {
-        }
+
         //println!("{:?} {}", area, cx.current_draw_list_id);
         let data = [
             /*x,y,w,h*/rect.x,

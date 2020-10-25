@@ -196,7 +196,7 @@ impl TabControl {
         Ok(())
     }
     
-    pub fn get_draw_tab(&mut self, cx: &mut Cx, label: &str, selected: bool, closeable: bool) -> &mut Tab {
+    pub fn get_draw_tab(&mut self, cx: &mut Cx, label: &str, selected: bool/*, closeable: bool*/) -> &mut Tab {
         let new_tab = self.tabs.get(self._tab_id_alloc).is_none();
         let tab = self.tabs.get_draw(cx, self._tab_id_alloc, | _cx, tmpl | tmpl.clone());
         if selected {
@@ -204,7 +204,7 @@ impl TabControl {
         }
         self._tab_id_alloc += 1;
         tab.label = label.to_string();
-        tab.is_closeable = closeable;
+        //tab.is_closeable = closeable;
         if new_tab {
             tab.set_tab_state(cx, selected, self._focussed);
         }
@@ -214,8 +214,8 @@ impl TabControl {
         tab
     }
     
-    pub fn draw_tab(&mut self, cx: &mut Cx, label: &str, selected: bool, closeable: bool) {
-        let tab = self.get_draw_tab(cx, label, selected, closeable);
+    pub fn draw_tab(&mut self, cx: &mut Cx, label: &str, selected: bool/*, closeable: bool*/) {
+        let tab = self.get_draw_tab(cx, label, selected/*, closeable*/);
         tab.draw_tab(cx);
     }
     
@@ -228,7 +228,7 @@ impl TabControl {
                 self.drag_tab.abs_origin = Some(Vec2 {x: fe.abs.x - fe.rel_start.x, y: fe.abs.y - fe.rel_start.y});
                 let origin_tab = self.tabs.get_draw(cx, *id, | _cx, tmpl | tmpl.clone());
                 self.drag_tab.label = origin_tab.label.clone();
-                self.drag_tab.is_closeable = origin_tab.is_closeable;
+                //self.drag_tab.is_closeable = origin_tab.is_closeable;
                 self.drag_tab.draw_tab(cx);
                 
                 self.drag_tab_view.end_view(cx);
