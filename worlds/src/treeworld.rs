@@ -38,8 +38,8 @@ impl TreeWorld {
                 instance depth: float;
 
                 varying color: vec4;
-                fn vertex() -> vec4 {
-                    let pos = vec2(0.0, -0.5);
+                fn vertex() -> vec4 {  
+                    let pos = vec2(0.0, 0.5);
                     let scale = vec2(0.2, 0.2);
                     let dir = vec2(0.0, 0.8);
                     let smaller = vec2(.85, 0.85);

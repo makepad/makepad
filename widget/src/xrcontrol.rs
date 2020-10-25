@@ -405,7 +405,7 @@ impl XRControl {
             self.window_mat = Some(Self::get_window_matrix(
                 view_rect,
                 Vec2 {x: 0.0, y: 1.0},
-                Vec3 {x: -0.20, y: -0.45, z: -0.3}
+                Vec3 {x: -0.20, y: 0.75, z: -0.3}
             ));
         }
         
