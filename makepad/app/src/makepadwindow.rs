@@ -120,13 +120,17 @@ impl MakepadWindow {
         
         match event {
             Event::XRUpdate(xu) => { // handle all VR updates here.
-                MakepadStorage::send_websocket_message(cx, MakepadChannelMessage::XRUpdate{event:xu.clone()});
+                
+                
                 let mut events = self.xr_control.handle_xr_control(
                     cx,
                     xu,
                     &mut makepad_storage.xr_channel,
                     &self.desktop_window.main_view
                 );
+                MakepadStorage::send_websocket_message(cx, MakepadChannelMessage::XRChannelUpdate {
+                    self_user: makepad_storage.xr_channel.self_user.clone()
+                });
                 for event in &mut events {
                     match event {
                         Event::FingerHover(fe) => {
@@ -412,7 +416,7 @@ impl MakepadWindow {
     ) {
         if self.desktop_window.begin_desktop_window(cx, Some(menu)).is_err() {return}
         
-         
+        
         self.dock.draw_dock(cx);
         
         let dock_items = &mut makepad_state.windows[window_index].dock_items;
@@ -481,8 +485,8 @@ impl MakepadWindow {
             self.xr_control.draw_xr_control(cx);
         }
         self.desktop_window.end_desktop_window(cx);
-    } 
-     
+    }
+    
     pub fn ensure_unique_tab_title_for_file_editors(&mut self, cx: &mut Cx, window_index: usize, makepad_state: &mut MakepadState) {
         // we walk through the dock collecting tab titles, if we run into a collision
         // we need to find the shortest uniqueness
