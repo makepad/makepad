@@ -1452,7 +1452,7 @@
         
         xr_start_presenting() {
             if (this.xr_can_present) {
-                navigator.xr.requestSession('immersive-vr').then(xr_session => {
+                navigator.xr.requestSession('immersive-vr', {requiredFeatures: ['local-floor']}).then(xr_session => {
                     
                     let xr_layer = new XRWebGLLayer(xr_session, this.gl, {
                         antialias: false,
@@ -1464,7 +1464,7 @@
                     });
                     
                     xr_session.updateRenderState({baseLayer: xr_layer});
-                    xr_session.requestReferenceSpace("local").then(xr_reference_space => {
+                    xr_session.requestReferenceSpace("local-floor").then(xr_reference_space => {
                         window.localStorage.setItem("xr_presenting", "true");
                         
                         this.xr_reference_space = xr_reference_space;
