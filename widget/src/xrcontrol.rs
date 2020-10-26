@@ -203,9 +203,9 @@ impl XRAvatar {
             if let Some(xe) = &self.last_user {xe} else {return}
         };
         
-        self.left_hand.set_mat(cx, Mat4::mul(&Mat4::transformation(user.left_input.ray), &personal_mat));
-        self.right_hand.set_mat(cx, Mat4::mul(&Mat4::transformation(user.right_input.ray), &personal_mat));
-        self.head.set_mat(cx, Mat4::mul(&Mat4::transformation(user.head_transform), &personal_mat));
+        self.left_hand.set_mat(cx, Mat4::mul(&user.left_input.ray.to_mat4(), &personal_mat));
+        self.right_hand.set_mat(cx, Mat4::mul(&user.right_input.ray.to_mat4(), &personal_mat));
+        self.head.set_mat(cx, Mat4::mul(&user.head_transform.to_mat4(), &personal_mat));
         self.ui.set_mat(cx, Mat4::mul(&user.window_mat, &personal_mat));
         self.ui_rect = ui_rect;
     }
@@ -242,9 +242,8 @@ pub struct XRControl {
     pub right_hand: XRCube,
     pub left_cursor: XRCursor,
     pub right_cursor: XRCursor,
-    
+    pub smooth_window: Option<Transform>,
     pub window_mat: Option<Mat4>,
-    
 }
 
 pub enum XRControlEvent {
@@ -262,6 +261,7 @@ impl XRControl {
             left_cursor: XRCursor::new(cx),
             right_cursor: XRCursor::new(cx),
             xr_avatars: BTreeMap::new(),
+            smooth_window:None,
             window_mat: None,
         }
     }
@@ -374,32 +374,43 @@ impl XRControl {
         // lets send our avatar over the socket
         let view_rect = window_view.get_rect(cx);
         // lets set the left_input matrix
-        self.left_hand.set_mat(cx, Mat4::transformation(xr_event.left_input.ray));
-        self.right_hand.set_mat(cx, Mat4::transformation(xr_event.right_input.ray));
+        self.left_hand.set_mat(cx, xr_event.left_input.ray.to_mat4());
+        self.right_hand.set_mat(cx, xr_event.right_input.ray.to_mat4());
         
         if xr_event.left_input.buttons[1].pressed {
+            // if the distance between smooth and left is small, smooth it, otherwise set it
+            if let Some(smooth_window) = &mut self.smooth_window{
+                *smooth_window = Transform::from_lerp(*smooth_window, xr_event.left_input.ray, 0.15);
+            }
+            else{
+                self.smooth_window = Some(xr_event.left_input.ray);
+            }
             self.window_mat = Some(Mat4::mul(
                 &Self::get_window_matrix(
                     view_rect,
                     Vec2 {x: 0.25, y: 0.6},
                     Vec3 {x: 0.0, y: 0.0, z: -0.1}
                 ),
-                &Mat4::transformation(
-                    xr_event.left_input.ray
-                ),
-            )); 
+                &self.smooth_window.unwrap().to_mat4(),
+            ));
         }
         else if xr_event.right_input.buttons[1].pressed {
+            // lets calculate the angle
+            if let Some(smooth_window) = &mut self.smooth_window{ 
+                *smooth_window = Transform::from_lerp(*smooth_window, xr_event.right_input.ray, 0.15);
+            }
+            else{
+                self.smooth_window = Some(xr_event.right_input.ray);
+            }
+
             self.window_mat = Some(Mat4::mul(
                 &Self::get_window_matrix(
                     view_rect,
                     Vec2 {x: 0.75, y: 0.6},
                     Vec3 {x: 0.0, y: 0.0, z: -0.1}
                 ),
-                &Mat4::transformation(
-                    xr_event.right_input.ray
-                ),
-            )); 
+                &self.smooth_window.unwrap().to_mat4(),
+            ));
         }
         else if self.window_mat.is_none() {
             self.window_mat = Some(Self::get_window_matrix(
@@ -409,8 +420,8 @@ impl XRControl {
             ));
         }
         
-        // we do a scale 
-        if xr_event.left_input.buttons[1].pressed && xr_event.right_input.buttons[1].pressed{
+        // we do a scale
+        if xr_event.left_input.buttons[1].pressed && xr_event.right_input.buttons[1].pressed {
             // check if last had both, ifnot we mark beginning of scaling
             
         }
@@ -460,7 +471,7 @@ impl XRControl {
                     handled_x: false,
                     handled_y: false,
                     scroll: Vec2 {x: input.axes[2] * 15.0, y: input.axes[3] * 15.0},
-                    is_wheel: true,
+                    input_type: FingerInputType::XR,
                     modifiers: KeyModifiers::default(),
                     time: time
                 }));
@@ -476,7 +487,7 @@ impl XRControl {
                         abs: pt,
                         rel: pt,
                         handled: false,
-                        is_touch: true,
+                        input_type: FingerInputType::XR,
                         rect: Rect::default(),
                         modifiers: KeyModifiers::default(),
                         time: time
@@ -489,7 +500,7 @@ impl XRControl {
                         abs: pt,
                         rel: pt,
                         is_over: false,
-                        is_touch: true,
+                        input_type: FingerInputType::XR,
                         rect: Rect::default(),
                         abs_start: Vec2::default(),
                         rel_start: Vec2::default(),
@@ -509,7 +520,7 @@ impl XRControl {
                     abs_start: Vec2::default(),
                     rel_start: Vec2::default(),
                     is_over: false,
-                    is_touch: true,
+                    input_type: FingerInputType::XR,
                     modifiers: KeyModifiers::default(),
                     time: time
                 }));
