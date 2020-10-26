@@ -64,7 +64,7 @@
             this.mu32[pos ++] = gpu_info.min_uniforms;
             this.send_string(gpu_info.vendor);
             this.send_string(gpu_info.renderer);
-
+            
             pos = this.fit(1);
             this.mu32[pos ++] = port;
             this.send_string(location.protocol);
@@ -414,7 +414,7 @@
             this.req_anim_frame_id = 0;
             this.text_copy_response = "";
             this.websockets = {};
-
+            
             this.init_webgl_context();
             this.run_async_webxr_check();
             this.bind_mouse_and_touch();
@@ -441,12 +441,12 @@
             Promise.all(this.resources).then(this.do_dep_results.bind(this))
         }
         
-        do_focus(){
+        do_focus() {
             this.to_wasm.window_focus(true);
             this.do_wasm_io();
         }
         
-        do_blur(){
+        do_blur() {
             this.to_wasm.window_focus(false);
             this.do_wasm_io();
         }
@@ -1405,8 +1405,8 @@
                 renderer: "unknown"
             }
             let debug_info = gl.getExtension('WEBGL_debug_renderer_info');
-
-            if(debug_info){
+            
+            if (debug_info) {
                 this.gpu_info.vendor = gl.getParameter(debug_info.UNMASKED_VENDOR_WEBGL);
                 this.gpu_info.renderer = gl.getParameter(debug_info.UNMASKED_RENDERER_WEBGL);
             }
@@ -1672,7 +1672,8 @@
                 let uniform = uniforms[i];
                 // lets align the uniform
                 let slots = this.uniform_size_table[uniform.ty];
-                if ((offset & 3) != 0 && (offset & 3) + slots > 4) { // goes over the boundary
+                let aligned_slots = slots == 3? 4: slots;
+                if ((offset & 3) != 0 && (offset & 3) + aligned_slots > 4) { // goes over the boundary
                     offset += 4 - (offset & 3); // make jump to new slot
                 }
                 uniform_locs.push({
@@ -1682,7 +1683,7 @@
                     loc: gl.getUniformLocation(program, uniform.name),
                     fn: this.uniform_fn_table[uniform.ty]
                 });
-                offset += slots
+                offset += aligned_slots
             }
             return uniform_locs;
         }
@@ -1742,7 +1743,7 @@
         alloc_array_buffer(array_buffer_id, array) {
             var gl = this.gl;
             let buf = this.array_buffers[array_buffer_id];
-            if(buf === undefined){
+            if (buf === undefined) {
                 buf = this.array_buffers[array_buffer_id] = {
                     gl_buf: gl.createBuffer(),
                 };
@@ -1755,9 +1756,9 @@
         
         alloc_index_buffer(index_buffer_id, array) {
             var gl = this.gl;
-    
+            
             let buf = this.index_buffers[index_buffer_id];
-            if(buf === undefined){
+            if (buf === undefined) {
                 buf = this.index_buffers[index_buffer_id] = {
                     gl_buf: gl.createBuffer()
                 };
@@ -1846,7 +1847,7 @@
             gl.useProgram(shader.program);
             
             let vao = this.vaos[vao_id];
-
+            
             this.OES_vertex_array_object.bindVertexArrayOES(vao.gl_vao);
             
             let index_buffer = this.index_buffers[vao.geom_ib_id];
@@ -1922,7 +1923,7 @@
                 }
                 this.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
             }
-            this.OES_vertex_array_object.bindVertexArrayOES(null); 
+            this.OES_vertex_array_object.bindVertexArrayOES(null);
         }
     }
     
@@ -2352,8 +2353,8 @@
                     _console_log
                 }}))
                     .then(results => {
-                        webasm = results;
-                        new WasmApp(canvas, results);
+                    webasm = results;
+                    new WasmApp(canvas, results);
                 }, errors => {
                     console.log("Error compiling wasm file", errors);
                 });

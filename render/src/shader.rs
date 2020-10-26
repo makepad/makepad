@@ -152,12 +152,12 @@ impl UniformProps {
         for prop in in_props {
             let slots = prop.ty.size();
             
-            if (offset & 3) + slots > 4 { // goes over the boundary
+            // metal+webgl
+            let aligned_slots = if slots==3{4}else{slots};
+            if (offset & 3) + aligned_slots > 4 { // goes over the boundary
                 offset += 4 - (offset & 3); // make jump to new slot
             }
-            if slots == 2 && (offset & 1) != 0 {
-                panic!("Please re-order uniform {} to be size-2 aligned", prop.name);
-            }
+            
             prop_map.insert(prop.live_item_id, out_props.len());
             out_props.push(UniformProp {
                 live_item_id: prop.live_item_id,
@@ -166,12 +166,12 @@ impl UniformProps {
                 offset: offset,
                 slots: slots
             });
-            offset += slots
+            offset += aligned_slots
         };
         if offset & 3 > 0 {
             offset += 4 - (offset & 3);
         }
-        UniformProps {
+        UniformProps { 
             prop_map,
             props: out_props,
             total_slots: offset

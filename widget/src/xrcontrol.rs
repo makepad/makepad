@@ -380,7 +380,7 @@ impl XRControl {
         if xr_event.left_input.buttons[1].pressed {
             // if the distance between smooth and left is small, smooth it, otherwise set it
             if let Some(smooth_window) = &mut self.smooth_window{
-                *smooth_window = Transform::from_lerp(*smooth_window, xr_event.left_input.ray, 0.15);
+                *smooth_window = Transform::from_lerp(*smooth_window, xr_event.left_input.ray, 0.2);
             }
             else{
                 self.smooth_window = Some(xr_event.left_input.ray);
@@ -397,7 +397,7 @@ impl XRControl {
         else if xr_event.right_input.buttons[1].pressed {
             // lets calculate the angle
             if let Some(smooth_window) = &mut self.smooth_window{ 
-                *smooth_window = Transform::from_lerp(*smooth_window, xr_event.right_input.ray, 0.15);
+                *smooth_window = Transform::from_lerp(*smooth_window, xr_event.right_input.ray, 0.2);
             }
             else{
                 self.smooth_window = Some(xr_event.right_input.ray);
