@@ -12,7 +12,7 @@ impl TabClose {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             bg: Quad{
-                z:12.0,
+                z:1.3,
                 ..Quad::new(cx)
             },
             animator: Animator::default(),

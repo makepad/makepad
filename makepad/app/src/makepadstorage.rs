@@ -288,10 +288,13 @@ impl MakepadStorage {
         }
     }
     
-    pub fn get_textbuffer_id_from_live_item_id(&self, cx: &Cx, live_item_id: LiveItemId) -> Option<MakepadTextBufferId> {
+    pub fn get_textbuffer_id_from_live_item_id(&mut self, cx: &mut Cx, live_item_id: LiveItemId) -> Option<MakepadTextBufferId> {
         if let Some(lb) = cx.live_styles.item_in_live_body.get(&live_item_id) {
             if let Some(file) = cx.live_styles.live_body_to_file.get(lb) {
                 let path = Self::live_path_to_file_path(file);
+
+                self.text_buffer_from_path(cx, &path);
+
                 return self.text_buffer_path_to_id.get(&path).cloned()
             }
         }
@@ -305,6 +308,7 @@ impl MakepadStorage {
                     for (id, m) in wsm.messages {
                         match m {
                             MakepadChannelMessage::XRChannelUpdate {self_user} => {
+                                //log!("GOT XRChannelUpdate {:?}", self_user);
                                 if id != wsm.ids[0]{
                                     let xr_id = XRUserId(id);
                                     self.xr_channel.users.insert(xr_id, self_user.clone());

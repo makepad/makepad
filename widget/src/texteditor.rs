@@ -174,7 +174,7 @@ impl TextEditor {
                 ..ScrollShadow::new(cx)
             },
             gutter_bg: Quad {
-                z: 2.1,
+                z: 1.1,
                 ..Quad::new(cx)
             },
             colors: CodeEditorColors::default(),
@@ -191,13 +191,13 @@ impl TextEditor {
             //code_icon: CodeIcon::proto(cx),
             //view_layout: Layout::default(),
             text: Text {
-                z: 2.00,
+                z: 1.2,
                 shader: live_shader!(cx, makepad_render::text::shader),
                 wrapping: Wrapping::Line,
                 ..Text::new(cx)
             },
             line_number_text: Text {
-                z: 2.2,
+                z: 1.2,
                 shader: live_shader!(cx, makepad_render::text::shader),
                 wrapping: Wrapping::Line,
                 ..Text::new(cx)
@@ -1219,12 +1219,15 @@ impl TextEditor {
         self.apply_style(cx);
         
         if !text_buffer.is_loaded {
+            let inst = self.bg.begin_quad_fill(cx);
+            inst.set_do_scroll(cx, false, false); // don't scroll the bg
             //et bg_inst = self.bg.begin_quad(cx, &Layout {
             //    align: Align::left_top(),
             //    ..self.bg_layout.clone()
             //});
             self.text.color = live_color!(cx, self::loading_color);
             self.text.draw_text(cx, "...");
+            self.bg.end_quad_fill(cx, inst);
             //self.bg.end_quad(cx, &bg_inst);
             //self._bg_area = bg_inst.into_area();
             self.view.end_view(cx);
