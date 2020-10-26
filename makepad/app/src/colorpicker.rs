@@ -51,7 +51,7 @@ impl ColorPicker {
                 self.val = 1.0 - clamp((vy + rsize) / (2.0 * rsize), 0.0, 1.0);
             },
             ColorPickerDragMode::Wheel => {
-                self.hue = vx.atan2(vy) / std::f32::consts::PI * 0.5 + 0.5;
+                self.hue = vx.atan2(vy) / std::f32::consts::PI * 0.5 - 0.33333;
             },
             _ => ()
         }
@@ -232,7 +232,7 @@ impl ColorPicker {
                     df.hexagon(cx, cy, w * 0.45);
                     df.hexagon(cx, cy, w * 0.4);
                     df.subtract();
-                    let ang = atan(pos.x * w - cx, 0.0001 + pos.y * h - cy) / PI * 0.5 + 0.5;
+                    let ang = atan(pos.x * w - cx, 0.0001 + pos.y * h - cy) / PI * 0.5 - 0.33333;
                     df.fill(Pal::hsv2rgb(vec4(ang, 1.0, 1.0, 1.0)));
                     
                     let rsize = inner / sqrt(2.0);
@@ -243,7 +243,7 @@ impl ColorPicker {
                     
                     df.fill(Pal::hsv2rgb(vec4(hue, (circ.x * .5 + .5), 1. - (circ.y * .5 + .5), 1.)));
                     
-                    let col_angle = (hue - .5) * 2. * PI;
+                    let col_angle = (hue + .333333) * 2. * PI;
                     let circle_puk = vec2(sin(col_angle) * radius + cx, cos(col_angle) * radius + cy);
                     
                     let rect_puk = vec2(cx + sat * 2. * rsize - rsize, cy + (1. - val) * 2. * rsize - rsize);
