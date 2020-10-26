@@ -66,11 +66,13 @@ impl TabClose {
                 instance down: float;
 
                 fn pixel() -> vec4 {
-                    return #f00;
                     let cx = Df::viewport(pos * vec2(w, h));
                     let hover_max: float = (hover * 0.2 + 0.8) * 0.5;
                     let hover_min: float = 1. - hover_max;
                     let c: vec2 = vec2(w, h) * 0.5;
+                    cx.circle(c.x, c.y, 10.);
+                    cx.stroke_keep(#4000,1.);
+                    cx.fill(#3002);
                     cx.rotate(down, c.x, c.y);
                     cx.move_to(c.x * hover_min, c.y * hover_min);
                     cx.line_to(c.x + c.x * hover_max, c.y + c.y * hover_max);
@@ -126,7 +128,7 @@ impl TabClose {
         self.bg.shader = live_shader!(cx, self::shader_bg);
         self.bg.color = self.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
         
-        let bg_inst = self.bg.draw_quad_rel(cx, Rect{x:0.0,y:0.0,w:25.0,h:25.0});
+        let bg_inst = self.bg.draw_quad_rel(cx, Rect{x:1.0,y:1.0,w:25.0,h:25.0});
 
         bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::hover));
         bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::down));
