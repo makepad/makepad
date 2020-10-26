@@ -72,7 +72,7 @@ impl TabClose {
                     let c: vec2 = vec2(w, h) * 0.5;
                     cx.circle(c.x, c.y, 12.);
                     cx.stroke_keep(#4000,1.);
-                    cx.fill(mix(#3002,#555f,hover));
+                    cx.fill(mix(#3332,#555f,hover));
                     cx.rotate(down, c.x, c.y);
                     cx.move_to(c.x * hover_min, c.y * hover_min);
                     cx.line_to(c.x + c.x * hover_max, c.y + c.y * hover_max);
