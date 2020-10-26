@@ -161,6 +161,21 @@ impl LiveStyles {
         return false
     }
     
+        // we have to check if live_id exists in the on_live_id dependency tree
+    pub fn check_depends_on2(&self, live_item_id: LiveItemId, on_live_item_id: LiveItemId) -> bool {
+        if let Some(deps) = self.live_depends_on.get(&on_live_item_id).cloned() {
+            if deps.contains(&live_item_id) {
+                return true
+            }
+            for dep_live_id in deps {
+                if self.check_depends_on2(live_item_id, dep_live_id) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+    
     pub fn update_deps(&mut self, live_item_id: LiveItemId, new_deps: HashSet<LiveItemId>) {
         if let Some(old_deps) = self.live_depends_on.get_mut(&live_item_id) {
             for on_live_item_id in old_deps.clone() {
@@ -175,7 +190,10 @@ impl LiveStyles {
         // add new deps
         let live_depends_on = self.live_depends_on.entry(live_item_id).or_insert_with( || HashSet::new());
         for on_live_id in new_deps {
+            
+            
             live_depends_on.insert(on_live_id);
+            
             let v = self.depends_on_live.entry(on_live_id).or_insert_with( || HashSet::new());
             v.insert(live_item_id);
         }

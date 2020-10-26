@@ -13,7 +13,7 @@ pub struct TreeWorld {
 Low    quest1
 Medium quest2
 High   pcbase
-Ultra  pchigh
+Ultra  pchigh 
 */
 impl TreeWorld {
     pub fn new(cx: &mut Cx) -> Self {
@@ -21,16 +21,17 @@ impl TreeWorld {
             view: View::new(cx),
             area: Area::Empty,
             sky_box: SkyBox::new(cx),
-        }
+        }  
     }  
-     
+      
     pub fn style(cx: &mut Cx) {
         live_body!(cx, r#"
             
             self::color: #E27D3A;
             self::leaf_1: #C1FF00;
             self::leaf_2: #009713;
-            self::angle: 0.5;
+            self::angle: 0.500;
+            self::off:0.183;
             self::width: 0.3;
             self::alpha: 0.114;
             self::shader: Shader { 
@@ -38,7 +39,6 @@ impl TreeWorld {
                 use makepad_worlds::worldview::uniforms::*;
                 
                 uniform max_depth: float;
-                
                 default_geometry: makepad_render::shader_std::quad_2d;
                 geometry geom: vec2;
                 
@@ -91,7 +91,7 @@ impl TreeWorld {
                     let size = vec2(0.01, 0.01);
                     
                     let m = Math::rotate_2d(
-                        vec2(1.0, self::width) * (geom.xy * nodesize - vec2(1.0, 0.5)),
+                        vec2(1.0, self::width) * (geom.xy * nodesize - vec2(5.0*self::off, 0.5)),
                         atan(
                             dir.y,
                             dir.x
