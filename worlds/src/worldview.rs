@@ -47,6 +47,7 @@ pub struct WorldView {
     pub view: View,
     pub bg: Quad,
     pub xr_is_presenting: bool,
+    pub time: f32,
     pub last_xr_update_event: Option<XRUpdateEvent>,
     pub viewport_3d: Viewport3D,
     pub world_type: WorldType,
@@ -64,6 +65,7 @@ impl WorldView {
             buttons: Elements::new(NormalButton {
                 ..NormalButton::new(cx)
             }),
+            time: 0.0,
             world_type: WorldType::TreeWorld,
             xr_is_presenting: false,
             last_xr_update_event: None, 
@@ -117,6 +119,25 @@ impl WorldView {
         self.select_view.end_view(cx);
     }
     
+    pub fn update_uniforms(&mut self, cx: &mut Cx){
+        // lets update the shaders
+        let areas = match &self.world_type {
+            WorldType::TreeWorld => {
+                vec![self.tree_world.area]
+            }
+            WorldType::FieldWorld => {
+                vec![self.field_world.area]
+            }
+        }; 
+        for area in areas{ // lets find some uniforms
+            area.write_uniform_float(cx, live_item_id!(self::uniforms::time), self.time);
+            if let Some(xu) = &self.last_xr_update_event{
+                area.write_uniform_vec3(cx, live_item_id!(self::uniforms::left_input_pos), xu.left_input.ray.position);
+                area.write_uniform_vec3(cx, live_item_id!(self::uniforms::right_input_pos), xu.right_input.ray.position);
+            }  
+        }  
+    }
+    
     pub fn handle_world_view(&mut self, cx: &mut Cx, event: &mut Event) {
         // do 2D camera interaction.
         if !self.xr_is_presenting{
@@ -124,24 +145,10 @@ impl WorldView {
         }
         
         if let Some(ae) = event.is_frame_event(cx, self.view.get_view_area(cx)) {
-            // lets update the shaders
-            let areas = match &self.world_type {
-                WorldType::TreeWorld => {
-                    vec![self.tree_world.area]
-                }
-                WorldType::FieldWorld => {
-                    vec![self.field_world.area]
-                }
-            }; 
-            for area in areas{ // lets find some uniforms
-                area.write_uniform_float(cx, live_item_id!(self::uniforms::time), ae.time as f32);
-                if let Some(xu) = &self.last_xr_update_event{
-                    area.write_uniform_vec3(cx, live_item_id!(self::uniforms::left_input_pos), xu.left_input.ray.position);
-                    area.write_uniform_vec3(cx, live_item_id!(self::uniforms::right_input_pos), xu.right_input.ray.position);
-                }  
-            }  
+            self.time = ae.time as f32;
+            self.update_uniforms(cx);
             cx.next_frame(self.view.get_view_area(cx));
-        }
+        } 
 
         match event {
             Event::XRUpdate(xu)=>{
@@ -202,7 +209,10 @@ impl WorldView {
         }
         
         self.view.end_view(cx,);
+        
         cx.next_frame(self.view.get_view_area(cx));
+        
+        self.update_uniforms(cx);
     }
     
 } 
