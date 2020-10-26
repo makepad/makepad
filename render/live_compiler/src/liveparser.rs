@@ -1,6 +1,6 @@
 use crate::error::LiveError;
 use crate::lit::{Lit, TyLit};
-use crate::ident::{Ident};
+use crate::ident::{Ident, QualifiedIdentPath};
 use crate::token::{Token, TokenWithSpan};
 use crate::livetypes::*;
 use crate::detok::*;
@@ -119,7 +119,7 @@ impl<'a> DeTokParserImpl<'a> {
         }
     }
     
-    fn parse_block_tokens(&mut self, live_item_id: LiveItemId) -> Result<Vec<TokenWithSpan>, LiveError> { // scans from { to }
+    fn parse_block_tokens(&mut self, base_ident:QualifiedIdentPath, live_item_id: LiveItemId) -> Result<Vec<TokenWithSpan>, LiveError> { // scans from { to }
         self.clear_token_clone();
         let mut paren_stack = Vec::new();
         let mut new_deps = HashSet::new();
@@ -133,7 +133,7 @@ impl<'a> DeTokParserImpl<'a> {
                         let on_live_id = qualified_ident_path.to_live_item_id();
                         // lets query if this one somehow depends on me
                         if self.live_styles.check_depends_on(live_item_id, on_live_id) {
-                            // cyclic dep
+                            self.live_styles.check_depends_on2(live_item_id, on_live_id);
                             return Err(self.error(format!("Cyclic dependency {}", ident_path)))
                         }
                         new_deps.insert(on_live_id);
@@ -162,7 +162,6 @@ impl<'a> DeTokParserImpl<'a> {
                     }
                     self.skip_token();
                     if paren_stack.len() == 0 {
-                        // lets remove old deps..
                         self.live_styles.update_deps(live_item_id, new_deps);
                         return Ok(self.get_token_clone());
                     }
@@ -207,7 +206,7 @@ impl<'a> DeTokParserImpl<'a> {
             
             match self.peek_token() {
                 Token::TyLit(tylit) => {
-                    let tokens = self.parse_block_tokens(live_item_id) ?;
+                    let tokens = self.parse_block_tokens(qualified_ident_path, live_item_id) ?;
                     let live_tokens_type = match tylit {
                         TyLit::Vec2 => {
                             LiveTokensType::Vec2
@@ -232,7 +231,7 @@ impl<'a> DeTokParserImpl<'a> {
                     self.expect_token(Token::Semi) ?;
                 },
                 Token::Ident(ident) => {
-                    let tokens = self.parse_block_tokens(live_item_id) ?;
+                    let tokens = self.parse_block_tokens(qualified_ident_path, live_item_id) ?;
                     // see if the tokens changed, ifso mark this thing dirty
                     let live_tokens_type = {
                         if ident == Ident::new("Float") {
@@ -278,6 +277,7 @@ impl<'a> DeTokParserImpl<'a> {
                     self.clear_token_clone();
                     self.skip_token();
                     let tokens = self.get_token_clone();
+                    self.live_styles.update_deps(live_item_id, HashSet::new());
                     self.live_styles.add_changed_deps(live_item_id, &tokens, LiveTokensType::Float);
                     self.live_styles.tokens.insert(live_item_id, LiveTokens {
                         ident_path,
@@ -292,6 +292,7 @@ impl<'a> DeTokParserImpl<'a> {
                     self.skip_token();
                     //let value = f32::de_tok(self) ?;
                     let tokens = self.get_token_clone();
+                    self.live_styles.update_deps(live_item_id, HashSet::new());
                     self.live_styles.add_changed_deps(live_item_id, &tokens, LiveTokensType::Color);
                     self.live_styles.tokens.insert(live_item_id, LiveTokens {
                         ident_path,
@@ -311,6 +312,9 @@ impl<'a> DeTokParserImpl<'a> {
         if let Some(live_body_contains) = self.live_styles.live_bodies_contains.get(&live_body_id).cloned() {
             for contains_live_id in live_body_contains {
                 if !new_body_contains.contains(&contains_live_id) {
+                    if let Some(tokens) = self.live_styles.tokens.get(&contains_live_id){
+                        println!("REMOVING ITEM {}", tokens.qualified_ident_path);
+                    }
                     self.live_styles.remove_live_id(contains_live_id);
                 }
             }
