@@ -186,7 +186,18 @@ where ID: std::cmp::Ord + std::hash::Hash + Clone
     }
     
     // gets a particular item. Returns None when not created (yet)
-    pub fn get<'a>(&'a mut self, index: ID) -> Option<&mut T> {
+    pub fn get<'a>(&'a self, index: ID) -> Option<&T> {
+        let elem = self.element_map.get(&index);
+        if let Some(elem) = elem {
+            return Some(&elem.item)
+        }
+        else {
+            return None
+        }
+    }
+
+    // gets a particular item. Returns None when not created (yet)
+    pub fn get_mut<'a>(&'a mut self, index: ID) -> Option<&mut T> {
         let elem = self.element_map.get_mut(&index);
         if let Some(elem) = elem {
             return Some(&mut elem.item)
@@ -249,9 +260,14 @@ where T:Clone{
     }
     
     // gets a particular item. Returns None when not created (yet)
-    pub fn get<'a>(&'a mut self, index: u64) -> Option<&mut T>
+    pub fn get<'a>(&'a self, index: u64) -> Option<&T>
     where T: Clone {
         return self.elements.get(index)
+    }
+    
+    pub fn get_mut<'a>(&'a mut self, index: u64) -> Option<&mut T>
+    where T: Clone {
+        return self.elements.get_mut(index)
     }
     
     pub fn template(&mut self)->&mut T{

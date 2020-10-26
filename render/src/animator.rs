@@ -1,8 +1,7 @@
 use crate::cx::*;
 
 #[derive(Clone)]
-pub struct AnimArea {
-    pub area: Area,
+pub struct AnimInfo {
     pub start_time: f64,
     pub total_time: f64
 }
@@ -33,7 +32,7 @@ impl Animator {
             self.live_update_id = cx.live_update_id;
             let anim = cb(cx);
             // lets stop all animations if we had any
-            if let Some(anim_area) = cx.playing_anim_areas.iter_mut().find( | v | v.area == self.area) {
+            if let Some(anim_area) = cx.playing_anim_areas.get_mut(&self.area) {
                 anim_area.total_time = 0.;
             }
             self.set_anim_as_last_values(&anim);
@@ -127,28 +126,27 @@ impl Animator {
             return
         }
         // alright first we find area, it already exists
-        if let Some(anim_area) = cx.playing_anim_areas.iter_mut().find( | v | v.area == self.area) {
+        if let Some(anim_info) = cx.playing_anim_areas.get_mut(&self.area){
             //do we cut the animation in right now?
             if anim.play.cut() || self.current.is_none() {
                 self.current = Some(anim);
-                anim_area.start_time = std::f64::NAN;
+                anim_info.start_time = std::f64::NAN;
                 self.next = None;
-                anim_area.total_time = self.current.as_ref().unwrap().play.total_time();
+                anim_info.total_time = self.current.as_ref().unwrap().play.total_time();
             }
             else { // queue it
                 self.next = Some(anim);
                 // lets ask an animation anim how long it is
-                anim_area.total_time = self.current.as_ref().unwrap().play.total_time() + self.next.as_ref().unwrap().play.total_time()
+                anim_info.total_time = self.current.as_ref().unwrap().play.total_time() + self.next.as_ref().unwrap().play.total_time()
             }
         }
         else if self.area != Area::Empty { // its new
             self.current = Some(anim);
             self.next = None;
-            cx.playing_anim_areas.push(AnimArea {
-                area: self.area.clone(),
+            cx.playing_anim_areas.insert(self.area, AnimInfo {
                 start_time: std::f64::NAN,
                 total_time: self.current.as_ref().unwrap().play.total_time()
-            })
+            });
         }
     }
     
@@ -158,41 +156,39 @@ impl Animator {
     
     
     pub fn update_anim_track(&mut self, cx: &mut Cx, time: f64) -> Option<f64> {
+
         // alright first we find area in running animations
-        let anim_index_opt = cx.playing_anim_areas.iter().position( | v | v.area == self.area);
-        if anim_index_opt.is_none() {
-            return None
-        }
-        let anim_index = anim_index_opt.unwrap();
-        
-        // initialize start time
-        if cx.playing_anim_areas[anim_index].start_time.is_nan() {
-            cx.playing_anim_areas[anim_index].start_time = time;
-        }
-        let mut start_time = cx.playing_anim_areas[anim_index].start_time;
-        
+
         // fetch current anim
         if self.current.is_none() { // remove anim
-            cx.playing_anim_areas.remove(anim_index);
+            cx.playing_anim_areas.remove(&self.area);
             return None
         }
         
-        let current_total_time = self.current.as_ref().unwrap().play.total_time();
-        
-        // process queueing
-        if time - start_time >= current_total_time && !self.next.is_none() {
-            self.current = self.next.clone();
-            self.next = None;
-            // update animation slot
-            start_time += current_total_time;
-            if let Some(anim) = cx.playing_anim_areas.iter_mut().find( | v | v.area == self.area) {
-                anim.start_time = start_time;
-                anim.total_time -= current_total_time;
+        if let Some(anim_info) = cx.playing_anim_areas.get_mut(&self.area){
+            if anim_info.start_time.is_nan(){
+                anim_info.start_time = time;
             }
-            Some(self.current.as_ref().unwrap().play.compute_time(time - start_time))
+            
+            let current_total_time = self.current.as_ref().unwrap().play.total_time();
+        
+            // process queueing
+            if time - anim_info.start_time >= current_total_time && !self.next.is_none() {
+                self.current = self.next.clone();
+                self.next = None;
+                // update animation slot
+                anim_info.start_time += current_total_time;
+                anim_info.total_time -= current_total_time;
+
+                Some(self.current.as_ref().unwrap().play.compute_time(time - anim_info.start_time))
+            }
+            else {
+                Some(self.current.as_ref().unwrap().play.compute_time(time - anim_info.start_time))
+            }
+            
         }
-        else {
-            Some(self.current.as_ref().unwrap().play.compute_time(time - start_time))
+        else{
+            return None
         }
     }
     

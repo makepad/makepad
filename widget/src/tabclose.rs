@@ -42,7 +42,7 @@ impl TabClose {
             }
             
             self::anim_over: Anim {
-                play: Cut {duration: 0.2},
+                play: Cut {duration: 0.1},
                 tracks: [
                     Color {keys: {0.0: self::color_selected_focus}, bind_to: makepad_render::quad::shader::color},
                     Float {keys: {1.0: 1.0}, bind_to: self::shader_bg::hover},
@@ -67,18 +67,18 @@ impl TabClose {
 
                 fn pixel() -> vec4 {
                     let cx = Df::viewport(pos * vec2(w, h));
-                    let hover_max: float = (hover * 0.2 + 0.8) * 0.5;
+                    let hover_max: float = (hover * 0.5 + 0.3) * 0.5;
                     let hover_min: float = 1. - hover_max;
                     let c: vec2 = vec2(w, h) * 0.5;
-                    cx.circle(c.x, c.y, 10.);
+                    cx.circle(c.x, c.y, 12.);
                     cx.stroke_keep(#4000,1.);
-                    cx.fill(#3002);
+                    cx.fill(mix(#3002,#555f,hover));
                     cx.rotate(down, c.x, c.y);
                     cx.move_to(c.x * hover_min, c.y * hover_min);
                     cx.line_to(c.x + c.x * hover_max, c.y + c.y * hover_max);
                     cx.move_to(c.x + c.x * hover_max, c.y * hover_min);
                     cx.line_to(c.x * hover_min, c.y + c.y * hover_max);
-                    return cx.stroke(color, 1. + down * 0.2);
+                    return cx.stroke(color, 1. + hover*0.2);
                     //return df_fill(color);
                 }
             }
