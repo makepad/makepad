@@ -26,8 +26,8 @@ impl TabClose {
             self::color_selected_focus: #f;
             self::color_deselected_focus: #9d;
             
-            self::walk: Walk {
-                width: Fix(20.),
+            self::walk: Walk { 
+                width: Fix(20.), 
                 height: Fix(20.),
                 margin: {l: -4., t: 0., r: 4., b: 0.}
             }

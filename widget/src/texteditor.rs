@@ -191,7 +191,7 @@ impl TextEditor {
             //code_icon: CodeIcon::proto(cx),
             //view_layout: Layout::default(),
             text: Text {
-                z: 1.2,
+                z: 0.5,
                 shader: live_shader!(cx, makepad_render::text::shader),
                 wrapping: Wrapping::Line,
                 ..Text::new(cx)
