@@ -197,7 +197,7 @@ impl WorldView {
             return
         };
         
-        self.view.block_set_view_transform(cx);
+        self.view.lock_view_transform(cx, &Mat4::identity());
         
         match &self.world_type {
             WorldType::TreeWorld => {

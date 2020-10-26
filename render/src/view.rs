@@ -36,10 +36,19 @@ impl View {
         }
     }
     
+    
+    pub fn lock_view_transform(&self, cx:&mut Cx, mat:&Mat4){
+         if let Some(view_id) = self.view_id {
+            let cxview = &mut cx.views[view_id];
+            cxview.uniform_view_transform(mat);
+            return cxview.locked_view_transform = true;
+        }
+    }
+    
     pub fn set_view_transform(&self, cx:&mut Cx, mat:&Mat4){
         
         fn set_view_transform_recur(view_id:usize, cx:&mut Cx, mat:&Mat4){
-            if cx.views[view_id].block_set_view_transform{
+            if cx.views[view_id].locked_view_transform{
                 return
             }
             cx.views[view_id].uniform_view_transform(mat);
@@ -126,6 +135,15 @@ impl View {
         
         // push ourselves up the parent draw_stack
         if view_id != parent_view_id {
+            // copy the view transform
+            
+            if !cx.views[view_id].locked_view_transform{
+                for i in 0..16{
+                    cx.views[view_id].view_uniforms.view_transform[i] = 
+                        cx.views[parent_view_id].view_uniforms.view_transform[i];
+                }
+            }
+            
             // we need a new draw
             let parent_cxview = &mut cx.views[parent_view_id];
             
@@ -221,12 +239,6 @@ impl View {
         Mat4::default()
     }
     
-    pub fn block_set_view_transform(&self, cx:&mut Cx){
-         if let Some(view_id) = self.view_id {
-            let cxview = &mut cx.views[view_id];
-            return cxview.block_set_view_transform = true;
-        }
-    }
     
    pub fn set_view_debug(&self, cx:&mut Cx, view_debug:CxViewDebug){
          if let Some(view_id) = self.view_id {
@@ -547,7 +559,7 @@ pub struct CxView {
     pub nesting_view_id: usize, // the id of the parent we nest in, codeflow wise
     pub redraw_id: u64,
     pub pass_id: usize,
-    pub block_set_view_transform: bool,
+    pub locked_view_transform: bool,
     pub do_v_scroll: bool, // this means we
     pub do_h_scroll: bool,
     pub draw_calls: Vec<DrawCall>,

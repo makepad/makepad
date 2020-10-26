@@ -361,7 +361,7 @@ impl FileTree {
                 Event::FingerMove(fe) => {
                     cx.set_down_mouse_cursor(MouseCursor::Hand);
                     if self._drag_move.is_none() {
-                        if fe.move_distance() > 30. {
+                        if fe.move_distance() > 50. {
                             self._drag_move = Some(fe);
                             self.view.redraw_view_area(cx);
                             self.drag_view.redraw_view_area(cx);

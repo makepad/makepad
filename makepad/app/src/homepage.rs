@@ -6,6 +6,7 @@ pub struct HomePage {
     pub view: ScrollView,
     pub shadow: ScrollShadow,
     pub text: Text,
+    pub bg: Quad,
     pub email_input: TextInput,
     pub email_state: EmailState,
     pub email_signal: Signal,
@@ -27,6 +28,7 @@ impl HomePage {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             view: ScrollView::new(cx),
+            bg: Quad::new(cx),
             text: Text::new(cx),
             shadow: ScrollShadow::new(cx),
             send_mail_button: NormalButton::new(cx),
@@ -50,6 +52,8 @@ impl HomePage {
     pub fn style(cx: &mut Cx) {
         
         live_body!(cx, r#"
+            self::color_bg: #2;
+            
             self::text_style_heading: TextStyle {
                 font_size: 28.0,
                 line_spacing: 2.0,
@@ -129,6 +133,9 @@ impl HomePage {
     
     pub fn draw_home_page(&mut self, cx: &mut Cx) {
         if self.view.begin_view(cx, live_layout!(cx, self::layout_main)).is_err() {return};
+
+        self.bg.color = live_color!(cx, self::color_bg);
+        let inst = self.bg.begin_quad_fill(cx);
         
         let t = &mut self.text;
         
@@ -249,6 +256,8 @@ impl HomePage {
         cx.turtle_new_line();
         
         self.shadow.draw_shadow_top(cx);
+        
+        self.bg.end_quad_fill(cx, inst); 
         self.view.end_view(cx);
     }
 }
