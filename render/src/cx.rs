@@ -1,4 +1,4 @@
-use std::collections::{HashMap, BTreeSet};
+use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 pub use makepad_live_compiler::livetypes::*;
@@ -139,12 +139,13 @@ pub struct Cx {
     pub hover_mouse_cursor: Option<MouseCursor>,
     pub fingers: Vec<CxPerFinger>,
     
-    pub playing_anim_areas: Vec<AnimArea>,
-    pub ended_anim_areas: Vec<AnimArea>,
+    pub playing_anim_areas: BTreeMap<Area, AnimInfo>,
+    pub ended_anim_areas: BTreeMap<Area ,AnimInfo>,
     
-    pub frame_callbacks: Vec<Area>,
-    pub _frame_callbacks: Vec<Area>,
+    pub frame_callbacks: HashSet<Area>,
+    pub _frame_callbacks: HashSet<Area>,
     
+    pub triggers: HashMap<Area, BTreeSet<TriggerId>>,
     pub signals: HashMap<Signal, BTreeSet<StatusId >>,
     
     pub live_styles: LiveStyles,
@@ -252,13 +253,15 @@ impl Default for Cx {
             
             command_settings: HashMap::new(),
             
-            playing_anim_areas: Vec::new(),
-            ended_anim_areas: Vec::new(),
+            playing_anim_areas: BTreeMap::new(),
+            ended_anim_areas: BTreeMap::new(),
             
-            frame_callbacks: Vec::new(),
-            _frame_callbacks: Vec::new(),
+            frame_callbacks: HashSet::new(),
+            _frame_callbacks: HashSet::new(),
             
             signals: HashMap::new(),
+            
+            triggers: HashMap::new(),
             
             panic_now: false,
             panic_redraw: false,
@@ -581,20 +584,14 @@ impl Cx {
     }
     
     pub fn check_ended_anim_areas(&mut self, time: f64) {
-        let mut i = 0;
-        self.ended_anim_areas.truncate(0);
-        loop {
-            if i >= self.playing_anim_areas.len() {
-                break
+        self.ended_anim_areas.clear();
+        for (area, anim_info) in &self.playing_anim_areas{
+            if anim_info.start_time.is_nan() || time - anim_info.start_time >= anim_info.total_time {
+                self.ended_anim_areas.insert(*area, anim_info.clone());
             }
-            let anim_start_time = self.playing_anim_areas[i].start_time;
-            let anim_total_time = self.playing_anim_areas[i].total_time;
-            if anim_start_time.is_nan() || time - anim_start_time >= anim_total_time {
-                self.ended_anim_areas.push(self.playing_anim_areas.remove(i));
-            }
-            else {
-                i = i + 1;
-            }
+        }
+        for (area, _) in &self.ended_anim_areas{
+            self.playing_anim_areas.remove(area);
         }
     }
     
@@ -603,9 +600,10 @@ impl Cx {
             return new_area
         }
         
-        if let Some(anim_anim) = self.playing_anim_areas.iter_mut().find( | v | v.area == old_area) {
-            anim_anim.area = new_area.clone()
+        if let Some(anim_info) = self.playing_anim_areas.get(&old_area).cloned() {
+            self.playing_anim_areas.insert(new_area, anim_info);
         }
+        self.playing_anim_areas.remove(&old_area);
         
         for finger in &mut self.fingers {
             if finger.captured == old_area {
@@ -629,9 +627,11 @@ impl Cx {
         }
         
         //
-        if let Some(next_frame) = self.frame_callbacks.iter_mut().find( | v | **v == old_area) {
-            *next_frame = new_area.clone()
+        if self.frame_callbacks.contains(&old_area){
+            self.frame_callbacks.insert(new_area);
+            self.frame_callbacks.remove(&old_area);
         }
+
         new_area
     }
     
@@ -737,7 +737,7 @@ impl Cx {
     where F: FnMut(&mut Cx, &mut Event)
     {
         std::mem::swap(&mut self._frame_callbacks, &mut self.frame_callbacks);
-        self.frame_callbacks.truncate(0);
+        self.frame_callbacks.clear();
         self.call_event_handler(&mut event_handler, &mut Event::Frame(FrameEvent {time: time, frame: self.repaint_id}));
     }
     
@@ -745,7 +745,7 @@ impl Cx {
         if let Some(_) = self.frame_callbacks.iter().position( | a | *a == area) {
             return;
         }
-        self.frame_callbacks.push(area);
+        self.frame_callbacks.insert(area);
     }
     
     pub fn new_signal(&mut self) -> Signal {
@@ -758,7 +758,7 @@ impl Cx {
             return
         }
         if let Some(statusses) = self.signals.get_mut(&signal) {
-            if statusses.iter().find( | s | **s == status).is_none() {
+            if !statusses.contains(&status) {
                 statusses.insert(status);
             }
         }
@@ -769,7 +769,20 @@ impl Cx {
         }
     }
     
-    pub fn call_signals<F>(&mut self, mut event_handler: F)
+    pub fn send_trigger(&mut self, area:Area, trigger_id:TriggerId){
+         if let Some(triggers) = self.triggers.get_mut(&area) {
+            if !triggers.contains(&trigger_id) {
+                triggers.insert(trigger_id);
+            }
+        }
+        else {
+            let mut new_set = BTreeSet::new();
+            new_set.insert(trigger_id);
+            self.triggers.insert(area, new_set);
+        }    
+    }
+    
+    pub fn call_signals_and_triggers<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
         let mut counter = 0;
@@ -787,6 +800,23 @@ impl Cx {
                 break
             }
         }
+
+        let mut counter = 0;
+        while self.triggers.len() != 0 {
+            counter += 1;
+            let mut triggers = HashMap::new();
+            std::mem::swap(&mut self.triggers, &mut triggers);
+            
+            self.call_event_handler(&mut event_handler, &mut Event::Triggers(TriggersEvent {
+                triggers: triggers,
+            }));
+            
+            if counter > 100 {
+                println!("Trigger feedback loop detected");
+                break
+            }
+        }
+
     }
     
     pub fn call_live_recompile_event<F>(&mut self, changed_live_bodies: BTreeSet<LiveBodyId>, errors: Vec<LiveBodyError>, mut event_handler: F)

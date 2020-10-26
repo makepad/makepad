@@ -119,7 +119,7 @@ impl LiveItemsView {
                 //let start = tok.tokens[0].span.start;
                 //let end = tok.tokens[0].span.end;
                 
-                if let Some(fold_caption) = self.fold_captions.get(index) {
+                if let Some(fold_caption) = self.fold_captions.get_mut(index) {
                     if fold_caption.handle_fold_caption(cx, event) == ButtonEvent::Down {
                         any_caption_down = Some(index);
                         do_open = fold_caption.open_state.is_open();
@@ -127,7 +127,7 @@ impl LiveItemsView {
                 }
                 match live_tokens_type {
                     LiveTokensType::Float => {
-                        if let Some(f) = self.float_sliders.get(index) {
+                        if let Some(f) = self.float_sliders.get_mut(index) {
                             match f.handle_float_slider(cx, event) {
                                 FloatSliderEvent::Change {scaled_value} => {
                                     let float = Float {value: scaled_value, ..Float::default()};
@@ -151,7 +151,7 @@ impl LiveItemsView {
                         }
                     },
                     LiveTokensType::Color => {
-                        if let Some(f) = self.color_pickers.get(index) {
+                        if let Some(f) = self.color_pickers.get_mut(index) {
                             match f.handle_color_picker(cx, event) {
                                 ColorPickerEvent::Change {rgba} => {
                                     MakepadStorage::handle_changed_color(
@@ -184,7 +184,7 @@ impl LiveItemsView {
             if let Event::FingerDown(fe) = event {
                 if fe.modifiers.control || fe.modifiers.logo {
                     for index in 0..mtb.live_items_list.items.len() {
-                        if let Some(fold_caption) = self.fold_captions.get(index) {
+                        if let Some(fold_caption) = self.fold_captions.get_mut(index) {
                             if fe.modifiers.control {
                                 if index != down_index {
                                     fold_caption.open_state.do_close();

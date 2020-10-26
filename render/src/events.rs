@@ -148,11 +148,6 @@ pub struct FrameEvent {
     pub time: f64
 }
 
-#[derive(Clone, Default, Debug)]
-pub struct RedrawEvent {
-    pub area: Area
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileReadEvent {
     pub read_id: u64,
@@ -167,6 +162,16 @@ pub struct TimerEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignalEvent {
     pub signals: HashMap<Signal, BTreeSet<StatusId>>
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TriggersEvent {
+    pub triggers: HashMap<Area, BTreeSet<TriggerId>>
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TriggerEvent {
+    pub triggers: BTreeSet<TriggerId>
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -303,6 +308,8 @@ pub enum Event {
     FileWrite(FileWriteEvent),
     Timer(TimerEvent),
     Signal(SignalEvent),
+    Triggers(TriggersEvent),
+    Trigger(TriggerEvent),
     Command(CommandId),
     KeyFocus(KeyFocusEvent),
     KeyFocusLost(KeyFocusEvent),
@@ -379,25 +386,24 @@ impl Event {
                     );
                 }
             },
+            Event::Triggers(te) => {
+                if let Some(triggers) = te.triggers.get(&area).cloned(){
+                    return Event::Trigger(TriggerEvent{triggers})
+                }
+            }
             Event::Animate(_) => {
-                for anim in &cx.playing_anim_areas {
-                    if anim.area == area {
-                        return self.clone()
-                    }
+                if let Some(_) = cx.playing_anim_areas.get(&area){
+                    return self.clone()
                 }
             },
             Event::Frame(_) => {
-                for frame_area in &cx._frame_callbacks {
-                    if *frame_area == area {
-                        return self.clone()
-                    }
+                if cx._frame_callbacks.contains(&area){
+                    return self.clone()
                 }
             },
             Event::AnimEnded(_) => {
-                for anim in &cx.ended_anim_areas {
-                    if anim.area == area {
-                        return self.clone()
-                    }
+                if let Some(_) = cx.ended_anim_areas.get(&area){
+                    return self.clone()
                 }
             },
             Event::FingerScroll(fe) => {
@@ -560,6 +566,14 @@ pub struct StatusId(pub TypeId);
 impl Into<StatusId> for TypeId {
     fn into(self) -> StatusId {StatusId(self)}
 }
+
+#[derive(PartialEq, Ord, PartialOrd, Copy, Clone, Hash, Eq, Debug)]
+pub struct TriggerId(pub TypeId);
+
+impl Into<TriggerId> for TypeId {
+    fn into(self) -> TriggerId {TriggerId(self)}
+}
+
 
 
 

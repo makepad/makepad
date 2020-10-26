@@ -196,7 +196,9 @@ impl MakepadWindow {
         let mut show_item_display_tab = false;
         let mut do_display_rust_file = None;
         
-        while let Some(item) = dock_walker.walk_handle_dock(cx, event) {
+        let mut do_close_tab = None;
+        
+        while let Some((item, dock_tab_ident)) = dock_walker.walk_handle_dock(cx, event) {
             match item {
                 Panel::LogList => {
                     match self.log_list.handle_log_list(cx, event, makepad_storage, build_manager) {
@@ -251,8 +253,10 @@ impl MakepadWindow {
                     file_tree_event = self.file_panel.handle_file_panel(cx, event);
                 }
                 Panel::FileEditor {path, scroll_pos, editor_id} => {
-                    if let Some(db) = self.close_buttons.get(*editor_id){
-                        db.handle_tab_close(cx, event);
+                    if let Some(db) = self.close_buttons.get_mut(*editor_id){
+                        if db.handle_tab_close(cx, event) == ButtonEvent::Down{
+                            do_close_tab = Some(dock_tab_ident)
+                        };
                     }
 
                     
@@ -306,6 +310,10 @@ impl MakepadWindow {
                     }
                 }
             }
+        }
+        
+        if let Some(dock_tab_ident) = do_close_tab{
+            self.dock.close_tab(cx, dock_tab_ident);
         }
         
         if let Some((search, first_tbid, focus, escape)) = do_search {

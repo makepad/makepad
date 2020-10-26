@@ -168,7 +168,7 @@ impl Tab {
     
     pub fn anim_close(&self, _cx: &Cx) -> Anim {
         Anim{
-            play: Play::Single {duration: 0.1, cut: true, term: true, end: 1.0},
+            play: Play::Single {duration: 2.1, cut: true, term: true, end: 1.0},
             tracks: vec![
                 Track::Float{
                     bind_to: live_item_id!(self::tab_closing),
@@ -200,25 +200,24 @@ impl Tab {
         self.animator.set_anim_as_last_values(&self.anim_default(cx));
     }
     
-    pub fn close_tab(&mut self, cx: &mut Cx){
-        self._close_anim_rect = self._bg_area.get_rect(cx);
-        self.animator.play_anim(cx, self.anim_close(cx));
+    pub fn close_tab(&self, cx: &mut Cx){
+        cx.send_trigger(self._bg_area, Self::trigger_close());
     }
-    
+
+    pub fn trigger_close() -> TriggerId {uid!()}
+
     pub fn handle_tab(&mut self, cx: &mut Cx, event: &mut Event) -> TabEvent {
-        /*
-        if !self.animator.term_anim_playing() {
-            match self.tab_close.handle_tab_close(cx, event) {
-                ButtonEvent::Down => {
-                    self._close_anim_rect = self._bg_area.get_rect(cx);
-                    self.animator.play_anim(cx, self.anim_close(cx));
-                    return TabEvent::Closing;
-                },
-                _ => ()
-            }
-        }*/
         
         match event.hits(cx, self._bg_area, HitOpt::default()) {
+            Event::Trigger(_ti)=>{
+                //TODO figure out why close animations mess everything up
+                //f !self.animator.term_anim_playing() {
+                    return TabEvent::Close;
+                    //self._close_anim_rect = self._bg_area.get_rect(cx);
+                    //self.animator.play_anim(cx, self.anim_close(cx));
+                    //return TabEvent::Closing;
+                //}
+            },
             Event::Animate(ae) => {
                 // its playing the term anim, run a redraw
                 if self.animator.term_anim_playing() {
