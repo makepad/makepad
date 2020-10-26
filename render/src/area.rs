@@ -1,7 +1,7 @@
 use crate::cx::*; 
 use makepad_live_compiler::ty::Ty;
 
-#[derive(Clone, Default, Debug, PartialEq, Copy)]
+#[derive(Clone, Default, Hash, Ord, PartialOrd, Eq,Debug, PartialEq, Copy)]
 pub struct InstanceArea{
     pub view_id:usize,
     pub draw_call_id:usize,
@@ -10,13 +10,13 @@ pub struct InstanceArea{
     pub redraw_id:u64
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Copy)]
+#[derive(Clone, Default, Hash, Ord, PartialOrd, Eq,Debug, PartialEq, Copy)]
 pub struct ViewArea{
     pub view_id:usize,
     pub redraw_id:u64 
 }
 
-#[derive(Clone, Debug, PartialEq, Copy)]
+#[derive(Clone, Debug, Hash, PartialEq, Ord, PartialOrd, Eq, Copy)]
 pub enum Area{
     Empty,
     All,
@@ -634,7 +634,7 @@ impl InstanceArea{
         }
     }
     
-    pub fn get_texture_offset(sh:&CxShader, live_item_id:LiveItemId, ty:Ty)->Option<usize>{
+    pub fn get_texture_offset(sh:&CxShader, live_item_id:LiveItemId)->Option<usize>{
         for (index, prop) in sh.mapping.textures.iter().enumerate(){
             if prop.live_item_id == live_item_id{
                 return Some(index)
@@ -648,7 +648,7 @@ impl InstanceArea{
         let draw_call = &mut cxview.draw_calls[self.draw_call_id];
         let sh = &cx.shaders[draw_call.shader_id];
 
-        if let Some(tex_offset) = Self::get_texture_offset(sh, live_item_id, Ty::Float){
+        if let Some(tex_offset) = Self::get_texture_offset(sh, live_item_id){
             draw_call.textures_2d[tex_offset] = texture_id as u32;
         }
     }
