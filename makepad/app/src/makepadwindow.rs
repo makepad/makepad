@@ -46,6 +46,7 @@ pub struct MakepadWindow {
     pub file_editors: FileEditors,
     pub xr_control: XRControl,
     pub world_view: WorldView,
+    pub close_buttons: Elements<u64, TabClose, TabClose>,
     pub dock: Dock<Panel>,
 }
 
@@ -84,6 +85,7 @@ impl MakepadWindow {
             file_panel: FilePanel::new(cx),
             xr_control: XRControl::new(cx),
             world_view: WorldView::new(cx),
+            close_buttons: Elements::new(TabClose::new(cx)),
             dock: Dock ::new(cx),
         }
     }
@@ -120,8 +122,6 @@ impl MakepadWindow {
         
         match event {
             Event::XRUpdate(xu) => { // handle all VR updates here.
-                
-                
                 let mut events = self.xr_control.handle_xr_control(
                     cx,
                     xu,
@@ -470,14 +470,16 @@ impl MakepadWindow {
                     file_panel.draw_file_panel(cx);
                 }
                 Panel::FileEditor {path, scroll_pos, editor_id} => {
+                    
                     let text_buffer = makepad_storage.text_buffer_from_path(cx, path);
                     let (file_editor, is_new) = self.file_editors.get_file_editor_for_path(path, *editor_id);
                     if is_new {
                         file_editor.set_scroll_pos_on_load(*scroll_pos);
                     }
                     file_editor.draw_file_editor(cx, text_buffer, &mut build_manager.search_index);
+
                     // draw the little editor close button over it
-                    
+                    self.close_buttons.get_draw(cx, *editor_id, |_,t| t.clone()).draw_tab_close(cx);
                 }
             }
         }
