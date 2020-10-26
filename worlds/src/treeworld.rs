@@ -22,8 +22,8 @@ impl TreeWorld {
             area: Area::Empty,
             sky_box: SkyBox::new(cx),
         }
-    }
-    
+    }  
+     
     pub fn style(cx: &mut Cx) {
         live_body!(cx, r#"
             
@@ -45,7 +45,7 @@ impl TreeWorld {
                 instance in_path: float;
                 instance depth: float;
 
-                varying color: vec4;
+                varying color: vec4; 
                 fn vertex() -> vec4 {  
                     let pos = vec2(0.0, 0.5);    
                     let scale = vec2(0.2, 0.2);
