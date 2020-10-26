@@ -446,12 +446,12 @@ impl Cx {
             };
         };
         
-        self.call_signals(&mut event_handler);
+        self.call_signals_and_triggers(&mut event_handler);
         
         if is_animation_frame && (self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0) {
             self.call_draw_event(&mut event_handler);
         }
-        self.call_signals(&mut event_handler);
+        self.call_signals_and_triggers(&mut event_handler);
         
         for window in &mut self.windows {
             
