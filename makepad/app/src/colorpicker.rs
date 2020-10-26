@@ -120,7 +120,7 @@ impl ColorPicker {
             },
             Event::FingerUp(fe) => {
                 if fe.is_over {
-                    if !fe.is_touch {
+                    if fe.input_type.has_hovers() {
                         self.animator.play_anim(cx, live_anim!(cx, self::anim_hover));
                     }
                     else {

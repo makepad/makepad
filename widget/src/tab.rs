@@ -1,6 +1,4 @@
 use makepad_render::*;
-use crate::buttonlogic::*;
-use crate::tabclose::*;
 
 #[derive(Clone)]
 pub struct Tab {
@@ -273,7 +271,7 @@ impl Tab {
                 self._is_down = false;
                 
                 if fe.is_over {
-                    if !fe.is_touch {
+                    if fe.input_type.has_hovers() {
                         self.animator.play_anim(cx, self.anim_over(cx));
                     }
                     else {
@@ -290,7 +288,7 @@ impl Tab {
             },
             Event::FingerMove(fe) => {
                 if !self._is_drag {
-                    if fe.move_distance() > 10. {
+                    if fe.move_distance() > 30. {
                         //cx.set_down_mouse_cursor(MouseCursor::Hidden);
                         self._is_drag = true;
                     }

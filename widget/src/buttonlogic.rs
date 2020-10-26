@@ -47,7 +47,7 @@ impl ButtonLogic {
                 }
             },
             Event::FingerUp(fe) => if fe.is_over {
-                if !fe.is_touch {cb(cx, ButtonLogicEvent::Over, area)}
+                if fe.input_type.has_hovers() {cb(cx, ButtonLogicEvent::Over, area)}
                 else {cb(cx, ButtonLogicEvent::Default, area)}
                 return ButtonEvent::Clicked;
             }

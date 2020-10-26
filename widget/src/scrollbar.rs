@@ -272,7 +272,7 @@ impl ScrollBar {
                             Axis::Horizontal => if self.use_vertical_finger_scroll {fe.scroll.y}else {fe.scroll.x},
                             Axis::Vertical => fe.scroll.y
                         };
-                        if !self.smoothing.is_none() && fe.is_wheel {
+                        if !self.smoothing.is_none() && fe.input_type.is_mouse() {
                             let scroll_pos_target = self.get_scroll_target();
                             if self.set_scroll_target(cx, scroll_pos_target + scroll) {
                                 match self.axis {
@@ -347,7 +347,7 @@ impl ScrollBar {
                 Event::FingerUp(fe) => {
                     self._drag_point = None;
                     if fe.is_over {
-                        if !fe.is_touch {
+                        if fe.input_type.has_hovers() {
                             self.animator.play_anim(cx, live_anim!(cx, self::anim_over));
                         }
                         else {
