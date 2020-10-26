@@ -152,6 +152,13 @@ impl TabControl {
         tab_control_event
     }
     
+    pub fn close_tab(&self, cx:&mut Cx, tab_id: usize){
+        println!("CLOSE TABS {}", tab_id);
+        if let Some(tab) = self.tabs.get(tab_id){
+            tab.close_tab(cx);
+        }
+    }
+    
     pub fn get_tab_rects(&mut self, cx: &Cx) -> Vec<Rect> {
         let mut rects = Vec::new();
         for tab in self.tabs.iter() {

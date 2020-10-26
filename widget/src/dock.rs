@@ -50,7 +50,6 @@ where TItem: Clone
 pub enum DockItem<TItem>
 where TItem: Clone
 {
-    Single(TItem),
     TabControl {
         current: usize,
         previous: usize,
@@ -105,6 +104,7 @@ where TItem: Clone
         let push_or_pop = if let Some(stack_top) = self.stack.last_mut() {
             // return item 'count'
             match stack_top.item {
+                /*
                 DockItem::Single(..) => {
                     if stack_top.counter == 0 {
                         stack_top.counter += 1;
@@ -113,7 +113,7 @@ where TItem: Clone
                     else {
                         None
                     }
-                },
+                },*/
                 DockItem::TabControl {..} => {
                     if stack_top.counter == 0 {
                         let uid = self.walk_uid;
@@ -160,11 +160,12 @@ where TItem: Clone
         return None;
     }
     
-    pub fn walk_handle_dock(&mut self, cx: &mut Cx, event: &mut Event) -> Option<&mut TItem> {
+    pub fn walk_handle_dock(&mut self, cx: &mut Cx, event: &mut Event) -> Option<(&mut TItem, DockTabIdent)> {
         // lets get the current item on the stack
         let push_or_pop = if let Some(stack_top) = self.stack.last_mut() {
             // return item 'count'
             match stack_top.item {
+                /*
                 DockItem::Single(item) => {
                     if stack_top.counter == 0 {
                         stack_top.counter += 1;
@@ -173,20 +174,27 @@ where TItem: Clone
                     else {
                         None
                     }
-                },
+                },*/
                 DockItem::TabControl {current, previous, tabs} => {
                     if stack_top.counter == 0 {
+                        let tab_control_id = self.walk_uid;
                         stack_top.counter += 1;
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
                         
                         if *current < tabs.len() {
-                            return Some(unsafe {mem::transmute(&mut tabs[*current].item)});
+                            return Some((
+                                unsafe {mem::transmute(&mut tabs[*current].item)},
+                                DockTabIdent {
+                                    tab_control_id: tab_control_id,
+                                    tab_id: *current
+                                }
+                            ));
                         }
                         None
                     }
                     else {
-                        let tab_control = self.tab_controls.get(stack_top.uid);
+                        let tab_control = self.tab_controls.get_mut(stack_top.uid);
                         let mut defocus = false;
                         if !tab_control.is_none() {
                             match tab_control.unwrap().handle_tab_control(cx, event) {
@@ -250,7 +258,7 @@ where TItem: Clone
                         stack_top.counter += 1;
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
-                        let split = self.splitters.get(stack_top.uid);
+                        let split = self.splitters.get_mut(stack_top.uid);
                         if let Some(split) = split {
                             match split.handle_splitter(cx, event) {
                                 SplitterEvent::Moving {new_pos} => {
@@ -298,6 +306,7 @@ where TItem: Clone
         let push_or_pop = if let Some(stack_top) = self.stack.last_mut() {
             // return item 'count'
             match stack_top.item {
+                /*
                 DockItem::Single(item) => {
                     if stack_top.counter == 0 {
                         stack_top.counter += 1;
@@ -306,7 +315,7 @@ where TItem: Clone
                     else {
                         None
                     }
-                },
+                },*/
                 DockItem::TabControl {current, previous: _, tabs} => {
                     if stack_top.counter == 0 {
                         stack_top.counter += 1;
@@ -410,11 +419,20 @@ where TItem: Clone
         }
     }
     
+    pub fn close_tab(&self, cx:&mut Cx, dock_tab_ident: DockTabIdent){
+        // lets trigger the tabcontrol tab
+        println!("DOCK CLOSE {:?}", dock_tab_ident);
+        if let Some(tab_ctrl) = self.tab_controls.get(dock_tab_ident.tab_control_id){
+            println!("TABCTRL");
+            tab_ctrl.close_tab(cx, dock_tab_ident.tab_id);
+        }
+    }
+    
     fn recur_remove_tab(dock_walk: &mut DockItem<TItem>, control_id: usize, tab_id: usize, counter: &mut usize, clone: bool, select_previous: bool) -> Option<DockTab<TItem >>
     where TItem: Clone
     {
         match dock_walk {
-            DockItem::Single(_) => {},
+            //DockItem::Single(_) => {},
             DockItem::TabControl {tabs, current, previous} => {
                 let id = *counter;
                 *counter += 1;
@@ -457,7 +475,7 @@ where TItem: Clone
     where TItem: Clone
     {
         match dock_walk {
-            DockItem::Single(_) => {},
+            //DockItem::Single(_) => {},
             DockItem::TabControl {tabs, ..} => {
                 return tabs.len() == 0
             },
@@ -482,7 +500,7 @@ where TItem: Clone
     where TItem: Clone
     {
         match dock_walk {
-            DockItem::Single(_) => {},
+            //DockItem::Single(_) => {},
             DockItem::TabControl {tabs, previous: _, current} => {
                 let id = *counter;
                 *counter += 1;
