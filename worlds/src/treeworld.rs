@@ -142,7 +142,7 @@ impl TreeWorld {
 
         inst.write_uniform_float(cx, live_item_id!(self::shader::max_depth), max_depth);
         
-        self.area = inst.into();
+        self.area = inst.into();   
         
         fn recur(shader: Shader, pself: &mut TreeWorld, cx: &mut Cx, path: f32, depth: f32, max_depth: f32) {
             let inst = cx.new_instance(shader, None, 1);
@@ -151,7 +151,7 @@ impl TreeWorld {
             if depth > max_depth {return}
             recur(shader, pself, cx, path, depth + 1.0, max_depth);
             recur(shader, pself, cx, path + (2.0f32).powf(depth), depth + 1.0, max_depth);
-        }
+        } 
         recur(shader, self, cx, 0., 0., max_depth);
     }
 }
