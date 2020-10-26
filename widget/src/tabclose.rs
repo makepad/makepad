@@ -11,7 +11,10 @@ pub struct TabClose {
 impl TabClose {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            bg: Quad::new(cx),
+            bg: Quad{
+                z:12.0,
+                ..Quad::new(cx)
+            },
             animator: Animator::default(),
             _bg_area: Area::Empty,
         }
@@ -24,8 +27,8 @@ impl TabClose {
             self::color_deselected_focus: #9d;
             
             self::walk: Walk {
-                width: Fix(10.),
-                height: Fix(10.),
+                width: Fix(20.),
+                height: Fix(20.),
                 margin: {l: -4., t: 0., r: 4., b: 0.}
             }
             
@@ -63,6 +66,7 @@ impl TabClose {
                 instance down: float;
 
                 fn pixel() -> vec4 {
+                    return #f00;
                     let cx = Df::viewport(pos * vec2(w, h));
                     let hover_max: float = (hover * 0.2 + 0.8) * 0.5;
                     let hover_min: float = 1. - hover_max;
@@ -121,7 +125,9 @@ impl TabClose {
         self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
         self.bg.shader = live_shader!(cx, self::shader_bg);
         self.bg.color = self.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
-        let bg_inst = self.bg.draw_quad(cx, live_walk!(cx, self::walk));
+        
+        let bg_inst = self.bg.draw_quad_rel(cx, Rect{x:0.0,y:0.0,w:25.0,h:25.0});
+
         bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::hover));
         bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::down));
         self._bg_area = bg_inst.into();
