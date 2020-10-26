@@ -144,7 +144,6 @@ impl TreeWorld {
         
         self.area = inst.into();
         
-        
         fn recur(shader: Shader, pself: &mut TreeWorld, cx: &mut Cx, path: f32, depth: f32, max_depth: f32) {
             let inst = cx.new_instance(shader, None, 1);
             let data = [path, depth];
