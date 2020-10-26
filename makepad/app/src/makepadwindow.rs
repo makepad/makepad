@@ -251,6 +251,11 @@ impl MakepadWindow {
                     file_tree_event = self.file_panel.handle_file_panel(cx, event);
                 }
                 Panel::FileEditor {path, scroll_pos, editor_id} => {
+                    if let Some(db) = self.close_buttons.get(*editor_id){
+                        db.handle_tab_close(cx, event);
+                    }
+
+                    
                     if let Some(file_editor) = &mut self.file_editors.editors.get_mut(editor_id) {
                         
                         let mtb = makepad_storage.text_buffer_from_path(cx, path);
