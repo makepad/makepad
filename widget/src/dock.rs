@@ -421,9 +421,7 @@ where TItem: Clone
     
     pub fn close_tab(&self, cx:&mut Cx, dock_tab_ident: DockTabIdent){
         // lets trigger the tabcontrol tab
-        println!("DOCK CLOSE {:?}", dock_tab_ident);
         if let Some(tab_ctrl) = self.tab_controls.get(dock_tab_ident.tab_control_id){
-            println!("TABCTRL");
             tab_ctrl.close_tab(cx, dock_tab_ident.tab_id);
         }
     }

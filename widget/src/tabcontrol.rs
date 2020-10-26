@@ -153,7 +153,6 @@ impl TabControl {
     }
     
     pub fn close_tab(&self, cx:&mut Cx, tab_id: usize){
-        println!("CLOSE TABS {}", tab_id);
         if let Some(tab) = self.tabs.get(tab_id){
             tab.close_tab(cx);
         }
