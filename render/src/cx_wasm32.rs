@@ -5,7 +5,7 @@ use crate::cx::*;
 use std::collections::BTreeSet;
 
 impl Cx {
-     
+    
     pub fn get_default_window_size(&self) -> Vec2 {
         return self.platform.window_geom.inner_size;
     }
@@ -25,7 +25,7 @@ impl Cx {
         
         //let root_view = unsafe {&mut *(self.platform.root_view_ptr as *mut View<NoScrollBar>)};
         let mut to_wasm = ToWasm::from(msg);
-        if self.platform.from_wasm.offset == 0{
+        if self.platform.from_wasm.offset == 0 {
             self.platform.from_wasm = FromWasm::new();
         }
         let mut is_animation_frame = false;
@@ -41,18 +41,18 @@ impl Cx {
                         to_wasm.parse_string(), // min_uniforms
                         to_wasm.parse_string() // min_uniforms
                     );
-                    self.platform_type = PlatformType::Web{
-                         port:to_wasm.mu32() as u16,
-                         protocol:to_wasm.parse_string(),
-                         hostname:to_wasm.parse_string(),
-                         pathname:to_wasm.parse_string(),
-                         search:to_wasm.parse_string(),
-                         hash:to_wasm.parse_string(),
+                    self.platform_type = PlatformType::Web {
+                        port: to_wasm.mu32() as u16,
+                        protocol: to_wasm.parse_string(),
+                        hostname: to_wasm.parse_string(),
+                        pathname: to_wasm.parse_string(),
+                        search: to_wasm.parse_string(),
+                        hash: to_wasm.parse_string(),
                     };
                     // send the UI our deps, overlap with shadercompiler
                     let mut load_deps = Vec::<String>::new();
                     
-                    for (file, _) in &self.live_styles.font_index{
+                    for (file, _) in &self.live_styles.font_index {
                         load_deps.push(file.to_string());
                     }
                     // other textures, things
@@ -69,7 +69,7 @@ impl Cx {
                         let vec_len = to_wasm.mu32() as usize;
                         let vec_rec = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
                         // check if its a font
-                        for (file, font) in &self.live_styles.font_index{
+                        for (file, font) in &self.live_styles.font_index {
                             let file_str = file.to_string();
                             if file_str.to_string() == dep_path {
                                 let mut cxfont = &mut self.fonts[font.font_id];
@@ -163,7 +163,7 @@ impl Cx {
                         rect: Rect::default(),
                         handled: false,
                         digit: digit,
-                        input_type: if is_touch{FingerInputType::Touch} else {FingerInputType::Mouse},
+                        input_type: if is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
                         modifiers: modifiers,
                         time: time,
                         tap_count: tap_count
@@ -188,7 +188,7 @@ impl Cx {
                         rel_start: Vec2::default(),
                         digit: digit,
                         is_over: false,
-                        input_type: if is_touch{FingerInputType::Touch} else {FingerInputType::Mouse},
+                        input_type: if is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
                         modifiers: modifiers,
                         time: time
                     }));
@@ -210,7 +210,7 @@ impl Cx {
                         rel_start: Vec2::default(),
                         is_over: false,
                         digit: digit,
-                        input_type: if is_touch{FingerInputType::Touch} else {FingerInputType::Mouse},
+                        input_type: if is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
                         modifiers: modifiers,
                         time: time
                     }));
@@ -256,7 +256,7 @@ impl Cx {
                         handled_x: false,
                         handled_y: false,
                         scroll: scroll,
-                        input_type: if is_wheel{FingerInputType::Mouse} else {FingerInputType::Touch},
+                        input_type: if is_wheel {FingerInputType::Mouse} else {FingerInputType::Touch},
                         modifiers: modifiers,
                         time: time
                     }));
@@ -364,35 +364,35 @@ impl Cx {
                     let mut other_inputs = Vec::new();
                     for _ in 0..inputs_len {
                         let skip = to_wasm.mu32();
-                        if skip == 0{
+                        if skip == 0 {
                             continue;
                         }
                         let mut input = XRInput::default();
                         input.active = true;
                         input.grip = to_wasm.parse_transform();
                         input.ray = to_wasm.parse_transform();
-
+                        
                         let hand = to_wasm.mu32();
                         let num_buttons = to_wasm.mu32() as usize;
                         input.num_buttons = num_buttons;
-                        for i in 0..num_buttons{
+                        for i in 0..num_buttons {
                             input.buttons[i].pressed = to_wasm.mu32() > 0;
                             input.buttons[i].value = to_wasm.mf32();
                         }
-
+                        
                         let num_axes = to_wasm.mu32() as usize;
                         input.num_axes = num_axes;
-                        for i in 0..num_axes{
+                        for i in 0..num_axes {
                             input.axes[i] = to_wasm.mf32();
                         }
-
-                        if hand == 1{
+                        
+                        if hand == 1 {
                             left_input = input;
                         }
-                        else if hand == 2{
+                        else if hand == 2 {
                             right_input = input;
                         }
-                        else{
+                        else {
                             other_inputs.push(input);
                         }
                     }
@@ -424,20 +424,20 @@ impl Cx {
                     });
                     self.signals.insert(Signal {signal_id: signal_id as usize}, new_set);
                 },
-                23 =>{ // websocket message 
+                23 => { // websocket message
                     let vec_ptr = to_wasm.mu32() as *mut u8;
                     let vec_len = to_wasm.mu32() as usize;
                     let url = to_wasm.parse_string();
                     let data = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
                     self.call_event_handler(&mut event_handler, &mut Event::WebSocketMessage(
-                        WebSocketMessageEvent{url, result:Ok(data)}
+                        WebSocketMessageEvent {url, result: Ok(data)}
                     ));
                 }
-                24 =>{ // websocket error 
+                24 => { // websocket error
                     let url = to_wasm.parse_string();
                     let err = to_wasm.parse_string();
                     self.call_event_handler(&mut event_handler, &mut Event::WebSocketMessage(
-                        WebSocketMessageEvent{url, result:Err(err)}
+                        WebSocketMessageEvent {url, result: Err(err)}
                     ));
                 }
                 _ => {
@@ -538,11 +538,11 @@ impl Cx {
         
         // lets check our recompile queue
         if !is_animation_frame {
-            if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0{
+            if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0 {
                 let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
                 let mut errors = self.process_live_styles_changes();
                 self.webgl_update_all_shaders(&mut errors);
-                self.call_live_recompile_event(changed_live_bodies, errors ,&mut event_handler);
+                self.call_live_recompile_event(changed_live_bodies, errors, &mut event_handler);
             }
             /*
             let mut shader_results = Vec::new();
@@ -617,9 +617,9 @@ impl Cx {
     pub fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         self.platform.from_wasm.http_send(verb, path, proto, domain, port, content_type, body, signal);
     }
-
-    pub fn websocket_send(&mut self, url:&str, data:&[u8]){
-        self.platform.from_wasm.websocket_send(url,data);
+    
+    pub fn websocket_send(&mut self, url: &str, data: &[u8]) {
+        self.platform.from_wasm.websocket_send(url, data);
     }
     
     pub fn update_menu(&mut self, _menu: &Menu) {
@@ -839,7 +839,7 @@ impl FromWasm {
                 mu32: buf as *mut u32,
                 mf32: buf as *mut f32,
                 mf64: buf as *mut f64,
-                slots: start_bytes>>2,
+                slots: start_bytes >> 2,
                 used: 2,
                 offset: 0
             }
@@ -904,7 +904,7 @@ impl FromWasm {
                 self.offset += 1;
             }
             self.fit(2);
-            self.mf64.offset(self.offset>>1).write(v);
+            self.mf64.offset(self.offset >> 1).write(v);
             self.offset += 2;
         }
     }
@@ -950,7 +950,13 @@ impl FromWasm {
         self.add_string(msg);
     }
     
-    pub fn compile_webgl_shader(&mut self, shader_id: usize, vertex: &str, fragment: &str, mapping: &CxShaderMapping) {
+    pub fn compile_webgl_shader(
+        &mut self,
+        shader_id: usize,
+        vertex: &str,
+        fragment: &str,
+        mapping: &CxShaderMapping
+    ) {
         self.fit(2);
         self.mu32(2);
         self.mu32(shader_id as u32);
@@ -983,7 +989,7 @@ impl FromWasm {
         self.mu32(data as u32);
     }
     
-    pub fn alloc_vao(&mut self, vao_id: usize, shader_id:usize, geom_ib_id: usize, geom_vb_id: usize, inst_vb_id: usize) {
+    pub fn alloc_vao(&mut self, vao_id: usize, shader_id: usize, geom_ib_id: usize, geom_vb_id: usize, inst_vb_id: usize) {
         self.fit(6);
         self.mu32(5);
         self.mu32(vao_id as u32);
@@ -1003,7 +1009,7 @@ impl FromWasm {
         uniforms_user: &[f32],
         uniforms_live: &[f32],
         textures: &Vec<u32>,
-        const_table: &Option<Vec<f32>>
+        const_table: &Option<Vec<f32 >>
     ) {
         self.fit(11);
         self.mu32(6);
@@ -1208,7 +1214,7 @@ impl FromWasm {
     
     fn add_u8slice(&mut self, msg: &[u8]) {
         let u8_len = msg.len();
-        let len = u8_len>>2;
+        let len = u8_len >> 2;
         let spare = u8_len & 3;
         self.fit(len + if spare > 0 {1}else {0} + 1);
         self.mu32(u8_len as u32);
@@ -1238,7 +1244,7 @@ impl FromWasm {
         self.add_u8slice(body);
     }
     
-    pub fn websocket_send(&mut self, url: &str, data:&[u8]) {
+    pub fn websocket_send(&mut self, url: &str, data: &[u8]) {
         self.fit(1);
         self.mu32(30);
         self.add_string(url);
@@ -1284,7 +1290,7 @@ impl ToWasm {
                 mf32: buf as *mut f32,
                 mf64: buf as *mut f64,
                 offset: 2,
-                slots: bytes>>2
+                slots: bytes >> 2
             }
         }
     }
@@ -1310,7 +1316,7 @@ impl ToWasm {
             if self.offset & 1 != 0 {
                 self.offset += 1;
             }
-            let ret = self.mf64.offset(self.offset>>1).read();
+            let ret = self.mf64.offset(self.offset >> 1).read();
             self.offset += 2;
             ret
         }
@@ -1329,7 +1335,7 @@ impl ToWasm {
     
     fn parse_transform(&mut self) -> Transform {
         Transform {
-        orientation: Quat {
+            orientation: Quat {
                 a: self.mf32(),
                 b: self.mf32(),
                 c: self.mf32(),
@@ -1382,20 +1388,20 @@ pub unsafe extern "C" fn dealloc_wasm_message(in_buf: u32) {
 }
 
 extern "C" {
-    pub fn _console_log(chars:u32, len:u32);
+    pub fn _console_log(chars: u32, len: u32);
 }
 
-pub fn console_log(val:&str){
-    unsafe{
-        let chars = val.chars().collect::<Vec<char>>();
+pub fn console_log(val: &str) {
+    unsafe {
+        let chars = val.chars().collect::<Vec<char >> ();
         _console_log(chars.as_ptr() as u32, chars.len() as u32);
     }
 }
 
 #[macro_export]
 macro_rules!log {
-    ( $ ( $t: tt) *) => {
-        console_log(&format!("{}:{} - {}",file!(),line!(),format!($($t)*)))
+    ( $ ( $ t: tt) *) => {
+        console_log(&format!("{}:{} - {}", file!(), line!(), format!( $ ( $ t) *)))
     }
 }
- 
+

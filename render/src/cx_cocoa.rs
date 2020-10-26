@@ -466,7 +466,7 @@ impl CocoaApp {
                             abs: cocoa_window.last_mouse_pos,
                             rel: cocoa_window.last_mouse_pos,
                             rect: Rect::default(),
-                            is_wheel: false,
+                            input_type: FingerInputType::Mouse,
                             modifiers: get_event_key_modifier(ns_event),
                             handled_x: false,
                             handled_y: false,
@@ -482,7 +482,7 @@ impl CocoaApp {
                             abs: cocoa_window.last_mouse_pos,
                             rel: cocoa_window.last_mouse_pos,
                             rect: Rect::default(),
-                            is_wheel: true,
+                            input_type: FingerInputType::Mouse,
                             modifiers: get_event_key_modifier(ns_event),
                             handled_x: false,
                             handled_y: false,
@@ -994,7 +994,7 @@ impl CocoaWindow {
             rect: Rect::default(),
             digit: digit,
             handled: false,
-            is_touch: false,
+            input_type: FingerInputType::Mouse,
             modifiers: modifiers,
             tap_count: 0,
             time: self.time_now()
@@ -1012,7 +1012,7 @@ impl CocoaWindow {
             rel_start: Vec2::default(),
             digit: digit,
             is_over: false,
-            is_touch: false,
+            input_type: FingerInputType::Mouse,
             modifiers: modifiers,
             time: self.time_now()
         })]);
@@ -1035,7 +1035,7 @@ impl CocoaWindow {
                     abs_start: Vec2::default(),
                     rel_start: Vec2::default(),
                     is_over: false,
-                    is_touch: false,
+                    input_type: FingerInputType::Mouse,
                     modifiers: modifiers.clone(),
                     time: self.time_now()
                 }));

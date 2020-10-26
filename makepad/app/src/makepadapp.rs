@@ -282,6 +282,7 @@ impl MakepadApp {
                     //self.storage.save_settings(cx);
                 },
                 KeyCode::Equals => if ke.modifiers.logo || ke.modifiers.control {
+                    cx.reset_font_atlas_and_redraw();
                     println!("IMPLEMENT SCALE");
                     //let scale = self.storage.settings.style_options.scale * 1.1;
                     // self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
@@ -290,6 +291,7 @@ impl MakepadApp {
                     //self.storage.save_settings(cx);
                 },
                 KeyCode::Minus => if ke.modifiers.logo || ke.modifiers.control {
+                    cx.reset_font_atlas_and_redraw();
                     println!("IMPLEMENT SCALE");
                     //let scale = self.storage.settings.style_options.scale / 1.1;
                     //self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
