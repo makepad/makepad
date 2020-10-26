@@ -287,7 +287,7 @@ impl Tab {
             },
             Event::FingerMove(fe) => {
                 if !self._is_drag {
-                    if fe.move_distance() > 30. {
+                    if fe.move_distance() > 50. {
                         //cx.set_down_mouse_cursor(MouseCursor::Hidden);
                         self._is_drag = true;
                     }

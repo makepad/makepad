@@ -6,7 +6,7 @@ use std::collections::{HashMap, BTreeMap};
 #[derive(Clone, Eq, Copy, Ord, PartialOrd, PartialEq, Hash, Default)]
 pub struct XRUserId(pub u32);
 
-#[derive(Clone, Default, SerBin, DeBin)]
+#[derive(Clone, Default, Debug, SerBin, DeBin)]
 pub struct XRChannelUser {
     head_transform: Transform,
     left_input: XRInput,
@@ -202,7 +202,6 @@ impl XRAvatar {
         } else {
             if let Some(xe) = &self.last_user {xe} else {return}
         };
-        
         self.left_hand.set_mat(cx, Mat4::mul(&user.left_input.ray.to_mat4(), &personal_mat));
         self.right_hand.set_mat(cx, Mat4::mul(&user.right_input.ray.to_mat4(), &personal_mat));
         self.head.set_mat(cx, Mat4::mul(&user.head_transform.to_mat4(), &personal_mat));
@@ -554,7 +553,7 @@ impl XRControl {
         
         // THIS HAS A VERY STRANGE BUG. if i reverse these, the dots are broken on wasm+quest
         if self.space_view.begin_view(cx, Layout::abs_origin_zero()).is_ok() {
-            self.space_view.block_set_view_transform(cx);
+            self.space_view.lock_view_transform(cx, &Mat4::identity());
             let hand_size = Vec3 {x: 0.02, y: 0.02, z: 0.12};
             let hand_pos = Vec3 {x: 0., y: 0., z: 0.0};
             
