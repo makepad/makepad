@@ -104,7 +104,7 @@ impl TabClose {
                 }
             },
             Event::FingerUp(fe) => if fe.is_over {
-                if !fe.is_touch {self.animator.play_anim(cx, live_anim!(cx, self::anim_over))}
+                if fe.input_type.has_hovers() {self.animator.play_anim(cx, live_anim!(cx, self::anim_over))}
                 else {self.animator.play_anim(cx, live_anim!(cx, self::anim_default))}
                 return ButtonEvent::Clicked;
             }

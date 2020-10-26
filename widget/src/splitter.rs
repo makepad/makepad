@@ -141,7 +141,7 @@ impl Splitter {
             Event::FingerUp(fe) => {
                 self._is_moving = false;
                 if fe.is_over {
-                    if !fe.is_touch {
+                    if fe.input_type.has_hovers() {
                         self.animator.play_anim(cx, live_anim!(cx, self::anim_over));
                     }
                     else {

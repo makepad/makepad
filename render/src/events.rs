@@ -11,6 +11,24 @@ pub struct KeyModifiers {
     pub logo: bool
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum FingerInputType{
+    Mouse,
+    Touch,
+    XR
+}
+
+impl FingerInputType{
+    pub fn is_touch(&self)->bool{*self == FingerInputType::Touch}
+    pub fn is_mouse(&self)->bool{*self == FingerInputType::Mouse}
+    pub fn is_xr(&self)->bool{*self == FingerInputType::XR}
+    pub fn has_hovers(&self)->bool{ *self == FingerInputType::Mouse || *self == FingerInputType::XR}
+}
+
+impl Default for FingerInputType{
+    fn default()->Self{Self::Mouse}
+}
+
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FingerDownEvent {
     pub window_id: usize,
@@ -20,7 +38,7 @@ pub struct FingerDownEvent {
     pub digit: usize,
     pub tap_count: u32,
     pub handled: bool,
-    pub is_touch: bool,
+    pub input_type: FingerInputType,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
@@ -35,7 +53,7 @@ pub struct FingerMoveEvent {
     pub rect: Rect,
     pub is_over: bool,
     pub digit: usize,
-    pub is_touch: bool,
+    pub input_type: FingerInputType,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
@@ -56,7 +74,7 @@ pub struct FingerUpEvent {
     pub rect: Rect,
     pub digit: usize,
     pub is_over: bool,
-    pub is_touch: bool,
+    pub input_type: FingerInputType,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
@@ -96,7 +114,8 @@ pub struct FingerScrollEvent {
     pub rel: Vec2,
     pub rect: Rect,
     pub scroll: Vec2,
-    pub is_wheel: bool,
+    pub input_type: FingerInputType,
+    //pub is_wheel: bool,
     pub handled_x: bool,
     pub handled_y: bool,
     pub modifiers: KeyModifiers,

@@ -163,7 +163,7 @@ impl Cx {
                         rect: Rect::default(),
                         handled: false,
                         digit: digit,
-                        is_touch: is_touch,
+                        input_type: if is_touch{FingerInputType::Touch} else {FingerInputType::Mouse},
                         modifiers: modifiers,
                         time: time,
                         tap_count: tap_count
@@ -188,7 +188,7 @@ impl Cx {
                         rel_start: Vec2::default(),
                         digit: digit,
                         is_over: false,
-                        is_touch: is_touch,
+                        input_type: if is_touch{FingerInputType::Touch} else {FingerInputType::Mouse},
                         modifiers: modifiers,
                         time: time
                     }));
@@ -210,7 +210,7 @@ impl Cx {
                         rel_start: Vec2::default(),
                         is_over: false,
                         digit: digit,
-                        is_touch: is_touch,
+                        input_type: if is_touch{FingerInputType::Touch} else {FingerInputType::Mouse},
                         modifiers: modifiers,
                         time: time
                     }));
@@ -256,7 +256,7 @@ impl Cx {
                         handled_x: false,
                         handled_y: false,
                         scroll: scroll,
-                        is_wheel: is_wheel,
+                        input_type: if is_wheel{FingerInputType::Mouse} else {FingerInputType::Touch},
                         modifiers: modifiers,
                         time: time
                     }));
@@ -1329,11 +1329,11 @@ impl ToWasm {
     
     fn parse_transform(&mut self) -> Transform {
         Transform {
-            orientation: Vec4 {
-                x: self.mf32(),
-                y: self.mf32(),
-                z: self.mf32(),
-                w: self.mf32(),
+        orientation: Quat {
+                a: self.mf32(),
+                b: self.mf32(),
+                c: self.mf32(),
+                d: self.mf32(),
             },
             position: Vec3 {
                 x: self.mf32(),
