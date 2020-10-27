@@ -171,6 +171,7 @@ impl BuildManager {
                 self.restart_build(cx, makepad_storage);
             },
             HubMsg::CargoBegin {uid} => if self.is_running_uid(uid) {
+                cx.send_signal(self.signal, BuildManager::status_new_log_item());
             },
             HubMsg::LogItem {uid, item} => if self.is_running_uid(uid) {
                 
@@ -271,6 +272,7 @@ impl BuildManager {
             self.process_loc_message_for_textbuffers(cx, &msg, TextBufferMessageLevel::Error, makepad_storage);
             self.log_items.push(HubLogItem::LocError(msg));
         }
+        cx.send_signal(self.signal, BuildManager::status_new_log_item());
     }
     
     pub fn run_all_artifacts(&mut self, makepad_storage: &mut MakepadStorage) {
