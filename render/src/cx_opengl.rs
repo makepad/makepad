@@ -60,7 +60,7 @@ impl Cx {
                     draw_call.instance_dirty = false;
                     draw_call.platform.inst_vb.update_with_f32_data(opengl_cx, &draw_call.instance);
                 }
-
+                
                 let geometry = &mut self.geometries[draw_call.geometry_id];
                 let indices = geometry.indices.len();
                 
@@ -84,7 +84,7 @@ impl Cx {
                 // lets check if our vao is still valid
                 if draw_call.platform.vao.is_none() {
                     draw_call.platform.vao = Some(CxPlatformDrawCallVao {
-                        vao: unsafe{
+                        vao: unsafe {
                             let mut vao = std::mem::MaybeUninit::uninit();
                             gl::GenVertexArrays(1, vao.as_mut_ptr());
                             vao.assume_init()
@@ -106,9 +106,9 @@ impl Cx {
                     vao.geom_vb = geometry.platform.vb.gl_buffer;
                     vao.geom_ib = geometry.platform.ib.gl_buffer;
                     
-                    unsafe{
+                    unsafe {
                         gl::BindVertexArray(vao.vao);
-                
+                        
                         // bind the vertex and indexbuffers
                         gl::BindBuffer(gl::ARRAY_BUFFER, vao.geom_vb.unwrap());
                         for attr in &shp.geometries {
@@ -126,7 +126,7 @@ impl Cx {
                         
                         // bind the indexbuffer
                         gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, vao.geom_ib.unwrap());
-                        gl::BindVertexArray(0);                        
+                        gl::BindVertexArray(0);
                     }
                 }
                 
@@ -148,7 +148,7 @@ impl Cx {
                     if let Some(ct) = &sh.mapping.const_table {
                         opengl_cx.set_uniform_array(&shp.const_table_uniform, ct);
                     }
-
+                    
                     // lets set our textures
                     for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
                         let cxtexture = &mut self.textures[*texture_id as usize];
@@ -233,7 +233,7 @@ impl Cx {
         }
         let window;
         let view_rect;
-
+        
         opengl_window.xlib_window.hide_child_windows();
         
         window = opengl_window.xlib_window.window.unwrap();
@@ -249,7 +249,7 @@ impl Cx {
             gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
         }
         view_rect = Rect::default();
-
+        
         //self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         // set up the
@@ -333,18 +333,61 @@ impl Cx {
             gl::BindFramebuffer(gl::FRAMEBUFFER, self.passes[pass_id].platform.gl_framebuffer.unwrap());
         }
         
+        
+        // attach/clear depth buffers, if any
+        if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
+            // ok lets do ugly shit here.
+            match self.passes[pass_id].clear_depth {
+                ClearDepth::InitWith(depth_clear) => {
+                    if opengl_cx.update_platform_render_target(&mut self.textures[depth_texture_id], dpi_factor, pass_size, true) {
+                        clear_depth = depth_clear;
+                        clear_flags |= gl::DEPTH_BUFFER_BIT;
+                    }
+                },
+                ClearDepth::ClearWith(depth_clear) => {
+                    opengl_cx.update_platform_render_target(&mut self.textures[depth_texture_id], dpi_factor, pass_size, true);
+                    clear_depth = depth_clear;
+                    clear_flags |= gl::DEPTH_BUFFER_BIT;
+                }
+            }
+            if let Some(gl_renderbuffer) = self.textures[depth_texture_id].platform.gl_renderbuffer {
+                unsafe {
+                    gl::FramebufferRenderbuffer( gl::FRAMEBUFFER, gl::DEPTH_ATTACHMENT, gl::RENDERBUFFER, gl_renderbuffer );
+                }
+            }            
+        }
+        else{
+            unsafe{ // BUGFIX. we have to create a depthbuffer for rtt without depthbuffer use otherwise it fails if there is another pass with depth
+                if self.passes[pass_id].platform.gl_bugfix_depthbuffer.is_none(){
+                    let mut gl_renderbuf = std::mem::MaybeUninit::uninit();
+                    gl::GenRenderbuffers(1, gl_renderbuf.as_mut_ptr());
+                    let gl_renderbuffer = gl_renderbuf.assume_init();
+                    gl::BindRenderbuffer(gl::RENDERBUFFER, gl_renderbuffer);
+                    gl::RenderbufferStorage(
+                        gl::RENDERBUFFER,
+                        gl::DEPTH_COMPONENT16,
+                        (pass_size.x * dpi_factor) as i32, (pass_size.y * dpi_factor) as i32
+                    );
+                    gl::BindRenderbuffer(gl::RENDERBUFFER, 0);
+                    self.passes[pass_id].platform.gl_bugfix_depthbuffer = Some(gl_renderbuffer);
+                }
+                gl::Disable(gl::DEPTH_TEST);
+                gl::FramebufferRenderbuffer( gl::FRAMEBUFFER, gl::DEPTH_ATTACHMENT, gl::RENDERBUFFER, self.passes[pass_id].platform.gl_bugfix_depthbuffer.unwrap() );
+            }
+        }
+        
         for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
             match color_texture.clear_color {
                 ClearColor::InitWith(color) => {
                     if opengl_cx.update_platform_render_target(&mut self.textures[color_texture.texture_id], dpi_factor, pass_size, false) {
                         clear_color = color;
-                        clear_flags = gl::COLOR_BUFFER_BIT;
+                        clear_flags |= gl::COLOR_BUFFER_BIT;
                     }
                 },
                 ClearColor::ClearWith(color) => {
                     opengl_cx.update_platform_render_target(&mut self.textures[color_texture.texture_id], dpi_factor, pass_size, false);
                     clear_color = color;
-                    clear_flags = gl::COLOR_BUFFER_BIT;
+                    clear_flags |= gl::COLOR_BUFFER_BIT;
                 }
             }
             if let Some(gl_texture) = self.textures[color_texture.texture_id].platform.gl_texture {
@@ -354,27 +397,6 @@ impl Cx {
             }
         }
         
-        // attach/clear depth buffers, if any
-        if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
-            match self.passes[pass_id].clear_depth {
-                ClearDepth::InitWith(depth_clear) => {
-                    if opengl_cx.update_platform_render_target(&mut self.textures[depth_texture_id], dpi_factor, pass_size, true) {
-                        clear_depth = depth_clear;
-                        clear_flags = gl::DEPTH_BUFFER_BIT;
-                    }
-                },
-                ClearDepth::ClearWith(depth_clear) => {
-                    opengl_cx.update_platform_render_target(&mut self.textures[depth_texture_id], dpi_factor, pass_size, true);
-                    clear_depth = depth_clear;
-                    clear_flags = gl::COLOR_BUFFER_BIT;
-                }
-            }
-            if let Some(gl_texture) = self.textures[depth_texture_id].platform.gl_texture {
-                unsafe {
-                    gl::FramebufferTexture2D(gl::FRAMEBUFFER, gl::DEPTH_STENCIL_ATTACHMENT, gl::TEXTURE_2D, gl_texture, 0);
-                }
-            }
-        }
         unsafe {
             gl::Viewport(0, 0, (pass_size.x * dpi_factor) as i32, (pass_size.y * dpi_factor) as i32);
         }
@@ -403,7 +425,9 @@ impl Cx {
             &mut zbias,
             zbias_step
         );
-        
+        unsafe{
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+        }
     }
     
     //let view_id = self.passes[pass_id].main_view_id.unwrap();
@@ -604,8 +628,8 @@ impl Cx {
     }
     
     
-    pub fn opengl_update_all_shaders(&mut self, opengl_cx: &OpenglCx, errors:&mut Vec<LiveBodyError>)  {
-      
+    pub fn opengl_update_all_shaders(&mut self, opengl_cx: &OpenglCx, errors: &mut Vec<LiveBodyError>) {
+        
         // recompile shaders, and update values
         
         let options = ShaderCompileOptions {
@@ -658,7 +682,7 @@ impl Cx {
         // lets generate the vertexshader
         let vertex = generate_glsl::generate_vertex_shader(&shader_ast, live_styles, options);
         let fragment = generate_glsl::generate_fragment_shader(&shader_ast, live_styles, options);
-
+        
         let vertex = format!("
             #version 100
             precision highp float;
@@ -672,7 +696,7 @@ impl Cx {
             precision highp int;
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             {}\0", fragment);
-
+        
         if shader_ast.debug {
             println!("--------------- Vertex shader {} --------------- \n{}\n---------------\n", shader_id, vertex);
             println!("--------------- Fragment shader {} --------------- \n{}\n---------------\n", shader_id, fragment);
@@ -688,7 +712,7 @@ impl Cx {
             }
         }
         
-        //println!("{} {} {}", sh.name, vertex, fragment); 
+        //println!("{} {} {}", sh.name, vertex, fragment);
         unsafe {
             
             let vs = gl::CreateShader(gl::VERTEX_SHADER);
@@ -1043,25 +1067,34 @@ impl OpenglCx {
         }
         
         unsafe {
-            if let Some(gl_texture) = cxtexture.platform.gl_texture {
-                gl::DeleteTextures(1, &gl_texture);
-            }
-            
-            let mut gl_texture = std::mem::MaybeUninit::uninit();
-            gl::GenTextures(1, gl_texture.as_mut_ptr());
-            let gl_texture = gl_texture.assume_init();
-            gl::BindTexture(gl::TEXTURE_2D, gl_texture);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
             
             cxtexture.platform.alloc_desc = cxtexture.desc.clone();
             cxtexture.platform.width = width;
             cxtexture.platform.height = height;
-            cxtexture.platform.gl_texture = Some(gl_texture);
+            if let Some(gl_texture) = cxtexture.platform.gl_texture {
+                gl::DeleteTextures(1, &gl_texture);
+            }
+            cxtexture.platform.gl_texture = None;
+
+            if let Some(gl_renderbuffer) = cxtexture.platform.gl_renderbuffer {
+                gl::DeleteTextures(1, &gl_renderbuffer);
+            }
+            cxtexture.platform.gl_renderbuffer = None;
+
             
             if !is_depth {
                 match cxtexture.desc.format {
                     TextureFormat::Default | TextureFormat::RenderBGRA => {
+                        
+                        let mut gl_texture = std::mem::MaybeUninit::uninit();
+                        gl::GenTextures(1, gl_texture.as_mut_ptr());
+                        let gl_texture = gl_texture.assume_init();
+                        gl::BindTexture(gl::TEXTURE_2D, gl_texture);
+                        
+                        cxtexture.platform.gl_texture = Some(gl_texture);
+
+                        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+                        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
                         gl::TexImage2D(gl::TEXTURE_2D, 0, gl::RGBA as i32, width as i32, height as i32, 0, gl::RGBA, gl::UNSIGNED_BYTE, ptr::null());
                     },
                     _ => {
@@ -1072,8 +1105,34 @@ impl OpenglCx {
             }
             else {
                 match cxtexture.desc.format {
-                    TextureFormat::Default | TextureFormat::Depth32Stencil8 => {
-                        println!("Depth stencil texture!");
+                    TextureFormat::Default | TextureFormat::Depth32F => {
+                        
+                        let mut gl_renderbuf = std::mem::MaybeUninit::uninit();
+                        gl::GenRenderbuffers(1, gl_renderbuf.as_mut_ptr());
+                        let gl_renderbuffer = gl_renderbuf.assume_init();
+                        gl::BindRenderbuffer(gl::RENDERBUFFER, gl_renderbuffer);
+                        gl::RenderbufferStorage(
+                            gl::RENDERBUFFER,
+                            gl::DEPTH_COMPONENT32F,
+                            width as i32,
+                            height as i32
+                        );
+                        gl::BindRenderbuffer(gl::RENDERBUFFER, 0);
+                        cxtexture.platform.gl_renderbuffer = Some(gl_renderbuffer);
+                        // this doesnt work.
+                        //gl::TexParameteri(gl::TEXTURE_2D, gl::DEPTH_STENCIL_TEXTURE_MODE, gl::LINEAR as i32);
+                        //gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+                        /*
+                        gl::TexImage2D(gl::TEXTURE_2D, 0, gl::DEPTH_COMPONENT as i32, width as i32, height as i32, 0, gl::DEPTH_COMPONENT, gl::UNSIGNED_SHORT, ptr::null());
+                        loop{
+                            let err = gl::GetError();
+                            if err == gl::NO_ERROR{
+                                break;
+                            }
+                            println!("GOT ERROR {} {} {:x}", width, height, err);
+                        }
+                        //println!("Depth stencil texture!");
+                        */
                     },
                     _ => {
                         println!("update_platform_render_targete unsupported texture format");
@@ -1206,11 +1265,13 @@ pub struct CxPlatformTexture {
     pub width: u64,
     pub height: u64,
     pub gl_texture: Option<u32>,
+    pub gl_renderbuffer: Option<u32>
 }
 
 #[derive(Default, Clone)]
 pub struct CxPlatformPass {
-    pub gl_framebuffer: Option<u32>
+    pub gl_framebuffer: Option<u32>,
+    pub gl_bugfix_depthbuffer: Option<u32>
 }
 
 #[derive(Default, Clone)]
