@@ -2,18 +2,7 @@ use std::mem;
 use std::ptr;
 use std::alloc;
 use crate::cx::*;
-use makepad_shader_compiler::ty::Ty;
-
-extern "C" {
-    fn _log_str(chars:u32, len:u32);
-}
-
-pub fn log_str(val:&str){
-    unsafe{
-        let chars = val.chars().collect::<Vec<char>>();
-        _log_str(chars.as_ptr() as u32, chars.len() as u32);
-    }
-}
+use std::collections::BTreeSet;
 
 impl Cx {
     
@@ -32,12 +21,11 @@ impl Cx {
             for _i in 0..10 {
                 self.platform.fingers_down.push(false);
             }
-            self.platform_type = PlatformType::WASM;
         }
         
         //let root_view = unsafe {&mut *(self.platform.root_view_ptr as *mut View<NoScrollBar>)};
         let mut to_wasm = ToWasm::from(msg);
-        if self.platform.from_wasm.offset == 0{
+        if self.platform.from_wasm.offset == 0 {
             self.platform.from_wasm = FromWasm::new();
         }
         let mut is_animation_frame = false;
@@ -48,12 +36,24 @@ impl Cx {
                     break;
                 },
                 1 => { // fetch_deps
-                    self.platform.gpu_spec_is_low_on_uniforms = to_wasm.mu32() > 0;
-                    
+                    self.gpu_info.init_from_info(
+                        to_wasm.mu32(), // min_uniforms
+                        to_wasm.parse_string(), // min_uniforms
+                        to_wasm.parse_string() // min_uniforms
+                    );
+                    self.platform_type = PlatformType::Web {
+                        port: to_wasm.mu32() as u16,
+                        protocol: to_wasm.parse_string(),
+                        hostname: to_wasm.parse_string(),
+                        pathname: to_wasm.parse_string(),
+                        search: to_wasm.parse_string(),
+                        hash: to_wasm.parse_string(),
+                    };
                     // send the UI our deps, overlap with shadercompiler
                     let mut load_deps = Vec::<String>::new();
-                    for cxfont in &self.fonts {
-                        load_deps.push(cxfont.path.clone());
+                    
+                    for (file, _) in &self.live_styles.font_index {
+                        load_deps.push(file.to_string());
                     }
                     // other textures, things
                     self.platform.from_wasm.load_deps(load_deps);
@@ -62,23 +62,23 @@ impl Cx {
                 },
                 2 => { // deps_loaded
                     let len = to_wasm.mu32();
-                    
+                    self.fonts.resize(self.live_styles.font_index.len(), CxFont::default());
                     for _ in 0..len {
                         let dep_path = to_wasm.parse_string();
                         let vec_ptr = to_wasm.mu32() as *mut u8;
                         let vec_len = to_wasm.mu32() as usize;
                         let vec_rec = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
                         // check if its a font
-                        for cxfont in &mut self.fonts {
-                            if cxfont.path == dep_path {
+                        for (file, font) in &self.live_styles.font_index {
+                            let file_str = file.to_string();
+                            if file_str.to_string() == dep_path {
+                                let mut cxfont = &mut self.fonts[font.font_id];
                                 // load it
-                                let mut font = CxFont::default();
-                                if font.load_from_ttf_bytes(&vec_rec).is_err() {
+                                if cxfont.load_from_ttf_bytes(&vec_rec).is_err() {
                                     println!("Error loading font {} ", dep_path);
                                 }
                                 else {
-                                    font.path = cxfont.path.clone();
-                                    *cxfont = font;
+                                    cxfont.file = file_str;
                                 }
                                 break;
                             }
@@ -139,6 +139,7 @@ impl Cx {
                 5 => { // animation_frame
                     is_animation_frame = true;
                     let time = to_wasm.mf64();
+                    self.anim_time = time;
                     //log!(self, "{} o clock",time);
                     if self.playing_anim_areas.len() != 0 {
                         self.call_animation_event(&mut event_handler, time);
@@ -162,7 +163,7 @@ impl Cx {
                         rect: Rect::default(),
                         handled: false,
                         digit: digit,
-                        is_touch: is_touch,
+                        input_type: if is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
                         modifiers: modifiers,
                         time: time,
                         tap_count: tap_count
@@ -187,7 +188,7 @@ impl Cx {
                         rel_start: Vec2::default(),
                         digit: digit,
                         is_over: false,
-                        is_touch: is_touch,
+                        input_type: if is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
                         modifiers: modifiers,
                         time: time
                     }));
@@ -209,7 +210,7 @@ impl Cx {
                         rel_start: Vec2::default(),
                         is_over: false,
                         digit: digit,
-                        is_touch: is_touch,
+                        input_type: if is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
                         modifiers: modifiers,
                         time: time
                     }));
@@ -255,7 +256,7 @@ impl Cx {
                         handled_x: false,
                         handled_y: false,
                         scroll: scroll,
-                        is_wheel: is_wheel,
+                        input_type: if is_wheel {FingerInputType::Mouse} else {FingerInputType::Touch},
                         modifiers: modifiers,
                         time: time
                     }));
@@ -362,32 +363,36 @@ impl Cx {
                     let mut right_input = XRInput::default();
                     let mut other_inputs = Vec::new();
                     for _ in 0..inputs_len {
+                        let skip = to_wasm.mu32();
+                        if skip == 0 {
+                            continue;
+                        }
                         let mut input = XRInput::default();
                         input.active = true;
                         input.grip = to_wasm.parse_transform();
                         input.ray = to_wasm.parse_transform();
-
+                        
                         let hand = to_wasm.mu32();
                         let num_buttons = to_wasm.mu32() as usize;
                         input.num_buttons = num_buttons;
-                        for i in 0..num_buttons{
+                        for i in 0..num_buttons {
                             input.buttons[i].pressed = to_wasm.mu32() > 0;
                             input.buttons[i].value = to_wasm.mf32();
                         }
-
+                        
                         let num_axes = to_wasm.mu32() as usize;
                         input.num_axes = num_axes;
-                        for i in 0..num_axes{
+                        for i in 0..num_axes {
                             input.axes[i] = to_wasm.mf32();
                         }
-
-                        if hand == 1{
+                        
+                        if hand == 1 {
                             left_input = input;
                         }
-                        else if hand == 2{
+                        else if hand == 2 {
                             right_input = input;
                         }
-                        else{
+                        else {
                             other_inputs.push(input);
                         }
                     }
@@ -412,23 +417,41 @@ impl Cx {
                 22 => { //http_send_response
                     let signal_id = to_wasm.mu32();
                     let success = to_wasm.mu32();
-                    self.signals.insert(Signal {signal_id: signal_id as usize}, vec![match success {
+                    let mut new_set = BTreeSet::new();
+                    new_set.insert(match success {
                         1 => Cx::status_http_send_ok(),
                         _ => Cx::status_http_send_fail()
-                    }]);
+                    });
+                    self.signals.insert(Signal {signal_id: signal_id as usize}, new_set);
                 },
+                23 => { // websocket message
+                    let vec_ptr = to_wasm.mu32() as *mut u8;
+                    let vec_len = to_wasm.mu32() as usize;
+                    let url = to_wasm.parse_string();
+                    let data = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
+                    self.call_event_handler(&mut event_handler, &mut Event::WebSocketMessage(
+                        WebSocketMessageEvent {url, result: Ok(data)}
+                    ));
+                }
+                24 => { // websocket error
+                    let url = to_wasm.parse_string();
+                    let err = to_wasm.parse_string();
+                    self.call_event_handler(&mut event_handler, &mut Event::WebSocketMessage(
+                        WebSocketMessageEvent {url, result: Err(err)}
+                    ));
+                }
                 _ => {
                     panic!("Message unknown")
                 }
             };
         };
         
-        self.call_signals(&mut event_handler);
+        self.call_signals_and_triggers(&mut event_handler);
         
         if is_animation_frame && (self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0) {
             self.call_draw_event(&mut event_handler);
         }
-        self.call_signals(&mut event_handler);
+        self.call_signals_and_triggers(&mut event_handler);
         
         for window in &mut self.windows {
             
@@ -515,13 +538,21 @@ impl Cx {
         
         // lets check our recompile queue
         if !is_animation_frame {
+            if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0 {
+                let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
+                let mut errors = self.process_live_styles_changes();
+                self.webgl_update_all_shaders(&mut errors);
+                self.call_live_recompile_event(changed_live_bodies, errors, &mut event_handler);
+            }
+            /*
             let mut shader_results = Vec::new();
             for shader_id in &self.shader_recompiles {
                 shader_results.push(Self::webgl_compile_shader(*shader_id, !self.platform.gpu_spec_is_low_on_uniforms, true, &mut self.shaders[*shader_id], &mut self.platform, &mut self.shader_inherit_cache));
             }
             self.shader_recompiles.truncate(0);
-            self.call_shader_recompile_event(shader_results, &mut event_handler);
+            self.call_shader_recompile_event(shader_results, &mut event_handler);*/
         }
+        self.process_live_style_errors();
         // mark the end of the message
         self.platform.from_wasm.end();
         
@@ -587,8 +618,11 @@ impl Cx {
         self.platform.from_wasm.http_send(verb, path, proto, domain, port, content_type, body, signal);
     }
     
+    pub fn websocket_send(&mut self, url: &str, data: &[u8]) {
+        self.platform.from_wasm.websocket_send(url, data);
+    }
+    
     pub fn update_menu(&mut self, _menu: &Menu) {
-        
     }
 }
 
@@ -735,15 +769,11 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
 #[derive(Clone)]
 pub struct CxPlatform {
     pub is_initialized: bool,
-    pub gpu_spec_is_low_on_uniforms: bool,
     pub window_geom: WindowGeom,
     pub from_wasm: FromWasm,
     pub vertex_buffers: usize,
-    pub vertex_buffers_free: Vec<usize>,
     pub index_buffers: usize,
-    pub index_buffers_free: Vec<usize>,
     pub vaos: usize,
-    pub vaos_free: Vec<usize>,
     pub fingers_down: Vec<bool>,
     pub xr_last_left_input: XRInput,
     pub xr_last_right_input: XRInput,
@@ -754,15 +784,11 @@ impl Default for CxPlatform {
     fn default() -> CxPlatform {
         CxPlatform {
             is_initialized: false,
-            gpu_spec_is_low_on_uniforms: false,
             window_geom: WindowGeom::default(),
             from_wasm: FromWasm::new(),
-            vertex_buffers: 1,
-            vertex_buffers_free: Vec::new(),
-            index_buffers: 1,
-            index_buffers_free: Vec::new(),
-            vaos: 1,
-            vaos_free: Vec::new(),
+            vertex_buffers: 0,
+            index_buffers: 0,
+            vaos: 0,
             file_read_id: 1,
             fingers_down: Vec::new(),
             xr_last_left_input: XRInput::default(),
@@ -772,33 +798,6 @@ impl Default for CxPlatform {
 }
 
 impl CxPlatform {
-    pub fn get_free_vertex_buffer(&mut self) -> usize {
-        if self.vertex_buffers_free.len() > 0 {
-            self.vertex_buffers_free.pop().unwrap()
-        }
-        else {
-            self.vertex_buffers += 1;
-            self.vertex_buffers
-        }
-    }
-    pub fn get_free_index_buffer(&mut self) -> usize {
-        if self.index_buffers_free.len() > 0 {
-            self.index_buffers_free.pop().unwrap()
-        }
-        else {
-            self.index_buffers += 1;
-            self.index_buffers
-        }
-    }
-    pub fn get_free_vao(&mut self) -> usize {
-        if self.vaos_free.len() > 0 {
-            self.vaos_free.pop().unwrap()
-        }
-        else {
-            self.vaos += 1;
-            self.vaos
-        }
-    }
 }
 
 
@@ -840,7 +839,7 @@ impl FromWasm {
                 mu32: buf as *mut u32,
                 mf32: buf as *mut f32,
                 mf64: buf as *mut f64,
-                slots: start_bytes>>2,
+                slots: start_bytes >> 2,
                 used: 2,
                 offset: 0
             }
@@ -905,7 +904,7 @@ impl FromWasm {
                 self.offset += 1;
             }
             self.fit(2);
-            self.mf64.offset(self.offset>>1).write(v);
+            self.mf64.offset(self.offset >> 1).write(v);
             self.offset += 2;
         }
     }
@@ -927,11 +926,11 @@ impl FromWasm {
         mu32 as u32
     }
     
-    fn add_propdefvec(&mut self, shvars: &Vec<PropDef>) {
+    fn add_propdefvec(&mut self, prop_defs: &Vec<PropDef>) {
         self.fit(1);
-        self.mu32(shvars.len() as u32);
-        for shvar in shvars {
-            self.add_string(match shvar.prop_id.shader_ty() {
+        self.mu32(prop_defs.len() as u32);
+        for prop_def in prop_defs {
+            self.add_string(match prop_def.ty {
                 Ty::Vec4 => "vec4",
                 Ty::Vec3 => "vec3",
                 Ty::Vec2 => "vec2",
@@ -940,7 +939,7 @@ impl FromWasm {
                 Ty::Texture2D => "sampler2D",
                 _ => panic!("unexpected type in add_propdefvec")
             });
-            self.add_string(&shvar.name);
+            self.add_string(&prop_def.name);
         }
     }
     
@@ -951,7 +950,13 @@ impl FromWasm {
         self.add_string(msg);
     }
     
-    pub fn compile_webgl_shader(&mut self, shader_id: usize, vertex: &str, fragment: &str, mapping: &CxShaderMapping) {
+    pub fn compile_webgl_shader(
+        &mut self,
+        shader_id: usize,
+        vertex: &str,
+        fragment: &str,
+        mapping: &CxShaderMapping
+    ) {
         self.fit(2);
         self.mu32(2);
         self.mu32(shader_id as u32);
@@ -963,7 +968,8 @@ impl FromWasm {
         self.add_propdefvec(&mapping.pass_uniforms);
         self.add_propdefvec(&mapping.view_uniforms);
         self.add_propdefvec(&mapping.draw_uniforms);
-        self.add_propdefvec(&mapping.uniforms);
+        self.add_propdefvec(&mapping.user_uniforms);
+        self.add_propdefvec(&mapping.live_uniforms);
         self.add_propdefvec(&mapping.textures);
     }
     
@@ -983,11 +989,11 @@ impl FromWasm {
         self.mu32(data as u32);
     }
     
-    pub fn alloc_vao(&mut self, shader_id: usize, vao_id: usize, geom_ib_id: usize, geom_vb_id: usize, inst_vb_id: usize) {
+    pub fn alloc_vao(&mut self, vao_id: usize, shader_id: usize, geom_ib_id: usize, geom_vb_id: usize, inst_vb_id: usize) {
         self.fit(6);
         self.mu32(5);
-        self.mu32(shader_id as u32);
         self.mu32(vao_id as u32);
+        self.mu32(shader_id as u32);
         self.mu32(geom_ib_id as u32);
         self.mu32(geom_vb_id as u32);
         self.mu32(inst_vb_id as u32);
@@ -997,21 +1003,23 @@ impl FromWasm {
         &mut self,
         shader_id: usize,
         vao_id: usize,
-        uniforms_cx: &[f32],
-        uniforms_dl: &[f32],
-        uniforms_dr: &[f32],
-        uniforms: &[f32],
+        uniforms_pass: &[f32],
+        uniforms_view: &[f32],
+        uniforms_draw: &[f32],
+        uniforms_user: &[f32],
+        uniforms_live: &[f32],
         textures: &Vec<u32>,
-        const_table: &Option<Vec<f32>>
+        const_table: &Option<Vec<f32 >>
     ) {
-        self.fit(10);
+        self.fit(11);
         self.mu32(6);
         self.mu32(shader_id as u32);
         self.mu32(vao_id as u32);
-        self.mu32(uniforms_cx.as_ptr() as u32);
-        self.mu32(uniforms_dl.as_ptr() as u32);
-        self.mu32(uniforms_dr.as_ptr() as u32);
-        self.mu32(uniforms.as_ptr() as u32);
+        self.mu32(uniforms_pass.as_ptr() as u32);
+        self.mu32(uniforms_view.as_ptr() as u32);
+        self.mu32(uniforms_draw.as_ptr() as u32);
+        self.mu32(uniforms_user.as_ptr() as u32);
+        self.mu32(uniforms_live.as_ptr() as u32);
         self.mu32(textures.as_ptr() as u32);
         if let Some(const_table) = const_table {
             self.mu32(const_table.as_ptr() as u32);
@@ -1206,7 +1214,7 @@ impl FromWasm {
     
     fn add_u8slice(&mut self, msg: &[u8]) {
         let u8_len = msg.len();
-        let len = u8_len>>2;
+        let len = u8_len >> 2;
         let spare = u8_len & 3;
         self.fit(len + if spare > 0 {1}else {0} + 1);
         self.mu32(u8_len as u32);
@@ -1223,7 +1231,7 @@ impl FromWasm {
         self.check();
     }
     
-    fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
+    pub fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         self.fit(3);
         self.mu32(27);
         self.mu32(port as u32);
@@ -1234,6 +1242,13 @@ impl FromWasm {
         self.add_string(domain);
         self.add_string(content_type);
         self.add_u8slice(body);
+    }
+    
+    pub fn websocket_send(&mut self, url: &str, data: &[u8]) {
+        self.fit(1);
+        self.mu32(30);
+        self.add_string(url);
+        self.add_u8slice(data);
     }
     
     pub fn fullscreen(&mut self) {
@@ -1275,7 +1290,7 @@ impl ToWasm {
                 mf32: buf as *mut f32,
                 mf64: buf as *mut f64,
                 offset: 2,
-                slots: bytes>>2
+                slots: bytes >> 2
             }
         }
     }
@@ -1301,7 +1316,7 @@ impl ToWasm {
             if self.offset & 1 != 0 {
                 self.offset += 1;
             }
-            let ret = self.mf64.offset(self.offset>>1).read();
+            let ret = self.mf64.offset(self.offset >> 1).read();
             self.offset += 2;
             ret
         }
@@ -1320,11 +1335,11 @@ impl ToWasm {
     
     fn parse_transform(&mut self) -> Transform {
         Transform {
-            orientation: Vec4 {
-                x: self.mf32(),
-                y: self.mf32(),
-                z: self.mf32(),
-                w: self.mf32(),
+            orientation: Quat {
+                a: self.mf32(),
+                b: self.mf32(),
+                c: self.mf32(),
+                d: self.mf32(),
             },
             position: Vec3 {
                 x: self.mf32(),
@@ -1371,3 +1386,22 @@ pub unsafe extern "C" fn dealloc_wasm_message(in_buf: u32) {
     let bytes = buf.read() as usize;
     std::alloc::dealloc(buf as *mut u8, std::alloc::Layout::from_size_align(bytes as usize, mem::align_of::<u64>()).unwrap());
 }
+
+extern "C" {
+    pub fn _console_log(chars: u32, len: u32);
+}
+
+pub fn console_log(val: &str) {
+    unsafe {
+        let chars = val.chars().collect::<Vec<char >> ();
+        _console_log(chars.as_ptr() as u32, chars.len() as u32);
+    }
+}
+
+#[macro_export]
+macro_rules!log {
+    ( $ ( $ t: tt) *) => {
+        console_log(&format!("{}:{} - {}", file!(), line!(), format!( $ ( $ t) *)))
+    }
+}
+

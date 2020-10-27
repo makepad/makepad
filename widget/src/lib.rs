@@ -45,5 +45,11 @@ pub use crate::tokentype::*;
 mod xrcontrol;
 pub use crate::xrcontrol::*;
 
+mod foldcaption;
+pub use crate::foldcaption::*;
+
+mod viewport3d;
+pub use crate::viewport3d::*;
+
 //mod texteditor;
 //pub use crate::texteditor::*;

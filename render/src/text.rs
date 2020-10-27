@@ -10,6 +10,7 @@ pub enum Wrapping {
     Ellipsis(f32)
 }
 
+/*
 #[derive(Clone, Copy)]
 pub struct TextStyle {
     pub font: Font,
@@ -33,7 +34,7 @@ impl Default for TextStyle {
             height_factor: 1.3,
         }
     }
-}
+}*/
 
 #[derive(Clone)]
 pub struct Text {
@@ -45,59 +46,50 @@ pub struct Text {
     pub font_scale: f32,
 }
 
-
 impl Text {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            text_style: TextStyle::default(),
-            shader: cx.add_shader(Self::def_text_shader(), "TextAtlas"),
+            text_style: TextStyle {
+                font: Font{font_id:0},
+                font_size: 8.0,
+                brightness: 1.0,
+                curve: 0.6,
+                line_spacing: 1.4,
+                top_drop: 1.1,
+                height_factor: 1.3,
+            },
+            shader: live_shader!(cx, self::shader),
             z: 0.0,
             wrapping: Wrapping::Word,
-            color: pick!(white).get(cx),
+            color: Color::parse_name("white").unwrap(),
             font_scale: 1.0,
         }
     }
     
-    fn geom()->Vec2Id{uid!()}
-    pub fn font_tc() -> Vec4Id {uid!()}
-    pub fn color() -> ColorId {uid!()}
-    pub fn x() -> FloatId {uid!()}
-    pub fn y() -> FloatId {uid!()}
-    pub fn w() -> FloatId {uid!()}
-    pub fn h() -> FloatId {uid!()}
-    pub fn z() -> FloatId {uid!()}
-    pub fn base_x() -> FloatId {uid!()}
-    pub fn base_y() -> FloatId {uid!()}
-    pub fn font_size() -> FloatId {uid!()}
-    pub fn marker() -> FloatId {uid!()}
-    pub fn char_offset() -> FloatId {uid!()}
-    
-    pub fn brightness() -> FloatId {uid!()}
-    pub fn curve() -> FloatId {uid!()}
-    
-    pub fn texturez() -> Texture2dId {uid!()}
-    
-    pub fn def_text_shader() -> ShaderGen {
-        // lets add the draw shader lib
-        let mut sg = Cx::shader_defs(ShaderGen::new());
+    pub fn style(cx: &mut Cx) {
+        
+        live_body!(cx, r#"self::shader: Shader {
 
-        sg.geometry.add_quad_2d();
-        sg.compose(shader!{" 
-            geometry geom: Self::geom();
-            texture texturez: Self::texturez();
+            use crate::shader_std::prelude::*;
             
-            instance font_tc: Self::font_tc();
-            instance color: Self::color();
-            instance x: Self::x();
-            instance y: Self::y();
-            instance w: Self::w();
-            instance h: Self::h();
-            instance z: Self::z();
-            instance base_x: Self::base_x();
-            instance base_y: Self::base_y();
-            instance font_size: Self::font_size();
-            instance char_offset: Self::char_offset();
-            instance marker: Self::marker();
+            default_geometry: crate::shader_std::quad_2d;
+            
+            geometry geom: vec2;
+
+            texture texturez: texture2D;
+            
+            instance font_tc: vec4;
+            instance color: vec4;
+            instance x: float;
+            instance y: float;
+            instance w: float;
+            instance h: float;
+            instance z: float;
+            instance base_x: float;
+            instance base_y: float;
+            instance font_size: float;
+            instance char_offset: float;
+            instance marker: float;
             
             varying tex_coord1: vec2;
             varying tex_coord2: vec2;
@@ -105,17 +97,18 @@ impl Text {
             varying clipped: vec2;
             //let rect: vec4<Varying>;
             
-            uniform brightness: Self::brightness();
-            uniform curve: Self::curve();
+            uniform brightness: float;
+            uniform curve: float;
             
             fn get_color() -> vec4 {
                 return color;
             }
             
             fn pixel() -> vec4 {
+                
                 let dx = dFdx(vec2(tex_coord1.x * 2048.0, 0.)).x;
                 let dp = 1.0 / 2048.0;
-                
+
                 // basic hardcoded mipmapping so it stops 'swimming' in VR
                 // mipmaps are stored in red/green/blue channel
                 let s = 1.0;
@@ -178,20 +171,20 @@ impl Text {
                 
                 return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + draw_zbias, 1.)));
             }
-        "})
+        }"#);
     }
     
     pub fn begin_text(&mut self, cx: &mut Cx) -> AlignedInstance {
         //let font_id = self.font.font_id.unwrap();
-        let inst = cx.new_instance(&self.shader, 0);
+        let inst = cx.new_instance(self.shader, None, 0);
         let aligned = cx.align_instance(inst);
         let text_style = &self.text_style;
         let brightness = text_style.brightness;
         let curve = text_style.curve;
-        if aligned.inst.need_uniforms_now(cx) {
-            aligned.inst.push_uniform_texture_2d_id(cx, cx.fonts_atlas.texture_id);
-            aligned.inst.push_uniform_float(cx, brightness);
-            aligned.inst.push_uniform_float(cx, curve);
+        if aligned.inst.is_first_instance() {
+            aligned.inst.write_texture_2d_id(cx, live_item_id!(self::shader::texturez), cx.fonts_atlas.texture_id);
+            aligned.inst.write_uniform_float(cx, live_item_id!(self::shader::brightness), brightness);
+            aligned.inst.write_uniform_float(cx, live_item_id!(self::shader::curve), curve);
         }
         return aligned
     }
@@ -206,7 +199,7 @@ impl Text {
         let text_style = &self.text_style;
         let mut geom_x = geom_x;
         let mut char_offset = char_offset;
-        let font_id = text_style.font.font_id.unwrap();
+        let font_id = text_style.font.font_id;
         
         let cxfont = &mut cx.fonts[font_id];
         
@@ -235,6 +228,7 @@ impl Text {
                 println!("GLYPHID OUT OF BOUNDS {} {} len is {}", unicode, glyph_id, font.glyphs.len());
                 continue;
             }
+
             let glyph = &font.glyphs[glyph_id];
             
             let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
@@ -282,7 +276,7 @@ impl Text {
                 });
                 
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id] = Some(
-                    cx.fonts_atlas.alloc_atlas_glyph(&cxfont.path, w, h)
+                    cx.fonts_atlas.alloc_atlas_glyph(&cxfont.file, w, h)
                 );
                 
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
@@ -337,7 +331,7 @@ impl Text {
         let height_factor = text_style.height_factor;
         let mut iter = text.chars().peekable();
         
-        let font_id = text_style.font.font_id.unwrap();
+        let font_id = text_style.font.font_id;
         let font_size_logical = text_style.font_size * 96.0 / (72.0 * cx.fonts[font_id].font_loaded.as_ref().unwrap().units_per_em);
         
         while let Some(c) = iter.next() {
@@ -414,11 +408,11 @@ impl Text {
     pub fn find_closest_offset(&self, cx: &Cx, area: &Area, pos: Vec2) -> usize {
         let scroll_pos = area.get_scroll_pos(cx);
         let spos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
-        let x_o = area.get_instance_offset(cx, Self::base_x().into()).unwrap();
-        let y_o = area.get_instance_offset(cx, Self::base_y().into()).unwrap();
-        let w_o = area.get_instance_offset(cx, Self::w().into()).unwrap();
-        let font_size_o = area.get_instance_offset(cx, Self::font_size().into()).unwrap();
-        let char_offset_o = area.get_instance_offset(cx, Self::char_offset().into()).unwrap();
+        let x_o = area.get_instance_offset(cx, live_item_id!(self::shader::base_x), Ty::Float).unwrap();
+        let y_o = area.get_instance_offset(cx, live_item_id!(self::shader::base_y), Ty::Float).unwrap();
+        let w_o = area.get_instance_offset(cx, live_item_id!(self::shader::w), Ty::Float).unwrap();
+        let font_size_o = area.get_instance_offset(cx, live_item_id!(self::shader::font_size), Ty::Float).unwrap();
+        let char_offset_o = area.get_instance_offset(cx, live_item_id!(self::shader::char_offset), Ty::Float).unwrap();
         let read = area.get_read_ref(cx);
         let text_style = &self.text_style;
         let line_spacing = text_style.line_spacing;
@@ -439,7 +433,7 @@ impl Text {
                             let prev_w = read.buffer[read.offset + w_o + prev_index * read.slots];
                             if index < read.count - 1 && prev_x > spos.x + prev_w { // fix newline jump-back
                                 return read.buffer[read.offset + char_offset_o + index * read.slots] as usize;
-                            }
+                            } 
                             return read.buffer[read.offset + char_offset_o + prev_index * read.slots] as usize;
                         }
                         index += 1;
@@ -456,7 +450,7 @@ impl Text {
     }
     
     pub fn get_monospace_base(&self, cx: &Cx) -> Vec2 {
-        let font_id = self.text_style.font.font_id.unwrap();
+        let font_id = self.text_style.font.font_id;
         let font = cx.fonts[font_id].font_loaded.as_ref().unwrap();
         let slot = font.char_code_to_glyph_index_map[33];
         let glyph = &font.glyphs[slot];

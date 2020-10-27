@@ -1,6 +1,5 @@
 use makepad_render::*;
 use makepad_microserde::*;
-use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct Splitter {
@@ -60,36 +59,47 @@ impl Splitter {
         }
     }
     
-    pub fn anim_default() -> AnimId {uid!()}
-    pub fn anim_over() -> AnimId {uid!()}
-    pub fn anim_down() -> AnimId {uid!()}
-    pub fn shader_bg() -> ShaderId {uid!()}
-    
-    pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+    pub fn style(cx: &mut Cx) {
         
-        Self::anim_default().set(cx, Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color(Quad::color(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter().get(cx))]),
-        ]));
-        
-        Self::anim_over().set(cx, Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(Quad::color(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter_over().get(cx))]),
-        ]));
-        
-        Self::anim_down().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(Quad::color(), Ease::Lin, vec![
-                (0.0, Theme::color_bg_splitter_peak().get(cx)),
-                (1.0, Theme::color_bg_splitter_drag().get(cx))
-            ]),
-        ]));
-        
-        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"
+        live_body!(cx, r#"
             
-            fn pixel() -> vec4 {
-                let df = Df::viewport(pos * vec2(w, h));
-                df.box(0., 0., w, h, 0.5);
-                return df.fill(color);
+            self::color_bg: #19;
+            self::color_over: #5;
+            self::color_peak: #f;
+            self::color_drag: #6;
+            
+            self::anim_default: Anim {
+                play: Cut {duration: 0.5}
+                tracks: [
+                    Color {keys: {1.0: self::color_bg} bind_to: makepad_render::quad::shader::color}
+                ]
             }
-        "}));
+            
+            self::anim_over: Anim {
+                play: Cut {duration: 0.05}
+                tracks: [
+                    Color {keys: {1.0: self::color_over}, bind_to: makepad_render::quad::shader::color}
+                ]
+            }
+            
+            self::anim_down: Anim {
+                play: Cut {duration: 0.2}
+                tracks: [
+                    Color {keys: {0.0: self::color_peak, 1.0: self::color_drag}, bind_to: makepad_render::quad::shader::color}
+                ]
+            }
+            
+            self::shader_bg: Shader {
+                use makepad_render::quad::shader::*;
+                
+                fn pixel() -> vec4 {
+                    let df = Df::viewport(pos * vec2(w, h));
+                    df.box(0., 0., w, h, 0.5);
+                    return df.fill(color);
+                }
+            }
+            
+        "#);
     }
     
     pub fn handle_splitter(&mut self, cx: &mut Cx, event: &mut Event) -> SplitterEvent {
@@ -100,7 +110,7 @@ impl Splitter {
             Event::AnimEnded(_) => self.animator.end(),
             Event::FingerDown(fe) => {
                 self._is_moving = true;
-                self.animator.play_anim(cx, Self::anim_down().get(cx));
+                self.animator.play_anim(cx, live_anim!(cx, self::anim_down));
                 match self.axis {
                     Axis::Horizontal => cx.set_down_mouse_cursor(MouseCursor::RowResize),
                     Axis::Vertical => cx.set_down_mouse_cursor(MouseCursor::ColResize)
@@ -119,10 +129,10 @@ impl Splitter {
                 if !self._is_moving {
                     match fe.hover_state {
                         HoverState::In => {
-                            self.animator.play_anim(cx, Self::anim_over().get(cx));
+                            self.animator.play_anim(cx, live_anim!(cx, self::anim_over));
                         },
                         HoverState::Out => {
-                            self.animator.play_anim(cx, Self::anim_default().get(cx));
+                            self.animator.play_anim(cx, live_anim!(cx, self::anim_default));
                         },
                         _ => ()
                     }
@@ -131,15 +141,15 @@ impl Splitter {
             Event::FingerUp(fe) => {
                 self._is_moving = false;
                 if fe.is_over {
-                    if !fe.is_touch {
-                        self.animator.play_anim(cx, Self::anim_over().get(cx));
+                    if fe.input_type.has_hovers() {
+                        self.animator.play_anim(cx, live_anim!(cx, self::anim_over));
                     }
                     else {
-                        self.animator.play_anim(cx, Self::anim_default().get(cx));
+                        self.animator.play_anim(cx, live_anim!(cx, self::anim_default));
                     }
                 }
                 else {
-                    self.animator.play_anim(cx, Self::anim_default().get(cx));
+                    self.animator.play_anim(cx, live_anim!(cx, self::anim_default));
                 }
                 // we should change our mode based on which edge we are closest to
                 // the rule is center - 30 + 30
@@ -236,7 +246,7 @@ impl Splitter {
     }
     
     pub fn begin_splitter(&mut self, cx: &mut Cx) {
-        self.animator.init(cx, | cx | Self::anim_default().get(cx));
+        self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
         let rect = cx.get_turtle_rect();
         self._calc_pos = match self.align {
             SplitterAlign::First => self.pos,
@@ -271,8 +281,8 @@ impl Splitter {
         cx.end_turtle(Area::Empty);
         let rect = cx.get_turtle_rect();
         let origin = cx.get_turtle_origin();
-        self.bg.shader = Self::shader_bg().get(cx);
-        self.bg.color = self.animator.last_color(cx, Quad::color());
+        self.bg.shader = live_shader!(cx, self::shader_bg);
+        self.bg.color = self.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
         match self.axis {
             Axis::Horizontal => {
                 cx.set_turtle_pos(Vec2 {x: origin.x, y: origin.y + self._calc_pos});

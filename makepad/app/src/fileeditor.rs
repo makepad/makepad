@@ -6,7 +6,7 @@ use crate::jseditor::*;
 use crate::rusteditor::*;
 use crate::plaineditor::*;
 use crate::searchindex::*;
-use crate::appstorage::*;
+use crate::makepadstorage::*;
 
 use std::collections::HashMap;
 
@@ -28,11 +28,11 @@ pub enum FileEditor {
 }
 
 impl FileEditor {
-    pub fn handle_file_editor(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer, search_index: Option<&mut SearchIndex>) -> TextEditorEvent {
+    pub fn handle_file_editor(&mut self, cx: &mut Cx, event: &mut Event, mtb: &mut MakepadTextBuffer, search_index: Option<&mut SearchIndex>) -> TextEditorEvent {
         match self {
-            FileEditor::Rust(re) => re.handle_rust_editor(cx, event, atb, search_index),
-            FileEditor::JS(re) => re.handle_js_editor(cx, event, atb),
-            FileEditor::Plain(re) => re.handle_plain_editor(cx, event, atb),
+            FileEditor::Rust(re) => re.handle_rust_editor(cx, event, mtb, search_index),
+            FileEditor::JS(re) => re.handle_js_editor(cx, event, mtb),
+            FileEditor::Plain(re) => re.handle_plain_editor(cx, event, mtb),
         }
     }
     
@@ -76,24 +76,32 @@ impl FileEditor {
         }
     }
     
-    pub fn draw_file_editor(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, search_index: &mut SearchIndex) {
+    pub fn draw_file_editor(&mut self, cx: &mut Cx, mtb: &mut MakepadTextBuffer, search_index: &mut SearchIndex) {
         match self {
-            FileEditor::Rust(re) => re.draw_rust_editor(cx, atb, Some(search_index)),
-            FileEditor::JS(re) => re.draw_js_editor(cx, atb, Some(search_index)),
-            FileEditor::Plain(re) => re.draw_plain_editor(cx, atb, Some(search_index)),
+            FileEditor::Rust(re) => re.draw_rust_editor(cx, mtb, Some(search_index)),
+            FileEditor::JS(re) => re.draw_js_editor(cx, mtb, Some(search_index)),
+            FileEditor::Plain(re) => re.draw_plain_editor(cx, mtb, Some(search_index)),
         }
     }
     
-    pub fn update_token_chunks(cx:&mut Cx, path: &str,  atb: &mut AppTextBuffer, search_index: &mut SearchIndex) {
+    pub fn get_text_editor(&mut self)->&TextEditor {
+        match self {
+            FileEditor::Rust(re) => &re.text_editor,
+            FileEditor::JS(re) => &re.text_editor,
+            FileEditor::Plain(re) => &re.text_editor,
+        }
+    }
+    
+    pub fn update_token_chunks(cx:&mut Cx, path: &str,  mtb: &mut MakepadTextBuffer, search_index: &mut SearchIndex) {
         // check which file extension we have to spawn a new editor
         if path.ends_with(".rs") || path.ends_with(".toml") || path.ends_with(".ron") {
-            RustEditor::update_token_chunks(cx, atb, Some(search_index));
+            RustEditor::update_token_chunks(cx, mtb, Some(search_index));
         }
         else if path.ends_with(".js") || path.ends_with(".html") {
-            JSTokenizer::update_token_chunks(atb, Some(search_index));
+            JSTokenizer::update_token_chunks(mtb, Some(search_index));
         }
         else {
-            PlainTokenizer::update_token_chunks(&mut atb.text_buffer, Some(search_index));
+            PlainTokenizer::update_token_chunks(&mut mtb.text_buffer, Some(search_index));
         }
     }
 }

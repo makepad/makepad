@@ -2,21 +2,22 @@
 use makepad_render::*;
 use makepad_widget::*;
 use makepad_microserde::*;
-use crate::appwindow::*;
-use crate::appstorage::*;
+use makepad_worlds::set_worlds_style;
+use crate::makepadwindow::*;
+use crate::makepadstorage::*;
 use crate::filetree::*;
 use crate::buildmanager::*;
 use crate::makepadstyle::*;
 
 pub struct MakepadApp {
-    pub app_window_state_template: AppWindowState,
-    pub app_window_template: AppWindow,
+    pub makepad_window_state_template: MakepadWindowState,
+    pub makepad_window_template: MakepadWindow,
     pub menu: Menu,
     pub menu_signal: Signal,
-    pub state: AppState,
-    pub storage: AppStorage,
+    pub makepad_state: MakepadState,
+    pub makepad_storage: MakepadStorage,
     pub build_manager: BuildManager,
-    pub windows: Vec<AppWindow>,
+    pub makepad_windows: Vec<MakepadWindow>,
 }
 
 impl MakepadApp {
@@ -42,9 +43,6 @@ impl MakepadApp {
     pub fn command_bring_all_to_front() -> CommandId {uid!()}
     
     pub fn new(cx: &mut Cx) -> Self {
-        let default_opt = StyleOptions {scale: 1.0, dark: true};
-        set_widget_style(cx, &default_opt);
-        set_makepad_style(cx, &default_opt);
         let ms = cx.new_signal();
         // set up the keyboard map
         Self::command_preferences().set_key(cx, KeyCode::Comma);
@@ -118,8 +116,8 @@ impl MakepadApp {
                 ])
             ]),
             menu_signal: ms,
-            app_window_template: AppWindow::new(cx),
-            app_window_state_template: AppWindowState {
+            makepad_window_template: MakepadWindow::new(cx),
+            makepad_window_state_template: MakepadWindowState {
                 open_folders: Vec::new(),
                 window_inner_size: Vec2::default(),
                 window_position: Vec2::default(),
@@ -127,6 +125,7 @@ impl MakepadApp {
                     axis: Axis::Vertical,
                     align: SplitterAlign::First,
                     pos: 200.0,
+                    
                     first: Box::new(DockItem::Splitter {
                         axis: Axis::Horizontal,
                         align: SplitterAlign::Last,
@@ -153,8 +152,8 @@ impl MakepadApp {
                             tabs: vec![
                                 DockTab {
                                     closeable: false,
-                                    title: "ShaderView".to_string(),
-                                    item: Panel::ShaderView
+                                    title: "WorldView".to_string(),
+                                    item: Panel::WorldView
                                 },
                             ],
                         }),
@@ -162,7 +161,7 @@ impl MakepadApp {
                     last: Box::new(DockItem::Splitter {
                         axis: Axis::Horizontal,
                         align: SplitterAlign::Last,
-                        pos: 150.0,
+                        pos: 100.0,
                         first: Box::new(DockItem::TabControl {
                             current: 1,
                             previous: 0,
@@ -173,19 +172,26 @@ impl MakepadApp {
                                     item: Panel::FileEditorTarget
                                 },
                                 DockTab {
-                                    closeable: false,
-                                    title: "shaderview.rs".to_string(),
-                                    item: Panel::FileEditor {path: "main/makepad/makepad/app/src/shaderview.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
+                                    closeable: true,
+                                    title: "treeworld.rs".to_string(),
+                                    //item: Panel::FileEditor {path: "main/makepad/makepad/app/src/shaderview.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
+                                    item: Panel::FileEditor {path: "main/makepad/worlds/src/treeworld.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
                                 },
-                                
+                                DockTab {
+                                    closeable: true,
+                                    title: "skybox.rs".to_string(),
+                                    //item: Panel::FileEditor {path: "main/makepad/makepad/app/src/shaderview.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 2}
+                                    item: Panel::FileEditor {path: "main/makepad/worlds/src/skybox.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 3}
+                                },
                             ],
-                        }),
+                        }), 
+                        
                         last: Box::new(DockItem::Splitter {
                             axis: Axis::Vertical,
                             align: SplitterAlign::Last,
-                            pos: 100.0,
+                            pos: 200.0,
                             first: Box::new(DockItem::TabControl {
-                                current: 0, 
+                                current: 0,
                                 previous: 0,
                                 tabs: vec![
                                     DockTab {
@@ -196,9 +202,14 @@ impl MakepadApp {
                                 ]
                             }),
                             last: Box::new(DockItem::TabControl {
-                                current: 1,
+                                current: 0,
                                 previous: 0,
                                 tabs: vec![
+                                    DockTab {
+                                        closeable: false,
+                                        title: "WorldSelect".to_string(),
+                                        item: Panel::WorldSelect
+                                    },
                                     DockTab {
                                         closeable: false,
                                         title: "Item".to_string(),
@@ -216,98 +227,117 @@ impl MakepadApp {
                     })
                 },
             },
-            windows: vec![],
+            makepad_windows: vec![],
             build_manager: BuildManager::new(cx),
-            state: AppState::default(),
-            storage: AppStorage::new(cx)
+            makepad_state: MakepadState::default(),
+            makepad_storage: MakepadStorage::new(cx)
         }
     }
     
-    pub fn default_layout(&mut self, cx: &mut Cx) {
-        self.state.windows = vec![self.app_window_state_template.clone()];
-        self.windows = vec![self.app_window_template.clone()];
-        cx.redraw_child_area(Area::All);
+    pub fn style(cx: &mut Cx) {
+        set_widget_style(cx);
+        set_makepad_style(cx);
+        set_worlds_style(cx);
     }
     
-    pub fn reload_style(&mut self, cx: &mut Cx) {
-        set_widget_style(cx, &self.storage.settings.style_options);
-        set_makepad_style(cx, &self.storage.settings.style_options);
+    pub fn default_layout(&mut self, cx: &mut Cx) {
+        self.makepad_state.windows = vec![self.makepad_window_state_template.clone()];
+        self.makepad_windows = vec![self.makepad_window_template.clone()];
+        cx.redraw_child_area(Area::All);
     }
+    /*
+    pub fn reload_style(&mut self, cx: &mut Cx) {
+        set_widget_style(cx);
+        set_makepad_style(cx);
+    }*/
     
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
             
             Event::Construct => {
-                self.storage.init(cx);
+                self.makepad_storage.init(cx);
                 if !cx.platform_type.is_desktop() {
+                    // lets connect our websocket
+                    MakepadStorage::send_websocket_message(cx, MakepadChannelMessage::Connect);
                     self.default_layout(cx);
                 }
             },
+            Event::WebSocketMessage(wm) => {
+                self.makepad_storage.handle_websocket_message(cx, &mut self.build_manager, wm);
+            }
             Event::KeyDown(ke) => match ke.key_code {
                 KeyCode::KeyD => if ke.modifiers.logo || ke.modifiers.control {
                     //let size = self.build_manager.search_index.calc_total_size();
                     //println!("Text Index size {}", size);
                 },
                 KeyCode::KeyR => if ke.modifiers.logo || ke.modifiers.control {
-                    self.storage.reload_builders();
+                    self.makepad_storage.reload_builders();
                 },
                 KeyCode::Key0 => if ke.modifiers.logo || ke.modifiers.control {
-                    self.storage.settings.style_options.scale = 1.0;
-                    self.reload_style(cx);
                     cx.reset_font_atlas_and_redraw();
-                    self.storage.save_settings(cx);
+                    println!("IMPLEMENT SCALE");
+                    //self.storage.settings.style_options.scale = 1.0;
+                    //self.reload_style(cx);
+                    //cx.reset_font_atlas_and_redraw();
+                    //self.storage.save_settings(cx);
                 },
                 KeyCode::Equals => if ke.modifiers.logo || ke.modifiers.control {
-                    let scale = self.storage.settings.style_options.scale * 1.1;
-                    self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
-                    self.reload_style(cx);
                     cx.reset_font_atlas_and_redraw();
-                    self.storage.save_settings(cx);
+                    println!("IMPLEMENT SCALE");
+                    //let scale = self.storage.settings.style_options.scale * 1.1;
+                    // self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
+                    //self.reload_style(cx);
+                    //cx.reset_font_atlas_and_redraw();
+                    //self.storage.save_settings(cx);
                 },
                 KeyCode::Minus => if ke.modifiers.logo || ke.modifiers.control {
-                    let scale = self.storage.settings.style_options.scale / 1.1;
-                    self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
-                    self.reload_style(cx);
                     cx.reset_font_atlas_and_redraw();
-                    self.storage.save_settings(cx);
+                    println!("IMPLEMENT SCALE");
+                    //let scale = self.storage.settings.style_options.scale / 1.1;
+                    //self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
+                    //self.reload_style(cx);
+                    //cx.reset_font_atlas_and_redraw();
+                    //self.storage.save_settings(cx);
                 },
                 _ => ()
             },
             Event::Signal(se) => {
                 // process network messages for hub_ui
-                if let Some(hub_ui) = &mut self.storage.hub_ui {
-                    if let Some(_) = se.signals.get(&self.storage.hub_ui_message) {
+                if let Some(hub_ui) = &mut self.makepad_storage.hub_ui {
+                    if let Some(_) = se.signals.get(&self.makepad_storage.hub_ui_message) {
                         if let Some(mut msgs) = hub_ui.get_messages() {
                             for htc in msgs.drain(..) {
-                                self.storage.handle_hub_msg(cx, &htc, &mut self.windows, &mut self.state, &mut self.build_manager);
-                                self.build_manager.handle_hub_msg(cx, &mut self.storage, &htc);
+                                self.makepad_storage.handle_hub_msg(cx, &htc, &mut self.makepad_windows, &mut self.makepad_state, &mut self.build_manager);
+                                self.build_manager.handle_hub_msg(cx, &mut self.makepad_storage, &htc);
                             }
                             return
                         }
                     }
                 }
-                if let Some(_statusses) = se.signals.get(&self.storage.settings_changed) {
-                    if self.storage.settings_old.builders != self.storage.settings.builders {
-                        self.storage.reload_builders();
+                if let Some(_statusses) = se.signals.get(&self.makepad_storage.settings_changed) {
+                    if self.makepad_storage.settings_old.builders != self.makepad_storage.settings.builders {
+                        self.makepad_storage.reload_builders();
                     }
+                    /*
                     if self.storage.settings_old.style_options != self.storage.settings.style_options {
                         self.reload_style(cx);
                         cx.reset_font_atlas_and_redraw();
-                    }
-                    if self.storage.settings_old.builds != self.storage.settings.builds {
-                        self.build_manager.restart_build(cx, &mut self.storage);
+                    }*/
+                    if self.makepad_storage.settings_old.builds != self.makepad_storage.settings.builds {
+                        self.build_manager.restart_build(cx, &mut self.makepad_storage);
                     }
                 }
             },
-            Event::ShaderRecompile(re) => {
-                self.build_manager.handle_shader_recompile_event(cx, re, &mut self.storage);
+            Event::LiveRecompile(re) => {
+                self.makepad_storage.handle_live_recompile_event(cx, re);
+                self.build_manager.handle_live_recompile_event(cx, re, &mut self.makepad_storage);
             },
             Event::FileRead(fr) => {
                 // lets see which file we loaded
-                if let Some(utf8_data) = self.storage.file_tree_file_read.resolve_utf8(fr) {
+                if let Some(utf8_data) = self.makepad_storage.file_tree_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
                         if let Ok(tree) = DeRon::deserialize_ron(utf8_data) {
-                            for window in &mut self.windows {
+                            for window in &mut self.makepad_windows {
                                 let mut paths = Vec::new();
                                 window.file_panel.file_tree.root_node = hub_to_tree(&tree, "", &mut paths);
                                 if let FileNode::Folder {folder, state, ..} = &mut window.file_panel.file_tree.root_node {
@@ -329,13 +359,13 @@ impl MakepadApp {
                         }
                     }
                 }
-                else if let Some(utf8_data) = self.storage.app_state_file_read.resolve_utf8(fr) {
+                else if let Some(utf8_data) = self.makepad_storage.state_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
-                        if let Ok(state) = DeRon::deserialize_ron(utf8_data) {
-                            self.state = state;
-                            self.windows.truncate(0);
+                        if let Ok(app_state) = DeRon::deserialize_ron(utf8_data) {
+                            self.makepad_state = app_state;
+                            self.makepad_windows.truncate(0);
                             // create our windows with the serialized positions/size
-                            for window_state in &self.state.windows {
+                            for window_state in &self.makepad_state.windows {
                                 let mut size = window_state.window_inner_size;
                                 
                                 if size.x <= 10. {
@@ -352,13 +382,13 @@ impl MakepadApp {
                                 else {
                                     create_pos = Some(last_pos);
                                 }
-                                self.windows.push(AppWindow {
+                                self.makepad_windows.push(MakepadWindow {
                                     desktop_window: DesktopWindow {window: Window {
                                         create_inner_size: Some(size),
                                         create_position: create_pos,
                                         ..Window::new(cx)
-                                    }, ..self.app_window_template.desktop_window.clone()},
-                                    ..self.app_window_template.clone()
+                                    }, ..self.makepad_window_template.desktop_window.clone()},
+                                    ..self.makepad_window_template.clone()
                                 })
                             }
                             cx.redraw_child_area(Area::All);
@@ -368,38 +398,37 @@ impl MakepadApp {
                     else { // load default window
                         self.default_layout(cx);
                     }
-                    for (window_index, window) in self.windows.iter_mut().enumerate() {
-                        window.ensure_unique_tab_title_for_file_editors(cx, window_index, &mut self.state);
+                    for (window_index, window) in self.makepad_windows.iter_mut().enumerate() {
+                        window.ensure_unique_tab_title_for_file_editors(cx, window_index, &mut self.makepad_state);
                     }
                 }
-                else if let Some(utf8_data) = self.storage.app_settings_file_read.resolve_utf8(fr) {
+                else if let Some(utf8_data) = self.makepad_storage.settings_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
-                        self.storage.load_settings(cx, utf8_data);
+                        self.makepad_storage.load_settings(cx, utf8_data);
                     }
                     else { // create default settings file
-                        let def_settings = AppSettings::initial();
+                        let def_settings = MakepadSettings::initial();
                         let ron = def_settings.serialize_ron();
                         cx.file_write("makepad_settings.ron", ron.as_bytes());
-                        self.storage.load_settings(cx, &ron);
+                        self.makepad_storage.load_settings(cx, &ron);
                     }
                 }
                 else {
-                    for atb in &mut self.storage.text_buffers {
-                        if let Some(utf8_data) = atb.file_read.resolve_utf8(fr) {
-                            if let Ok(utf8_data) = utf8_data {
-                                atb.text_buffer.load_from_utf8(utf8_data);
-                                atb.text_buffer.send_textbuffer_loaded_signal(cx);
-                                break;
-                            }
-                        }
-                    }
+                    self.makepad_storage.text_buffer_handle_file_read(cx, fr);
                 }
             },
             
             _ => ()
         }
-        for (window_index, window) in self.windows.iter_mut().enumerate() {
-            window.handle_app_window(cx, event, window_index, &mut self.state, &mut self.storage, &mut self.build_manager);
+        for (window_index, window) in self.makepad_windows.iter_mut().enumerate() {
+            window.handle_app_window(
+                cx,
+                event,
+                window_index,
+                &mut self.makepad_state,
+                &mut self.makepad_storage,
+                &mut self.build_manager
+            );
             // break;
         }
     }
@@ -408,8 +437,15 @@ impl MakepadApp {
     pub fn draw_app(&mut self, cx: &mut Cx) {
         
         //return;
-        for (window_index, window) in self.windows.iter_mut().enumerate() {
-            window.draw_app_window(cx, &self.menu, window_index, &mut self.state, &mut self.storage, &mut self.build_manager);
+        for (window_index, window) in self.makepad_windows.iter_mut().enumerate() {
+            window.draw_app_window(
+                cx,
+                &self.menu,
+                window_index,
+                &mut self.makepad_state,
+                &mut self.makepad_storage,
+                &mut self.build_manager
+            );
             // break;
         }
     }

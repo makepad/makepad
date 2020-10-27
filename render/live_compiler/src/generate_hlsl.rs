@@ -1,9 +1,12 @@
 use {
     crate::{
-        ast::*,
-        env::VarKind,
+        shaderast::*,
+        env::{VarKind, Env},
+        span::Span,
+        analyse::ShaderCompileOptions,
         generate::{BackendWriter, BlockGenerator, ExprGenerator},
-        ident::Ident,
+        ident::{Ident,IdentPath},
+        livestyles::LiveStyles,
         lit::TyLit,
         ty::Ty,
     },
@@ -18,24 +21,29 @@ pub fn index_to_char(index: usize) -> char {
     std::char::from_u32(index as u32 + 65).unwrap()
 }
 
-pub fn generate_shader(shader: &ShaderAst, use_const_table: bool) -> String {
+pub fn generate_shader(shader: &ShaderAst, live_styles: &LiveStyles, options:ShaderCompileOptions) -> String {
     let mut string = String::new();
+    let env = Env::new(live_styles);
     ShaderGenerator {
         shader,
-        use_const_table,
+        create_const_table: options.create_const_table,
         string: &mut string,
+        env: &env,
+        backend_writer: &HlslBackendWriter {env: &env}
     }
     .generate_shader();
     string
 }
 
-struct ShaderGenerator<'a> {
+struct ShaderGenerator<'a, 'b> {
     shader: &'a ShaderAst,
-    use_const_table: bool,
+    create_const_table: bool,
     string: &'a mut String,
+    env: &'a Env<'b>,
+    backend_writer: &'a dyn BackendWriter
 }
 
-impl<'a> ShaderGenerator<'a> {
+impl<'a, 'b> ShaderGenerator<'a, 'b> {
     fn generate_shader(&mut self) {
         writeln!(self.string, "SamplerState mpsc_default_texture_sampler{{Filter=MIN_MAX_MIP_LINEAR;AddressU = Wrap;AddressV=Wrap;}};").unwrap();
         writeln!(self.string, "float4 sample2d(Texture2D tex, float2 pos){{return tex.Sample(mpsc_default_texture_sampler,pos);}}").unwrap();
@@ -46,8 +54,8 @@ impl<'a> ShaderGenerator<'a> {
         self.generate_instance_struct();
         self.generate_varying_struct();
         self.generate_const_decls();
-        let vertex_decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
-        let fragment_decl = self.shader.find_fn_decl(Ident::new("pixel")).unwrap();
+        let vertex_decl = self.shader.find_fn_decl(IdentPath::from_str("vertex")).unwrap();
+        let fragment_decl = self.shader.find_fn_decl(IdentPath::from_str("pixel")).unwrap();
         for &(ty_lit, ref param_tys) in vertex_decl
             .cons_fn_deps
             .borrow_mut()
@@ -138,7 +146,19 @@ impl<'a> ShaderGenerator<'a> {
         if !has_default {
             writeln!(self.string, "cbuffer mpsc_default_Uniforms : register(b3){{}};").unwrap();
         }
-        if self.use_const_table{
+        writeln!(self.string, "cbuffer mpsc_live_Uniforms : register(b4) {{").unwrap();
+        for (ty, qualified_ident_path) in self.shader.livestyle_uniform_deps.borrow().as_ref().unwrap() {
+            // we have a span and an ident_path.
+            // lets fully qualify it
+            write!(self.string, "    ").unwrap();
+            self.backend_writer.write_ty_lit(self.string, ty.maybe_ty_lit().unwrap());
+            write!(self.string, " mpsc_live_").unwrap();
+            qualified_ident_path.write_underscored_ident(self.string);
+            writeln!(self.string, ";").unwrap();
+        }
+        writeln!(self.string, "}}").unwrap();
+        
+        if self.create_const_table{
             if let Some(const_table) = self.shader.const_table.borrow_mut().as_mut(){
                 // lets use a float4 table.
                 let size = const_table.len();
@@ -146,7 +166,7 @@ impl<'a> ShaderGenerator<'a> {
                 for _ in 0..align_gap{
                     const_table.push(0.0);
                 }
-                writeln!(self.string, "cbuffer mspc_const_Table : register(b4){{float4 mpsc_const_table[{}];}};",const_table.len()>>2).unwrap();
+                writeln!(self.string, "cbuffer mspc_const_Table : register(b5){{float4 mpsc_const_table[{}];}};",const_table.len()>>2).unwrap();
             };
         }
     }
@@ -342,7 +362,7 @@ impl<'a> ShaderGenerator<'a> {
         for param_ty in param_tys {
             write!(cons_name, "_{}", param_ty).unwrap();
         }
-        if !HlslBackendWriter.use_cons_fn(&cons_name){
+        if !self.backend_writer.use_cons_fn(&cons_name){
             return 
         }
         
@@ -425,11 +445,12 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, "}}").unwrap();
     }
     
-    fn generate_fn_decl(&mut self, decl: &FnDecl, visited: &mut HashSet<Ident>) {
+    fn generate_fn_decl(&mut self, decl: &FnDecl, visited: &mut HashSet<IdentPath>) {
         FnDeclGenerator {
             shader: self.shader,
             decl,
-            use_const_table: self.use_const_table,
+            backend_writer: self.backend_writer,
+            create_const_table: self.create_const_table,
             visited,
             string: self.string,
         }
@@ -437,7 +458,7 @@ impl<'a> ShaderGenerator<'a> {
     }
     
     fn generate_vertex_main(&mut self) {
-        let decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
+        let decl = self.shader.find_fn_decl(IdentPath::from_str("vertex")).unwrap();
         write!(self.string, "mpsc_Varyings mpsc_vertex_main(").unwrap();
         write!(
             self.string,
@@ -458,7 +479,7 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, "    mpsc_Varyings mpsc_varyings = ").unwrap();
         self.generate_varying_init();
         write!(self.string, "    mpsc_varyings.mpsc_position = ").unwrap();
-        self.write_ident(decl.ident);
+        self.write_ident(decl.ident_path.get_single().expect("unexpected"));
         write!(self.string, "(").unwrap();
         let mut sep = "";
         if !decl.geometry_deps.borrow().as_ref().unwrap().is_empty() {
@@ -499,13 +520,13 @@ impl<'a> ShaderGenerator<'a> {
     }
     
     fn generate_fragment_main(&mut self) {
-        let decl = self.shader.find_fn_decl(Ident::new("pixel")).unwrap();
+        let decl = self.shader.find_fn_decl(IdentPath::from_str("pixel")).unwrap();
         write!(self.string, "float4 mpsc_fragment_main(").unwrap();
         write!(self.string, "mpsc_Varyings mpsc_varyings").unwrap();
         writeln!(self.string, ") : SV_TARGET{{").unwrap();
         
         write!(self.string, "    return ").unwrap();
-        self.write_ident(decl.ident);
+        self.write_ident(decl.ident_path.get_single().expect("unexpected"));
         write!(self.string, "(").unwrap();
         
         let has_geometry_deps = !decl.geometry_deps.borrow().as_ref().unwrap().is_empty();
@@ -523,8 +544,8 @@ impl<'a> ShaderGenerator<'a> {
         ExprGenerator {
             shader: self.shader,
             decl: None,
-            backend_writer: &HlslBackendWriter,
-            use_const_table: self.use_const_table,
+            backend_writer: self.backend_writer,
+            create_const_table: self.create_const_table,
             //use_generated_cons_fns: true,
             string: self.string,
         }
@@ -553,36 +574,38 @@ impl<'a> ShaderGenerator<'a> {
     }
     
     fn write_var_decl(&mut self, is_inout: bool, is_packed: bool, ident: Ident, ty: &Ty) {
-        HlslBackendWriter.write_var_decl(&mut self.string, is_inout, is_packed, ident, ty);
+        self.backend_writer.write_var_decl(&mut self.string, is_inout, is_packed, ident, ty);
     }
     
     fn write_ident(&mut self, ident: Ident) {
-        HlslBackendWriter.write_ident(&mut self.string, ident);
+        self.backend_writer.write_ident(&mut self.string, ident);
     }
     
     fn write_ty_lit(&mut self, ty_lit: TyLit) {
-        HlslBackendWriter.write_ty_lit(&mut self.string, ty_lit);
+        self.backend_writer.write_ty_lit(&mut self.string, ty_lit);
     }
 }
 
 struct FnDeclGenerator<'a> {
     shader: &'a ShaderAst,
     decl: &'a FnDecl,
-    use_const_table: bool,
-    visited: &'a mut HashSet<Ident>,
+    create_const_table: bool,
+    visited: &'a mut HashSet<IdentPath>,
     string: &'a mut String,
+    backend_writer: &'a dyn BackendWriter
 }
 
 impl<'a> FnDeclGenerator<'a> {
     fn generate_fn_decl(&mut self) {
-        if self.visited.contains(&self.decl.ident) {
+        if self.visited.contains(&self.decl.ident_path) {
             return;
         }
         for &callee in self.decl.callees.borrow().as_ref().unwrap().iter() {
             FnDeclGenerator {
+                backend_writer: self.backend_writer,
                 shader: self.shader,
                 decl: self.shader.find_fn_decl(callee).unwrap(),
-                use_const_table: self.use_const_table,
+                create_const_table: self.create_const_table,
                 visited: self.visited,
                 string: self.string,
             }
@@ -591,7 +614,7 @@ impl<'a> FnDeclGenerator<'a> {
         self.write_var_decl(
             false,
             false,
-            self.decl.ident,
+            self.decl.ident_path.to_struct_fn_ident(),
             self.decl.return_ty.borrow().as_ref().unwrap(),
         );
         write!(self.string, "(").unwrap();
@@ -649,15 +672,15 @@ impl<'a> FnDeclGenerator<'a> {
         write!(self.string, ") ").unwrap();
         self.generate_block(&self.decl.block);
         writeln!(self.string).unwrap();
-        self.visited.insert(self.decl.ident);
+        self.visited.insert(self.decl.ident_path);
     }
     
     fn generate_block(&mut self, block: &Block) {
         BlockGenerator {
             shader: self.shader,
             decl: self.decl,
-            backend_writer: &HlslBackendWriter,
-            use_const_table: self.use_const_table,
+            backend_writer: self.backend_writer,
+            create_const_table: self.create_const_table,
             //use_generated_cons_fns: true,
             indent_level: 0,
             string: self.string,
@@ -666,16 +689,18 @@ impl<'a> FnDeclGenerator<'a> {
     }
     
     fn write_var_decl(&mut self, is_inout: bool, is_packed: bool, ident: Ident, ty: &Ty) {
-        HlslBackendWriter.write_var_decl(&mut self.string, is_inout, is_packed, ident, ty);
+        self.backend_writer.write_var_decl(&mut self.string, is_inout, is_packed, ident, ty);
     }
 }
 
-struct HlslBackendWriter;
+struct HlslBackendWriter<'a, 'b>{
+    pub env: &'a Env<'b>
+}
 
-impl BackendWriter for HlslBackendWriter {
+impl<'a, 'b> BackendWriter for HlslBackendWriter<'a, 'b> {
     
-    fn write_call_expr_hidden_args(&self, string: &mut String, _use_const_table: bool, ident: Ident, shader: &ShaderAst, sep: &str) {
-        if let Some(decl) = shader.find_fn_decl(ident) {
+    fn write_call_expr_hidden_args(&self, string: &mut String, _use_const_table: bool, ident_path: IdentPath, shader: &ShaderAst, sep: &str) {
+        if let Some(decl) = shader.find_fn_decl(ident_path) {
             let mut sep = sep;
             if decl.is_used_in_vertex_shader.get().unwrap() {
                 if !decl.geometry_deps.borrow().as_ref().unwrap().is_empty() {
@@ -702,7 +727,7 @@ impl BackendWriter for HlslBackendWriter {
     }
     
     
-    fn generate_var_expr(&self, string: &mut String, ident: Ident, kind: &Cell<Option<VarKind>>, _shader: &ShaderAst, decl: &FnDecl, ty:&Option<Ty>) {
+    fn generate_var_expr(&self, string: &mut String, span:Span, ident_path: IdentPath, kind: &Cell<Option<VarKind>>, _shader: &ShaderAst, decl: &FnDecl, ty:&Option<Ty>) {
         
         let is_used_in_vertex_shader = decl.is_used_in_vertex_shader.get().unwrap();
         let is_used_in_fragment_shader = decl.is_used_in_fragment_shader.get().unwrap();
@@ -713,32 +738,62 @@ impl BackendWriter for HlslBackendWriter {
                     match ty{
                         Some(Ty::Mat4)=>{
                             write!(string, "float4x4(").unwrap();
+                            let ident = ident_path.get_single().expect("unexpected");
                             for i in 0..4{
-                                if i != 0{
-                                    write!(string, ",").unwrap();
+                                for j in 0..4{
+                                    if i != 0 || j != 0{
+                                        write!(string, ",").unwrap();
+                                    }
+                                    write!(string, "mpsc_instances.").unwrap();
+                                    write!(string, "{}{}", ident, j).unwrap();
+                                    match i{
+                                        0=>write!(string,".x").unwrap(),
+                                        1=>write!(string,".y").unwrap(),
+                                        2=>write!(string,".z").unwrap(),
+                                        _=>write!(string,".w").unwrap()
+                                    }
                                 }
-                                write!(string, "mpsc_instances.").unwrap();
-                                write!(string, "{}{}", ident, i).unwrap();
                             }
                             write!(string, ")").unwrap();
                             return
                         },
                         Some(Ty::Mat3)=>{
                             write!(string, "float3x3(").unwrap();
+                            let ident = ident_path.get_single().expect("unexpected");
                             for i in 0..3{
-                                if i != 0{
-                                    write!(string, ",").unwrap();
+                                for j in 0..3{
+                                    if i != 0 || j != 0{
+                                        write!(string, ",").unwrap();
+                                    }
+                                    write!(string, "mpsc_instances.").unwrap();
+                                    write!(string, "{}{}", ident, j).unwrap();
+                                    match i{
+                                        0=>write!(string,".x").unwrap(),
+                                        1=>write!(string,".y").unwrap(),
+                                        _=>write!(string,".z").unwrap(),
+                                    }
                                 }
-                                write!(string, "mpsc_instances.").unwrap();
-                                write!(string, "{}{}", ident, i).unwrap();
+                                write!(string, ")").unwrap();
                             }
-                            write!(string, ")").unwrap();
                             return
                         },
                         Some(Ty::Mat2)=>{
                             write!(string, "float2x2(").unwrap();
-                            write!(string, "mpsc_instances.").unwrap();
-                            write!(string, ")").unwrap();
+                            let ident = ident_path.get_single().expect("unexpected");
+                            for i in 0..2{
+                                for j in 0..2{
+                                    if i != 0 || j != 0{
+                                        write!(string, ",").unwrap();
+                                    }
+                                    write!(string, "mpsc_instances.").unwrap();
+                                    write!(string, "{}{}", ident, j).unwrap();
+                                    match i{
+                                        0=>write!(string,".x").unwrap(),
+                                        _=>write!(string,".y").unwrap(),
+                                    }
+                                }
+                                write!(string, ")").unwrap();
+                            }
                             return
                         },
                         _=>{
@@ -758,7 +813,17 @@ impl BackendWriter for HlslBackendWriter {
                 _ => {}
             }
         }
-        write!(string, "{}", ident).unwrap();
+        match kind.get().unwrap(){
+            VarKind::LiveStyle => {
+                let qualified = self.env.qualify_ident_path(span.live_body_id, ident_path);
+                write!(string, "mpsc_live_").unwrap();
+                qualified.write_underscored_ident(string);
+                return
+            },
+            _ => {}
+        }
+        
+        self.write_ident(string, ident_path.get_single().expect("unexpected"));
     }
     
     fn needs_mul_fn_for_matrix_multiplication(&self) -> bool {
@@ -925,6 +990,9 @@ impl BackendWriter for HlslBackendWriter {
                 write!(string, "atan").unwrap();
             }
         }
+        else if ident == Ident::new("mod") {
+            write!(string, "fmod").unwrap();
+        }
         else if ident == Ident::new("mix") {
             write!(string, "lerp").unwrap();
         }
@@ -952,6 +1020,7 @@ impl BackendWriter for HlslBackendWriter {
                     string,
                     "{}",
                     match ident_string.as_ref() {
+                        "line"=>"mpsc_line",
                         "frac"=>"mpsc_frac",
                         "thread" => "mpsc_thread",
                         "device" => "mpsc_device",

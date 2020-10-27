@@ -1,6 +1,7 @@
 use crate::ident::Ident;
 use std::fmt;
 use std::rc::Rc;
+use crate::lit::TyLit;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum Ty {
@@ -26,6 +27,30 @@ pub enum Ty {
 }
 
 impl Ty {
+    pub fn maybe_ty_lit(&self)->Option<TyLit>{
+        match self{
+            Ty::Void => None,
+            Ty::Bool => Some(TyLit::Bool),
+            Ty::Int =>  Some(TyLit::Int),
+            Ty::Float => Some(TyLit::Float),
+            Ty::Bvec2 => Some(TyLit::Bvec2),
+            Ty::Bvec3 => Some(TyLit::Bvec3),
+            Ty::Bvec4 => Some(TyLit::Bvec4),
+            Ty::Ivec2 => Some(TyLit::Ivec2),
+            Ty::Ivec3 => Some(TyLit::Ivec3),
+            Ty::Ivec4 => Some(TyLit::Ivec4),
+            Ty::Vec2 => Some(TyLit::Vec2),
+            Ty::Vec3 => Some(TyLit::Vec3),
+            Ty::Vec4 => Some(TyLit::Vec4),
+            Ty::Mat2 => Some(TyLit::Mat2),
+            Ty::Mat3 => Some(TyLit::Mat3),
+            Ty::Mat4 => Some(TyLit::Mat4),
+            Ty::Texture2D => Some(TyLit::Bool),
+            Ty::Array { .. } => None,
+            Ty::Struct { .. } => None
+        }
+    }
+    
     pub fn is_scalar(&self) -> bool {
         match self {
             Ty::Bool | Ty::Int | Ty::Float => true,

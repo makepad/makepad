@@ -1,7 +1,7 @@
 use makepad_render::*;
 use makepad_widget::*;
 use crate::searchindex::*;
-use crate::appstorage::*;
+use crate::makepadstorage::*;
 use crate::mprstokenizer::*;
 
 #[derive(Clone)]
@@ -19,12 +19,12 @@ impl JSEditor {
         }
     }
     
-    pub fn handle_js_editor(&mut self, cx: &mut Cx, event: &mut Event, atb: &mut AppTextBuffer) -> TextEditorEvent {
-        let ce = self.text_editor.handle_text_editor(cx, event, &mut atb.text_buffer);
+    pub fn handle_js_editor(&mut self, cx: &mut Cx, event: &mut Event, mtb: &mut MakepadTextBuffer) -> TextEditorEvent {
+        let ce = self.text_editor.handle_text_editor(cx, event, &mut mtb.text_buffer);
         match ce {
             TextEditorEvent::AutoFormat => {
-                let formatted = JSTokenizer::auto_format(&mut atb.text_buffer).out_lines;
-                self.text_editor.cursors.replace_lines_formatted(formatted, &mut atb.text_buffer);
+                let formatted = JSTokenizer::auto_format(&mut mtb.text_buffer).out_lines;
+                self.text_editor.cursors.replace_lines_formatted(formatted, &mut mtb.text_buffer);
                 self.text_editor.view.redraw_view_area(cx);
             },
             _ => ()
@@ -32,17 +32,17 @@ impl JSEditor {
         ce
     }
     
-    pub fn draw_js_editor(&mut self, cx: &mut Cx, atb: &mut AppTextBuffer, search_index: Option<&mut SearchIndex>) {
+    pub fn draw_js_editor(&mut self, cx: &mut Cx, mtb: &mut MakepadTextBuffer, search_index: Option<&mut SearchIndex>) {
         
-        JSTokenizer::update_token_chunks(atb, search_index);
+        JSTokenizer::update_token_chunks(mtb, search_index);
         
-        if self.text_editor.begin_text_editor(cx, &mut atb.text_buffer).is_err() {return}
+        if self.text_editor.begin_text_editor(cx, &mut mtb.text_buffer).is_err() {return}
         
-        for (index, token_chunk) in atb.text_buffer.token_chunks.iter_mut().enumerate() {
-            self.text_editor.draw_chunk(cx, index, &atb.text_buffer.flat_text, token_chunk, &atb.text_buffer.markers);
+        for (index, token_chunk) in mtb.text_buffer.token_chunks.iter_mut().enumerate() {
+            self.text_editor.draw_chunk(cx, index, &mtb.text_buffer.flat_text, token_chunk, &mtb.text_buffer.markers);
         }
         
-        self.text_editor.end_text_editor(cx, &mut atb.text_buffer);
+        self.text_editor.end_text_editor(cx, &mut mtb.text_buffer);
     }
 }
 
@@ -59,8 +59,8 @@ impl JSTokenizer {
         }
     }
     
-    pub fn update_token_chunks(atb: &mut AppTextBuffer, mut _search_index: Option<&mut SearchIndex>) {
-        let text_buffer = &mut atb.text_buffer;
+    pub fn update_token_chunks(mtb: &mut MakepadTextBuffer, mut _search_index: Option<&mut SearchIndex>) {
+        let text_buffer = &mut mtb.text_buffer;
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
             let mut state = TokenizerState::new(&text_buffer.lines);
             let mut tokenizer = JSTokenizer::new();

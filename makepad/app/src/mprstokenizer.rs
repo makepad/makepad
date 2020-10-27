@@ -40,6 +40,14 @@ impl <'a>TokenParser<'a> {
         return true
     }
     
+    pub fn eat_token(&mut self, tt: TokenType) -> bool {
+        if self.tokens[self.index].token_type == tt{
+            self.advance();
+            return true
+        }
+        false
+    }
+    
     pub fn eat(&mut self, what: &str) -> bool {
         // eat as many ignorable tokens
         if !self.eat_should_ignore() {
@@ -437,11 +445,11 @@ impl MprsTokenizer {
                     
                     chunk.push(state.cur);
                     
-                    if chunk.len()>=2 && chunk[chunk.len() - 2] == '{' {
+                    if chunk.len()>=3 && chunk[chunk.len() - 3] == 'r' && chunk[chunk.len() - 2] == '#'{
                         self.in_string_code = true;
                         return TokenType::ParenOpen;
                     }
-                    if state.next == '}' && self.in_string_code {
+                    if state.next == '#' && self.in_string_code {
                         self.in_string_code = false;
                         return TokenType::ParenClose;
                     }

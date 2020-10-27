@@ -10,7 +10,10 @@ use wio::com::ComPtr;
 use std::mem;
 use std::ptr;
 use std::ffi;
-use makepad_shader_compiler::generate_hlsl;
+
+use makepad_live_compiler::generate_hlsl;
+use makepad_live_compiler::analyse::ShaderCompileOptions;
+use makepad_live_compiler::shaderast::ShaderAst;
 //use std::ffi::c_void;
 //use std::sync::Mutex;
 
@@ -27,7 +30,6 @@ impl Cx {
         zbias: &mut f32,
         zbias_step: f32
     ) {
-        
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
         
@@ -80,8 +82,8 @@ impl Cx {
                 
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
-                    if draw_call.uniforms.len() != 0 {
-                        draw_call.platform.uniforms.update_with_f32_constant_data(d3d11_cx, &mut draw_call.uniforms);
+                    if draw_call.user_uniforms.len() != 0 {
+                        draw_call.platform.user_uniforms.update_with_f32_constant_data(d3d11_cx, &mut draw_call.user_uniforms);
                     }
                 }
                 
@@ -91,21 +93,35 @@ impl Cx {
                     continue;
                 }
                 
+                let geometry = &mut self.geometries[draw_call.geometry_id];
+                
+                if geometry.dirty {
+                    geometry.platform.geom_ibuf.update_with_u32_index_data(d3d11_cx, &geometry.indices);
+                    geometry.platform.geom_vbuf.update_with_f32_vertex_data(d3d11_cx, &geometry.vertices);
+                    geometry.dirty = false;
+                }
+                
                 d3d11_cx.set_shaders(&shp.vertex_shader, &shp.pixel_shader);
                 
                 d3d11_cx.set_primitive_topology();
                 
                 d3d11_cx.set_input_layout(&shp.input_layout);
                 
-                d3d11_cx.set_index_buffer(&shp.geom_ibuf);
+                d3d11_cx.set_index_buffer(&geometry.platform.geom_ibuf);
                 
-                d3d11_cx.set_vertex_buffers(&shp.geom_vbuf, sh.mapping.geometry_props.total_slots, &draw_call.platform.inst_vbuf, sh.mapping.instance_props.total_slots);
+                d3d11_cx.set_vertex_buffers(
+                    &geometry.platform.geom_vbuf,
+                    sh.mapping.geometry_props.total_slots,
+                    &draw_call.platform.inst_vbuf,
+                    sh.mapping.instance_props.total_slots
+                );
                 
                 d3d11_cx.set_constant_buffers(
                     &self.passes[pass_id].platform.pass_uniforms,
                     &cxview.platform.view_uniforms,
                     &draw_call.platform.draw_uniforms,
-                    &draw_call.platform.uniforms,
+                    &draw_call.platform.user_uniforms,
+                    &shp.live_uniforms,
                     &shp.const_table_uniforms
                 );
                 
@@ -131,17 +147,24 @@ impl Cx {
                         _ => ()
                     }
                 }
-                d3d11_cx.draw_indexed_instanced(sh.shader_gen.geometry.indices.len(), instances);
+                //if self.passes[pass_id].debug{
+                //    println!("DRAWING PASS {} {}", geometry.indices.len(), instances);
+                //}
+                
+                d3d11_cx.draw_indexed_instanced(
+                    geometry.indices.len(),
+                    instances
+                );
             }
         }
     }
     
-    pub fn setup_pass_render_targets(&mut self, pass_id: usize, inherit_dpi_factor: f32, first_target: Option<&ComPtr<d3d11::ID3D11RenderTargetView>>, d3d11_cx: &D3d11Cx) {
+    pub fn setup_pass_render_targets(&mut self, pass_id: usize, inherit_dpi_factor: f32, first_target: Option<&ComPtr<d3d11::ID3D11RenderTargetView >>, d3d11_cx: &D3d11Cx) {
         
         let pass_size = self.passes[pass_id].pass_size;
         
-        self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
-        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
+        self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
+        
         self.passes[pass_id].paint_dirty = false;
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor
@@ -270,70 +293,116 @@ impl Cx {
     
     
     pub fn hlsl_compile_all_shaders(&mut self, d3d11_cx: &D3d11Cx) {
-        for (index, sh) in &mut self.shaders.iter_mut().enumerate() {
-            let result = Self::hlsl_compile_shader(index, false, sh, d3d11_cx, &mut self.shader_inherit_cache);
-            if let ShaderCompileResult::Fail {err, ..} = result {
-                panic!("{}", err);
+        
+        let options = ShaderCompileOptions {
+            gather_all: false,
+            create_const_table: false,
+            no_const_collapse: false
+        };
+        
+        for (live_id, shader) in &self.live_styles.shader_alloc {
+            match self.live_styles.collect_and_analyse_shader(*live_id, options) {
+                Err(err) => {
+                    eprintln!("{}", err);
+                    panic!()
+                },
+                Ok((shader_ast, default_geometry)) => {
+                    let shader_id = shader.shader_id;
+                    Self::hlsl_compile_shader(
+                        shader_id,
+                        &mut self.shaders[shader_id],
+                        shader_ast,
+                        default_geometry,
+                        options,
+                        d3d11_cx,
+                        &self.live_styles
+                    );
+                }
             }
         };
+        self.live_styles.changed_shaders.clear();
     }
     
-    fn slots_to_dxgi_format(slots: usize) -> u32 {
+    
+    pub fn hlsl_update_all_shaders(&mut self, d3d11_cx: &D3d11Cx, errors: &mut Vec<LiveBodyError>) {
         
-        match slots {
-            1 => dxgiformat::DXGI_FORMAT_R32_FLOAT,
-            2 => dxgiformat::DXGI_FORMAT_R32G32_FLOAT,
-            3 => dxgiformat::DXGI_FORMAT_R32G32B32_FLOAT,
-            4 => dxgiformat::DXGI_FORMAT_R32G32B32A32_FLOAT,
-            _ => panic!("slots_to_dxgi_format unsupported slotcount {}", slots)
-        }
-    }
-    pub fn hlsl_compile_shader(shader_id: usize, use_const_table: bool, sh: &mut CxShader, d3d11_cx: &D3d11Cx, inherit_cache: &mut ShaderInheritCache) -> ShaderCompileResult {
-        let shader_ast = sh.shader_gen.lex_parse_analyse(true, use_const_table, inherit_cache); 
-
-        let shader_ast = match shader_ast{
-            ShaderGenResult::Error(err)=>{
-                return ShaderCompileResult::Fail{id:shader_id, err:err}
-            },
-            ShaderGenResult::PatchedConstTable(const_table)=>{ 
-                sh.mapping.const_table = Some(const_table);
-                if let Some(sh_platform) = &mut sh.platform{
-                    if let Some(const_table) = &sh.mapping.const_table{
-                        if const_table.len()>0{
-                            sh_platform.const_table_uniforms.update_with_f32_constant_data(d3d11_cx, const_table.as_slice());
+        // recompile shaders, and update values
+        
+        let options = ShaderCompileOptions {
+            gather_all: true,
+            create_const_table: true,
+            no_const_collapse: false
+        };
+        
+        for (live_id, change) in &self.live_styles.changed_shaders {
+            match change {
+                LiveChangeType::Recompile => {
+                    match self.live_styles.collect_and_analyse_shader(*live_id, options) {
+                        Err(err) => {
+                            errors.push(err);
+                        },
+                        Ok((shader_ast, default_geometry)) => {
+                            let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                            Self::hlsl_compile_shader(
+                                shader_id,
+                                &mut self.shaders[shader_id],
+                                shader_ast,
+                                default_geometry,
+                                options,
+                                d3d11_cx,
+                                &self.live_styles
+                            );
                         }
                     }
                 }
-                return ShaderCompileResult::Nop{id:shader_id}
-            },
-            ShaderGenResult::ShaderAst(shader_ast)=>{
-                shader_ast
+                LiveChangeType::UpdateValue => {
+                    let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                    let sh = &mut self.shaders[shader_id];
+                    sh.mapping.update_live_uniforms(&self.live_styles);
+                    if let Some(platform) = &mut sh.platform{
+                        platform.live_uniforms.update_with_f32_constant_data(d3d11_cx, sh.mapping.live_uniforms_buf.as_slice());
+                    }
+                }
             }
-        };
+        }
+        self.live_styles.changed_shaders.clear();
         
-        let hlsl = generate_hlsl::generate_shader(&shader_ast, use_const_table);
-        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, if use_const_table{shader_ast.const_table.borrow_mut().take()} else {None});
-
-        if let Some(sh_platform) = &mut sh.platform{
-            if sh_platform.hlsl_shader == hlsl{
+    }
+    
+    pub fn hlsl_compile_shader(
+        shader_id: usize,
+        sh: &mut CxShader,
+        shader_ast: ShaderAst,
+        default_geometry: Option<Geometry>,
+        options: ShaderCompileOptions,
+        d3d11_cx: &D3d11Cx,
+        live_styles: &LiveStyles
+    ) -> ShaderCompileResult {
+        
+        let hlsl = generate_hlsl::generate_shader(&shader_ast, live_styles, options);
+        let debug = shader_ast.debug;
+        let mut mapping = CxShaderMapping::from_shader_ast(shader_ast, options);
+        mapping.update_live_uniforms(live_styles);
+        
+        if debug {
+            println!("--------------- Shader {} --------------- \n{}\n", shader_id, hlsl);
+        }
+        
+        if let Some(sh_platform) = &mut sh.platform {
+            if sh_platform.hlsl_shader == hlsl {
                 sh.mapping = mapping;
-                if let Some(const_table) = &sh.mapping.const_table{
-                    if const_table.len()>0{
+                if let Some(const_table) = &sh.mapping.const_table {
+                    if const_table.len()>0 {
                         sh_platform.const_table_uniforms.update_with_f32_constant_data(d3d11_cx, const_table.as_slice());
                     }
                 }
-                
-                return ShaderCompileResult::Nop{id:shader_id}
+                return ShaderCompileResult::Nop
             }
-        } 
-
-        if shader_ast.debug{
-            println!("--------------- Shader {} --------------- \n{}\n", shader_id, hlsl);
         }
         
         let vs_blob = d3d11_cx.compile_shader("vs", "mpsc_vertex_main".as_bytes(), hlsl.as_bytes());
         
-        fn split_source(src:&str)->String{
+        fn split_source(src: &str) -> String {
             let mut r = String::new();
             let split = src.split("\n");
             for (line, chunk) in split.enumerate() {
@@ -345,20 +414,20 @@ impl Cx {
             return r
         }
         
-        if let Err(msg) = vs_blob{
+        if let Err(msg) = vs_blob {
             println!("{}\n{}", msg, split_source(&hlsl));
             panic!("Cannot compile vertexshader {}", msg);
         }
         let vs_blob = vs_blob.unwrap();
         
         let ps_blob = d3d11_cx.compile_shader("ps", "mpsc_fragment_main".as_bytes(), hlsl.as_bytes());
-
-        if let Err(msg) = ps_blob{
+        
+        if let Err(msg) = ps_blob {
             println!("{}\n{}", msg, split_source(&hlsl));
             panic!("Cannot compile pixelshader {}", msg);
         }
         let ps_blob = ps_blob.unwrap();
-
+        
         let vs = d3d11_cx.create_vertex_shader(&vs_blob).expect("cannot create vertexshader");
         let ps = d3d11_cx.create_pixel_shader(&ps_blob).expect("cannot create pixelshader");
         
@@ -367,12 +436,23 @@ impl Cx {
         let inst_named = NamedProps::construct(&mapping.instances);
         let mut strings = Vec::new();
         
+        fn slots_to_dxgi_format(slots: usize) -> u32 {
+            
+            match slots {
+                1 => dxgiformat::DXGI_FORMAT_R32_FLOAT,
+                2 => dxgiformat::DXGI_FORMAT_R32G32_FLOAT,
+                3 => dxgiformat::DXGI_FORMAT_R32G32B32_FLOAT,
+                4 => dxgiformat::DXGI_FORMAT_R32G32B32A32_FLOAT,
+                _ => panic!("slots_to_dxgi_format unsupported slotcount {}", slots)
+            }
+        }
+        
         for (index, geom) in geom_named.props.iter().enumerate() {
             strings.push(ffi::CString::new(format!("GEOM{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
             layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
                 SemanticName: strings.last().unwrap().as_ptr() as *const _,
                 SemanticIndex: 0,
-                Format: Self::slots_to_dxgi_format(geom.slots),
+                Format: slots_to_dxgi_format(geom.slots),
                 InputSlot: 0,
                 AlignedByteOffset: (geom.offset * 4) as u32,
                 InputSlotClass: d3d11::D3D11_INPUT_PER_VERTEX_DATA,
@@ -382,71 +462,69 @@ impl Cx {
         
         let mut index = 0;
         for inst in &inst_named.props {
-            if inst.slots == 16{
-                for _ in 0..4{
+            if inst.slots == 16 {
+                for i in 0..4 {
                     strings.push(ffi::CString::new(format!("INST{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
                     layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
                         SemanticName: strings.last().unwrap().as_ptr() as *const _,
                         SemanticIndex: 0,
-                        Format: Self::slots_to_dxgi_format(4),
+                        Format: slots_to_dxgi_format(4),
                         InputSlot: 1,
-                        AlignedByteOffset: (inst.offset * 4) as u32,
+                        AlignedByteOffset: (inst.offset * 4 + i * 16) as u32,
                         InputSlotClass: d3d11::D3D11_INPUT_PER_INSTANCE_DATA,
                         InstanceDataStepRate: 1
-                    });  
+                    });
                     index += 1;
                 }
             }
-            else if inst.slots == 9{ 
-                for _ in 0..3{
+            else if inst.slots == 9 {
+                for i in 0..3 {
                     strings.push(ffi::CString::new(format!("INST{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
                     layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
                         SemanticName: strings.last().unwrap().as_ptr() as *const _,
                         SemanticIndex: 0,
-                        Format: Self::slots_to_dxgi_format(3),
+                        Format: slots_to_dxgi_format(3),
                         InputSlot: 1,
-                        AlignedByteOffset: (inst.offset * 4) as u32,
+                        AlignedByteOffset: (inst.offset * 4 + i * 9) as u32,
                         InputSlotClass: d3d11::D3D11_INPUT_PER_INSTANCE_DATA,
                         InstanceDataStepRate: 1
-                    });  
+                    });
                     index += 1;
                 }
-            }            
-            else{
+            }
+            else {
                 strings.push(ffi::CString::new(format!("INST{}", generate_hlsl::index_to_char(index))).unwrap()); //std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
                 layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
                     SemanticName: strings.last().unwrap().as_ptr() as *const _,
                     SemanticIndex: 0,
-                    Format: Self::slots_to_dxgi_format(inst.slots),
+                    Format: slots_to_dxgi_format(inst.slots),
                     InputSlot: 1,
                     AlignedByteOffset: (inst.offset * 4) as u32,
                     InputSlotClass: d3d11::D3D11_INPUT_PER_INSTANCE_DATA,
                     InstanceDataStepRate: 1
-                }); 
+                });
                 index += 1;
             }
         }
         
         let input_layout = d3d11_cx.create_input_layout(&vs_blob, &layout_desc).expect("cannot create input layout");
         
+        sh.default_geometry = default_geometry;
         sh.mapping = mapping;
         sh.platform = Some(CxPlatformShader {
-            geom_ibuf: {
-                let mut geom_ibuf = D3d11Buffer {..Default::default()};
-                geom_ibuf.update_with_u32_index_data(d3d11_cx, &sh.shader_gen.geometry.indices);
-                geom_ibuf
-            },
-            geom_vbuf: {
-                let mut geom_vbuf = D3d11Buffer {..Default::default()};
-                geom_vbuf.update_with_f32_vertex_data(d3d11_cx, &sh.shader_gen.geometry.vertices);
-                geom_vbuf
-            },
-            const_table_uniforms:{
-                let mut buf = D3d11Buffer{..Default::default()};
-                if let Some(const_table) = &sh.mapping.const_table{
-                    if const_table.len()>0{
+            const_table_uniforms: {
+                let mut buf = D3d11Buffer {..Default::default()};
+                if let Some(const_table) = &sh.mapping.const_table {
+                    if const_table.len()>0 {
                         buf.update_with_f32_constant_data(d3d11_cx, const_table.as_slice());
                     }
+                }
+                buf
+            },
+            live_uniforms: {
+                let mut buf = D3d11Buffer {..Default::default()};
+                if sh.mapping.live_uniforms_buf.len()>0 {
+                    buf.update_with_f32_constant_data(d3d11_cx, sh.mapping.live_uniforms_buf.as_slice());
                 }
                 buf
             },
@@ -458,13 +536,13 @@ impl Cx {
             input_layout: input_layout,
         });
         
-        return ShaderCompileResult::Ok{id:shader_id};
+        return ShaderCompileResult::Ok;
     }
 }
 
 
 pub struct D3d11RenderTarget {
-    pub render_target_view: Option<ComPtr<d3d11::ID3D11RenderTargetView>>,
+    pub render_target_view: Option<ComPtr<d3d11::ID3D11RenderTargetView >>,
     //pub raster_state: ComPtr<d3d11::ID3D11RasterizerState>,
     //pub blend_state: ComPtr<d3d11::ID3D11BlendState>,
 }
@@ -496,11 +574,11 @@ pub struct D3d11Window {
     pub is_in_resize: bool,
     pub window_geom: WindowGeom,
     pub win32_window: Win32Window,
-    pub render_target_view: Option<ComPtr<d3d11::ID3D11RenderTargetView>>,
+    pub render_target_view: Option<ComPtr<d3d11::ID3D11RenderTargetView >>,
     //pub render_target: D3d11RenderTarget,
     // pub depth_stencil_view: Option<ComPtr<d3d11::ID3D11DepthStencilView>>,
     // pub depth_stencil_buffer: Option<ComPtr<d3d11::ID3D11Texture2D>>,
-    pub swap_texture: Option<ComPtr<d3d11::ID3D11Texture2D>>,
+    pub swap_texture: Option<ComPtr<d3d11::ID3D11Texture2D >>,
     // pub d2d1_hwnd_target: Option<ComPtr<d2d1::ID2D1HwndRenderTarget>>,
     // pub d2d1_bitmap: Option<ComPtr<d2d1::ID2D1Bitmap>>,
     pub alloc_size: Vec2,
@@ -647,7 +725,12 @@ impl D3d11Cx {
     }
     
     pub fn clear_depth_stencil_view(&self, depth_stencil_view: &ComPtr<d3d11::ID3D11DepthStencilView>, depth: f32) {
-        unsafe {self.context.ClearDepthStencilView(depth_stencil_view.as_raw() as *mut _, d3d11::D3D11_CLEAR_DEPTH | d3d11::D3D11_CLEAR_STENCIL, depth, 0)}
+        unsafe {self.context.ClearDepthStencilView(
+            depth_stencil_view.as_raw() as *mut _,
+            d3d11::D3D11_CLEAR_DEPTH | d3d11::D3D11_CLEAR_STENCIL,
+            depth,
+            0
+        )}
     }
     
     //fn clear_depth_stencil_view(&self, d3d11_window: &D3d11Window) {
@@ -678,7 +761,7 @@ impl D3d11Cx {
         unsafe {self.context.PSSetShader(pixel_shader.as_raw() as *mut _, ptr::null(), 0)}
     }
     
-    pub fn set_shader_resource(&self, index: usize, texture: &Option<ComPtr<d3d11::ID3D11ShaderResourceView>>) {
+    pub fn set_shader_resource(&self, index: usize, texture: &Option<ComPtr<d3d11::ID3D11ShaderResourceView >>) {
         if let Some(texture) = texture {
             let raw = [texture.as_raw() as *const std::ffi::c_void];
             unsafe {self.context.PSSetShaderResources(index as u32, 1, raw.as_ptr() as *const *mut _)}
@@ -710,7 +793,15 @@ impl D3d11Cx {
         )};
     }
     
-    pub fn set_constant_buffers(&self, pass_uni: &D3d11Buffer, view_uni: &D3d11Buffer, draw_uni: &D3d11Buffer, uni: &D3d11Buffer, const_table: &D3d11Buffer) {
+    pub fn set_constant_buffers(
+        &self,
+        pass_uni: &D3d11Buffer,
+        view_uni: &D3d11Buffer,
+        draw_uni: &D3d11Buffer,
+        user_uni: &D3d11Buffer,
+        live_uni: &D3d11Buffer,
+        const_table: &D3d11Buffer
+    ) {
         let pass_uni = pass_uni.buffer.as_ref().unwrap();
         let view_uni = view_uni.buffer.as_ref().unwrap();
         let draw_uni = draw_uni.buffer.as_ref().unwrap();
@@ -719,17 +810,18 @@ impl D3d11Cx {
             pass_uni.as_raw() as *const std::ffi::c_void,
             view_uni.as_raw() as *const std::ffi::c_void,
             draw_uni.as_raw() as *const std::ffi::c_void,
-            if let Some(uni) = uni.buffer.as_ref(){uni.as_raw() as *const std::ffi::c_void}else{0 as *const std::ffi::c_void},
-            if let Some(const_table) = const_table.buffer.as_ref(){const_table.as_raw() as *const std::ffi::c_void}else{0 as *const std::ffi::c_void},
+            if let Some(uni) = user_uni.buffer.as_ref() {uni.as_raw() as *const std::ffi::c_void}else {0 as *const std::ffi::c_void},
+            if let Some(uni) = live_uni.buffer.as_ref() {uni.as_raw() as *const std::ffi::c_void}else {0 as *const std::ffi::c_void},
+            if let Some(const_table) = const_table.buffer.as_ref() {const_table.as_raw() as *const std::ffi::c_void}else {0 as *const std::ffi::c_void},
         ];
         unsafe {self.context.VSSetConstantBuffers(
             0,
-            5,
+            6,
             buffers.as_ptr() as *const *mut _,
         )};
         unsafe {self.context.PSSetConstantBuffers(
             0,
-            5,
+            6,
             buffers.as_ptr() as *const *mut _,
         )};
     }
@@ -1123,6 +1215,7 @@ impl D3d11Cx {
             unsafe {self.device.CreateShaderResourceView(texture as *mut _, ptr::null(), &mut shader_resource as *mut *mut _)};
             cxtexture.platform.width = width;
             cxtexture.platform.height = height;
+            
             cxtexture.platform.texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
             let mut shader_resource = ptr::null_mut();
             unsafe {self.device.CreateShaderResourceView(texture as *mut _, ptr::null(), &mut shader_resource as *mut *mut _)};
@@ -1257,14 +1350,14 @@ pub struct CxPlatformView {
 #[derive(Default, Clone)]
 pub struct CxPlatformDrawCall {
     pub draw_uniforms: D3d11Buffer,
-    pub uniforms: D3d11Buffer,
+    pub user_uniforms: D3d11Buffer,
     pub inst_vbuf: D3d11Buffer
 }
 
 #[derive(Default, Clone)]
 pub struct D3d11Buffer {
     pub last_size: usize,
-    pub buffer: Option<ComPtr<d3d11::ID3D11Buffer>>
+    pub buffer: Option<ComPtr<d3d11::ID3D11Buffer >>
 }
 
 impl D3d11Buffer {
@@ -1349,29 +1442,32 @@ pub struct CxPlatformTexture {
     width: usize,
     height: usize,
     slots_per_pixel: usize,
-    texture: Option<ComPtr<d3d11::ID3D11Texture2D>>,
-    shader_resource: Option<ComPtr<d3d11::ID3D11ShaderResourceView>>,
-    d3d11_resource: Option<ComPtr<d3d11::ID3D11Resource>>,
-    //single: CxPlatformTextureResource,
-    //mapped: Mutex<CxPlatformTextureMapped>,
-    render_target_view: Option<ComPtr<d3d11::ID3D11RenderTargetView>>,
-    depth_stencil_view: Option<ComPtr<d3d11::ID3D11DepthStencilView>>
+    texture: Option<ComPtr<d3d11::ID3D11Texture2D >>,
+    shader_resource: Option<ComPtr<d3d11::ID3D11ShaderResourceView >>,
+    d3d11_resource: Option<ComPtr<d3d11::ID3D11Resource >>,
+    render_target_view: Option<ComPtr<d3d11::ID3D11RenderTargetView >>,
+    depth_stencil_view: Option<ComPtr<d3d11::ID3D11DepthStencilView >>
 }
 
 #[derive(Default, Clone)]
 pub struct CxPlatformPass {
     pass_uniforms: D3d11Buffer,
-    blend_state: Option<ComPtr<d3d11::ID3D11BlendState>>,
-    raster_state: Option<ComPtr<d3d11::ID3D11RasterizerState>>,
-    depth_stencil_state: Option<ComPtr<d3d11::ID3D11DepthStencilState>>
+    blend_state: Option<ComPtr<d3d11::ID3D11BlendState >>,
+    raster_state: Option<ComPtr<d3d11::ID3D11RasterizerState >>,
+    depth_stencil_state: Option<ComPtr<d3d11::ID3D11DepthStencilState >>
+}
+
+#[derive(Default, Clone)]
+pub struct CxPlatformGeometry {
+    pub geom_vbuf: D3d11Buffer,
+    pub geom_ibuf: D3d11Buffer,
 }
 
 #[derive(Clone)]
 pub struct CxPlatformShader {
     pub hlsl_shader: String,
-    pub geom_vbuf: D3d11Buffer,
-    pub geom_ibuf: D3d11Buffer,
     pub const_table_uniforms: D3d11Buffer,
+    pub live_uniforms: D3d11Buffer,
     pub pixel_shader: ComPtr<d3d11::ID3D11PixelShader>,
     pub vertex_shader: ComPtr<d3d11::ID3D11VertexShader>,
     pub pixel_shader_blob: ComPtr<d3dcommon::ID3DBlob>,

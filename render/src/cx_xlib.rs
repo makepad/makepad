@@ -2,7 +2,7 @@ use crate::cx::*;
 use libc;
 use libc::timeval;
 use makepad_x11_sys as X11_sys;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, BTreeSet, VecDeque};
 use std::ffi::CString;
 use std::ffi::CStr;
 use std::slice;
@@ -381,6 +381,9 @@ impl XlibApp {
                                 let window = &mut (**window_ptr);
                                 let mut x = motion.x;
                                 let mut y = motion.y;
+                                if window.window.is_none(){
+                                    return; // shutdown
+                                }
                                 if motion.window != window.window.unwrap() {
                                     // find the right child
                                     for child in &window.child_windows {
@@ -476,7 +479,7 @@ impl XlibApp {
                                         abs: window.last_mouse_pos,
                                         rel: window.last_mouse_pos,
                                         rect: Rect::default(),
-                                        is_wheel: true,
+                                        input_type: FingerInputType::Mouse,
                                         modifiers: self.xkeystate_to_modifiers(button.state),
                                         handled_x: false,
                                         handled_y: false,
@@ -780,7 +783,9 @@ impl XlibApp {
         unsafe {
             if let Ok(mut signals_locked) = (*GLOBAL_XLIB_APP).signals.lock() {
                 let mut signals = HashMap::new();
-                signals.insert(signal, vec![status]);
+                let mut set = BTreeSet::new();
+                set.insert(status);
+                signals.insert(signal, set);
                 signals_locked.push(Event::Signal(SignalEvent {signals}));
                 //let mut f = unsafe { File::from_raw_fd((*GLOBAL_XLIB_APP).display_fd) };
                 //let _ = write!(&mut f, "\0");
@@ -882,7 +887,6 @@ impl XlibApp {
                 ptr::null_mut(),
             );
         }
-        println!("{:?}", keysym);
         match keysym as u32 {
             X11_sys::XK_a => KeyCode::KeyA,
             X11_sys::XK_A => KeyCode::KeyA,
@@ -1483,7 +1487,7 @@ impl XlibWindow {
             rect: Rect::default(),
             digit: digit,
             handled: false,
-            is_touch: false,
+            input_type:FingerInputType::Mouse,
             modifiers: modifiers,
             tap_count: 0,
             time: self.time_now()
@@ -1510,7 +1514,7 @@ impl XlibWindow {
             rel_start: Vec2::default(),
             digit: digit,
             is_over: false,
-            is_touch: false,
+            input_type:FingerInputType::Mouse,
             modifiers: modifiers,
             time: self.time_now()
         })]);
@@ -1530,7 +1534,7 @@ impl XlibWindow {
                     abs_start: Vec2::default(),
                     rel_start: Vec2::default(),
                     is_over: false,
-                    is_touch: false,
+                    input_type:FingerInputType::Mouse,
                     modifiers: modifiers.clone(),
                     time: self.time_now()
                 }));
@@ -1721,15 +1725,14 @@ impl Dnd {
     }
     
     /// Handles a XSelectionEvent.
-    unsafe fn handle_selection_event(&mut self, event: &X11_sys::XSelectionEvent) {
+    unsafe fn handle_selection_event(&mut self, _event: &X11_sys::XSelectionEvent) {
         // The XSelectionEvent is sent by the source window in response to a request by the source
         // window to convert the selection representing the thing being dragged to the appropriate
         // data type. This request is always sent in response to a XDndDrop event, so this event
         // should only be received after a drop operation has completed.
         
-        let source_window = event.requestor;
-        let selection = CString::new(self.get_selection_property(source_window)).unwrap();
-        println!("{:?}", selection);
+        //let source_window = event.requestor;
+        //let selection = CString::new(self.get_selection_property(source_window)).unwrap();
         
         // TODO: Actually use the selection
     }

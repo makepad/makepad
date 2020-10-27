@@ -1,14 +1,15 @@
 use crate::ty::Ty;
 use crate::val::Val;
-use crate::math::Vec4;
+use crate::colors::Color;
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Lit {
     Bool(bool),
-    Int(u32),
+    Int(i32),
     Float(f32),
-    Vec4(Vec4)
+    Color(Color)
+    
 }
 
 impl Lit {
@@ -17,7 +18,7 @@ impl Lit {
             Lit::Bool(_) => Ty::Bool,
             Lit::Int(_) => Ty::Int,
             Lit::Float(_) => Ty::Float,
-            Lit::Vec4(_) => Ty::Vec4
+            Lit::Color(_) => Ty::Vec4
         }
     }
 
@@ -26,7 +27,7 @@ impl Lit {
             Lit::Bool(lit) => Val::Bool(lit),
             Lit::Int(lit) => Val::Int(lit as i32),
             Lit::Float(lit) => Val::Float(lit),
-            Lit::Vec4(lit) => Val::Vec4(lit)
+            Lit::Color(lit) => Val::Vec4(lit.to_vec4())
         }
     }
 }
@@ -43,8 +44,8 @@ impl fmt::Display for Lit {
                     write!(f, "{}", lit)
                 }
             },
-            Lit::Vec4(lit) =>{
-                write!(f, "vec4({},{},{},{})", lit.x,lit.y,lit.z,lit.w)
+            Lit::Color(lit) =>{
+                write!(f, "color({},{},{},{})", lit.r,lit.g,lit.b,lit.a)
             }
         }
     }
@@ -91,6 +92,26 @@ impl TyLit {
             TyLit::Texture2D => Ty::Texture2D,
         }
     }
+    /*
+    pub fn from_ident(ident:Ident)->Option<TyLit>{
+        if ident == Ident::new("bool"){return Some(TyLit::Bool)}
+        if ident == Ident::new("int"){return Some(TyLit::Int)}
+        if ident == Ident::new("float"){return Some(TyLit::Float)}
+        if ident == Ident::new("vec2"){return Some(TyLit::Vec2)}
+        if ident == Ident::new("vec3"){return Some(TyLit::Vec3)}
+        if ident == Ident::new("vec4"){return Some(TyLit::Vec4)}
+        if ident == Ident::new("mat2"){return Some(TyLit::Mat2)}
+        if ident == Ident::new("mat3"){return Some(TyLit::Mat3)}
+        if ident == Ident::new("mat4"){return Some(TyLit::Mat4)}
+        if ident == Ident::new("texture2D"){return Some(TyLit::Texture2D)}
+        if ident == Ident::new("bvec2"){return Some(TyLit::Bvec2)}
+        if ident == Ident::new("bvec3"){return Some(TyLit::Bvec3)}
+        if ident == Ident::new("bvec4"){return Some(TyLit::Bvec4)}
+        if ident == Ident::new("ivec2"){return Some(TyLit::Ivec2)}
+        if ident == Ident::new("ivec3"){return Some(TyLit::Ivec3)}
+        if ident == Ident::new("ivec4"){return Some(TyLit::Ivec4)}
+        None
+    }*/
 }
 
 impl fmt::Display for TyLit {

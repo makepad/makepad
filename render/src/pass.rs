@@ -72,6 +72,9 @@ impl Pass {
     }
     
     pub fn set_size(&mut self, cx: &mut Cx, pass_size: Vec2) {
+        let mut pass_size = pass_size;
+        if pass_size.x < 1.0{pass_size.x = 1.0};
+        if pass_size.y < 1.0{pass_size.y = 1.0};
         let cxpass = &mut cx.passes[self.pass_id.unwrap()];
         cxpass.pass_size = pass_size;
     }
@@ -82,24 +85,37 @@ impl Pass {
         cxpass.clear_color = clear_color;
     }
     
-    pub fn add_color_texture(&mut self, cx: &mut Cx, texture: &mut Texture, clear_color: ClearColor) {
-        texture.set_desc(cx, None);
+    pub fn add_color_texture(&mut self, cx: &mut Cx, texture: Texture, clear_color: ClearColor) {
         let pass_id = self.pass_id.expect("Please call add_color_texture after begin_pass");
         let cxpass = &mut cx.passes[pass_id];
         cxpass.color_textures.push(CxPassColorTexture {
-            texture_id: texture.texture_id.unwrap(),
+            texture_id: texture.texture_id,
             clear_color: clear_color
         })
     }
     
-    pub fn set_depth_texture(&mut self, cx: &mut Cx, texture: &mut Texture, clear_depth: ClearDepth) {
-        texture.set_desc(cx, None);
+    pub fn set_depth_texture(&mut self, cx: &mut Cx, texture: Texture, clear_depth: ClearDepth) {
         let pass_id = self.pass_id.expect("Please call set_depth_texture after begin_pass");
         let cxpass = &mut cx.passes[pass_id];
-        cxpass.depth_texture = texture.texture_id;
+        cxpass.depth_texture = Some(texture.texture_id);
         cxpass.clear_depth = clear_depth;
     }
     
+    pub fn set_matrix_mode(&mut self, cx: &mut Cx, pmm: PassMatrixMode){
+        if let Some(pass_id) = self.pass_id{
+            let cxpass = &mut cx.passes[pass_id];
+            cxpass.paint_dirty = true;
+            cxpass.matrix_mode = pmm;
+        }
+    }
+
+    pub fn set_debug(&mut self, cx: &mut Cx, debug:bool){
+        if let Some(pass_id) = self.pass_id{
+            let cxpass = &mut cx.passes[pass_id];
+            cxpass.debug = debug;
+        }
+    }
+
     
     pub fn end_pass(&mut self, cx: &mut Cx) {
         cx.pass_stack.pop();
@@ -159,7 +175,15 @@ impl PassUniforms{
 }
 
 #[derive(Clone)]
+pub enum PassMatrixMode{
+    Ortho,
+    Projection{fov_y:f32, near:f32, far:f32, cam:Mat4}
+}
+
+#[derive(Clone)]
 pub struct CxPass {
+    pub debug: bool,
+    pub matrix_mode: PassMatrixMode,
     pub color_textures: Vec<CxPassColorTexture>,
     pub depth_texture: Option<usize>,
     pub clear_depth: ClearDepth,
@@ -178,6 +202,8 @@ pub struct CxPass {
 impl Default for CxPass {
     fn default() -> Self {
         CxPass {
+            debug: false,
+            matrix_mode: PassMatrixMode::Ortho,
             zbias_step: 0.001,
             pass_uniforms: PassUniforms::default(),
             color_textures: Vec::new(),
@@ -205,23 +231,6 @@ pub enum CxPassDepOf {
 
 impl CxPass {
     
-    fn camera_projection()->Mat4Id{uid!()}
-    fn camera_view()->Mat4Id{uid!()}
-    fn camera_inv()->Mat4Id{uid!()}
-
-    fn dpi_factor()->FloatId{uid!()}
-    fn dpi_dilate()->FloatId{uid!()}
-    
-    pub fn def_uniforms(sg: ShaderGen) -> ShaderGen {
-        sg.compose(shader!{"
-            uniform camera_projection: Self::camera_projection() in pass;
-            uniform camera_view: Self::camera_view() in pass;
-            uniform camera_inv: Self::camera_inv() in pass;
-            uniform dpi_factor: Self::dpi_factor() in pass;
-            uniform dpi_dilate: Self::dpi_dilate() in pass;
-        "})
-    }
-    
     pub fn uniform_camera_projection(&mut self, v: &Mat4) {
         //dump in uniforms
         for i in 0..16 {
@@ -242,21 +251,38 @@ impl CxPass {
         self.pass_uniforms.dpi_dilate = dpi_dilate;
     }
     
-    pub fn set_ortho_matrix(&mut self, offset: Vec2, size: Vec2) {
-        let ortho_matrix = Mat4::ortho(
-            offset.x,
-            offset.x + size.x,
-            offset.y,
-            offset.y + size.y,
-            100.,
-            -100.,
-            1.0,
-            1.0
-        );
-        
-        //println!("{} {}", ortho_matrix.v[10], ortho_matrix.v[14]);
-        //println!("CHECK {} {} {:?}", size.x, size.y,ortho_matrix.transform_vec4(Vec4{x:200.,y:300.,z:100.,w:1.0}));
-        self.uniform_camera_projection(&ortho_matrix);
+    pub fn set_matrix(&mut self, offset: Vec2, size: Vec2) {
+         match self.matrix_mode{
+            PassMatrixMode::Ortho=>{
+                let ortho = Mat4::ortho(
+                    offset.x,
+                    offset.x + size.x,
+                    offset.y,
+                    offset.y + size.y,
+                    100.,
+                    -100.,
+                    1.0,
+                    1.0
+                );
+                self.uniform_camera_projection(&ortho);
+                self.uniform_camera_view(&Mat4::identity());
+            }
+            PassMatrixMode::Projection{fov_y, near, far, cam}=>{
+                let proj = Mat4::perspective(fov_y, size.x / size.y, near, far);
+                self.uniform_camera_projection(&proj);
+                self.uniform_camera_view(&cam);
+                
+                /*Mat4::ortho(
+                    offset.x,
+                    offset.x + size.x,
+                    offset.y,
+                    offset.y + size.y,
+                    100.,
+                    -100.,
+                    1.0,
+                    1.0)*/
+            }
+        };
         //self.set_matrix(cx, &ortho_matrix);
     }
     

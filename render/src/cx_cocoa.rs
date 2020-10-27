@@ -1,7 +1,7 @@
 //  Life is too short for leaky abstractions.
 // Gleaned/learned/templated from https://github.com/tomaka/winit/blob/master/src/platform/macos/
 
-use std::collections::HashMap;
+use std::collections::{HashMap,BTreeSet};
 use crate::cx_apple::*;
 use std::os::raw::c_void;
 use std::sync::{Mutex};
@@ -466,7 +466,7 @@ impl CocoaApp {
                             abs: cocoa_window.last_mouse_pos,
                             rel: cocoa_window.last_mouse_pos,
                             rect: Rect::default(),
-                            is_wheel: false,
+                            input_type: FingerInputType::Mouse,
                             modifiers: get_event_key_modifier(ns_event),
                             handled_x: false,
                             handled_y: false,
@@ -482,7 +482,7 @@ impl CocoaApp {
                             abs: cocoa_window.last_mouse_pos,
                             rel: cocoa_window.last_mouse_pos,
                             rect: Rect::default(),
-                            is_wheel: true,
+                            input_type: FingerInputType::Mouse,
                             modifiers: get_event_key_modifier(ns_event),
                             handled_x: false,
                             handled_y: false,
@@ -677,7 +677,9 @@ impl CocoaApp {
     
     pub fn send_signal_event(&mut self, signal: Signal, status: StatusId) {
         let mut signals = HashMap::new();
-        signals.insert(signal, vec![status]);
+        let mut new_set = BTreeSet::new();
+        new_set.insert(status);
+        signals.insert(signal, new_set);
         self.do_callback(&mut vec![
             Event::Signal(SignalEvent {
                 signals: signals,
@@ -992,7 +994,7 @@ impl CocoaWindow {
             rect: Rect::default(),
             digit: digit,
             handled: false,
-            is_touch: false,
+            input_type: FingerInputType::Mouse,
             modifiers: modifiers,
             tap_count: 0,
             time: self.time_now()
@@ -1010,7 +1012,7 @@ impl CocoaWindow {
             rel_start: Vec2::default(),
             digit: digit,
             is_over: false,
-            is_touch: false,
+            input_type: FingerInputType::Mouse,
             modifiers: modifiers,
             time: self.time_now()
         })]);
@@ -1033,7 +1035,7 @@ impl CocoaWindow {
                     abs_start: Vec2::default(),
                     rel_start: Vec2::default(),
                     is_over: false,
-                    is_touch: false,
+                    input_type: FingerInputType::Mouse,
                     modifiers: modifiers.clone(),
                     time: self.time_now()
                 }));
@@ -1640,7 +1642,6 @@ pub fn define_cocoa_window_class() -> *const Class {
     }
     
     extern fn is_movable_by_window_background(_: &Object, _: Sel) -> BOOL {
-        println!("CALLED!");
         YES
     }
     

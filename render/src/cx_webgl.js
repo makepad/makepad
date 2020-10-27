@@ -12,17 +12,23 @@
         constructor(wasm_app) {
             this.wasm_app = wasm_app;
             this.exports = wasm_app.exports;
-            this.slots = 512;
+            this.slots = 1024;
             this.used = 2; // skip 8 byte header
+            this.buffer_len = 0;
+            this.last_pointer = 0;
             // lets write
             this.pointer = this.exports.alloc_wasm_message(this.slots * 4);
             this.update_refs();
         }
         
         update_refs() {
-            this.mf32 = new Float32Array(this.exports.memory.buffer, this.pointer, this.slots);
-            this.mu32 = new Uint32Array(this.exports.memory.buffer, this.pointer, this.slots);
-            this.mf64 = new Float64Array(this.exports.memory.buffer, this.pointer, this.slots >> 1);
+            if (this.last_ptr != this.pointer || this.buffer_len != this.exports.memory.buffer.byteLength) {
+                this.last_pointer = this.pointer;
+                this.buffer_len = this.exports.memory.buffer.byteLength;
+                this.mf32 = new Float32Array(this.exports.memory.buffer, this.pointer, this.slots);
+                this.mu32 = new Uint32Array(this.exports.memory.buffer, this.pointer, this.slots);
+                this.mf64 = new Float64Array(this.exports.memory.buffer, this.pointer, this.slots >> 1);
+            }
         }
         
         fit(slots) {
@@ -40,10 +46,59 @@
             return pos;
         }
         
-        fetch_deps(caps) {
+        fetch_deps(gpu_info) {
+            let port;
+            if (!location.port) {
+                if (location.protocol == "https:") {
+                    port = 443;
+                }
+                else {
+                    port = 80;
+                }
+            }
+            else {
+                port = parseInt(location.port);
+            }
             let pos = this.fit(2);
             this.mu32[pos ++] = 1;
-            this.mu32[pos ++] = caps.gpu_spec_is_low_on_uniforms? 1: 0;
+            this.mu32[pos ++] = gpu_info.min_uniforms;
+            this.send_string(gpu_info.vendor);
+            this.send_string(gpu_info.renderer);
+            
+            pos = this.fit(1);
+            this.mu32[pos ++] = port;
+            this.send_string(location.protocol);
+            this.send_string(location.hostname);
+            this.send_string(location.pathname);
+            this.send_string(location.search);
+            this.send_string(location.hash);
+        }
+        
+        // i forgot how to do memcpy with typed arrays. so, we'll do this.
+        copy_to_wasm(input_buffer, output_ptr) {
+            let u8len = input_buffer.byteLength;
+            
+            if ((u8len & 3) != 0 || (output_ptr & 3) != 0) { // not u32 aligned, do a byte copy
+                var u8out = new Uint8Array(this.exports.memory.buffer, output_ptr, u8len)
+                var u8in = new Uint8Array(input_buffer)
+                for (let i = 0; i < u8len; i ++) {
+                    u8out[i] = u8in[i];
+                }
+            }
+            else { // do a u32 copy
+                let u32len = u8len >> 2; //4 bytes at a time.
+                var u32out = new Uint32Array(this.exports.memory.buffer, output_ptr, u32len)
+                var u32in = new Uint32Array(input_buffer)
+                for (let i = 0; i < u32len; i ++) {
+                    u32out[i] = u32in[i];
+                }
+            }
+        }
+        
+        alloc_wasm_vec(vec_len) {
+            let ret = this.exports.alloc_wasm_vec(vec_len);
+            this.update_refs();
+            return ret
         }
         
         send_string(str) {
@@ -56,12 +111,12 @@
         
         send_f64(value) {
             if (this.used & 1) { // float64 align, need to fit another
-                var pos = this.fit(3);
+                let pos = this.fit(3);
                 pos ++;
                 this.mf64[pos >> 1] = value;
             }
             else {
-                var pos = this.fit(2);
+                let pos = this.fit(2);
                 this.mf64[pos >> 1] = value;
             }
         }
@@ -83,13 +138,15 @@
         send_pose_transform(pose_transform) {
             // lets send over a pose.
             let pos = this.fit(7)
-            this.mf32[pos ++] = pose_transform.inverse.orientation.x;
-            this.mf32[pos ++] = pose_transform.inverse.orientation.y;
-            this.mf32[pos ++] = pose_transform.inverse.orientation.z;
-            this.mf32[pos ++] = pose_transform.inverse.orientation.w;
-            this.mf32[pos ++] = pose_transform.position.x;
-            this.mf32[pos ++] = pose_transform.position.y;
-            this.mf32[pos ++] = pose_transform.position.z;
+            let inv_orient = pose_transform.inverse.orientation;
+            this.mf32[pos ++] = inv_orient.x;
+            this.mf32[pos ++] = inv_orient.y;
+            this.mf32[pos ++] = inv_orient.z;
+            this.mf32[pos ++] = inv_orient.w;
+            let tpos = pose_transform.position;
+            this.mf32[pos ++] = tpos.x;
+            this.mf32[pos ++] = tpos.y;
+            this.mf32[pos ++] = tpos.z;
         }
         
         deps_loaded(deps) {
@@ -106,7 +163,7 @@
         }
         
         init(info) {
-            let pos = this.fit(7);
+            let pos = this.fit(6);
             this.mu32[pos ++] = 3;
             this.mf32[pos ++] = info.width;
             this.mf32[pos ++] = info.height;
@@ -254,31 +311,49 @@
             this.mu32[pos ++] = is_focus? 1: 0;
         }
         
-        xr_update(
-            time,
-            head_pose_transform,
-            inputs,
-        ) {
+        xr_update_head(inputs_len, time) {
+            //this.send_f64(time);
+        }
+        
+        xr_update_inputs(xr_frame, xr_session, time, xr_pose, xr_reference_space) {
+            let input_len = xr_session.inputSources.length;
+            
             let pos = this.fit(2);
             this.mu32[pos ++] = 20;
-            this.mu32[pos ++] = inputs.length;
-            this.send_f64(time);
-            this.send_pose_transform(head_pose_transform);
-            for (let input of inputs) {
-                this.send_pose_transform(input.grip_transform);
-                this.send_pose_transform(input.ray_transform);
-                let button_len = input.buttons.length;
-                let axes_len = input.axes.length;
-                let pos = this.fit(3 + button_len * 2 + axes_len);
-                this.mu32[pos ++] = input.hand;
-                this.mu32[pos ++] = input.buttons.length;
-                for (let i = 0; i < button_len; i ++) {
-                    this.mu32[pos ++] = input.buttons[i].pressed? 1: 0;
-                    this.mf32[pos ++] = input.buttons[i].value;
+            this.mu32[pos ++] = input_len;
+            
+            this.send_f64(time / 1000.0);
+            this.send_pose_transform(xr_pose.transform);
+            
+            for (let i = 0; i < input_len; i ++) {
+                let input = xr_session.inputSources[i];
+                let grip_pose = xr_frame.getPose(input.gripSpace, xr_reference_space);
+                let ray_pose = xr_frame.getPose(input.targetRaySpace, xr_reference_space);
+                if (grip_pose == null || ray_pose == null) {
+                    let pos = this.fit(1);
+                    this.mu32[pos ++] = 0;
+                    continue
                 }
-                this.mu32[pos ++] = input.axes.length;
+                let pos = this.fit(1);
+                this.mu32[pos ++] = 1;
+                
+                this.send_pose_transform(grip_pose.transform)
+                this.send_pose_transform(ray_pose.transform)
+                let buttons = input.gamepad.buttons;
+                let axes = input.gamepad.axes;
+                let buttons_len = buttons.length;
+                let axes_len = axes.length;
+                
+                pos = this.fit(3 + buttons_len * 2 + axes_len);
+                this.mu32[pos ++] = input.handedness == "left"? 1: input.handedness == "right"? 2: 0;
+                this.mu32[pos ++] = buttons_len;
+                for (let i = 0; i < buttons_len; i ++) {
+                    this.mu32[pos ++] = buttons[i].pressed? 1: 0;
+                    this.mf32[pos ++] = buttons[i].value;
+                }
+                this.mu32[pos ++] = axes_len;
                 for (let i = 0; i < axes_len; i ++) {
-                    this.mf32[pos ++] = input.axes[i]
+                    this.mf32[pos ++] = axes[i]
                 }
             }
         }
@@ -295,12 +370,30 @@
             this.mu32[pos ++] = success? 1: 2;
         }
         
+        websocket_message(url, data) {
+            let vec_len = data.byteLength;
+            let vec_ptr = this.alloc_wasm_vec(vec_len);
+            this.copy_to_wasm(data, vec_ptr);
+            let pos = this.fit(3);
+            this.mu32[pos ++] = 23;
+            this.mu32[pos ++] = vec_ptr;
+            this.mu32[pos ++] = vec_len;
+            this.send_string(url);
+        }
+        
+        websocket_error(url, error) {
+            let pos = this.fit(1);
+            this.mu32[pos ++] = 24;
+            this.send_string(url);
+            this.send_string(error);
+        }
+        
         end() {
             let pos = this.fit(1);
             this.mu32[pos] = 0;
         }
-        
     }
+    
     
     class WasmApp {
         constructor(canvas, webasm) {
@@ -320,71 +413,77 @@
             this.resources = [];
             this.req_anim_frame_id = 0;
             this.text_copy_response = "";
+            this.websockets = {};
+            
             this.init_webgl_context();
             this.run_async_webxr_check();
             this.bind_mouse_and_touch();
             this.bind_keyboard();
             
-            window.addEventListener('focus', _ => {
-                this.to_wasm.window_focus(true);
-                this.do_wasm_io();
-            })
-            
-            window.addEventListener('blur', _ => {
-                this.to_wasm.window_focus(false);
-                this.do_wasm_io();
-            })
+            window.addEventListener('focus', this.do_focus.bind(this));
+            window.addEventListener('blur', this.do_blur.bind(this));
             // lets create the wasm app and cx
             this.app = this.exports.create_wasm_app();
             
             // create initial to_wasm
             this.to_wasm = new ToWasm(this);
             
+            
+            
             // fetch dependencies
-            this.to_wasm.fetch_deps({
-                gpu_spec_is_low_on_uniforms: this.gpu_spec_is_low_on_uniforms
-            });
+            this.to_wasm.fetch_deps(this.gpu_info);
             
             this.do_wasm_io();
             
             this.do_wasm_block = true;
             
             // ok now, we wait for our resources to load.
-            Promise.all(this.resources).then(results => {
-                let deps = []
-                // copy our reslts into wasm pointers
-                for (let i = 0; i < results.length; i ++) {
-                    var result = results[i]
-                    // allocate pointer, do +8 because of the u64 length at the head of the buffer
-                    let vec_len = result.buffer.byteLength;
-                    let vec_ptr = this.exports.alloc_wasm_vec(vec_len);
-                    this.copy_to_wasm(result.buffer, vec_ptr);
-                    deps.push({
-                        name: result.name,
-                        vec_ptr: vec_ptr,
-                        vec_len: vec_len
-                    });
-                }
-                // pass wasm the deps
-                this.to_wasm.deps_loaded(deps);
-                // initialize the application
-                this.to_wasm.init({
-                    width: this.width,
-                    height: this.height,
-                    dpi_factor: this.dpi_factor,
-                    xr_can_present: this.xr_can_present,
-                    can_fullscreen: this.can_fullscreen(),
-                    xr_is_presenting: false,
-                })
-                this.do_wasm_block = false;
-                this.do_wasm_io();
-                
-                var loaders = document.getElementsByClassName('cx_webgl_loader');
-                for (var i = 0; i < loaders.length; i ++) {
-                    loaders[i].parentNode.removeChild(loaders[i])
-                }
-                
+            Promise.all(this.resources).then(this.do_dep_results.bind(this))
+        }
+        
+        do_focus() {
+            this.to_wasm.window_focus(true);
+            this.do_wasm_io();
+        }
+        
+        do_blur() {
+            this.to_wasm.window_focus(false);
+            this.do_wasm_io();
+        }
+        
+        do_dep_results(results) {
+            let deps = []
+            // copy our reslts into wasm pointers
+            for (let i = 0; i < results.length; i ++) {
+                var result = results[i]
+                // allocate pointer, do +8 because of the u64 length at the head of the buffer
+                let vec_len = result.buffer.byteLength;
+                let vec_ptr = this.to_wasm.alloc_wasm_vec(vec_len);
+                this.to_wasm.copy_to_wasm(result.buffer, vec_ptr);
+                deps.push({
+                    name: result.name,
+                    vec_ptr: vec_ptr,
+                    vec_len: vec_len
+                });
+            }
+            // pass wasm the deps
+            this.to_wasm.deps_loaded(deps);
+            // initialize the application
+            this.to_wasm.init({
+                width: this.width,
+                height: this.height,
+                dpi_factor: this.dpi_factor,
+                xr_can_present: this.xr_can_present,
+                can_fullscreen: this.can_fullscreen(),
+                xr_is_presenting: false,
             })
+            this.do_wasm_block = false;
+            this.do_wasm_io();
+            
+            var loaders = document.getElementsByClassName('cx_webgl_loader');
+            for (var i = 0; i < loaders.length; i ++) {
+                loaders[i].parentNode.removeChild(loaders[i])
+            }
         }
         
         do_wasm_io() {
@@ -463,7 +562,6 @@
                 data[u8_pos + 1] = (u32 >> 8) & 0xff;
                 data[u8_pos + 2] = (u32 >> 16) & 0xff;
             }
-            console.log(data);
             return data
         }
         
@@ -484,26 +582,7 @@
             }
             return vars
         }
-        // i forgot how to do memcpy with typed arrays. so, we'll do this.
-        copy_to_wasm(input_buffer, output_ptr) {
-            let u8len = input_buffer.byteLength;
-            
-            if ((u8len & 3) != 0 || (output_ptr & 3) != 0) { // not u32 aligned, do a byte copy
-                var u8out = new Uint8Array(this.memory.buffer, output_ptr, u8len)
-                var u8in = new Uint8Array(input_buffer)
-                for (let i = 0; i < u8len; i ++) {
-                    u8out[i] = u8in[i];
-                }
-            }
-            else { // do a u32 copy
-                let u32len = u8len >> 2; //4 bytes at a time.
-                var u32out = new Uint32Array(this.memory.buffer, output_ptr, u32len)
-                var u32in = new Uint32Array(input_buffer)
-                for (let i = 0; i < u32len; i ++) {
-                    u32out[i] = u32in[i];
-                }
-            }
-        }
+        
         
         load_deps(deps) {
             for (var i = 0; i < deps.length; i ++) {
@@ -611,15 +690,16 @@
                 })
             }
             
+            var mouse_fingers = [];
             function mouse_to_finger(e) {
-                return {
-                    x: e.pageX,
-                    y: e.pageY,
-                    digit: e.button,
-                    time: e.timeStamp / 1000.0,
-                    modifiers: pack_key_modifier(e),
-                    touch: false
-                }
+                let mf = mouse_fingers[e.button] || (mouse_fingers[e.button] = {});
+                mf.x = e.pageX;
+                mf.y = e.pageY;
+                mf.digit = e.button;
+                mf.time = e.timeStamp / 1000.0;
+                mf.modifiers = pack_key_modifier(e);
+                mf.touch = false;
+                return mf
             }
             
             var digit_map = {}
@@ -732,13 +812,9 @@
                 
                 for (var i = 0; i < mouse_buttons_down.length; i ++) {
                     if (mouse_buttons_down[i]) {
-                        this.to_wasm.finger_move({
-                            x: e.pageX,
-                            y: e.pageY,
-                            time: e.timeStamp / 1000.0,
-                            modifiers: 0,
-                            digit: i
-                        })
+                        let mf = mouse_to_finger(e);
+                        mf.digit = i;
+                        this.to_wasm.finger_move(mf);
                     }
                 }
                 last_mouse_finger = mouse_to_finger(e);
@@ -1024,6 +1100,7 @@
         }
         
         update_text_area_pos() {
+            
             var pos = this.text_area_pos;
             var ta = this.text_area;
             if (ta) {
@@ -1050,8 +1127,8 @@
             
             fetch_path(file_path).then(result => {
                 let byte_len = result.buffer.byteLength
-                let output_ptr = this.exports.alloc_wasm_vec(byte_len);
-                this.copy_to_wasm(result.buffer, output_ptr);
+                let output_ptr = this.to_wasm.alloc_wasm_vec(byte_len);
+                this.to_wasm.copy_to_wasm(result.buffer, output_ptr);
                 this.to_wasm.read_file_data(id, output_ptr, byte_len)
                 this.do_wasm_io();
             }, err => {
@@ -1129,6 +1206,44 @@
             req.open(verb, proto + "://" + domain + ":" + port + path, true);
             console.log(verb, proto + "://" + domain + ":" + port + path, body);
             req.send(body.buffer);
+        }
+        
+        websocket_send(url, data) {
+            let socket = this.websockets[url];
+            if (!socket) {
+                let socket = new WebSocket(url);
+                this.websockets[url] = socket;
+                socket.send_stack = [data];
+                socket.addEventListener('close', event => {
+                    this.websockets[url] = null;
+                })
+                socket.addEventListener('error', event => {
+                    this.websockets[url] = null;
+                    this.to_wasm.websocket_error(url, "" + event);
+                    this.do_wasm_io();
+                })
+                socket.addEventListener('message', event => {
+                    event.data.arrayBuffer().then(data => {
+                        this.to_wasm.websocket_message(url, data);
+                        this.do_wasm_io();
+                    })
+                })
+                socket.addEventListener('open', event => {
+                    let send_stack = socket.send_stack;
+                    socket.send_stack = null;
+                    for (data of send_stack) {
+                        socket.send(data);
+                    }
+                })
+            }
+            else {
+                if (socket.send_stack) {
+                    socket.send_stack.push(data);
+                }
+                else {
+                    socket.send(data);
+                }
+            }
         }
         
         can_fullscreen() {
@@ -1276,21 +1391,25 @@
                 span.innerHTML = "Sorry, makepad needs browser support for WebGL to run<br/>Please update your browser to a more modern one<br/>Update to atleast iOS 10, Safari 10, latest Chrome, Edge or Firefox<br/>Go and update and come back, your browser will be better, faster and more secure!<br/>If you are using chrome on OSX on a 2011/2012 mac please enable your GPU at: Override software rendering list:Enable (the top item) in: <a href='about://flags'>about://flags</a>. Or switch to Firefox or Safari."
                 return
             }
-            gl.OES_standard_derivatives = gl.getExtension('OES_standard_derivatives')
-            gl.OES_vertex_array_object = gl.getExtension('OES_vertex_array_object')
-            gl.OES_element_index_uint = gl.getExtension("OES_element_index_uint")
-            gl.ANGLE_instanced_arrays = gl.getExtension('ANGLE_instanced_arrays')
+            this.OES_standard_derivatives = gl.getExtension('OES_standard_derivatives')
+            this.OES_vertex_array_object = gl.getExtension('OES_vertex_array_object')
+            this.OES_element_index_uint = gl.getExtension("OES_element_index_uint")
+            this.ANGLE_instanced_arrays = gl.getExtension('ANGLE_instanced_arrays')
             
             // check uniform count
             var max_vertex_uniforms = gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS);
             var max_fragment_uniforms = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS);
-            if (max_vertex_uniforms < 512 || max_fragment_uniforms < 512) {
-                this.gpu_spec_is_low_on_uniforms = true
+            this.gpu_info = {
+                min_uniforms: Math.min(max_vertex_uniforms, max_fragment_uniforms),
+                vendor: "unknown",
+                renderer: "unknown"
             }
-            else {
-                this.gpu_spec_is_low_on_uniforms = false
-            }
+            let debug_info = gl.getExtension('WEBGL_debug_renderer_info');
             
+            if (debug_info) {
+                this.gpu_info.vendor = gl.getParameter(debug_info.UNMASKED_VENDOR_WEBGL);
+                this.gpu_info.renderer = gl.getParameter(debug_info.UNMASKED_RENDERER_WEBGL);
+            }
             
             //gl.EXT_blend_minmax = gl.getExtension('EXT_blend_minmax')
             //gl.OES_texture_half_float_linear = gl.getExtension('OES_texture_half_float_linear')
@@ -1314,6 +1433,7 @@
                 this.in_animation_frame = true;
                 this.do_wasm_io();
                 this.in_animation_frame = false;
+                
             })
         }
         
@@ -1338,9 +1458,10 @@
             }
         }
         
+        
         xr_start_presenting() {
             if (this.xr_can_present) {
-                navigator.xr.requestSession('immersive-vr').then(xr_session => {
+                navigator.xr.requestSession('immersive-vr', {requiredFeatures: ['local-floor']}).then(xr_session => {
                     
                     let xr_layer = new XRWebGLLayer(xr_session, this.gl, {
                         antialias: false,
@@ -1351,17 +1472,8 @@
                         framebufferScaleFactor: 1.5
                     });
                     
-                    let xr_layer2 = new XRWebGLLayer(xr_session, this.gl, {
-                        antialias: false,
-                        depth: true,
-                        stencil: false,
-                        alpha: false,
-                        ignoreDepthValues: false,
-                        framebufferScaleFactor: 0.3
-                    });
-                    
                     xr_session.updateRenderState({baseLayer: xr_layer});
-                    xr_session.requestReferenceSpace("local").then(xr_reference_space => {
+                    xr_session.requestReferenceSpace("local-floor").then(xr_reference_space => {
                         window.localStorage.setItem("xr_presenting", "true");
                         
                         this.xr_reference_space = xr_reference_space;
@@ -1373,17 +1485,10 @@
                         xr_session.gamepad;
                         
                         // lets start the loop
-                        let last_gamepad = [];
+                        let inputs = [];
                         let alternate = false;
+                        let last_time;
                         let xr_on_request_animation_frame = (time, xr_frame) => {
-                            
-                            //if(alternate){
-                                //xr_session.updateRenderState({baseLayer: xr_layer});
-                           // }
-                            //else{
-                             //   xr_session.updateRenderState({baseLayer: xr_layer2});
-                            //}
-                            alternate = !alternate;
                             
                             if (first_on_resize) {
                                 this.on_screen_resize();
@@ -1398,36 +1503,18 @@
                                 return;
                             }
                             
-                            // lets collect things
-                            //console.log();
-                            let input_len = xr_session.inputSources.length;
-                            // send the input gripSpace and ray stuff.
-                            
-                            let inputs = [];
-                            for (let input of xr_session.inputSources) {
-                                
-                                let grip_pose = xr_frame.getPose(input.gripSpace, this.xr_reference_space);
-                                let ray_pose = xr_frame.getPose(input.targetRaySpace, this.xr_reference_space);
-                                inputs.push({
-                                    grip_transform: grip_pose.transform,
-                                    ray_transform: ray_pose.transform,
-                                    hand: input.handedness == "left"? 1: input.handedness == "right"? 2: 0,
-                                    buttons: input.gamepad.buttons,
-                                    axes: input.gamepad.axes
-                                });
-                            }
-                            this.to_wasm.xr_update(
-                                time / 1000.0,
-                                this.xr_pose.transform,
-                                inputs,
-                            );
-                            //let perf_start = performance.now();
-                            this.do_wasm_io();
+                            this.to_wasm.xr_update_inputs(xr_frame, xr_session, time, this.xr_pose, this.xr_reference_space)
                             this.to_wasm.animation_frame(time / 1000.0);
                             this.in_animation_frame = true;
+                            let start = performance.now();
                             this.do_wasm_io();
                             this.in_animation_frame = false;
-                            //console.log(performance.now() - perf_start);
+                            this.xr_pose = null;
+                            //let new_time = performance.now();
+                            //if (new_time - last_time > 13.) {
+                            //    console.log(new_time - last_time);
+                            // }
+                            //last_time = new_time;
                         }
                         this.xr_session.requestAnimationFrame(xr_on_request_animation_frame);
                         
@@ -1455,6 +1542,9 @@
                 let xr_webgllayer = this.xr_session.renderState.baseLayer;
                 this.gl.bindFramebuffer(gl.FRAMEBUFFER, xr_webgllayer.framebuffer);
                 gl.viewport(0, 0, xr_webgllayer.framebufferWidth, xr_webgllayer.framebufferHeight);
+                
+                // quest 1 is 3648
+                // quest 2 is 4096
                 
                 let left_view = this.xr_pose.views[0];
                 let right_view = this.xr_pose.views[1];
@@ -1527,7 +1617,7 @@
         
         set_depth_target(texture_id, init_only, depth) {
             this.clear_depth = depth;
-            console.log("IMPLEMENT DEPTH TEXTURE TARGETS ON WEBGL")
+            //console.log("IMPLEMENT DEPTH TEXTURE TARGETS ON WEBGL")
         }
         
         end_render_targets() {
@@ -1582,7 +1672,8 @@
                 let uniform = uniforms[i];
                 // lets align the uniform
                 let slots = this.uniform_size_table[uniform.ty];
-                if ((offset & 3) != 0 && (offset & 3) + slots > 4) { // goes over the boundary
+                let aligned_slots = slots == 3? 4: slots;
+                if ((offset & 3) != 0 && (offset & 3) + aligned_slots > 4) { // goes over the boundary
                     offset += 4 - (offset & 3); // make jump to new slot
                 }
                 uniform_locs.push({
@@ -1592,7 +1683,7 @@
                     loc: gl.getUniformLocation(program, uniform.name),
                     fn: this.uniform_fn_table[uniform.ty]
                 });
-                offset += slots
+                offset += aligned_slots
             }
             return uniform_locs;
         }
@@ -1639,7 +1730,8 @@
                 pass_uniforms: this.get_uniform_locations(program, ash.pass_uniforms),
                 view_uniforms: this.get_uniform_locations(program, ash.view_uniforms),
                 draw_uniforms: this.get_uniform_locations(program, ash.draw_uniforms),
-                uniforms: this.get_uniform_locations(program, ash.uniforms),
+                user_uniforms: this.get_uniform_locations(program, ash.user_uniforms),
+                live_uniforms: this.get_uniform_locations(program, ash.live_uniforms),
                 texture_slots: this.get_uniform_locations(program, ash.texture_slots),
                 instance_slots: ash.instance_slots,
                 const_table_uniform: gl.getUniformLocation(program, "mpsc_const_table"),
@@ -1650,20 +1742,31 @@
         
         alloc_array_buffer(array_buffer_id, array) {
             var gl = this.gl;
-            let gl_buf = this.array_buffers[array_buffer_id] || gl.createBuffer()
-            gl_buf.length = array.length;
-            gl.bindBuffer(gl.ARRAY_BUFFER, gl_buf);
+            let buf = this.array_buffers[array_buffer_id];
+            if (buf === undefined) {
+                buf = this.array_buffers[array_buffer_id] = {
+                    gl_buf: gl.createBuffer(),
+                };
+            }
+            buf.length = array.length;
+            gl.bindBuffer(gl.ARRAY_BUFFER, buf.gl_buf);
             gl.bufferData(gl.ARRAY_BUFFER, array, gl.STATIC_DRAW);
-            this.array_buffers[array_buffer_id] = gl_buf;
+            gl.bindBuffer(gl.ARRAY_BUFFER, null);
         }
         
         alloc_index_buffer(index_buffer_id, array) {
             var gl = this.gl;
-            let gl_buf = this.index_buffers[index_buffer_id] || gl.createBuffer();
-            gl_buf.length = array.length;
-            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl_buf);
+            
+            let buf = this.index_buffers[index_buffer_id];
+            if (buf === undefined) {
+                buf = this.index_buffers[index_buffer_id] = {
+                    gl_buf: gl.createBuffer()
+                };
+            };
+            buf.length = array.length;
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buf.gl_buf);
             gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, array, gl.STATIC_DRAW);
-            this.index_buffers[index_buffer_id] = gl_buf;
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
         }
         
         alloc_texture(texture_id, width, height, data_ptr) {
@@ -1682,25 +1785,24 @@
             this.textures[texture_id] = gl_tex;
         }
         
-        alloc_vao(shader_id, vao_id, geom_ib_id, geom_vb_id, inst_vb_id) {
+        alloc_vao(vao_id, shader_id, geom_ib_id, geom_vb_id, inst_vb_id) {
             let gl = this.gl;
-            
-            let shader = this.shaders[shader_id];
-            
             let old_vao = this.vaos[vao_id];
             if (old_vao) {
-                gl.OES_vertex_array_object.deleteVertexArrayOES(old_vao);
+                this.OES_vertex_array_object.deleteVertexArrayOES(old_vao.gl);
             }
-            let vao = gl.OES_vertex_array_object.createVertexArrayOES();
-            this.vaos[vao_id] = vao;
+            let gl_vao = this.OES_vertex_array_object.createVertexArrayOES();
+            let vao = this.vaos[vao_id] = {
+                gl_vao: gl_vao,
+                geom_ib_id,
+                geom_vb_id,
+                inst_vb_id
+            };
             
-            vao.geom_ib_id = geom_ib_id;
-            vao.geom_vb_id = geom_vb_id;
-            vao.inst_vb_id = inst_vb_id;
+            this.OES_vertex_array_object.bindVertexArrayOES(vao.gl_vao)
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[geom_vb_id].gl_buf);
             
-            gl.OES_vertex_array_object.bindVertexArrayOES(vao)
-            
-            gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[geom_vb_id]);
+            let shader = this.shaders[shader_id];
             
             for (let i = 0; i < shader.geom_attribs.length; i ++) {
                 let attr = shader.geom_attribs[i];
@@ -1709,10 +1811,10 @@
                 }
                 gl.vertexAttribPointer(attr.loc, attr.size, gl.FLOAT, false, attr.stride, attr.offset);
                 gl.enableVertexAttribArray(attr.loc);
-                gl.ANGLE_instanced_arrays.vertexAttribDivisorANGLE(attr.loc, 0);
+                this.ANGLE_instanced_arrays.vertexAttribDivisorANGLE(attr.loc, 0);
             }
             
-            gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[inst_vb_id]);
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[inst_vb_id].gl_buf);
             for (let i = 0; i < shader.inst_attribs.length; i ++) {
                 let attr = shader.inst_attribs[i];
                 if (attr.loc < 0) {
@@ -1720,12 +1822,11 @@
                 }
                 gl.vertexAttribPointer(attr.loc, attr.size, gl.FLOAT, false, attr.stride, attr.offset);
                 gl.enableVertexAttribArray(attr.loc);
-                gl.ANGLE_instanced_arrays.vertexAttribDivisorANGLE(attr.loc, 1);
+                this.ANGLE_instanced_arrays.vertexAttribDivisorANGLE(attr.loc, 1);
             }
             
-            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.index_buffers[geom_ib_id]);
-            //gl.OES_vertex_array_object.bindVertexArrayOES(0);
-            
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.index_buffers[geom_ib_id].gl_buf);
+            this.OES_vertex_array_object.bindVertexArrayOES(null);
         }
         
         draw_call(
@@ -1734,7 +1835,8 @@
             pass_uniforms_ptr,
             view_uniforms_ptr,
             draw_uniforms_ptr,
-            uniforms_ptr,
+            user_uniforms_ptr,
+            live_uniforms_ptr,
             textures_ptr,
             const_table_ptr,
             const_table_len
@@ -1745,7 +1847,8 @@
             gl.useProgram(shader.program);
             
             let vao = this.vaos[vao_id];
-            gl.OES_vertex_array_object.bindVertexArrayOES(vao);
+            
+            this.OES_vertex_array_object.bindVertexArrayOES(vao.gl_vao);
             
             let index_buffer = this.index_buffers[vao.geom_ib_id];
             let instance_buffer = this.array_buffers[vao.inst_vb_id];
@@ -1764,10 +1867,15 @@
                 let uni = draw_uniforms[i];
                 uni.fn(this, uni.loc, uni.offset + draw_uniforms_ptr);
             }
-            let uniforms = shader.uniforms;
-            for (let i = 0; i < uniforms.length; i ++) {
-                let uni = uniforms[i];
-                uni.fn(this, uni.loc, uni.offset + uniforms_ptr);
+            let user_uniforms = shader.user_uniforms;
+            for (let i = 0; i < user_uniforms.length; i ++) {
+                let uni = user_uniforms[i];
+                uni.fn(this, uni.loc, uni.offset + user_uniforms_ptr);
+            }
+            let live_uniforms = shader.live_uniforms;
+            for (let i = 0; i < live_uniforms.length; i ++) {
+                let uni = live_uniforms[i];
+                uni.fn(this, uni.loc, uni.offset + live_uniforms_ptr);
             }
             if (const_table_ptr !== 0) {
                 gl.uniform1fv(shader.const_table_uniform, new Float32Array(this.memory.buffer, const_table_ptr, const_table_len));
@@ -1785,7 +1893,6 @@
             let instances = instance_buffer.length / shader.instance_slots;
             // lets do a drawcall!
             
-            
             if (this.is_main_canvas && this.xr_is_presenting) {
                 for (let i = 3; i < pass_uniforms.length; i ++) {
                     let uni = pass_uniforms[i];
@@ -1798,27 +1905,26 @@
                 gl.uniformMatrix4fv(pass_uniforms[0].loc, false, this.xr_left_projection_matrix);
                 gl.uniformMatrix4fv(pass_uniforms[1].loc, false, this.xr_left_transform_matrix);
                 gl.uniformMatrix4fv(pass_uniforms[2].loc, false, this.xr_left_invtransform_matrix);
-
-                gl.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+                
+                this.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
                 let right_viewport = this.xr_right_viewport;
                 gl.viewport(right_viewport.x, right_viewport.y, right_viewport.width, right_viewport.height);
-
+                
                 gl.uniformMatrix4fv(pass_uniforms[0].loc, false, this.xr_right_projection_matrix);
                 gl.uniformMatrix4fv(pass_uniforms[1].loc, false, this.xr_right_transform_matrix);
                 gl.uniformMatrix4fv(pass_uniforms[2].loc, false, this.xr_right_invtransform_matrix);
-
-                gl.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+                
+                this.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
             }
             else {
                 for (let i = 0; i < pass_uniforms.length; i ++) {
                     let uni = pass_uniforms[i];
                     uni.fn(this, uni.loc, uni.offset + pass_uniforms_ptr);
                 }
-                gl.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+                this.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
             }
+            this.OES_vertex_array_object.bindVertexArrayOES(null);
         }
-        
-        
     }
     
     // array of function id's wasm can call on us, self is pointer to WasmApp
@@ -1839,7 +1945,8 @@
                 pass_uniforms: self.parse_shvarvec(),
                 view_uniforms: self.parse_shvarvec(),
                 draw_uniforms: self.parse_shvarvec(),
-                uniforms: self.parse_shvarvec(),
+                user_uniforms: self.parse_shvarvec(),
+                live_uniforms: self.parse_shvarvec(),
                 texture_slots: self.parse_shvarvec()
             }
             self.compile_webgl_shader(ash);
@@ -1859,30 +1966,32 @@
             self.alloc_index_buffer(index_buffer_id, array);
         },
         function alloc_vao_5(self) {
-            let shader_id = self.mu32[self.parse ++];
             let vao_id = self.mu32[self.parse ++];
+            let shader_id = self.mu32[self.parse ++];
             let geom_ib_id = self.mu32[self.parse ++];
             let geom_vb_id = self.mu32[self.parse ++];
             let inst_vb_id = self.mu32[self.parse ++];
-            self.alloc_vao(shader_id, vao_id, geom_ib_id, geom_vb_id, inst_vb_id)
+            self.alloc_vao(vao_id, shader_id, geom_ib_id, geom_vb_id, inst_vb_id)
         },
         function draw_call_6(self) {
             let shader_id = self.mu32[self.parse ++];
             let vao_id = self.mu32[self.parse ++];
-            let uniforms_cx_ptr = self.mu32[self.parse ++];
-            let uniforms_dl_ptr = self.mu32[self.parse ++];
-            let uniforms_dr_ptr = self.mu32[self.parse ++];
-            let uniforms_ptr = self.mu32[self.parse ++];
+            let uniforms_pass_ptr = self.mu32[self.parse ++];
+            let uniforms_view_ptr = self.mu32[self.parse ++];
+            let uniforms_draw_ptr = self.mu32[self.parse ++];
+            let uniforms_user_ptr = self.mu32[self.parse ++];
+            let uniforms_live_ptr = self.mu32[self.parse ++];
             let textures = self.mu32[self.parse ++];
             let const_table_ptr = self.mu32[self.parse ++];
             let const_table_len = self.mu32[self.parse ++];
             self.draw_call(
                 shader_id,
                 vao_id,
-                uniforms_cx_ptr,
-                uniforms_dl_ptr,
-                uniforms_dr_ptr,
-                uniforms_ptr,
+                uniforms_pass_ptr,
+                uniforms_view_ptr,
+                uniforms_draw_ptr,
+                uniforms_user_ptr,
+                uniforms_live_ptr,
                 textures,
                 const_table_ptr,
                 const_table_len
@@ -1999,7 +2108,12 @@
         },
         function normalscreen_29(self) {
             self.normalscreen();
-        }, 
+        },
+        function websocket_send(self) {
+            let url = self.parse_string();
+            let data = self.parse_u8slice();
+            self.websocket_send(url, data);
+        }
     ]
     
     WasmApp.prototype.uniform_fn_table = {
@@ -2194,47 +2308,6 @@
         return out;
     }
     
-    var wasm_instances = [];
-    
-    function init() {
-        for (let i = 0; i < canvasses.length; i ++) {
-            // we found a canvas. instance the referenced wasm file
-            var canvas = canvasses[i]
-            let wasmfile = canvas.getAttribute("wasm");
-            if (!wasmfile) continue
-            function fetch_wasm(wasmfile) {
-                let webasm = null;
-                function _log_str(chars_ptr, len) {
-                    let out = "";
-                    let array = new Uint32Array(webasm.instance.exports.memory.buffer, chars_ptr, len);
-                    for(let i = 0; i < len; i++){
-                        out += String.fromCharCode(array[i]);
-                    }
-                    console.log(out);
-                }
-                
-                fetch(wasmfile)
-                    .then(response => response.arrayBuffer())
-                    .then(bytes => WebAssembly.instantiate(bytes, {env: {
-                    _log_str
-                }}))
-                    .then(results => {
-                    webasm = results
-                    wasm_instances.push(
-                        new WasmApp(canvas, results)
-                    );
-                }, errors => {
-                    console.log("Error compiling wasm file", errors);
-                });
-            }
-            fetch_wasm(wasmfile);
-            // load this wasm file
-        }
-    }
-    
-    var canvasses = document.getElementsByClassName('cx_webgl')
-    document.addEventListener('DOMContentLoaded', init)
-    
     function fetch_path(file_path) {
         return new Promise(function(resolve, reject) {
             var req = new XMLHttpRequest()
@@ -2255,6 +2328,43 @@
             req.send()
         })
     }
+    
+    function init() {
+        var canvasses = document.getElementsByClassName('cx_webgl')
+        for (let i = 0; i < canvasses.length; i ++) {
+            // we found a canvas. instance the referenced wasm file
+            var canvas = canvasses[i]
+            let wasmfile = canvas.getAttribute("wasm");
+            if (!wasmfile) continue
+            function fetch_wasm(wasmfile) {
+                let webasm = null;
+                function _console_log(chars_ptr, len) {
+                    let out = "";
+                    let array = new Uint32Array(webasm.instance.exports.memory.buffer, chars_ptr, len);
+                    for (let i = 0; i < len; i ++) {
+                        out += String.fromCharCode(array[i]);
+                    }
+                    console.log(out);
+                }
+                
+                fetch(wasmfile)
+                    .then(response => response.arrayBuffer())
+                    .then(bytes => WebAssembly.instantiate(bytes, {env: {
+                    _console_log
+                }}))
+                    .then(results => {
+                    webasm = results;
+                    new WasmApp(canvas, results);
+                }, errors => {
+                    console.log("Error compiling wasm file", errors);
+                });
+            }
+            fetch_wasm(wasmfile);
+            // load this wasm file
+        }
+    }
+    
+    document.addEventListener('DOMContentLoaded', init)
     
     function watchFileChange() {
         var req = new XMLHttpRequest()

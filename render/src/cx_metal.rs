@@ -5,7 +5,11 @@
 //use core_graphics::color::CGColor;
 use makepad_objc_sys::{msg_send};
 use makepad_objc_sys::runtime::YES;
-use makepad_shader_compiler::generate_metal;
+
+use makepad_live_compiler::generate_metal;
+use makepad_live_compiler::analyse::ShaderCompileOptions;
+use makepad_live_compiler::shaderast::ShaderAst;
+
 //use metal::*;
 use crate::cx_apple::*;
 use crate::cx_cocoa::*;
@@ -78,7 +82,15 @@ impl Cx {
                 let pipeline_state = shp.pipeline_state;
                 unsafe {let () = msg_send![encoder, setRenderPipelineState: pipeline_state];}
                 
-                if let Some(buf) = shp.geom_vbuf.multi_buffer_read().buffer {
+                let geometry = &mut self.geometries[draw_call.geometry_id];
+                
+                if geometry.dirty {
+                    geometry.platform.geom_ibuf.update_with_u32_data(metal_cx, &geometry.indices);
+                    geometry.platform.geom_vbuf.update_with_f32_data(metal_cx, &geometry.vertices);
+                    geometry.dirty = false;
+                }
+                
+                if let Some(buf) = geometry.platform.geom_vbuf.multi_buffer_read().buffer {
                     unsafe {msg_send![
                         encoder,
                         setVertexBuffer: buf
@@ -106,14 +118,18 @@ impl Cx {
                     let () = msg_send![encoder, setVertexBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: 2u64];
                     let () = msg_send![encoder, setVertexBytes: view_uniforms.as_ptr() as *const std::ffi::c_void length: (view_uniforms.len() * 4) as u64 atIndex: 3u64];
                     let () = msg_send![encoder, setVertexBytes: draw_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_uniforms.len() * 4) as u64 atIndex: 4u64];
-                    let () = msg_send![encoder, setVertexBytes: draw_call.uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.uniforms.len() * 4) as u64 atIndex: 5u64];
+                    let () = msg_send![encoder, setVertexBytes: draw_call.user_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.user_uniforms.len() * 4) as u64 atIndex: 5u64];
+                    let () = msg_send![encoder, setVertexBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 6u64];
+                    
                     let () = msg_send![encoder, setFragmentBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: 0u64];
                     let () = msg_send![encoder, setFragmentBytes: view_uniforms.as_ptr() as *const std::ffi::c_void length: (view_uniforms.len() * 4) as u64 atIndex: 1u64];
                     let () = msg_send![encoder, setFragmentBytes: draw_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_uniforms.len() * 4) as u64 atIndex: 2u64];
-                    let () = msg_send![encoder, setFragmentBytes: draw_call.uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.uniforms.len() * 4) as u64 atIndex: 3u64];
-                    if let Some(ct) = &sh.mapping.const_table{
-                        let () = msg_send![encoder, setVertexBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 6u64];
-                        let () = msg_send![encoder, setFragmentBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 4u64];
+                    let () = msg_send![encoder, setFragmentBytes: draw_call.user_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.user_uniforms.len() * 4) as u64 atIndex: 3u64];
+                    let () = msg_send![encoder, setFragmentBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 4u64];
+                    
+                    if let Some(ct) = &sh.mapping.const_table {
+                        let () = msg_send![encoder, setVertexBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 7u64];
+                        let () = msg_send![encoder, setFragmentBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 5u64];
                     }
                 }
                 //encoder.set_vertex_bytes(2, (pass_uniforms.len() * 4) as u64, pass_uniforms.as_ptr() as *const std::ffi::c_void);
@@ -144,12 +160,12 @@ impl Cx {
                     }
                 }
                 self.platform.draw_calls_done += 1;
-                if let Some(buf) = shp.geom_ibuf.multi_buffer_read().buffer {
+                if let Some(buf) = geometry.platform.geom_ibuf.multi_buffer_read().buffer {
                     
                     let () = unsafe {msg_send![
                         encoder,
                         drawIndexedPrimitives: MTLPrimitiveType::Triangle
-                        indexCount: sh.shader_gen.geometry.indices.len() as u64
+                        indexCount: geometry.indices.len() as u64
                         indexType: MTLIndexType::UInt32
                         indexBuffer: buf
                         indexBufferOffset: 0
@@ -163,9 +179,8 @@ impl Cx {
     
     pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: id, pass_id: usize, inherit_dpi_factor: f32, first_texture: Option<id>, metal_cx: &MetalCx) {
         let pass_size = self.passes[pass_id].pass_size;
-        
-        self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
-        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
+
+        self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
         self.passes[pass_id].paint_dirty = false;
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor
@@ -632,11 +647,6 @@ pub struct MetalBuffer {
     pub multi3: MultiMetalBuffer,
     pub multi4: MultiMetalBuffer,
     pub multi5: MultiMetalBuffer,
-    pub multi6: MultiMetalBuffer,
-    pub multi7: MultiMetalBuffer,
-    pub multi8: MultiMetalBuffer,
-    pub multi9: MultiMetalBuffer,
-    pub multi10: MultiMetalBuffer,
 }
 
 impl MetalBuffer {
@@ -723,15 +733,17 @@ impl MetalBuffer {
     }
 }
 
-
+#[derive(Clone, Default)]
+pub struct CxPlatformGeometry {
+    pub geom_vbuf: MetalBuffer,
+    pub geom_ibuf: MetalBuffer,
+}
 
 #[derive(Clone)]
 pub struct CxPlatformShader {
     pub library: id,
     pub metal_shader: String,
     pub pipeline_state: id,
-    pub geom_vbuf: MetalBuffer,
-    pub geom_ibuf: MetalBuffer,
 }
 
 impl PartialEq for CxPlatformShader {
@@ -750,53 +762,105 @@ pub struct SlErr {
 impl Cx {
     
     pub fn mtl_compile_all_shaders(&mut self, metal_cx: &MetalCx) {
-        for (index, sh) in &mut self.shaders.iter_mut().enumerate() {
-            let result = Self::mtl_compile_shader(index, false, sh, metal_cx, &mut self.shader_inherit_cache);
-            if let ShaderCompileResult::Fail{err, ..} = result {
-                eprintln!("{}", err);
-                panic!("{}", err);
-            } 
-        };
-    } 
-    
-    pub fn mtl_compile_shader(shader_id:usize, use_const_table:bool, sh: &mut CxShader, metal_cx: &MetalCx, inherit_cache: &mut ShaderInheritCache) -> ShaderCompileResult {
         
-        //let now = std::time::Instant::now();
-
-        let shader_ast = sh.shader_gen.lex_parse_analyse(true, use_const_table, inherit_cache);
-
-        let shader_ast = match shader_ast{
-            ShaderGenResult::Error(err)=>{
-                return ShaderCompileResult::Fail{id:shader_id, err:err}
-            },
-            ShaderGenResult::PatchedConstTable(const_table)=>{
-                sh.mapping.const_table = Some(const_table);
-                return ShaderCompileResult::Nop{id:shader_id}
-            },
-            ShaderGenResult::ShaderAst(shader_ast)=>{ 
-                shader_ast
+        let options = ShaderCompileOptions {
+            gather_all: false,
+            create_const_table: false,
+            no_const_collapse: false
+        };
+        
+        for (live_id, shader) in &self.live_styles.shader_alloc {
+            match self.live_styles.collect_and_analyse_shader(*live_id, options) {
+                Err(err) => {
+                    eprintln!("{}", err);
+                    panic!()
+                },
+                Ok((shader_ast, default_geometry)) => {
+                    let shader_id = shader.shader_id;
+                    Self::mtl_compile_shader(
+                        shader_id,
+                        &mut self.shaders[shader_id],
+                        shader_ast,
+                        default_geometry,
+                        options,
+                        metal_cx,
+                        &self.live_styles
+                    );
+                }
             }
         };
-
-        let mtlsl =  generate_metal::generate_shader(&shader_ast, use_const_table);
-        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, if use_const_table{shader_ast.const_table.borrow_mut().take()} else {None});
+        self.live_styles.changed_shaders.clear();
+    }
     
+    pub fn mtl_update_all_shaders(&mut self, metal_cx: &MetalCx, errors:&mut Vec<LiveBodyError>)  {
+      
+        // recompile shaders, and update values
         
-        if shader_ast.debug{
+        let options = ShaderCompileOptions {
+            gather_all: true,
+            create_const_table: true,
+            no_const_collapse: false
+        };
+        
+        for (live_id, change) in &self.live_styles.changed_shaders {
+            match change {
+                LiveChangeType::Recompile => {
+                    match self.live_styles.collect_and_analyse_shader(*live_id, options) {
+                        Err(err) => {
+                            errors.push(err);
+                        },
+                        Ok((shader_ast, default_geometry)) => {
+                            let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                            Self::mtl_compile_shader(
+                                shader_id,
+                                &mut self.shaders[shader_id],
+                                shader_ast,
+                                default_geometry,
+                                options,
+                                metal_cx,
+                                &self.live_styles
+                            );
+                        }
+                    }
+                }
+                LiveChangeType::UpdateValue => {
+                    let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                    self.shaders[shader_id].mapping.update_live_uniforms(&self.live_styles);
+                }
+            }
+        }
+        self.live_styles.changed_shaders.clear();
+    }
+    
+    pub fn mtl_compile_shader(
+        shader_id: usize,
+        sh: &mut CxShader,
+        shader_ast: ShaderAst,
+        default_geometry: Option<Geometry>,
+        options: ShaderCompileOptions,
+        metal_cx: &MetalCx,
+        live_styles: &LiveStyles
+    ) -> ShaderCompileResult {
+        
+        let mtlsl = generate_metal::generate_shader(&shader_ast, live_styles, options);
+        let debug = shader_ast.debug;
+        let mut mapping = CxShaderMapping::from_shader_ast(shader_ast, options);
+        mapping.update_live_uniforms(live_styles);
+        if debug {
             println!("--------------- Shader {} --------------- \n{}\n---------------\n", shader_id, mtlsl);
         }
         
-        if let Some(sh_platform) = &sh.platform{
-            if sh_platform.metal_shader == mtlsl{
+        if let Some(sh_platform) = &sh.platform {
+            if sh_platform.metal_shader == mtlsl {
                 sh.mapping = mapping;
-                return ShaderCompileResult::Nop{id:shader_id}
+                return ShaderCompileResult::Nop
             }
-        } 
+        }
         
-        let options: id = unsafe {msg_send![class!(MTLCompileOptions), new]};
+        let mtl_compile_options: id = unsafe {msg_send![class!(MTLCompileOptions), new]};
         
-        let _:id = unsafe{msg_send![
-            options, 
+        let _: id = unsafe {msg_send![
+            mtl_compile_options,
             setFastMathEnabled: true
         ]};
         
@@ -805,22 +869,22 @@ impl Cx {
         let library: id = unsafe {msg_send![
             metal_cx.device,
             newLibraryWithSource: ns_mtlsl
-            options: options
-            error: &mut err 
+            options: mtl_compile_options
+            error: &mut err
         ]};
-        
         if library == nil {
             let err_str: id = unsafe {msg_send![err, localizedDescription]};
+            eprintln!("{}", nsstring_to_string(err_str));
             panic!("{}", nsstring_to_string(err_str));
             //return Err(SlErr {msg: nsstring_to_string(err_str)})
         }
         
         //let err_str: id = unsafe {msg_send![err, localizedDescription]};
         //println!("{}", nsstring_to_string(err_str));
-        
+        sh.default_geometry = default_geometry;
         sh.mapping = mapping;
         sh.platform = Some(CxPlatformShader {
-            metal_shader: mtlsl, 
+            metal_shader: mtlsl,
             pipeline_state: unsafe {
                 let vert: id = msg_send![library, newFunctionWithName: str_to_nsstring("mpsc_vertex_main")];
                 let frag: id = msg_send![library, newFunctionWithName: str_to_nsstring("mpsc_fragment_main")];
@@ -854,17 +918,7 @@ impl Cx {
                 rps //.expect("Could not create render pipeline state")
             },
             library: library,
-            geom_ibuf: {
-                let mut geom_ibuf = MetalBuffer {..Default::default()};
-                geom_ibuf.update_with_u32_data(metal_cx, &sh.shader_gen.geometry.indices);
-                geom_ibuf
-            },
-            geom_vbuf: {
-                let mut geom_vbuf = MetalBuffer {..Default::default()};
-                geom_vbuf.update_with_f32_data(metal_cx, &sh.shader_gen.geometry.vertices);
-                geom_vbuf
-            }
         });
-        return ShaderCompileResult::Ok{id:shader_id};
+        return ShaderCompileResult::Ok
     }
 }

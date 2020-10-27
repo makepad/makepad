@@ -5,6 +5,13 @@ use std::io;
 use std::net::TcpStream;
 //use time::precise_time_ns;
 
+#[macro_export]
+macro_rules!log {
+    ( $ ( $t: tt) *) => {
+        println!("{}:{} - {}",file!(),line!(),format!($($t)*))
+    }
+}
+
 #[derive(Clone)]
 pub struct CxDesktop {
     pub repaint_via_scroll_event: bool,
@@ -133,7 +140,7 @@ impl Cx {
             }
         }
         
-        self.call_signals(&mut event_handler);
+        self.call_signals_and_triggers(&mut event_handler);
         
         // call redraw event
         if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
@@ -145,7 +152,7 @@ impl Cx {
         
         self.process_desktop_file_reads(&mut event_handler);
         
-        self.call_signals(&mut event_handler);
+        self.call_signals_and_triggers(&mut event_handler);
         
         vsync
     }
@@ -198,31 +205,26 @@ impl Cx {
         0
     }
     
-    pub fn load_theme_fonts(&mut self) {
+    pub fn load_all_fonts(&mut self) {
+        
+        self.fonts.resize(self.live_styles.font_index.len(), CxFont::default());
         // lets load all fonts that aren't loaded yet
-        for cxfont in &mut self.fonts {
-            let path = cxfont.path.clone();
-            if cxfont.font_loaded.is_none() {
-                // load it
-                let file_result = File::open(&path);
-                if let Ok(mut file) = file_result {
-                    let mut buffer = Vec::<u8>::new();
-                    // read the whole file
-                    if file.read_to_end(&mut buffer).is_ok() {
-                        let mut font = CxFont::default();
-                        if font.load_from_ttf_bytes(&buffer).is_err() {
-                            println!("Error loading font {} ", path);
-                        }
-                        else {
-                            font.path = path.clone();
-                            *cxfont = font;
-                        }
+        for (file, font) in &self.live_styles.font_index {
+            let file = file.to_string();
+            let cxfont = &mut self.fonts[font.font_id];
+            if let Ok(mut file_handle) = File::open(&file) {
+                let mut buffer = Vec::<u8>::new();
+                if file_handle.read_to_end(&mut buffer).is_ok() {
+                    if cxfont.load_from_ttf_bytes(&buffer).is_err() {
+                        println!("Error loading font {} ", file);
+                    }
+                    else {
+                        cxfont.file = file;
                     }
                 }
-                else {
-                    println!("Error loading font {} ", path);
-                }
-                
+            }
+            else {
+                println!("Error loading font {} ", file);
             }
         }
     }
@@ -238,7 +240,11 @@ impl Cx {
         let _ = io::stdout().flush();
     }
     
-    pub fn http_send(&self, verb: &str, path: &str, _proto:&str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
+    pub fn websocket_send(&self, _url: &str, _data: &[u8]) {
+        // nop
+    }
+    
+    pub fn http_send(&self, verb: &str, path: &str, _proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         
         fn write_bytes_to_tcp_stream(tcp_stream: &mut TcpStream, bytes: &[u8]) -> bool {
             let bytes_total = bytes.len();

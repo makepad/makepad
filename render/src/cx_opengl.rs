@@ -6,7 +6,9 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_ulong, c_void};
 use std::ptr;
 use std::mem;
-use makepad_shader_compiler::generate_glsl;
+use makepad_live_compiler::generate_glsl;
+use makepad_live_compiler::analyse::ShaderCompileOptions;
+use makepad_live_compiler::shaderast::ShaderAst;
 
 impl Cx {
     
@@ -56,10 +58,11 @@ impl Cx {
                 
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
-                    draw_call.platform.inst_vbuf.update_with_f32_data(opengl_cx, &draw_call.instance);
+                    draw_call.platform.inst_vb.update_with_f32_data(opengl_cx, &draw_call.instance);
                 }
                 
-                draw_call.platform.check_vao(draw_call.shader_id, &shp);
+                let geometry = &mut self.geometries[draw_call.geometry_id];
+                let indices = geometry.indices.len();
                 
                 draw_call.set_zbias(*zbias);
                 draw_call.set_local_scroll(scroll, local_scroll);
@@ -70,11 +73,67 @@ impl Cx {
                     draw_call.uniforms_dirty = false;
                 }
                 
+                // update geometry?
+                let geometry = &mut self.geometries[draw_call.geometry_id];
+                if geometry.dirty || geometry.platform.vb.gl_buffer.is_none() || geometry.platform.ib.gl_buffer.is_none() {
+                    geometry.platform.vb.update_with_f32_data(opengl_cx, &geometry.vertices);
+                    geometry.platform.ib.update_with_u32_data(opengl_cx, &geometry.indices);
+                    geometry.dirty = false;
+                }
+                
+                // lets check if our vao is still valid
+                if draw_call.platform.vao.is_none() {
+                    draw_call.platform.vao = Some(CxPlatformDrawCallVao {
+                        vao: unsafe {
+                            let mut vao = std::mem::MaybeUninit::uninit();
+                            gl::GenVertexArrays(1, vao.as_mut_ptr());
+                            vao.assume_init()
+                        },
+                        shader_id: None,
+                        inst_vb: None,
+                        geom_vb: None,
+                        geom_ib: None,
+                    });
+                }
+                
+                let vao = draw_call.platform.vao.as_mut().unwrap();
+                if vao.inst_vb != draw_call.platform.inst_vb.gl_buffer
+                    || vao.geom_vb != geometry.platform.vb.gl_buffer
+                    || vao.geom_ib != geometry.platform.ib.gl_buffer
+                    || vao.shader_id != Some(draw_call.shader_id) {
+                    vao.shader_id = Some(draw_call.shader_id);
+                    vao.inst_vb = draw_call.platform.inst_vb.gl_buffer;
+                    vao.geom_vb = geometry.platform.vb.gl_buffer;
+                    vao.geom_ib = geometry.platform.ib.gl_buffer;
+                    
+                    unsafe {
+                        gl::BindVertexArray(vao.vao);
+                        
+                        // bind the vertex and indexbuffers
+                        gl::BindBuffer(gl::ARRAY_BUFFER, vao.geom_vb.unwrap());
+                        for attr in &shp.geometries {
+                            gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
+                            gl::EnableVertexAttribArray(attr.loc);
+                        }
+                        
+                        gl::BindBuffer(gl::ARRAY_BUFFER, vao.inst_vb.unwrap());
+                        
+                        for attr in &shp.instances {
+                            gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
+                            gl::EnableVertexAttribArray(attr.loc);
+                            gl::VertexAttribDivisor(attr.loc, 1 as gl::types::GLuint);
+                        }
+                        
+                        // bind the indexbuffer
+                        gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, vao.geom_ib.unwrap());
+                        gl::BindVertexArray(0);
+                    }
+                }
+                
                 unsafe {
                     gl::UseProgram(shp.program);
-                    gl::BindVertexArray(draw_call.platform.vao.unwrap());
+                    gl::BindVertexArray(draw_call.platform.vao.as_ref().unwrap().vao);
                     let instances = draw_call.instance.len() / sh.mapping.instance_props.total_slots;
-                    let indices = sh.shader_gen.geometry.indices.len();
                     
                     let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
                     let view_uniforms = cxview.view_uniforms.as_slice();
@@ -83,14 +142,18 @@ impl Cx {
                     opengl_cx.set_uniform_buffer(&shp.pass_uniforms, pass_uniforms);
                     opengl_cx.set_uniform_buffer(&shp.view_uniforms, view_uniforms);
                     opengl_cx.set_uniform_buffer(&shp.draw_uniforms, draw_uniforms);
-                    opengl_cx.set_uniform_buffer(&shp.uniforms, &draw_call.uniforms);
-                    if let Some(ct) = &sh.mapping.const_table{
+                    opengl_cx.set_uniform_buffer(&shp.user_uniforms, &draw_call.user_uniforms);
+                    opengl_cx.set_uniform_buffer(&shp.live_uniforms, &sh.mapping.live_uniforms_buf);
+                    
+                    if let Some(ct) = &sh.mapping.const_table {
                         opengl_cx.set_uniform_array(&shp.const_table_uniform, ct);
                     }
+                    
                     // lets set our textures
                     for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
                         let cxtexture = &mut self.textures[*texture_id as usize];
                         if cxtexture.update_image {
+                            cxtexture.update_image = false;
                             opengl_cx.update_platform_texture_image2d(cxtexture);
                         }
                         // get the loc
@@ -110,9 +173,11 @@ impl Cx {
                         ptr::null(),
                         instances as i32
                     );
+                    
+                    gl::BindVertexArray(0);
                 }
             }
-        } 
+        }
     }
     
     pub fn calc_dirty_bounds(&mut self, pass_id: usize, view_id: usize, view_bounds: &mut ViewBounds) {
@@ -158,8 +223,8 @@ impl Cx {
         let mut view_bounds = ViewBounds::new();
         let mut init_repaint = false;
         self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
-
-        let full_repaint =  true;/*force_full_repaint || view_bounds.max_x - view_bounds.min_x > opengl_window.window_geom.inner_size.x - 100.
+        
+        let full_repaint = true;/*force_full_repaint || view_bounds.max_x - view_bounds.min_x > opengl_window.window_geom.inner_size.x - 100.
          && view_bounds.max_y - view_bounds.min_y > opengl_window.window_geom.inner_size.y - 100. ||
          opengl_window.opening_repaint_count < 10;*/
         if opengl_window.opening_repaint_count < 10 { // for some reason the first repaint doesn't arrive on the window
@@ -168,70 +233,24 @@ impl Cx {
         }
         let window;
         let view_rect;
-        if full_repaint {
-            opengl_window.xlib_window.hide_child_windows();
-            
-            window = opengl_window.xlib_window.window.unwrap();
-            
-            let pass_size = self.passes[pass_id].pass_size;
-            self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
-            
-            let pix_width = opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor;
-            let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
-            
-            unsafe {
-                glx_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
-                gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
-            }
-            view_rect = Rect::default();
-        }
-        else {
-            if view_bounds.max_x == std::f32::NEG_INFINITY
-                || view_bounds.max_y == std::f32::NEG_INFINITY
-                || view_bounds.min_x == std::f32::INFINITY
-                || view_bounds.min_x == std::f32::INFINITY
-                || view_bounds.min_x == view_bounds.max_x
-                || view_bounds.min_y == view_bounds.max_y {
-                return false
-            }
-            /*
-            unsafe {
-                glx_sys::glXMakeCurrent(xlib_app.display, opengl_window.xlib_window.window.unwrap(), opengl_cx.context);
-                gl::Viewport(
-                    0,
-                    0,
-                    (opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor) as i32,
-                    (opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor) as i32
-                );
-                gl::ClearColor(0.0, 1.0, 0.0, 0.0);
-                gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
-                glx_sys::glXSwapBuffers(xlib_app.display, opengl_window.xlib_window.window.unwrap());
-            }*/
-            
-            let pix_width = (view_bounds.max_x - view_bounds.min_x) * opengl_window.window_geom.dpi_factor;
-            let pix_height = (view_bounds.max_y - view_bounds.min_y) * opengl_window.window_geom.dpi_factor;
-            
-            window = opengl_window.xlib_window.alloc_child_window(
-                (view_bounds.min_x * opengl_window.window_geom.dpi_factor) as i32,
-                (view_bounds.min_y * opengl_window.window_geom.dpi_factor) as i32,
-                pix_width as u32,
-                pix_height as u32
-            ).unwrap();
-            
-            //let pass_size = self.passes[pass_id].pass_size;
-            self.passes[pass_id].set_ortho_matrix(
-                Vec2 {x: view_bounds.min_x, y: view_bounds.min_y},
-                Vec2 {x: pix_width / opengl_window.window_geom.dpi_factor, y: pix_height / opengl_window.window_geom.dpi_factor}
-            );
-            
-            unsafe {
-                glx_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
-                gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
-            }
-            view_rect = Rect {x: view_bounds.min_x, y: view_bounds.min_y, w: view_bounds.max_x - view_bounds.min_x, h: view_bounds.max_y - view_bounds.min_y}
-        }
         
-        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
+        opengl_window.xlib_window.hide_child_windows();
+        
+        window = opengl_window.xlib_window.window.unwrap();
+        
+        let pass_size = self.passes[pass_id].pass_size;
+        self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
+        
+        let pix_width = opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor;
+        let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
+        
+        unsafe {
+            glx_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
+            gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
+        }
+        view_rect = Rect::default();
+        
+        //self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         // set up the
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
@@ -285,8 +304,7 @@ impl Cx {
     ) {
         
         let pass_size = self.passes[pass_id].pass_size;
-        self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
-        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
+        self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
         self.passes[pass_id].paint_dirty = false;
         
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
@@ -315,18 +333,63 @@ impl Cx {
             gl::BindFramebuffer(gl::FRAMEBUFFER, self.passes[pass_id].platform.gl_framebuffer.unwrap());
         }
         
+        
+        // attach/clear depth buffers, if any
+        if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
+            // ok lets do ugly shit here.
+            match self.passes[pass_id].clear_depth {
+                ClearDepth::InitWith(depth_clear) => {
+                    if opengl_cx.update_platform_render_target(&mut self.textures[depth_texture_id], dpi_factor, pass_size, true) {
+                        clear_depth = depth_clear;
+                        clear_flags |= gl::DEPTH_BUFFER_BIT;
+                    }
+                },
+                ClearDepth::ClearWith(depth_clear) => {
+                    opengl_cx.update_platform_render_target(&mut self.textures[depth_texture_id], dpi_factor, pass_size, true);
+                    clear_depth = depth_clear;
+                    clear_flags |= gl::DEPTH_BUFFER_BIT;
+                }
+            }
+            if let Some(gl_renderbuffer) = self.textures[depth_texture_id].platform.gl_renderbuffer {
+                unsafe {
+                    gl::FramebufferRenderbuffer( gl::FRAMEBUFFER, gl::DEPTH_ATTACHMENT, gl::RENDERBUFFER, gl_renderbuffer );
+                }
+            }            
+        }
+        else{
+            unsafe{ // BUGFIX. we have to create a depthbuffer for rtt without depthbuffer use otherwise it fails if there is another pass with depth
+                if self.passes[pass_id].platform.gl_bugfix_depthbuffer.is_none(){
+                    let mut gl_renderbuf = std::mem::MaybeUninit::uninit();
+                    gl::GenRenderbuffers(1, gl_renderbuf.as_mut_ptr());
+                    let gl_renderbuffer = gl_renderbuf.assume_init();
+                    gl::BindRenderbuffer(gl::RENDERBUFFER, gl_renderbuffer);
+                    gl::RenderbufferStorage(
+                        gl::RENDERBUFFER, 
+                        gl::DEPTH_COMPONENT16,
+                        (pass_size.x * dpi_factor) as i32, (pass_size.y * dpi_factor) as i32
+                    );
+                    gl::BindRenderbuffer(gl::RENDERBUFFER, 0);
+                    self.passes[pass_id].platform.gl_bugfix_depthbuffer = Some(gl_renderbuffer);
+                }
+                clear_depth = 1.0;
+                clear_flags |= gl::DEPTH_BUFFER_BIT;
+                gl::Disable(gl::DEPTH_TEST);
+                gl::FramebufferRenderbuffer( gl::FRAMEBUFFER, gl::DEPTH_ATTACHMENT, gl::RENDERBUFFER, self.passes[pass_id].platform.gl_bugfix_depthbuffer.unwrap() );
+            }
+        }
+        
         for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
             match color_texture.clear_color {
                 ClearColor::InitWith(color) => {
                     if opengl_cx.update_platform_render_target(&mut self.textures[color_texture.texture_id], dpi_factor, pass_size, false) {
                         clear_color = color;
-                        clear_flags = gl::COLOR_BUFFER_BIT;
+                        clear_flags |= gl::COLOR_BUFFER_BIT;
                     }
                 },
                 ClearColor::ClearWith(color) => {
                     opengl_cx.update_platform_render_target(&mut self.textures[color_texture.texture_id], dpi_factor, pass_size, false);
                     clear_color = color;
-                    clear_flags = gl::COLOR_BUFFER_BIT;
+                    clear_flags |= gl::COLOR_BUFFER_BIT;
                 }
             }
             if let Some(gl_texture) = self.textures[color_texture.texture_id].platform.gl_texture {
@@ -336,27 +399,6 @@ impl Cx {
             }
         }
         
-        // attach/clear depth buffers, if any
-        if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
-            match self.passes[pass_id].clear_depth {
-                ClearDepth::InitWith(depth_clear) => {
-                    if opengl_cx.update_platform_render_target(&mut self.textures[depth_texture_id], dpi_factor, pass_size, true) {
-                        clear_depth = depth_clear;
-                        clear_flags = gl::DEPTH_BUFFER_BIT;
-                    }
-                },
-                ClearDepth::ClearWith(depth_clear) => {
-                    opengl_cx.update_platform_render_target(&mut self.textures[depth_texture_id], dpi_factor, pass_size, true);
-                    clear_depth = depth_clear;
-                    clear_flags = gl::COLOR_BUFFER_BIT;
-                }
-            }
-            if let Some(gl_texture) = self.textures[depth_texture_id].platform.gl_texture {
-                unsafe {
-                    gl::FramebufferTexture2D(gl::FRAMEBUFFER, gl::DEPTH_STENCIL_ATTACHMENT, gl::TEXTURE_2D, gl_texture, 0);
-                }
-            }
-        }
         unsafe {
             gl::Viewport(0, 0, (pass_size.x * dpi_factor) as i32, (pass_size.y * dpi_factor) as i32);
         }
@@ -385,7 +427,9 @@ impl Cx {
             &mut zbias,
             zbias_step
         );
-        
+        unsafe{
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+        }
     }
     
     //let view_id = self.passes[pass_id].main_view_id.unwrap();
@@ -416,28 +460,16 @@ impl Cx {
         */
     //self.render_view(pass_id, view_id, true, &Rect::zero(), &opengl_cx);
     // commit
-    //} 
+    //}
     
-    pub fn opengl_compile_all_shaders(&mut self, opengl_cx: &OpenglCx) {
+    
+    
+    pub fn opengl_get_info_log(compile: bool, shader: usize, source: &str) -> String {
         unsafe {
-            glx_sys::glXMakeCurrent(opengl_cx.display, opengl_cx.hidden_window, opengl_cx.context);
-        }
-        for (index, sh) in self.shaders.iter_mut().enumerate() {
-            let result = Self::opengl_compile_shader(index, false, sh, opengl_cx, &mut self.shader_inherit_cache);
-            if let ShaderCompileResult::Fail{err, ..} = result {
-                panic!("{}", err);
-            } 
-        }; 
-    }
-    
-    
-    
-    pub fn opengl_get_info_log(compile: bool,shader: usize, source: &str) -> String {
-        unsafe{
             let mut length = 0;
-            if compile { 
+            if compile {
                 gl::GetShaderiv(shader as u32, gl::INFO_LOG_LENGTH, &mut length);
-            } else { 
+            } else {
                 gl::GetProgramiv(shader as u32, gl::INFO_LOG_LENGTH, &mut length);
             }
             let mut log = Vec::with_capacity(length as usize);
@@ -464,7 +496,7 @@ impl Cx {
     pub fn opengl_has_shader_error(compile: bool, shader: usize, source: &str) -> Option<String> {
         //None
         unsafe {
-             
+            
             let mut success = i32::from(gl::FALSE);
             
             if compile {
@@ -486,7 +518,7 @@ impl Cx {
     pub fn ceil_div4(base: usize) -> usize {
         let r = base >> 2;
         if base & 3 != 0 {
-            return r + 1 
+            return r + 1
         }
         r
     }
@@ -526,25 +558,24 @@ impl Cx {
         let mut gl_uni = Vec::new();
         for uni in unis {
             gl_uni.push(
-                Self::opengl_get_uniform(program, &uni.name, uni.prop_id.shader_ty().size())
+                Self::opengl_get_uniform(program, &uni.name, uni.ty.size())
             );
         }
         gl_uni
     }
     
-    pub fn opengl_get_uniform(program: u32, name:&str, size:usize) -> OpenglUniform {
+    pub fn opengl_get_uniform(program: u32, name: &str, size: usize) -> OpenglUniform {
         let mut name0 = String::new();
         name0.push_str(name);
         name0.push_str("\0");
         unsafe {
             OpenglUniform {
-                loc:gl::GetUniformLocation(program, name0.as_ptr() as *const _),
+                loc: gl::GetUniformLocation(program, name0.as_ptr() as *const _),
                 name: name.to_string(),
                 size: size
             }
         }
     }
-    
     
     pub fn opengl_get_texture_slots(program: u32, texture_slots: &Vec<PropDef>) -> Vec<OpenglUniform> {
         let mut gl_texture_slots = Vec::new();
@@ -565,29 +596,95 @@ impl Cx {
         gl_texture_slots
     }
     
-    pub fn opengl_compile_shader(shader_id:usize, use_const_table:bool, sh: &mut CxShader, opengl_cx: &OpenglCx, inherit_cache: &mut ShaderInheritCache) -> ShaderCompileResult {
-        
-        // lets compile.
-        let shader_ast = sh.shader_gen.lex_parse_analyse(true, use_const_table, inherit_cache);
-
-        let shader_ast = match shader_ast{
-            ShaderGenResult::Error(err)=>{
-                return ShaderCompileResult::Fail{id:shader_id, err:err}
-            },
-            ShaderGenResult::PatchedConstTable(const_table)=>{
-                sh.mapping.const_table = Some(const_table);
-                return ShaderCompileResult::Nop{id:shader_id}
-            },
-            ShaderGenResult::ShaderAst(shader_ast)=>{
-                shader_ast
-            }
+    pub fn opengl_compile_all_shaders(&mut self, opengl_cx: &OpenglCx) {
+        unsafe {
+            glx_sys::glXMakeCurrent(opengl_cx.display, opengl_cx.hidden_window, opengl_cx.context);
+        }
+        let options = ShaderCompileOptions {
+            gather_all: false,
+            create_const_table: false,
+            no_const_collapse: false
         };
         
-        // lets generate the vertexshader
-        let vertex = generate_glsl::generate_vertex_shader(&shader_ast, use_const_table);
-        let fragment = generate_glsl::generate_fragment_shader(&shader_ast, use_const_table);
-        let mapping = CxShaderMapping::from_shader_gen(&sh.shader_gen, shader_ast.const_table.borrow_mut().take());
+        for (live_id, shader) in &self.live_styles.shader_alloc {
+            match self.live_styles.collect_and_analyse_shader(*live_id, options) {
+                Err(err) => {
+                    eprintln!("{}", err);
+                    panic!()
+                },
+                Ok((shader_ast, default_geometry)) => {
+                    let shader_id = shader.shader_id;
+                    Self::opengl_compile_shader(
+                        shader_id,
+                        &mut self.shaders[shader_id],
+                        shader_ast,
+                        default_geometry,
+                        options,
+                        opengl_cx,
+                        &self.live_styles
+                    );
+                }
+            }
+        };
+        self.live_styles.changed_shaders.clear();
+    }
     
+    
+    pub fn opengl_update_all_shaders(&mut self, opengl_cx: &OpenglCx, errors: &mut Vec<LiveBodyError>) {
+        
+        // recompile shaders, and update values
+        
+        let options = ShaderCompileOptions {
+            gather_all: true,
+            create_const_table: true,
+            no_const_collapse: false
+        };
+        
+        for (live_id, change) in &self.live_styles.changed_shaders {
+            match change {
+                LiveChangeType::Recompile => {
+                    match self.live_styles.collect_and_analyse_shader(*live_id, options) {
+                        Err(err) => {
+                            errors.push(err);
+                        },
+                        Ok((shader_ast, default_geometry)) => {
+                            let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                            Self::opengl_compile_shader(
+                                shader_id,
+                                &mut self.shaders[shader_id],
+                                shader_ast,
+                                default_geometry,
+                                options,
+                                opengl_cx,
+                                &self.live_styles
+                            );
+                        }
+                    }
+                }
+                LiveChangeType::UpdateValue => {
+                    let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                    self.shaders[shader_id].mapping.update_live_uniforms(&self.live_styles);
+                }
+            }
+        }
+        self.live_styles.changed_shaders.clear();
+    }
+    
+    
+    pub fn opengl_compile_shader(
+        shader_id: usize,
+        sh: &mut CxShader,
+        shader_ast: ShaderAst,
+        default_geometry: Option<Geometry>,
+        options: ShaderCompileOptions,
+        _opengl_cx: &OpenglCx,
+        live_styles: &LiveStyles
+    ) -> ShaderCompileResult {
+        
+        // lets generate the vertexshader
+        let vertex = generate_glsl::generate_vertex_shader(&shader_ast, live_styles, options);
+        let fragment = generate_glsl::generate_fragment_shader(&shader_ast, live_styles, options);
+        
         let vertex = format!("
             #version 100
             precision highp float;
@@ -602,29 +699,32 @@ impl Cx {
             vec4 sample2d(sampler2D sampler, vec2 pos){{return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}}
             {}\0", fragment);
         
-        if shader_ast.debug{
+        if shader_ast.debug {
             println!("--------------- Vertex shader {} --------------- \n{}\n---------------\n", shader_id, vertex);
             println!("--------------- Fragment shader {} --------------- \n{}\n---------------\n", shader_id, fragment);
         }
         
-        if let Some(sh_platform) = &sh.platform{
-            if sh_platform.vertex == vertex && sh_platform.fragment == fragment{
+        let mut mapping = CxShaderMapping::from_shader_ast(shader_ast, options);
+        mapping.update_live_uniforms(live_styles);
+        
+        if let Some(sh_platform) = &sh.platform {
+            if sh_platform.vertex == vertex && sh_platform.fragment == fragment {
                 sh.mapping = mapping;
-                return ShaderCompileResult::Nop{id:shader_id}
+                return ShaderCompileResult::Nop
             }
-        } 
-
-        //println!("{} {} {}", sh.name, vertex, fragment);  
-        unsafe { 
-
+        }
+        
+        //println!("{} {} {}", sh.name, vertex, fragment);
+        unsafe {
+            
             let vs = gl::CreateShader(gl::VERTEX_SHADER);
             gl::ShaderSource(vs, 1, [vertex.as_ptr() as *const _].as_ptr(), ptr::null());
             gl::CompileShader(vs);
             //println!("{}", Self::opengl_get_info_log(true, vs as usize, &vertex));
             if let Some(error) = Self::opengl_has_shader_error(true, vs as usize, &vertex) {
-                if use_const_table{
+                if options.create_const_table {
                     println!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error);
-                    return ShaderCompileResult::Nop{id:shader_id}
+                    return ShaderCompileResult::Nop
                 }
                 panic!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error);
             }
@@ -633,21 +733,21 @@ impl Cx {
             gl::CompileShader(fs);
             //println!("{}", Self::opengl_get_info_log(true, fs as usize, &fragment));
             if let Some(error) = Self::opengl_has_shader_error(true, fs as usize, &fragment) {
-                if use_const_table{
+                if options.create_const_table {
                     println!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error);
-                    return ShaderCompileResult::Nop{id:shader_id}
+                    return ShaderCompileResult::Nop
                 }
                 panic!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error);
-            }  
+            }
             
             let program = gl::CreateProgram();
             gl::AttachShader(program, vs);
             gl::AttachShader(program, fs);
             gl::LinkProgram(program);
             if let Some(error) = Self::opengl_has_shader_error(false, program as usize, "") {
-                if use_const_table{
+                if options.create_const_table {
                     println!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error);
-                    return ShaderCompileResult::Nop{id:shader_id}
+                    return ShaderCompileResult::Nop
                 }
                 panic!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error);
             }
@@ -658,30 +758,22 @@ impl Cx {
             let instances = Self::opengl_get_attributes(program, "mpsc_packed_instance_", mapping.instance_props.total_slots);
             
             // lets fetch the uniform positions for our uniforms
+            sh.default_geometry = default_geometry;
             sh.platform = Some(CxPlatformShader {
-                program: program, 
-                geom_ibuf: {
-                    let mut buf = OpenglBuffer::default();
-                    buf.update_with_u32_data(opengl_cx, &sh.shader_gen.geometry.indices);
-                    buf
-                },
-                geom_vbuf: {
-                    let mut buf = OpenglBuffer::default();
-                    buf.update_with_f32_data(opengl_cx, &sh.shader_gen.geometry.vertices);
-                    buf
-                },
+                program: program,
                 geometries,
                 instances,
                 vertex,
                 fragment,
-                pass_uniforms: Self::opengl_get_uniforms(program,  &mapping.pass_uniforms),
+                pass_uniforms: Self::opengl_get_uniforms(program, &mapping.pass_uniforms),
                 view_uniforms: Self::opengl_get_uniforms(program, &mapping.view_uniforms),
                 draw_uniforms: Self::opengl_get_uniforms(program, &mapping.draw_uniforms),
+                live_uniforms: Self::opengl_get_uniforms(program, &mapping.live_uniforms),
                 const_table_uniform: Self::opengl_get_uniform(program, "mpsc_const_table", 1),
-                uniforms: Self::opengl_get_uniforms(program, &mapping.uniforms),
+                user_uniforms: Self::opengl_get_uniforms(program, &mapping.user_uniforms),
             });
             sh.mapping = mapping;
-            return ShaderCompileResult::Ok{id:shader_id};
+            return ShaderCompileResult::Ok
             
         }
     }
@@ -721,7 +813,7 @@ impl ViewBounds {
     }
 }
 pub struct OpenglCx {
-    pub display: *mut glx_sys::Display,
+    pub display: *mut glx_sys::Display, 
     pub context: glx_sys::GLXContext,
     pub visual_info: glx_sys::XVisualInfo,
     pub hidden_window: glx_sys::Window,
@@ -731,7 +823,7 @@ impl OpenglCx {
     pub fn new(display: *mut X11_sys::Display) -> OpenglCx {
         unsafe {
             let display = display as *mut glx_sys::Display;
-
+            
             // Query GLX version.
             let mut major = 0;
             let mut minor = 0;
@@ -739,7 +831,7 @@ impl OpenglCx {
                 glx_sys::glXQueryVersion(display, &mut major, &mut minor) >= 0,
                 "can't query GLX version"
             );
-
+            
             // Check that GLX version number is 1.4 or higher.
             assert!(
                 major > 1 || major == 1 && minor >= 4,
@@ -749,7 +841,7 @@ impl OpenglCx {
             );
             
             let screen = glx_sys::XDefaultScreen(display);
-
+            
             // Query extensions string
             let supported_extensions = glx_sys::glXQueryExtensionsString(display, screen);
             assert!(
@@ -757,7 +849,7 @@ impl OpenglCx {
                 "can't query GLX extensions string"
             );
             let supported_extensions = CStr::from_ptr(supported_extensions).to_str().unwrap();
-
+            
             // Check that required extensions are supported.
             let required_extensions = &["GLX_ARB_get_proc_address", "GLX_ARB_create_context"];
             for required_extension in required_extensions {
@@ -767,7 +859,7 @@ impl OpenglCx {
                     required_extension,
                 );
             }
-
+            
             // Load GLX function pointers.
             #[allow(non_snake_case)]
             let glXCreateContextAttribsARB = mem::transmute::<
@@ -779,16 +871,16 @@ impl OpenglCx {
                     .to_bytes_with_nul()
                     .as_ptr(),
             ))
-            .expect("can't load glXCreateContextAttribsARB function pointer");
-
+                .expect("can't load glXCreateContextAttribsARB function pointer");
+            
             // Load GL function pointers.
-            gl::load_with(|symbol| {
+            gl::load_with( | symbol | {
                 glx_sys::glXGetProcAddressARB(
                     CString::new(symbol).unwrap().to_bytes_with_nul().as_ptr(),
                 )
-                .map_or(ptr::null(), |ptr| ptr as *const c_void)
+                    .map_or(ptr::null(), | ptr | ptr as *const c_void)
             });
-
+            
             // Choose framebuffer configuration.
             let config_attribs = &[
                 glx_sys::GLX_DOUBLEBUFFER as i32,
@@ -815,7 +907,7 @@ impl OpenglCx {
             }
             let config = *configs;
             glx_sys::XFree(configs as *mut c_void);
-
+            
             // Create GLX context.
             let context_attribs = &[
                 glx_sys::GLX_CONTEXT_MAJOR_VERSION_ARB as i32,
@@ -833,7 +925,7 @@ impl OpenglCx {
                 glx_sys::True as i32,
                 context_attribs.as_ptr(),
             );
-
+            
             // Get visual from framebuffer configuration.
             let visual_info_ptr = glx_sys::glXGetVisualFromFBConfig(display, config);
             assert!(
@@ -842,18 +934,18 @@ impl OpenglCx {
             );
             let visual_info = *visual_info_ptr;
             glx_sys::XFree(visual_info_ptr as *mut c_void);
-
+            
             let root_window = glx_sys::XRootWindow(display, screen);
-
+            
             // Create hidden window compatible with visual
             //
             // We need a hidden window because we sometimes want to create OpenGL resources, such as
             // shaders, when Makepad does not have any windows open. In cases such as these, we need
             // *some* window to make the OpenGL context current on.
             let mut attributes = mem::zeroed::<glx_sys::XSetWindowAttributes>();
-
+            
             // We need a color map that is compatible with our visual. Otherwise, the call to
-            // XCreateWindow below will fail. 
+            // XCreateWindow below will fail.
             attributes.colormap = glx_sys::XCreateColormap(
                 display,
                 root_window,
@@ -874,9 +966,9 @@ impl OpenglCx {
                 glx_sys::CWColormap as c_ulong,
                 &mut attributes,
             );
-
+            
             // To make sure the window stays hidden, we simply never call XMapWindow on it.
-
+            
             OpenglCx {
                 display,
                 context,
@@ -887,7 +979,7 @@ impl OpenglCx {
     }
     
     pub fn set_uniform_array(&self, loc: &OpenglUniform, array: &[f32]) {
-        unsafe{
+        unsafe {
             gl::Uniform1fv(loc.loc as i32, array.len() as i32, array.as_ptr());
         }
     }
@@ -977,25 +1069,34 @@ impl OpenglCx {
         }
         
         unsafe {
-            if let Some(gl_texture) = cxtexture.platform.gl_texture {
-                gl::DeleteTextures(1, &gl_texture);
-            }
-            
-            let mut gl_texture = std::mem::MaybeUninit::uninit();
-            gl::GenTextures(1, gl_texture.as_mut_ptr());
-            let gl_texture = gl_texture.assume_init();
-            gl::BindTexture(gl::TEXTURE_2D, gl_texture);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
             
             cxtexture.platform.alloc_desc = cxtexture.desc.clone();
             cxtexture.platform.width = width;
             cxtexture.platform.height = height;
-            cxtexture.platform.gl_texture = Some(gl_texture);
+            if let Some(gl_texture) = cxtexture.platform.gl_texture {
+                gl::DeleteTextures(1, &gl_texture);
+            }
+            cxtexture.platform.gl_texture = None;
+
+            if let Some(gl_renderbuffer) = cxtexture.platform.gl_renderbuffer {
+                gl::DeleteTextures(1, &gl_renderbuffer);
+            }
+            cxtexture.platform.gl_renderbuffer = None;
+
             
-            if !is_depth {
+            if !is_depth { 
                 match cxtexture.desc.format {
                     TextureFormat::Default | TextureFormat::RenderBGRA => {
+                        
+                        let mut gl_texture = std::mem::MaybeUninit::uninit();
+                        gl::GenTextures(1, gl_texture.as_mut_ptr());
+                        let gl_texture = gl_texture.assume_init();
+                        gl::BindTexture(gl::TEXTURE_2D, gl_texture);
+                        
+                        cxtexture.platform.gl_texture = Some(gl_texture);
+
+                        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+                        gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
                         gl::TexImage2D(gl::TEXTURE_2D, 0, gl::RGBA as i32, width as i32, height as i32, 0, gl::RGBA, gl::UNSIGNED_BYTE, ptr::null());
                     },
                     _ => {
@@ -1007,7 +1108,33 @@ impl OpenglCx {
             else {
                 match cxtexture.desc.format {
                     TextureFormat::Default | TextureFormat::Depth32Stencil8 => {
-                        println!("Depth stencil texture!");
+                        
+                        let mut gl_renderbuf = std::mem::MaybeUninit::uninit();
+                        gl::GenRenderbuffers(1, gl_renderbuf.as_mut_ptr());
+                        let gl_renderbuffer = gl_renderbuf.assume_init();
+                        gl::BindRenderbuffer(gl::RENDERBUFFER, gl_renderbuffer);
+                        gl::RenderbufferStorage(
+                            gl::RENDERBUFFER,
+                            gl::DEPTH_COMPONENT32F,
+                            width as i32,
+                            height as i32
+                        );
+                        gl::BindRenderbuffer(gl::RENDERBUFFER, 0);
+                        cxtexture.platform.gl_renderbuffer = Some(gl_renderbuffer);
+                        // this doesnt work.
+                        //gl::TexParameteri(gl::TEXTURE_2D, gl::DEPTH_STENCIL_TEXTURE_MODE, gl::LINEAR as i32);
+                        //gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+                        /*
+                        gl::TexImage2D(gl::TEXTURE_2D, 0, gl::DEPTH_COMPONENT as i32, width as i32, height as i32, 0, gl::DEPTH_COMPONENT, gl::UNSIGNED_SHORT, ptr::null());
+                        loop{
+                            let err = gl::GetError();
+                            if err == gl::NO_ERROR{
+                                break;
+                            }
+                            println!("GOT ERROR {} {} {:x}", width, height, err);
+                        }
+                        //println!("Depth stencil texture!");
+                        */
                     },
                     _ => {
                         println!("update_platform_render_targete unsupported texture format");
@@ -1026,15 +1153,14 @@ pub struct CxPlatformShader {
     pub program: u32,
     pub vertex: String,
     pub fragment: String,
-    pub geom_vbuf: OpenglBuffer,
-    pub geom_ibuf: OpenglBuffer,
     pub geometries: Vec<OpenglAttribute>,
     pub instances: Vec<OpenglAttribute>,
     pub pass_uniforms: Vec<OpenglUniform>,
     pub view_uniforms: Vec<OpenglUniform>,
     pub draw_uniforms: Vec<OpenglUniform>,
+    pub user_uniforms: Vec<OpenglUniform>,
+    pub live_uniforms: Vec<OpenglUniform>,
     pub const_table_uniform: OpenglUniform,
-    pub uniforms: Vec<OpenglUniform>
 }
 
 
@@ -1053,7 +1179,7 @@ impl OpenglWindow {
         
         let mut xlib_window = XlibWindow::new(xlib_app, window_id);
         
-        let visual_info = unsafe { mem::transmute(opengl_cx.visual_info) };
+        let visual_info = unsafe {mem::transmute(opengl_cx.visual_info)};
         xlib_window.init(title, inner_size, position, visual_info);
         
         OpenglWindow {
@@ -1097,6 +1223,14 @@ pub struct OpenglUniform {
     pub name: String,
     pub size: usize
 }
+
+
+#[derive(Clone, Default)]
+pub struct CxPlatformGeometry {
+    pub vb: OpenglBuffer,
+    pub ib: OpenglBuffer,
+}
+
 /*
 #[derive(Default, Clone)]
 pub struct OpenglTextureSlot {
@@ -1109,57 +1243,22 @@ pub struct CxPlatformView {
 }
 
 #[derive(Default, Clone)]
+pub struct CxPlatformDrawCallVao {
+    pub vao: u32,
+    pub shader_id: Option<usize>,
+    pub inst_vb: Option<u32>,
+    pub geom_vb: Option<u32>,
+    pub geom_ib: Option<u32>,
+}
+
+
+#[derive(Default, Clone)]
 pub struct CxPlatformDrawCall {
-    pub inst_vbuf: OpenglBuffer,
-    pub vao_shader_id: Option<usize>,
-    pub vao: Option<u32>
+    pub inst_vb: OpenglBuffer,
+    pub vao: Option<CxPlatformDrawCallVao>,
 }
 
 impl CxPlatformDrawCall {
-    
-    pub fn check_vao(&mut self, shader_id: usize, shp: &CxPlatformShader) {
-        if self.vao_shader_id.is_none() || self.vao_shader_id.unwrap() != shader_id {
-            self.free_vao();
-            // create the VAO
-            unsafe {
-                let mut vao = std::mem::MaybeUninit::uninit();
-                gl::GenVertexArrays(1, vao.as_mut_ptr());
-                let vao = vao.assume_init();
-                gl::BindVertexArray(vao);
-                
-                // bind the vertex and indexbuffers
-                gl::BindBuffer(gl::ARRAY_BUFFER, shp.geom_vbuf.gl_buffer.unwrap());
-                for attr in &shp.geometries {
-                    gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
-                    gl::EnableVertexAttribArray(attr.loc);
-                }
-                
-                gl::BindBuffer(gl::ARRAY_BUFFER, self.inst_vbuf.gl_buffer.unwrap());
-                
-                for attr in &shp.instances {
-                    gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
-                    gl::EnableVertexAttribArray(attr.loc);
-                    gl::VertexAttribDivisor(attr.loc, 1 as gl::types::GLuint);
-                }
-                
-                // bind the indexbuffer
-                gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, shp.geom_ibuf.gl_buffer.unwrap());
-                gl::BindVertexArray(0);
-                
-                self.vao_shader_id = Some(shader_id);
-                self.vao = Some(vao);
-            }
-        }
-    }
-    
-    fn free_vao(&mut self) {
-        unsafe {
-            if let Some(mut vao) = self.vao {
-                gl::DeleteVertexArrays(1, &mut vao);
-                self.vao = None;
-            }
-        }
-    }
 }
 
 #[derive(Default, Clone)]
@@ -1168,11 +1267,13 @@ pub struct CxPlatformTexture {
     pub width: u64,
     pub height: u64,
     pub gl_texture: Option<u32>,
+    pub gl_renderbuffer: Option<u32>
 }
 
 #[derive(Default, Clone)]
 pub struct CxPlatformPass {
-    pub gl_framebuffer: Option<u32>
+    pub gl_framebuffer: Option<u32>,
+    pub gl_bugfix_depthbuffer: Option<u32>
 }
 
 #[derive(Default, Clone)]

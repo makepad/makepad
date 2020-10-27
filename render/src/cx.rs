@@ -1,13 +1,12 @@
-use std::collections::HashMap;
-use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-pub use makepad_shader_compiler::shadergen::*;
-pub use makepad_shader_compiler::colors::*;
-pub use makepad_shader_compiler::util::*;
-pub use makepad_shader_compiler::math::*;
-pub use makepad_shader_compiler::uid;
-pub use makepad_live_macros::*;
+pub use makepad_live_compiler::livetypes::*;
+pub use makepad_live_compiler::livestyles::*;
+pub use makepad_live_compiler::span::LiveBodyId;
+pub use makepad_live_compiler::math::*;
+pub use makepad_live_compiler::colors::*;
+pub use makepad_live_compiler::ty::Ty;
 
 pub use crate::fonts::*;
 pub use crate::turtle::*;
@@ -15,17 +14,19 @@ pub use crate::cursor::*;
 pub use crate::window::*;
 pub use crate::view::*;
 pub use crate::pass::*;
+pub use crate::geometry::*;
 pub use crate::texture::*;
 pub use crate::text::*;
-pub use crate::live::*;
-
+pub use crate::livemacros::*;
 pub use crate::events::*;
-//pub use crate::elements::*;
 pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::menu::*;
-pub use crate::styling::*;
 pub use crate::shader::*;
+pub use crate::livemacros::*;
+pub use crate::geometrygen::*;
+pub use crate::gpuinfo::*;
+pub use crate::uid;
 
 #[cfg(all(not(feature = "ipc"), target_os = "linux"))]
 pub use crate::cx_linux::*;
@@ -63,20 +64,23 @@ pub use crate::cx_ipc_posix::*;
 #[cfg(all(feature = "ipc", target_os = "windows"))]
 pub use crate::cx_ipc_win32::*;
 
+#[derive(Clone)]
 pub enum PlatformType {
+    Unknown,
     Windows,
     OSX,
     Linux,
-    WASM
+    Web {protocol: String, hostname: String, port: u16, pathname: String, search: String, hash: String}
 }
 
 impl PlatformType {
     pub fn is_desktop(&self) -> bool {
         match self {
+            PlatformType::Unknown => true,
             PlatformType::Windows => true,
             PlatformType::OSX => true,
             PlatformType::Linux => true,
-            PlatformType::WASM => false
+            PlatformType::Web {..} => false
         }
     }
 }
@@ -85,7 +89,7 @@ pub struct Cx {
     pub running: bool,
     pub counter: usize,
     pub platform_type: PlatformType,
-    
+    pub gpu_info: GpuInfo,
     pub windows: Vec<CxWindow>,
     pub windows_free: Vec<usize>,
     pub passes: Vec<CxPass>,
@@ -97,15 +101,10 @@ pub struct Cx {
     pub fonts_atlas: CxFontsAtlas,
     pub textures: Vec<CxTexture>,
     pub textures_free: Vec<usize>,
-    pub shaders: Vec<CxShader>,
-    pub shader_recompiles: Vec<usize>,
-    pub shader_map: HashMap<ShaderGen, usize>,
-    pub shader_instance_id: usize,
-    pub shader_inherit_cache: ShaderInheritCache,
-    pub live_macros_on_self: bool,
     
-    pub str_to_id: RefCell<HashMap<String, usize>>,
-    pub id_to_str: RefCell<HashMap<usize, String>>,
+    pub geometries: Vec<CxGeometry>,
+    
+    pub shaders: Vec<CxShader>,
     
     pub is_in_redraw_cycle: bool,
     pub default_dpi_factor: f32,
@@ -126,7 +125,8 @@ pub struct Cx {
     pub event_id: u64,
     pub timer_id: u64,
     pub signal_id: usize,
-    pub theme_update_id: usize,
+    pub live_update_id: u64,
+    pub anim_time: f64,
     
     pub prev_key_focus: Area,
     pub next_key_focus: Area,
@@ -139,47 +139,24 @@ pub struct Cx {
     pub hover_mouse_cursor: Option<MouseCursor>,
     pub fingers: Vec<CxPerFinger>,
     
-    pub playing_anim_areas: Vec<AnimArea>,
-    pub ended_anim_areas: Vec<AnimArea>,
+    pub playing_anim_areas: BTreeMap<Area, AnimInfo>,
+    pub ended_anim_areas: BTreeMap<Area ,AnimInfo>,
     
-    pub frame_callbacks: Vec<Area>,
-    pub _frame_callbacks: Vec<Area>,
+    pub frame_callbacks: HashSet<Area>,
+    pub _frame_callbacks: HashSet<Area>,
     
-    pub signals: HashMap<Signal, Vec<StatusId>>,
+    pub triggers: HashMap<Area, BTreeSet<TriggerId>>,
+    pub signals: HashMap<Signal, BTreeSet<StatusId >>,
     
-    pub style_base: CxStyle,
-    pub styles: Vec<CxStyle>,
-    pub style_map: HashMap<StyleId, usize>,
-    pub style_stack: Vec<usize>,
-
-    pub live_base: CxLive,
-    pub lives: Vec<CxLive>,
-    pub live_map: HashMap<LiveId, usize>,
-    pub live_stack: Vec<usize>,
+    pub live_styles: LiveStyles,
     
     pub command_settings: HashMap<CommandId, CxCommandSetting>,
     
     pub panic_now: bool,
     pub panic_redraw: bool,
     
-    pub live_macros: HashMap<CxLiveLoc, CxLiveMacro>,
-    //pub live_client: Option<LiveClient>,
-    
     pub platform: CxPlatform,
 }
-
-#[derive(Clone, Default, Hash, PartialEq)]
-pub struct CxLiveLoc{
-    file:String,
-    line:usize,
-    column:usize,
-}
-
-#[derive(Clone, Default)]
-pub struct CxLiveMacro{
-    code:String
-}
-
 
 #[derive(Clone, Copy, Default)]
 pub struct CxCommandSetting {
@@ -187,29 +164,6 @@ pub struct CxCommandSetting {
     pub key_code: KeyCode,
     pub enabled: bool
 }
-
-#[derive(Default)]
-pub struct CxStyle {
-    pub floats: HashMap<FloatId, f32>,
-    pub colors: HashMap<ColorId, Color>,
-    pub text_styles: HashMap<TextStyleId, TextStyle>,
-    pub layouts: HashMap<LayoutId, Layout>,
-    pub walks: HashMap<WalkId, Walk>,
-    pub anims: HashMap<AnimId, Anim>,
-    pub shaders: HashMap<ShaderId, Shader>,
-}
-
-#[derive(Default)]
-pub struct CxLive {
-    pub floats: HashMap<LiveId, f32>,
-    pub colors: HashMap<LiveId, Color>,
-    pub text_styles: HashMap<LiveId, TextStyle>,
-    pub layouts: HashMap<LiveId, Layout>,
-    pub walks: HashMap<LiveId, Walk>,
-    pub anims: HashMap<LiveId, Anim>,
-    pub shaders: HashMap<LiveId, Shader>,
-}
-
 
 #[derive(Default, Clone)]
 pub struct CxPerFinger {
@@ -243,10 +197,9 @@ impl Default for Cx {
         
         Self {
             counter: 0,
-            platform_type: PlatformType::Windows,
+            platform_type: PlatformType::Unknown,
+            gpu_info: GpuInfo::default(),
             running: true,
-            
-            //live_client: LiveClient::connect_to_live_server(None),
             
             windows: Vec::new(),
             windows_free: Vec::new(),
@@ -259,14 +212,9 @@ impl Default for Cx {
             textures: textures,
             textures_free: Vec::new(),
             shaders: Vec::new(),
-            shader_recompiles: Vec::new(),
-            shader_map: HashMap::new(),
-            shader_inherit_cache: ShaderInheritCache::new(),
+            //shader_recompiles: Vec::new(),
             
-            live_macros_on_self: true,
-            
-            id_to_str: RefCell::new(HashMap::new()),
-            str_to_id: RefCell::new(HashMap::new()),
+            geometries: Vec::new(),
             
             default_dpi_factor: 1.0,
             current_dpi_factor: 1.0,
@@ -287,8 +235,8 @@ impl Default for Cx {
             repaint_id: 1,
             timer_id: 1,
             signal_id: 1,
-            shader_instance_id: 1,
-            theme_update_id: 1,
+            live_update_id: 1,
+            anim_time: 0.0,
             
             next_key_focus: Area::Empty,
             prev_key_focus: Area::Empty,
@@ -301,63 +249,31 @@ impl Default for Cx {
             hover_mouse_cursor: None,
             fingers: fingers,
             
-            style_base: CxStyle::default(),
-            styles: Vec::new(),
-            style_map: HashMap::new(),
-            style_stack: Vec::new(),
-
-            live_base: CxLive::default(),
-            lives: Vec::new(),
-            live_map: HashMap::new(),
-            live_stack: Vec::new(),
+            live_styles: LiveStyles::new(),
             
             command_settings: HashMap::new(),
             
-            playing_anim_areas: Vec::new(),
-            ended_anim_areas: Vec::new(),
+            playing_anim_areas: BTreeMap::new(),
+            ended_anim_areas: BTreeMap::new(),
             
-            frame_callbacks: Vec::new(),
-            _frame_callbacks: Vec::new(),
+            frame_callbacks: HashSet::new(),
+            _frame_callbacks: HashSet::new(),
             
             signals: HashMap::new(),
+            
+            triggers: HashMap::new(),
             
             panic_now: false,
             panic_redraw: false,
             
             platform: CxPlatform {..Default::default()},
             
-            live_macros:HashMap::new(),
         }
     }
 }
 
 
 impl Cx {
-    
-    pub fn shader_defs(sg: ShaderGen) -> ShaderGen {
-        let sg = CxShader::def_df(sg);
-        let sg = CxPass::def_uniforms(sg);
-        let sg = CxView::def_uniforms(sg);
-        sg
-    }
-    
-    pub fn add_shader(&mut self, sg: ShaderGen, name: &str) -> Shader {
-        let inst_id = self.shader_instance_id;
-        self.shader_instance_id += 1;
-        if let Some(stored_id) = self.shader_map.get(&sg) {
-            return Shader {shader_id: Some((*stored_id, inst_id))}
-        }
-        
-        let new_id = self.shaders.len();
-        self.shader_map.insert(sg.clone(), new_id);
-        self.shaders.push(CxShader {
-            name: name.to_string(),
-            shader_gen: sg,
-            platform: None,
-            mapping: CxShaderMapping::default()
-        });
-        Shader {shader_id: Some((new_id, inst_id))}
-    }
     
     pub fn process_tap_count(&mut self, digit: usize, pos: Vec2, time: f64) -> u32 {
         if digit >= self.fingers.len() {
@@ -419,6 +335,29 @@ impl Cx {
     pub fn compute_passes_to_repaint(&mut self, passes_todo: &mut Vec<usize>, windows_need_repaint: &mut usize) {
         passes_todo.truncate(0);
         
+        loop {
+            let mut altered = false; // yes this is horrible but im tired and i dont know why recursion fails
+            for pass_id in 0..self.passes.len() {
+                if self.passes[pass_id].paint_dirty {
+                    let other = match self.passes[pass_id].dep_of {
+                        CxPassDepOf::Pass(dep_of_pass_id) => {
+                            Some(dep_of_pass_id)
+                        }
+                        _ => None
+                    };
+                    if let Some(other) = other {
+                        if !self.passes[other].paint_dirty {
+                            self.passes[other].paint_dirty = true;
+                            altered = true;
+                        }
+                    }
+                }
+            }
+            if !altered {
+                break
+            }
+        }
+        
         for (pass_id, cxpass) in self.passes.iter().enumerate() {
             if cxpass.paint_dirty {
                 let mut inserted = false;
@@ -427,6 +366,9 @@ impl Cx {
                         *windows_need_repaint += 1
                     },
                     CxPassDepOf::Pass(dep_of_pass_id) => {
+                        if pass_id == dep_of_pass_id {
+                            eprintln!("WHAAAT");
+                        }
                         for insert_before in 0..passes_todo.len() {
                             if passes_todo[insert_before] == dep_of_pass_id {
                                 passes_todo.insert(insert_before, pass_id);
@@ -549,6 +491,16 @@ impl Cx {
         self.redraw_parent_areas.push(area);
     }
     
+    pub fn is_xr_presenting(&mut self) -> bool {
+        if !self.is_in_redraw_cycle {
+            panic!("Cannot call is_xr_presenting outside of redraw flow");
+        }
+        if self.window_stack.len() == 0 {
+            panic!("Can only call is_xr_presenting inside of a window");
+        }
+        self.windows[*self.window_stack.last().unwrap()].window_geom.xr_is_presenting
+    }
+    
     pub fn redraw_previous_areas(&mut self) {
         for area in self._redraw_child_areas.clone() {
             self.redraw_child_area(area);
@@ -632,20 +584,14 @@ impl Cx {
     }
     
     pub fn check_ended_anim_areas(&mut self, time: f64) {
-        let mut i = 0;
-        self.ended_anim_areas.truncate(0);
-        loop {
-            if i >= self.playing_anim_areas.len() {
-                break
+        self.ended_anim_areas.clear();
+        for (area, anim_info) in &self.playing_anim_areas{
+            if anim_info.start_time.is_nan() || time - anim_info.start_time >= anim_info.total_time {
+                self.ended_anim_areas.insert(*area, anim_info.clone());
             }
-            let anim_start_time = self.playing_anim_areas[i].start_time;
-            let anim_total_time = self.playing_anim_areas[i].total_time;
-            if anim_start_time.is_nan() || time - anim_start_time >= anim_total_time {
-                self.ended_anim_areas.push(self.playing_anim_areas.remove(i));
-            }
-            else {
-                i = i + 1;
-            }
+        }
+        for (area, _) in &self.ended_anim_areas{
+            self.playing_anim_areas.remove(area);
         }
     }
     
@@ -654,9 +600,10 @@ impl Cx {
             return new_area
         }
         
-        if let Some(anim_anim) = self.playing_anim_areas.iter_mut().find( | v | v.area == old_area) {
-            anim_anim.area = new_area.clone()
+        if let Some(anim_info) = self.playing_anim_areas.get(&old_area).cloned() {
+            self.playing_anim_areas.insert(new_area, anim_info);
         }
+        self.playing_anim_areas.remove(&old_area);
         
         for finger in &mut self.fingers {
             if finger.captured == old_area {
@@ -680,9 +627,11 @@ impl Cx {
         }
         
         //
-        if let Some(next_frame) = self.frame_callbacks.iter_mut().find( | v | **v == old_area) {
-            *next_frame = new_area.clone()
+        if self.frame_callbacks.contains(&old_area){
+            self.frame_callbacks.insert(new_area);
+            self.frame_callbacks.remove(&old_area);
         }
+
         new_area
     }
     
@@ -756,7 +705,7 @@ impl Cx {
         self.redraw_parent_areas.truncate(0);
         self.call_event_handler(&mut event_handler, &mut Event::Draw);
         self.is_in_redraw_cycle = false;
-        if self.style_stack.len()>0 {
+        if self.live_styles.style_stack.len()>0 {
             panic!("Style stack disaligned, forgot a cx.end_style()");
         }
         if self.view_stack.len()>0 {
@@ -788,7 +737,7 @@ impl Cx {
     where F: FnMut(&mut Cx, &mut Event)
     {
         std::mem::swap(&mut self._frame_callbacks, &mut self.frame_callbacks);
-        self.frame_callbacks.truncate(0);
+        self.frame_callbacks.clear();
         self.call_event_handler(&mut event_handler, &mut Event::Frame(FrameEvent {time: time, frame: self.repaint_id}));
     }
     
@@ -796,7 +745,7 @@ impl Cx {
         if let Some(_) = self.frame_callbacks.iter().position( | a | *a == area) {
             return;
         }
-        self.frame_callbacks.push(area);
+        self.frame_callbacks.insert(area);
     }
     
     pub fn new_signal(&mut self) -> Signal {
@@ -809,16 +758,31 @@ impl Cx {
             return
         }
         if let Some(statusses) = self.signals.get_mut(&signal) {
-            if statusses.iter().find( | s | **s == status).is_none() {
-                statusses.push(status);
+            if !statusses.contains(&status) {
+                statusses.insert(status);
             }
         }
         else {
-            self.signals.insert(signal, vec![status]);
+            let mut new_set = BTreeSet::new();
+            new_set.insert(status);
+            self.signals.insert(signal, new_set);
         }
     }
     
-    pub fn call_signals<F>(&mut self, mut event_handler: F)
+    pub fn send_trigger(&mut self, area:Area, trigger_id:TriggerId){
+         if let Some(triggers) = self.triggers.get_mut(&area) {
+            if !triggers.contains(&trigger_id) {
+                triggers.insert(trigger_id);
+            }
+        }
+        else {
+            let mut new_set = BTreeSet::new();
+            new_set.insert(trigger_id);
+            self.triggers.insert(area, new_set);
+        }    
+    }
+    
+    pub fn call_signals_and_triggers<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
         let mut counter = 0;
@@ -831,103 +795,82 @@ impl Cx {
                 signals: signals,
             }));
             
-            if counter > 100  {
+            if counter > 100 {
                 println!("Signal feedback loop detected");
                 break
             }
         }
+
+        let mut counter = 0;
+        while self.triggers.len() != 0 {
+            counter += 1;
+            let mut triggers = HashMap::new();
+            std::mem::swap(&mut self.triggers, &mut triggers);
+            
+            self.call_event_handler(&mut event_handler, &mut Event::Triggers(TriggersEvent {
+                triggers: triggers,
+            }));
+            
+            if counter > 100 {
+                println!("Trigger feedback loop detected");
+                break
+            }
+        }
+
     }
     
-    pub fn call_shader_recompile_event<F>(&mut self, results: Vec<ShaderCompileResult>, mut event_handler: F)
+    pub fn call_live_recompile_event<F>(&mut self, changed_live_bodies: BTreeSet<LiveBodyId>, errors: Vec<LiveBodyError>, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
-        if results.len()>0 {
-            self.call_event_handler(&mut event_handler, &mut Event::ShaderRecompile(ShaderRecompileEvent {
-                results: results
-            }));
-        }
+        self.call_event_handler(&mut event_handler, &mut Event::LiveRecompile(LiveRecompileEvent {
+            changed_live_bodies,
+            errors
+        }));
     }
     
     pub fn status_http_send_ok() -> StatusId {uid!()}
     pub fn status_http_send_fail() -> StatusId {uid!()}
     
-    pub fn recompile_shader_sub(&mut self, file: &str, line: usize, col: usize, code: String) {
-        if !self.live_macros_on_self {
-            return
-        }
-        
-        for (shader_index, shader) in self.shaders.iter_mut().enumerate() {
-            // ok so lets enumerate our subs
-            for sub in &mut shader.shader_gen.subs {
-                //println!("{} {}", file, sub.loc.path);
-                //i file == sub.loc.path{
-                // }
-                
-                if file == sub.loc.path && line == sub.loc.line && col == sub.loc.column {
-                    if code != sub.code {
-                        sub.code = code.clone();
-                        // we need to recompile some shader..
-                        if !self.shader_recompiles.contains(&shader_index){
-                            self.shader_recompiles.push(
-                                shader_index
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
     
-    
-    pub fn debug_draw_tree_recur(&mut self, dump_instances:bool, s: &mut String, view_id:usize, depth:usize){
-        if view_id >= self.views.len(){
+    pub fn debug_draw_tree_recur(&mut self, dump_instances: bool, s: &mut String, view_id: usize, depth: usize) {
+        if view_id >= self.views.len() {
             writeln!(s, "---------- Drawlist still empty ---------").unwrap();
             return
         }
         let mut indent = String::new();
-        for _i in 0..depth{
+        for _i in 0..depth {
             indent.push_str("  ");
         }
         let draw_calls_len = self.views[view_id].draw_calls_len;
-        if view_id == 0{
-            writeln!(s,"---------- Begin Debug draw tree for redraw_id: {} ---------", self.redraw_id).unwrap();
+        if view_id == 0 {
+            writeln!(s, "---------- Begin Debug draw tree for redraw_id: {} ---------", self.redraw_id).unwrap();
         }
-        writeln!(s,"{}view {}: len:{} rect:{:?} scroll:{:?}", indent, view_id, draw_calls_len, self.views[view_id].rect, self.views[view_id].get_local_scroll()).unwrap();
+        writeln!(s, "{}view {}: len:{} rect:{:?} scroll:{:?}", indent, view_id, draw_calls_len, self.views[view_id].rect, self.views[view_id].get_local_scroll()).unwrap();
         indent.push_str("  ");
-        for draw_call_id in 0..draw_calls_len{
+        for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
-            if sub_view_id != 0{
+            if sub_view_id != 0 {
                 self.debug_draw_tree_recur(dump_instances, s, sub_view_id, depth + 1);
             }
-            else{
-               let cxview = &mut self.views[view_id];
+            else {
+                let cxview = &mut self.views[view_id];
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
                 let slots = sh.mapping.instance_props.total_slots;
                 let instances = draw_call.instance.len() / slots;
                 writeln!(s, "{}call {}: {}({}) *:{} scroll:{}", indent, draw_call_id, sh.name, draw_call.shader_id, instances, draw_call.get_local_scroll()).unwrap();
                 // lets dump the instance geometry
-                if dump_instances{
-                    for inst in 0..instances.min(1){
+                if dump_instances {
+                    for inst in 0..instances.min(1) {
                         let mut out = String::new();
                         let mut off = 0;
-                        for prop in &sh.mapping.instance_props.props{
-                            match prop.slots{
-                                1=>out.push_str(&format!("{}:{} ", prop.name,
-                                    draw_call.instance[inst*slots + off])),
-                                2=>out.push_str(&format!("{}:v2({},{}) ", prop.name,
-                                    draw_call.instance[inst*slots+ off],
-                                    draw_call.instance[inst*slots+1+ off])),
-                                3=>out.push_str(&format!("{}:v3({},{},{}) ", prop.name,
-                                    draw_call.instance[inst*slots+ off],
-                                    draw_call.instance[inst*slots+1+ off],
-                                    draw_call.instance[inst*slots+1+ off])),
-                                4=>out.push_str(&format!("{}:v4({},{},{},{}) ", prop.name,
-                                    draw_call.instance[inst*slots+ off],
-                                    draw_call.instance[inst*slots+1+ off],
-                                    draw_call.instance[inst*slots+2+ off],
-                                    draw_call.instance[inst*slots+3+ off])),
-                                _=>{}
+                        for prop in &sh.mapping.instance_props.props {
+                            match prop.slots {
+                                1 => out.push_str(&format!("{}:{} ", prop.name, draw_call.instance[inst * slots + off])),
+                                2 => out.push_str(&format!("{}:v2({},{}) ", prop.name, draw_call.instance[inst * slots + off], draw_call.instance[inst * slots + 1 + off])),
+                                3 => out.push_str(&format!("{}:v3({},{},{}) ", prop.name, draw_call.instance[inst * slots + off], draw_call.instance[inst * slots + 1 + off], draw_call.instance[inst * slots + 1 + off])),
+                                4 => out.push_str(&format!("{}:v4({},{},{},{}) ", prop.name, draw_call.instance[inst * slots + off], draw_call.instance[inst * slots + 1 + off], draw_call.instance[inst * slots + 2 + off], draw_call.instance[inst * slots + 3 + off])),
+                                _ => {}
                             }
                             off += prop.slots;
                         }
@@ -936,7 +879,7 @@ impl Cx {
                 }
             }
         }
-        if view_id == 0{
+        if view_id == 0 {
             writeln!(s, "---------- End Debug draw tree for redraw_id: {} ---------", self.redraw_id).unwrap();
         }
     }
@@ -953,17 +896,13 @@ pub enum StyleValue {
 }
 
 #[macro_export]
-macro_rules!log {
-    ( $ ( $ arg: tt) *) => ({
-        $ crate::Cx::write_log(&format!("[{}:{}:{}] {}\n", file!(), line!(), column!(), &format!( $ ( $ arg) *)))
-    })
-}
-
-#[macro_export]
 macro_rules!main_app {
     ( $ app: ident) => {
         //TODO do this with a macro to generate both entrypoints for App and Cx
         let mut cx = Cx::default();
+        cx.style();
+        $ app::style(&mut cx);
+        cx.init_live_styles();
         let mut app = $ app::new(&mut cx);
         let mut cxafterdraw = CxAfterDraw::new(&mut cx);
         cx.event_loop( | cx, mut event | {
@@ -983,6 +922,9 @@ macro_rules!wasm_app {
         #[export_name = "create_wasm_app"]
         pub extern "C" fn create_wasm_app() -> u32 {
             let mut cx = Box::new(Cx::default());
+            cx.style();
+            $ app::style(&mut cx);
+            cx.init_live_styles();
             let app = Box::new( $ app::new(&mut cx));
             let cxafterdraw = Box::new(CxAfterDraw::new(&mut cx));
             Box::into_raw(Box::new((Box::into_raw(app), Box::into_raw(cx), Box::into_raw(cxafterdraw)))) as u32

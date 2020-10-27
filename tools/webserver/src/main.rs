@@ -3,13 +3,16 @@
 use std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::io::prelude::*;
-use std::io::BufReader;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use deflate::Compression;
 use deflate::write::ZlibEncoder;
+
+use std::io::prelude::*;
+
+use makepad_http::channel::WebSocketChannels;
+use makepad_http::httputil::*;
 
 fn main() {
     // config params
@@ -18,48 +21,62 @@ fn main() {
     let exts = [".rs", ".js", ".toml", ".html", ".js", ".wasm", ".ttf", ".ron"];
     let ex_file = ["bindings.rs"];
     let ex_dirs = ["deps", "build", "edit_repo"];
-     
-    let brotli_filecache = Arc::new(Mutex::new(None));
-    let zlib_filecache = Arc::new(Mutex::new(None));
+    
+    let brotli_filecache = FileCacheWrap::default();
+    let zlib_filecache = FileCacheWrap::default();
+    let websocket_channels = WebSocketChannels::default();
     
     let http_server = HttpServer::start_http_server(
         SocketAddr::from(([0, 0, 0, 0], 80)),
         brotli_filecache.clone(),
         zlib_filecache.clone(),
+        websocket_channels,
     ).expect("Can't start server");
     
     // the file reload loop
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
         let mut iter = stdin.lock().lines();
-        loop{
+        loop {
             let mut new_zlib_filecache = HashMap::new();
-            println!("Starting zlib compression");
+            //println!("Starting zlib compression");
             let mut total_size = 0;
             HttpServer::compress_tree_recursive(base_path, calc_path, &exts, &ex_file, &ex_dirs, &mut new_zlib_filecache, &mut total_size, false);
-            println!("Done with zlib compression {} files {} bytes", new_zlib_filecache.len(), total_size);
-            if let Ok(mut fc) = zlib_filecache.lock() {
-                *fc = Some(Arc::new(new_zlib_filecache));
-            }
-
-            if let Ok(mut fc) = brotli_filecache.lock() {
-                *fc = None;
+            //println!("Done with zlib compression {} files {} bytes", new_zlib_filecache.len(), total_size);
+            if let Ok(mut fc) = zlib_filecache.wrap.lock() {
+                *fc = FileCache {cache: Some(Arc::new(new_zlib_filecache))};
             }
             
+            if let Ok(mut fc) = brotli_filecache.wrap.lock() {
+                *fc = FileCache {cache: None};
+            }
+            /*
             let mut new_brotli_filecache = HashMap::new();
             println!("Starting brotli compression");
             let mut total_size = 0;
             HttpServer::compress_tree_recursive(base_path, calc_path, &exts, &ex_file, &ex_dirs, &mut new_brotli_filecache, &mut total_size, true);
             println!("Done with brotli compression {} files {} bytes", new_brotli_filecache.len(), total_size);
-            if let Ok(mut fc) = brotli_filecache.lock() {
-                *fc = Some(Arc::new(new_brotli_filecache));
-            }
+            if let Ok(mut fc) = brotli_filecache.wrap.lock() {
+                *fc = FileCache{cache:Some(Arc::new(new_brotli_filecache))};
+            }*/
             println!("Press return to reload");
+            //return
             iter.next();
+            //std::thread::sleep(std::time::Duration::from_millis(1500));
         }
     });
     
     http_server.listen_thread.unwrap().join().expect("can't join thread");
+}
+
+#[derive(Clone, Default)]
+pub struct FileCacheWrap {
+    wrap: Arc<Mutex<FileCache >>,
+}
+
+#[derive(Clone, Default)]
+pub struct FileCache {
+    cache: Option<Arc<HashMap<String, Vec<u8 >> >>
 }
 
 pub struct HttpServer {
@@ -67,9 +84,10 @@ pub struct HttpServer {
     pub listen_address: Option<SocketAddr>,
 }
 
+
 impl HttpServer {
     
-    fn handle_post(tcp_stream: &mut TcpStream, url: &str, mut body: Vec<u8>) {
+    fn handle_post(tcp_stream: TcpStream, url: &str, mut body: Vec<u8>) {
         match url {
             "/subscribe" => {
                 let mut file = OpenOptions::new()
@@ -84,33 +102,27 @@ impl HttpServer {
                     println!("Couldn't append email to file");
                 }
             },
-            _ => return error_out(tcp_stream, 500)
+            _ => return http_error_out(tcp_stream, 500)
         }
     }
     
+    
     fn handle_get(
-        tcp_stream: &mut TcpStream,
-        url: &str,
+        mut tcp_stream: TcpStream,
+        path: &str,
         accept_encoding: String,
-        zlib_filecache: Option<Arc<HashMap<String, Vec<u8 >> >>,
-        brotli_filecache: Option<Arc<HashMap<String, Vec<u8 >> >>
+        zlib_filecache: FileCache,
+        brotli_filecache: FileCache,
     ) {
         
-        let url = if let Some(url) = parse_url_file(url) {
-            url
-        }
-        else {
-            return error_out(tcp_stream, 500);
-        };
-        
-        let mime_type = if url.ends_with(".html") {"text/html"}
-        else if url.ends_with(".wasm") {"application/wasm"}
-        else if url.ends_with(".js") {"text/javascript"}
+        let mime_type = if path.ends_with(".html") {"text/html"}
+        else if path.ends_with(".wasm") {"application/wasm"}
+        else if path.ends_with(".js") {"text/javascript"}
         else {"application/octet-stream"};
         
         if accept_encoding.contains("br") { // we want the brotli
-            if let Some(brotli_filecache) = brotli_filecache {
-                if let Some(data) = brotli_filecache.get(&url) {
+            if let Some(brotli_filecache) = brotli_filecache.cache {
+                if let Some(data) = brotli_filecache.get(path) {
                     let header = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\
                             Content-encoding: br\r\n\
@@ -120,39 +132,39 @@ impl HttpServer {
                         mime_type,
                         data.len()
                     );
-                    write_bytes_to_tcp_stream_no_error(tcp_stream, header.as_bytes());
-                    write_bytes_to_tcp_stream_no_error(tcp_stream, &data);
+                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, header.as_bytes());
+                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, &data);
                     let _ = tcp_stream.shutdown(Shutdown::Both);
                 }
                 else {
-                    return error_out(tcp_stream, 404);
+                    return http_error_out(tcp_stream, 404);
                 }
             }
         }
         
-        if accept_encoding.contains("gzip") || accept_encoding.contains("deflate"){
-            if let Some(zlib_filecache) = zlib_filecache {
-                if let Some(data) = zlib_filecache.get(&url) {
+        if accept_encoding.contains("gzip") || accept_encoding.contains("deflate") {
+            if let Some(zlib_filecache) = zlib_filecache.cache {
+                if let Some(data) = zlib_filecache.get(path) {
                     let header = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\
                             Content-encoding: deflate\r\n\
                             Cache-Control: max-age:0\r\n\
                             Content-Length: {}\r\n\
                             Connection: close\r\n\r\n",
-                        mime_type, 
+                        mime_type,
                         data.len()
                     );
-                    write_bytes_to_tcp_stream_no_error(tcp_stream, header.as_bytes());
-                    write_bytes_to_tcp_stream_no_error(tcp_stream, &data);
+                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, header.as_bytes());
+                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, &data);
                     let _ = tcp_stream.shutdown(Shutdown::Both);
                     return
                 }
                 else {
-                    return error_out(tcp_stream, 404);
+                    return http_error_out(tcp_stream, 404);
                 }
             }
         }
-        return error_out(tcp_stream, 500);
+        return http_error_out(tcp_stream, 500);
     }
     
     fn compress_tree_recursive(
@@ -217,8 +229,9 @@ impl HttpServer {
     
     pub fn start_http_server(
         listen_address: SocketAddr,
-        brotli_filecache: Arc<Mutex<Option<Arc<HashMap<String, Vec<u8 >> >> >>,
-        zlib_filecache: Arc<Mutex<Option<Arc<HashMap<String, Vec<u8 >> >> >>
+        brotli_filecache: FileCacheWrap,
+        zlib_filecache: FileCacheWrap,
+        websocket_channels: WebSocketChannels,
     ) -> Option<HttpServer> {
         
         let listener = if let Ok(listener) = TcpListener::bind(listen_address.clone()) {listener} else {println!("Cannot bind http server port"); return None};
@@ -233,99 +246,77 @@ impl HttpServer {
                         println!("Incoming stream failure");
                         continue
                     };
-
-                    let zlib_filecache = if let Ok(v) = zlib_filecache.lock() {
-                        if let Some(v) = v.as_ref() {
-                            Some(v.clone())
-                        }
-                        else {
-                            None
-                        }
+                    
+                    let zlib_filecache = if let Ok(v) = zlib_filecache.wrap.lock() {
+                        v.clone()
                     }
                     else {
-                        None
+                        FileCache::default()
                     };
                     
-                    let brotli_filecache = if let Ok(v) = brotli_filecache.lock() {
-                        if let Some(v) = v.as_ref() {
-                            Some(v.clone())
-                        }
-                        else {
-                            None
-                        }
+                    let brotli_filecache = if let Ok(v) = brotli_filecache.wrap.lock() {
+                        v.clone()
                     }
                     else {
-                        None
+                        FileCache::default()
                     };
                     
+                    let websocket_channels = websocket_channels.clone();
                     let _read_thread = std::thread::spawn(move || {
                         
-                        let mut reader = BufReader::new(tcp_stream.try_clone().expect("Cannot clone tcp stream"));
+                        let header = HttpHeader::from_tcp_stream(tcp_stream.try_clone().expect("Cannot clone tcp stream"));
                         
-                        // read the entire header
-                        let mut header = Vec::new();
-                        let mut content_length = None;
-                        let mut accept_encoding = None;
+                        if header.is_none() {
+                            return http_error_out(tcp_stream, 500);
+                        }
+                        let header = header.unwrap();
                         
-                        let mut line = String::new();
-                        while let Ok(_) = reader.read_line(&mut line) { // TODO replace this with a non-line read
-                            if line == "\r\n" { // the newline
-                                break;
-                            }
-                            if let Some(v) = split_header_line(&line, "Content-Length: ") {
-                                content_length = Some(if let Ok(v) = v.parse() {v} else {
-                                    return error_out(&mut tcp_stream, 500)
-                                });
-                            }
-                            if let Some(v) = split_header_line(&line, "Accept-Encoding: ") {
-                                accept_encoding = Some(v.to_string());
-                            }
-                            if line.len() > 4096 || header.len() > 4096 { // some overflow protection
-                                return error_out(&mut tcp_stream, 500);
-                            }
-                            header.push(line.clone());
-                            line.truncate(0);
+                        if let Some(key) = header.sec_websocket_key {
+                            // lets hash the thing
+                            return websocket_channels.handle_websocket(&mut tcp_stream, &header.path, &key);
                         }
                         
-                        if header.len() < 2 {
-                            return error_out(&mut tcp_stream, 500);
-                        }
-                        
-                        if let Some(url) = split_header_line(&header[0], "POST ") {
+                        if header.verb == "POST" {
                             // we have to have a content-length or bust
-                            if content_length.is_none() {
-                                return error_out(&mut tcp_stream, 500);
+                            if header.content_length.is_none() {
+                                return http_error_out(tcp_stream, 500);
                             }
-                            let content_length = content_length.unwrap();
-                            //read the rest
+                            let content_length = header.content_length.unwrap();
+                            
+                            let bytes_total = content_length as usize;
                             let mut body = Vec::new();
-                            loop {
-                                let len = if let Ok(buf) = reader.fill_buf() {
-                                    body.extend_from_slice(buf);
-                                    buf.len()
-                                }else {0};
-                                if len == 0 {
-                                    if body.len() < content_length {
-                                        return error_out(&mut tcp_stream, 500);
-                                    }
-                                    break;
+                            body.resize(bytes_total, 0u8);
+                            // lets read content_length
+                            let mut bytes_left = bytes_total;
+                            while bytes_left > 0 {
+                                let buf = &mut body[(bytes_total - bytes_left)..bytes_total];
+                                let bytes_read = tcp_stream.read(buf);
+                                if bytes_read.is_err() {
+                                    return http_error_out(tcp_stream, 500);
                                 }
-                                if body.len()>40960000 || body.len() as usize >= content_length {
-                                    return error_out(&mut tcp_stream, 500);
+                                let bytes_read = bytes_read.unwrap();
+                                if bytes_read == 0 {
+                                    return http_error_out(tcp_stream, 500);
                                 }
-                                reader.consume(len);
+                                bytes_left -= bytes_read;
                             }
-                            // ok we have the data. Jump to the post handler
-                            return Self::handle_post(&mut tcp_stream, url, body);
+                            
+                            return Self::handle_post(tcp_stream, &header.path, body);
                         }
-
-                        if let Some(url) = split_header_line(&header[0], "GET ") {
-                            if let Some(accept_encoding) = accept_encoding {
-                                return Self::handle_get(&mut tcp_stream, url, accept_encoding, zlib_filecache, brotli_filecache)
+                        
+                        if header.verb == "GET" {
+                            if let Some(accept_encoding) = header.accept_encoding {
+                                return Self::handle_get(
+                                    tcp_stream,
+                                    &header.path,
+                                    accept_encoding,
+                                    zlib_filecache,
+                                    brotli_filecache
+                                )
                             }
                         }
                         
-                        return error_out(&mut tcp_stream, 500);
+                        return http_error_out(tcp_stream, 500);
                     });
                 }
             })
@@ -337,56 +328,5 @@ impl HttpServer {
     }
 }
 
-fn write_bytes_to_tcp_stream_no_error(tcp_stream: &mut TcpStream, bytes: &[u8]) {
-    let bytes_total = bytes.len();
-    let mut bytes_left = bytes_total;
-    while bytes_left > 0 {
-        let buf = &bytes[(bytes_total - bytes_left)..bytes_total];
-        if let Ok(bytes_written) = tcp_stream.write(buf) {
-            if bytes_written == 0 {
-                return
-            }
-            bytes_left -= bytes_written;
-        }
-        else {
-            return
-        }
-    }
-}
 
-fn split_header_line<'a>(inp: &'a str, what: &str) -> Option<&'a str> {
-    let mut what_lc = what.to_string();
-    what_lc.make_ascii_lowercase();
-    let mut inp_lc = inp.to_string();
-    inp_lc.make_ascii_lowercase();
-    if inp_lc.starts_with(&what_lc) {
-        return Some(&inp[what.len()..(inp.len() - 2)])
-    }
-    None
-}
 
-fn parse_url_file(url: &str) -> Option<String> {
-    
-    // find the end_of_name skipping everything else
-    let end_of_name = url.find(' ');
-    if end_of_name.is_none() {
-        return None;
-    }
-    let end_of_name = end_of_name.unwrap();
-    let end_of_name = if let Some(q) = url.find('?') {
-        end_of_name.min(q)
-    }else {end_of_name};
-    
-    let mut url = url[0..end_of_name].to_string();
-    
-    if url.ends_with("/") {
-        url.push_str("index.html");
-    }
-    
-    Some(url)
-}
-
-fn error_out(tcp_stream: &mut TcpStream, code: usize) {
-    write_bytes_to_tcp_stream_no_error(tcp_stream, format!("HTTP/1.1 {}\r\n\r\n", code).as_bytes());
-    let _ = tcp_stream.shutdown(Shutdown::Both);
-}

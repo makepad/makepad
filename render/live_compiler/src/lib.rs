@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 pub mod analyse;
-pub mod ast;
+pub mod shaderast;
 pub mod builtin;
 pub mod const_eval;
 pub mod const_gather;
@@ -17,7 +17,8 @@ pub mod lex;
 pub mod lhs_check;
 pub mod lit;
 pub mod math;
-pub mod parse;
+pub mod shaderparser;
+pub mod liveparser;
 pub mod span;
 pub mod swizzle;
 pub mod token;
@@ -25,8 +26,7 @@ pub mod ty;
 pub mod ty_check;
 pub mod util;
 pub mod val;
-#[macro_use]
-pub mod shadergen;
 pub mod colors;
-pub mod geometry;
-pub mod liveparse;
+pub mod livestyles;
+pub mod livetypes;
+pub mod detok;

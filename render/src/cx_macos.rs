@@ -16,10 +16,10 @@ impl Cx {
         let mut metal_cx = MetalCx::new();
         
         let mut metal_windows: Vec<MetalWindow> = Vec::new();
-
+        
         self.mtl_compile_all_shaders(&metal_cx);
 
-        self.load_theme_fonts();
+        self.load_all_fonts();
         
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
@@ -223,7 +223,7 @@ impl Cx {
                     },
                     Event::Signal{..}=>{
                         self.call_event_handler(&mut event_handler, &mut event);
-                        self.call_signals(&mut event_handler);
+                        self.call_signals_and_triggers(&mut event_handler);
                     },
                     _ => {
                         self.call_event_handler(&mut event_handler, &mut event);
@@ -234,18 +234,14 @@ impl Cx {
                 }
             }
             
-            // show the timer
-            if self.shader_recompiles.len()>0{
-                
-                let mut shader_results = Vec::new();
-                for shader_id in &self.shader_recompiles {
-                    shader_results.push(Self::mtl_compile_shader(*shader_id, true, &mut self.shaders[*shader_id], &metal_cx, &mut self.shader_inherit_cache));
-                }
-                
-                self.shader_recompiles.truncate(0);
-                self.call_shader_recompile_event(shader_results, &mut event_handler);
+            if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0{
+                let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
+                let mut errors = self.process_live_styles_changes();
+                self.mtl_update_all_shaders(&metal_cx, &mut errors);
+                self.call_live_recompile_event(changed_live_bodies, errors ,&mut event_handler);
             }
-                
+            
+            self.process_live_style_errors();
             
             if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
                 true

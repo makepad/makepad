@@ -2,12 +2,12 @@ use makepad_render::*;
 use crate::buttonlogic::*;
 use crate::desktopbutton::*;
 use crate::windowmenu::*;
-use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct DesktopWindow {
     pub window: Window,
     pub pass: Pass,
+    pub clear_color: Color,
     pub color_texture: Texture,
     pub depth_texture: Texture,
     pub caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
@@ -46,8 +46,9 @@ impl DesktopWindow {
         Self {
             window: Window::new(cx),
             pass: Pass::default(),
-            color_texture: Texture::default(),
-            depth_texture: Texture::default(),
+            clear_color: Color::parse_hex_str("1e").unwrap(),
+            color_texture: Texture::new(cx),
+            depth_texture: Texture::new(cx),
             main_view: View::new(cx),
             caption_view: View::new(cx),
             inner_view: View::new(cx),
@@ -61,7 +62,7 @@ impl DesktopWindow {
             window_menu: WindowMenu::new(cx),
             default_menu: Menu::main(vec![
                 Menu::sub("App", vec![
-                    Menu::item("Quit App",  Cx::command_quit()),
+                    Menu::item("Quit App", Cx::command_quit()),
                 ]),
             ]),
             caption_text: Text::new(cx),
@@ -74,10 +75,13 @@ impl DesktopWindow {
         }
     }
     
-    pub fn text_style_window_caption() ->TextStyleId{uid!()}
-    
-    pub fn style(cx:&mut Cx, _opt:&StyleOptions){
-        Self::text_style_window_caption().set(cx, Theme::text_style_unscaled().get(cx));
+    pub fn style(cx: &mut Cx) {
+        live_body!(cx, r#"
+            self::color_bg_selected_over: #3d;
+            self::text_style_window_caption: TextStyle{
+                ..crate::widgetstyle::text_style_unscaled
+            }
+        "#);
     }
     
     pub fn handle_desktop_window(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
@@ -91,7 +95,7 @@ impl DesktopWindow {
                 self.window.xr_start_presenting(cx);
             }
         }
-
+        
         if let ButtonEvent::Clicked = self.fullscreen_btn.handle_button(cx, event) {
             if self.window.is_fullscreen(cx) {
                 self.window.normal_window(cx);
@@ -169,20 +173,20 @@ impl DesktopWindow {
         
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
-        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(pick!(30, 30, 30).get(cx)));
-        self.pass.set_depth_texture(cx, &mut self.depth_texture, ClearDepth::ClearWith(1.0));
+        self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(self.clear_color));
+        self.pass.set_depth_texture(cx, self.depth_texture, ClearDepth::ClearWith(1.0));
         
         let _ = self.main_view.begin_view(cx, Layout::default());
         
         if self.caption_view.begin_view(cx, Layout {
-            walk:Walk::wh(Width::Fill, Height::Compute),
+            walk: Walk::wh(Width::Fill, Height::Compute),
             ..Layout::default()
         }).is_ok() {
-            self.caption_text.text_style = Self::text_style_window_caption().get(cx);
-            self.caption_bg.color = Theme::color_bg_selected_over().get(cx);//cx.colors[self.caption_bg_color];
+            self.caption_text.text_style = live_text_style!(cx, self::text_style_window_caption);
+            self.caption_bg.color = live_color!(cx, self::color_bg_selected_over); //cx.colors[self.caption_bg_color];
             // alright here we draw our platform buttons.
             match cx.platform_type {
-                PlatformType::Linux | PlatformType::Windows => {
+                PlatformType::Linux | PlatformType::Windows | PlatformType::Unknown => {
                     
                     let bg_inst = self.caption_bg.begin_quad(cx, Layout {
                         align: Align::right_top(),
@@ -206,9 +210,9 @@ impl DesktopWindow {
                     self.close_btn.draw_desktop_button(cx, DesktopButtonType::WindowsClose);
                     
                     // change alignment
-                    cx.change_turtle_align_x(0.5); //Align::center());
+                    cx.change_turtle_align_x_cab(0.5); //Align::center());
                     cx.compute_turtle_height();
-                    cx.change_turtle_align_y(0.5); //Align::center());
+                    cx.change_turtle_align_y_cab(0.5); //Align::center());
                     cx.reset_turtle_pos();
                     cx.move_turtle(50., 0.);
                     // we need to store our caption rect somewhere.
@@ -222,7 +226,7 @@ impl DesktopWindow {
                     if let Some(menu) = menu {
                         cx.update_menu(menu);
                     }
-                    else{
+                    else {
                         cx.update_menu(&self.default_menu);
                     }
                     let bg_inst = self.caption_bg.begin_quad(cx, Layout {
@@ -235,8 +239,8 @@ impl DesktopWindow {
                     self.caption_bg.end_quad(cx, bg_inst);
                     cx.turtle_new_line();
                 },
-                PlatformType::WASM => {
-                    if self.window.is_fullscreen(cx){ // put a bar at the top
+                PlatformType::Web{..} => {
+                    if self.window.is_fullscreen(cx) { // put a bar at the top
                         let bg_inst = self.caption_bg.begin_quad(cx, Layout {
                             align: Align::center(),
                             walk: Walk::wh(Width::Fill, Height::Fix(22.)),
@@ -255,7 +259,7 @@ impl DesktopWindow {
             let _ = self.inner_view.begin_view(cx, Layout {abs_origin: Some(Vec2::default()), ..Layout::default()});
         }
         else {
-            let _ = self.inner_view.begin_view(cx, Layout{..Layout::default()});
+            let _ = self.inner_view.begin_view(cx, Layout {..Layout::default()});
         }
         Ok(())
     }
@@ -266,18 +270,18 @@ impl DesktopWindow {
         // window fullscreen?
         
         // only support fullscreen on web atm
-        if !cx.platform_type.is_desktop() && !self.window.is_fullscreen(cx){ 
+        if !cx.platform_type.is_desktop() && !self.window.is_fullscreen(cx) {
             cx.reset_turtle_pos();
             cx.move_turtle(cx.get_width_total() - 50.0, 0.);
             self.fullscreen_btn.draw_desktop_button(cx, DesktopButtonType::Fullscreen);
         }
-
+        
         if self.window.xr_can_present(cx) { // show a switch-to-VRMode button
             cx.reset_turtle_pos();
             cx.move_turtle(cx.get_width_total() - 100.0, 0.);
             self.xr_btn.draw_desktop_button(cx, DesktopButtonType::XRMode);
         }
-
+        
         self.main_view.end_view(cx);
         
         self.pass.end_pass(cx);

@@ -28,14 +28,3 @@ impl fmt::Display for PrettyPrintedFloat {
     }
 }
 
-pub struct PrettyPrintedFloat3Decimals(pub f32);
-
-impl fmt::Display for PrettyPrintedFloat3Decimals {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.0.abs().fract() < 0.00000001 {
-            write!(f, "{}.000", self.0)
-        } else {
-            write!(f, "{:.3}", self.0)
-        }
-    }
-}

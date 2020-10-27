@@ -1,6 +1,6 @@
-use crate::ast::*;
+use crate::shaderast::*;
 use crate::env::VarKind;
-use crate::ident::Ident;
+use crate::ident::{Ident,IdentPath};
 use crate::lit::{Lit, TyLit};
 use crate::span::Span;
 use crate::ty::Ty;
@@ -76,9 +76,9 @@ impl<'a> ConstGatherer<'a> {
             } => self.const_gather_index_expr(span, expr, index_expr),
             ExprKind::Call {
                 span,
-                ident,
+                ident_path,
                 ref arg_exprs,
-            } => self.const_gather_call_expr(span, ident, arg_exprs),
+            } => self.const_gather_call_expr(span, ident_path, arg_exprs),
             ExprKind::MacroCall {
                 span,
                 ref analysis,
@@ -94,8 +94,8 @@ impl<'a> ConstGatherer<'a> {
             ExprKind::Var {
                 span,
                 ref kind,
-                ident,
-            } => self.const_gather_var_expr(span, kind, ident),
+                ident_path,
+            } => self.const_gather_var_expr(span, kind, ident_path),
             ExprKind::Lit { span, lit } => self.const_gather_lit_expr(span, lit),
         }
     }
@@ -128,7 +128,7 @@ impl<'a> ConstGatherer<'a> {
                 ident: struct_ident,
             } => self.const_gather_call_expr(
                 span,
-                Ident::new(format!("{}::{}", struct_ident, ident)),
+                IdentPath::from_two(*struct_ident, ident),
                 arg_exprs,
             ),
             _ => panic!(),
@@ -143,7 +143,7 @@ impl<'a> ConstGatherer<'a> {
         self.const_gather_expr(expr);
     }
 
-    fn const_gather_call_expr(&self, _span: Span, _ident: Ident, arg_exprs: &[Expr]) {
+    fn const_gather_call_expr(&self, _span: Span, _ident_path: IdentPath, arg_exprs: &[Expr]) {
         for arg_expr in arg_exprs {
             self.const_gather_expr(arg_expr);
         }
@@ -164,7 +164,7 @@ impl<'a> ConstGatherer<'a> {
         }
     }
 
-    fn const_gather_var_expr(&self, _span: Span, _kind: &Cell<Option<VarKind>>, _ident: Ident) {}
+    fn const_gather_var_expr(&self, _span: Span, _kind: &Cell<Option<VarKind>>, _ident_path: IdentPath) {}
 
     fn const_gather_lit_expr(&self, _span: Span, _lit: Lit) {}
 

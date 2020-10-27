@@ -6,6 +6,8 @@ impl Cx {
     where F: FnMut(&mut Cx, &mut Event),
     {
         self.platform_type = PlatformType::Linux;
+        // 
+        self.gpu_info.performance = GpuPerformance::Tier1;
         
         let mut xlib_app = XlibApp::new();
         
@@ -17,7 +19,7 @@ impl Cx {
         
         self.opengl_compile_all_shaders(&opengl_cx);
         
-        self.load_theme_fonts();
+        self.load_all_fonts();
         
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
@@ -216,11 +218,11 @@ impl Cx {
                             }
                         }
                     },
+                    Event::None => {
+                    },
                     Event::Signal {..} => {
                         self.call_event_handler(&mut event_handler, &mut event);
-                        self.call_signals(&mut event_handler);
-                    },
-                    Event::None => {
+                        self.call_signals_and_triggers(&mut event_handler);
                     },
                     _ => {
                         self.call_event_handler(&mut event_handler, &mut event);
@@ -230,14 +232,16 @@ impl Cx {
                     xlib_app.terminate_event_loop();
                 }
             }
-    
-            let mut shader_results = Vec::new();
-            for shader_id in &self.shader_recompiles {
-                shader_results.push(Self::opengl_compile_shader(*shader_id, true, &mut self.shaders[*shader_id], &opengl_cx, &mut self.shader_inherit_cache));
-            }
-            self.shader_recompiles.truncate(0);
-            self.call_shader_recompile_event(shader_results, &mut event_handler);
             
+            if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0{
+                let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
+                let mut errors = self.process_live_styles_changes();
+                self.opengl_update_all_shaders(&opengl_cx, &mut errors);
+                self.call_live_recompile_event(changed_live_bodies, errors ,&mut event_handler);
+            }
+            
+            self.process_live_style_errors();
+
             if !paint_dirty && self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
                 true
             } else {

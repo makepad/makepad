@@ -2,148 +2,56 @@ use crate::util::PrettyPrintedFloat;
 use makepad_microserde::*;
 use std::fmt;
 
-#[derive(Clone, Copy, Default, Debug, PartialEq, SerRon, DeRon)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32
-}
 
-impl Rect {
-    
-    pub fn contains(&self, x: f32, y: f32) -> bool {
-        return x >= self.x && x <= self.x + self.w &&
-        y >= self.y && y <= self.y + self.h;
-    }
-    pub fn intersects(&self, r: Rect) -> bool {
-        !(
-            r.x > self.x + self.w ||
-            r.x + r.w < self.x ||
-            r.y > self.y + self.h ||
-            r.y + r.h < self.y
-        )
-    }
-    
-    pub fn contains_with_margin(&self, x: f32, y: f32, margin: &Option<Margin>) -> bool {
-        if let Some(margin) = margin {
-            return x >= self.x - margin.l && x <= self.x + self.w + margin.r &&
-            y >= self.y - margin.t && y <= self.y + self.h + margin.b;
-        }
-        else {
-            return self.contains(x, y);
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default, Debug)]
-pub struct Align {
-    pub fx: f32,
-    pub fy: f32
-}
-
-impl Align {
-    pub fn left_top() -> Align {Align {fx: 0., fy: 0.}}
-    pub fn center_top() -> Align {Align {fx: 0.5, fy: 0.0}}
-    pub fn right_top() -> Align {Align {fx: 1.0, fy: 0.0}}
-    pub fn left_center() -> Align {Align {fx: 0.0, fy: 0.5}}
-    pub fn center() -> Align {Align {fx: 0.5, fy: 0.5}}
-    pub fn right_center() -> Align {Align {fx: 1.0, fy: 0.5}}
-    pub fn left_bottom() -> Align {Align {fx: 0., fy: 1.0}}
-    pub fn center_bottom() -> Align {Align {fx: 0.5, fy: 1.0}}
-    pub fn right_bottom() -> Align {Align {fx: 1.0, fy: 1.0}}
-}
-
-#[derive(Clone, Copy, Default, Debug)]
-pub struct Margin {
-    pub l: f32,
-    pub t: f32,
-    pub r: f32,
-    pub b: f32
-}
-
-impl Margin {
-    pub fn zero() -> Margin {
-        Margin {l: 0.0, t: 0.0, r: 0.0, b: 0.0}
-    }
-    
-    pub fn all(v: f32) -> Margin {
-        Margin {l: v, t: v, r: v, b: v}
-    }
-    
-    pub fn left(v: f32) -> Margin {
-        Margin {l: v, t: 0.0, r: 0.0, b: 0.0}
-    }
-    
-    pub fn top(v: f32) -> Margin {
-        Margin {l: 0.0, t: v, r: 0.0, b: 0.0}
-    }
-    
-    pub fn right(v: f32) -> Margin {
-        Margin {l: 0.0, t: 0.0, r: v, b: 0.0}
-    }
-    
-    pub fn bottom(v: f32) -> Margin {
-        Margin {l: 0.0, t: 0.0, r: 0.0, b: v}
-    }
-    
-}
-
-#[derive(Clone, Copy, Default, Debug)]
-pub struct Padding {
-    pub l: f32,
-    pub t: f32,
-    pub r: f32,
-    pub b: f32
-}
-
-impl Padding {
-    pub fn zero() -> Padding {
-        Padding {l: 0.0, t: 0.0, r: 0.0, b: 0.0}
-    }
-    pub fn all(v: f32) -> Padding {
-        Padding {l: v, t: v, r: v, b: v}
-    }
-}
-
-
-#[derive(Copy, Clone, Debug)]
-pub enum Direction {
-    Left,
-    Right,
-    Up,
-    Down
-}
-
-impl Default for Direction {
-    fn default() -> Self {
-        Direction::Right
-    }
-}
-
-#[derive(Copy, Clone, SerRon, DeRon)]
-pub enum Axis {
-    Horizontal,
-    Vertical
-}
-
-impl Default for Axis {
-    fn default() -> Self {
-        Axis::Horizontal
-    }
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, SerBin, DeBin, PartialEq, Debug)]
 pub struct Mat4 {
     pub v: [f32; 16],
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, SerBin, DeBin, PartialEq, Debug)]
 pub struct Transform {
-    pub orientation: Vec4,
+    pub orientation: Quat,
     pub position: Vec3
 }
 
+impl Transform {
+    pub fn to_mat4(&self) -> Mat4 {
+        let q = self.orientation;
+        let t = self.position;
+        return Mat4 {v: [
+            (1.0 - 2.0 * q.b * q.b - 2.0 * q.c * q.c),
+            (2.0 * q.a * q.b - 2.0 * q.c * q.d),
+            (2.0 * q.a * q.c + 2.0 * q.b * q.d),
+            0.0,
+            (2.0 * q.a * q.b + 2.0 * q.c * q.d),
+            (1.0 - 2.0 * q.a * q.a - 2.0 * q.c * q.c),
+            (2.0 * q.b * q.c - 2.0 * q.a * q.d),
+            0.0,
+            (2.0 * q.a * q.c - 2.0 * q.b * q.d),
+            (2.0 * q.b * q.c + 2.0 * q.a * q.d),
+            (1.0 - 2.0 * q.a * q.a - 2.0 * q.b * q.b),
+            0.0,
+            t.x,
+            t.y,
+            t.z,
+            1.0
+        ]}
+    }
+    
+    pub fn from_lerp(a:Transform, b:Transform, f:f32)->Self{
+        Transform{
+            orientation: Quat::from_slerp(a.orientation, b.orientation, f),
+            position: Vec3::from_lerp(a.position, b.position, f)
+        }
+    }
+    
+    pub fn from_slerp_orientation(a:Transform, b:Transform, f:f32)->Self{
+        Transform{
+            orientation: Quat::from_slerp(a.orientation, b.orientation, f),
+            position: b.position
+        }
+    }
+}
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, SerRon, DeRon)]
 pub struct Vec2 {
@@ -152,6 +60,9 @@ pub struct Vec2 {
 }
 
 impl Vec2 {
+    pub fn all(x: f32) -> Vec2 {
+        Vec2 {x: x, y: x}
+    }
     
     pub fn distance(&self, other: &Vec2) -> f32 {
         let dx = self.x - other.x;
@@ -159,12 +70,16 @@ impl Vec2 {
         (dx * dx + dy * dy).sqrt()
     }
 }
+
+const TORAD: f32 = 0.017453292519943295;
+const TODEG: f32 = 57.295779513082321;
+
 /*
 pub fn vec2(x:f32, y:f32)->Vec2{
     Vec2{x:x, y:y}
 }*/
 
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, SerBin, DeBin, PartialEq, Debug)]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
@@ -172,14 +87,27 @@ pub struct Vec3 {
 }
 
 impl Vec3 {
-    pub fn to_vec2(&self) -> Vec2{
-        Vec2{x:self.x, y:self.y}
+    
+    pub fn from_lerp(a:Vec3, b:Vec3, f:f32)->Vec3{
+        Vec3{
+            x: (b.x - a.x) * f + a.x,
+            y: (b.y - a.y) * f + a.y,
+            z: (b.z - a.z) * f + a.z
+        }
     }
-
+    
+    pub fn all(x: f32) -> Vec3 {
+        Vec3 {x: x, y: x, z: x}
+    }
+    
+    pub fn to_vec2(&self) -> Vec2 {
+        Vec2 {x: self.x, y: self.y}
+    }
+    
     pub fn scale(&self, f: f32) -> Vec3 {
         Vec3 {x: self.x * f, y: self.y * f, z: self.z * f}
     }
-
+    
     pub fn add(a: Vec3, b: Vec3) -> Vec3 {
         Vec3 {x: a.x + b.x, y: a.y + b.y, z: a.z + b.z}
     }
@@ -249,20 +177,20 @@ impl Plane {
         return Self::from_point_normal(p1, normal);
     }
     
-    pub fn intersect_line(&self, v1: Vec3, v2: Vec3)->Vec3{
+    pub fn intersect_line(&self, v1: Vec3, v2: Vec3) -> Vec3 {
         let diff = Vec3::sub(v1, v2);
         let denom = self.a * diff.x + self.b * diff.y + self.c * diff.z;
         if denom == 0.0 {
             return Vec3::add(v1, v2).scale(0.5)
         }
         let u = (self.a * v1.x + self.b * v1.y + self.c * v1.z + self.d) / denom;
-        return Vec3::add(v1, Vec3::sub(v2,v1).scale(u))
+        return Vec3::add(v1, Vec3::sub(v2, v1).scale(u))
     }
 }
 
 
 
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, SerBin, DeBin, PartialEq)]
 pub struct Vec4 {
     pub x: f32,
     pub y: f32,
@@ -284,9 +212,80 @@ impl fmt::Display for Vec4 {
 }
 
 impl Vec4 {
-    pub fn to_vec3(&self)->Vec3{
+    pub fn all(v: f32) -> Self {
+        Self {x: v, y: v, z: v, w: v}
+    }
+    pub fn to_vec3(&self) -> Vec3 {
         Vec3 {x: self.x, y: self.y, z: self.z}
     }
+    pub fn dot(&self, other: Vec4) -> f32 {
+        self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w
+    }
+}
+
+
+#[derive(Clone, Copy, Default, Debug, SerBin, DeBin, PartialEq)]
+pub struct Quat {
+    pub a: f32,
+    pub b: f32,
+    pub c: f32,
+    pub d: f32
+}
+
+impl Quat {
+    pub fn dot(&self, other: Quat) -> f32 {
+        self.a * other.a + self.b * other.b + self.c * other.c + self.d * other.d
+    }
+    
+    pub fn neg(&self) -> Quat {
+        Quat {a: -self.a, b: -self.b, c: -self.c, d: -self.d}
+    }
+    
+    pub fn get_angle_with(&self, other: Quat) -> f32 {
+        let dot = self.dot(other);
+        (2.0 * dot * dot - 1.0).acos() * TODEG
+    }
+    
+    pub fn from_slerp(n: Quat, mut m: Quat, t:f32) -> Quat {
+        // calc cosine
+        let mut cosom = n.dot(m);
+        // adjust signs (if necessary)
+        if cosom < 0.0 {
+            cosom = -cosom;
+            m = m.neg();
+        }
+        // calculate coefficients
+        let (scale0, scale1) = if 1.0 - cosom > 0.000001 {
+            // standard case (slerp)
+            let omega = cosom.acos();
+            let sinom = omega.sin();
+            ( ((1.0 - t) * omega).sin() / sinom, (t * omega).sin() / sinom )
+        } else {
+            (1.0 - t, t)
+        };
+        // calculate final values
+        (Quat{
+            a:scale0 * n.a + scale1 * m.a,
+            b:scale0 * n.b + scale1 * m.b,
+            c:scale0 * n.c + scale1 * m.c,
+            d:scale0 * m.d + scale1 * m.d
+        }).normalized()
+    }
+    
+    pub fn length(self)->f32{
+        return self.dot(self).sqrt()
+    }
+    
+    pub fn normalized(&mut self)->Quat{
+        let len = self.length();
+        Quat{
+            a:self.a / len,
+            b:self.b / len,
+            c:self.c / len,
+            d:self.d / len,
+        }
+    }
+    
 }
 
 /*
@@ -317,46 +316,88 @@ impl Mat4 {
         ]}
     }
     
-    pub fn from_transform(transform: Transform) -> Mat4 {
-        let q = transform.orientation;
-        let t = transform.position;
-        return Mat4 {v: [
-            (1.0 - 2.0 * q.y * q.y - 2.0 * q.z * q.z),
-            (2.0 * q.x * q.y - 2.0 * q.z * q.w),
-            (2.0 * q.x * q.z + 2.0 * q.y * q.w),
-            0.0,
-            (2.0 * q.x * q.y + 2.0 * q.z * q.w),
-            (1.0 - 2.0 * q.x * q.x - 2.0 * q.z * q.z),
-            (2.0 * q.y * q.z - 2.0 * q.x * q.w),
-            0.0,
-            (2.0 * q.x * q.z - 2.0 * q.y * q.w),
-            (2.0 * q.y * q.z + 2.0 * q.x * q.w),
-            (1.0 - 2.0 * q.x * q.x - 2.0 * q.y * q.y),
-            0.0,
-            t.x,
-            t.y,
-            t.z,
-            1.0
-        ]}
-    }
     
-    pub fn rotate_tsrt(t1: Vec3, s: f32, r: Vec3, t2: Vec3) -> Mat4 {
-        const TORAD: f32 = 0.017453292519943295;
-        let cx = f32::cos(r.x * TORAD);
-        let cy = f32::cos(r.y * TORAD);
-        let cz = f32::cos(r.z * TORAD);
-        let sx = f32::sin(r.x * TORAD);
-        let sy = f32::sin(r.y * TORAD);
-        let sz = f32::sin(r.z * TORAD);
+    
+    pub fn txyz_s_ry_rx_txyz(t1: Vec3, s: f32, ry: f32, rx: f32, t2: Vec3) -> Mat4 {
+        
+        let cx = f32::cos(rx * TORAD);
+        let cy = f32::cos(ry * TORAD);
+        //let cz = f32::cos(r.z * TORAD);
+        let sx = f32::sin(rx * TORAD);
+        let sy = f32::sin(ry * TORAD);
+        //let sz = f32::sin(r.z * TORAD);
+        // y first, then x, then z
+        
+        // Y
+        // |  cy,  0,  sy  |
+        // |  0,   1,  0  |
+        // | -sy,  0,  cy  |
+        
+        // X:
+        // |  1,  0,  0  |
+        // |  0,  cx, -sx  |
+        // |  0,  sx,  cx  |
+        
+        // Z:
+        // |  cz, -sz,  0  |
+        // |  sz,  cz,  0  |
+        // |  0,    0,  1  |
+        
+        // X * Y
+        // | cy,           0,    sy |
+        // | -sx*-sy,     cx,   -sx*cy  |
+        // | -sy * cx,    sx,  cx*cy  |
+        
+        // Z * X * Y
+        // | cz * cy + -sz * -sx *-sy,   -sz * cx,    sy *cz + -sz * -sx * cy |
+        // | sz * cy + -sx*-sy * cz,     sz * cx,   sy * sz + cz * -sz * cy  |
+        // | -sy * cx,    sx,  cx*cy  |
+        
+        
+        // Y * X * Z
+        // | c*c,  c, s*s   |
+        // |   0,  c,  -s   |
+        // |  -s,  c*s, c*c |
+        
+        /*       
+        let m0 = s * (cz * cy + (-sz) * (-sx) *(-sy));
+        let m1 = s * (-sz * cx);
+        let m2 = s * (sy *cz + (-sz) * (-sx) * cy);
+        
+        let m4 = s * (sz * cy + (-sx)*(-sy) * cz);
+        let m5 = s * (sz * cx);
+        let m6 = s * (sy * sz + cz * (-sx) * cy);
+        
+        let m8 = s * (-sy*cx);
+        let m9 = s * (sx);
+        let m10 = s * (cx * cy);
+        */
+        
+        let m0 = s * (cy);
+        let m1 = s * (0.0);
+        let m2 = s * (sy);
+        
+        let m4 = s * (-sx * -sy);
+        let m5 = s * (cx);
+        let m6 = s * (-sx * cy);
+        
+        let m8 = s * (-sy * cx);
+        let m9 = s * (sx);
+        let m10 = s * (cx * cy);
+        
+        /*
         let m0 = s * (cy * cz + sx * sy * sz);
         let m1 = s * (-sz * cy + cz * sx * sy);
         let m2 = s * (sy * cx);
+        
         let m4 = s * (sz * cx);
         let m5 = s * (cx * cz);
         let m6 = s * (-sx);
+        
         let m8 = s * (-sy * cz + cy * sx * sz);
         let m9 = s * (sy * sz + cy * sx * cz);
         let m10 = s * (cx * cy);
+        */
         return Mat4 {v: [
             m0,
             m4,
@@ -370,7 +411,7 @@ impl Mat4 {
             m6,
             m10,
             0.0,
-            t2.x + (m0 * t1.x + m1 * t1.y + m1 * t1.z),
+            t2.x + (m0 * t1.x + m1 * t1.y + m2 * t1.z),
             t2.y + (m4 * t1.x + m5 * t1.y + m6 * t1.z),
             t2.z + (m8 * t1.x + m9 * t1.y + m10 * t1.z),
             1.0
@@ -378,7 +419,7 @@ impl Mat4 {
     }
     
     pub fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
-        let f = 1.0 / f32::tan(fov_y / 2.0);
+        let f = 1.0 / f32::tan(fov_y * TORAD / 2.0);
         let nf = 1.0 / (near - far);
         return Mat4 {v: [
             f / aspect,
@@ -400,7 +441,29 @@ impl Mat4 {
         ]}
     }
     
-    pub fn scale_translate(s: f32, x: f32, y: f32, z: f32) -> Mat4 {
+    pub fn translation(x: f32, y: f32, z: f32) -> Mat4 {
+        return Mat4 {v: [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            x,
+            y,
+            z,
+            1.0
+        ]}
+        
+    }
+    
+    pub fn scaled_translation(s: f32, x: f32, y: f32, z: f32) -> Mat4 {
         return Mat4 {v: [
             s,
             0.0,
@@ -422,7 +485,7 @@ impl Mat4 {
         
     }
     
-    pub fn rotate(rx: f32, ry: f32, rz: f32) -> Mat4 {
+    pub fn rotation(rx: f32, ry: f32, rz: f32) -> Mat4 {
         const TORAD: f32 = 0.017453292519943295;
         let cx = f32::cos(rx * TORAD);
         let cy = f32::cos(ry * TORAD);
@@ -499,7 +562,7 @@ impl Mat4 {
         }
     }
     
-    pub fn from_mul(a: &Mat4, b: &Mat4) -> Mat4 {
+    pub fn mul(a: &Mat4, b: &Mat4) -> Mat4 {
         // this is probably stupid. Programmed JS for too long.
         let a = &a.v;
         let b = &b.v;

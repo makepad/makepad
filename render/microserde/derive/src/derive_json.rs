@@ -161,7 +161,7 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
                 }
                 tb.add(") ;");
                 tb.add("s . block_close ( i ) ? ;");
-                tb.add("std :: result :: Result :: Ok ( r ) ;");
+                tb.add("std :: result :: Result :: Ok ( r )");
             }
             else if let Some(fields) = parser.eat_all_struct_fields(){ 
                 tb.add("s . curly_open ( i ) ? ;");

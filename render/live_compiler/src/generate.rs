@@ -1,8 +1,9 @@
 use {
     crate::{
-        ast::*,
+        shaderast::*,
         env::VarKind,
         ident::Ident,
+        ident::IdentPath,
         lit::{Lit, TyLit},
         span::Span,
         ty::Ty,
@@ -25,9 +26,9 @@ pub trait BackendWriter {
         ty: &Ty,
     );
     
-    fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, ident: Ident, shader: &ShaderAst, sep: &str);
+    fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, ident_path: IdentPath, shader: &ShaderAst, sep: &str);
     
-    fn generate_var_expr(&self, string: &mut String, ident: Ident, kind: &Cell<Option<VarKind>>, shader: &ShaderAst, decl: &FnDecl, ty:&Option<Ty>);
+    fn generate_var_expr(&self, string: &mut String, span:Span, ident_path: IdentPath, kind: &Cell<Option<VarKind>>, shader: &ShaderAst, decl: &FnDecl, ty:&Option<Ty>);
     
     fn write_ident(&self, string: &mut String, ident: Ident);
     
@@ -48,7 +49,7 @@ pub struct BlockGenerator<'a> {
     pub shader: &'a ShaderAst,
     pub decl: &'a FnDecl,
     pub backend_writer: &'a dyn BackendWriter,
-    pub use_const_table: bool,
+    pub create_const_table: bool,
     //pub use_generated_cons_fns: bool,
     pub indent_level: usize,
     pub string: &'a mut String,
@@ -224,7 +225,7 @@ impl<'a> BlockGenerator<'a> {
             shader: self.shader,
             decl: Some(self.decl),
             backend_writer: self.backend_writer,
-            use_const_table: self.use_const_table,
+            create_const_table: self.create_const_table,
             //use_hidden_params: self.use_hidden_params,
             //use_generated_cons_fns: self.use_generated_cons_fns,
             string: self.string,
@@ -248,7 +249,7 @@ pub struct ExprGenerator<'a> {
     pub shader: &'a ShaderAst,
     pub decl: Option<&'a FnDecl>,
     pub backend_writer: &'a dyn BackendWriter,
-    pub use_const_table: bool,
+    pub create_const_table: bool,
     //pub use_hidden_params2: bool,
     //pub use_generated_cons_fns: bool,
     pub string: &'a mut String,
@@ -267,7 +268,7 @@ impl<'a> ExprGenerator<'a> {
             }
         }
         match (expr.const_val.borrow().as_ref(), expr.const_index.get()) {
-            (Some(Some(Val::Vec4(_))), Some(mut index)) if self.use_const_table => {
+            (Some(Some(Val::Vec4(_))), Some(mut index)) if self.create_const_table => {
                 self.write_ty_lit(TyLit::Vec4);
                 write!(self.string, "(").unwrap();
                 let mut sep = "";
@@ -284,7 +285,7 @@ impl<'a> ExprGenerator<'a> {
                 }
                 write!(self.string, ")").unwrap();
             },
-            (Some(Some(Val::Float(_))), Some(index)) if self.use_const_table => {
+            (Some(Some(Val::Float(_))), Some(index)) if self.create_const_table => {
                 write!(self.string, "mpsc_const_table").unwrap();
                 if self.backend_writer.const_table_is_vec4() {
                     const_table_index_to_vec4(self.string, index);
@@ -342,9 +343,9 @@ impl<'a> ExprGenerator<'a> {
                 } => self.generate_index_expr(span, expr, index_expr),
                 ExprKind::Call {
                     span,
-                    ident,
+                    ident_path,
                     ref arg_exprs,
-                } => self.generate_call_expr(span, ident, arg_exprs),
+                } => self.generate_call_expr(span, ident_path, arg_exprs),
                 ExprKind::MacroCall {
                     ref analysis,
                     span,
@@ -360,8 +361,8 @@ impl<'a> ExprGenerator<'a> {
                 ExprKind::Var {
                     span,
                     ref kind,
-                    ident,
-                } => self.generate_var_expr(span, kind, ident, &expr.ty.borrow()),
+                    ident_path,
+                } => self.generate_var_expr(span, kind, ident_path, &expr.ty.borrow()),
                 ExprKind::Lit {span, lit} => self.generate_lit_expr(span, lit),
             },
         }
@@ -477,7 +478,7 @@ impl<'a> ExprGenerator<'a> {
             } => {
                 self.generate_call_expr(
                     span,
-                    Ident::new(format!("{}::{}", struct_ident, ident)),
+                    IdentPath::from_two(*struct_ident, ident),
                     arg_exprs,
                 );
             }
@@ -497,7 +498,9 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, "]").unwrap();
     }
     
-    fn generate_call_expr(&mut self, _span: Span, ident: Ident, arg_exprs: &[Expr]) {
+    fn generate_call_expr(&mut self, _span: Span, ident_path: IdentPath, arg_exprs: &[Expr]) {
+        let ident = ident_path.to_struct_fn_ident();
+
         //TODO add built-in check
         self.backend_writer.write_call_ident(&mut self.string, ident, arg_exprs);
         
@@ -511,41 +514,19 @@ impl<'a> ExprGenerator<'a> {
             sep = ", ";
         }
         
-        self.backend_writer.write_call_expr_hidden_args(&mut self.string, self.use_const_table, ident, &self.shader, &sep);
+        self.backend_writer.write_call_expr_hidden_args(&mut self.string, self.create_const_table, ident_path, &self.shader, &sep);
         
         write!(self.string, ")").unwrap();
     }
     
     fn generate_macro_call_expr(
         &mut self,
-        analysis: &Cell<Option<MacroCallAnalysis>>,
+        _analysis: &Cell<Option<MacroCallAnalysis>>,
         _span: Span,
         _ident: Ident,
         _arg_exprs: &[Expr],
     ) {
-        
-        match analysis.get().unwrap() {
-            MacroCallAnalysis::Pick {r, g, b, a} => {
-                self.backend_writer.write_ty_lit(self.string, TyLit::Vec4);
-                
-                write!(
-                    self.string,
-                    "({},{},{},{})",
-                    PrettyPrintedFloat(r),
-                    PrettyPrintedFloat(g),
-                    PrettyPrintedFloat(b),
-                    PrettyPrintedFloat(a)
-                ).unwrap();
-                
-            },
-            MacroCallAnalysis::Slide {v} => {
-                write!(
-                    self.string,
-                    "{}",
-                    PrettyPrintedFloat(v),
-                ).unwrap();
-            }
-        }
+
     }
     
     fn generate_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {
@@ -569,13 +550,13 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, ")").unwrap();
     }
     
-    fn generate_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind>>, ident: Ident, ty:&Option<Ty>) {
+    fn generate_var_expr(&mut self, span: Span, kind: &Cell<Option<VarKind>>, ident_path: IdentPath, ty:&Option<Ty>) {
         //self.backend_write.generate_var_expr(&mut self.string, span, kind, &self.shader, decl)
         if let Some(decl) = self.decl {
-            self.backend_writer.generate_var_expr(&mut self.string, ident, kind, &self.shader, decl, ty)
+            self.backend_writer.generate_var_expr(&mut self.string, span, ident_path, kind, &self.shader, decl, ty)
         }
     }
-    
+
     fn generate_lit_expr(&mut self, _span: Span, lit: Lit) {
         write!(self.string, "{}", lit).unwrap();
     }

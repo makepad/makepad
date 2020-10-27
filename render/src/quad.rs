@@ -1,5 +1,4 @@
 use crate::cx::*;
-
 #[derive(Clone)]
 pub struct Quad {
     pub shader: Shader,
@@ -8,53 +7,40 @@ pub struct Quad {
 }
 
 impl Quad {
-    pub fn proto_with_shader(cx: &mut Cx, shader: ShaderGen, name: &str) -> Self {
-        Self {
-            shader: cx.add_shader(shader, name),
-            ..Self::new(cx)
-        }
-    }
     
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            shader: cx.add_shader(Self::def_quad_shader(), "Quad"),
+            shader: live_shader!(cx, self::shader),
             z: 0.0,
-            color: pick!(green).get(cx)
-        } 
+            color: Color::parse_name("green").unwrap()
+        }
     }
     
-    pub fn geom()->Vec2Id{uid!()}
-    pub fn x() -> FloatId {uid!()}
-    pub fn y() -> FloatId {uid!()}
-    pub fn w() -> FloatId {uid!()}
-    pub fn h() -> FloatId {uid!()}
-    pub fn z() -> FloatId {uid!()}
-    pub fn color() -> ColorId {uid!()}
-    
-    pub fn def_quad_shader() -> ShaderGen {
-        // lets add the draw shader lib
-        let mut sg = Cx::shader_defs(ShaderGen::new()); 
-        sg.geometry.add_quad_2d();
-        
-        sg.compose(shader!{"
+    pub fn style(cx: &mut Cx) {
+        live_body!(cx, r#"self::shader: Shader {
+
+            use crate::shader_std::prelude::*;
             
-            geometry geom: Self::geom();
+            default_geometry: crate::shader_std::quad_2d;
+            geometry geom: vec2;
+            
             varying pos: vec2;
             
-            instance x: Self::x();
-            instance y: Self::y();
-            instance w: Self::w();
-            instance h: Self::h();
-            instance z: Self::z();
-            instance color: Self::color();
+            instance x: float;
+            instance y: float;
+            instance w: float;
+            instance h: float;
+            instance z: float;
+            instance color: vec4;
             
             //let dpi_dilate: float<Uniform>;
-            fn scroll() -> vec2{ 
+            fn scroll() -> vec2 {
                 return draw_scroll.xy;
             }
             
             fn vertex() -> vec4 {
                 let scr = scroll();
+                
                 let clipped: vec2 = clamp(
                     geom * vec2(w, h) + vec2(x, y) - scr,
                     draw_clip.xy,
@@ -68,8 +54,7 @@ impl Quad {
             fn pixel() -> vec4 {
                 return vec4(color.rgb * color.a, color.a);
             }
-            
-        "})
+        }"#);
     }
     
     pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) -> InstanceArea {
@@ -78,7 +63,7 @@ impl Quad {
         cx.begin_turtle(layout, area);
         inst
     }
-
+    
     pub fn end_quad(&mut self, cx: &mut Cx, inst: InstanceArea) -> Area {
         let area = inst.into();
         let rect = cx.end_turtle(area);
@@ -90,9 +75,9 @@ impl Quad {
         let inst = self.draw_quad_rel(cx, Rect::default());
         inst
     }
-
-    pub fn end_quad_fill(&mut self, cx: &mut Cx, inst: &InstanceArea) -> Area {
-        let area:Area = inst.clone().into();
+    
+    pub fn end_quad_fill(&mut self, cx: &mut Cx, inst: InstanceArea) -> Area {
+        let area: Area = inst.into();
         let pos = cx.get_turtle_origin();
         area.set_rect(cx, &Rect {x: pos.x, y: pos.y, w: cx.get_width_total(), h: cx.get_height_total()});
         area
@@ -113,9 +98,8 @@ impl Quad {
     }
     
     pub fn draw_quad_abs(&mut self, cx: &mut Cx, rect: Rect) -> InstanceArea {
-        let inst = cx.new_instance(&self.shader, 1);
-        if inst.need_uniforms_now(cx) {
-        }
+        let inst = cx.new_instance(self.shader, None, 1);
+
         //println!("{:?} {}", area, cx.current_draw_list_id);
         let data = [
             /*x,y,w,h*/rect.x,

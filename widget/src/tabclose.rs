@@ -1,6 +1,5 @@
 use makepad_render::*;
 use crate::buttonlogic::*;
-use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct TabClose {
@@ -12,70 +11,79 @@ pub struct TabClose {
 impl TabClose {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            bg: Quad::new(cx),
+            bg: Quad{
+                z:1.3,
+                ..Quad::new(cx)
+            },
             animator: Animator::default(),
             _bg_area: Area::Empty,
         }
     }
     
-    pub fn walk() -> WalkId {uid!()}
-    pub fn hover() -> FloatId {uid!()}
-    pub fn down() -> FloatId {uid!()}
-    pub fn anim_default() -> AnimId {uid!()}
-    pub fn anim_over() -> AnimId {uid!()}
-    pub fn anim_down() -> AnimId {uid!()}
-    pub fn shader_bg() -> ShaderId {uid!()}
-
-    pub fn style(cx: &mut Cx, opt: &StyleOptions) {
-        Self::walk().set(cx, Walk {
-            width: Width::Fix(10. * opt.scale),
-            height: Height::Fix(10. * opt.scale),
-            margin: Margin {l: -4., t: 0., r: 4., b: 0.}
-        });
+    pub fn style(cx: &mut Cx) {
         
-        Self::anim_default().set(cx,Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(Quad::color(), Ease::Lin, vec![(1.0, Theme::color_text_deselected_focus().get(cx))]),
-            Track::float(Self::hover(), Ease::Lin, vec![(1.0, 0.)]),
-            Track::float(Self::down(), Ease::Lin, vec![(1.0, 0.)]),
-        ]));
-        
-        Self::anim_over().set(cx,Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(Quad::color(), Ease::Lin, vec![
-                (0.0, Theme::color_text_selected_focus().get(cx)),
-                (1.0, Theme::color_text_selected_focus().get(cx))
-            ]),
-            Track::float(Self::hover(), Ease::Lin, vec![(1.0, 1.0)]),
-            Track::float(Self::down(), Ease::Lin, vec![(1.0, 0.)]),
-        ]));
-        
-        Self::anim_down().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(Quad::color(), Ease::Lin, vec![
-                (0.0, Theme::color_text_selected_focus().get(cx)),
-                (1.0, Theme::color_text_selected_focus().get(cx))
-            ]),
-            Track::float(Self::hover(), Ease::Lin, vec![(1.0, 1.0)]),
-            Track::float(Self::down(), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
-        ]));
-        
-        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader!{"
-            instance hover: Self::hover();
-            instance down: Self::down();
-            fn pixel() -> vec4 {
-                let cx = Df::viewport(pos * vec2(w, h));
-                let hover_max: float = (hover * 0.2 + 0.8) * 0.5;
-                let hover_min: float = 1. - hover_max;
-                let c: vec2 = vec2(w, h) * 0.5;
-                cx.rotate(down, c.x, c.y);
-                cx.move_to(c.x * hover_min, c.y * hover_min);
-                cx.line_to(c.x + c.x * hover_max, c.y + c.y * hover_max);
-                cx.move_to(c.x + c.x * hover_max, c.y * hover_min);
-                cx.line_to(c.x * hover_min, c.y + c.y * hover_max);
-                return cx.stroke(color, 1. + down * 0.2);
-                //return df_fill(color);
+        live_body!(cx, r#"
+            self::color_selected_focus: #f;
+            self::color_deselected_focus: #9d;
+            
+            self::walk: Walk { 
+                width: Fix(20.), 
+                height: Fix(20.),
+                margin: {l: -4., t: 0., r: 4., b: 0.}
             }
-        "}));
+            
+            self::anim_default: Anim {
+                play: Cut {duration: 0.2},
+                tracks: [
+                    Color {keys: {1.0: self::color_deselected_focus}, bind_to: makepad_render::quad::shader::color},
+                    Float {keys: {1.0: 0.0}, bind_to: self::shader_bg::hover},
+                    Float {keys: {1.0: 0.0}, bind_to: self::shader_bg::down},
+                ]
+            }
+            
+            self::anim_over: Anim {
+                play: Cut {duration: 0.1},
+                tracks: [
+                    Color {keys: {0.0: self::color_selected_focus}, bind_to: makepad_render::quad::shader::color},
+                    Float {keys: {1.0: 1.0}, bind_to: self::shader_bg::hover},
+                    Float {keys: {1.0: 0.0}, bind_to: self::shader_bg::down},
+                ]
+            }
+            
+            self::anim_down: Anim {
+                play: Cut {duration: 0.2}
+                tracks: [
+                    Color {keys: {0.0: self::color_selected_focus}, bind_to: makepad_render::quad::shader::color},
+                    Float {keys: {1.0: 1.0}, bind_to: self::shader_bg::hover},
+                    Float {keys: {0.0: 0.0, 1.0: 0.0}, bind_to: self::shader_bg::down},
+                ]
+            }
+            
+            self::shader_bg: Shader {
+                use makepad_render::quad::shader::*;
+                
+                instance hover: float;
+                instance down: float;
+
+                fn pixel() -> vec4 {
+                    let cx = Df::viewport(pos * vec2(w, h));
+                    let hover_max: float = (hover * 0.5 + 0.3) * 0.5;
+                    let hover_min: float = 1. - hover_max;
+                    let c: vec2 = vec2(w, h) * 0.5;
+                    cx.circle(c.x, c.y, 12.);
+                    cx.stroke_keep(#4000,1.);
+                    cx.fill(mix(#3332,#555f,hover));
+                    cx.rotate(down, c.x, c.y);
+                    cx.move_to(c.x * hover_min, c.y * hover_min);
+                    cx.line_to(c.x + c.x * hover_max, c.y + c.y * hover_max);
+                    cx.move_to(c.x + c.x * hover_max, c.y * hover_min);
+                    cx.line_to(c.x * hover_min, c.y + c.y * hover_max);
+                    return cx.stroke(color, 1. + hover*0.2);
+                    //return df_fill(color);
+                }
+            }
+        "#);
     }
-    
     
     pub fn handle_tab_close(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
         match event.hits(cx, self._bg_area, HitOpt {
@@ -84,7 +92,7 @@ impl TabClose {
         }) {
             Event::Animate(ae) => self.animator.calc_area(cx, self._bg_area, ae.time),
             Event::FingerDown(_fe) => {
-                self.animator.play_anim(cx, Self::anim_down().get(cx));
+                self.animator.play_anim(cx, live_anim!(cx, self::anim_down));
                 cx.set_down_mouse_cursor(MouseCursor::Hand);
                 return ButtonEvent::Down;
             },
@@ -92,22 +100,22 @@ impl TabClose {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match fe.hover_state {
                     HoverState::In => if fe.any_down {
-                        self.animator.play_anim(cx, Self::anim_down().get(cx))
+                        self.animator.play_anim(cx, live_anim!(cx, self::anim_down))
                     }
                     else {
-                        self.animator.play_anim(cx, Self::anim_over().get(cx))
+                        self.animator.play_anim(cx, live_anim!(cx, self::anim_over))
                     },
-                    HoverState::Out => self.animator.play_anim(cx, Self::anim_default().get(cx)),
+                    HoverState::Out => self.animator.play_anim(cx, live_anim!(cx, self::anim_default)),
                     _ => ()
                 }
             },
             Event::FingerUp(fe) => if fe.is_over {
-                if !fe.is_touch {self.animator.play_anim(cx, Self::anim_over().get(cx))}
-                else {self.animator.play_anim(cx, Self::anim_default().get(cx))}
+                if fe.input_type.has_hovers() {self.animator.play_anim(cx, live_anim!(cx, self::anim_over))}
+                else {self.animator.play_anim(cx, live_anim!(cx, self::anim_default))}
                 return ButtonEvent::Clicked;
             }
             else {
-                self.animator.play_anim(cx, Self::anim_default().get(cx));
+                self.animator.play_anim(cx, live_anim!(cx, self::anim_default));
                 return ButtonEvent::Up;
             }
             _ => ()
@@ -116,12 +124,14 @@ impl TabClose {
     }
     
     pub fn draw_tab_close(&mut self, cx: &mut Cx) {
-        self.animator.init(cx, | cx | Self::anim_default().get(cx));
-        self.bg.shader = Self::shader_bg().get(cx);
-        self.bg.color = self.animator.last_color(cx, Quad::color());
-        let bg_inst = self.bg.draw_quad(cx, Self::walk().get(cx));
-        bg_inst.push_last_float(cx, &self.animator, Self::hover());
-        bg_inst.push_last_float(cx, &self.animator, Self::down());
+        self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
+        self.bg.shader = live_shader!(cx, self::shader_bg);
+        self.bg.color = self.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
+        
+        let bg_inst = self.bg.draw_quad_rel(cx, Rect{x:1.0,y:1.0,w:25.0,h:25.0});
+
+        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::hover));
+        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::down));
         self._bg_area = bg_inst.into();
         self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
     }

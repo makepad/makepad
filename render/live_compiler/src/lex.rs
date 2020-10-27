@@ -1,14 +1,14 @@
-use crate::error::Error;
+use crate::error::LiveError;
 use crate::ident::Ident;
-use crate::lit::{Lit, TyLit};
-use crate::span::Span;
+use crate::lit::{Lit,TyLit};
+use crate::span::{Span,LiveBodyId};
 use crate::token::{Token, TokenWithSpan};
 use crate::colors::Color;
 
 #[derive(Clone, Debug)]
 pub struct Lex<C> {
     chars: C,
-    loc_id: usize,
+    live_body_id: LiveBodyId,
     ch_0: char,
     ch_1: char,
     index: usize,
@@ -19,7 +19,7 @@ impl<C> Lex<C>
 where
     C: Iterator<Item = char>,
 {
-    fn read_token_with_span(&mut self) -> Result<TokenWithSpan, Error> {
+    fn read_token_with_span(&mut self) -> Result<TokenWithSpan, LiveError> {
         let span = self.begin_span();
         loop {
             self.skip_chars_while(|ch| ch.is_ascii_whitespace());
@@ -64,6 +64,17 @@ where
         }
         let span = self.begin_span();
         let token = match (self.ch_0, self.ch_1) {
+            ('"', _) =>{ // read a string
+                self.skip_char();
+                let mut string = String::new();
+                while let Some(ch) = self.read_char_if(|ch| ch != '"' && ch != '\0') {
+                    string.push(ch)
+                }
+                if self.ch_0 == '"'{
+                    self.skip_char();
+                }
+                Token::String(Ident::new(string))
+            }
             ('\0', _) => Token::Eof,
             ('!', '=') => {
                 self.skip_two_chars();
@@ -78,64 +89,13 @@ where
                 let mut hex = Vec::new();
                 while let Some(ch) = self.read_char_if(|ch| ch.is_ascii_hexdigit()) {
                     hex.push(ch as u8)
-                    //digits.push(ch.to_digit(16).unwrap() as u8);
                 }
                 if let Ok(color) = Color::parse_hex(&hex){
-                    Token::Lit(Lit::Vec4(color.to_vec4()))
+                    Token::Lit(Lit::Color(color))
                 }
                 else{
                     return Err(span.error(self, "Cannot parse color".into()));
                 }
-                /*
-                let mut value = 0;
-                match digits.len() {
-                    1 => {
-                        for &digit in digits.iter().cycle().take(6) {
-                            value = value << 4 | digit;
-                        }
-                        for &digit in &[0xF, 0xF] {
-                            value = value << 4 | digit;
-                        }
-                    }
-                    2 => {
-                        for &digit in digits.iter().cycle().take(6) {
-                            value = value << 4 | digit;
-                        }
-                        for &digit in &[0xF, 0xF] {
-                            value = value << 4 | digit;
-                        }
-                    }
-                    3 => {
-                        for &digit in &digits {
-                            value = value << 4 | digit;
-                            value = value << 4 | digit;
-                        }
-                        for &digit in &[0xF, 0xF] {
-                            value = value << 4 | digit;
-                        }
-                    }
-                    4 => {
-                        for &digit in &digits {
-                            value = value << 4 | digit;
-                            value = value << 4 | digit;
-                        }
-                    }
-                    6 => {
-                        for &digit in &digits {
-                            value = value << 4 | digit;
-                        }
-                        for &digit in &[0xF, 0xF] {
-                            value = value << 4 | digit;
-                        }
-                    }
-                    8 => {
-                        for &digit in &digits {
-                            value = value << 4 | digit;
-                        }
-                    }
-                    _ => return Err(span.error(self, "invalid color literal".into())),
-                }
-                */
             }
             ('&', '&') => {
                 self.skip_two_chars();
@@ -177,12 +137,21 @@ where
                 self.skip_two_chars();
                 Token::Arrow
             }
-            ('-', _) => {
-                self.skip_char();
-                Token::Minus
-            }
-            ('.', ch) | (ch, _) if ch.is_ascii_digit() => {
+            ('-','.') => {
                 let mut string = String::new();
+                self.skip_two_chars();
+                string.push('-');
+                string.push('0');
+                string.push('.');
+                self.read_chars_while(&mut string, |ch| ch.is_ascii_digit());
+                Token::Lit(Lit::Float(string.parse::<f32>().unwrap()))
+            }
+            ('-', ch) | ('.', ch) | (ch, _) if ch.is_ascii_digit() => {
+                let mut string = String::new();
+                if self.ch_0 == '-'{
+                    self.skip_char();
+                    string.push('-');
+                }
                 self.read_chars_while(&mut string, |ch| ch.is_ascii_digit());
                 let has_frac_part = if let Some(ch) = self.read_char_if(|ch| ch == '.') {
                     string.push(ch);
@@ -210,10 +179,18 @@ where
                 if has_frac_part || has_exp_part {
                     Token::Lit(Lit::Float(string.parse::<f32>().unwrap()))
                 } else {
-                    Token::Lit(Lit::Int(string.parse::<u32>().map_err(|_| {
+                    Token::Lit(Lit::Int(string.parse::<i32>().map_err(|_| {
                         span.error(self, "overflowing integer literal".into())
                     })?))
                 }
+            }
+            ('-', _) => {
+                self.skip_char();
+                Token::Minus
+            }
+            ('.', '.') => {
+                self.skip_two_chars();
+                Token::Splat
             }
             ('.', _) => {
                 self.skip_char();
@@ -272,12 +249,12 @@ where
                 string.push(self.read_char());
                 self.read_chars_while(&mut string, |ch| ch.is_ascii_alphanumeric() || ch == '_');
                 match string.as_str() {
-                    "geometry" => Token::Geometry,
                     "bool" => Token::TyLit(TyLit::Bool),
                     "break" => Token::Break,
                     "bvec2" => Token::TyLit(TyLit::Bvec2),
                     "bvec3" => Token::TyLit(TyLit::Bvec3),
                     "bvec4" => Token::TyLit(TyLit::Bvec4),
+                    "texture2D" => Token::TyLit(TyLit::Texture2D),
                     "const" => Token::Const,
                     "continue" => Token::Continue,
                     "else" => Token::Else,
@@ -285,12 +262,11 @@ where
                     "float" => Token::TyLit(TyLit::Float),
                     "fn" => Token::Fn,
                     "for" => Token::For,
-                    "from" => Token::From,
+                    //"from" => Token::From,
                     "if" => Token::If,
-                    "impl" => Token::Impl,
-                    "in" => Token::In,
+                    "impl" => Token::Ident(Ident::new("impl")),
+                    //"in" => Token::In,
                     "inout" => Token::Inout,
-                    "instance" => Token::Instance,
                     "int" => Token::TyLit(TyLit::Int),
                     "ivec2" => Token::TyLit(TyLit::Ivec2),
                     "ivec3" => Token::TyLit(TyLit::Ivec3),
@@ -300,12 +276,10 @@ where
                     "mat3" => Token::TyLit(TyLit::Mat3),
                     "mat4" => Token::TyLit(TyLit::Mat4),
                     "return" => Token::Return,
-                    "self" => Token::Self_,
+                    //"self" => Token::Self_,
+                    //"crate"=>Token::Crate,
                     "struct" => Token::Struct,
-                    "texture" => Token::Texture,
-                    "to" => Token::To,
-                    "uniform" => Token::Uniform,
-                    "varying" => Token::Varying,
+                    //"to" => Token::To,
                     "vec2" => Token::TyLit(TyLit::Vec2),
                     "vec3" => Token::TyLit(TyLit::Vec3),
                     "vec4" => Token::TyLit(TyLit::Vec4),
@@ -399,7 +373,7 @@ where
 
     fn begin_span(&mut self) -> SpanTracker {
         SpanTracker {
-            loc_id: self.loc_id,
+            live_body_id: self.live_body_id,
             start: self.index,
         }
     }
@@ -409,9 +383,9 @@ impl<C> Iterator for Lex<C>
 where
     C: Iterator<Item = char>,
 {
-    type Item = Result<TokenWithSpan, Error>;
+    type Item = Result<TokenWithSpan, LiveError>;
 
-    fn next(&mut self) -> Option<Result<TokenWithSpan, Error>> {
+    fn next(&mut self) -> Option<Result<TokenWithSpan, LiveError>> {
         if self.is_done {
             None
         } else {
@@ -425,7 +399,7 @@ where
     }
 }
 
-pub fn lex<C>(chars: C, loc_id: usize) -> Lex<C::IntoIter>
+pub fn lex<C>(chars: C, live_body_id: LiveBodyId) -> Lex<C::IntoIter>
 where
     C: IntoIterator<Item = char>,
 {
@@ -436,14 +410,14 @@ where
         chars,
         ch_0,
         ch_1,
-        loc_id,
+        live_body_id,
         index: 0,
         is_done: false,
     }
 }
 
 struct SpanTracker {
-    loc_id: usize,
+    live_body_id: LiveBodyId,
     start: usize,
 }
 
@@ -451,7 +425,7 @@ impl SpanTracker {
     fn token<C>(&self, lex: &Lex<C>, token: Token) -> TokenWithSpan {
         TokenWithSpan {
             span: Span {
-                loc_id: self.loc_id,
+                live_body_id: self.live_body_id,
                 start: self.start,
                 end: lex.index,
             },
@@ -459,10 +433,10 @@ impl SpanTracker {
         }
     }
 
-    fn error<C>(&self, lex: &Lex<C>, message: String) -> Error {
-        Error {
+    fn error<C>(&self, lex: &Lex<C>, message: String) -> LiveError {
+        LiveError {
             span: Span {
-                loc_id: self.loc_id,
+                live_body_id: self.live_body_id,
                 start: self.start,
                 end: lex.index,
             },

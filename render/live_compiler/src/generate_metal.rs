@@ -1,9 +1,12 @@
 use {
     crate::{
-        ast::*,
-        env::VarKind,
+        shaderast::*,
+        env::{VarKind, Env},
+        span::Span,
+        analyse::ShaderCompileOptions,
         generate::{BackendWriter, BlockGenerator, ExprGenerator},
-        ident::Ident,
+        ident::{Ident, IdentPath},
+        livestyles::LiveStyles,
         lit::TyLit,
         ty::Ty,
     },
@@ -14,24 +17,29 @@ use {
     },
 };
 
-pub fn generate_shader(shader: &ShaderAst, use_const_table: bool) -> String {
+pub fn generate_shader(shader: &ShaderAst, live_styles: &LiveStyles, options: ShaderCompileOptions) -> String {
     let mut string = String::new();
+    let env = Env::new(live_styles);
     ShaderGenerator {
         shader,
-        use_const_table,
+        env: &env,
+        create_const_table: options.create_const_table,
         string: &mut string,
+        backend_writer: &MetalBackendWriter {env: &env}
     }
     .generate_shader();
     string
 }
 
-struct ShaderGenerator<'a> {
+struct ShaderGenerator<'a, 'b> {
     shader: &'a ShaderAst,
-    use_const_table: bool,
+    create_const_table: bool,
     string: &'a mut String,
+    env: &'a Env<'b>,
+    backend_writer: &'a dyn BackendWriter
 }
 
-impl<'a> ShaderGenerator<'a> {
+impl<'a, 'b> ShaderGenerator<'a, 'b> {
     fn generate_shader(&mut self) {
         writeln!(self.string, "#include <metal_stdlib>").unwrap();
         writeln!(self.string, "using namespace metal;").unwrap();
@@ -43,8 +51,8 @@ impl<'a> ShaderGenerator<'a> {
         self.generate_instance_struct();
         self.generate_varying_struct();
         self.generate_const_decls();
-        let vertex_decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
-        let fragment_decl = self.shader.find_fn_decl(Ident::new("pixel")).unwrap();
+        let vertex_decl = self.shader.find_fn_decl(IdentPath::from_str("vertex")).unwrap();
+        let fragment_decl = self.shader.find_fn_decl(IdentPath::from_str("pixel")).unwrap();
         for &(ty_lit, ref param_tys) in vertex_decl
             .cons_fn_deps
             .borrow_mut()
@@ -120,6 +128,18 @@ impl<'a> ShaderGenerator<'a> {
         if !has_default {
             writeln!(self.string, "struct mpsc_default_Uniforms{{}};").unwrap();
         }
+        
+        writeln!(self.string, "struct mpsc_live_Uniforms {{").unwrap();
+        for (ty, qualified_ident_path) in self.shader.livestyle_uniform_deps.borrow().as_ref().unwrap() {
+            // we have a span and an ident_path.
+            // lets fully qualify it
+            write!(self.string, "    ").unwrap();
+            self.backend_writer.write_ty_lit(self.string, ty.maybe_ty_lit().unwrap());
+            write!(self.string, " ").unwrap();
+            qualified_ident_path.write_underscored_ident(self.string);
+            writeln!(self.string, ";").unwrap();
+        }
+        writeln!(self.string, "}};").unwrap();
     }
     
     fn generate_texture_struct(&mut self) {
@@ -250,7 +270,7 @@ impl<'a> ShaderGenerator<'a> {
         for param_ty in param_tys {
             write!(cons_name, "_{}", param_ty).unwrap();
         }
-        if !MetalBackendWriter.use_cons_fn(&cons_name){
+        if !self.backend_writer.use_cons_fn(&cons_name) {
             return
         }
         
@@ -333,57 +353,55 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(self.string, "}}").unwrap();
     }
     
-    fn generate_fn_decl(&mut self, decl: &FnDecl, visited: &mut HashSet<Ident>) {
+    fn generate_fn_decl(&mut self, decl: &FnDecl, visited: &mut HashSet<IdentPath>) {
         FnDeclGenerator {
             shader: self.shader,
             decl,
-            use_const_table: self.use_const_table,
+            create_const_table: self.create_const_table,
             visited,
+            backend_writer: self.backend_writer,
             string: self.string,
         }
         .generate_fn_decl()
     }
     
     fn generate_vertex_main(&mut self) {
-        let decl = self.shader.find_fn_decl(Ident::new("vertex")).unwrap();
+        let decl = self.shader.find_fn_decl(IdentPath::from_str("vertex")).unwrap();
         write!(self.string, "vertex mpsc_Varyings mpsc_vertex_main(").unwrap();
         write!(self.string, "mpsc_Textures mpsc_textures").unwrap();
         write!(
             self.string,
             ", const device mpsc_Geometries *in_geometries [[buffer(0)]]"
-        )
-            .unwrap();
+        ).unwrap();
         write!(
             self.string,
             ", const device mpsc_Instances *in_instances [[buffer(1)]]"
-        )
-            .unwrap();
+        ).unwrap();
         write!(
             self.string,
             ", constant mpsc_pass_Uniforms &mpsc_pass_uniforms [[buffer(2)]]"
-        )
-            .unwrap();
+        ).unwrap();
         write!(
             self.string,
             ", constant mpsc_view_Uniforms &mpsc_view_uniforms [[buffer(3)]]"
-        )
-            .unwrap();
+        ).unwrap();
         write!(
             self.string,
             ", constant mpsc_draw_Uniforms &mpsc_draw_uniforms [[buffer(4)]]"
-        )
-            .unwrap();
+        ).unwrap();
         write!(
             self.string,
             ", constant mpsc_default_Uniforms &mpsc_default_uniforms [[buffer(5)]]"
-        )
-            .unwrap();
-        if self.use_const_table {
+        ).unwrap();
+        write!(
+            self.string,
+            ", constant mpsc_live_Uniforms &mpsc_live_uniforms [[buffer(6)]]"
+        ).unwrap();
+        if self.create_const_table {
             write!(
                 self.string,
-                ", constant const float *mpsc_const_table [[buffer(6)]]"
-            )
-                .unwrap();
+                ", constant const float *mpsc_const_table [[buffer(7)]]"
+            ).unwrap();
         }
         write!(self.string, ", uint vtx_id [[vertex_id]]").unwrap();
         write!(self.string, ", uint inst_id [[instance_id]]").unwrap();
@@ -391,19 +409,17 @@ impl<'a> ShaderGenerator<'a> {
         writeln!(
             self.string,
             "    mpsc_Geometries mpsc_geometries = in_geometries[vtx_id];"
-        )
-            .unwrap();
+        ).unwrap();
         writeln!(
             self.string,
             "    mpsc_Instances mpsc_instances = in_instances[inst_id];"
-        )
-            .unwrap();
+        ).unwrap();
         writeln!(self.string, "    mpsc_Varyings mpsc_varyings;").unwrap();
         write!(self.string, "    mpsc_varyings.mpsc_position = ").unwrap();
-        self.write_ident(decl.ident);
+        self.write_ident(decl.ident_path.get_single().expect("unexpected"));
         write!(self.string, "(").unwrap();
         let mut sep = "";
-        if self.use_const_table {
+        if self.create_const_table {
             write!(self.string, "mpsc_const_table").unwrap();
             sep = ", ";
         }
@@ -453,45 +469,44 @@ impl<'a> ShaderGenerator<'a> {
     }
     
     fn generate_fragment_main(&mut self) {
-        let decl = self.shader.find_fn_decl(Ident::new("pixel")).unwrap();
+        let decl = self.shader.find_fn_decl(IdentPath::from_str("pixel")).unwrap();
         write!(self.string, "fragment float4 mpsc_fragment_main(").unwrap();
         write!(self.string, "mpsc_Varyings mpsc_varyings[[stage_in]]").unwrap();
         write!(
             self.string,
             ", constant mpsc_pass_Uniforms &mpsc_pass_uniforms [[buffer(0)]]"
-        )
-            .unwrap();
+        ).unwrap();
         write!(
             self.string,
             ", constant mpsc_view_Uniforms &mpsc_view_uniforms [[buffer(1)]]"
-        )
-            .unwrap();
+        ).unwrap();
         write!(
             self.string,
             ", constant mpsc_draw_Uniforms &mpsc_draw_uniforms [[buffer(2)]]"
-        )
-            .unwrap();
+        ).unwrap();
         write!(
             self.string,
             ", constant mpsc_default_Uniforms &mpsc_default_uniforms [[buffer(3)]]"
-        )
-            .unwrap();
-        if self.use_const_table {
+        ).unwrap();
+        write!(
+            self.string,
+            ", constant mpsc_live_Uniforms &mpsc_live_uniforms [[buffer(4)]]"
+        ).unwrap();
+        if self.create_const_table {
             write!(
                 self.string,
-                ", constant const float *mpsc_const_table [[buffer(4)]]"
-            )
-                .unwrap();
+                ", constant const float *mpsc_const_table [[buffer(5)]]"
+            ).unwrap();
         }
         write!(self.string, ", mpsc_Textures mpsc_textures").unwrap();
         
         writeln!(self.string, ") {{").unwrap();
         
         write!(self.string, "    return ").unwrap();
-        self.write_ident(decl.ident);
+        self.write_ident(decl.ident_path.get_single().expect("unexpected"));
         write!(self.string, "(").unwrap();
         let mut sep = "";
-        if self.use_const_table {
+        if self.create_const_table {
             write!(self.string, "mpsc_const_table").unwrap();
             sep = ", ";
         }
@@ -518,8 +533,8 @@ impl<'a> ShaderGenerator<'a> {
         ExprGenerator {
             shader: self.shader,
             decl: None,
-            backend_writer: &MetalBackendWriter,
-            use_const_table: self.use_const_table,
+            backend_writer: self.backend_writer,
+            create_const_table: self.create_const_table,
             //use_generated_cons_fns: false,
             string: self.string,
         }
@@ -527,36 +542,38 @@ impl<'a> ShaderGenerator<'a> {
     }
     
     fn write_var_decl(&mut self, is_inout: bool, is_packed: bool, ident: Ident, ty: &Ty) {
-        MetalBackendWriter.write_var_decl(&mut self.string, is_inout, is_packed, ident, ty);
+        self.backend_writer.write_var_decl(&mut self.string, is_inout, is_packed, ident, ty);
     }
-     
+    
     fn write_ident(&mut self, ident: Ident) {
-        MetalBackendWriter.write_ident(&mut self.string, ident);
+        self.backend_writer.write_ident(&mut self.string, ident);
     }
     
     fn write_ty_lit(&mut self, ty_lit: TyLit) {
-        MetalBackendWriter.write_ty_lit(&mut self.string, ty_lit);
+        self.backend_writer.write_ty_lit(&mut self.string, ty_lit);
     }
 }
 
 struct FnDeclGenerator<'a> {
     shader: &'a ShaderAst,
     decl: &'a FnDecl,
-    use_const_table: bool,
-    visited: &'a mut HashSet<Ident>,
+    create_const_table: bool,
+    visited: &'a mut HashSet<IdentPath>,
     string: &'a mut String,
+    backend_writer: &'a dyn BackendWriter
 }
 
 impl<'a> FnDeclGenerator<'a> {
     fn generate_fn_decl(&mut self) {
-        if self.visited.contains(&self.decl.ident) {
+        if self.visited.contains(&self.decl.ident_path) {
             return;
         }
         for &callee in self.decl.callees.borrow().as_ref().unwrap().iter() {
             FnDeclGenerator {
                 shader: self.shader,
+                backend_writer: self.backend_writer,
                 decl: self.shader.find_fn_decl(callee).unwrap(),
-                use_const_table: self.use_const_table,
+                create_const_table: self.create_const_table,
                 visited: self.visited,
                 string: self.string,
             }
@@ -565,7 +582,7 @@ impl<'a> FnDeclGenerator<'a> {
         self.write_var_decl(
             false,
             false,
-            self.decl.ident,
+            self.decl.ident_path.to_struct_fn_ident(),
             self.decl.return_ty.borrow().as_ref().unwrap(),
         );
         write!(self.string, "(").unwrap();
@@ -580,7 +597,7 @@ impl<'a> FnDeclGenerator<'a> {
             );
             sep = ", ";
         }
-        if self.use_const_table {
+        if self.create_const_table {
             write!(self.string, "{}constant float *mpsc_const_table", sep).unwrap();
             sep = ", ";
         }
@@ -641,16 +658,16 @@ impl<'a> FnDeclGenerator<'a> {
         write!(self.string, ") ").unwrap();
         self.generate_block(&self.decl.block);
         writeln!(self.string).unwrap();
-        self.visited.insert(self.decl.ident);
+        self.visited.insert(self.decl.ident_path);
     }
     
     fn generate_block(&mut self, block: &Block) {
         BlockGenerator {
             shader: self.shader,
             decl: self.decl,
-            backend_writer: &MetalBackendWriter,
-            use_const_table: self.use_const_table,
-           // use_generated_cons_fns: false,
+            backend_writer: self.backend_writer,
+            create_const_table: self.create_const_table,
+            // use_generated_cons_fns: false,
             indent_level: 0,
             string: self.string,
         }
@@ -658,16 +675,18 @@ impl<'a> FnDeclGenerator<'a> {
     }
     
     fn write_var_decl(&mut self, is_inout: bool, is_packed: bool, ident: Ident, ty: &Ty) {
-        MetalBackendWriter.write_var_decl(&mut self.string, is_inout, is_packed, ident, ty);
+        self.backend_writer.write_var_decl(&mut self.string, is_inout, is_packed, ident, ty);
     }
 }
 
-struct MetalBackendWriter;
+struct MetalBackendWriter<'a, 'b> {
+    pub env: &'a Env<'b>
+}
 
-impl BackendWriter for MetalBackendWriter {
-    fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, ident: Ident, shader: &ShaderAst, sep:&str) {
+impl<'a, 'b> BackendWriter for MetalBackendWriter<'a, 'b> {
+    fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, ident_path: IdentPath, shader: &ShaderAst, sep: &str) {
         let mut sep = sep;
-        if let Some(decl) = shader.find_fn_decl(ident) {
+        if let Some(decl) = shader.find_fn_decl(ident_path) {
             if use_const_table {
                 write!(string, "{}mpsc_const_table", sep).unwrap();
                 sep = ", ";
@@ -704,76 +723,73 @@ impl BackendWriter for MetalBackendWriter {
         }
     }
     
-    fn generate_var_expr(&self, string: &mut String, ident: Ident, kind: &Cell<Option<VarKind>>, shader: &ShaderAst, decl: &FnDecl, _ty:&Option<Ty>) {
-    
+    fn generate_var_expr(&self, string: &mut String, span: Span, ident_path: IdentPath, kind: &Cell<Option<VarKind >>, shader: &ShaderAst, decl: &FnDecl, _ty: &Option<Ty>) {
+        
         let is_used_in_vertex_shader = decl.is_used_in_vertex_shader.get().unwrap();
         let is_used_in_fragment_shader = decl.is_used_in_fragment_shader.get().unwrap();
         if is_used_in_vertex_shader {
             match kind.get().unwrap() {
                 VarKind::Geometry => write!(string, "mpsc_geometries.").unwrap(),
                 VarKind::Instance => write!(string, "mpsc_instances.").unwrap(),
-                VarKind::Uniform => {
-                    write!(
-                        string,
-                        "mpsc_{}_uniforms.",
-                        shader
-                            .find_uniform_decl(ident)
-                            .unwrap()
-                            .block_ident
-                            .unwrap_or(Ident::new("default")),
-                    )
-                        .unwrap();
-                }
-                VarKind::Texture => write!(string, "mpsc_textures.").unwrap(),
                 VarKind::Varying => write!(string, "mpsc_varyings.").unwrap(),
                 _ => {}
             }
         }
         if is_used_in_fragment_shader {
             match kind.get().unwrap() {
-                VarKind::Uniform => {
-                    write!(
-                        string,
-                        "mpsc_{}_uniforms.",
-                        shader
-                            .find_uniform_decl(ident)
-                            .unwrap()
-                            .block_ident
-                            .unwrap_or(Ident::new("default")),
-                    )
-                        .unwrap();
-                }
-                VarKind::Texture => write!(string, "mpsc_textures.").unwrap(),
                 VarKind::Geometry | VarKind::Instance | VarKind::Varying => {
                     write!(string, "mpsc_varyings.").unwrap()
                 }
                 _ => {}
             }
         }
-        write!(string, "{}", ident).unwrap()
+        match kind.get().unwrap() {
+            VarKind::Uniform => {
+                write!(
+                    string,
+                    "mpsc_{}_uniforms.",
+                    shader
+                        .find_uniform_decl(ident_path.get_single().expect("unexpected"))
+                        .unwrap()
+                        .block_ident
+                        .unwrap_or(Ident::new("default")),
+                )
+                    .unwrap();
+            }
+            VarKind::Texture => write!(string, "mpsc_textures.").unwrap(),
+            VarKind::LiveStyle => {
+                let qualified = self.env.qualify_ident_path(span.live_body_id, ident_path);
+                write!(string, "mpsc_live_uniforms.").unwrap();
+                qualified.write_underscored_ident(string);
+                return
+            },
+            _ => ()
+        }
+        self.write_ident(string, ident_path.get_single().expect("unexpected"));
+        //write!(string, "{}", ident_path.get_single().expect("unexpected")).unwrap()
     }
-
-    fn needs_mul_fn_for_matrix_multiplication(&self)->bool{
+    
+    fn needs_mul_fn_for_matrix_multiplication(&self) -> bool {
         false
     }
     
-    fn needs_unpack_for_matrix_multiplication(&self)->bool{
+    fn needs_unpack_for_matrix_multiplication(&self) -> bool {
         true
     }
     
-    fn  const_table_is_vec4(&self) -> bool{
+    fn const_table_is_vec4(&self) -> bool {
         false
     }
-
-    fn use_cons_fn(&self, what:&str)->bool{
-        match what{
-            "mpsc_mat3_mat4"=>true,
-            "mpsc_mat2_mat4"=>true,
-            "mpsc_mat2_mat3"=>true,
-            _=>false
+    
+    fn use_cons_fn(&self, what: &str) -> bool {
+        match what {
+            "mpsc_mat3_mat4" => true,
+            "mpsc_mat2_mat4" => true,
+            "mpsc_mat2_mat3" => true,
+            _ => false
         }
     }
-
+    
     fn write_var_decl(
         &self,
         string: &mut String,
@@ -953,15 +969,16 @@ impl BackendWriter for MetalBackendWriter {
                     string,
                     "{}",
                     match ident_string.as_ref() {
+                        "line" => "mpsc_line",
                         "thread" => "mpsc_thread",
                         "device" => "mpsc_device",
                         "dfdx" => "mpsc_dfdx",
                         "dfdy" => "mpsc_dfdy",
+                        "coord" => "mpsc_coord",
                         "using" => "mpsc_using",
                         "union" => "mpsc_union",
                         "namespace" => "mpsc_namespace",
-                        "sampler" => "mpsc_sampler",
-                        "coord" => "mpsc_coord",
+                        "sampler" => "mpsc_sampler", 
                         "address" => "mpsc_address",
                         "filter" => "mpsc_filter",
                         "mag_filter" => "mpsc_mag_filter",

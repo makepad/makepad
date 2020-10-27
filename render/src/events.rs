@@ -1,7 +1,7 @@
 use crate::cx::*;
+use makepad_microserde::*;
 use std::any::TypeId;
-use std::collections::HashMap;
-use makepad_shader_compiler::shadergen::ShaderGenError;
+use std::collections::{HashMap,BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct KeyModifiers {
@@ -9,6 +9,24 @@ pub struct KeyModifiers {
     pub control: bool,
     pub alt: bool,
     pub logo: bool
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FingerInputType{
+    Mouse,
+    Touch,
+    XR
+}
+
+impl FingerInputType{
+    pub fn is_touch(&self)->bool{*self == FingerInputType::Touch}
+    pub fn is_mouse(&self)->bool{*self == FingerInputType::Mouse}
+    pub fn is_xr(&self)->bool{*self == FingerInputType::XR}
+    pub fn has_hovers(&self)->bool{ *self == FingerInputType::Mouse || *self == FingerInputType::XR}
+}
+
+impl Default for FingerInputType{
+    fn default()->Self{Self::Mouse}
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -20,7 +38,7 @@ pub struct FingerDownEvent {
     pub digit: usize,
     pub tap_count: u32,
     pub handled: bool,
-    pub is_touch: bool,
+    pub input_type: FingerInputType,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
@@ -35,7 +53,7 @@ pub struct FingerMoveEvent {
     pub rect: Rect,
     pub is_over: bool,
     pub digit: usize,
-    pub is_touch: bool,
+    pub input_type: FingerInputType,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
@@ -56,7 +74,7 @@ pub struct FingerUpEvent {
     pub rect: Rect,
     pub digit: usize,
     pub is_over: bool,
-    pub is_touch: bool,
+    pub input_type: FingerInputType,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
@@ -96,7 +114,8 @@ pub struct FingerScrollEvent {
     pub rel: Vec2,
     pub rect: Rect,
     pub scroll: Vec2,
-    pub is_wheel: bool,
+    pub input_type: FingerInputType,
+    //pub is_wheel: bool,
     pub handled_x: bool,
     pub handled_y: bool,
     pub modifiers: KeyModifiers,
@@ -129,11 +148,6 @@ pub struct FrameEvent {
     pub time: f64
 }
 
-#[derive(Clone, Default, Debug)]
-pub struct RedrawEvent {
-    pub area: Area
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileReadEvent {
     pub read_id: u64,
@@ -147,7 +161,17 @@ pub struct TimerEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignalEvent {
-    pub signals: HashMap<Signal, Vec<StatusId>>
+    pub signals: HashMap<Signal, BTreeSet<StatusId>>
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TriggersEvent {
+    pub triggers: HashMap<Area, BTreeSet<TriggerId>>
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TriggerEvent {
+    pub triggers: BTreeSet<TriggerId>
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -157,17 +181,10 @@ pub struct FileWriteEvent {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ShaderRecompileEvent {
-    pub results: Vec<ShaderCompileResult>
+pub struct LiveRecompileEvent {
+    pub changed_live_bodies: BTreeSet<LiveBodyId>,
+    pub errors: Vec<LiveBodyError>
 }
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum ShaderCompileResult{
-    Ok{id:usize},
-    Nop{id:usize},
-    Fail{id:usize, err:ShaderGenError},
-}
-
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyEvent {
@@ -228,13 +245,13 @@ pub struct WindowDragQueryEvent {
     pub response: WindowDragQueryResponse,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, SerBin, DeBin, PartialEq)]
 pub struct XRButton {
     pub value:f32,
     pub pressed:bool
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, SerBin, DeBin,PartialEq)]
 pub struct XRInput {
     pub active: bool,
     pub grip: Transform,
@@ -245,7 +262,7 @@ pub struct XRInput {
     pub axes: [f32;8],
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, SerBin, DeBin, PartialEq)]
 pub struct XRUpdateEvent {
     // alright what data are we stuffing in 
     pub time: f64,
@@ -255,6 +272,12 @@ pub struct XRUpdateEvent {
     pub right_input: XRInput,
     pub last_right_input: XRInput,
     pub other_inputs: Vec<XRInput>
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WebSocketMessageEvent{
+    pub url: String, 
+    pub result: Result<Vec<u8>, String>
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -285,6 +308,8 @@ pub enum Event {
     FileWrite(FileWriteEvent),
     Timer(TimerEvent),
     Signal(SignalEvent),
+    Triggers(TriggersEvent),
+    Trigger(TriggerEvent),
     Command(CommandId),
     KeyFocus(KeyFocusEvent),
     KeyFocusLost(KeyFocusEvent),
@@ -292,7 +317,8 @@ pub enum Event {
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
     TextCopy(TextCopyEvent),
-    ShaderRecompile(ShaderRecompileEvent)
+    LiveRecompile(LiveRecompileEvent),
+    WebSocketMessage(WebSocketMessageEvent),
 }
 
 impl Default for Event {
@@ -313,6 +339,20 @@ pub struct HitOpt {
 }
 
 impl Event {
+    
+    pub fn is_frame_event(&self, cx:&mut Cx, area: Area)->Option<FrameEvent>{
+         match self {
+            Event::Frame(fe) => {
+                for frame_area in &cx._frame_callbacks {
+                    if *frame_area == area {
+                        return Some(fe.clone())
+                    }  
+                }
+            }
+            _=>()
+        }
+        None
+    }
     
     pub fn hits(&mut self, cx: &mut Cx, area: Area, opt: HitOpt) -> Event {
         match self {
@@ -346,25 +386,24 @@ impl Event {
                     );
                 }
             },
+            Event::Triggers(te) => {
+                if let Some(triggers) = te.triggers.get(&area).cloned(){
+                    return Event::Trigger(TriggerEvent{triggers})
+                }
+            }
             Event::Animate(_) => {
-                for anim in &cx.playing_anim_areas {
-                    if anim.area == area {
-                        return self.clone()
-                    }
+                if let Some(_) = cx.playing_anim_areas.get(&area){
+                    return self.clone()
                 }
             },
             Event::Frame(_) => {
-                for frame_area in &cx._frame_callbacks {
-                    if *frame_area == area {
-                        return self.clone()
-                    }
+                if cx._frame_callbacks.contains(&area){
+                    return self.clone()
                 }
             },
             Event::AnimEnded(_) => {
-                for anim in &cx.ended_anim_areas {
-                    if anim.area == area {
-                        return self.clone()
-                    }
+                if let Some(_) = cx.ended_anim_areas.get(&area){
+                    return self.clone()
                 }
             },
             Event::FingerScroll(fe) => {
@@ -515,26 +554,26 @@ impl Signal {
     pub fn is_empty(&self) -> bool {
         self.signal_id == 0
     }
-    
-    pub fn send(&self, cx:&mut Cx, status:StatusId){
-        cx.send_signal(*self, status);
-    }
-
-    pub fn post(&self, status:StatusId){
-        Cx::post_signal(*self, status);
-    }
 }
 
 
 // Status
 
 
-#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
+#[derive(PartialEq, Ord, PartialOrd, Copy, Clone, Hash, Eq, Debug)]
 pub struct StatusId(pub TypeId);
 
 impl Into<StatusId> for TypeId {
     fn into(self) -> StatusId {StatusId(self)}
 }
+
+#[derive(PartialEq, Ord, PartialOrd, Copy, Clone, Hash, Eq, Debug)]
+pub struct TriggerId(pub TypeId);
+
+impl Into<TriggerId> for TypeId {
+    fn into(self) -> TriggerId {TriggerId(self)}
+}
+
 
 
 

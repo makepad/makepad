@@ -8,3 +8,6 @@ license = "MIT"
 
 [dependencies.makepad-microserde]
 path="../../render/microserde"
+
+[dependencies.makepad-http]
+path="../http"
