@@ -1642,7 +1642,6 @@ pub fn define_cocoa_window_class() -> *const Class {
     }
     
     extern fn is_movable_by_window_background(_: &Object, _: Sel) -> BOOL {
-        println!("CALLED!");
         YES
     }
     

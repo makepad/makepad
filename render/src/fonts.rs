@@ -264,7 +264,8 @@ pub struct CxAfterDraw {
     pub trapezoid_text: TrapezoidText,
     pub atlas_pass: Pass,
     pub atlas_view: View,
-    pub atlas_texture: Texture
+    pub atlas_texture: Texture,
+    pub depth_texture: Texture
 }
 
 impl CxAfterDraw {
@@ -277,6 +278,7 @@ impl CxAfterDraw {
         Self {
             trapezoid_text: TrapezoidText::default(),
             atlas_pass: Pass::default(),
+            depth_texture: Texture::new(cx),
             atlas_view: View {
                 always_redraw: true,
                 ..View::new(cx)
@@ -300,6 +302,7 @@ impl CxAfterDraw {
                 ClearColor::InitWith(Color::default())
             };
             self.atlas_pass.add_color_texture(cx, self.atlas_texture, clear);
+            self.atlas_pass.set_depth_texture(cx, self.depth_texture, ClearDepth::ClearWith(1.0));
             let _ = self.atlas_view.begin_view(cx, Layout::default());
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut cx.fonts_atlas.atlas_todo, &mut atlas_todo);
