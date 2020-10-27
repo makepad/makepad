@@ -104,7 +104,7 @@ impl TreeWorld {
                         1.
                     ); 
                     
-                    return camera_projection * (camera_view * view_transform * v);
+                    return camera_projection * (camera_view * (view_transform * v));
                 }
                 
                 fn pixel() -> vec4 {

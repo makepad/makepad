@@ -108,6 +108,14 @@ impl Pass {
             cxpass.matrix_mode = pmm;
         }
     }
+
+    pub fn set_debug(&mut self, cx: &mut Cx, debug:bool){
+        if let Some(pass_id) = self.pass_id{
+            let cxpass = &mut cx.passes[pass_id];
+            cxpass.debug = debug;
+        }
+    }
+
     
     pub fn end_pass(&mut self, cx: &mut Cx) {
         cx.pass_stack.pop();
@@ -174,6 +182,7 @@ pub enum PassMatrixMode{
 
 #[derive(Clone)]
 pub struct CxPass {
+    pub debug: bool,
     pub matrix_mode: PassMatrixMode,
     pub color_textures: Vec<CxPassColorTexture>,
     pub depth_texture: Option<usize>,
@@ -193,6 +202,7 @@ pub struct CxPass {
 impl Default for CxPass {
     fn default() -> Self {
         CxPass {
+            debug: false,
             matrix_mode: PassMatrixMode::Ortho,
             zbias_step: 0.001,
             pass_uniforms: PassUniforms::default(),
