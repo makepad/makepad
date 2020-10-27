@@ -6,6 +6,8 @@ impl Cx {
     where F: FnMut(&mut Cx, &mut Event),
     {
         self.platform_type = PlatformType::Linux;
+        // 
+        self.gpu_info.performance = GpuPerformance::Tier1;
         
         let mut xlib_app = XlibApp::new();
         
