@@ -146,12 +146,11 @@ impl HomePage {
         
         t.text_style = live_text_style!(cx, self::text_style_body);
         t.draw_text(cx, "\
-            Makepad is a creative software development platform built around Rust. \
-            We aim to make the creative software development process as fun as possible! \
-            To do this we will provide a set of visual design tools that modify your \
-            application in real time, as well as a library ecosystem that allows you to \
-            write highly performant multimedia applications. Please note the following text \
-            input doesn't work on mobile-web yet. We also won't email you a confirmation right now, that will follow later.\n");
+            Makepad is a new VR, web and native collaborative shader programming environment. \
+            It will support many different shader modes including many vertex-shaders \
+            besides the well known shader toy SDF programs. This makes shader coding possible \
+            for more compute constrained environments like VR goggles or mobiles.\
+            Try makepad now on a Quest in the quest browser, click the goggles top right of the UI. Try touching the leaves of the tree with your hands! Magic!\n");
         
 
         self.email_input.draw_text_input(cx);
@@ -169,37 +168,15 @@ impl HomePage {
         
         t.draw_text(cx, "\
             The Makepad development platform and library ecosystem are MIT licensed, \
-            and will be available for free as part of Makepad Basic. In the near future, \
-            we will also introduce Makepad Pro, which will be available as a subscription \
-            model. Makepad Pro will include the visual design tools. Because the library \
-            ecosystem is MIT licensed, all applications made with the Pro version are \
-            entirely free licensed.\n");
-        
-        t.draw_text(cx, "\
-            Today, we launch an early alpha of Makepad Basic. This version shows off \
-            the development platform, but does not include the visual design tools or \
-            library ecosystem yet. It is intended as a starting point for feedback \
-            from you! Although Makepad is primarily a native application, its UI \
-            is perfectly capable of running on the web. Try browsing the source code and pressing alt \
-            in a large code file!. To compile code yourself, you have to install \
-            the native version. Right now makepad is set up to compile a simple WASM example you run in a browser from a localhost url.\n");
-        
-        t.text_style = live_text_style!(cx, self::text_style_heading);
-        t.draw_text(cx, "How to use\n");
-        
-        t.text_style = live_text_style!(cx, self::text_style_body);
-        t.draw_text(cx, "\
-            After install (see below) you can open the following file in makepad, and when you change the rust code, \
-            the browser should live reload the wasm application as you type.\
+            for the Quest and in the future iOS we will provide paid, native versions, \
             \n");
         
-        self.example_texts.get_draw(cx).draw_text_input_static(cx, "\
-            open this file the makepad editor UI: main/makepad/examples/webgl_example_wasm/src/sierpinski.rs \n\
-            open this url in your browser: http://127.0.0.1:8000/makepad/examples/webgl_example_wasm/");
-        cx.turtle_new_line();
+        t.draw_text(cx, "\
+            We are still building the collaborative backend, so for now you can simply play with the shader code\
+            \n");
         
         t.text_style = live_text_style!(cx, self::text_style_heading);
-        t.draw_text(cx, "How to install\n");
+        t.draw_text(cx, "How to install the native version\n");
         
         t.text_style = live_text_style!(cx, self::text_style_body);
         t.draw_text(cx, "\
