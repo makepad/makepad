@@ -2,7 +2,7 @@ use crate::cx::*;
 use libc;
 use libc::timeval;
 use makepad_x11_sys as X11_sys;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, BTreeSet, VecDeque};
 use std::ffi::CString;
 use std::ffi::CStr;
 use std::slice;
@@ -476,7 +476,7 @@ impl XlibApp {
                                         abs: window.last_mouse_pos,
                                         rel: window.last_mouse_pos,
                                         rect: Rect::default(),
-                                        is_wheel: true,
+                                        input_type: FingerInputType::Mouse,
                                         modifiers: self.xkeystate_to_modifiers(button.state),
                                         handled_x: false,
                                         handled_y: false,
@@ -780,7 +780,9 @@ impl XlibApp {
         unsafe {
             if let Ok(mut signals_locked) = (*GLOBAL_XLIB_APP).signals.lock() {
                 let mut signals = HashMap::new();
-                signals.insert(signal, vec![status]);
+                let mut set = BTreeSet::new();
+                set.insert(status);
+                signals.insert(signal, set);
                 signals_locked.push(Event::Signal(SignalEvent {signals}));
                 //let mut f = unsafe { File::from_raw_fd((*GLOBAL_XLIB_APP).display_fd) };
                 //let _ = write!(&mut f, "\0");
@@ -1483,7 +1485,7 @@ impl XlibWindow {
             rect: Rect::default(),
             digit: digit,
             handled: false,
-            is_touch: false,
+            input_type:FingerInputType::Mouse,
             modifiers: modifiers,
             tap_count: 0,
             time: self.time_now()
@@ -1510,7 +1512,7 @@ impl XlibWindow {
             rel_start: Vec2::default(),
             digit: digit,
             is_over: false,
-            is_touch: false,
+            input_type:FingerInputType::Mouse,
             modifiers: modifiers,
             time: self.time_now()
         })]);
@@ -1530,7 +1532,7 @@ impl XlibWindow {
                     abs_start: Vec2::default(),
                     rel_start: Vec2::default(),
                     is_over: false,
-                    is_touch: false,
+                    input_type:FingerInputType::Mouse,
                     modifiers: modifiers.clone(),
                     time: self.time_now()
                 }));

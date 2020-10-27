@@ -173,6 +173,8 @@ impl Cx {
                         ptr::null(),
                         instances as i32
                     );
+                    
+                    gl::BindVertexArray(0);
                 }
             }
         }
@@ -549,7 +551,6 @@ impl Cx {
         }
     }
     
-    
     pub fn opengl_get_texture_slots(program: u32, texture_slots: &Vec<PropDef>) -> Vec<OpenglUniform> {
         let mut gl_texture_slots = Vec::new();
         
@@ -579,28 +580,68 @@ impl Cx {
             no_const_collapse: false
         };
         
-        let shaders = &mut self.shaders;
-        let live_styles = &mut self.live_styles;
-        for (live_id,_shader) in &live_styles.shader_alloc{
-            match live_styles.collect_and_analyse_shader(*live_id, options) {
+        for (live_id, shader) in &self.live_styles.shader_alloc {
+            match self.live_styles.collect_and_analyse_shader(*live_id, options) {
                 Err(err) => {
                     eprintln!("{}", err);
                     panic!()
                 },
                 Ok((shader_ast, default_geometry)) => {
-                    let shader_id = live_styles.shader_alloc.get(live_id).unwrap().shader_id;
+                    let shader_id = shader.shader_id;
                     Self::opengl_compile_shader(
                         shader_id,
-                        &mut shaders[shader_id],
+                        &mut self.shaders[shader_id],
                         shader_ast,
                         default_geometry,
                         options,
                         opengl_cx,
-                        live_styles
+                        &self.live_styles
                     );
                 }
             }
         };
+        self.live_styles.changed_shaders.clear();
+    }
+    
+    
+    pub fn opengl_update_all_shaders(&mut self, opengl_cx: &OpenglCx, errors:&mut Vec<LiveBodyError>)  {
+      
+        // recompile shaders, and update values
+        
+        let options = ShaderCompileOptions {
+            gather_all: true,
+            create_const_table: true,
+            no_const_collapse: false
+        };
+        
+        for (live_id, change) in &self.live_styles.changed_shaders {
+            match change {
+                LiveChangeType::Recompile => {
+                    match self.live_styles.collect_and_analyse_shader(*live_id, options) {
+                        Err(err) => {
+                            errors.push(err);
+                        },
+                        Ok((shader_ast, default_geometry)) => {
+                            let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                            Self::opengl_compile_shader(
+                                shader_id,
+                                &mut self.shaders[shader_id],
+                                shader_ast,
+                                default_geometry,
+                                options,
+                                opengl_cx,
+                                &self.live_styles
+                            );
+                        }
+                    }
+                }
+                LiveChangeType::UpdateValue => {
+                    let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                    self.shaders[shader_id].mapping.update_live_uniforms(&self.live_styles);
+                }
+            }
+        }
+        self.live_styles.changed_shaders.clear();
     }
     
     
@@ -637,14 +678,13 @@ impl Cx {
             println!("--------------- Fragment shader {} --------------- \n{}\n---------------\n", shader_id, fragment);
         }
         
-        let mapping = CxShaderMapping::from_shader_ast(shader_ast, options);
-        
-        
+        let mut mapping = CxShaderMapping::from_shader_ast(shader_ast, options);
+        mapping.update_live_uniforms(live_styles);
         
         if let Some(sh_platform) = &sh.platform {
             if sh_platform.vertex == vertex && sh_platform.fragment == fragment {
                 sh.mapping = mapping;
-                return ShaderCompileResult::Nop {id: shader_id}
+                return ShaderCompileResult::Nop
             }
         }
         
@@ -658,7 +698,7 @@ impl Cx {
             if let Some(error) = Self::opengl_has_shader_error(true, vs as usize, &vertex) {
                 if options.create_const_table {
                     println!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error);
-                    return ShaderCompileResult::Nop {id: shader_id}
+                    return ShaderCompileResult::Nop
                 }
                 panic!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error);
             }
@@ -669,7 +709,7 @@ impl Cx {
             if let Some(error) = Self::opengl_has_shader_error(true, fs as usize, &fragment) {
                 if options.create_const_table {
                     println!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error);
-                    return ShaderCompileResult::Nop {id: shader_id}
+                    return ShaderCompileResult::Nop
                 }
                 panic!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error);
             }
@@ -681,7 +721,7 @@ impl Cx {
             if let Some(error) = Self::opengl_has_shader_error(false, program as usize, "") {
                 if options.create_const_table {
                     println!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error);
-                    return ShaderCompileResult::Nop {id: shader_id}
+                    return ShaderCompileResult::Nop
                 }
                 panic!("ERROR::SHADER::LINK::COMPILATION_FAILED\n{}", error);
             }
@@ -707,7 +747,7 @@ impl Cx {
                 user_uniforms: Self::opengl_get_uniforms(program, &mapping.user_uniforms),
             });
             sh.mapping = mapping;
-            return ShaderCompileResult::Ok {id: shader_id};
+            return ShaderCompileResult::Ok
             
         }
     }
