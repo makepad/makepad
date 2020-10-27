@@ -830,7 +830,6 @@ impl Cx {
             }
         }
         self.live_styles.changed_shaders.clear();
-
     }
     
     pub fn mtl_compile_shader(
