@@ -884,7 +884,6 @@ impl XlibApp {
                 ptr::null_mut(),
             );
         }
-        println!("{:?}", keysym);
         match keysym as u32 {
             X11_sys::XK_a => KeyCode::KeyA,
             X11_sys::XK_A => KeyCode::KeyA,
@@ -1723,15 +1722,14 @@ impl Dnd {
     }
     
     /// Handles a XSelectionEvent.
-    unsafe fn handle_selection_event(&mut self, event: &X11_sys::XSelectionEvent) {
+    unsafe fn handle_selection_event(&mut self, _event: &X11_sys::XSelectionEvent) {
         // The XSelectionEvent is sent by the source window in response to a request by the source
         // window to convert the selection representing the thing being dragged to the appropriate
         // data type. This request is always sent in response to a XDndDrop event, so this event
         // should only be received after a drop operation has completed.
         
-        let source_window = event.requestor;
-        let selection = CString::new(self.get_selection_property(source_window)).unwrap();
-        println!("{:?}", selection);
+        //let source_window = event.requestor;
+        //let selection = CString::new(self.get_selection_property(source_window)).unwrap();
         
         // TODO: Actually use the selection
     }
