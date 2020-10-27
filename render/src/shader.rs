@@ -144,7 +144,7 @@ impl InstanceProps {
 }
 
 impl UniformProps {
-    pub fn construct(in_props: &Vec<PropDef>) -> UniformProps {
+    pub fn construct(in_props: &Vec<PropDef>, metal_uniform_packing:bool) -> UniformProps {
         let mut out_props = Vec::new();
         let mut prop_map = HashMap::new();
         let mut offset = 0;
@@ -153,7 +153,7 @@ impl UniformProps {
             let slots = prop.ty.size();
             
             // metal+webgl
-            let aligned_slots = if slots==3{4}else{slots};
+            let aligned_slots = if metal_uniform_packing && slots==3{4}else{slots};
             if (offset & 3) + aligned_slots > 4 { // goes over the boundary
                 offset += 4 - (offset & 3); // make jump to new slot
             }
@@ -208,7 +208,7 @@ pub struct CxShaderMapping {
 }
 
 impl CxShaderMapping {
-    pub fn from_shader_ast(shader_ast: ShaderAst, options: ShaderCompileOptions) -> Self {
+    pub fn from_shader_ast(shader_ast: ShaderAst, options: ShaderCompileOptions, metal_uniform_packing:bool) -> Self {
         
         let mut instances = Vec::new();
         let mut geometries = Vec::new();
@@ -284,13 +284,13 @@ impl CxShaderMapping {
         }
         
         
-        let live_uniform_props = UniformProps::construct(&live_uniforms);
+        let live_uniform_props = UniformProps::construct(&live_uniforms, metal_uniform_packing);
         let mut live_uniforms_buf = Vec::new();
         live_uniforms_buf.resize(live_uniform_props.total_slots, 0.0);
         CxShaderMapping {
             live_uniforms_buf,
             rect_instance_props: RectInstanceProps::construct(&instances),
-            user_uniform_props: UniformProps::construct(&user_uniforms),
+            user_uniform_props: UniformProps::construct(&user_uniforms, metal_uniform_packing),
             live_uniform_props: live_uniform_props,
             instance_props: InstanceProps::construct(&instances),
             geometry_props: InstanceProps::construct(&geometries),

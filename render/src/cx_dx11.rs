@@ -381,7 +381,7 @@ impl Cx {
         
         let hlsl = generate_hlsl::generate_shader(&shader_ast, live_styles, options);
         let debug = shader_ast.debug;
-        let mut mapping = CxShaderMapping::from_shader_ast(shader_ast, options);
+        let mut mapping = CxShaderMapping::from_shader_ast(shader_ast, options, false);
         mapping.update_live_uniforms(live_styles);
         
         if debug {
@@ -394,7 +394,7 @@ impl Cx {
                 if let Some(const_table) = &sh.mapping.const_table {
                     if const_table.len()>0 {
                         sh_platform.const_table_uniforms.update_with_f32_constant_data(d3d11_cx, const_table.as_slice());
-                    }
+                    } 
                 }
                 return ShaderCompileResult::Nop
             }
