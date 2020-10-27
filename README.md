@@ -1,23 +1,17 @@
 # Introducing Makepad
 
-Makepad is a creative software development platform built around Rust. We aim to make the creative software development process as fun as possible! To do this we will provide a set of visual design tools that modify your application in real time, as well as a library ecosystem that allows you to write highly performant multimedia applications. 
+Makepad is a new VR, web and native collaborative shader programming environment. 
+It will support many different shader modes including many vertex-shaders 
+besides the well known shader toy SDF programs. This makes shader coding possible
+for more compute constrained environments like VR goggles or mobiles.
+Try makepad now on a Quest in the quest browser, click the goggles top right of the UI. Try touching the leaves of the tree with your hands! Magic!
 
-The Makepad development platform and library ecosystem are MIT licensed, and will be available for free as part of Makepad Basic. In the near future, we will also introduce Makepad Pro, which will be available as a subscription model. Makepad Pro will include the visual design tools. Because the library ecosystem is MIT licensed, all applications made with the Pro version are entirely free licensed.
+https://makepad.dev
 
-Today, we launch an early alpha of Makepad Basic. This version shows off the development platform, but does not include the visual design tools or library ecosystem yet. Today it effectively is a GPU accelerated Rust editor. However since we are developing makepad in makepad for months already, we released what we have now as a starting point. Although Makepad is primarily a native application, its UI is perfectly capable of running on the web. The web build can be tried here http://makepad.nl Try browsing the source code and pressing alt in a large code file! To compile code yourself, you have to install the native version. Right now makepad is set up to compile a simple WASM example you run in a browser from a localhost url.
+The Makepad development platform and library ecosystem are MIT licensed,
+for the Quest and in the future iOS we will provide paid, native version
 
-# How to use
-
-After install (see below) you can open the following file in makepad, and when you change the rust code, the browser should live reload the wasm application as you type.
-
-open this file the makepad editor UI: 
-```
-main/makepad/examples/webgl_example_wasm/src/sierpinski.rs
-```
-open this url in your browser: 
-http://127.0.0.1:8000/makepad/examples/webgl_example_wasm/
-
-# How to install
+# How to install the native version
 
 On all platforms first install Rust. We have seen the gnu chain fail a lot on windows, so if you are up for it also have to install msvc.
 
@@ -50,7 +44,6 @@ rustup default stable-msvc
 tools/windows_rustup.bat
 cargo run -p makepad --release
 ```
-
 
 # Linux
 ```
