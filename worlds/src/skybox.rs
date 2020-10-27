@@ -1,26 +1,26 @@
 use makepad_render::*;
 
 #[derive(Clone)]
-pub struct SkyBox{
-     cube:Cube,
+pub struct SkyBox {
+    cube: Cube,
 }
 
-impl SkyBox{
+impl SkyBox {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             cube: Cube::new(cx),
         }
     }
     
-    pub fn style(cx:&mut Cx){
+    pub fn style(cx: &mut Cx) {
         live_body!(cx, r#"
             self::sky_color: #0;
             self::edge_color: #1;
             self::floor_color: #8;
-
+            
             self::size: vec3(200.0, 100.0, 200.0);
             self::pos: vec3(0.0, 50.0, 0.);
-
+            
             self::shader_sky_box: Shader {
                 use makepad_render::cube::shader::*;
                 fn color_form_id() -> vec4 {
@@ -38,13 +38,19 @@ impl SkyBox{
                     }
                     return #f0f;
                 }
-                
+                varying t:float;
                 fn vertex() -> vec4 {
-                    let model_view = camera_view * view_transform * transform;
-                    return camera_projection * (model_view * vec4(geom_pos.x * size.x + pos.x, geom_pos.y * size.y + pos.y, geom_pos.z * size.z + pos.z + draw_zbias, 1.));
+                
+                    let model_view = camera_view * view_transform * transform ;
+                    return camera_projection * (model_view * vec4(
+                        geom_pos.x * size.x + pos.x,
+                        geom_pos.y * size.y + pos.y,
+                        geom_pos.z * size.z + pos.z + draw_zbias,
+                        1.
+                    ));
                 }
                 
-                fn pixel() -> vec4 {
+                fn pixel() -> vec4 { 
                     let x = geom_uv.x;
                     let y = geom_uv.y;
                     // walls
@@ -64,15 +70,13 @@ impl SkyBox{
                         let uv2 = abs(2.0 * geom_uv - 1.0);
                         return mix(grid2, edge, min(max(uv2.x, uv2.y) + 0.7, 1.0));
                     }
-                    if geom_id>1.5 { // ceiling
-                        return sky;
-                    }
+                    return sky;
                 }
-            }  
+            }
         "#)
     }
     
-    pub fn draw_sky_box(&mut self, cx:&mut Cx){
+    pub fn draw_sky_box(&mut self, cx: &mut Cx) {
         self.cube.shader = live_shader!(cx, self::shader_sky_box);
         self.cube.draw_cube(
             cx,

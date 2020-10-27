@@ -74,6 +74,8 @@ impl Viewport3D {
     }
     
     pub fn pass_set_matrix_mode(&mut self, cx: &mut Cx) {
+        //self.pass.set_matrix_mode(cx, PassMatrixMode::Ortho);
+        
         self.pass.set_matrix_mode(cx, PassMatrixMode::Projection {
             fov_y: 40.0,
             near: 0.1,
@@ -98,6 +100,7 @@ impl Viewport3D {
         }
         
         self.pass.begin_pass(cx);
+        self.pass.set_debug(cx, true);
         self.pass.set_size(cx, self.measured_size);
         self.pass_set_matrix_mode(cx);
         self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(self.clear_color));

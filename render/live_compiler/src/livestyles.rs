@@ -714,11 +714,11 @@ impl LiveStyles {
     
     // alright we got a new live body
     pub fn update_live_body(&mut self, file: &str, line: usize, column: usize, code: String) -> Result<LiveBodyId, ()> {
-        // find the body
+        
         if let Some(list) = self.file_to_live_bodies.get(file) {
             // find the nearest block
             let mut nearest = std::usize::MAX;
-            let mut nearest_id = None;
+            let mut nearest_id = None; 
             for live_body_id in list {
                 let other_line = self.live_bodies[live_body_id.0].line;
                 let dist = if other_line > line {other_line - line}else {line - other_line};

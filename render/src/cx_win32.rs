@@ -18,7 +18,7 @@ use winapi::um::wingdi::{GetDeviceCaps, LOGPIXELSX};
 use winapi::um::winuser::{MONITOR_DEFAULTTONEAREST, TRACKMOUSEEVENT};
 use winapi::um::uxtheme::MARGINS;
 use std::sync::{Mutex};
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeSet};
 
 static mut GLOBAL_WIN32_APP: *mut Win32App = 0 as *mut _;
 
@@ -584,7 +584,7 @@ impl Win32Window {
                         abs: window.last_mouse_pos,
                         rel: window.last_mouse_pos,
                         rect: Rect::default(),
-                        is_wheel: true,
+                        input_type: FingerInputType::Mouse,
                         modifiers: Self::get_key_modifiers(),
                         handled_x: false,
                         handled_y: false,
@@ -598,7 +598,7 @@ impl Win32Window {
             winuser::WM_RBUTTONUP => window.send_finger_up(1, Self::get_key_modifiers()),
             winuser::WM_MBUTTONDOWN => window.send_finger_down(2, Self::get_key_modifiers()),
             winuser::WM_MBUTTONUP => window.send_finger_up(2, Self::get_key_modifiers()),
-            winuser::WM_KEYDOWN | winuser::WM_SYSKEYDOWN => {
+            winuser::WM_KEYDOWN | winuser::WM_SYSKEYDOWN => { 
                 // detect control/cmd - c / v / x
                 let modifiers = Self::get_key_modifiers();
                 let key_code = Self::virtual_key_to_key_code(wparam);
@@ -734,7 +734,9 @@ impl Win32Window {
                 else {None};
                 if let Some(status) = status{
                     let mut signals = HashMap::new();
-                    signals.insert(Signal {signal_id: wparam as usize}, vec![status]);
+                    let mut set = BTreeSet::new();
+                    set.insert(status);
+                    signals.insert(Signal {signal_id: wparam as usize}, set);
                     window.do_callback(&mut vec![
                         Event::Signal(SignalEvent {signals})
                     ]);
@@ -1034,7 +1036,7 @@ impl Win32Window {
             rect: Rect::default(),
             digit: digit,
             handled: false,
-            is_touch: false,
+            input_type: FingerInputType::Mouse,
             modifiers: modifiers,
             tap_count: 0,
             time: self.time_now()
@@ -1061,7 +1063,7 @@ impl Win32Window {
             rel_start: Vec2::default(),
             digit: digit,
             is_over: false,
-            is_touch: false,
+            input_type: FingerInputType::Mouse,
             modifiers: modifiers,
             time: self.time_now()
         })]);
@@ -1081,7 +1083,7 @@ impl Win32Window {
                     abs_start: Vec2::default(),
                     rel_start: Vec2::default(),
                     is_over: false,
-                    is_touch: false,
+                    input_type: FingerInputType::Mouse,
                     modifiers: modifiers.clone(),
                     time: self.time_now()
                 }));
