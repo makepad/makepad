@@ -128,6 +128,8 @@ impl TreeWorld {
     
     pub fn draw_tree_world(&mut self, cx: &mut Cx) {
         
+        self.sky_box.draw_sky_box(cx);
+        
         let shader = live_shader!(cx, self::shader);
         let inst = cx.new_instance(shader, None, 0);
         
@@ -152,8 +154,6 @@ impl TreeWorld {
             recur(shader, pself, cx, path + (2.0f32).powf(depth), depth + 1.0, max_depth);
         } 
         recur(shader, self, cx, 0., 0., max_depth);
-
-        self.sky_box.draw_sky_box(cx);
 
     }
 }

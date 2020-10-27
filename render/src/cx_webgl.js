@@ -1672,8 +1672,8 @@
                 let uniform = uniforms[i];
                 // lets align the uniform
                 let slots = this.uniform_size_table[uniform.ty];
-                let aligned_slots = slots == 3? 4: slots;
-                if ((offset & 3) != 0 && (offset & 3) + aligned_slots > 4) { // goes over the boundary
+                
+                if ((offset & 3) != 0 && (offset & 3) + slots > 4) { // goes over the boundary
                     offset += 4 - (offset & 3); // make jump to new slot
                 }
                 uniform_locs.push({
@@ -1683,7 +1683,7 @@
                     loc: gl.getUniformLocation(program, uniform.name),
                     fn: this.uniform_fn_table[uniform.ty]
                 });
-                offset += aligned_slots
+                offset += slots
             }
             return uniform_locs;
         }

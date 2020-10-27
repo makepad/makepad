@@ -704,7 +704,7 @@ impl Cx {
             println!("--------------- Fragment shader {} --------------- \n{}\n---------------\n", shader_id, fragment);
         }
         
-        let mut mapping = CxShaderMapping::from_shader_ast(shader_ast, options);
+        let mut mapping = CxShaderMapping::from_shader_ast(shader_ast, options, false);
         mapping.update_live_uniforms(live_styles);
         
         if let Some(sh_platform) = &sh.platform {
@@ -712,7 +712,7 @@ impl Cx {
                 sh.mapping = mapping;
                 return ShaderCompileResult::Nop
             }
-        }
+        } 
         
         //println!("{} {} {}", sh.name, vertex, fragment);
         unsafe {
