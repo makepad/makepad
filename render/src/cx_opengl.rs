@@ -1105,7 +1105,7 @@ impl OpenglCx {
             }
             else {
                 match cxtexture.desc.format {
-                    TextureFormat::Default | TextureFormat::Depth32F => {
+                    TextureFormat::Default | TextureFormat::Depth32Stencil8 => {
                         
                         let mut gl_renderbuf = std::mem::MaybeUninit::uninit();
                         gl::GenRenderbuffers(1, gl_renderbuf.as_mut_ptr());
