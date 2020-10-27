@@ -1082,7 +1082,7 @@ impl OpenglCx {
             cxtexture.platform.gl_renderbuffer = None;
 
             
-            if !is_depth {
+            if !is_depth { 
                 match cxtexture.desc.format {
                     TextureFormat::Default | TextureFormat::RenderBGRA => {
                         

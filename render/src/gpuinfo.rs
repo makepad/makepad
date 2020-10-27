@@ -12,7 +12,7 @@ pub struct GpuInfo {
     pub performance: GpuPerformance,
     pub vendor: String,
     pub renderer: String
-}
+} 
 
 impl Default for GpuInfo{
     fn default()->Self{
