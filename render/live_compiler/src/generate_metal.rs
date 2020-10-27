@@ -969,6 +969,7 @@ impl<'a, 'b> BackendWriter for MetalBackendWriter<'a, 'b> {
                     string,
                     "{}",
                     match ident_string.as_ref() {
+                        "line" => "mpsc_line",
                         "thread" => "mpsc_thread",
                         "device" => "mpsc_device",
                         "dfdx" => "mpsc_dfdx",

@@ -234,7 +234,6 @@ impl Cx {
                 }
             }
             
-            // show the timer
             if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0{
                 let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
                 let mut errors = self.process_live_styles_changes();

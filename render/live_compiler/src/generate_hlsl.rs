@@ -147,11 +147,13 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
             writeln!(self.string, "cbuffer mpsc_default_Uniforms : register(b3){{}};").unwrap();
         }
         writeln!(self.string, "cbuffer mpsc_live_Uniforms : register(b4) {{").unwrap();
-        for (ty, ident_path) in self.shader.livestyle_uniform_deps.borrow().as_ref().unwrap() {
+        for (ty, qualified_ident_path) in self.shader.livestyle_uniform_deps.borrow().as_ref().unwrap() {
             // we have a span and an ident_path.
             // lets fully qualify it
-            write!(self.string, "    {} mpsc_live_", ty).unwrap();
-            ident_path.write_underscored_ident(self.string);
+            write!(self.string, "    ").unwrap();
+            self.backend_writer.write_ty_lit(self.string, ty.maybe_ty_lit().unwrap());
+            write!(self.string, " mpsc_live_").unwrap();
+            qualified_ident_path.write_underscored_ident(self.string);
             writeln!(self.string, ";").unwrap();
         }
         writeln!(self.string, "}}").unwrap();
@@ -736,32 +738,62 @@ impl<'a, 'b> BackendWriter for HlslBackendWriter<'a, 'b> {
                     match ty{
                         Some(Ty::Mat4)=>{
                             write!(string, "float4x4(").unwrap();
+                            let ident = ident_path.get_single().expect("unexpected");
                             for i in 0..4{
-                                if i != 0{
-                                    write!(string, ",").unwrap();
+                                for j in 0..4{
+                                    if i != 0 || j != 0{
+                                        write!(string, ",").unwrap();
+                                    }
+                                    write!(string, "mpsc_instances.").unwrap();
+                                    write!(string, "{}{}", ident, j).unwrap();
+                                    match i{
+                                        0=>write!(string,".x").unwrap(),
+                                        1=>write!(string,".y").unwrap(),
+                                        2=>write!(string,".z").unwrap(),
+                                        _=>write!(string,".w").unwrap()
+                                    }
                                 }
-                                write!(string, "mpsc_instances.").unwrap();
-                                write!(string, "{}{}", ident_path.get_single().expect("unexpected"), i).unwrap();
                             }
                             write!(string, ")").unwrap();
                             return
                         },
                         Some(Ty::Mat3)=>{
                             write!(string, "float3x3(").unwrap();
+                            let ident = ident_path.get_single().expect("unexpected");
                             for i in 0..3{
-                                if i != 0{
-                                    write!(string, ",").unwrap();
+                                for j in 0..3{
+                                    if i != 0 || j != 0{
+                                        write!(string, ",").unwrap();
+                                    }
+                                    write!(string, "mpsc_instances.").unwrap();
+                                    write!(string, "{}{}", ident, j).unwrap();
+                                    match i{
+                                        0=>write!(string,".x").unwrap(),
+                                        1=>write!(string,".y").unwrap(),
+                                        _=>write!(string,".z").unwrap(),
+                                    }
                                 }
-                                write!(string, "mpsc_instances.").unwrap();
-                                write!(string, "{}{}", ident_path.get_single().expect("unexpected"), i).unwrap();
+                                write!(string, ")").unwrap();
                             }
-                            write!(string, ")").unwrap();
                             return
                         },
                         Some(Ty::Mat2)=>{
                             write!(string, "float2x2(").unwrap();
-                            write!(string, "mpsc_instances.").unwrap();
-                            write!(string, ")").unwrap();
+                            let ident = ident_path.get_single().expect("unexpected");
+                            for i in 0..2{
+                                for j in 0..2{
+                                    if i != 0 || j != 0{
+                                        write!(string, ",").unwrap();
+                                    }
+                                    write!(string, "mpsc_instances.").unwrap();
+                                    write!(string, "{}{}", ident, j).unwrap();
+                                    match i{
+                                        0=>write!(string,".x").unwrap(),
+                                        _=>write!(string,".y").unwrap(),
+                                    }
+                                }
+                                write!(string, ")").unwrap();
+                            }
                             return
                         },
                         _=>{
@@ -958,6 +990,9 @@ impl<'a, 'b> BackendWriter for HlslBackendWriter<'a, 'b> {
                 write!(string, "atan").unwrap();
             }
         }
+        else if ident == Ident::new("mod") {
+            write!(string, "fmod").unwrap();
+        }
         else if ident == Ident::new("mix") {
             write!(string, "lerp").unwrap();
         }
@@ -985,6 +1020,7 @@ impl<'a, 'b> BackendWriter for HlslBackendWriter<'a, 'b> {
                     string,
                     "{}",
                     match ident_string.as_ref() {
+                        "line"=>"mpsc_line",
                         "frac"=>"mpsc_frac",
                         "thread" => "mpsc_thread",
                         "device" => "mpsc_device",
