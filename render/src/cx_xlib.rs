@@ -381,6 +381,9 @@ impl XlibApp {
                                 let window = &mut (**window_ptr);
                                 let mut x = motion.x;
                                 let mut y = motion.y;
+                                if window.window.is_none(){
+                                    return; // shutdown
+                                }
                                 if motion.window != window.window.unwrap() {
                                     // find the right child
                                     for child in &window.child_windows {
