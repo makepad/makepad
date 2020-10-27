@@ -364,13 +364,15 @@ impl Cx {
                     let gl_renderbuffer = gl_renderbuf.assume_init();
                     gl::BindRenderbuffer(gl::RENDERBUFFER, gl_renderbuffer);
                     gl::RenderbufferStorage(
-                        gl::RENDERBUFFER,
+                        gl::RENDERBUFFER, 
                         gl::DEPTH_COMPONENT16,
                         (pass_size.x * dpi_factor) as i32, (pass_size.y * dpi_factor) as i32
                     );
                     gl::BindRenderbuffer(gl::RENDERBUFFER, 0);
                     self.passes[pass_id].platform.gl_bugfix_depthbuffer = Some(gl_renderbuffer);
                 }
+                clear_depth = 1.0;
+                clear_flags |= gl::DEPTH_BUFFER_BIT;
                 gl::Disable(gl::DEPTH_TEST);
                 gl::FramebufferRenderbuffer( gl::FRAMEBUFFER, gl::DEPTH_ATTACHMENT, gl::RENDERBUFFER, self.passes[pass_id].platform.gl_bugfix_depthbuffer.unwrap() );
             }
@@ -811,7 +813,7 @@ impl ViewBounds {
     }
 }
 pub struct OpenglCx {
-    pub display: *mut glx_sys::Display,
+    pub display: *mut glx_sys::Display, 
     pub context: glx_sys::GLXContext,
     pub visual_info: glx_sys::XVisualInfo,
     pub hidden_window: glx_sys::Window,
