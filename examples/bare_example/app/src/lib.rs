@@ -11,7 +11,7 @@ pub struct BareExampleApp {
 
 impl BareExampleApp {
     pub fn style(cx: &mut Cx){
-        live!(cx, r#"
+        live_body!(cx, r#"
             self::bg_color: #f00;
             self::bg_color2: #00f;
             self::bg_shader: Shader { 
