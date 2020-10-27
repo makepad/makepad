@@ -2,7 +2,3 @@
 name = "cmdline_example"
 version = "0.1.0"
 edition = "2018"
-
-[dependencies]
-makepad-live-compiler = { path = "../../render/live_compiler", version = "0.1" } 
-
