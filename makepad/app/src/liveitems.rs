@@ -334,9 +334,9 @@ impl MakepadTextBuffer {
                                 ) {
                                     self.live_items_list.live_bodies.insert(live_body_id, tp.cur_offset() + 1);
                                 }
-                                else {
-                                    eprintln!("LiveBody not found");
-                                };
+                                //else {
+                                    //eprintln!("LiveBody not found");
+                                //};
                             }
                         }
                     }

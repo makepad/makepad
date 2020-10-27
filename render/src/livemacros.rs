@@ -53,7 +53,7 @@ macro_rules!uid {
 macro_rules!live_body {
     ( $ cx: ident, $ code: literal) => {
         $ cx.add_live_body(LiveBody {
-            file: file!().to_string().replace("\\", ","),
+            file: file!().to_string().replace("\\", "/"),
             module_path: module_path!().to_string(),
             line: line!() as usize,
             column: column!() as usize,

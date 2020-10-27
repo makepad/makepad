@@ -1,6 +1,6 @@
 use crate::error::LiveError;
 use crate::lit::{Lit, TyLit};
-use crate::ident::{Ident, QualifiedIdentPath};
+use crate::ident::{Ident};
 use crate::token::{Token, TokenWithSpan};
 use crate::livetypes::*;
 use crate::detok::*;
@@ -119,7 +119,7 @@ impl<'a> DeTokParserImpl<'a> {
         }
     }
     
-    fn parse_block_tokens(&mut self, base_ident:QualifiedIdentPath, live_item_id: LiveItemId) -> Result<Vec<TokenWithSpan>, LiveError> { // scans from { to }
+    fn parse_block_tokens(&mut self, live_item_id: LiveItemId) -> Result<Vec<TokenWithSpan>, LiveError> { // scans from { to }
         self.clear_token_clone();
         let mut paren_stack = Vec::new();
         let mut new_deps = HashSet::new();
@@ -206,7 +206,7 @@ impl<'a> DeTokParserImpl<'a> {
             
             match self.peek_token() {
                 Token::TyLit(tylit) => {
-                    let tokens = self.parse_block_tokens(qualified_ident_path, live_item_id) ?;
+                    let tokens = self.parse_block_tokens(live_item_id) ?;
                     let live_tokens_type = match tylit {
                         TyLit::Vec2 => {
                             LiveTokensType::Vec2
@@ -231,7 +231,7 @@ impl<'a> DeTokParserImpl<'a> {
                     self.expect_token(Token::Semi) ?;
                 },
                 Token::Ident(ident) => {
-                    let tokens = self.parse_block_tokens(qualified_ident_path, live_item_id) ?;
+                    let tokens = self.parse_block_tokens(live_item_id) ?;
                     // see if the tokens changed, ifso mark this thing dirty
                     let live_tokens_type = {
                         if ident == Ident::new("Float") {

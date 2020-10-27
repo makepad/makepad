@@ -76,7 +76,7 @@ impl WorldView {
     
     pub fn style(cx: &mut Cx) {
         live_body!(cx, r#"
-            self::color_bg: #2;
+            self::color_bg: #222222;
             self::uniforms: ShaderLib {
                 uniform time:float;
                 uniform left_input_pos: vec3;
