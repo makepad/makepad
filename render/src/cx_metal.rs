@@ -844,7 +844,7 @@ impl Cx {
         
         let mtlsl = generate_metal::generate_shader(&shader_ast, live_styles, options);
         let debug = shader_ast.debug;
-        let mut mapping = CxShaderMapping::from_shader_ast(shader_ast, options);
+        let mut mapping = CxShaderMapping::from_shader_ast(shader_ast, options, true);
         mapping.update_live_uniforms(live_styles);
         if debug {
             println!("--------------- Shader {} --------------- \n{}\n---------------\n", shader_id, mtlsl);

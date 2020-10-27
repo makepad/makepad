@@ -353,7 +353,7 @@ impl Cx {
             ));
         }
         
-        let mut mapping = CxShaderMapping::from_shader_ast(shader_ast, options);
+        let mut mapping = CxShaderMapping::from_shader_ast(shader_ast, options, false);
         mapping.update_live_uniforms(live_styles);
         // lets check if we need to recompile the shader at all
         if let Some(sh_platform) = &sh.platform {
