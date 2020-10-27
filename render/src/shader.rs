@@ -153,7 +153,7 @@ impl UniformProps {
             let slots = prop.ty.size();
             
             // metal+webgl
-            let aligned_slots = slots;// if slots==3{4}else{slots};
+            let aligned_slots = if slots==3{4}else{slots};
             if (offset & 3) + aligned_slots > 4 { // goes over the boundary
                 offset += 4 - (offset & 3); // make jump to new slot
             }
