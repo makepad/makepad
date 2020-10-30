@@ -65,6 +65,7 @@ pub struct MakepadState {
 
 impl MakepadWindow {
     pub fn new(cx: &mut Cx) -> Self {
+        
         Self {
             desktop_window: DesktopWindow {
                 caption: "Makepad".to_string(),
@@ -99,6 +100,7 @@ impl MakepadWindow {
         makepad_storage: &mut MakepadStorage,
         build_manager: &mut BuildManager
     ) {
+        
         match self.desktop_window.handle_desktop_window(cx, event) {
             DesktopWindowEvent::EventForOtherWindow => {
                 return
@@ -428,7 +430,6 @@ impl MakepadWindow {
         build_manager: &mut BuildManager
     ) {
         if self.desktop_window.begin_desktop_window(cx, Some(menu)).is_err() {return}
-        
         
         self.dock.draw_dock(cx);
         

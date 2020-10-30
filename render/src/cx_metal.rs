@@ -896,14 +896,17 @@ impl Cx {
                 let color_attachments: id = msg_send![rpd, colorAttachments];
                 
                 let ca: id = msg_send![color_attachments, objectAtIndexedSubscript: 0u64];
+                
                 let () = msg_send![ca, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
                 let () = msg_send![ca, setBlendingEnabled: YES];
                 let () = msg_send![ca, setSourceRGBBlendFactor: MTLBlendFactor::One];
                 let () = msg_send![ca, setDestinationRGBBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
+                
                 let () = msg_send![ca, setSourceAlphaBlendFactor: MTLBlendFactor::One];
                 let () = msg_send![ca, setDestinationAlphaBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
                 let () = msg_send![ca, setRgbBlendOperation: MTLBlendOperation::Add];
                 let () = msg_send![ca, setAlphaBlendOperation: MTLBlendOperation::Add];
+                
                 let () = msg_send![rpd, setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float_Stencil8];
                 
                 let mut err: id = nil;
