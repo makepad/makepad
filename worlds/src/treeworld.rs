@@ -34,6 +34,7 @@ impl TreeWorld {
             self::off:0.183;
             self::width: 0.3;
             self::alpha: 0.114;
+         
             self::shader: Shader { 
                 use makepad_render::shader_std::prelude::*;
                 use makepad_worlds::worldview::uniforms::*;
@@ -108,7 +109,7 @@ impl TreeWorld {
                 }
                 
                 fn pixel() -> vec4 {
-                    let color = vec4(0.);
+                    let color = vec4(0.); 
                     if depth > max_depth{ 
                         color = mix(self::leaf_1,self::leaf_2,sin(0.01*in_path));
                     }
@@ -117,6 +118,11 @@ impl TreeWorld {
                     }
                     return vec4(color.xyz * self::alpha, self::alpha); 
                 }
+                /*
+                fn blend(a:vec4, b:vec4) -> vec4{
+                    blend_premultiply_alpha(a,b);
+                    blend_multiply(a,b);
+                }*/
             }
         "#)
     }
@@ -139,7 +145,7 @@ impl TreeWorld {
             GpuPerformance::Tier3=>12.0,
             GpuPerformance::Tier4=>16.0,
             GpuPerformance::Tier5=>18.0,
-        }; 
+        };  
 
         inst.write_uniform_float(cx, live_item_id!(self::shader::max_depth), max_depth);
         
