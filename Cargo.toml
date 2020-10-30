@@ -8,9 +8,10 @@ members = [
     "examples/widget_example",
     "examples/cmdline_example",
     "tools/webserver",
+    "tools/brotli_test",
     "builder"
 ]
 
 [profile.release]
-#lto=true
+lto=true
  

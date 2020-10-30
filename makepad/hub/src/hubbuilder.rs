@@ -706,7 +706,9 @@ impl HubBuilder {
                 
                 let mut parsed: Result<RustcCompilerMessage, DeJsonErr> = DeJson::deserialize_json(&line);
                 match &mut parsed {
-                    Err(_) => (),
+                    Err(_e) => {
+                        //eprintln!("ERROR PARSING {} {:?}", line, e);
+                    },
                     Ok(parsed) => {
                         if let Some(message) = &mut parsed.message { //.spans;
                             let spans = &message.spans;
@@ -1131,7 +1133,8 @@ pub struct RustcTarget {
     name: String,
     src_path: String,
     edition: String,
-    doctest: bool
+    doctest: bool,
+    test:bool
 }
 
 #[derive(Clone, DeJson, Default)]
@@ -1158,7 +1161,32 @@ pub struct RustcSpan {
     expansion: Option<Box<RustcExpansion >>,
     level: Option<String>
 }
-
+/*
+{
+    "reason": "compiler-artifact",
+    "package_id": "makepad-internal-iter 0.1.0 (path+file:///Users/admin/makepad/edit_repo/render/vector/internal_iter)",
+    "target": {
+        "kind": ["lib"],
+        "crate_types": ["lib"],
+        "name": "makepad-internal-iter",
+        "src_path": "/Users/admin/makepad/edit_repo/render/vector/internal_iter/src/lib.rs",
+        "edition": "2018",
+        "doctest": true,
+        "test": true
+    },
+    "profile": {
+        "opt_level": "3",
+        "debuginfo": null,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": false
+    },
+    "features": [],
+    "filenames": ["/Users/admin/makepad/edit_repo/target/wasm32-unknown-unknown/release/deps/libmakepad_internal_iter-80a744de08b29e21.rlib", "/Users/admin/makepad/edit_repo/target/wasm32-unknown-unknown/release/deps/libmakepad_internal_iter-80a744de08b29e21.rmeta"],
+    "executable": null,
+    "fresh": false
+}
+*/
 #[derive(Clone, DeJson, Default)]
 pub struct RustcExpansion {
     span: Option<RustcSpan>,
