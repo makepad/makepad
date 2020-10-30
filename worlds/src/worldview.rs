@@ -62,9 +62,7 @@ impl WorldView {
             bg: Quad::new(cx),
             select_view: ScrollView::new(cx),
             viewport_3d: Viewport3D::new(cx),
-            buttons: Elements::new(NormalButton {
-                ..NormalButton::new(cx)
-            }),
+            buttons: Elements::new(NormalButton::new(cx)),
             time: 0.0,
             world_type: WorldType::TreeWorld,
             xr_is_presenting: false,
@@ -188,7 +186,6 @@ impl WorldView {
         
         // lets draw it
         self.viewport_3d.draw_viewport_2d(cx);
-        
     }
     
     pub fn draw_world_view_3d(&mut self, cx: &mut Cx) {
