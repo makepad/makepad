@@ -118,6 +118,7 @@ impl HttpServer {
         let mime_type = if path.ends_with(".html") {"text/html"}
         else if path.ends_with(".wasm") {"application/wasm"}
         else if path.ends_with(".js") {"text/javascript"}
+        else if path.ends_with(".ttf") {"application/ttf"}
         else {"application/octet-stream"};
         
         if accept_encoding.contains("br") { // we want the brotli
