@@ -3,15 +3,21 @@ use crate::cx_cocoa::*;
 use crate::cx::*;
 
 impl Cx {
-    
+
     pub fn event_loop<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event),
     {
+        self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &mut Event) as *mut dyn FnMut(&mut Cx, &mut Event));
+        self.event_loop_core();
+        self.event_handler = None;  
+    }
+
+    pub fn event_loop_core(&mut self){
         self.platform_type = PlatformType::OSX;
-        
+
         let mut cocoa_app = CocoaApp::new();
         
-        cocoa_app.init();
+        cocoa_app.init();  
         
         let mut metal_cx = MetalCx::new();
         
@@ -21,17 +27,17 @@ impl Cx {
 
         self.load_all_fonts();
         
-        self.call_event_handler(&mut event_handler, &mut Event::Construct);
+        self.call_event_handler(&mut Event::Construct);
         
         self.redraw_child_area(Area::All);
-        
-        let mut passes_todo = Vec::new();
+         
+        let mut passes_todo = Vec::new(); 
         
         cocoa_app.event_loop( | cocoa_app, events | {
             //let mut paint_dirty = false;
             for mut event in events {
                 
-                self.process_desktop_pre_event(&mut event, &mut event_handler);
+                self.process_desktop_pre_event(&mut event);
                 
                 match &event {
                     Event::WindowGeomChange(re) => { // do this here because mac
@@ -49,7 +55,7 @@ impl Cx {
                             }
                         }
                         // ok lets not redraw all, just this window
-                        self.call_event_handler(&mut event_handler, &mut event);
+                        self.call_event_handler(&mut event);
                     },
                     Event::WindowClosed(wc) => { 
                         // lets remove the window from the set
@@ -68,11 +74,11 @@ impl Cx {
                                 }
                             }
                         }
-                        self.call_event_handler(&mut event_handler, &mut event);
+                        self.call_event_handler(&mut event);
                     },
                     Event::Paint => {
                         
-                        let vsync = self.process_desktop_paint_callbacks(cocoa_app.time_now(), &mut event_handler);
+                        let vsync = self.process_desktop_paint_callbacks(cocoa_app.time_now());
                         
                         // construct or destruct windows
                         for (index, window) in self.windows.iter_mut().enumerate() {
@@ -222,11 +228,11 @@ impl Cx {
                     Event::None => {
                     },
                     Event::Signal{..}=>{
-                        self.call_event_handler(&mut event_handler, &mut event);
-                        self.call_signals_and_triggers(&mut event_handler);
+                        self.call_event_handler(&mut event);
+                        self.call_signals_and_triggers();
                     },
                     _ => {
-                        self.call_event_handler(&mut event_handler, &mut event);
+                        self.call_event_handler(&mut event);
                     }
                 }
                 if self.process_desktop_post_event(event) {
@@ -238,7 +244,7 @@ impl Cx {
                 let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
                 let mut errors = self.process_live_styles_changes();
                 self.mtl_update_all_shaders(&metal_cx, &mut errors);
-                self.call_live_recompile_event(changed_live_bodies, errors ,&mut event_handler);
+                self.call_live_recompile_event(changed_live_bodies, errors);
             }
             
             self.process_live_style_errors();

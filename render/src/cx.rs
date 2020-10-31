@@ -69,7 +69,7 @@ pub enum PlatformType {
     Unknown,
     Windows,
     OSX,
-    Linux,
+    Linux {custom_window_chrome: bool},
     Web {protocol: String, hostname: String, port: u16, pathname: String, search: String, hash: String}
 }
 
@@ -79,7 +79,7 @@ impl PlatformType {
             PlatformType::Unknown => true,
             PlatformType::Windows => true,
             PlatformType::OSX => true,
-            PlatformType::Linux => true,
+            PlatformType::Linux{..} => true,
             PlatformType::Web {..} => false
         }
     }
@@ -156,6 +156,8 @@ pub struct Cx {
     pub panic_redraw: bool,
     
     pub platform: CxPlatform,
+    // this cuts the compiletime of an end-user application in half
+    pub event_handler: Option<*mut dyn FnMut(&mut Cx, &mut Event)>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -268,6 +270,7 @@ impl Default for Cx {
             
             platform: CxPlatform {..Default::default()},
             
+            event_handler: None
         }
     }
 }
@@ -663,36 +666,36 @@ impl Cx {
         }
     }
     
-    pub fn call_all_keys_up<F>(&mut self, mut event_handler: F)
-    where F: FnMut(&mut Cx, &mut Event)
+    pub fn call_all_keys_up(&mut self)
     {
         let mut keys_down = Vec::new();
         std::mem::swap(&mut keys_down, &mut self.keys_down);
         for key_event in keys_down {
-            self.call_event_handler(&mut event_handler, &mut Event::KeyUp(key_event))
+            self.call_event_handler(&mut Event::KeyUp(key_event))
         }
     }
     
     // event handler wrappers
     
-    pub fn call_event_handler<F>(&mut self, mut event_handler: F, event: &mut Event)
-    where F: FnMut(&mut Cx, &mut Event)
+    pub fn call_event_handler(&mut self, event: &mut Event)
     {
         self.event_id += 1;
-        event_handler(self, event);
+
+        let event_handler = self.event_handler.unwrap();
         
+        unsafe{(*event_handler)(self, event);}
+
         if self.next_key_focus != self.key_focus {
             self.prev_key_focus = self.key_focus;
             self.key_focus = self.next_key_focus;
-            event_handler(self, &mut Event::KeyFocus(KeyFocusEvent {
+            unsafe{(*event_handler)(self,  &mut Event::KeyFocus(KeyFocusEvent {
                 prev: self.prev_key_focus,
                 focus: self.key_focus
-            }))
+            }));}
         }
     }
     
-    pub fn call_draw_event<F>(&mut self, mut event_handler: F)
-    where F: FnMut(&mut Cx, &mut Event)
+    pub fn call_draw_event(&mut self)
     {
         // self.profile();
         self.is_in_redraw_cycle = true;
@@ -703,7 +706,7 @@ impl Cx {
         self.align_list.truncate(0);
         self.redraw_child_areas.truncate(0);
         self.redraw_parent_areas.truncate(0);
-        self.call_event_handler(&mut event_handler, &mut Event::Draw);
+        self.call_event_handler(&mut Event::Draw);
         self.is_in_redraw_cycle = false;
         if self.live_styles.style_stack.len()>0 {
             panic!("Style stack disaligned, forgot a cx.end_style()");
@@ -723,22 +726,20 @@ impl Cx {
         //self.profile();
     }
     
-    pub fn call_animation_event<F>(&mut self, mut event_handler: F, time: f64)
-    where F: FnMut(&mut Cx, &mut Event)
+    pub fn call_animation_event(&mut self, time: f64)
     {
-        self.call_event_handler(&mut event_handler, &mut Event::Animate(AnimateEvent {time: time, frame: self.repaint_id}));
+        self.call_event_handler(&mut Event::Animate(AnimateEvent {time: time, frame: self.repaint_id}));
         self.check_ended_anim_areas(time);
         if self.ended_anim_areas.len() > 0 {
-            self.call_event_handler(&mut event_handler, &mut Event::AnimEnded(AnimateEvent {time: time, frame: self.repaint_id}));
+            self.call_event_handler(&mut Event::AnimEnded(AnimateEvent {time: time, frame: self.repaint_id}));
         }
     }
     
-    pub fn call_frame_event<F>(&mut self, mut event_handler: F, time: f64)
-    where F: FnMut(&mut Cx, &mut Event)
+    pub fn call_frame_event(&mut self, time: f64)
     {
         std::mem::swap(&mut self._frame_callbacks, &mut self.frame_callbacks);
         self.frame_callbacks.clear();
-        self.call_event_handler(&mut event_handler, &mut Event::Frame(FrameEvent {time: time, frame: self.repaint_id}));
+        self.call_event_handler(&mut Event::Frame(FrameEvent {time: time, frame: self.repaint_id}));
     }
     
     pub fn next_frame(&mut self, area: Area) {
@@ -782,8 +783,7 @@ impl Cx {
         }    
     }
     
-    pub fn call_signals_and_triggers<F>(&mut self, mut event_handler: F)
-    where F: FnMut(&mut Cx, &mut Event)
+    pub fn call_signals_and_triggers(&mut self)
     {
         let mut counter = 0;
         while self.signals.len() != 0 {
@@ -791,7 +791,7 @@ impl Cx {
             let mut signals = HashMap::new();
             std::mem::swap(&mut self.signals, &mut signals);
             
-            self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent {
+            self.call_event_handler(&mut Event::Signal(SignalEvent {
                 signals: signals,
             }));
             
@@ -807,7 +807,7 @@ impl Cx {
             let mut triggers = HashMap::new();
             std::mem::swap(&mut self.triggers, &mut triggers);
             
-            self.call_event_handler(&mut event_handler, &mut Event::Triggers(TriggersEvent {
+            self.call_event_handler(&mut Event::Triggers(TriggersEvent {
                 triggers: triggers,
             }));
             
@@ -819,10 +819,9 @@ impl Cx {
 
     }
     
-    pub fn call_live_recompile_event<F>(&mut self, changed_live_bodies: BTreeSet<LiveBodyId>, errors: Vec<LiveBodyError>, mut event_handler: F)
-    where F: FnMut(&mut Cx, &mut Event)
+    pub fn call_live_recompile_event(&mut self, changed_live_bodies: BTreeSet<LiveBodyId>, errors: Vec<LiveBodyError>)
     {
-        self.call_event_handler(&mut event_handler, &mut Event::LiveRecompile(LiveRecompileEvent {
+        self.call_event_handler(&mut Event::LiveRecompile(LiveRecompileEvent {
             changed_live_bodies,
             errors
         }));

@@ -6,17 +6,17 @@ pub struct BareExampleApp {
     color_texture: Texture,
     main_view: View,
     quad: Quad,
-    count: f32
-}
-
-impl BareExampleApp {
+    count: f32 
+}  
+ 
+impl BareExampleApp {  
     pub fn style(cx: &mut Cx){
         live_body!(cx, r#"
-            self::bg_color: #f00;
+            self::bg_color: #f00; 
             self::bg_color2: #00f;
             self::bg_shader: Shader { 
                 use makepad_render::quad::shader::*;
-
+ 
                 instance counter: float;
 
                 fn pixel() -> vec4 {

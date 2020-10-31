@@ -15,6 +15,12 @@ use std::os::raw::{c_char, c_uchar, c_int, c_uint, c_ulong, c_long, c_void};
 use std::ptr;
 use time::precise_time_ns;
 
+
+#[cfg(target_arch = "arm")]
+pub const LINUX_CUSTOM_WINDOW_CHROME: bool = false;
+#[cfg(not(target_arch = "arm"))]
+pub const LINUX_CUSTOM_WINDOW_CHROME: bool = true;
+
 static mut GLOBAL_XLIB_APP: *mut XlibApp = 0 as *mut _;
 
 pub struct XlibApp {
@@ -33,13 +39,14 @@ pub struct XlibApp {
     pub event_loop_running: bool,
     pub timers: VecDeque<XlibTimer>,
     pub free_timers: Vec<usize>,
-    pub signals: Mutex<Vec<Event>>,
+    pub signals: Mutex<Vec<Event >>,
     pub loop_block: bool,
     pub current_cursor: MouseCursor,
     
     pub atom_clipboard: X11_sys::Atom,
     pub atom_net_wm_moveresize: X11_sys::Atom,
     pub atom_wm_delete_window: X11_sys::Atom,
+    pub atom_wm_protocols: X11_sys::Atom,
     pub atom_motif_wm_hints: X11_sys::Atom,
     pub atom_net_wm_state: X11_sys::Atom,
     pub atom_new_wm_state_maximized_horz: X11_sys::Atom,
@@ -109,6 +116,7 @@ impl XlibApp {
                 atom_clipboard: X11_sys::XInternAtom(display, CString::new("CLIPBOARD").unwrap().as_ptr(), 0),
                 atom_net_wm_moveresize: X11_sys::XInternAtom(display, CString::new("_NET_WM_MOVERESIZE").unwrap().as_ptr(), 0),
                 atom_wm_delete_window: X11_sys::XInternAtom(display, CString::new("WM_DELETE_WINDOW").unwrap().as_ptr(), 0),
+                atom_wm_protocols: X11_sys::XInternAtom(display, CString::new("WM_PROTOCOLS").unwrap().as_ptr(), 0),
                 atom_motif_wm_hints: X11_sys::XInternAtom(display, CString::new("_MOTIF_WM_HINTS").unwrap().as_ptr(), 0),
                 atom_net_wm_state: X11_sys::XInternAtom(display, CString::new("_NET_WM_STATE").unwrap().as_ptr(), 0),
                 atom_new_wm_state_maximized_horz: X11_sys::XInternAtom(display, CString::new("_NET_WM_STATE_MAXIMIZED_HORZ").unwrap().as_ptr(), 0),
@@ -298,7 +306,7 @@ impl XlibApp {
                                 type_: X11_sys::SelectionNotify as i32,
                                 serial: 0,
                                 send_event: 0,
-                                display: self.display, 
+                                display: self.display,
                                 requestor: request.requestor,
                                 selection: request.selection,
                                 target: request.target,
@@ -381,7 +389,7 @@ impl XlibApp {
                                 let window = &mut (**window_ptr);
                                 let mut x = motion.x;
                                 let mut y = motion.y;
-                                if window.window.is_none(){
+                                if window.window.is_none() {
                                     return; // shutdown
                                 }
                                 if motion.window != window.window.unwrap() {
@@ -489,10 +497,10 @@ impl XlibApp {
                                 else {
                                     // do all the 'nonclient' area messaging to the window manager
                                     if let Some(last_nc_mode) = window.last_nc_mode {
-                                        if (time_now - self.last_click_time) < 0.35 
-                                        && (button.x_root - self.last_click_pos.0).abs() < 5
-                                        && (button.y_root - self.last_click_pos.1).abs() < 5
-                                        && last_nc_mode == _NET_WM_MOVERESIZE_MOVE {
+                                        if (time_now - self.last_click_time) < 0.35
+                                            && (button.x_root - self.last_click_pos.0).abs() < 5
+                                            && (button.y_root - self.last_click_pos.1).abs() < 5
+                                            && last_nc_mode == _NET_WM_MOVERESIZE_MOVE {
                                             if window.get_is_maximized() {
                                                 window.restore();
                                             }
@@ -611,9 +619,9 @@ impl XlibApp {
                                         time: self.time_now()
                                     })]);
                                     block_text
-                                }else{false};
+                                }else {false};
                                 
-                                if !block_text{
+                                if !block_text {
                                     // decode the character
                                     let mut buffer = [0u8; 32];
                                     let mut keysym = mem::MaybeUninit::uninit();
@@ -654,6 +662,12 @@ impl XlibApp {
                         },
                         X11_sys::ClientMessage => {
                             let event = event.xclient;
+                            if event.message_type == self.atom_wm_protocols {
+                                if let Some(window_ptr) = self.window_map.get(&event.window) {
+                                    let window = &mut (**window_ptr);
+                                    window.close_window();
+                                }
+                            }
                             if event.message_type == self.dnd.atoms.enter {
                                 self.dnd.handle_enter_event(&event);
                             } else if event.message_type == self.dnd.atoms.drop {
@@ -665,7 +679,7 @@ impl XlibApp {
                             }
                         },
                         X11_sys::Expose => {
-                            /*
+                            /* 
                             (glx.glXMakeCurrent)(display, window, context);
                             gl::ClearColor(1.0, 0.0, 0.0, 1.0);
                             gl::Clear(gl::COLOR_BUFFER_BIT);
@@ -779,7 +793,7 @@ impl XlibApp {
         }
     }
     
-    pub fn post_signal(signal:Signal, status:StatusId) {
+    pub fn post_signal(signal: Signal, status: StatusId) {
         unsafe {
             if let Ok(mut signals_locked) = (*GLOBAL_XLIB_APP).signals.lock() {
                 let mut signals = HashMap::new();
@@ -794,7 +808,7 @@ impl XlibApp {
         }
     }
     
-    pub fn terminate_event_loop(&mut self) { 
+    pub fn terminate_event_loop(&mut self) {
         // maybe need to do more here
         self.event_loop_running = false;
         unsafe {X11_sys::XCloseIM(self.xim)};
@@ -972,8 +986,8 @@ impl XlibApp {
             X11_sys::XK_comma => KeyCode::Comma,
             X11_sys::XK_slash => KeyCode::Slash,
             X11_sys::XK_period => KeyCode::Period,
-            X11_sys::XK_Tab=> KeyCode::Tab,
-            X11_sys::XK_ISO_Left_Tab=> KeyCode::Tab,
+            X11_sys::XK_Tab => KeyCode::Tab,
+            X11_sys::XK_ISO_Left_Tab => KeyCode::Tab,
             X11_sys::XK_space => KeyCode::Space,
             X11_sys::XK_BackSpace => KeyCode::Backspace,
             X11_sys::XK_Escape => KeyCode::Escape,
@@ -1050,7 +1064,7 @@ impl XlibWindow {
         }
     }
     
-    pub fn init(&mut self, _title: &str, size: Vec2, position: Option<Vec2>, visual_info: X11_sys::XVisualInfo) {
+    pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>, visual_info: X11_sys::XVisualInfo) {
         unsafe {
             let display = (*self.xlib_app).display;
             
@@ -1066,7 +1080,20 @@ impl XlibWindow {
             //attributes.override_redirect = 1;
             attributes.colormap =
             X11_sys::XCreateColormap(display, root_window, visual_info.visual, X11_sys::AllocNone as i32);
-            attributes.event_mask = (X11_sys::ExposureMask | X11_sys::StructureNotifyMask | X11_sys::ButtonMotionMask | X11_sys::PointerMotionMask | X11_sys::ButtonPressMask | X11_sys::ButtonReleaseMask | X11_sys::KeyPressMask | X11_sys::KeyReleaseMask | X11_sys::VisibilityChangeMask | X11_sys::FocusChangeMask | X11_sys::EnterWindowMask | X11_sys::LeaveWindowMask) as c_long;
+            attributes.event_mask = (
+                X11_sys::ExposureMask
+                    | X11_sys::StructureNotifyMask
+                    | X11_sys::ButtonMotionMask
+                    | X11_sys::PointerMotionMask
+                    | X11_sys::ButtonPressMask
+                    | X11_sys::ButtonReleaseMask
+                    | X11_sys::KeyPressMask
+                    | X11_sys::KeyReleaseMask
+                    | X11_sys::VisibilityChangeMask
+                    | X11_sys::FocusChangeMask
+                    | X11_sys::EnterWindowMask
+                    | X11_sys::LeaveWindowMask
+            ) as c_long;
             
             let dpi_factor = self.get_dpi_factor();
             // Create a window
@@ -1088,23 +1115,28 @@ impl XlibWindow {
             // Tell the window manager that we want to be notified when the window is closed
             X11_sys::XSetWMProtocols(display, window, &mut (*self.xlib_app).atom_wm_delete_window, 1);
             
-            let hints = MwmHints {
-                flags: MWM_HINTS_DECORATIONS,
-                functions: 0,
-                decorations: 0,
-                input_mode: 0,
-                status: 0,
-            };
-            
-            let atom_motif_wm_hints = (*self.xlib_app).atom_motif_wm_hints;
-            
-            X11_sys::XChangeProperty(display, window, atom_motif_wm_hints, atom_motif_wm_hints, 32, X11_sys::PropModeReplace as i32, &hints as *const _ as *const u8, 5);
+            if LINUX_CUSTOM_WINDOW_CHROME{
+                let hints = MwmHints {
+                    flags: MWM_HINTS_DECORATIONS,
+                    functions: 0,
+                    decorations: 0,
+                    input_mode: 0,
+                    status: 0,
+                };
+                
+                let atom_motif_wm_hints = (*self.xlib_app).atom_motif_wm_hints;
+                
+                X11_sys::XChangeProperty(display, window, atom_motif_wm_hints, atom_motif_wm_hints, 32, X11_sys::PropModeReplace as i32, &hints as *const _ as *const u8, 5);
+            }
             
             (*self.xlib_app).dnd.enable_for_window(window);
             
             // Map the window to the screen
             X11_sys::XMapWindow(display, window);
             X11_sys::XFlush(display);
+            
+            let title_bytes = format!("{}\0",title);
+            X11_sys::XStoreName(display, window, title_bytes.as_bytes().as_ptr() as *const ::std::os::raw::c_char);
             
             let xic = X11_sys::XCreateIC((*self.xlib_app).xim, CStr::from_bytes_with_nul(X11_sys::XNInputStyle.as_ref()).unwrap().as_ptr(), (X11_sys::XIMPreeditNothing | X11_sys::XIMStatusNothing) as i32, CStr::from_bytes_with_nul(X11_sys::XNClientWindow.as_ref()).unwrap().as_ptr(), window, CStr::from_bytes_with_nul(X11_sys::XNFocusWindow.as_ref()).unwrap().as_ptr(), window, ptr::null_mut() as *mut c_void);
             
@@ -1410,7 +1442,7 @@ impl XlibWindow {
             //return 2.0;
             let display = (*self.xlib_app).display;
             let resource_string = X11_sys::XResourceManagerString(display);
-            if resource_string == std::ptr::null_mut(){
+            if resource_string == std::ptr::null_mut() {
                 return 1.0
             }
             let db = X11_sys::XrmGetStringDatabase(resource_string);
@@ -1487,7 +1519,7 @@ impl XlibWindow {
             rect: Rect::default(),
             digit: digit,
             handled: false,
-            input_type:FingerInputType::Mouse,
+            input_type: FingerInputType::Mouse,
             modifiers: modifiers,
             tap_count: 0,
             time: self.time_now()
@@ -1514,7 +1546,7 @@ impl XlibWindow {
             rel_start: Vec2::default(),
             digit: digit,
             is_over: false,
-            input_type:FingerInputType::Mouse,
+            input_type: FingerInputType::Mouse,
             modifiers: modifiers,
             time: self.time_now()
         })]);
@@ -1534,7 +1566,7 @@ impl XlibWindow {
                     abs_start: Vec2::default(),
                     rel_start: Vec2::default(),
                     is_over: false,
-                    input_type:FingerInputType::Mouse,
+                    input_type: FingerInputType::Mouse,
                     modifiers: modifiers.clone(),
                     time: self.time_now()
                 }));
@@ -1614,7 +1646,7 @@ const _NET_WM_STATE_TOGGLE: c_long = 2;/* toggle property  */
 pub struct Dnd {
     atoms: DndAtoms,
     display: *mut X11_sys::Display,
-    type_list: Option<Vec<X11_sys::Atom>>,
+    type_list: Option<Vec<X11_sys::Atom >>,
     selection: Option<CString>,
 }
 

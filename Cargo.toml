@@ -6,8 +6,10 @@ members = [
     "examples/bare_example", 
     "examples/bare_example/wasm",
     "examples/widget_example",
+    "examples/widget_example/wasm",
     "examples/cmdline_example",
     "tools/webserver",
+    "tools/brotli_test",
     "builder"
 ]
 

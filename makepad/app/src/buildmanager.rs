@@ -250,7 +250,7 @@ impl BuildManager {
         self.log_items.truncate(0);
         if re.errors.len() == 0 {
             self.log_items.push(HubLogItem::Message(
-                format!("Live block compiled OK")
+                format!("Live block compiled OK") 
             ));
         }
         for err in &re.errors {
