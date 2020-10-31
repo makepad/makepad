@@ -1,6 +1,7 @@
 use crate::cx_xlib::*;
 use crate::cx::*;
 
+
 impl Cx {
         pub fn event_loop<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event),
@@ -12,7 +13,7 @@ impl Cx {
 
     
     pub fn event_loop_core(&mut self){
-        self.platform_type = PlatformType::Linux;
+        self.platform_type = PlatformType::Linux{custom_window_chrome: LINUX_CUSTOM_WINDOW_CHROME};
         // 
         self.gpu_info.performance = GpuPerformance::Tier1;
         
