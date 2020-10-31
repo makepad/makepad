@@ -1065,7 +1065,7 @@ impl XlibWindow {
         }
     }
     
-    pub fn init(&mut self, _title: &str, size: Vec2, position: Option<Vec2>, visual_info: X11_sys::XVisualInfo) {
+    pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>, visual_info: X11_sys::XVisualInfo) {
         unsafe {
             let display = (*self.xlib_app).display;
             
@@ -1135,6 +1135,9 @@ impl XlibWindow {
             // Map the window to the screen
             X11_sys::XMapWindow(display, window);
             X11_sys::XFlush(display);
+            
+            let title_bytes = format!("{}\0",title);
+            X11_sys::XStoreName(display, window, title_bytes.as_bytes().as_ptr() as *const ::std::os::raw::c_char);
             
             let xic = X11_sys::XCreateIC((*self.xlib_app).xim, CStr::from_bytes_with_nul(X11_sys::XNInputStyle.as_ref()).unwrap().as_ptr(), (X11_sys::XIMPreeditNothing | X11_sys::XIMStatusNothing) as i32, CStr::from_bytes_with_nul(X11_sys::XNClientWindow.as_ref()).unwrap().as_ptr(), window, CStr::from_bytes_with_nul(X11_sys::XNFocusWindow.as_ref()).unwrap().as_ptr(), window, ptr::null_mut() as *mut c_void);
             
