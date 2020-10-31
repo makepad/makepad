@@ -69,7 +69,7 @@ pub enum PlatformType {
     Unknown,
     Windows,
     OSX,
-    Linux,
+    Linux {custom_window_chrome: bool},
     Web {protocol: String, hostname: String, port: u16, pathname: String, search: String, hash: String}
 }
 
@@ -79,7 +79,7 @@ impl PlatformType {
             PlatformType::Unknown => true,
             PlatformType::Windows => true,
             PlatformType::OSX => true,
-            PlatformType::Linux => true,
+            PlatformType::Linux{..} => true,
             PlatformType::Web {..} => false
         }
     }
