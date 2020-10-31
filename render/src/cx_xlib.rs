@@ -663,7 +663,7 @@ impl XlibApp {
                         X11_sys::ClientMessage => {
                             let event = event.xclient;
                             if event.message_type == self.atom_wm_protocols &&
-                            event.data.l[0] == self.atom_wm_delete_window as i64 {
+                            event.data.l[0] == self.atom_wm_delete_window as std::os::raw::c_long {
                                 if let Some(window_ptr) = self.window_map.get(&event.window) {
                                     let window = &mut (**window_ptr);
                                     window.close_window();
