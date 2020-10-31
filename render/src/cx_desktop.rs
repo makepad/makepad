@@ -64,8 +64,7 @@ impl Cx {
         0
     }
     
-    pub fn process_desktop_pre_event<F>(&mut self, event: &mut Event, mut event_handler: F)
-    where F: FnMut(&mut Cx, &mut Event)
+    pub fn process_desktop_pre_event(&mut self, event: &mut Event)
     {
         match event {
             Event::FingerHover(fe) => {
@@ -96,7 +95,7 @@ impl Cx {
                 self.process_key_up(&ke);
             },
             Event::AppFocusLost => {
-                self.call_all_keys_up(&mut event_handler);
+                self.call_all_keys_up();
             },
             _ => ()
         };
@@ -124,43 +123,40 @@ impl Cx {
         false
     }
     
-    pub fn process_desktop_paint_callbacks<F>(&mut self, time: f64, mut event_handler: F) -> bool
-    where F: FnMut(&mut Cx, &mut Event)
+    pub fn process_desktop_paint_callbacks(&mut self, time: f64) -> bool
     {
         if self.playing_anim_areas.len() != 0 {
-            self.call_animation_event(&mut event_handler, time);
+            self.call_animation_event(time);
         }
         
         let mut vsync = false; //self.platform.desktop.repaint_via_scroll_event;
         self.platform.desktop.repaint_via_scroll_event = false;
         if self.frame_callbacks.len() != 0 {
-            self.call_frame_event(&mut event_handler, time);
+            self.call_frame_event(time);
             if self.frame_callbacks.len() != 0 {
                 vsync = true;
             }
         }
         
-        self.call_signals_and_triggers(&mut event_handler);
+        self.call_signals_and_triggers();
         
         // call redraw event
         if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
-            self.call_draw_event(&mut event_handler);
+            self.call_draw_event();
         }
         if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
             vsync = true;
         }
         
-        self.process_desktop_file_reads(&mut event_handler);
+        self.process_desktop_file_reads();
         
-        self.call_signals_and_triggers(&mut event_handler);
+        self.call_signals_and_triggers();
         
         vsync
     }
     
     
-    pub fn process_desktop_file_reads<F>(&mut self, mut event_handler: F)
-    where F: FnMut(&mut Cx, &mut Event)
-    {
+    pub fn process_desktop_file_reads(&mut self){
         if self.platform.desktop.file_reads.len() == 0 {
             return
         }
@@ -174,20 +170,20 @@ impl Cx {
                 let mut buffer = Vec::new();
                 // read the whole file
                 if file.read_to_end(&mut buffer).is_ok() {
-                    event_handler(self, &mut Event::FileRead(FileReadEvent {
+                    self.call_event_handler(&mut Event::FileRead(FileReadEvent {
                         read_id: read_req.read_id,
                         data: Ok(buffer)
                     }))
                 }
                 else {
-                    event_handler(self, &mut Event::FileRead(FileReadEvent {
+                    self.call_event_handler(&mut Event::FileRead(FileReadEvent {
                         read_id: read_req.read_id,
                         data: Err(format!("Failed to read {}", read_req.path))
                     }))
                 }
             }
             else {
-                event_handler(self, &mut Event::FileRead(FileReadEvent {
+                self.call_event_handler(&mut Event::FileRead(FileReadEvent {
                     read_id: read_req.read_id,
                     data: Err(format!("Failed to open {}", read_req.path))
                 }))
@@ -195,7 +191,7 @@ impl Cx {
         }
         
         if self.platform.desktop.file_reads.len() != 0 {
-            self.process_desktop_file_reads(event_handler);
+            self.process_desktop_file_reads();
         }
     }
     

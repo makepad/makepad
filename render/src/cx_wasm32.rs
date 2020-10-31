@@ -10,10 +10,18 @@ impl Cx {
         return self.platform.window_geom.inner_size;
     }
     
+    pub fn process_to_wasm<F>(&mut self, msg: u32, mut event_handler: F) -> u32
+    where F: FnMut(&mut Cx, &mut Event),
+    {
+        self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &mut Event) as *mut dyn FnMut(&mut Cx, &mut Event));
+        let ret = self.event_loop_core(msg);
+        self.event_handler = None;  
+        ret
+    }
+    
     // incoming to_wasm. There is absolutely no other entrypoint
     // to general rust codeflow than this function. Only the allocators and init
-    pub fn process_to_wasm<F>(&mut self, msg: u32, mut event_handler: F) -> u32
-    where F: FnMut(&mut Cx, &mut Event)
+    pub fn event_loop_core(&mut self, msg: u32) -> u32
     {
         // store our view root somewhere
         if self.platform.is_initialized == false {
@@ -103,7 +111,7 @@ impl Cx {
                         self.windows[0].window_geom = self.platform.window_geom.clone();
                     }
                     
-                    self.call_event_handler(&mut event_handler, &mut Event::Construct);
+                    self.call_event_handler(&mut Event::Construct);
                     
                     self.redraw_child_area(Area::All);
                 },
@@ -126,7 +134,7 @@ impl Cx {
                         self.windows[0].window_geom = self.platform.window_geom.clone();
                     }
                     if old_geom != new_geom {
-                        self.call_event_handler(&mut event_handler, &mut Event::WindowGeomChange(WindowGeomChangeEvent {
+                        self.call_event_handler(&mut Event::WindowGeomChange(WindowGeomChangeEvent {
                             window_id: 0,
                             old_geom: old_geom,
                             new_geom: new_geom
@@ -142,10 +150,10 @@ impl Cx {
                     self.anim_time = time;
                     //log!(self, "{} o clock",time);
                     if self.playing_anim_areas.len() != 0 {
-                        self.call_animation_event(&mut event_handler, time);
+                        self.call_animation_event(time);
                     }
                     if self.frame_callbacks.len() != 0 {
-                        self.call_frame_event(&mut event_handler, time);
+                        self.call_frame_event(time);
                     }
                 },
                 6 => { // finger down
@@ -156,7 +164,7 @@ impl Cx {
                     let modifiers = unpack_key_modifier(to_wasm.mu32());
                     let time = to_wasm.mf64();
                     let tap_count = self.process_tap_count(digit, abs, time);
-                    self.call_event_handler(&mut event_handler, &mut Event::FingerDown(FingerDownEvent {
+                    self.call_event_handler(&mut Event::FingerDown(FingerDownEvent {
                         window_id: 0,
                         abs: abs,
                         rel: abs,
@@ -179,7 +187,7 @@ impl Cx {
                     let is_touch = to_wasm.mu32()>0;
                     let modifiers = unpack_key_modifier(to_wasm.mu32());
                     let time = to_wasm.mf64();
-                    self.call_event_handler(&mut event_handler, &mut Event::FingerUp(FingerUpEvent {
+                    self.call_event_handler(&mut Event::FingerUp(FingerUpEvent {
                         window_id: 0,
                         abs: abs,
                         rel: abs,
@@ -201,7 +209,7 @@ impl Cx {
                     let is_touch = to_wasm.mu32()>0;
                     let modifiers = unpack_key_modifier(to_wasm.mu32());
                     let time = to_wasm.mf64();
-                    self.call_event_handler(&mut event_handler, &mut Event::FingerMove(FingerMoveEvent {
+                    self.call_event_handler(&mut Event::FingerMove(FingerMoveEvent {
                         window_id: 0,
                         abs: abs,
                         rel: abs,
@@ -221,7 +229,7 @@ impl Cx {
                     self.hover_mouse_cursor = None;
                     let modifiers = unpack_key_modifier(to_wasm.mu32());
                     let time = to_wasm.mf64();
-                    self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent {
+                    self.call_event_handler(&mut Event::FingerHover(FingerHoverEvent {
                         any_down: false,
                         digit: 0,
                         window_id: 0,
@@ -247,7 +255,7 @@ impl Cx {
                     let is_wheel = to_wasm.mu32() != 0;
                     let modifiers = unpack_key_modifier(to_wasm.mu32());
                     let time = to_wasm.mf64();
-                    self.call_event_handler(&mut event_handler, &mut Event::FingerScroll(FingerScrollEvent {
+                    self.call_event_handler(&mut Event::FingerScroll(FingerScrollEvent {
                         window_id: 0,
                         digit: 0,
                         abs: abs,
@@ -265,7 +273,7 @@ impl Cx {
                     let abs = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
                     let modifiers = unpack_key_modifier(to_wasm.mu32());
                     let time = to_wasm.mf64();
-                    self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent {
+                    self.call_event_handler(&mut Event::FingerHover(FingerHoverEvent {
                         window_id: 0,
                         digit: 0,
                         any_down: false,
@@ -287,7 +295,7 @@ impl Cx {
                         time: to_wasm.mf64()
                     };
                     self.process_key_down(key_event.clone());
-                    self.call_event_handler(&mut event_handler, &mut Event::KeyDown(key_event));
+                    self.call_event_handler(&mut Event::KeyDown(key_event));
                 },
                 13 => { // key up
                     let key_event = KeyEvent {
@@ -298,10 +306,10 @@ impl Cx {
                         time: to_wasm.mf64()
                     };
                     self.process_key_up(&key_event);
-                    self.call_event_handler(&mut event_handler, &mut Event::KeyUp(key_event));
+                    self.call_event_handler(&mut Event::KeyUp(key_event));
                 },
                 14 => { // text input
-                    self.call_event_handler(&mut event_handler, &mut Event::TextInput(TextInputEvent {
+                    self.call_event_handler(&mut Event::TextInput(TextInputEvent {
                         was_paste: to_wasm.mu32()>0,
                         replace_last: to_wasm.mu32()>0,
                         input: to_wasm.parse_string(),
@@ -313,7 +321,7 @@ impl Cx {
                     let buf_len = to_wasm.mu32() as usize;
                     let vec_buf = unsafe {Vec::<u8>::from_raw_parts(buf_ptr, buf_len, buf_len)};
                     
-                    self.call_event_handler(&mut event_handler, &mut Event::FileRead(FileReadEvent {
+                    self.call_event_handler(&mut Event::FileRead(FileReadEvent {
                         read_id: read_id as u64,
                         data: Ok(vec_buf)
                     }));
@@ -321,7 +329,7 @@ impl Cx {
                 16 => { // file error
                     let read_id = to_wasm.mu32();
                     
-                    self.call_event_handler(&mut event_handler, &mut Event::FileRead(FileReadEvent {
+                    self.call_event_handler(&mut Event::FileRead(FileReadEvent {
                         read_id: read_id as u64,
                         data: Err("Cannot load".to_string())
                     }));
@@ -330,7 +338,7 @@ impl Cx {
                     let mut event = Event::TextCopy(TextCopyEvent {
                         response: None
                     });
-                    self.call_event_handler(&mut event_handler, &mut event);
+                    self.call_event_handler(&mut event);
                     match &event {
                         Event::TextCopy(req) => if let Some(response) = &req.response {
                             self.platform.from_wasm.text_copy_response(&response);
@@ -340,18 +348,18 @@ impl Cx {
                 },
                 18 => { // timer fired
                     let timer_id = to_wasm.mf64() as u64;
-                    self.call_event_handler(&mut event_handler, &mut Event::Timer(TimerEvent {
+                    self.call_event_handler(&mut Event::Timer(TimerEvent {
                         timer_id: timer_id
                     }));
                 },
                 19 => { // window focus lost
                     let focus = to_wasm.mu32();
                     if focus == 0 {
-                        self.call_all_keys_up(&mut event_handler);
-                        self.call_event_handler(&mut event_handler, &mut Event::AppFocusLost);
+                        self.call_all_keys_up();
+                        self.call_event_handler(&mut Event::AppFocusLost);
                     }
                     else {
-                        self.call_event_handler(&mut event_handler, &mut Event::AppFocus);
+                        self.call_event_handler(&mut Event::AppFocus);
                     }
                 },
                 20 => { // xr_update, TODO add all the matrices / tracked hands / position IO'ed here
@@ -397,7 +405,7 @@ impl Cx {
                         }
                     }
                     // call the VRUpdate event
-                    self.call_event_handler(&mut event_handler, &mut Event::XRUpdate(XRUpdateEvent {
+                    self.call_event_handler(&mut Event::XRUpdate(XRUpdateEvent {
                         time,
                         head_transform,
                         last_left_input: self.platform.xr_last_left_input.clone(),
@@ -429,14 +437,14 @@ impl Cx {
                     let vec_len = to_wasm.mu32() as usize;
                     let url = to_wasm.parse_string();
                     let data = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
-                    self.call_event_handler(&mut event_handler, &mut Event::WebSocketMessage(
+                    self.call_event_handler(&mut Event::WebSocketMessage(
                         WebSocketMessageEvent {url, result: Ok(data)}
                     ));
                 }
                 24 => { // websocket error
                     let url = to_wasm.parse_string();
                     let err = to_wasm.parse_string();
-                    self.call_event_handler(&mut event_handler, &mut Event::WebSocketMessage(
+                    self.call_event_handler(&mut Event::WebSocketMessage(
                         WebSocketMessageEvent {url, result: Err(err)}
                     ));
                 }
@@ -446,12 +454,12 @@ impl Cx {
             };
         };
         
-        self.call_signals_and_triggers(&mut event_handler);
+        self.call_signals_and_triggers();
         
         if is_animation_frame && (self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0) {
-            self.call_draw_event(&mut event_handler);
+            self.call_draw_event();
         }
-        self.call_signals_and_triggers(&mut event_handler);
+        self.call_signals_and_triggers();
         
         for window in &mut self.windows {
             
@@ -542,7 +550,7 @@ impl Cx {
                 let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
                 let mut errors = self.process_live_styles_changes();
                 self.webgl_update_all_shaders(&mut errors);
-                self.call_live_recompile_event(changed_live_bodies, errors, &mut event_handler);
+                self.call_live_recompile_event(changed_live_bodies, errors);
             }
             /*
             let mut shader_results = Vec::new();
