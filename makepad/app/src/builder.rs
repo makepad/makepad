@@ -2,7 +2,7 @@
 use makepad_hub::*;
 
 pub fn builder(ws: &mut HubBuilder, htc: FromHubMsg) -> Result<(), HubWsError> {
-    match htc.msg {
+    match htc.msg { 
         HubMsg::ListPackagesRequest {uid} => {
             // lets read our Cargo.toml in the root
             let packages = ws.read_packages(uid);
@@ -13,7 +13,7 @@ pub fn builder(ws: &mut HubBuilder, htc: FromHubMsg) -> Result<(), HubWsError> {
                 packages.iter().map( | (project, v) | HubPackage::new(project, v, builds)).collect()
             );   
             Ok(())
-        }, 
+        },  
         HubMsg::Build {uid, workspace, package, config} => {
             let mut args = Vec::new();
             let mut env = Vec::new();

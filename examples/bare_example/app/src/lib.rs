@@ -16,7 +16,7 @@ impl BareExampleApp {
             self::bg_color2: #00f;
             self::bg_shader: Shader { 
                 use makepad_render::quad::shader::*;
-
+ 
                 instance counter: float;
 
                 fn pixel() -> vec4 {
