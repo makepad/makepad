@@ -1,5 +1,5 @@
 [package]
-name = "widget_example"
+name = "widget_example_app"
 version = "0.1.0"
 authors = ["makepaddev"]
 edition = "2018"
@@ -7,7 +7,7 @@ edition = "2018"
 [dependencies]
 
 [dependencies.makepad-render]
-path="../../render"
+path="../../../render"
 
-[dependencies.widget_example_app]
-path="./app"
+[dependencies.makepad-widget]
+path="../../../widget"
