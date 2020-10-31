@@ -3,7 +3,7 @@ use crate::cx::*;
 
 
 impl Cx {
-        pub fn event_loop<F>(&mut self, mut event_handler: F)
+    pub fn event_loop<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event),
     {
         self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &mut Event) as *mut dyn FnMut(&mut Cx, &mut Event));
@@ -27,7 +27,7 @@ impl Cx {
         
         self.opengl_compile_all_shaders(&opengl_cx);
         
-        self.load_all_fonts(); 
+        self.load_all_fonts();  
         
         self.call_event_handler(&mut Event::Construct);
         
