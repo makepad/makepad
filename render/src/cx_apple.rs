@@ -96,7 +96,6 @@ pub fn str_to_nsstring(val: &str) -> id {
     }
 }
 
-
 pub fn load_native_cursor(cursor_name: &str) -> id {
     let sel = Sel::register(cursor_name);
     let id: id = unsafe {msg_send![class!(NSCursor), performSelector: sel]};
