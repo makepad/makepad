@@ -35,7 +35,7 @@ impl Cx {
             else {
                 let cxview = &mut self.views[view_id];
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
-                let sh = &self.shaders[draw_call.shader_id];
+                let sh = &self.shaders[draw_call.shader.shader_id];
 
                 if draw_call.instance_dirty || draw_call.platform.inst_vb_id.is_none() {
                     draw_call.instance_dirty = false;
@@ -45,8 +45,8 @@ impl Cx {
                     }
                     self.platform.from_wasm.alloc_array_buffer(
                         draw_call.platform.inst_vb_id.unwrap(),
-                        draw_call.instance.len(),
-                        draw_call.instance.as_ptr() as *const f32
+                        draw_call.instances.len(),
+                        draw_call.instances.as_ptr() as *const f32
                     );
                     draw_call.instance_dirty = false;
                 }
@@ -67,8 +67,18 @@ impl Cx {
                     }
                 }
                 
+                let geometry_id = if let Some(geometry) = draw_call.geometry{
+                    geometry.geometry_id
+                }
+                else if let Some(geometry) = sh.default_geometry{
+                    geometry.geometry_id
+                }
+                else{
+                    continue
+                };
+                
                 // update geometry?
-                let geometry = &mut self.geometries[draw_call.geometry_id];
+                let geometry = &mut self.geometries[geometry_id];
                 
                 if geometry.dirty || geometry.platform.vb_id.is_none() || geometry.platform.ib_id.is_none() {
                     if geometry.platform.vb_id.is_none() {
@@ -109,9 +119,9 @@ impl Cx {
                 if vao.inst_vb_id != draw_call.platform.inst_vb_id
                     || vao.geom_vb_id != geometry.platform.vb_id
                     || vao.geom_ib_id != geometry.platform.ib_id
-                    || vao.shader_id != Some(draw_call.shader_id) {
+                    || vao.shader_id != Some(draw_call.shader.shader_id) {
                         
-                    vao.shader_id = Some(draw_call.shader_id);
+                    vao.shader_id = Some(draw_call.shader.shader_id);
                     vao.inst_vb_id = draw_call.platform.inst_vb_id;
                     vao.geom_vb_id = geometry.platform.vb_id;
                     vao.geom_ib_id = geometry.platform.ib_id;
@@ -126,7 +136,7 @@ impl Cx {
                 }
                 
                 self.platform.from_wasm.draw_call(
-                    draw_call.shader_id,
+                    draw_call.shader.shader_id,
                     draw_call.platform.vao.as_ref().unwrap().vao_id,
                     self.passes[pass_id].pass_uniforms.as_slice(),
                     cxview.view_uniforms.as_slice(),

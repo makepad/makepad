@@ -99,6 +99,12 @@ impl TokenBuilder {
         self
     }
     
+    pub fn sep(&mut self) -> &mut Self {
+        self.extend(TokenTree::from(Punct::new(':', Spacing::Joint)));
+        self.extend(TokenTree::from(Punct::new(':', Spacing::Alone)));
+        self
+    }
+    
     pub fn string(&mut self, val: &str) -> &mut Self {self.extend(TokenTree::from(Literal::string(val)))}
     pub fn unsuf_usize(&mut self, val: usize) -> &mut Self {self.extend(TokenTree::from(Literal::usize_unsuffixed(val)))}
     pub fn suf_u16(&mut self, val: u16) -> &mut Self {self.extend(TokenTree::from(Literal::u16_suffixed(val)))}
@@ -174,7 +180,7 @@ impl<It> Iterator for Iter<It> where It: Iterator {
 
 pub struct TokenParser {
     iter_stack: Vec<IntoIter>,
-    current: Option<TokenTree>
+    pub current: Option<TokenTree>
 }
 
 // this parser is optimized for parsing type definitions, not general Rust code
@@ -288,7 +294,9 @@ impl TokenParser {
     pub fn eat_literal(&mut self) -> Option<Literal> {
         // check if our current thing is an ident, ifso eat it.
         if let Some(TokenTree::Literal(lit)) = &self.current {
-            return Some(lit.clone())
+            let ret = Some(lit.clone());
+            self.advance();
+            return ret
         }
         return None
     }
@@ -309,6 +317,22 @@ impl TokenParser {
         }
     }
     
+    pub fn eat_sep(&mut self) -> bool {
+        // check if our punct is multichar.
+        if let Some(TokenTree::Punct(current)) = &self.current {
+            if current.as_char() == ':' && current.spacing() == Spacing::Joint{
+                self.advance();
+                if let Some(TokenTree::Punct(current)) = &self.current {
+                    if current.as_char() == ':' && current.spacing() == Spacing::Alone{
+                        self.advance();
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+    
     pub fn eat_punct(&mut self, what: char) -> bool {
         if self.is_punct(what) {
             self.advance();
@@ -322,6 +346,27 @@ impl TokenParser {
             let ret = Some(ident.to_string());
             self.advance();
             return ret
+        }
+        return None
+    }
+    
+    pub fn eat_ident_path(&mut self) -> Option<TokenStream> {
+        let mut tb = TokenBuilder::new();
+        loop{
+            if let Some(ident) = self.eat_any_ident(){
+                tb.ident(&ident);
+                if !self.eat_sep(){
+                    break
+                }
+                tb.sep();
+            }
+            else{
+                break
+            }
+        }
+        let ts = tb.end();
+        if !ts.is_empty(){
+            return Some(ts)
         }
         return None
     }
@@ -397,6 +442,10 @@ impl TokenParser {
         if self.open_brace(){
             let mut fields = Vec::new();
             while !self.eat_eot(){
+                // lets eat an attrib
+                if self.eat_punct('#'){
+                    
+                }
                 if let Some((field, ty)) = self.eat_struct_field(){
                     fields.push((field, ty));
                     self.eat_punct(',');

@@ -63,7 +63,7 @@ pub struct TextEditor {
     pub _paren_stack: Vec<ParenItem>,
     pub _indent_stack: Vec<(Color, f32)>,
     pub _indent_id_alloc: f32,
-    pub _indent_line_inst: Option<InstanceArea>,
+    pub _indent_line_inst: Area,
     pub _bg_inst: Option<InstanceArea>,
     pub _last_indent_color: Color,
     
@@ -261,7 +261,7 @@ impl TextEditor {
             _paren_stack: Vec::new(),
             _indent_stack: Vec::new(),
             _indent_id_alloc: 0.0,
-            _indent_line_inst: None,
+            _indent_line_inst: Area::Empty,
             
             //_line_chunk: Vec::new(),
             //_highlight_selection: Vec::new(),
@@ -1165,17 +1165,17 @@ impl TextEditor {
         // layering, this sets the draw call order
         self._highlight_area = cx.new_instance_draw_call(self.token_highlight.shader, None, 0).into();
         //cx.new_instance_layer(self.select_highlight.shader_id, 0);
-        cx.new_instance_draw_call(self.cursor_row.shader, None, 0);
-        cx.new_instance_draw_call(self.selection.shader, None, 0);
-        cx.new_instance_draw_call(self.message_marker.shader, None, 0);
-        cx.new_instance_draw_call(self.search_marker.shader, None, 0);
-        cx.new_instance_draw_call(self.paren_pair.shader, None, 0);
+        cx.new_draw_call(self.cursor_row.shader);
+        cx.new_draw_call(self.selection.shader);
+        cx.new_draw_call(self.message_marker.shader);
+        cx.new_draw_call(self.search_marker.shader);
+        cx.new_draw_call(self.paren_pair.shader);
         
         // force next begin_text in another drawcall
         self._text_inst = Some(self.text.begin_text(cx));
-        self._indent_line_inst = Some(cx.new_instance_draw_call(self.indent_lines.shader, None, 0));
+        self._indent_line_inst = cx.new_draw_call(self.indent_lines.shader).into_area();
         
-        self._cursor_area = cx.new_instance_draw_call(self.cursor.shader, None, 0).into();
+        self._cursor_area = cx.new_draw_call(self.cursor.shader).get_current_instance_area(0).into();
         
         if self.draw_line_numbers {
             if line_number_bg {
@@ -1219,7 +1219,8 @@ impl TextEditor {
         self.apply_style(cx);
         
         if !text_buffer.is_loaded {
-            let inst = self.bg.begin_quad_fill(cx);
+            let inst = self.bg.draw_quad_rel(cx, cx.get_turtle_rect());
+            //let inst = self.bg.begin_quad_fill(cx);
             inst.set_do_scroll(cx, false, false); // don't scroll the bg
             //et bg_inst = self.bg.begin_quad(cx, &Layout {
             //    align: Align::left_top(),
@@ -1227,7 +1228,7 @@ impl TextEditor {
             //});
             self.text.color = live_color!(cx, self::loading_color);
             self.text.draw_text(cx, "...");
-            self.bg.end_quad_fill(cx, inst);
+            //self.bg.end_quad_fill(cx, inst);
             //self.bg.end_quad(cx, &bg_inst);
             //self._bg_area = bg_inst.into_area();
             self.view.end_view(cx);
@@ -1243,7 +1244,7 @@ impl TextEditor {
                 self.set_key_focus(cx);
             }
             
-            let inst = self.bg.begin_quad_fill(cx);
+            let inst = self.bg.draw_quad_rel(cx, cx.get_turtle_rect());
             inst.set_do_scroll(cx, false, false); // don't scroll the bg
             self._bg_inst = Some(inst);
             
@@ -1813,7 +1814,7 @@ impl TextEditor {
         self.place_ime_and_draw_cursor_row(cx);
         self.set_indent_line_highlight_id(cx);
         self.draw_shadows(cx);
-        self.bg.end_quad_fill(cx, self._bg_inst.take().unwrap());
+        //self.bg.end_quad_fill(cx, self._bg_inst.take().unwrap());
         
         self.view.end_view(cx);
         
@@ -2029,12 +2030,11 @@ impl TextEditor {
     
     fn set_indent_line_highlight_id(&mut self, cx: &mut Cx) {
         // compute the line which our last cursor is on so we can set the highlight id
-        if let Some(indent_inst) = self._indent_line_inst {
+        if !self._indent_line_inst.is_empty() {
             let indent_id = if self.cursors.is_last_cursor_singular() && self._last_cursor_pos.row < self._line_geometry.len() {
                 self._line_geometry[self._last_cursor_pos.row].indent_id
             }else {0.};
-            let area: Area = indent_inst.clone().into();
-            area.write_uniform_float(cx, live_item_id!(self::shader_indent_lines::indent_sel), indent_id);
+            self._indent_line_inst.write_uniform_float(cx, live_item_id!(self::shader_indent_lines::indent_sel), indent_id);
         }
     }
     

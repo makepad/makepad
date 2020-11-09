@@ -49,6 +49,9 @@ mod animator;
 mod elements;
 mod area;
 mod geometrygen;
+
+mod drawquad;
+
 mod quad;
 mod blit;
 mod text;
@@ -61,8 +64,24 @@ mod shader_std;
 mod gpuinfo;
 
 pub use crate::cx::*;
+pub use crate::drawquad::*;
 pub use crate::quad::*;
 pub use crate::cube::*;
 pub use crate::blit::*;
 pub use crate::text::*;
 pub use crate::elements::*;
+
+use std::time::{Instant};
+
+impl Cx{
+    pub fn profile_start(&mut self, id:u64){
+        self.profiles.insert(id, Instant::now());
+    }
+    
+    pub fn profile_end(&self, id:u64){
+        if let Some(inst) = self.profiles.get(&id){
+            log!("Profile {} time {}", id, inst.elapsed().as_millis());
+        }
+        
+    }
+}
