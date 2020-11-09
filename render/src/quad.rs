@@ -70,19 +70,7 @@ impl Quad {
         area.set_rect(cx, &rect);
         area
     }
-    
-    pub fn begin_quad_fill(&mut self, cx: &mut Cx) -> InstanceArea {
-        let inst = self.draw_quad_rel(cx, Rect::default());
-        inst
-    }
-    
-    pub fn end_quad_fill(&mut self, cx: &mut Cx, inst: InstanceArea) -> Area {
-        let area: Area = inst.into();
-        let pos = cx.get_turtle_origin();
-        area.set_rect(cx, &Rect {x: pos.x, y: pos.y, w: cx.get_width_total(), h: cx.get_height_total()});
-        area
-    }
-    
+
     pub fn draw_quad(&mut self, cx: &mut Cx, walk: Walk) -> InstanceArea {
         let geom = cx.walk_turtle(walk);
         let inst = self.draw_quad_abs(cx, geom);
@@ -116,3 +104,6 @@ impl Quad {
         inst
     }
 }
+
+
+

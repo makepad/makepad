@@ -18,6 +18,7 @@ makepad-trapezoidator = { path = "./vector/trapezoidator", version = "0.1" }
 makepad-ttf-parser = { path = "./vector/ttf_parser", version = "0.1" }
 makepad-path = { path = "./vector/path", version = "0.1" }
 makepad-live-compiler = { path = "./live_compiler", version = "0.1" } 
+makepad-draw-derive = { path = "./draw_derive", version = "0.1" } 
 
 [target.x86_64-apple-darwin.dependencies]
 makepad-objc-sys = { path = "./bind/objc-sys", version = "0.2" }

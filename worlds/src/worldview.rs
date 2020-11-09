@@ -103,7 +103,8 @@ impl WorldView {
     pub fn draw_world_select(&mut self, cx: &mut Cx) {
         if self.select_view.begin_view(cx, Layout::default()).is_err() {return}
         self.bg.color = live_color!(cx, self::color_bg);
-        let inst = self.bg.begin_quad_fill(cx);
+        self.bg.draw_quad_rel(cx, cx.get_turtle_rect());
+        //let inst = self.bg.begin_quad_fill(cx);
        
         let world_types = vec![WorldType::TreeWorld, WorldType::FieldWorld];
         
@@ -113,7 +114,7 @@ impl WorldView {
             }).draw_normal_button(cx, &world_type.name());
         }
         
-        self.bg.end_quad_fill(cx, inst);
+        //self.bg.end_quad_fill(cx, inst);
         self.select_view.end_view(cx);
     }
     
@@ -174,8 +175,9 @@ impl WorldView {
         if self.xr_is_presenting {
             // just do some gray rect
             self.bg.color = live_color!(cx, self::color_bg);
-            let inst = self.bg.begin_quad_fill(cx);
-            self.bg.end_quad_fill(cx, inst);
+            self.bg.draw_quad_rel(cx, cx.get_turtle_rect());
+            //let inst = self.bg.begin_quad_fill(cx);
+            //self.bg.end_quad_fill(cx, inst);
             return
         } 
         
