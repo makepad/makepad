@@ -16,7 +16,7 @@ pub struct Float {
     pub step: Option<f32>,
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, Default, PartialEq, Debug)]
 pub struct Shader {
     pub shader_id: usize,
     pub location_hash: u64
@@ -340,6 +340,10 @@ pub struct Rect {
 }
 
 impl Rect {
+    
+    pub fn translate(self, pos: Vec2)->Rect{
+        Rect {x: self.x + pos.x, y: self.y + pos.y, w: self.w, h: self.h}
+    }
     
     pub fn contains(&self, x: f32, y: f32) -> bool {
         return x >= self.x && x <= self.x + self.w &&

@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
 use std::fmt::Write;
+use std::time::{Instant};
 
+pub use makepad_draw_derive::*;
 pub use makepad_live_compiler::livetypes::*;
 pub use makepad_live_compiler::livestyles::*;
 pub use makepad_live_compiler::span::LiveBodyId;
@@ -147,6 +149,8 @@ pub struct Cx {
     
     pub triggers: HashMap<Area, BTreeSet<TriggerId>>,
     pub signals: HashMap<Signal, BTreeSet<StatusId >>,
+
+    pub profiles: HashMap<u64, Instant>,
     
     pub live_styles: LiveStyles,
     
@@ -260,6 +264,7 @@ impl Default for Cx {
             
             frame_callbacks: HashSet::new(),
             _frame_callbacks: HashSet::new(),
+            profiles: HashMap::new(),
             
             signals: HashMap::new(),
             
@@ -830,7 +835,6 @@ impl Cx {
     pub fn status_http_send_ok() -> StatusId {uid!()}
     pub fn status_http_send_fail() -> StatusId {uid!()}
     
-    
     pub fn debug_draw_tree_recur(&mut self, dump_instances: bool, s: &mut String, view_id: usize, depth: usize) {
         if view_id >= self.views.len() {
             writeln!(s, "---------- Drawlist still empty ---------").unwrap();
@@ -854,10 +858,10 @@ impl Cx {
             else {
                 let cxview = &mut self.views[view_id];
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
-                let sh = &self.shaders[draw_call.shader_id];
+                let sh = &self.shaders[draw_call.shader.shader_id];
                 let slots = sh.mapping.instance_props.total_slots;
-                let instances = draw_call.instance.len() / slots;
-                writeln!(s, "{}call {}: {}({}) *:{} scroll:{}", indent, draw_call_id, sh.name, draw_call.shader_id, instances, draw_call.get_local_scroll()).unwrap();
+                let instances = draw_call.instances.len() / slots;
+                writeln!(s, "{}call {}: {}({}) *:{} scroll:{}", indent, draw_call_id, sh.name, draw_call.shader.shader_id, instances, draw_call.get_local_scroll()).unwrap();
                 // lets dump the instance geometry
                 if dump_instances {
                     for inst in 0..instances.min(1) {
@@ -865,10 +869,10 @@ impl Cx {
                         let mut off = 0;
                         for prop in &sh.mapping.instance_props.props {
                             match prop.slots {
-                                1 => out.push_str(&format!("{}:{} ", prop.name, draw_call.instance[inst * slots + off])),
-                                2 => out.push_str(&format!("{}:v2({},{}) ", prop.name, draw_call.instance[inst * slots + off], draw_call.instance[inst * slots + 1 + off])),
-                                3 => out.push_str(&format!("{}:v3({},{},{}) ", prop.name, draw_call.instance[inst * slots + off], draw_call.instance[inst * slots + 1 + off], draw_call.instance[inst * slots + 1 + off])),
-                                4 => out.push_str(&format!("{}:v4({},{},{},{}) ", prop.name, draw_call.instance[inst * slots + off], draw_call.instance[inst * slots + 1 + off], draw_call.instance[inst * slots + 2 + off], draw_call.instance[inst * slots + 3 + off])),
+                                1 => out.push_str(&format!("{}:{} ", prop.name, draw_call.instances[inst * slots + off])),
+                                2 => out.push_str(&format!("{}:v2({},{}) ", prop.name, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off])),
+                                3 => out.push_str(&format!("{}:v3({},{},{}) ", prop.name, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off], draw_call.instances[inst * slots + 1 + off])),
+                                4 => out.push_str(&format!("{}:v4({},{},{},{}) ", prop.name, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off], draw_call.instances[inst * slots + 2 + off], draw_call.instances[inst * slots + 3 + off])),
                                 _ => {}
                             }
                             off += prop.slots;

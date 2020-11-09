@@ -29,7 +29,7 @@ impl <'a>TokenParser<'a> {
         self.index = self.next_index;
         self.next_index += 1;
         return true;
-    }
+    } 
     
     pub fn eat_should_ignore(&mut self) -> bool {
         while self.cur_type().should_ignore() {
