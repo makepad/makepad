@@ -34,14 +34,20 @@ pub struct InstanceReadRef<'a>{
     pub offset:usize,
     pub slots:usize,
     pub count:usize, 
-    pub buffer:&'a Vec<f32>
+    pub instances:&'a Vec<f32>
 }
 
 pub struct InstanceWriteRef<'a>{
     pub offset:usize,
     pub slots:usize,
     pub count:usize,
-    pub buffer:&'a mut Vec<f32>
+    pub instances:&'a mut Vec<f32>
+}
+
+pub struct LockedInstances{
+    pub instance_area: InstanceArea,
+    pub aligned: Option<usize>,
+    pub instances:Vec<f32>
 }
 
 impl Area{
@@ -130,16 +136,16 @@ impl Area{
                     return Rect::default();
                 }
                 let draw_call = &cxview.draw_calls[inst.draw_call_id];
-                let sh = &cx.shaders[draw_call.shader_id];
+                let sh = &cx.shaders[draw_call.shader.shader_id];
                 // ok now we have to patch x/y/w/h into it
                 if let Some(ix) = sh.mapping.rect_instance_props.x{
-                    let x = draw_call.instance[inst.instance_offset + ix];
+                    let x = draw_call.instances[inst.instance_offset + ix];
                     if let Some(iy) = sh.mapping.rect_instance_props.y{
-                        let y = draw_call.instance[inst.instance_offset + iy];
+                        let y = draw_call.instances[inst.instance_offset + iy];
                         if let Some(iw) = sh.mapping.rect_instance_props.w{
-                            let w = draw_call.instance[inst.instance_offset + iw];
+                            let w = draw_call.instances[inst.instance_offset + iw];
                             if let Some(ih) = sh.mapping.rect_instance_props.h{
-                                let h = draw_call.instance[inst.instance_offset + ih];
+                                let h = draw_call.instances[inst.instance_offset + ih];
                                 return draw_call.clip_and_scroll_rect(x,y,w,h);
                             }
                         }
@@ -172,12 +178,12 @@ impl Area{
                     return abs;
                 }
                 let draw_call = &cxview.draw_calls[inst.draw_call_id];
-                let sh = &cx.shaders[draw_call.shader_id];
+                let sh = &cx.shaders[draw_call.shader.shader_id];
                 // ok now we have to patch x/y/w/h into it
                 if let Some(ix) = sh.mapping.rect_instance_props.x{
-                    let x = draw_call.instance[inst.instance_offset + ix];
+                    let x = draw_call.instances[inst.instance_offset + ix];
                     if let Some(iy) = sh.mapping.rect_instance_props.y{
-                        let y = draw_call.instance[inst.instance_offset + iy];
+                        let y = draw_call.instances[inst.instance_offset + iy];
                         return Vec2{
                             x:abs.x - x + draw_call.draw_uniforms.draw_scroll_x,
                             y:abs.y - y + draw_call.draw_uniforms.draw_scroll_y
@@ -206,19 +212,19 @@ impl Area{
                     return;
                 }
                 let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
-                let sh = &cx.shaders[draw_call.shader_id];        // ok now we have to patch x/y/w/h into it
+                let sh = &cx.shaders[draw_call.shader.shader_id];        // ok now we have to patch x/y/w/h into it
                 
                 if let Some(ix) = sh.mapping.rect_instance_props.x{
-                    draw_call.instance[inst.instance_offset + ix] = rect.x;
+                    draw_call.instances[inst.instance_offset + ix] = rect.x;
                 }
                 if let Some(iy) = sh.mapping.rect_instance_props.y{
-                    draw_call.instance[inst.instance_offset + iy] = rect.y;
+                    draw_call.instances[inst.instance_offset + iy] = rect.y;
                 }
                 if let Some(iw) = sh.mapping.rect_instance_props.w{
-                    draw_call.instance[inst.instance_offset + iw] = rect.w;
+                    draw_call.instances[inst.instance_offset + iw] = rect.w;
                 }
                 if let Some(ih) = sh.mapping.rect_instance_props.h{
-                    draw_call.instance[inst.instance_offset + ih] = rect.h;
+                    draw_call.instances[inst.instance_offset + ih] = rect.h;
                 }
             },
             Area::View(view_area)=>{
@@ -234,7 +240,7 @@ impl Area{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
                 let draw_call = &cxview.draw_calls[inst.draw_call_id];
-                let sh = &cx.shaders[draw_call.shader_id];
+                let sh = &cx.shaders[draw_call.shader.shader_id];
 
                 if let Some(prop_id) = sh.mapping.instance_props.prop_map.get(&live_item_id){
                     let prop = &sh.mapping.instance_props.props[*prop_id];
@@ -254,7 +260,7 @@ impl Area{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
                 let draw_call = &cxview.draw_calls[inst.draw_call_id];
-                let sh = &cx.shaders[draw_call.shader_id];
+                let sh = &cx.shaders[draw_call.shader.shader_id];
                 if let Some(prop_id) = sh.mapping.user_uniform_props.prop_map.get(&live_item_id){
                     let prop = &sh.mapping.user_uniform_props.props[*prop_id];
                     if prop.ty != ty{
@@ -277,13 +283,13 @@ impl Area{
                     println!("get_read_ref alled on invalid area pointer, use mark/sweep correctly!");
                     return None;
                 }
-                let sh = &cx.shaders[draw_call.shader_id];
+                let sh = &cx.shaders[draw_call.shader.shader_id];
                 return Some(
                     InstanceReadRef{
                         offset:inst.instance_offset, 
                         count:inst.instance_count, 
                         slots:sh.mapping.instance_props.total_slots,
-                        buffer:&draw_call.instance
+                        instances:&draw_call.instances
                     }
                 )
             }
@@ -301,7 +307,7 @@ impl Area{
                     //println!("get_write_ref called on invalid area pointer, use mark/sweep correctly!");
                     return None;
                 }
-                let sh = &cx.shaders[draw_call.shader_id];
+                let sh = &cx.shaders[draw_call.shader.shader_id];
                 cx.passes[cxview.pass_id].paint_dirty = true;
                 draw_call.instance_dirty = true;
                 return Some(
@@ -309,7 +315,7 @@ impl Area{
                         offset:inst.instance_offset, 
                         count:inst.instance_count, 
                         slots:sh.mapping.instance_props.total_slots,
-                        buffer:&mut draw_call.instance
+                        instances:&mut draw_call.instances
                     }
                 )
             }
@@ -342,7 +348,7 @@ impl Area{
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
-                    write.buffer[write.offset + inst_offset + i * write.slots] = value;
+                    write.instances[write.offset + inst_offset + i * write.slots] = value;
                 }
             }
         }
@@ -352,7 +358,7 @@ impl Area{
         if let Some(inst_offset) = self.get_instance_offset(cx, live_item_id, Ty::Float){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
-                return read.buffer[read.offset + inst_offset]
+                return read.instances[read.offset + inst_offset]
             }
         }
         0.0
@@ -363,8 +369,8 @@ impl Area{
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
-                    write.buffer[write.offset + inst_offset + 0 + i * write.slots] = value.y;
-                    write.buffer[write.offset + inst_offset + 1 + i * write.slots] = value.x;
+                    write.instances[write.offset + inst_offset + 0 + i * write.slots] = value.y;
+                    write.instances[write.offset + inst_offset + 1 + i * write.slots] = value.x;
                 }
             }
         }
@@ -375,8 +381,8 @@ impl Area{
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
                 return Vec2{
-                    x:read.buffer[read.offset + inst_offset + 0],
-                    y:read.buffer[read.offset + inst_offset + 1]
+                    x:read.instances[read.offset + inst_offset + 0],
+                    y:read.instances[read.offset + inst_offset + 1]
                 }
             }
         }
@@ -388,9 +394,9 @@ impl Area{
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
-                    write.buffer[write.offset + inst_offset + 0 + i * write.slots] = value.y;
-                    write.buffer[write.offset + inst_offset + 1 + i * write.slots] = value.x;
-                    write.buffer[write.offset + inst_offset + 2 + i * write.slots] = value.z;
+                    write.instances[write.offset + inst_offset + 0 + i * write.slots] = value.y;
+                    write.instances[write.offset + inst_offset + 1 + i * write.slots] = value.x;
+                    write.instances[write.offset + inst_offset + 2 + i * write.slots] = value.z;
                 }
             }
         }
@@ -401,9 +407,9 @@ impl Area{
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
                 return Vec3{
-                    x:read.buffer[read.offset + inst_offset + 0],
-                    y:read.buffer[read.offset + inst_offset + 1],
-                    z:read.buffer[read.offset + inst_offset + 2]
+                    x:read.instances[read.offset + inst_offset + 0],
+                    y:read.instances[read.offset + inst_offset + 1],
+                    z:read.instances[read.offset + inst_offset + 2]
                 }
             }
         }
@@ -415,10 +421,10 @@ impl Area{
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
-                    write.buffer[write.offset + inst_offset + 0 + i * write.slots] = value.x;
-                    write.buffer[write.offset + inst_offset + 1 + i * write.slots] = value.y;
-                    write.buffer[write.offset + inst_offset + 2 + i * write.slots] = value.z;
-                    write.buffer[write.offset + inst_offset + 3 + i * write.slots] = value.w;
+                    write.instances[write.offset + inst_offset + 0 + i * write.slots] = value.x;
+                    write.instances[write.offset + inst_offset + 1 + i * write.slots] = value.y;
+                    write.instances[write.offset + inst_offset + 2 + i * write.slots] = value.z;
+                    write.instances[write.offset + inst_offset + 3 + i * write.slots] = value.w;
                 }
             }
         }
@@ -429,10 +435,10 @@ impl Area{
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
                 return Vec4{
-                    x:read.buffer[read.offset + inst_offset + 0],
-                    y:read.buffer[read.offset + inst_offset + 1],
-                    z:read.buffer[read.offset + inst_offset + 2],
-                    w:read.buffer[read.offset + inst_offset + 3],
+                    x:read.instances[read.offset + inst_offset + 0],
+                    y:read.instances[read.offset + inst_offset + 1],
+                    z:read.instances[read.offset + inst_offset + 2],
+                    w:read.instances[read.offset + inst_offset + 3],
                 }
             }
         }
@@ -444,10 +450,10 @@ impl Area{
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
-                    write.buffer[write.offset + inst_offset + 0 + i * write.slots] = value.r;
-                    write.buffer[write.offset + inst_offset + 1 + i * write.slots] = value.g;
-                    write.buffer[write.offset + inst_offset + 2 + i * write.slots] = value.b;
-                    write.buffer[write.offset + inst_offset + 3 + i * write.slots] = value.a;
+                    write.instances[write.offset + inst_offset + 0 + i * write.slots] = value.r;
+                    write.instances[write.offset + inst_offset + 1 + i * write.slots] = value.g;
+                    write.instances[write.offset + inst_offset + 2 + i * write.slots] = value.b;
+                    write.instances[write.offset + inst_offset + 3 + i * write.slots] = value.a;
                 }
             }
         }
@@ -458,10 +464,10 @@ impl Area{
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
                 return Color{
-                    r:read.buffer[read.offset + inst_offset + 0],
-                    g:read.buffer[read.offset + inst_offset + 1],
-                    b:read.buffer[read.offset + inst_offset + 2],
-                    a:read.buffer[read.offset + inst_offset + 3],
+                    r:read.instances[read.offset + inst_offset + 0],
+                    g:read.instances[read.offset + inst_offset + 1],
+                    b:read.instances[read.offset + inst_offset + 2],
+                    a:read.instances[read.offset + inst_offset + 3],
                 }
             }
         }
@@ -474,7 +480,7 @@ impl Area{
             if let Some(write) = write{
                 for i in 0..write.count{
                     for j in 0..16{
-                        write.buffer[write.offset + inst_offset + j + i * write.slots] = value.v[j];
+                        write.instances[write.offset + inst_offset + j + i * write.slots] = value.v[j];
                     }
                 }
             }
@@ -487,7 +493,7 @@ impl Area{
             if let Some(read) = read{
                 let mut ret = Mat4::default();
                 for j in 0..16{
-                    ret.v[j] = read.buffer[read.offset + inst_offset + j];
+                    ret.v[j] = read.instances[read.offset + inst_offset + j];
                 }
                 return ret
             }
@@ -528,9 +534,9 @@ impl InstanceArea{
         let cxview = &mut cx.views[self.view_id];
         let draw_call = &mut cxview.draw_calls[self.draw_call_id];
         //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
-        draw_call.instance.extend_from_slice(data);
+        draw_call.instances.extend_from_slice(data);
     }
-
+    
     pub fn push_last_float(&self, cx:&mut Cx, animator:&Animator, live_item_id:LiveItemId)->f32{
         let ret = animator.last_float(cx, live_item_id);
         self.push_float(cx, ret);
@@ -541,7 +547,7 @@ impl InstanceArea{
         let cxview = &mut cx.views[self.view_id];
         let draw_call = &mut cxview.draw_calls[self.draw_call_id];
         //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
-        draw_call.instance.push(value);
+        draw_call.instances.push(value);
     }
 
     pub fn push_last_vec2(&self, cx:&mut Cx, animator:&Animator, live_item_id:LiveItemId)->Vec2{
@@ -554,8 +560,8 @@ impl InstanceArea{
         let cxview = &mut cx.views[self.view_id];
         let draw_call = &mut cxview.draw_calls[self.draw_call_id];
         //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
-        draw_call.instance.push(value.x);
-        draw_call.instance.push(value.y);
+        draw_call.instances.push(value.x);
+        draw_call.instances.push(value.y);
     }
 
     pub fn push_last_vec3(&self, cx:&mut Cx, animator:&Animator, live_item_id:LiveItemId)->Vec3{
@@ -567,9 +573,9 @@ impl InstanceArea{
     pub fn push_vec3(&self, cx:&mut Cx, value:Vec3){
         let cxview = &mut cx.views[self.view_id];
         let draw_call = &mut cxview.draw_calls[self.draw_call_id];
-        draw_call.instance.push(value.x);
-        draw_call.instance.push(value.y);
-        draw_call.instance.push(value.z);
+        draw_call.instances.push(value.x);
+        draw_call.instances.push(value.y);
+        draw_call.instances.push(value.z);
     }
 
     pub fn push_last_vec4(&self, cx:&mut Cx, animator:&Animator, live_item_id:LiveItemId)->Vec4{
@@ -581,10 +587,10 @@ impl InstanceArea{
     pub fn push_vec4(&self, cx:&mut Cx, value:Vec4){
         let cxview = &mut cx.views[self.view_id];
         let draw_call = &mut cxview.draw_calls[self.draw_call_id];
-        draw_call.instance.push(value.x);
-        draw_call.instance.push(value.y);
-        draw_call.instance.push(value.z);
-        draw_call.instance.push(value.w);
+        draw_call.instances.push(value.x);
+        draw_call.instances.push(value.y);
+        draw_call.instances.push(value.z);
+        draw_call.instances.push(value.w);
     }
 
     pub fn push_last_color(&self, cx:&mut Cx, animator:&Animator, live_item_id:LiveItemId)->Color{
@@ -596,10 +602,10 @@ impl InstanceArea{
     pub fn push_color(&self, cx:&mut Cx, value:Color){
         let cxview = &mut cx.views[self.view_id];
         let draw_call = &mut cxview.draw_calls[self.draw_call_id];
-        draw_call.instance.push(value.r);
-        draw_call.instance.push(value.g);
-        draw_call.instance.push(value.b);
-        draw_call.instance.push(value.a);
+        draw_call.instances.push(value.r);
+        draw_call.instances.push(value.g);
+        draw_call.instances.push(value.b);
+        draw_call.instances.push(value.a);
     }
 
     pub fn set_do_scroll(&self, cx:&mut Cx, hor:bool, ver:bool){
@@ -627,7 +633,7 @@ impl InstanceArea{
     pub fn write_uniform_float(&self, cx:&mut Cx, live_item_id:LiveItemId, v:f32){
         let cxview = &mut cx.views[self.view_id];
         let draw_call = &mut cxview.draw_calls[self.draw_call_id];
-        let sh = &cx.shaders[draw_call.shader_id];
+        let sh = &cx.shaders[draw_call.shader.shader_id];
 
         if let Some(uni_offset) = Self::get_user_uniform_offset(sh, live_item_id, Ty::Float){
             draw_call.user_uniforms[uni_offset] = v;
@@ -646,7 +652,7 @@ impl InstanceArea{
     pub fn write_texture_2d_id(&self, cx:&mut Cx, live_item_id:LiveItemId, texture_id: usize){
         let cxview = &mut cx.views[self.view_id];
         let draw_call = &mut cxview.draw_calls[self.draw_call_id];
-        let sh = &cx.shaders[draw_call.shader_id];
+        let sh = &cx.shaders[draw_call.shader.shader_id];
 
         if let Some(tex_offset) = Self::get_texture_offset(sh, live_item_id){
             draw_call.textures_2d[tex_offset] = texture_id as u32;
@@ -656,95 +662,4 @@ impl InstanceArea{
     pub fn write_texture_2d(&self, cx:&mut Cx, live_item_id:LiveItemId, texture: Texture){
         self.write_texture_2d_id(cx, live_item_id, texture.texture_id);
     }
-
-
-
-/*
-    pub fn need_uniforms_now(&self, cx:&mut Cx)->bool{
-        let cxview = &mut cx.views[self.view_id];
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id];
-        //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
-        return draw_call.need_uniforms_now()
-    }
-
-    pub fn push_uniform_texture_2d(&self, cx:&mut Cx,texture:Texture){
-        let cxview = &mut cx.views[self.view_id];
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
-        draw_call.textures_2d.push(texture.texture_id as u32);
-    }
-
-    pub fn push_uniform_texture_2d_id(&self, cx:&mut Cx, texture_id: usize){
-        let cxview = &mut cx.views[self.view_id];
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
-        draw_call.textures_2d.push(texture_id as u32);
-    }
-
-    pub fn push_uniform_float(&self, cx:&mut Cx, v:f32){
-        let cxview = &mut cx.views[self.view_id];
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
-        draw_call.user_uniforms.push(v);
-    }
-
-    pub fn push_uniform_vec2(&self, cx:&mut Cx, v:Vec2){
-        let cxview = &mut cx.views[self.view_id];
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
-        let left = draw_call.user_uniforms.len()&3;
-        if left > 2{ // align buffer
-            for _ in 0..(4-left){
-                draw_call.user_uniforms.push(0.0);
-            }
-        }
-        draw_call.user_uniforms.push(v.x);
-        draw_call.user_uniforms.push(v.y);
-    }
-
-    pub fn push_uniform_vec2f(&self, cx:&mut Cx,  x:f32, y:f32){
-        let cxview = &mut cx.views[self.view_id];
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
-        let left = draw_call.user_uniforms.len()&3;
-        if left > 2{ // align buffer
-            for _ in 0..(4-left){
-                draw_call.user_uniforms.push(0.0);
-            }
-        }
-        draw_call.user_uniforms.push(x);
-        draw_call.user_uniforms.push(y);
-    }
-
-    pub fn push_uniform_vec3f(&mut self, cx:&mut Cx, x:f32, y:f32, z:f32){
-        let cxview = &mut cx.views[self.view_id];
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
-        let left = draw_call.user_uniforms.len()&3;
-        if left > 1{ // align buffer
-            for _ in 0..(4-left){
-                draw_call.user_uniforms.push(0.0);
-            }
-        }
-        draw_call.user_uniforms.push(x);
-        draw_call.user_uniforms.push(y);
-        draw_call.user_uniforms.push(z);
-    }
-
-    pub fn push_uniform_vec4f(&self, cx:&mut Cx, x:f32, y:f32, z:f32, w:f32){
-        let cxview = &mut cx.views[self.view_id];
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
-        let left = draw_call.user_uniforms.len()&3;
-        if left > 0{ // align buffer
-            for _ in 0..(4-left){
-                draw_call.user_uniforms.push(0.0);
-            }
-        }
-        draw_call.user_uniforms.push(x);
-        draw_call.user_uniforms.push(y);
-        draw_call.user_uniforms.push(z);
-        draw_call.user_uniforms.push(w);
-    }
-
-    pub fn push_uniform_mat4(&self, cx:&mut Cx, v:&Mat4){
-        let cxview = &mut cx.views[self.view_id];
-        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
-        for i in 0..16{
-            draw_call.user_uniforms.push(v.v[i]);
-        }
-    }*/
 }

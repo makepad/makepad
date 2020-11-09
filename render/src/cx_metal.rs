@@ -54,14 +54,14 @@ impl Cx {
                 let cxview = &mut self.views[view_id];
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
-                let sh = &self.shaders[draw_call.shader_id];
+                let sh = &self.shaders[draw_call.shader.shader_id];
                 let shp = sh.platform.as_ref().unwrap();
                 
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
-                    self.platform.bytes_written += draw_call.instance.len() * 4;
-                    draw_call.platform.inst_vbuf.update_with_f32_data(metal_cx, &draw_call.instance);
+                    self.platform.bytes_written += draw_call.instances.len() * 4;
+                    draw_call.platform.inst_vbuf.update_with_f32_data(metal_cx, &draw_call.instances);
                 }
                 
                 // update the zbias uniform if we have it.
@@ -75,14 +75,24 @@ impl Cx {
                 }
                 
                 // lets verify our instance_offset is not disaligned
-                let instances = (draw_call.instance.len() / sh.mapping.instance_props.total_slots) as u64;
+                let instances = (draw_call.instances.len() / sh.mapping.instance_props.total_slots) as u64;
                 if instances == 0 {
                     continue;
                 }
                 let pipeline_state = shp.pipeline_state;
                 unsafe {let () = msg_send![encoder, setRenderPipelineState: pipeline_state];}
                 
-                let geometry = &mut self.geometries[draw_call.geometry_id];
+                let geometry_id = if let Some(geometry) = draw_call.geometry{
+                    geometry.geometry_id
+                }
+                else if let Some(geometry) = sh.default_geometry{
+                    geometry.geometry_id
+                }
+                else{
+                    continue
+                };
+                
+                let geometry = &mut self.geometries[geometry_id];
                 
                 if geometry.dirty {
                     geometry.platform.geom_ibuf.update_with_u32_data(metal_cx, &geometry.indices);

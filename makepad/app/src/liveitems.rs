@@ -212,7 +212,7 @@ impl LiveItemsView {
             ..Layout::default()
         }).is_ok() {
             self.view_bg.color = live_color!(cx, self::color_bg);
-            let bg_inst = self.view_bg.begin_quad_fill(cx);
+            let bg_inst = self.view_bg.draw_quad_rel(cx, cx.get_turtle_rect());//self.view_bg.begin_quad_fill(cx);
             bg_inst.set_do_scroll(cx, false, false);
             
             //let layout_caption_bg = live_layout!(cx, self::layout_caption_bg);
@@ -264,7 +264,7 @@ impl LiveItemsView {
                 }
             }
             
-            self.view_bg.end_quad_fill(cx, bg_inst);
+            //self.view_bg.end_quad_fill(cx, bg_inst);
             
             self.scroll_view.end_view(cx);
         }
