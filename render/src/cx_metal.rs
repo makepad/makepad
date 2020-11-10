@@ -779,8 +779,8 @@ impl Cx {
             no_const_collapse: false
         };
         
-        for (live_id, shader) in &self.live_styles.shader_alloc {
-            match self.live_styles.collect_and_analyse_shader(*live_id, options) {
+        for (live_item_id, shader) in &self.live_styles.shader_alloc {
+            match self.live_styles.collect_and_analyse_shader(*live_item_id, options) {
                 Err(err) => {
                     eprintln!("{}", err);
                     panic!()
@@ -789,6 +789,7 @@ impl Cx {
                     let shader_id = shader.shader_id;
                     Self::mtl_compile_shader(
                         shader_id,
+                        self.live_styles.live_item_id_to_string(*live_item_id).unwrap(),
                         &mut self.shaders[shader_id],
                         shader_ast,
                         default_geometry,
@@ -812,17 +813,18 @@ impl Cx {
             no_const_collapse: false
         };
         
-        for (live_id, change) in &self.live_styles.changed_shaders {
+        for (live_item_id, change) in &self.live_styles.changed_shaders {
             match change {
                 LiveChangeType::Recompile => {
-                    match self.live_styles.collect_and_analyse_shader(*live_id, options) {
+                    match self.live_styles.collect_and_analyse_shader(*live_item_id, options) {
                         Err(err) => {
                             errors.push(err);
                         },
                         Ok((shader_ast, default_geometry)) => {
-                            let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                            let shader_id = self.live_styles.shader_alloc.get(&live_item_id).unwrap().shader_id;
                             Self::mtl_compile_shader(
                                 shader_id,
+                                self.live_styles.live_item_id_to_string(*live_item_id).unwrap(),
                                 &mut self.shaders[shader_id],
                                 shader_ast,
                                 default_geometry,
@@ -834,7 +836,7 @@ impl Cx {
                     }
                 }
                 LiveChangeType::UpdateValue => {
-                    let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                    let shader_id = self.live_styles.shader_alloc.get(&live_item_id).unwrap().shader_id;
                     self.shaders[shader_id].mapping.update_live_uniforms(&self.live_styles);
                 }
             }
@@ -844,6 +846,7 @@ impl Cx {
     
     pub fn mtl_compile_shader(
         shader_id: usize,
+        name: String,
         sh: &mut CxShader,
         shader_ast: ShaderAst,
         default_geometry: Option<Geometry>,
@@ -891,6 +894,7 @@ impl Cx {
         
         //let err_str: id = unsafe {msg_send![err, localizedDescription]};
         //println!("{}", nsstring_to_string(err_str));
+        sh.name = name;
         sh.default_geometry = default_geometry;
         sh.mapping = mapping;
         sh.platform = Some(CxPlatformShader {
