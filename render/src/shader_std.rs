@@ -5,6 +5,10 @@ use crate::blit::Blit;
 use crate::cube::Cube;
 use crate::fonts::TrapezoidText;
 
+use crate::drawquad::DrawQuad;
+use crate::drawtext::DrawText;
+
+
 impl Cx{
     pub fn style(&mut self){
         define_shader_stdlib(self);
@@ -13,6 +17,10 @@ impl Cx{
         Quad::style(self);
         Text::style(self);
         Blit::style(self);
+
+        DrawQuad::style(self);
+        DrawText::style(self);
+
     }
 }
 

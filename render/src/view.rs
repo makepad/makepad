@@ -36,7 +36,6 @@ impl View {
         }
     }
     
-    
     pub fn lock_view_transform(&self, cx: &mut Cx, mat: &Mat4) {
         if let Some(view_id) = self.view_id {
             let cxview = &mut cx.views[view_id];
@@ -771,12 +770,13 @@ impl CxView {
         }
     }
     
-    pub fn find_appendable_drawcall(&self, shader:Shader)->Option<usize>{
+    pub fn find_appendable_drawcall(&mut self, shader:Shader)->Option<usize>{
         // find our drawcall to append to the current layer
         if self.draw_calls_len > 0 {
             for i in (0..self.draw_calls_len).rev() {
-                let dc = &self.draw_calls[i];
+                let dc = &mut self.draw_calls[i];
                 if dc.sub_view_id == 0 && dc.shader == shader {
+                    //dc.current_instance_offset = dc.instances.len();
                     return Some(i)
                 }
             }
