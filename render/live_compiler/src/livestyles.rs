@@ -102,7 +102,6 @@ pub struct LiveTokens {
     pub live_tokens_type: LiveTokensType
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LiveTokensType {
     Float,
@@ -144,6 +143,13 @@ impl LiveStyles {
             builtins: builtin::generate_builtins(),
             ..Self::default()
         }
+    }
+    
+    pub fn live_item_id_to_string(&self, live_item_id:LiveItemId)->Option<String>{
+        if let Some(tokens) = self.tokens.get(&live_item_id){
+            return Some(tokens.qualified_ident_path.to_string())
+        }
+        return None
     }
     
     // we have to check if live_id exists in the on_live_id dependency tree

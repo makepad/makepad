@@ -392,14 +392,14 @@ impl Cx {
     }
     
     pub fn new_draw_call(&mut self, shader: Shader) -> &mut DrawCall {
-        return self.get_draw_call(false, shader);
+        return self.get_draw_call(false, shader, None);
     }
     
-    pub fn append_to_draw_call(&mut self, shader: Shader)-> &mut DrawCall {
-        return self.get_draw_call(true, shader);
+    pub fn append_to_draw_call(&mut self, shader: Shader, slots:usize)-> &mut DrawCall {
+        return self.get_draw_call(true, shader, Some(slots));
     }
     
-    pub fn get_draw_call(&mut self, append:bool, shader: Shader) -> &mut DrawCall {
+    pub fn get_draw_call(&mut self, append:bool, shader: Shader, slots:Option<usize>) -> &mut DrawCall {
         let sh = &self.shaders[shader.shader_id];
         
         let current_view_id = *self.view_stack.last().unwrap();
@@ -414,7 +414,11 @@ impl Cx {
 
         // add one
         cxview.draw_calls_len = cxview.draw_calls_len + 1;
-        
+        if let Some(slots) = slots{
+            if slots != sh.mapping.instance_props.total_slots{
+                log!("Warning, instance disalignment between struct and shader in {}", sh.name)
+            }
+        }
         // see if we need to add a new one
         if draw_call_id >= cxview.draw_calls.len() {
             cxview.draw_calls.push(DrawCall {
@@ -468,8 +472,8 @@ impl Cx {
         dc
     }
     
-    pub fn lock_instances(&mut self, shader: Shader) -> LockedInstances {
-        let dc = self.append_to_draw_call(shader);
+    pub fn lock_instances(&mut self, shader: Shader, slots:usize) -> LockedInstances {
+        let dc = self.append_to_draw_call(shader, slots);
         let mut instances = Vec::new();
         std::mem::swap(&mut instances, &mut dc.instances);
         LockedInstances {
@@ -485,8 +489,8 @@ impl Cx {
         }
     }
     
-    pub fn lock_aligned_instances(&mut self, shader: Shader) -> LockedInstances {
-        let mut li = self.lock_instances(shader);
+    pub fn lock_aligned_instances(&mut self, shader: Shader, slots:usize) -> LockedInstances {
+        let mut li = self.lock_instances(shader, slots);
         li.aligned = Some(self.align_list.len());
         self.align_list.push(Area::Empty);
         li
@@ -505,7 +509,7 @@ impl Cx {
     }
     
     pub fn add_instance(&mut self, shader: Shader, data: &[f32]) -> Area {
-        let dc = self.append_to_draw_call(shader);
+        let dc = self.append_to_draw_call(shader, data.len());
         dc.instances.extend_from_slice(data);
         (InstanceArea {
             view_id: dc.view_id,
@@ -517,7 +521,7 @@ impl Cx {
     }
     
     pub fn add_aligned_instance(&mut self, shader: Shader, data: &[f32]) -> Area {
-        let dc = self.append_to_draw_call(shader);
+        let dc = self.append_to_draw_call(shader, data.len());
         dc.instances.extend_from_slice(data);
         let ia:Area = (InstanceArea {
             view_id: dc.view_id,
@@ -552,6 +556,12 @@ impl Cx {
             self.passes[cxview.pass_id].paint_dirty = true;
         }
     }
+}
+
+pub struct LockedInstances{
+    pub instance_area: InstanceArea,
+    pub aligned: Option<usize>,
+    pub instances:Vec<f32>
 }
 
 #[derive(Clone)]
