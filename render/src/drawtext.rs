@@ -124,11 +124,9 @@ impl DrawText {
                 
                 instance font_tc: vec4;
                 instance color: vec4;
-                instance x: float;
-                instance y: float;
-                instance w: float;
-                instance h: float;
-                instance z: float;
+                instance rect_pos: vec2;
+                instance rect_size: vec2;
+                instance instance_z: float;
                 instance base_x: float;
                 instance base_y: float;
                 instance font_size: float;
@@ -182,8 +180,8 @@ impl DrawText {
                 }
                 
                 fn vertex() -> vec4 {
-                    let min_pos = vec2(x, y);
-                    let max_pos = vec2(x + w, y - h);
+                    let min_pos = vec2(rect_pos.x, rect_pos.y);
+                    let max_pos = vec2(rect_pos.x + rect_size.x, rect_pos.y - rect_size.y);
                     
                     clipped = clamp(
                         mix(min_pos, max_pos, geom) - draw_scroll.xy,
@@ -191,7 +189,7 @@ impl DrawText {
                         draw_clip.zw
                     );
                     
-                    let normalized: vec2 = (clipped - min_pos + draw_scroll.xy) / vec2(w, -h);
+                    let normalized: vec2 = (clipped - min_pos + draw_scroll.xy) / vec2(rect_size.x, -rect_size.y);
                     //rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
                     
                     tex_coord1 = mix(
@@ -212,7 +210,7 @@ impl DrawText {
                         normalized.xy
                     );
                     
-                    return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + draw_zbias, 1.)));
+                    return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, instance_z + draw_zbias, 1.)));
                 }
             }
         "#);
