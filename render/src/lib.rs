@@ -51,6 +51,7 @@ mod area;
 mod geometrygen;
 
 mod drawquad;
+mod drawtext;
 
 mod quad;
 mod blit;
@@ -65,6 +66,7 @@ mod gpuinfo;
 
 pub use crate::cx::*;
 pub use crate::drawquad::*;
+pub use crate::drawtext::*;
 pub use crate::quad::*;
 pub use crate::cube::*;
 pub use crate::blit::*;
