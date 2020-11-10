@@ -44,12 +44,6 @@ pub struct InstanceWriteRef<'a>{
     pub instances:&'a mut Vec<f32>
 }
 
-pub struct LockedInstances{
-    pub instance_area: InstanceArea,
-    pub aligned: Option<usize>,
-    pub instances:Vec<f32>
-}
-
 impl Area{
     pub fn is_empty(&self)->bool{
         if let Area::Empty = self{
@@ -273,6 +267,8 @@ impl Area{
         }
         None
     }
+
+
 
     pub fn get_read_ref<'a>(&self, cx:&'a Cx)->Option<InstanceReadRef<'a>>{
         match self{
@@ -520,6 +516,27 @@ impl Area{
             }
         }
     } 
+
+    pub fn write_texture_2d_id(&self, cx:&mut Cx, live_item_id:LiveItemId, texture_id: usize){
+         match self{
+            Area::Instance(inst)=>{
+                let cxview = &mut cx.views[inst.view_id];
+                let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
+                let sh = &cx.shaders[draw_call.shader.shader_id];
+                for (index, prop) in sh.mapping.textures.iter().enumerate(){
+                    if prop.live_item_id == live_item_id{
+                        draw_call.textures_2d[index] = texture_id as u32;
+                        return
+                    }
+                }
+            }
+            _=>(),
+        }
+    }
+
+    pub fn write_texture_2d(&self, cx:&mut Cx, live_item_id:LiveItemId, texture: Texture){
+        self.write_texture_2d_id(cx, live_item_id, texture.texture_id);
+    }
 }
 
 impl Into<Area> for InstanceArea{
