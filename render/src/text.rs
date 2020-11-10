@@ -1,7 +1,7 @@
 
 use crate::cx::*;
 
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub enum Wrapping {
     Char,
     Word,
