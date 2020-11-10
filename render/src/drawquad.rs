@@ -10,6 +10,19 @@ pub struct DrawQuad {
     pub z: f32
 }
 
+impl Clone for DrawQuad{
+    fn clone(&self)->Self{
+        Self{
+            shader: unsafe{self.shader.clone()},
+            area:Area :: Empty,
+            lock:None,
+            slots:self.slots,
+            rect:self.rect,
+            z:self.z
+        }
+    }
+}
+
 impl DrawQuad {
     pub fn new(cx: &mut Cx) -> Self {
         Self::with_shader(cx, live_shader!(cx, self::bg_shader), 0)
@@ -58,16 +71,34 @@ impl DrawQuad {
     }
     
     pub fn lock_quad(&mut self, cx: &mut Cx) {
-        self.lock = Some(cx.lock_instances(self.shader))
+        self.lock = Some(cx.lock_instances(self.shader, self.slots))
+    }
+
+    pub fn lock_aligned_quad(&mut self, cx: &mut Cx) {
+        self.lock = Some(cx.lock_aligned_instances(self.shader, self.slots))
     }
     
-    pub fn add_quad(&mut self, rect: Rect) {
+    pub fn add_quad(&mut self, rect: Rect){
         self.rect = rect;
         unsafe{
             if let Some(li) = &mut self.lock {
                 li.instances.extend_from_slice(std::slice::from_raw_parts(&self.rect as *const _ as *const f32, self.slots));
             }
         }
+    }
+    
+    pub fn get_next_locked_area(&mut self)->Area{
+        unsafe{
+            if let Some(li) = &mut self.lock {
+                // return the area for the last locked item
+                return Area::Instance(InstanceArea{
+                    instance_count: 1,
+                    instance_offset: li.instances.len(),
+                    ..li.instance_area.clone()
+                })
+            }
+        }
+        Area::Empty
     }
     
     pub fn unlock_quad(&mut self, cx: &mut Cx) {
