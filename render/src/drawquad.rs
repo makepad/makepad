@@ -107,7 +107,7 @@ impl DrawQuad {
         cx.begin_turtle(layout, self.area);
     }
     
-    pub fn end_quad(&mut self, cx: &mut Cx) {
+    pub fn end_quad(&mut self, cx: &mut Cx)  {
         let rect = cx.end_turtle(self.area);
         unsafe {self.area.set_rect(cx, &rect)};
     }
