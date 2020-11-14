@@ -532,6 +532,7 @@ impl Area{
             }
             _=>(),
         }
+        panic!("Cannot find texture_2d_id")
     }
 
     pub fn write_texture_2d(&self, cx:&mut Cx, live_item_id:LiveItemId, texture: Texture){

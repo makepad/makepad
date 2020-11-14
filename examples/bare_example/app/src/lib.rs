@@ -2,13 +2,13 @@ use makepad_render::*;
 
 #[derive(Clone, DrawQuad)]
 #[repr(C)]
-struct ButtonQuad {
-    #[shader(self::shader_button_quad)]
+struct DrawButton {
+    #[default_shader(self::shader_button)]
+    some: Vec4,
     base: DrawQuad,
-    #[instance(self::shader_button_quad::counter)]
     counter: f32,
 }
-
+/*
 #[derive(Clone, DrawText)]
 #[repr(C)]
 struct ButtonText {
@@ -16,15 +16,15 @@ struct ButtonText {
     base: DrawText,
     #[instance(self::shader_button_text::counter)]
     counter: f32,
-}
+}*/
 
 pub struct BareExampleApp {
     window: Window,
     pass: Pass,
     color_texture: Texture,
     main_view: View,
-    quad: ButtonQuad,
-    text: ButtonText,
+    quad: DrawButton,
+    //text: ButtonText,
     count: f32
 }
 
@@ -34,30 +34,35 @@ impl BareExampleApp {
             window: Window::new(cx),
             pass: Pass::default(),
             color_texture: Texture::new(cx),
-            quad: ButtonQuad::new(cx),
-            text: ButtonText::new(cx),
+            quad: DrawButton::new(cx, default_shader!()),
             main_view: View::new(cx),
             count: 0.
         }
     }
     
     pub fn style(cx: &mut Cx) {
+        
+        DrawButton::register_draw_input(cx);
+
         live_body!(cx, r#"
-            self::shader_button_quad: Shader {
+            self::shader_button: Shader {
+                debug
                 use makepad_render::drawquad::shader::*;
-                instance counter: float;
+
+                draw_input: self::DrawButton;
+
                 fn pixel() -> vec4 {
-                    return mix(#f00, #0f0, counter);
+                    return mix(#f00, #0f0, abs(sin(counter)));
                 }
             }
-            
+            /*
             self::shader_button_text: Shader {
                 use makepad_render::drawtext::shader::*;
                 instance counter: float;
                 fn get_color() -> vec4 {
                     return mix(#f00, #0f0, abs(sin(counter + char_offset * 0.2)));
                 }
-            }
+            }*/
         "#);
     }
     
@@ -78,7 +83,7 @@ impl BareExampleApp {
         self.pass.begin_pass(cx);
         self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(Color::rgb(32, 0, 0)));
         if self.main_view.begin_view(cx, Layout::default()).is_ok() {
-             cx.profile_start(1);
+             //cx.profile_start(1);
             
             //let x = 1.0f32;
             //let y = x.sin();
@@ -86,9 +91,10 @@ impl BareExampleApp {
             self.quad.lock_quad(cx);
             //self.quad.base.shader = live_shader!(cx, self::bg_shader);
             //println!("{}", self.quad.base.slots);
-            self.text.counter += 0.01;
+            //self.text.counter += 0.01;
             
             //self.text.lock_text(cx);
+            self.quad.counter = 0.;
             let msg = format!("HELLO WORLD");
             for i in 0..20000 {
                 let v = 0.3 * (i as f32);
@@ -99,16 +105,17 @@ impl BareExampleApp {
                     w: 10.,
                     h: 10.
                 });
+                /*
                 self.text.draw_text(
                     cx,
                     &msg
-                );
+                );*/
             }
            // self.text.unlock_text(cx);
             self.quad.unlock_quad(cx);
             self.count += 0.001;
             
-            cx.profile_end(1);
+            ///cx.profile_end(1);
             
             /*
             cx.profile_start(2);

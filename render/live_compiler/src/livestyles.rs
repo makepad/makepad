@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
-use crate::shaderast::{ShaderAst};
+use crate::shaderast::{ShaderAst, TyExpr};
 use crate::span::LiveBodyId;
 use crate::lex;
 use crate::analyse::{ShaderCompileOptions, ShaderAnalyser};
@@ -44,11 +44,49 @@ pub enum LiveChangeType {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct LiveDrawInput {
+    pub uniforms: Vec<LiveDrawInputDef>,
+    pub instances: Vec<LiveDrawInputDef>,
+    pub textures: Vec<LiveDrawInputDef>,
+}
+
+impl LiveDrawInput {
+    pub fn add_uniform(&mut self, modpath: &str, name: &str, ty: &str) {
+        self.uniforms.push(LiveDrawInputDef::new(modpath, name, ty));
+    }
+    pub fn add_texture(&mut self, modpath: &str, name: &str, ty: &str) {
+        self.textures.push(LiveDrawInputDef::new(modpath, name, ty));
+    }
+    pub fn add_instance(&mut self, modpath: &str, name: &str, ty: &str) {
+        self.instances.push(LiveDrawInputDef::new(modpath, name, ty));
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LiveDrawInputDef {
+    pub qualified_ident_path: QualifiedIdentPath,
+    pub ident: Ident,
+    pub ty_expr: TyExpr
+}
+
+impl LiveDrawInputDef {
+    pub fn new(modpath: &str, name: &str, ty: &str) -> LiveDrawInputDef {
+        let ident = IdentPath::from_two(Ident::new("self"), Ident::new(name));
+        Self {
+            qualified_ident_path: ident.qualify(modpath),
+            ident: Ident::new(name),
+            ty_expr: TyExpr::from_rust_type_str(ty).expect(&format!("Rust type can't be mapped to shader {}", ty))
+        }
+    }
+    
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct LiveStyles {
     pub file_to_live_bodies: HashMap<String, Vec<LiveBodyId >>,
     pub live_body_to_file: HashMap<LiveBodyId, String>,
     
-    pub live_access_errors: RefCell<Vec<String>>,
+    pub live_access_errors: RefCell<Vec<String >>,
     
     // change sets
     pub changed_live_bodies: BTreeSet<LiveBodyId>,
@@ -57,6 +95,8 @@ pub struct LiveStyles {
     pub changed_tokens: HashSet<LiveItemId>,
     
     pub changed_shaders: HashMap<LiveItemId, LiveChangeType>,
+    
+    pub draw_inputs: HashMap<LiveItemId, LiveDrawInput>,
     
     pub builtins: HashMap<Ident, Builtin>,
     pub live_bodies: Vec<LiveBody>,
@@ -145,8 +185,8 @@ impl LiveStyles {
         }
     }
     
-    pub fn live_item_id_to_string(&self, live_item_id:LiveItemId)->Option<String>{
-        if let Some(tokens) = self.tokens.get(&live_item_id){
+    pub fn live_item_id_to_string(&self, live_item_id: LiveItemId) -> Option<String> {
+        if let Some(tokens) = self.tokens.get(&live_item_id) {
             return Some(tokens.qualified_ident_path.to_string())
         }
         return None
@@ -167,20 +207,6 @@ impl LiveStyles {
         return false
     }
     
-        // we have to check if live_id exists in the on_live_id dependency tree
-    pub fn check_depends_on2(&self, live_item_id: LiveItemId, on_live_item_id: LiveItemId) -> bool {
-        if let Some(deps) = self.live_depends_on.get(&on_live_item_id).cloned() {
-            if deps.contains(&live_item_id) {
-                return true
-            }
-            for dep_live_id in deps {
-                if self.check_depends_on2(live_item_id, dep_live_id) {
-                    return true
-                }
-            }
-        }
-        return false
-    }
     
     pub fn update_deps(&mut self, live_item_id: LiveItemId, new_deps: HashSet<LiveItemId>) {
         if let Some(old_deps) = self.live_depends_on.get_mut(&live_item_id) {
@@ -239,14 +265,14 @@ impl LiveStyles {
     }
     
     // return all the live items for a certain file, in order
-    pub fn get_live_items_for_file(&self, file:&str)->Vec<LiveItemId>{
+    pub fn get_live_items_for_file(&self, file: &str) -> Vec<LiveItemId> {
         //println!("get_live_items_for_file {}", file);
         let mut ret = Vec::new();
-        if let Some(live_bodies_id) = self.file_to_live_bodies.get(file){
+        if let Some(live_bodies_id) = self.file_to_live_bodies.get(file) {
             //println!("HERE {}", live_bodies_id.len());
-            for live_body_id in live_bodies_id{
-                if let Some(live_items) = self.live_bodies_items.get(live_body_id){
-                    for live_item_id in live_items{
+            for live_body_id in live_bodies_id {
+                if let Some(live_items) = self.live_bodies_items.get(live_body_id) {
+                    for live_item_id in live_items {
                         ret.push(*live_item_id);
                     }
                 }
@@ -263,7 +289,11 @@ impl LiveStyles {
         self.shader_asts.remove(&live_item_id);
     }
     
-    pub fn add_direct_value_change(&mut self, live_item_id: LiveItemId){
+    pub fn register_draw_input(&mut self, live_item_id: LiveItemId, live_draw_input: LiveDrawInput) {
+        self.draw_inputs.insert(live_item_id, live_draw_input);
+    }
+    
+    pub fn add_direct_value_change(&mut self, live_item_id: LiveItemId) {
         if let Some(set) = self.depends_on_live.get(&live_item_id).cloned() {
             for dep_live in set {
                 self._add_changed_deps_recursive(dep_live, LiveChangeType::UpdateValue);
@@ -326,8 +356,8 @@ impl LiveStyles {
             }
         }
     }
-
-    pub fn find_remap(&self, live_item_id:LiveItemId)->LiveItemId{
+    
+    pub fn find_remap(&self, live_item_id: LiveItemId) -> LiveItemId {
         for style_index in &self.style_stack {
             if let Some(fwd) = self.style_list[style_index.0].remap.get(&live_item_id) {
                 return *fwd;
@@ -338,57 +368,57 @@ impl LiveStyles {
     
     pub fn get_float(&self, live_item_id: LiveItemId, name: &str) -> f32 {
         let live_item_id = self.find_remap(live_item_id);
-        if let Some(v) = self.floats.get(&live_item_id){
+        if let Some(v) = self.floats.get(&live_item_id) {
             return v.value;
         }
         self.live_access_errors.borrow_mut().push(format!("Float not found {}", name));
         return 0.0;
     }
-
+    
     pub fn get_vec2(&self, live_item_id: LiveItemId, name: &str) -> Vec2 {
         let live_item_id = self.find_remap(live_item_id);
-        if let Some(v) = self.vec2s.get(&live_item_id){
+        if let Some(v) = self.vec2s.get(&live_item_id) {
             return *v;
         }
         self.live_access_errors.borrow_mut().push(format!("Vec2 not found {}", name));
         return Vec2::all(0.);
     }
-
+    
     pub fn get_vec3(&self, live_item_id: LiveItemId, name: &str) -> Vec3 {
         let live_item_id = self.find_remap(live_item_id);
-        if let Some(v) = self.vec3s.get(&live_item_id){
+        if let Some(v) = self.vec3s.get(&live_item_id) {
             return *v
         }
         self.live_access_errors.borrow_mut().push(format!("Vec3 not found {}", name));
         return Vec3::all(0.);
     }
-
+    
     pub fn get_vec4(&self, live_item_id: LiveItemId, name: &str) -> Vec4 {
         let live_item_id = self.find_remap(live_item_id);
-        if let Some(v) = self.vec4s.get(&live_item_id){
+        if let Some(v) = self.vec4s.get(&live_item_id) {
             return *v
         }
         self.live_access_errors.borrow_mut().push(format!("Vec4 not found {}", name));
         return Vec4::all(0.);
     }
-
+    
     pub fn get_color(&self, live_item_id: LiveItemId, name: &str) -> Color {
         let live_item_id = self.find_remap(live_item_id);
-        if let Some(v) = self.colors.get(&live_item_id){
+        if let Some(v) = self.colors.get(&live_item_id) {
             return *v
         }
         self.live_access_errors.borrow_mut().push(format!("Color not found {}", name));
-        return Color{r:1.0,g:0.0,b:1.0,a:1.0};
+        return Color {r: 1.0, g: 0.0, b: 1.0, a: 1.0};
     }
     
     pub fn get_text_style(&self, live_item_id: LiveItemId, name: &str) -> TextStyle {
         let live_item_id = self.find_remap(live_item_id);
-        if let Some(v) = self.text_styles.get(&live_item_id){
+        if let Some(v) = self.text_styles.get(&live_item_id) {
             return *v
         }
         self.live_access_errors.borrow_mut().push(format!("Color not found {}", name));
-        return TextStyle{
-            font:Font{font_id:0},
+        return TextStyle {
+            font: Font {font_id: 0},
             font_size: 8.0,
             brightness: 1.0,
             curve: 0.6,
@@ -400,7 +430,7 @@ impl LiveStyles {
     
     pub fn get_layout(&self, live_item_id: LiveItemId, name: &str) -> Layout {
         let live_item_id = self.find_remap(live_item_id);
-        if let Some(v) = self.layouts.get(&live_item_id){
+        if let Some(v) = self.layouts.get(&live_item_id) {
             return *v
         }
         self.live_access_errors.borrow_mut().push(format!("Layout not found {}", name));
@@ -409,7 +439,7 @@ impl LiveStyles {
     
     pub fn get_walk(&self, live_item_id: LiveItemId, name: &str) -> Walk {
         let live_item_id = self.find_remap(live_item_id);
-        if let Some(v) = self.walks.get(&live_item_id){
+        if let Some(v) = self.walks.get(&live_item_id) {
             return *v
         }
         self.live_access_errors.borrow_mut().push(format!("Walk not found {}", name));
@@ -418,7 +448,7 @@ impl LiveStyles {
     
     pub fn get_anim(&self, live_item_id: LiveItemId, name: &str) -> Anim {
         let live_item_id = self.find_remap(live_item_id);
-        if let Some(v) = self.anims.get(&live_item_id){
+        if let Some(v) = self.anims.get(&live_item_id) {
             return v.clone()
         }
         self.live_access_errors.borrow_mut().push(format!("Anim not found {}", name));
@@ -428,18 +458,27 @@ impl LiveStyles {
     pub fn get_shader(&self, live_item_id: LiveItemId, location_hash: u64, _module_path: &str, name: &str) -> Shader {
         let live_item_id = self.find_remap(live_item_id);
         let shader = self.shaders.get(&live_item_id);
-        if let Some(shader) = shader{
+        if let Some(shader) = shader {
             Shader {
                 shader_id: shader.shader_id,
                 location_hash
             }
         }
-        else{
+        else {
             eprintln!("Shader not found {}", name);
             Shader {
                 shader_id: 0,
                 location_hash
             }
+        }
+    }
+    
+    pub fn get_default_shader_overload(&self, base: Shader, live_item_id: LiveItemId, _module_path: &str, name: &str) -> Shader {
+        if base.shader_id == 0 {
+            self.get_shader(live_item_id, base.location_hash, _module_path, name)
+        }
+        else {
+            base
         }
     }
     
@@ -598,7 +637,7 @@ impl LiveStyles {
                         Ok(v) => {self.vec2s.insert(live_id, v);}
                     }
                 },
-                LiveTokensType::Vec3=> {
+                LiveTokensType::Vec3 => {
                     match DeTokParserImpl::new(&swap_live_tokens.tokens, self).parse_vec3() {
                         Err(err) => {errors.push(self.live_error_to_live_body_error(err));},
                         Ok(v) => {self.vec3s.insert(live_id, v);}
@@ -701,13 +740,13 @@ impl LiveStyles {
         
         let seek_line = live_body.line;
         let live_bodies = &self.live_bodies;
-        match file_live_bodies.binary_search_by(|probe|{
+        match file_live_bodies.binary_search_by( | probe | {
             live_bodies[probe.as_index()].line.cmp(&seek_line)
-        }){
-            Err(pos)=>{ // not found
+        }) {
+            Err(pos) => { // not found
                 file_live_bodies.insert(pos, live_body_id)
             }
-            Ok(_pos)=>{
+            Ok(_pos) => {
                 panic!("Called add_live_body twice for the same body! {} {}", live_body.file, live_body.line)
             }
         }
@@ -724,7 +763,7 @@ impl LiveStyles {
         if let Some(list) = self.file_to_live_bodies.get(file) {
             // find the nearest block
             let mut nearest = std::usize::MAX;
-            let mut nearest_id = None; 
+            let mut nearest_id = None;
             for live_body_id in list {
                 let other_line = self.live_bodies[live_body_id.0].line;
                 let dist = if other_line > line {other_line - line}else {line - other_line};
@@ -735,7 +774,7 @@ impl LiveStyles {
             }
             let nearest_id = nearest_id.unwrap();
             let live_body = &mut self.live_bodies[nearest_id.0];
-            if live_body.code != code{
+            if live_body.code != code {
                 self.changed_live_bodies.insert(*nearest_id);
                 live_body.code = code;
             }
@@ -752,9 +791,9 @@ impl LiveStyles {
         let mut out_ast = ShaderAst::default();
         let mut visited = Vec::new();
         
-        let in_ast = match self.shader_asts.get(&live_item_id){
-            Some(ast)=>ast,
-            None=>{
+        let in_ast = match self.shader_asts.get(&live_item_id) {
+            Some(ast) => ast,
+            None => {
                 return Err(self.live_error_to_live_body_error(LiveError {
                     span: Span::default(),
                     message: format!("Cannot find library or shader")
@@ -784,14 +823,27 @@ impl LiveStyles {
             if let Some(dg) = in_ast.default_geometry {
                 out_ast.default_geometry = Some(dg);
             }
+            if let Some(di) = in_ast.draw_input {
+                out_ast.draw_input = Some(di);
+            }
             if in_ast.debug {out_ast.debug = true};
             for decl in &in_ast.decls {
                 out_ast.decls.push(decl.clone())
             }
+            out_ast.live_body_id = in_ast.live_body_id;
             Ok(())
         }
         recur(&mut visited, in_ast, &mut out_ast, self) ?;
+        // lets expand
+        
         let mut env = Env::new(self);
+        let span = Span {live_body_id: out_ast.live_body_id, start: 0, end: 0};
+        if let Err((span, msg)) = out_ast.convert_draw_input_to_decls(self, span) {
+            return Err(self.live_error_to_live_body_error(LiveError {
+                span: span,
+                message: msg
+            }));
+        }
         
         let default_geometry = if let Some(geom_ipws) = out_ast.default_geometry {
             let live_id = geom_ipws.to_live_item_id(self);
