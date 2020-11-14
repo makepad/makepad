@@ -51,6 +51,15 @@ impl Area{
         }
         false
     }
+    
+    pub fn need_uniforms_now(&self)->bool{
+        return match self{
+            Area::Instance(inst)=>{
+                inst.instance_count == 0
+            },
+            _=>false,
+        }
+    }
 
     pub fn is_valid(&self, cx:&Cx)->bool{
         return match self{
@@ -515,7 +524,7 @@ impl Area{
                 write[uni_offset+2] = v.z;
             }
         }
-    } 
+    }
 
     pub fn write_texture_2d_id(&self, cx:&mut Cx, live_item_id:LiveItemId, texture_id: usize){
          match self{

@@ -4,7 +4,7 @@ use makepad_render::*;
 #[repr(C)]
 struct DrawButton {
     #[default_shader(self::shader_button)]
-    some: Vec4,
+    some: f32,
     base: DrawQuad,
     counter: f32,
 }
