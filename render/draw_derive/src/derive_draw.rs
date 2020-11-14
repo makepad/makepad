@@ -185,15 +185,16 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             tb.add("self ::").ident(&struct_name).add(") , Self :: live_draw_input ( ) ) ;");
             tb.add("}");
             
-            tb.add("pub fn write_uniforms ( cx : & mut Cx ) -> bool {");
+            tb.add("pub fn write_uniforms ( & self , cx : & mut Cx ) {");
+            tb.add("if self . area ( ) . need_uniforms_now ( ) {");
             for (name, ty) in &uniforms {
-                tb.add("def . add_uniform ( module_path ! ( ) , ");
-                tb.string(name).add(" , ");
                 let st = ShaderType::parse(&ty).unwrap();
-                tb.string(ty).add(" ) ;");
+                tb.add("self . area ( ) .").ident(st.to_uniform_write()).add("( cx , live_item_id ! (");
+                tb.add("self :: ").ident(&base_type.to_string()).add("::").ident(&name);
+                tb.add(") , self .").ident(&name).add(") ;");
             }
             
-            tb.add("true }");
+            tb.add("} }");
             
             
             match draw_type {
@@ -204,7 +205,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
                     tb.add("pub fn draw_text ( & mut self , cx : & mut Cx , text : & str ) -> bool { if self . base . draw_text ( cx , text ) { self . write_uniforms ( cx ) } else { false } }");
                     tb.add("pub fn lock_aligned_text ( & mut self , cx : & mut Cx ) { self . base . lock_aligned_text ( cx ) }");
                     tb.add("pub fn lock_text ( & mut self , cx : & mut Cx ) { self . base . lock_text ( cx ) }");
-                    tb.add("pub fn unlock_text ( & mut self , cx : & mut Cx ) -> bool { if self . base . unlock_text ( cx ) { self . write_uniforms ( cx ) } else { false } }");
+                    tb.add("pub fn unlock_text ( & mut self , cx : & mut Cx ) { self . base . unlock_text ( cx ) ; self . write_uniforms ( cx ) }");
                     tb.add("pub fn add_text ( & mut self , cx : & mut Cx , geom_x : f32 , geom_y : f32 , text : & str ) { self . base . add_text ( cx , geom_x , geom_y , text ) }");
                     tb.add("pub fn add_text_chunk < F > (  & mut self , cx : & mut Cx , geom_x : f32 , geom_y : f32 , char_offset : usize , chunk : & [ char ] , mut char_callback : F )");
                     tb.add("where F : FnMut ( char , usize , f32 , f32 ) -> f32 { self . base . add_text_chunk ( cx , geom_x , geom_y , char_offset , chunk , char_callback ) }");
@@ -213,19 +214,19 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
                     // quad forward implementation
                     tb.add("pub fn area ( & self ) -> Area { self . base . area ( ) }");
                     tb.add("pub fn begin_quad ( & mut self , cx : & mut Cx , layout : Layout ) { self . base . begin_quad ( cx , layout ) }");
-                    tb.add("pub fn end_quad ( & mut self , cx : & mut Cx ) -> bool { if self . base . end_quad ( cx ) { self . write_uniforms ( cx ) } else { false } }");
-                    tb.add("pub fn draw_quad ( & mut self , cx : & mut Cx , walk : Walk ) -> bool { if self . base . draw_quad ( cx , walk ) { self . write_uniforms ( cx ) } else { false } }");
-                    tb.add("pub fn draw_quad_rel ( & mut self , cx : & mut Cx , rect : Rect ) -> bool { if self . base . draw_quad_rel ( cx , rect ) { self . write_uniforms ( cx ) } else { false } }");
-                    tb.add("pub fn draw_quad_abs ( & mut self , cx : & mut Cx , rect : Rect ) -> bool { if self . base . draw_quad_abs ( cx , rect ) { self . write_uniforms ( cx ) } else { false } }");
+                    tb.add("pub fn end_quad ( & mut self , cx : & mut Cx )  { self . base . end_quad ( cx ) ; self . write_uniforms ( cx ) }");
+                    tb.add("pub fn draw_quad ( & mut self , cx : & mut Cx , walk : Walk )  { self . base . draw_quad ( cx , walk ) ; self . write_uniforms ( cx ) }");
+                    tb.add("pub fn draw_quad_rel ( & mut self , cx : & mut Cx , rect : Rect ) { self . base . draw_quad_rel ( cx , rect ) ; self . write_uniforms ( cx ) }");
+                    tb.add("pub fn draw_quad_abs ( & mut self , cx : & mut Cx , rect : Rect ) { self . base . draw_quad_abs ( cx , rect ) ; self . write_uniforms ( cx ) }");
                     tb.add("pub fn lock_aligned_quad ( & mut self , cx : & mut Cx ) { self . base . lock_aligned_quad ( cx ) }");
                     tb.add("pub fn lock_quad ( & mut self , cx : & mut Cx ) { self . base . lock_quad ( cx ) }");
                     tb.add("pub fn add_quad ( & mut self , rect : Rect ) { self . base . add_quad ( rect ) }");
-                    tb.add("pub fn unlock_quad ( & mut self , cx : & mut Cx ) -> bool { if self . base . unlock_quad ( cx ) { self . write_uniforms ( cx ) } else { false } }");
+                    tb.add("pub fn unlock_quad ( & mut self , cx : & mut Cx ) { self . base . unlock_quad ( cx ) ; self . write_uniforms ( cx ) }");
                 }
             }
             
             tb.add("}");
-            //tb.eprint();
+            tb.eprint();
             return tb.end();
         }
     }
