@@ -36,8 +36,8 @@ pub fn derive_de_tok_impl(input: TokenStream) -> TokenStream {
             else if let Some(fields) = parser.eat_all_struct_fields() { // if all our fields are f32's
                 // we can use a special all() function for f32 only structs
                 let mut all_f32 = true;
-                for (_field, ty) in &fields{
-                    let ty_str = ty.to_string();
+                for field in &fields{
+                    let ty_str = field.ty.to_string();
                     if ty_str != "f32"{
                         all_f32 = false;
                         break;
@@ -49,26 +49,26 @@ pub fn derive_de_tok_impl(input: TokenStream) -> TokenStream {
                     tb.add("let f = f32 :: de_tok ( p ) ? ;");
                     tb.add("p . expect_token ( Token :: RightParen ) ? ;");
                     tb.add("return std :: result :: Result :: Ok ( Self {");
-                    for (field, _ty) in &fields {
-                        tb.ident(&field).add(": f ,");
+                    for field in &fields {
+                        tb.ident(&field.name).add(": f ,");
                     }
                     tb.add("} ) }");
                 }
                 
                 tb.add("let mut default = Self :: default ( ) ;");
                 tb.add("p . expect_token ( Token :: LeftBrace )  ? ;");
-                for (field, _ty) in &fields {
-                    tb.add("let mut").ident(&format!("_{}", field)).add("= None ;");
+                for field in &fields {
+                    tb.add("let mut").ident(&format!("_{}", field.name)).add("= None ;");
                 }
                 tb.add("while let Ok ( ident ) = p . parse_ident ( ) {");
 
-                for (index, (field, _ty)) in fields.iter().enumerate() {
+                for (index, field) in fields.iter().enumerate() {
                     if index != 0{
                         tb.add("else");
                     }
-                    tb.add("if ident == Ident :: new (").string(&field).add(") {");
+                    tb.add("if ident == Ident :: new (").string(&field.name).add(") {");
                     tb.add("p . expect_token ( Token :: Colon ) ? ;");
-                    tb.ident(&format!("_{}", field)).add("= Some ( DeTok :: de_tok ( p  ) ? ) ;");
+                    tb.ident(&format!("_{}", field.name)).add("= Some ( DeTok :: de_tok ( p  ) ? ) ;");
                     tb.add("p . accept_token ( Token :: Comma ) ;");
                     tb.add("}");
                 }
@@ -78,15 +78,15 @@ pub fn derive_de_tok_impl(input: TokenStream) -> TokenStream {
                 tb.add("}");
                 tb.add("p . expect_token ( Token :: RightBrace )  ? ;");
                 tb.add("std :: result :: Result :: Ok ( Self {");
-                for (field, ty) in fields {
-                    tb.ident(&field).add(":");
-                    if ty.into_iter().next().unwrap().to_string() == "Option" {
-                        tb.add("if let Some ( t ) =").ident(&format!("_{}", field));
+                for field in fields {
+                    tb.ident(&field.name).add(":");
+                    if field.ty.into_iter().next().unwrap().to_string() == "Option" {
+                        tb.add("if let Some ( t ) =").ident(&format!("_{}", field.name));
                         tb.add("{ t } else { None } ,");
                     }
                     else {
-                        tb.add("if let Some ( t ) =").ident(&format!("_{}", field));
-                        tb.add("{ t } else { default .").ident(&field).add("} ,");
+                        tb.add("if let Some ( t ) =").ident(&format!("_{}", field.name));
+                        tb.add("{ t } else { default .").ident(&field.name).add("} ,");
                     }
                 }
                 tb.add("} )");
@@ -133,33 +133,33 @@ pub fn derive_de_tok_impl(input: TokenStream) -> TokenStream {
                     }
                     else if let Some(fields) = parser.eat_all_struct_fields() { // named variant
                         tb.add("p . expect_token ( Token :: LeftBrace )  ? ;");
-                        for (field, _ty) in &fields {
-                            tb.add("let mut").ident(&format!("_{}", field)).add("= None ;");
+                        for field in &fields {
+                            tb.add("let mut").ident(&format!("_{}", field.name)).add("= None ;");
                         }
                         tb.add("while let Ok ( ident ) = p . parse_ident ( ) {");
-                        for (index, (field, _ty)) in fields.iter().enumerate() {
+                        for (index, field) in fields.iter().enumerate() {
                             if index != 0{
                                 tb.add("else");
                             }
-                            tb.add("if ident == Ident :: new (").string(&field).add(") {");
+                            tb.add("if ident == Ident :: new (").string(&field.name).add(") {");
                             tb.add("p . expect_token ( Token :: Colon ) ? ;");
-                            tb.ident(&format!("_{}", field)).add("= Some ( DeTok :: de_tok ( p  ) ? ) ;");
+                            tb.ident(&format!("_{}", field.name)).add("= Some ( DeTok :: de_tok ( p  ) ? ) ;");
                             tb.add("p . accept_token ( Token :: Comma ) ;");
                             tb.add("}");
                         }
                         tb.add("}");
                         tb.add("p . expect_token ( Token :: RightBrace )  ? ;");
                         tb.add("return Ok ( Self ::").ident(&variant).add("{");
-                        for (field, ty) in fields {
-                            tb.ident(&field).add(":");
-                            if ty.into_iter().next().unwrap().to_string() == "Option" {
-                                tb.add("if let Some ( t ) =").ident(&format!("_{}", field));
+                        for field in fields {
+                            tb.ident(&field.name).add(":");
+                            if field.ty.into_iter().next().unwrap().to_string() == "Option" {
+                                tb.add("if let Some ( t ) =").ident(&format!("_{}", field.name));
                                 tb.add("{ t } else { None } ,");
                             }
                             else {
-                                tb.add("if let Some ( t ) =").ident(&format!("_{}", field));
+                                tb.add("if let Some ( t ) =").ident(&format!("_{}", field.name));
                                 tb.add("{ t } else { return Err ( p . error_missing_prop (");
-                                tb.string(&field).add(") ) } ,");
+                                tb.string(&field.name).add(") ) } ,");
                             }
                         }
                         tb.add("} )");

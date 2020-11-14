@@ -27,17 +27,30 @@ pub struct TrapezoidText {
     trapezoidator: Trapezoidator
 }
 
+const TRAPEZOID_TEXT_SLOTS: usize = 5;
+
 impl TrapezoidText {
+    
+    pub fn register_draw_input(cx: &mut Cx) {
+        let mut def = LiveDrawInput::default();
+        let mp = module_path!();
+        def.add_instance(mp, "a_xs", "Vec2");
+        def.add_instance(mp, "a_ys", "Vec4");
+        def.add_instance(mp, "chan", "f32");
+        cx.live_styles.register_draw_input(live_item_id!(self::TrapezoidText), def)
+    }
+    
     pub fn style(cx: &mut Cx){
+        
+        Self::register_draw_input(cx);
+        
         live_body!(cx, r#"
             self::trapezoid_shader: Shader{
                 use crate::shader_std::prelude::*;
                 default_geometry: crate::shader_std::quad_2d;
                 geometry geom: vec2;
                 
-                instance a_xs: vec2;
-                instance a_ys: vec4;
-                instance chan: float;
+                draw_input: self::TrapezoidText;
                 
                 varying v_p0: vec2;
                 varying v_p1: vec2;
@@ -133,7 +146,7 @@ impl TrapezoidText {
     // test api for directly drawing a glyph
     pub fn draw_char(&mut self, cx: &mut Cx, c: char, font_id: usize, font_size: f32) {
         // now lets make a draw_character function
-        let inst = cx.new_instance(live_shader!(cx, self::trapezoid_shader), None, 0);
+        let mut lock = cx.lock_instances(live_shader!(cx, self::trapezoid_shader), TRAPEZOID_TEXT_SLOTS);
         
         let trapezoids = {
             let cxfont = &cx.fonts[font_id];
@@ -186,8 +199,10 @@ impl TrapezoidText {
                 trapezoid.ys[3],
                 3.0
             ];
-            inst.push_slice(cx, &data);
+            lock.instances.extend_from_slice(&data);
         }
+
+        cx.unlock_instances(lock);
     }
     
     // atlas drawing function used by CxAfterDraw

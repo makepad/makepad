@@ -1,62 +1,12 @@
 use proc_macro::{TokenStream};
+use crate::macro_lib::*;
 
-pub enum DrawType{
+pub enum DrawType {
     DrawQuad,
     DrawText
 }
 
-use crate::macro_lib::*;
-#[derive(Clone, Debug, PartialEq)]
-enum AttribType {
-    Instance,
-    Uniform,
-    Shader,
-}
-
-struct Attrib{
-    ty: AttribType,
-    path: TokenStream
-}
-
-impl Attrib {
-    fn parse(parser: &mut TokenParser) -> Result<Attrib, TokenStream> {
-        fn parse_live_item_id(parser: &mut TokenParser) -> Result<TokenStream, TokenStream> {
-            if !parser.open_paren() {
-                return Err(error("expected ("))
-            }
-            if let Some(ret) = parser.eat_ident_path() {
-                if !parser.eat_eot() {
-                    return Err(error("expected )"));
-                }
-                return Ok(ret)
-            }
-            return Err(error("expected live_item_id"))
-        }
-        if parser.eat_punct('#') { // parse our attribute
-            if !parser.open_bracket() {
-                return Err(error("Expected ["))
-            }
-            let ret = if parser.eat_ident("instance") {
-                Attrib{ty:AttribType::Instance, path: parse_live_item_id(parser) ?}
-            }
-            else if parser.eat_ident("uniform") {
-                Attrib{ty:AttribType::Uniform, path: parse_live_item_id(parser) ?}
-            }
-            else if parser.eat_ident("shader") {
-                Attrib{ty:AttribType::Shader, path: parse_live_item_id(parser) ?}
-            }
-            else {
-                return Err(error("Expected instance, uniform or "))
-            };
-             if !parser.eat_eot() {
-                return Err(error("expected ]"));
-            }
-            return Ok(ret)
-        }
-        return Err(error("Expected #[shader()] #[uniform()] or #[instance()] attribute"))
-    }
-}
-
+#[derive(PartialEq)]
 enum ShaderType {
     Float,
     Vec2,
@@ -64,12 +14,13 @@ enum ShaderType {
     Vec4,
     Mat2,
     Mat3,
-    Mat4
+    Mat4,
+    Texture2D
 }
 
 impl ShaderType {
-    fn parse(ts: &TokenStream) -> Result<ShaderType, TokenStream> {
-        match ts.to_string().as_ref() {
+    fn parse(ts: &str) -> Result<ShaderType, TokenStream> {
+        match ts{
             "f32" => Ok(ShaderType::Float),
             "Vec2" => Ok(ShaderType::Vec2),
             "Vec3" => Ok(ShaderType::Vec3),
@@ -77,11 +28,14 @@ impl ShaderType {
             "Mat2" => Ok(ShaderType::Mat2),
             "Mat3" => Ok(ShaderType::Mat3),
             "Mat4" => Ok(ShaderType::Mat4),
+            "Texture2D" => Ok(ShaderType::Texture2D),
             _ => Err(error("Unexpected type, only f32, Vec2, Vec3, Vec4, Mat2, Mat3, Mat4 supported"))
         }
     }
+
     fn slots(self) -> usize {
         match self {
+            ShaderType::Texture2D => 0,
             ShaderType::Float => 1,
             ShaderType::Vec2 => 2,
             ShaderType::Vec3 => 3,
@@ -89,6 +43,19 @@ impl ShaderType {
             ShaderType::Mat2 => 4,
             ShaderType::Mat3 => 9,
             ShaderType::Mat4 => 16
+        }
+    }
+    
+    fn to_uniform_write(self) -> &'static str {
+        match self {
+            ShaderType::Texture2D => panic!("invalid"),
+            ShaderType::Float => "write_uniform_float",
+            ShaderType::Vec2 => "write_uniform_vec2",
+            ShaderType::Vec3 => "write_uniform_vec3",
+            ShaderType::Vec4 => "write_uniform_vec4",
+            ShaderType::Mat2 => "write_uniform_mat2",
+            ShaderType::Mat3 => "write_uniform_mat3",
+            ShaderType::Mat4 => "write_uniform_mat4",
         }
     }
 }
@@ -109,119 +76,151 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
     
     parser.eat_ident("pub");
     if parser.eat_ident("struct") {
-        if let Some(name) = parser.eat_any_ident() {
+        if let Some(struct_name) = parser.eat_any_ident() {
             // lets eat all the fields
-            if !parser.open_brace() {
-                return error("Expected {")
+            let fields = if let Some(fields) = parser.eat_all_struct_fields() {
+                fields
             }
-            let mut fields = Vec::new();
-            while !parser.eat_eot() {
-                // lets eat an attrib
-                let attrib = match Attrib::parse(&mut parser) {
-                    Err(err) => return err,
-                    Ok(attrib) => attrib
-                };
-                if let Some((field, ty)) = parser.eat_struct_field() {
-                    fields.push((field, ty, attrib));
-                    parser.eat_punct(',');
-                }
-            }
-            // before 'base' we can only accept uniform fields
-            let mut base_shader = None;
-            let mut base_type = None;
-            
+            else {
+                return error("No fields in struct");
+            };
+
             let mut with_shader = TokenBuilder::new();
             with_shader.add("pub fn with_shader ( cx : & mut Cx , shader : Shader , slots : usize ) -> Self {");
             with_shader.add("Self {");
+             
             let mut total_slots = 0;
-            for (field, ty, attrib) in &fields {
-                if field == "base" {
-                    base_type = Some(ty);
-                    // only accept shader
-                    if attrib.ty == AttribType::Shader {
-                        base_shader = Some(attrib.path.clone());
-                    }
-                    else {
-                        return error("base field requires a #[shader(self::shader)] attribute")
-                    }
-                }
-                else if base_shader.is_none() { // only accept uniforms
-                    if attrib.ty == AttribType::Uniform{
-                        // output uniform code
-                        let _shader_ty = match ShaderType::parse(&ty) {
-                            Err(err) => return err,
-                            Ok(ty) => ty
-                        };
-                        return error("Implement uniforms")
-                    }
-                    else {
-                        return error("Before base field #[uniform(self::shader::uniformprop)] attributes are required")
+            let mut base_type = None;
+            let mut default_shader = None;
+            let mut uniforms = Vec::new();
+            let mut instances = Vec::new();
+            let mut textures = Vec::new();
+            
+            for field in &fields {
+                for attr in &field.attrs{
+                    if attr.name == "default_shader"{
+                        default_shader = Some(attr.args.clone());
                     }
                 }
-                else {
-                    if attrib.ty == AttribType::Instance{
-                        // output instance code
-                        let shader_ty = match ShaderType::parse(&ty) {
-                            Err(err) => return err,
-                            Ok(ty) => ty
-                        };
-                        total_slots += shader_ty.slots();
-                    }
-                    else {
-                        eprintln!("{:?}", attrib.ty);
-                        return error("After base field using #[instance(self::shader::instanceprop)] attributes are required")
-                    }
+                if field.name == "base" {
+                    base_type = Some(field.ty.clone());
+                }
+                else { // only accept uniforms
+                    // spit out attrib
+                    let _st = match ShaderType::parse(&field.ty.to_string()){
+                        Err(e)=>return e,
+                        Ok(st)=>{
+                            if st == ShaderType::Texture2D{
+                                if !base_type.is_none(){
+                                    return error("Texture2D not allowed in instance position, please move before 'base'");
+                                }
+                                textures.push((field.name.clone(), field.ty.to_string()));
+                            }
+                            else{
+                                if base_type.is_none(){
+                                    uniforms.push((field.name.clone(), field.ty.to_string()));
+                                }
+                                else{
+                                    total_slots += st.slots();
+                                    instances.push((field.name.clone(), field.ty.to_string()));
+                                }
+                            }
+                        }
+                    };
                 }
             }
-            let base_shader = if let Some(bs) = base_shader {bs} else {
+            let base_type = if let Some(bt) = base_type {bt} else {
                 return error("base field not defined!")
             };
+            if default_shader.is_none(){
+                return error("#[default_shader()] defined!")
+            }
             // 'base' needs a shader field
             // and after can only accept instance fields
             
             // ok we have fields and attribs
-            tb.add("impl").ident(&name).add("{");
-            tb.add("pub fn new ( cx : & mut Cx ) -> Self {");
-            tb.add("Self :: with_shader ( cx , live_shader ! ( cx ,").stream(Some(base_shader)).add(") , 0 )");
+            tb.add("impl").ident(&struct_name).add("{");
+            tb.add("pub fn new ( cx : & mut Cx , shader : Shader ) -> Self {");
+            tb.add("Self :: with_slot_count ( cx , default_shader_overload ! ( cx , shader ,").stream(default_shader).add(") , 0 )");
             tb.add("}");
             
-            tb.add("pub fn with_shader ( cx : & mut Cx , shader : Shader , slots : usize ) -> Self {");
+            tb.add("pub fn with_slot_count ( cx : & mut Cx , shader : Shader , slots : usize ) -> Self {");
             tb.add("Self {");
-            tb.add("base :").ident(&base_type.unwrap().to_string());
-            tb.add(":: with_shader ( cx , shader , slots +").unsuf_usize(total_slots).add(") ,");
+            tb.add("base :").ident(&base_type.to_string());
+            tb.add(":: with_slot_count ( cx , shader , slots +").unsuf_usize(total_slots).add(") ,");
             // now add initializers for all values
-            for (field, _ty, _attrib) in &fields {
-                if field != "base"{
-                    tb.ident(&field).add(": Default :: default ( ) ,");
+            for field in &fields {
+                if field.name != "base" {
+                    tb.ident(&field.name).add(": Default :: default ( ) ,");
                 }
             }
             tb.add("}");
             tb.add("}");
             
+            tb.add("pub fn live_draw_input ( ) -> LiveDrawInput {");
+            tb.add("let mut def =").ident(&base_type.to_string()).add(" :: live_draw_input ( ) ;");
 
-            match draw_type{
-                DrawType::DrawText=>{
+            for (name, ty) in &uniforms {
+                tb.add("def . add_uniform ( module_path ! ( ) , ");
+                tb.string(name).add(" , ");
+                tb.string(ty).add(" ) ;");
+            }
+
+            for (name, ty) in &instances {
+                tb.add("def . add_instance ( module_path ! ( ) , ");
+                tb.string(name).add(" , ");
+                tb.string(ty).add(" ) ;");
+            }
+
+            for (name, ty) in &textures {
+                tb.add("def . add_texture ( module_path ! ( ) , ");
+                tb.string(name).add(" , ");
+                tb.string(ty).add(" ) ;");
+            }
+
+            tb.add("return def ; }");
+            
+            tb.add("pub fn register_draw_input ( cx : & mut Cx ) {");
+            tb.add("cx . live_styles . register_draw_input ( live_item_id ! (");
+            tb.add("self ::").ident(&struct_name).add(") , Self :: live_draw_input ( ) ) ;");
+            tb.add("}");
+            
+            tb.add("pub fn write_uniforms ( cx : & mut Cx ) -> bool {");
+            for (name, ty) in &uniforms {
+                tb.add("def . add_uniform ( module_path ! ( ) , ");
+                tb.string(name).add(" , ");
+                let st = ShaderType::parse(&ty).unwrap();
+                tb.string(ty).add(" ) ;");
+            }
+            
+            tb.add("true }");
+            
+            
+            match draw_type {
+                DrawType::DrawText => {
+                    tb.add("pub fn area ( & self ) -> Area { self . base . area ( ) }");
                     tb.add("pub fn get_monospace_base ( & self , cx : & mut Cx ) -> Vec2 { self . base . get_monospace_base ( cx ) }");
                     tb.add("pub fn find_closest_offset ( & self , cx : & Cx , pos : Vec2 ) -> usize { self . base . find_closest_offset ( cx , pos ) }");
-                    tb.add("pub fn draw_text ( & mut self , cx : & mut Cx , text : & str ) { self . base . draw_text ( cx , text ) }");
+                    tb.add("pub fn draw_text ( & mut self , cx : & mut Cx , text : & str ) -> bool { if self . base . draw_text ( cx , text ) { self . write_uniforms ( cx ) } else { false } }");
                     tb.add("pub fn lock_aligned_text ( & mut self , cx : & mut Cx ) { self . base . lock_aligned_text ( cx ) }");
                     tb.add("pub fn lock_text ( & mut self , cx : & mut Cx ) { self . base . lock_text ( cx ) }");
-                    tb.add("pub fn unlock_text ( & mut self , cx : & mut Cx ) { self . base . unlock_text ( cx ) }");
+                    tb.add("pub fn unlock_text ( & mut self , cx : & mut Cx ) -> bool { if self . base . unlock_text ( cx ) { self . write_uniforms ( cx ) } else { false } }");
                     tb.add("pub fn add_text ( & mut self , cx : & mut Cx , geom_x : f32 , geom_y : f32 , text : & str ) { self . base . add_text ( cx , geom_x , geom_y , text ) }");
                     tb.add("pub fn add_text_chunk < F > (  & mut self , cx : & mut Cx , geom_x : f32 , geom_y : f32 , char_offset : usize , chunk : & [ char ] , mut char_callback : F )");
                     tb.add("where F : FnMut ( char , usize , f32 , f32 ) -> f32 { self . base . add_text_chunk ( cx , geom_x , geom_y , char_offset , chunk , char_callback ) }");
                 },
-                DrawType::DrawQuad=>{
+                DrawType::DrawQuad => {
                     // quad forward implementation
+                    tb.add("pub fn area ( & self ) -> Area { self . base . area ( ) }");
                     tb.add("pub fn begin_quad ( & mut self , cx : & mut Cx , layout : Layout ) { self . base . begin_quad ( cx , layout ) }");
-                    tb.add("pub fn end_quad ( & mut self , cx : & mut Cx ) { self . base . end_quad ( cx ) }");
-                    tb.add("pub fn draw_quad ( & mut self , cx : & mut Cx , walk : Walk ) { self . base . draw_quad ( cx , walk ) }");
-                    tb.add("pub fn draw_quad_rel ( & mut self , cx : & mut Cx , rect : Rect ) { self . base . draw_quad_rel ( cx , rect ) }");
-                    tb.add("pub fn draw_quad_abs ( & mut self , cx : & mut Cx , rect : Rect ) { self . base . draw_quad_abs ( cx , rect ) }");
+                    tb.add("pub fn end_quad ( & mut self , cx : & mut Cx ) -> bool { if self . base . end_quad ( cx ) { self . write_uniforms ( cx ) } else { false } }");
+                    tb.add("pub fn draw_quad ( & mut self , cx : & mut Cx , walk : Walk ) -> bool { if self . base . draw_quad ( cx , walk ) { self . write_uniforms ( cx ) } else { false } }");
+                    tb.add("pub fn draw_quad_rel ( & mut self , cx : & mut Cx , rect : Rect ) -> bool { if self . base . draw_quad_rel ( cx , rect ) { self . write_uniforms ( cx ) } else { false } }");
+                    tb.add("pub fn draw_quad_abs ( & mut self , cx : & mut Cx , rect : Rect ) -> bool { if self . base . draw_quad_abs ( cx , rect ) { self . write_uniforms ( cx ) } else { false } }");
                     tb.add("pub fn lock_aligned_quad ( & mut self , cx : & mut Cx ) { self . base . lock_aligned_quad ( cx ) }");
                     tb.add("pub fn lock_quad ( & mut self , cx : & mut Cx ) { self . base . lock_quad ( cx ) }");
                     tb.add("pub fn add_quad ( & mut self , rect : Rect ) { self . base . add_quad ( rect ) }");
-                    tb.add("pub fn unlock_quad ( & mut self , cx : & mut Cx ) { self . base . unlock_quad ( cx ) }");
+                    tb.add("pub fn unlock_quad ( & mut self , cx : & mut Cx ) -> bool { if self . base . unlock_quad ( cx ) { self . write_uniforms ( cx ) } else { false } }");
                 }
             }
             

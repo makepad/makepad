@@ -4,6 +4,7 @@ use crate::lit::{Lit, TyLit};
 use crate::span::{Span, LiveBodyId};
 use crate::ty::Ty;
 use crate::val::Val;
+use crate::livestyles::LiveStyles;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -14,83 +15,139 @@ pub struct ShaderAst {
     pub live_body_id: LiveBodyId,
     pub debug: bool,
     pub default_geometry: Option<IdentPathWithSpan>,
+    pub draw_input: Option<(Span, QualifiedIdentPath)>,
     pub decls: Vec<Decl>,
     pub uses: Vec<IdentPathWithSpan>,
     // generated
-    pub const_table: RefCell<Option<Vec<f32>>>,
-    pub const_table_spans: RefCell<Option<Vec<(usize,Span)>>>,
-    pub livestyle_uniform_deps: RefCell<Option<BTreeSet<(Ty,QualifiedIdentPath)>>>,
+    pub const_table: RefCell<Option<Vec<f32 >> >,
+    pub const_table_spans: RefCell<Option<Vec<(usize, Span) >> >,
+    pub livestyle_uniform_deps: RefCell<Option<BTreeSet<(Ty, QualifiedIdentPath) >> >,
 }
 
 impl ShaderAst {
+    
+    pub fn convert_draw_input_to_decls(&mut self, live_styles: &LiveStyles, span: Span) -> Result<(), (Span,String)> {
+        // we convert the draw inputs to decls
+        if self.draw_input.is_none() {
+            return Err((span,format!("please define draw_input for shader")))
+        }
+        let (inp_span, qualified_ident_path) = self.draw_input.as_ref().unwrap();
 
+        // lets find draw_input
+        let draw_input = live_styles.draw_inputs.get(&qualified_ident_path.to_live_item_id());
+        if draw_input.is_none(){
+            return Err((inp_span.clone(), format!("draw_input {} not registered", qualified_ident_path)));
+        }
+        let draw_input = draw_input.unwrap();
+
+        if draw_input.instances.len() == 0 {
+            return Err((inp_span.clone(), format!("please define atleast 1 float in the instance data")))
+        }
+
+        for instance in &draw_input.instances {
+            self.decls.push(
+                Decl::Instance(InstanceDecl {
+                    is_used_in_fragment_shader: Cell::new(None),
+                    span,
+                    ident: instance.ident,
+                    ty_expr: instance.ty_expr.clone(),
+                    qualified_ident_path: instance.qualified_ident_path,
+                })
+            )
+        }
+        
+        for uniform in &draw_input.uniforms {
+            self.decls.push(
+                Decl::Uniform(UniformDecl {
+                    block_ident: None,
+                    span,
+                    ident: uniform.ident,
+                    ty_expr: uniform.ty_expr.clone(),
+                    qualified_ident_path: uniform.qualified_ident_path,
+                })
+            )
+        }
+        
+        for texture in &draw_input.textures {
+            self.decls.push(
+                Decl::Texture(TextureDecl {
+                    span,
+                    ident: texture.ident,
+                    ty_expr: texture.ty_expr.clone(),
+                    qualified_ident_path: texture.qualified_ident_path,
+                })
+            )
+        }
+        return Ok(())
+    }
+    
     pub fn find_geometry_decl(&self, ident: Ident) -> Option<&GeometryDecl> {
-        self.decls.iter().find_map(|decl| {
+        self.decls.iter().find_map( | decl | {
             match decl {
                 Decl::Geometry(decl) => Some(decl),
                 _ => None,
             }
-            .filter(|decl| decl.ident == ident)
+            .filter( | decl | decl.ident == ident)
         })
     }
-
+    
     pub fn find_const_decl(&self, ident: Ident) -> Option<&ConstDecl> {
-        self.decls.iter().find_map(|decl| {
+        self.decls.iter().find_map( | decl | {
             match decl {
                 Decl::Const(decl) => Some(decl),
                 _ => None,
             }
-            .filter(|decl| decl.ident == ident)
+            .filter( | decl | decl.ident == ident)
         })
     }
-
+    
     pub fn find_fn_decl(&self, ident_path: IdentPath) -> Option<&FnDecl> {
-        self.decls.iter().rev().find_map(|decl| {
+        self.decls.iter().rev().find_map( | decl | {
             match decl {
                 Decl::Fn(decl) => Some(decl),
                 _ => None,
             }
-            .filter(|decl| decl.ident_path == ident_path)
+            .filter( | decl | decl.ident_path == ident_path)
         })
     }
-
+    
     pub fn find_instance_decl(&self, ident: Ident) -> Option<&InstanceDecl> {
-        self.decls.iter().find_map(|decl| {
+        self.decls.iter().find_map( | decl | {
             match decl {
                 Decl::Instance(decl) => Some(decl),
                 _ => None,
             }
-            .filter(|decl| decl.ident == ident)
+            .filter( | decl | decl.ident == ident)
         })
     }
-
+    
     pub fn find_struct_decl(&self, ident: Ident) -> Option<&StructDecl> {
-        self.decls.iter().find_map(|decl| {
+        self.decls.iter().find_map( | decl | {
             match decl {
                 Decl::Struct(decl) => Some(decl),
                 _ => None,
             }
-            .filter(|decl| decl.ident == ident)
+            .filter( | decl | decl.ident == ident)
         })
     }
-
+    
     pub fn find_uniform_decl(&self, ident: Ident) -> Option<&UniformDecl> {
-        self.decls.iter().find_map(|decl| {
+        self.decls.iter().find_map( | decl | {
             match decl {
                 Decl::Uniform(decl) => Some(decl),
                 _ => None,
             }
-            .filter(|decl| decl.ident == ident)
+            .filter( | decl | decl.ident == ident)
         })
     }
-
+    
     pub fn find_varying_decl(&self, ident: Ident) -> Option<&VaryingDecl> {
-        self.decls.iter().find_map(|decl| {
+        self.decls.iter().find_map( | decl | {
             match decl {
                 Decl::Varying(decl) => Some(decl),
                 _ => None,
             }
-            .filter(|decl| decl.ident == ident)
+            .filter( | decl | decl.ident == ident)
         })
     }
 }
@@ -109,7 +166,7 @@ pub enum Decl {
 
 #[derive(Clone, Debug)]
 pub struct GeometryDecl {
-    pub is_used_in_fragment_shader: Cell<Option<bool>>,
+    pub is_used_in_fragment_shader: Cell<Option<bool >>,
     pub span: Span,
     pub ident: Ident,
     pub qualified_ident_path: QualifiedIdentPath,
@@ -127,17 +184,17 @@ pub struct ConstDecl {
 #[derive(Clone, Debug)]
 pub struct FnDecl {
     pub span: Span,
-    pub return_ty: RefCell<Option<Ty>>,
-    pub is_used_in_vertex_shader: Cell<Option<bool>>,
-    pub is_used_in_fragment_shader: Cell<Option<bool>>,
-    pub callees: RefCell<Option<BTreeSet<IdentPath>>>, 
-    pub uniform_block_deps: RefCell<Option<BTreeSet<Ident>>>,
-    pub has_texture_deps: Cell<Option<bool>>,
-    pub geometry_deps: RefCell<Option<BTreeSet<Ident>>>,
-    pub instance_deps: RefCell<Option<BTreeSet<Ident>>>,
-    pub has_varying_deps: Cell<Option<bool>>,
-    pub builtin_deps: RefCell<Option<BTreeSet<Ident>>>,
-    pub cons_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>)>>>,
+    pub return_ty: RefCell<Option<Ty >>,
+    pub is_used_in_vertex_shader: Cell<Option<bool >>,
+    pub is_used_in_fragment_shader: Cell<Option<bool >>,
+    pub callees: RefCell<Option<BTreeSet<IdentPath >> >,
+    pub uniform_block_deps: RefCell<Option<BTreeSet<Ident >> >,
+    pub has_texture_deps: Cell<Option<bool >>,
+    pub geometry_deps: RefCell<Option<BTreeSet<Ident >> >,
+    pub instance_deps: RefCell<Option<BTreeSet<Ident >> >,
+    pub has_varying_deps: Cell<Option<bool >>,
+    pub builtin_deps: RefCell<Option<BTreeSet<Ident >> >,
+    pub cons_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>) >> >,
     pub ident_path: IdentPath,
     pub params: Vec<Param>,
     pub return_ty_expr: Option<TyExpr>,
@@ -146,7 +203,7 @@ pub struct FnDecl {
 
 #[derive(Clone, Debug)]
 pub struct InstanceDecl {
-    pub is_used_in_fragment_shader: Cell<Option<bool>>,
+    pub is_used_in_fragment_shader: Cell<Option<bool >>,
     pub span: Span,
     pub ident: Ident,
     pub qualified_ident_path: QualifiedIdentPath,
@@ -162,7 +219,7 @@ pub struct StructDecl {
 
 impl StructDecl {
     pub fn find_field(&self, ident: Ident) -> Option<&Field> {
-        self.fields.iter().find(|field| field.ident == ident)
+        self.fields.iter().find( | field | field.ident == ident)
     }
 }
 
@@ -229,11 +286,11 @@ pub enum Stmt {
         span: Span,
         expr: Expr,
         block_if_true: Box<Block>,
-        block_if_false: Option<Box<Block>>,
+        block_if_false: Option<Box<Block >>,
     },
     Let {
         span: Span,
-        ty: RefCell<Option<Ty>>,
+        ty: RefCell<Option<Ty >>,
         ident: Ident,
         ty_expr: Option<TyExpr>,
         expr: Option<Expr>,
@@ -254,7 +311,7 @@ pub enum Stmt {
 
 #[derive(Clone, Debug)]
 pub struct TyExpr {
-    pub ty: RefCell<Option<Ty>>,
+    pub ty: RefCell<Option<Ty >>,
     pub kind: TyExprKind,
 }
 
@@ -275,12 +332,27 @@ pub enum TyExprKind {
     },
 }
 
+impl TyExpr {
+    pub fn from_rust_type_str(rust_type: &str) -> Option<TyExpr> {
+        if let Some(ty_lit) = TyLit::from_rust_type_str(rust_type) {
+            return Some(TyExpr {
+                ty: RefCell::new(None),
+                kind: TyExprKind::Lit {
+                    span: Span::default(),
+                    ty_lit: ty_lit
+                }
+            })
+        }
+        return None
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Expr {
     pub span: Span,
-    pub ty: RefCell<Option<Ty>>,
-    pub const_val: RefCell<Option<Option<Val>>>,
-    pub const_index: Cell<Option<usize>>,
+    pub ty: RefCell<Option<Ty >>,
+    pub const_val: RefCell<Option<Option<Val >> >,
+    pub const_index: Cell<Option<usize >>,
     pub kind: ExprKind,
 }
 
@@ -325,7 +397,7 @@ pub enum ExprKind {
     },
     MacroCall {
         span: Span,
-        analysis: Cell<Option<MacroCallAnalysis>>,
+        analysis: Cell<Option<MacroCallAnalysis >>,
         ident: Ident,
         arg_exprs: Vec<Expr>,
     },
@@ -336,7 +408,7 @@ pub enum ExprKind {
     },
     Var {
         span: Span,
-        kind: Cell<Option<VarKind>>,
+        kind: Cell<Option<VarKind >>,
         ident_path: IdentPath,
     },
     Lit {
@@ -370,7 +442,7 @@ pub enum BinOp {
     Mul,
     Div,
 }
- 
+
 impl fmt::Display for BinOp {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
