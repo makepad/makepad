@@ -260,20 +260,25 @@ impl DrawText {
         self.lock = Some(cx.lock_instances(self.shader, self.slots));
     }
     
-    pub fn unlock_text(&mut self, cx: &mut Cx) -> bool {
+    pub fn write_uniforms(&mut self, cx:&mut Cx){
+        if self.area().need_uniforms_now(){
+            self.area().write_texture_2d_id(cx, live_item_id!(self::DrawText::texture), cx.fonts_atlas.texture_id);
+            self.area().write_uniform_float(cx, live_item_id!(self::DrawText::brightness), self.text_style.brightness);
+            self.area().write_uniform_float(cx, live_item_id!(self::DrawText::curve), self.text_style.curve);
+        }
+    }
+    
+    pub fn area(&self)->Area{
+        self.area
+    }
+    
+    pub fn unlock_text(&mut self, cx: &mut Cx) {
         unsafe {
             if let Some(li) = self.lock.take() {
-                let offset = li.instance_area.instance_offset;
                 self.area = cx.unlock_instances(li);
-                if offset == 0 {
-                    self.area.write_texture_2d_id(cx, live_item_id!(self::DrawText::texture), cx.fonts_atlas.texture_id);
-                    self.area.write_uniform_float(cx, live_item_id!(self::DrawText::brightness), self.text_style.brightness);
-                    self.area.write_uniform_float(cx, live_item_id!(self::DrawText::curve), self.text_style.curve);
-                    return true
-                }
+                self.write_uniforms(cx);
             }
         }
-        return false
     }
     
     pub fn add_text(&mut self, cx: &mut Cx, geom_x: f32, geom_y: f32, val: &str) {
@@ -404,7 +409,7 @@ impl DrawText {
         }
     }
     
-    pub fn draw_text(&mut self, cx: &mut Cx, text: &str) -> bool {
+    pub fn draw_text(&mut self, cx: &mut Cx, text: &str) {
         self.lock_aligned_text(cx);
         
         let mut chunk = Vec::new();
