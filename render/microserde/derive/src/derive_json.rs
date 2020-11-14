@@ -31,15 +31,15 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
             else if let Some(fields) = parser.eat_all_struct_fields(){
                 tb.add("s . st_pre ( ) ;");
                 // named struct
-                for (field,ty) in fields{
-                    if ty.into_iter().next().unwrap().to_string() == "Option"{
-                        tb.add("if let Some ( t ) = ").add("& self .").ident(&field).add("{");
-                        tb.add("s . field ( d + 1 ,").string(&field).add(") ;");
+                for field in fields{
+                    if field.ty.into_iter().next().unwrap().to_string() == "Option"{
+                        tb.add("if let Some ( t ) = ").add("& self .").ident(&field.name).add("{");
+                        tb.add("s . field ( d + 1 ,").string(&field.name).add(") ;");
                         tb.add("t . ser_json ( d + 1 , s ) ; s . conl ( ) ; } ;");
                     }
                     else{
-                        tb.add("s . field ( d + 1 ,").string(&field).add(" ) ;");
-                        tb.add("self .").ident(&field).add(". ser_json ( d + 1 , s ) ; s . conl ( ) ;");
+                        tb.add("s . field ( d + 1 ,").string(&field.name).add(" ) ;");
+                        tb.add("self .").ident(&field.name).add(". ser_json ( d + 1 , s ) ; s . conl ( ) ;");
                     }
                 }
                 tb.add("s . st_post ( d ) ;");
@@ -91,8 +91,8 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
                     }
                     else if let Some(fields) = parser.eat_all_struct_fields(){ // named variant
                         tb.add("Self ::").ident(&variant).add("{");
-                        for (field, _ty) in fields.iter(){
-                            tb.ident(field).add(",");
+                        for field in fields.iter(){
+                            tb.ident(&field.name).add(",");
                         }
                         tb.add("} => {");
                         
@@ -100,15 +100,15 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
                         tb.add("s . out . push (").chr(':').add(") ;");
                         tb.add("s . st_pre ( ) ;");
                         
-                        for (field, ty) in fields{
-                            if ty.into_iter().next().unwrap().to_string() == "Option"{
-                                tb.add("if let Some ( t ) = ").ident(&field).add("{");
-                                tb.add("s . field ( d + 1 ,").string(&field).add(") ;");
+                        for field in fields{
+                            if field.ty.into_iter().next().unwrap().to_string() == "Option"{
+                                tb.add("if let Some ( t ) = ").ident(&field.name).add("{");
+                                tb.add("s . field ( d + 1 ,").string(&field.name).add(") ;");
                                 tb.add("t . ser_json ( d + 1 , s ) ; s . conl ( ) ; } ;");
                             }
                             else{
-                                tb.add("s . field ( d + 1 ,").string(&field).add(" ) ;");
-                                tb.ident(&field).add(". ser_json ( d + 1 , s ) ; s . conl ( ) ;");
+                                tb.add("s . field ( d + 1 ,").string(&field.name).add(" ) ;");
+                                tb.ident(&field.name).add(". ser_json ( d + 1 , s ) ; s . conl ( ) ;");
                             }
                         }
                         tb.add("s . st_post ( d ) ; }");
@@ -165,30 +165,30 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
             }
             else if let Some(fields) = parser.eat_all_struct_fields(){ 
                 tb.add("s . curly_open ( i ) ? ;");
-                for (field,_ty) in &fields{
-                    tb.add("let mut").ident(&format!("_{}",field)).add("= None ;");
+                for field in &fields{
+                    tb.add("let mut").ident(&format!("_{}",field.name)).add("= None ;");
                 }
                 tb.add("while let Some ( _ ) = s . next_str ( ) {");
                 tb.add("match s . strbuf . as_ref ( ) {");
-                for (field,_ty) in &fields{
-                    tb.string(&field).add("=> { s . next_colon ( i ) ? ;");
-                    tb.ident(&format!("_{}",field)).add("= Some ( DeJson :: de_json ( s , i ) ? ) ; } ,");
+                for field in &fields{
+                    tb.string(&field.name).add("=> { s . next_colon ( i ) ? ;");
+                    tb.ident(&format!("_{}",field.name)).add("= Some ( DeJson :: de_json ( s , i ) ? ) ; } ,");
                 }
                 tb.add("_ => return std :: result :: Result :: Err ( s . err_exp ( & s . strbuf ) )");
                 tb.add("} ; s . eat_comma_curly ( i ) ? ;");
                 tb.add("} ; s . curly_close ( i ) ? ;");
                 
                 tb.add("std :: result :: Result :: Ok ( Self {");
-                for (field,ty) in fields{
-                    tb.ident(&field).add(":");
-                    if ty.into_iter().next().unwrap().to_string() == "Option"{
-                        tb.add("if let Some ( t ) =").ident(&format!("_{}",field));
+                for field in fields{
+                    tb.ident(&field.name).add(":");
+                    if field.ty.into_iter().next().unwrap().to_string() == "Option"{
+                        tb.add("if let Some ( t ) =").ident(&format!("_{}",field.name));
                         tb.add("{ t } else { None } ,");
                     }
                     else{
-                        tb.add("if let Some ( t ) =").ident(&format!("_{}",field));
+                        tb.add("if let Some ( t ) =").ident(&format!("_{}",field.name));
                         tb.add("{ t } else { return Err ( s . err_nf (");
-                        tb.string(&field).add(") ) } ,");
+                        tb.string(&field.name).add(") ) } ,");
                     }
                 }
                 tb.add("} )");
@@ -234,30 +234,30 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
                     }
                     else if let Some(fields) = parser.eat_all_struct_fields(){ // named variant
                         tb.add("s . curly_open ( i ) ? ;");
-                        for (field,_ty) in &fields{
-                            tb.add("let mut").ident(&format!("_{}",field)).add("= None ;");
+                        for field in &fields{
+                            tb.add("let mut").ident(&format!("_{}",field.name)).add("= None ;");
                         }
                         tb.add("while let Some ( _ ) = s . next_str ( ) {");
                         tb.add("match s . strbuf . as_ref ( ) {");
-                        for (field,_ty) in &fields{
-                            tb.string(&field).add("=> { s . next_colon ( i ) ? ;");
-                            tb.ident(&format!("_{}",field)).add("= Some ( DeJson :: de_json ( s , i ) ? ) ; } ,");
+                        for field in &fields{
+                            tb.string(&field.name).add("=> { s . next_colon ( i ) ? ;");
+                            tb.ident(&format!("_{}",field.name)).add("= Some ( DeJson :: de_json ( s , i ) ? ) ; } ,");
                         }
                         tb.add("_ => return std :: result :: Result :: Err ( s . err_exp ( & s . strbuf ) )");
                         tb.add("} s . eat_comma_curly ( i ) ? ;");
                         tb.add("} s . curly_close ( i ) ? ;");
                         
                         tb.add("Self ::").ident(&variant).add("{");
-                        for (field,ty) in fields{
-                            tb.ident(&field).add(":");
-                            if ty.into_iter().next().unwrap().to_string() == "Option"{
-                                tb.add("if let Some ( t ) =").ident(&format!("_{}",field));
+                        for field in fields{
+                            tb.ident(&field.name).add(":");
+                            if field.ty.into_iter().next().unwrap().to_string() == "Option"{
+                                tb.add("if let Some ( t ) =").ident(&format!("_{}",field.name));
                                 tb.add("{ t } else { None } ,");
                             }
                             else{
-                                tb.add("if let Some ( t ) =").ident(&format!("_{}",field));
+                                tb.add("if let Some ( t ) =").ident(&format!("_{}",field.name));
                                 tb.add("{ t } else { return Err ( s . err_nf (");
-                                tb.string(&field).add(") ) } ,");
+                                tb.string(&field.name).add(") ) } ,");
                             }
                         }
                         tb.add("}");

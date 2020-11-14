@@ -53,24 +53,18 @@ mod geometrygen;
 mod drawquad;
 mod drawtext;
 
-mod quad;
-mod blit;
-mod text;
 mod events;
 mod menu; 
 mod geometry;
 mod shader;
-mod cube;
 mod shader_std;
 mod gpuinfo;
 
 pub use crate::cx::*;
 pub use crate::drawquad::*;
 pub use crate::drawtext::*;
-pub use crate::quad::*;
-pub use crate::cube::*;
-pub use crate::blit::*;
-pub use crate::text::*;
+//pub use crate::cube::*;
+//pub use crate::blit::*;
 pub use crate::elements::*;
 
 use std::time::{Instant};

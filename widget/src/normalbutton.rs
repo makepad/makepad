@@ -1,10 +1,23 @@
 use makepad_render::*;
 use crate::buttonlogic::*;
 
+#[derive(Clone, DrawQuad)]
+#[repr(C)]
+struct NormalButtonBg {
+    #[default_shader(self::shader_bg)],
+
+    bla: f32,
+    
+    base: DrawQuad,
+
+    hover: f32,
+    down: f32,
+}
+
 #[derive(Clone)]
 pub struct NormalButton {
     pub button: ButtonLogic,
-    pub bg: Quad,
+    pub bg: NormalButtonBg,
     pub text: Text,
     pub animator: Animator,
     pub _bg_area: Area,
@@ -15,7 +28,7 @@ impl NormalButton {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             button: ButtonLogic::default(),
-            bg: Quad::new(cx),
+            bg: NormalButtonBg::new(cx, live_default_shader!(cx, self::shader_bg)),
             text: Text{
                 shader: live_shader!(cx, makepad_render::text::shader),
                 ..Text::new(cx)
@@ -26,6 +39,7 @@ impl NormalButton {
         }
     }
     pub fn style(cx: &mut Cx) {
+        live_draw_input!(cx, self::NormalButtonBg);
         live_body!(cx, r#"
             self::layout_bg: Layout {
                 align: all(0.5),
@@ -44,9 +58,9 @@ impl NormalButton {
             self::anim_default: Anim {
                 play: Cut {duration: 0.1}
                 tracks:[
-                    Float {keys:{1.0: 0.0}, bind_to: self::shader_bg::hover}
-                    Float {keys:{1.0: 0.0}, bind_to: self::shader_bg::down}
-                    Color {keys:{1.0: #9}, bind_to: makepad_render::text::shader::color}
+                    Float {keys:{1.0: 0.0}, bind_to: self::NormalButtonBg::hover}
+                    Float {keys:{1.0: 0.0}, bind_to: self::NormalButtonBg::down}
+                    Color {keys:{1.0: #9}, bind_to: makepad_render::drawwtext::DrawText::color}
                 ]
             }
             
@@ -72,8 +86,7 @@ impl NormalButton {
                 
                 use makepad_render::quad::shader::*;
                 
-                instance hover: float;
-                instance down: float;
+                draw_input: self::NormalButtonBg;
                 
                 const shadow: float = 3.0;
                 const border_radius: float = 2.5;
@@ -124,5 +137,20 @@ impl NormalButton {
         
         self._bg_area = self.bg.end_quad(cx, bg_inst);
         self.animator.set_area(cx, self._bg_area);
+        
+        
+        
+        //---- IS NOW ----
+            self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
+        
+        self.bg.last_animator(&self.animator);
+        self.bg.begin_quad(cx, live_layout!(cx, self::layout_bg));
+        
+        self.text.text_style = live_text_style!(cx, self::text_style_label);
+        self.text.last_animator(&self.animator);
+        self.text.draw_text(cx, label);
+        
+        self.bg.end_quad(cx);
+        self.animator.set_area(cx, self.bg.area());
     }
 }

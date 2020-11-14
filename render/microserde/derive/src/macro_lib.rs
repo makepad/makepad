@@ -159,6 +159,18 @@ pub struct Iter<It> where It: Iterator {
     buffer: Option<It::Item>,
 }
 
+
+pub struct Attribute{
+    pub name: String,
+    pub args: TokenStream
+}
+ 
+pub struct StructField{
+    pub name:String,
+    pub ty: TokenStream,
+    pub attrs: Vec<Attribute>
+}
+
 impl<It> Iterator for Iter<It> where It: Iterator {
     type Item = (bool, It::Item);
     
@@ -270,6 +282,15 @@ impl TokenParser {
             return true;
         }
         return false
+    }
+    
+    pub fn eat_level(&mut self)->TokenStream{
+        let mut tb = TokenBuilder::new();
+        while !self.eat_eot(){
+            tb.extend(self.current.clone().unwrap());
+            self.advance();
+        }
+        tb.end()
     }
     
     pub fn eat_ident(&mut self, what: &str) -> bool {
@@ -424,30 +445,51 @@ impl TokenParser {
         return None
     }
     
-    pub fn eat_struct_field(&mut self) -> Option<(String, TokenStream)> {
+    pub fn eat_struct_field(&mut self) -> Option<StructField> {
         // letsparse an ident
+        let attrs = self.eat_attributes();
+        
         self.eat_ident("pub");
         if let Some(field) = self.eat_any_ident() {
             if self.eat_punct(':') {
                 if let Some(ty) = self.eat_type() {
-                    return Some((field, ty))
+                    return Some(StructField{name:field, ty:ty, attrs:attrs})
                 }
             }
         }
         return None
     }
     
-    pub fn eat_all_struct_fields(&mut self, )->Option<Vec<(String, TokenStream)>>{
+
+    pub fn eat_attributes(&mut self) -> Vec<Attribute> {
+        let mut results = Vec::new();
+        while self.eat_punct('#') { // parse our attribute
+            if !self.open_bracket() {
+                break;
+            }
+            while let Some(ident) = self.eat_any_ident(){
+                if !self.open_paren() {
+                    break;
+                }
+                // lets take the whole ts
+                results.push(Attribute{name:ident, args:self.eat_level()});
+                self.eat_punct(',');
+            }
+            if !self.eat_eot(){
+                break
+            }
+        }
+        return results;
+    }
+    
+    pub fn eat_all_struct_fields(&mut self, )->Option<Vec<StructField>>{
         
         if self.open_brace(){
             let mut fields = Vec::new();
             while !self.eat_eot(){
                 // lets eat an attrib
-                if self.eat_punct('#'){
-                    
-                }
-                if let Some((field, ty)) = self.eat_struct_field(){
-                    fields.push((field, ty));
+                if let Some(sf) = self.eat_struct_field(){
+                    fields.push(sf);
                     self.eat_punct(',');
                 }
                 else{

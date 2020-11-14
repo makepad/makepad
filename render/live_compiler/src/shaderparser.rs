@@ -53,10 +53,22 @@ impl<'a> DeTokParserImpl<'a>{
                     let decl = self.parse_struct_decl() ?;
                     shader_ast.decls.push(Decl::Struct(decl));
                 }
+                /*
                 Token::Ident(ident) if ident == Ident::new("instance") => {
                     self.skip_token();
                     let decl = self.parse_instance_decl(qualified_ident_path) ?;
                     shader_ast.decls.push(Decl::Instance(decl));
+                }
+                */
+                Token::Ident(ident) if ident == Ident::new("draw_input") => {
+
+                    self.skip_token();
+                    self.expect_token(Token::Colon) ?;
+                    let span = self.begin_span();
+                    let ident_path = self.parse_ident_path() ?;
+                    let qualified_ident_path = self.qualify_ident_path(&ident_path);
+                    shader_ast.draw_input = Some((span.end(self, | span | span),qualified_ident_path));
+                    self.expect_token(Token::Semi) ?;
                 }
                 Token::Ident(ident) if ident == Ident::new("texture") => {
                     self.skip_token();
@@ -242,11 +254,8 @@ impl<'a> DeTokParserImpl<'a>{
         let ident = self.parse_ident() ?;
         self.expect_token(Token::Colon) ?;
         let ty_expr = self.parse_prim_ty_expr() ?;
-        let block_ident = if self.accept_ident("in") {
-            Some(self.parse_ident() ?)
-        } else {
-            None
-        };
+        self.expect_ident("in")?;
+        let block_ident = Some(self.parse_ident() ?);
         self.expect_token(Token::Semi) ?;
         Ok(span.end(self, | span | UniformDecl {
             span,

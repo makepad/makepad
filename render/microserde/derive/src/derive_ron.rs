@@ -32,15 +32,15 @@ pub fn derive_ser_ron_impl(input: TokenStream) -> TokenStream {
             else if let Some(fields) = parser.eat_all_struct_fields(){ 
                 tb.add("s . st_pre ( ) ;");
                 // named struct
-                for (field,ty) in fields{
-                    if ty.into_iter().next().unwrap().to_string() == "Option"{
-                        tb.add("if let Some ( t ) = ").add("& self .").ident(&field).add("{");
-                        tb.add("s . field ( d + 1 ,").string(&field).add(") ;");
+                for field in fields{
+                    if field.ty.into_iter().next().unwrap().to_string() == "Option"{
+                        tb.add("if let Some ( t ) = ").add("& self .").ident(&field.name).add("{");
+                        tb.add("s . field ( d + 1 ,").string(&field.name).add(") ;");
                         tb.add("t . ser_ron ( d + 1 , s ) ; s . conl ( ) ; } ;");
                     }
                     else{
-                        tb.add("s . field ( d + 1 ,").string(&field).add(" ) ;");
-                        tb.add("self .").ident(&field).add(". ser_ron ( d + 1 , s ) ; s . conl ( ) ;");
+                        tb.add("s . field ( d + 1 ,").string(&field.name).add(" ) ;");
+                        tb.add("self .").ident(&field.name).add(". ser_ron ( d + 1 , s ) ; s . conl ( ) ;");
                     }
                 }
                 tb.add("s . st_post ( d ) ;");
@@ -90,23 +90,23 @@ pub fn derive_ser_ron_impl(input: TokenStream) -> TokenStream {
                     }
                     else if let Some(fields) = parser.eat_all_struct_fields(){ // named variant
                         tb.add("Self ::").ident(&variant).add("{");
-                        for (field, _ty) in fields.iter(){
-                            tb.ident(field).add(",");
+                        for field in fields.iter(){
+                            tb.ident(&field.name).add(",");
                         }
                         tb.add("} => {");
                         
                         tb.add("s . out . push_str (").string(&variant).add(") ;");
                         tb.add("s . st_pre ( ) ;");
                         
-                        for (field, ty) in fields{
-                            if ty.into_iter().next().unwrap().to_string() == "Option"{
-                                tb.add("if ").ident(&field).add(". is_some ( ) {");
-                                tb.add("s . field ( d + 1 ,").string(&field).add(") ;");
-                                tb.ident(&field).add(" . ser_ron ( d + 1 , s ) ; s . conl ( ) ; } ;");
+                        for field in fields{
+                            if field.ty.into_iter().next().unwrap().to_string() == "Option"{
+                                tb.add("if ").ident(&field.name).add(". is_some ( ) {");
+                                tb.add("s . field ( d + 1 ,").string(&field.name).add(") ;");
+                                tb.ident(&field.name).add(" . ser_ron ( d + 1 , s ) ; s . conl ( ) ; } ;");
                             }
                             else{
-                                tb.add("s . field ( d + 1 ,").string(&field).add(" ) ;");
-                                tb.ident(&field).add(". ser_ron ( d + 1 , s ) ; s . conl ( ) ;");
+                                tb.add("s . field ( d + 1 ,").string(&field.name).add(" ) ;");
+                                tb.ident(&field.name).add(". ser_ron ( d + 1 , s ) ; s . conl ( ) ;");
                             }
                         }
                         tb.add("s . st_post ( d ) ; }");
@@ -160,30 +160,30 @@ pub fn derive_de_ron_impl(input: TokenStream) -> TokenStream {
             }
             else if let Some(fields) = parser.eat_all_struct_fields(){ 
                 tb.add("s . paren_open ( i ) ? ;");
-                for (field,_ty) in &fields{
-                    tb.add("let mut").ident(&format!("_{}",field)).add("= None ;");
+                for field in &fields{
+                    tb.add("let mut").ident(&format!("_{}",field.name)).add("= None ;");
                 }
                 tb.add("while let Some ( _ ) = s . next_ident ( ) {");
                 tb.add("match s . identbuf . as_ref ( ) {");
-                for (field,_ty) in &fields{
-                    tb.string(&field).add("=> { s . next_colon ( i ) ? ;");
-                    tb.ident(&format!("_{}",field)).add("= Some ( DeRon :: de_ron ( s , i ) ? ) ; } ,");
+                for field in &fields{
+                    tb.string(&field.name).add("=> { s . next_colon ( i ) ? ;");
+                    tb.ident(&format!("_{}",field.name)).add("= Some ( DeRon :: de_ron ( s , i ) ? ) ; } ,");
                 }
                 tb.add("_ => return std :: result :: Result :: Err ( s . err_exp ( & s . identbuf ) )");
                 tb.add("} ; s . eat_comma_paren ( i ) ? ;");
                 tb.add("} ; s . paren_close ( i ) ? ;");
                 
                 tb.add("std :: result :: Result :: Ok ( Self {");
-                for (field,ty) in fields{
-                    tb.ident(&field).add(":");
-                    if ty.into_iter().next().unwrap().to_string() == "Option"{
-                        tb.add("if let Some ( t ) =").ident(&format!("_{}",field));
+                for field in fields{
+                    tb.ident(&field.name).add(":");
+                    if field.ty.into_iter().next().unwrap().to_string() == "Option"{
+                        tb.add("if let Some ( t ) =").ident(&format!("_{}",field.name));
                         tb.add("{ t } else { None } ,");
                     }
                     else{
-                        tb.add("if let Some ( t ) =").ident(&format!("_{}",field));
+                        tb.add("if let Some ( t ) =").ident(&format!("_{}",field.name));
                         tb.add("{ t } else { return Err ( s . err_nf (");
-                        tb.string(&field).add(") ) } ,");
+                        tb.string(&field.name).add(") ) } ,");
                     }
                 }
                 tb.add("} )");
@@ -227,30 +227,30 @@ pub fn derive_de_ron_impl(input: TokenStream) -> TokenStream {
                     }
                     else if let Some(fields) = parser.eat_all_struct_fields(){ // named variant
                         tb.add("s . paren_open ( i ) ? ;");
-                        for (field,_ty) in &fields{
-                            tb.add("let mut").ident(&format!("_{}",field)).add("= None ;");
+                        for field in &fields{
+                            tb.add("let mut").ident(&format!("_{}",field.name)).add("= None ;");
                         }
                         tb.add("while let Some ( _ ) = s . next_ident ( ) {");
                         tb.add("match s . identbuf . as_ref ( ) {");
-                        for (field,_ty) in &fields{
-                            tb.string(&field).add("=> { s . next_colon ( i ) ? ;");
-                            tb.ident(&format!("_{}",field)).add("= Some ( DeRon :: de_ron ( s , i ) ? ) ; } ,");
+                        for field in &fields{
+                            tb.string(&field.name).add("=> { s . next_colon ( i ) ? ;");
+                            tb.ident(&format!("_{}",field.name)).add("= Some ( DeRon :: de_ron ( s , i ) ? ) ; } ,");
                         }
                         tb.add("_ => return std :: result :: Result :: Err ( s . err_exp ( & s . strbuf ) )");
                         tb.add("} ; s . eat_comma_paren ( i ) ? ;");
                         tb.add("} ; s . paren_close ( i ) ? ;");
                         
                         tb.add("Self ::").ident(&variant).add("{");
-                        for (field,ty) in fields{
-                            tb.ident(&field).add(":");
-                            if ty.into_iter().next().unwrap().to_string() == "Option"{
-                                tb.add("if let Some ( t ) =").ident(&format!("_{}",field));
+                        for field in fields{
+                            tb.ident(&field.name).add(":");
+                            if field.ty.into_iter().next().unwrap().to_string() == "Option"{
+                                tb.add("if let Some ( t ) =").ident(&format!("_{}",field.name));
                                 tb.add("{ t } else { None } ,");
                             }
                             else{
-                                tb.add("if let Some ( t ) =").ident(&format!("_{}",field));
+                                tb.add("if let Some ( t ) =").ident(&format!("_{}",field.name));
                                 tb.add("{ t } else { return Err ( s . err_nf (");
-                                tb.string(&field).add(") ) } ,");
+                                tb.string(&field.name).add(") ) } ,");
                             }
                         }
                         tb.add("}");

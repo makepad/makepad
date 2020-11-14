@@ -23,8 +23,8 @@ pub fn derive_ser_bin_impl(input: TokenStream) -> TokenStream {
                 }
             }
             else if let Some(fields) = parser.eat_all_struct_fields(){ 
-                for (field,_ty) in fields{
-                    tb.add("self .").ident(&field).add(". ser_bin ( s ) ;");
+                for field in fields{
+                    tb.add("self .").ident(&field.name).add(". ser_bin ( s ) ;");
                 }
             }
             else{
@@ -64,12 +64,12 @@ pub fn derive_ser_bin_impl(input: TokenStream) -> TokenStream {
                     }
                     else if let Some(fields) = parser.eat_all_struct_fields(){ // named variant
                         tb.add("Self ::").ident(&variant).add("{");
-                        for (field, _ty) in fields.iter(){
-                            tb.ident(field).add(",");
+                        for field in fields.iter(){
+                            tb.ident(&field.name).add(",");
                         }
                         tb.add("} => {").suf_u16(index).add(". ser_bin ( s ) ;");
-                        for (field, _ty) in fields{
-                            tb.ident(&field).add(". ser_bin ( s ) ;");
+                        for field in fields{
+                            tb.ident(&field.name).add(". ser_bin ( s ) ;");
                         }
                         tb.add("}");
                     }
@@ -120,8 +120,8 @@ pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
             }
             else if let Some(fields) = parser.eat_all_struct_fields(){ 
                 tb.add("{");
-                for (field,_ty) in fields{
-                    tb.ident(&field).add(": DeBin :: de_bin ( o , d ) ? ,");
+                for field in fields{
+                    tb.ident(&field.name).add(": DeBin :: de_bin ( o , d ) ? ,");
                 }
                 tb.add("}");
             }
@@ -162,8 +162,8 @@ pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
                     }
                     else if let Some(fields) = parser.eat_all_struct_fields(){ // named variant
                         tb.ident(&variant).add("{");
-                        for (field, _ty) in fields.iter(){
-                            tb.ident(field).add(": DeBin :: de_bin ( o , d ) ? ,");
+                        for field in fields.iter(){
+                            tb.ident(&field.name).add(": DeBin :: de_bin ( o , d ) ? ,");
                         }
                         tb.add("}");
                     }
