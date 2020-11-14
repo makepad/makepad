@@ -6,6 +6,7 @@ pub trait TextureCx {
     fn get_desc(&self, cx:&mut Cx) -> TextureDesc;
 }
 
+
 impl TextureCx for Texture{
     fn new(cx:&mut Cx)->Texture{
         Texture{

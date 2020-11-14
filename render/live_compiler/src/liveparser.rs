@@ -133,7 +133,6 @@ impl<'a> DeTokParserImpl<'a> {
                         let on_live_id = qualified_ident_path.to_live_item_id();
                         // lets query if this one somehow depends on me
                         if self.live_styles.check_depends_on(live_item_id, on_live_id) {
-                            self.live_styles.check_depends_on2(live_item_id, on_live_id);
                             return Err(self.error(format!("Cyclic dependency {}", ident_path)))
                         }
                         new_deps.insert(on_live_id);

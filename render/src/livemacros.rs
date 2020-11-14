@@ -2,7 +2,7 @@ use crate::cx::*;
 use crate::log;
 
 impl Cx {
-    pub fn process_live_styles_changes(&mut self) -> Vec<LiveBodyError>{
+    pub fn process_live_styles_changes(&mut self) -> Vec<LiveBodyError> {
         let mut errors = Vec::new();
         self.live_styles.process_changed_live_bodies(&mut errors);
         self.live_styles.process_changed_deps(&mut errors);
@@ -10,18 +10,18 @@ impl Cx {
         errors
     }
     
-    pub fn init_live_styles(&mut self){
+    pub fn init_live_styles(&mut self) {
         let errors = self.process_live_styles_changes();
-
-        for error in &errors{
+        
+        for error in &errors {
             eprintln!("{}", error);
         }
-        if errors.len()>0{
+        if errors.len()>0 {
             panic!();
         }
     }
     
-    pub fn ensure_live_style_shaders_allocated(&mut self){
+    pub fn ensure_live_style_shaders_allocated(&mut self) {
         for _ in self.shaders.len()..(self.live_styles.shader_alloc.len()) {
             self.shaders.push(CxShader::default());
         }
@@ -31,9 +31,9 @@ impl Cx {
         self.live_styles.add_live_body(live_body,);
     }
     
-    pub fn process_live_style_errors(&self){
+    pub fn process_live_style_errors(&self) {
         let mut ae = self.live_styles.live_access_errors.borrow_mut();
-        for err in ae.iter(){
+        for err in ae.iter() {
             log!("{}", err);
         }
         ae.truncate(0)
@@ -59,6 +59,17 @@ macro_rules!live_body {
             column: column!() as usize,
             code: $ code.to_string(),
         })
+    }
+}
+
+#[macro_export]
+macro_rules!live_draw_input {
+    ( $ cx: ident, $ path: path) => {
+        $cx.live_styles.add_live_draw_input(
+            live_str_to_id(module_path!(), stringify!( $ path)),
+            stringify!( $ path),
+            $path :: draw_input_def()
+        )
     }
 }
 
@@ -98,6 +109,25 @@ macro_rules!live_shader {
             module_path!(),
             stringify!( $ path)
         )
+    }
+}
+
+#[macro_export]
+macro_rules!default_shader_overload {
+    ( $ cx: ident, $ base: ident, $ path: path) => {
+        $ cx.live_styles.get_default_shader_overload(
+            $ base,
+            live_str_to_id(module_path!(), stringify!( $ path)),
+            module_path!(),
+            stringify!( $ path)
+        )
+    }
+}
+
+#[macro_export]
+macro_rules!default_shader {
+    () => {
+        Shader {shader_id: 0, location_hash: live_location_hash(file!(), line!() as u64, column!() as u64)}
     }
 }
 
@@ -142,7 +172,7 @@ macro_rules!live_vec2 {
 }
 
 #[macro_export]
-macro_rules!live_vec3{
+macro_rules!live_vec3 {
     ( $ cx: ident, $ path: path) => {
         $ cx.live_styles.get_vec3(
             live_str_to_id(module_path!(), stringify!( $ path)),
@@ -152,7 +182,7 @@ macro_rules!live_vec3{
 }
 
 #[macro_export]
-macro_rules!live_vec4{
+macro_rules!live_vec4 {
     ( $ cx: ident, $ path: path) => {
         $ cx.live_styles.get_vec4(
             live_str_to_id(module_path!(), stringify!( $ path)),

@@ -71,6 +71,10 @@ impl Vec2 {
     }
 }
 
+pub fn vec2(x:f32, y:f32)->Vec2{Vec2{x,y}}
+pub fn vec3(x:f32, y:f32, z:f32)->Vec3{Vec3{x,y,z}}
+pub fn vec4(x:f32, y:f32, z:f32, w:f32)->Vec4{Vec4{x,y,z,w}}
+
 const TORAD: f32 = 0.017453292519943295;
 const TODEG: f32 = 57.295779513082321;
 

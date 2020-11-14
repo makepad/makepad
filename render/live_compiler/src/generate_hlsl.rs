@@ -1012,50 +1012,46 @@ impl<'a, 'b> BackendWriter for HlslBackendWriter<'a, 'b> {
     
     fn write_ident(&self, string: &mut String, ident: Ident) {
         ident.with( | ident_string | {
-            if ident_string.contains("::") {
-                write!(string, "mpsc_{}", ident_string.replace("::", "_")).unwrap()
-            } else {
-                // do a remapping
-                write!(
-                    string,
-                    "{}",
-                    match ident_string.as_ref() {
-                        "line"=>"mpsc_line",
-                        "frac"=>"mpsc_frac",
-                        "thread" => "mpsc_thread",
-                        "device" => "mpsc_device",
-                        "ddx" => "mpsc_ddx",
-                        "ddy" => "mpsc_ddy",
-                        "using" => "mpsc_using",
-                        "union" => "mpsc_union",
-                        "namespace" => "mpsc_namespace",
-                        "sampler" => "mpsc_sampler",
-                        "coord" => "mpsc_coord",
-                        "address" => "mpsc_address",
-                        "filter" => "mpsc_filter",
-                        "mag_filter" => "mpsc_mag_filter",
-                        "min_filter" => "mspc_min_filter",
-                        "mip_filter" => "mpsc_mip_filter",
-                        "compare_func" => "mpsc_compare_func",
-                        "access" => "mpsc_access",
-                        "write" => "mpsc_write",
-                        "read" => "mpsc_read",
-                        "read_write" => "mpsc_read_write",
-                        "texture2d" => "mpsc_texture2d",
-                        "pixel" => "mpsc_pixel",
-                        "vertex" => "mpsc_vertex",
-                        "constant" => "mpsc_constant",
-                        "float2" => "mpsc_float2",
-                        "float3" => "mpsc_float3",
-                        "float4" => "mpsc_float4",
-                        "float2x2" => "mpsc_float2x2",
-                        "float3x3" => "mpsc_float3x3",
-                        "float4x4" => "mpsc_float4x4",
-                        _ => ident_string,
-                    }
-                )
-                    .unwrap()
-            }
+            write!(
+                string,
+                "{}",
+                match ident_string.as_ref() {
+                    "line"=>"mpsc_line",
+                    "frac"=>"mpsc_frac",
+                    "thread" => "mpsc_thread",
+                    "device" => "mpsc_device",
+                    "ddx" => "mpsc_ddx",
+                    "ddy" => "mpsc_ddy",
+                    "using" => "mpsc_using",
+                    "union" => "mpsc_union",
+                    "namespace" => "mpsc_namespace",
+                    "sampler" => "mpsc_sampler",
+                    "coord" => "mpsc_coord",
+                    "address" => "mpsc_address",
+                    "filter" => "mpsc_filter",
+                    "mag_filter" => "mpsc_mag_filter",
+                    "min_filter" => "mspc_min_filter",
+                    "mip_filter" => "mpsc_mip_filter",
+                    "compare_func" => "mpsc_compare_func",
+                    "access" => "mpsc_access",
+                    "write" => "mpsc_write",
+                    "read" => "mpsc_read",
+                    "read_write" => "mpsc_read_write",
+                    "texture2d" => "mpsc_texture2d",
+                    "texture" => "mpsc_texture",
+                    "pixel" => "mpsc_pixel",
+                    "vertex" => "mpsc_vertex",
+                    "constant" => "mpsc_constant",
+                    "float2" => "mpsc_float2",
+                    "float3" => "mpsc_float3",
+                    "float4" => "mpsc_float4",
+                    "float2x2" => "mpsc_float2x2",
+                    "float3x3" => "mpsc_float3x3",
+                    "float4x4" => "mpsc_float4x4",
+                    _ => ident_string,
+                }
+            )
+                .unwrap()
         })
     }
 }

@@ -18,7 +18,6 @@ pub use crate::view::*;
 pub use crate::pass::*;
 pub use crate::geometry::*;
 pub use crate::texture::*;
-pub use crate::text::*;
 pub use crate::livemacros::*;
 pub use crate::events::*;
 pub use crate::animator::*;

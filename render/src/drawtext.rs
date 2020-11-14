@@ -1,5 +1,14 @@
 use crate::cx::*;
 
+#[derive(Copy, Clone)]
+pub enum Wrapping {
+    Char,
+    Word,
+    Line,
+    None,
+    Ellipsis(f32)
+}
+
 #[repr(C, packed)]
 pub struct DrawText {
     pub shader: Shader,
@@ -10,17 +19,16 @@ pub struct DrawText {
     pub text_style: TextStyle,
     pub wrapping: Wrapping,
     pub font_scale: f32,
-    pub z: f32,
+    pub instance_z: f32,
     
-    pub font_tx1: f32,
-    pub font_ty1: f32,
-    pub font_tx2: f32,
-    pub font_ty2: f32,
+    // instances
+    pub font_t1: Vec2,
+    pub font_t2: Vec2,
     pub color: Color,
-    pub rect: Rect,
-    pub z_bias: f32,
-    pub base_x: f32,
-    pub base_y: f32,
+    pub rect_pos: Vec2,
+    pub rect_size: Vec2,
+    pub char_z: f32,
+    pub base: Vec2,
     pub font_size: f32,
     pub char_offset: f32,
     pub marker: f32,
@@ -35,21 +43,20 @@ impl Clone for DrawText {
             lock: None,
             slots: self.slots,
             chunk: Vec::new(),
-
+            
             text_style: self.text_style,
             wrapping: self.wrapping,
             font_scale: self.font_scale,
-            z: self.z,
-
-            font_tx1: 0.0,
-            font_ty1: 0.0,
-            font_tx2: 0.0,
-            font_ty2: 0.0,
+            instance_z: self.instance_z,
+            
+            //instances
+            font_t1: Vec2::all(0.0),
+            font_t2: Vec2::all(0.0),
             color: self.color,
-            rect: Rect::default(),
-            z_bias: 0.0,
-            base_x: 0.0,
-            base_y: 0.0,
+            rect_pos: Vec2::all(0.0),
+            rect_size: Vec2::all(0.0),
+            char_z: 0.0,
+            base: Vec2::all(0.0),
             font_size: 0.0,
             char_offset: 0.0,
             marker: 0.0,
@@ -71,35 +78,53 @@ impl DrawText {
             slots: slots + 18,
             chunk: Vec::new(),
             
-            text_style: live_text_style!(cx, self::text_style_unscaled),/*TextStyle {
-                font: Font {font_id: 0},
-                font_size: 8.0,
-                brightness: 1.0,
-                curve: 0.6,
-                line_spacing: 1.4,
-                top_drop: 1.1,
-                height_factor: 1.3,
-            },*/
+            text_style: live_text_style!(cx, self::text_style_unscaled),
             wrapping: Wrapping::Word,
             font_scale: 1.0,
-            z: 0.0,
+            instance_z: 0.0,
             
-            font_tx1: 0.0,
-            font_ty1: 0.0,
-            font_tx2: 0.0,
-            font_ty2: 0.0,
+            font_t1: Vec2::all(0.0),
+            font_t2: Vec2::all(0.0),
             color: Color::parse_name("white").unwrap(),
-            rect: Rect::default(),
-            z_bias: 0.0,
-            base_x: 0.0,
-            base_y: 0.0,
+            rect_pos: Vec2::all(0.0),
+            rect_size: Vec2::all(0.0),
+            char_z: 0.0,
+            base: Vec2::all(0.0),
             font_size: 0.0,
             char_offset: 0.0,
             marker: 0.0,
         }
     }
     
+    pub fn register_draw_input(cx: &mut Cx) {
+        cx.live_styles.register_draw_input(live_item_id!(self::DrawText), Self::live_draw_input())
+    }
+    
+    pub fn live_draw_input() -> LiveDrawInput {
+        let mut def = LiveDrawInput::default();
+        let mp = module_path!();
+        def.add_uniform(mp, "brightness", "f32");
+        def.add_uniform(mp, "curve", "f32");
+        
+        def.add_texture(mp, "texture", "Texture2D");
+        
+        def.add_instance(mp, "font_t1", "Vec2");
+        def.add_instance(mp, "font_t2", "Vec2");
+        def.add_instance(mp, "color", "Vec4");
+        def.add_instance(mp, "rect_pos", "Vec2");
+        def.add_instance(mp, "rect_size", "Vec2");
+        def.add_instance(mp, "char_z", "f32");
+        def.add_instance(mp, "base", "Vec2");
+        def.add_instance(mp, "font_size", "f32");
+        def.add_instance(mp, "char_offset", "f32");
+        def.add_instance(mp, "marker", "f32");
+        
+        return def
+    }
+    
     pub fn style(cx: &mut Cx) {
+        
+        Self::register_draw_input(cx);
         
         live_body!(cx, r#"
             self::text_style_unscaled: TextStyle {
@@ -120,7 +145,10 @@ impl DrawText {
                 
                 geometry geom: vec2;
                 
-                texture texturez: texture2D;
+                draw_input: self::DrawText;
+                
+                /*
+                //texture texturez: texture2D;
                 
                 instance font_tc: vec4;
                 instance color: vec4;
@@ -131,7 +159,7 @@ impl DrawText {
                 instance base_y: float;
                 instance font_size: float;
                 instance char_offset: float;
-                instance marker: float;
+                instance marker: float;*/
                 
                 varying tex_coord1: vec2;
                 varying tex_coord2: vec2;
@@ -139,8 +167,8 @@ impl DrawText {
                 varying clipped: vec2;
                 //let rect: vec4<Varying>;
                 
-                uniform brightness: float;
-                uniform curve: float;
+                //uniform brightness: float;
+                //uniform curve: float;
                 
                 fn get_color() -> vec4 {
                     return color;
@@ -158,20 +186,20 @@ impl DrawText {
                     }
                     else if dx > 2.75 {
                         s = (
-                            sample2d(texturez, tex_coord3.xy + vec2(0., 0.)).z
-                                + sample2d(texturez, tex_coord3.xy + vec2(dp, 0.)).z
-                                + sample2d(texturez, tex_coord3.xy + vec2(0., dp)).z
-                                + sample2d(texturez, tex_coord3.xy + vec2(dp, dp)).z
+                            sample2d(texture, tex_coord3.xy + vec2(0., 0.)).z
+                                + sample2d(texture, tex_coord3.xy + vec2(dp, 0.)).z
+                                + sample2d(texture, tex_coord3.xy + vec2(0., dp)).z
+                                + sample2d(texture, tex_coord3.xy + vec2(dp, dp)).z
                         ) * 0.25;
                     }
                     else if dx > 1.75 {
-                        s = sample2d(texturez, tex_coord3.xy).z;
+                        s = sample2d(texture, tex_coord3.xy).z;
                     }
                     else if dx > 1.3 {
-                        s = sample2d(texturez, tex_coord2.xy).y;
+                        s = sample2d(texture, tex_coord2.xy).y;
                     }
                     else {
-                        s = sample2d(texturez, tex_coord1.xy).x;
+                        s = sample2d(texture, tex_coord1.xy).x;
                     }
                     
                     s = pow(s, curve);
@@ -193,27 +221,35 @@ impl DrawText {
                     //rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
                     
                     tex_coord1 = mix(
-                        font_tc.xy,
-                        font_tc.zw,
+                        font_t1.xy,
+                        font_t2.xy,
                         normalized.xy
                     );
                     
                     tex_coord2 = mix(
-                        font_tc.xy,
-                        font_tc.xy + (font_tc.zw - font_tc.xy) * 0.75,
+                        font_t1.xy,
+                        font_t1.xy + (font_t2.xy - font_t1.xy) * 0.75,
                         normalized.xy
                     );
                     
                     tex_coord3 = mix(
-                        font_tc.xy,
-                        font_tc.xy + (font_tc.zw - font_tc.xy) * 0.6,
+                        font_t1.xy,
+                        font_t1.xy + (font_t2.xy - font_t1.xy) * 0.6,
                         normalized.xy
                     );
                     
-                    return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, instance_z + draw_zbias, 1.)));
+                    return camera_projection * (camera_view * (view_transform * vec4(
+                        clipped.x,
+                        clipped.y,
+                        char_z + draw_zbias,
+                        1.
+                    )));
                 }
             }
         "#);
+    }
+    
+    pub fn last_animator(&mut self, _cx: &mut Cx) {
     }
     
     pub fn lock_aligned_text(&mut self, cx: &mut Cx) {
@@ -224,29 +260,31 @@ impl DrawText {
         self.lock = Some(cx.lock_instances(self.shader, self.slots));
     }
     
-    pub fn unlock_text(&mut self, cx: &mut Cx) {
+    pub fn unlock_text(&mut self, cx: &mut Cx) -> bool {
         unsafe {
             if let Some(li) = self.lock.take() {
                 let offset = li.instance_area.instance_offset;
                 self.area = cx.unlock_instances(li);
                 if offset == 0 {
-                    self.area.write_texture_2d_id(cx, live_item_id!(self::shader::texturez), cx.fonts_atlas.texture_id);
-                    self.area.write_uniform_float(cx, live_item_id!(self::shader::brightness), self.text_style.brightness);
-                    self.area.write_uniform_float(cx, live_item_id!(self::shader::curve), self.text_style.curve);
+                    self.area.write_texture_2d_id(cx, live_item_id!(self::DrawText::texture), cx.fonts_atlas.texture_id);
+                    self.area.write_uniform_float(cx, live_item_id!(self::DrawText::brightness), self.text_style.brightness);
+                    self.area.write_uniform_float(cx, live_item_id!(self::DrawText::curve), self.text_style.curve);
+                    return true
                 }
             }
         }
+        return false
     }
     
-    pub fn add_text(&mut self, cx: &mut Cx, geom_x: f32, geom_y: f32, val:&str){
+    pub fn add_text(&mut self, cx: &mut Cx, geom_x: f32, geom_y: f32, val: &str) {
         let mut chunk = Vec::new();
-        std::mem::swap(&mut chunk, unsafe{&mut self.chunk});
+        std::mem::swap(&mut chunk, unsafe {&mut self.chunk});
         chunk.truncate(0);
-        for c in val.chars(){
+        for c in val.chars() {
             chunk.push(c)
         }
         self.add_text_chunk(cx, geom_x, geom_y, 0, &chunk, | _, _, _, _ | {0.0});
-        std::mem::swap(&mut chunk, unsafe{&mut self.chunk});
+        std::mem::swap(&mut chunk, unsafe {&mut self.chunk});
     }
     
     pub fn add_text_chunk<F>(&mut self, cx: &mut Cx, geom_x: f32, geom_y: f32, char_offset: usize, chunk: &[char], mut char_callback: F)
@@ -341,27 +379,23 @@ impl DrawText {
             };
             
             // give the callback a chance to do things
-            self.font_tx1 = tc.tx1;
-            self.font_ty1 = tc.ty1;
-            self.font_tx2 = tc.tx2;
-            self.font_ty2 = tc.ty2;
-            self.rect = Rect {
-                x: scaled_min_pos_x,
-                y: scaled_min_pos_y,
-                w: w * self.font_scale / dpi_factor,
-                h: h * self.font_scale / dpi_factor
-            };
-            self.z_bias = self.z + 0.00001 * min_pos_x;
-            self.base_x = geom_x;
-            self.base_y = geom_y;
+            self.font_t1.x = tc.tx1;
+            self.font_t1.y = tc.ty1;
+            self.font_t2.x = tc.tx2;
+            self.font_t2.y = tc.ty2;
+            self.rect_pos = vec2(scaled_min_pos_x, scaled_min_pos_y);
+            self.rect_size = vec2(w * self.font_scale / dpi_factor, h * self.font_scale / dpi_factor);
+            self.char_z = self.instance_z + 0.00001 * min_pos_x;
+            self.base.x = geom_x;
+            self.base.y = geom_y;
             self.font_size = text_style.font_size;
             self.char_offset = char_offset as f32;
             
             // self.marker = marker;
             self.marker = char_callback(*wc, char_offset, geom_x, advance);
-
+            
             li.instances.extend_from_slice(unsafe {
-                std::slice::from_raw_parts(&self.font_tx1 as *const _ as *const f32, self.slots)
+                std::slice::from_raw_parts(&self.font_t1 as *const _ as *const f32, self.slots)
             });
             // !TODO make sure a derived shader adds 'empty' values here.
             
@@ -370,11 +404,11 @@ impl DrawText {
         }
     }
     
-    pub fn draw_text(&mut self, cx: &mut Cx, text: &str) {
+    pub fn draw_text(&mut self, cx: &mut Cx, text: &str) -> bool {
         self.lock_aligned_text(cx);
         
         let mut chunk = Vec::new();
-        std::mem::swap(&mut chunk, unsafe{&mut self.chunk});
+        std::mem::swap(&mut chunk, unsafe {&mut self.chunk});
         chunk.truncate(0);
         
         let mut width = 0.0;
@@ -457,14 +491,14 @@ impl DrawText {
                 }
             }
         }
-        std::mem::swap(&mut chunk, unsafe{&mut self.chunk});
+        std::mem::swap(&mut chunk, unsafe {&mut self.chunk});
         
-        self.unlock_text(cx);
+        self.unlock_text(cx)
     }
     
     // looks up text with the behavior of a text selection mouse cursor
     pub fn find_closest_offset(&self, cx: &Cx, pos: Vec2) -> usize {
-        let area = unsafe{&self.area};
+        let area = unsafe {&self.area};
         let scroll_pos = area.get_scroll_pos(cx);
         let spos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
         let x_o = area.get_instance_offset(cx, live_item_id!(self::shader::base_x), Ty::Float).unwrap();
