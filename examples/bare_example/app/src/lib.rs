@@ -79,7 +79,7 @@ impl BareExampleApp {
     pub fn draw_app(&mut self, cx: &mut Cx) {
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
-        self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(Color::rgb(32, 0, 0)));
+        self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(Vec4::color("300")));
         if self.main_view.begin_view(cx, Layout::default()).is_ok() {
              cx.profile_start(1);
             
@@ -101,15 +101,12 @@ impl BareExampleApp {
                 self.quad.counter += 0.01; //= (i as f32).sin();
                 let x = 300. + (v + self.count).sin() * 100.;
                 let y = 300. + (v + self.count * 8.).cos() * 100.;
-                self.quad.add_quad(Rect {
-                    x: x,
-                    y: y,
-                    w: 10.,
-                    h: 10.
-                });
+
+                self.quad.add_quad(Rect { pos: vec2(x,y), size:vec2(10.,10.0) });
+
                 self.text.add_text(
                     cx,
-                    x,y,
+                    vec2(x,y),
                     &msg
                 );
             }

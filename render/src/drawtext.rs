@@ -24,7 +24,7 @@ pub struct DrawText {
     // instances
     pub font_t1: Vec2,
     pub font_t2: Vec2,
-    pub color: Color,
+    pub color: Vec4,
     pub rect_pos: Vec2,
     pub rect_size: Vec2,
     pub char_z: f32,
@@ -85,7 +85,7 @@ impl DrawText {
             
             font_t1: Vec2::all(0.0),
             font_t2: Vec2::all(0.0),
-            color: Color::parse_name("white").unwrap(),
+            color: Vec4::from_color_name("white").unwrap(),
             rect_pos: Vec2::all(0.0),
             rect_size: Vec2::all(0.0),
             char_z: 0.0,
@@ -281,27 +281,27 @@ impl DrawText {
         }
     }
     
-    pub fn add_text(&mut self, cx: &mut Cx, geom_x: f32, geom_y: f32, val: &str) {
+    pub fn add_text(&mut self, cx: &mut Cx, pos: Vec2, val: &str) {
         let mut chunk = Vec::new();
         std::mem::swap(&mut chunk, unsafe {&mut self.chunk});
         chunk.truncate(0);
         for c in val.chars() {
             chunk.push(c)
         }
-        self.add_text_chunk(cx, geom_x, geom_y, 0, &chunk, | _, _, _, _ | {0.0});
+        self.add_text_chunk(cx, pos, 0, &chunk, | _, _, _, _ | {0.0});
         std::mem::swap(&mut chunk, unsafe {&mut self.chunk});
     }
     
-    pub fn add_text_chunk<F>(&mut self, cx: &mut Cx, geom_x: f32, geom_y: f32, char_offset: usize, chunk: &[char], mut char_callback: F)
+    pub fn add_text_chunk<F>(&mut self, cx: &mut Cx, pos: Vec2, char_offset: usize, chunk: &[char], mut char_callback: F)
     where F: FnMut(char, usize, f32, f32) -> f32
     {
-        if geom_x.is_nan() || geom_y.is_nan() {
+        if pos.x.is_nan() || pos.y.is_nan() {
             return
         }
         
         let text_style = unsafe {&self.text_style};
         
-        let mut geom_x = geom_x;
+        let mut walk_x = pos.x;
         let mut char_offset = char_offset;
         let font_id = text_style.font.font_id;
         
@@ -339,8 +339,8 @@ impl DrawText {
             let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 1.0;
             
             // this one needs pixel snapping
-            let min_pos_x = geom_x + font_size_logical * glyph.bounds.p_min.x;
-            let min_pos_y = geom_y - font_size_logical * glyph.bounds.p_min.y + text_style.font_size * text_style.top_drop;
+            let min_pos_x = walk_x + font_size_logical * glyph.bounds.p_min.x;
+            let min_pos_y = pos.y - font_size_logical * glyph.bounds.p_min.y + text_style.font_size * text_style.top_drop;
             
             // compute subpixel shift
             let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
@@ -348,8 +348,8 @@ impl DrawText {
             
             
             // scale and snap it
-            let scaled_min_pos_x = geom_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
-            let scaled_min_pos_y = geom_y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + text_style.font_size * self.font_scale * text_style.top_drop - subpixel_y_fract;
+            let scaled_min_pos_x = walk_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
+            let scaled_min_pos_y = pos.y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + text_style.font_size * self.font_scale * text_style.top_drop - subpixel_y_fract;
             
             // only use a subpixel id for small fonts
             let subpixel_id = if text_style.font_size>32.0 {
@@ -391,20 +391,20 @@ impl DrawText {
             self.rect_pos = vec2(scaled_min_pos_x, scaled_min_pos_y);
             self.rect_size = vec2(w * self.font_scale / dpi_factor, h * self.font_scale / dpi_factor);
             self.char_z = self.instance_z + 0.00001 * min_pos_x;
-            self.base.x = geom_x;
-            self.base.y = geom_y;
+            self.base.x = walk_x;
+            self.base.y = pos.y;
             self.font_size = text_style.font_size;
             self.char_offset = char_offset as f32;
             
             // self.marker = marker;
-            self.marker = char_callback(*wc, char_offset, geom_x, advance);
+            self.marker = char_callback(*wc, char_offset, walk_x, advance);
             
             li.instances.extend_from_slice(unsafe {
                 std::slice::from_raw_parts(&self.font_t1 as *const _ as *const f32, self.slots)
             });
             // !TODO make sure a derived shader adds 'empty' values here.
             
-            geom_x += advance;
+            walk_x += advance;
             char_offset += 1;
         }
     }
@@ -481,13 +481,13 @@ impl DrawText {
             }
             if emit {
                 let height = font_size * height_factor * self.font_scale;
-                let geom = cx.walk_turtle(Walk {
+                let rect = cx.walk_turtle(Walk {
                     width: Width::Fix(width),
                     height: Height::Fix(height),
                     margin: Margin::zero()
                 });
                 
-                self.add_text_chunk(cx, geom.x, geom.y, 0, &chunk, | _, _, _, _ | {0.0});
+                self.add_text_chunk(cx, rect.pos, 0, &chunk, | _, _, _, _ | {0.0});
                 
                 width = 0.0;
                 chunk.truncate(0);
