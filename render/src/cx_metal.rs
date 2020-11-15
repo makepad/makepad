@@ -236,10 +236,10 @@ impl Cx {
                         unsafe {
                             let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
                             let () = msg_send![color_attachment, setClearColor: MTLClearColor {
-                                red: color.r as f64,
-                                green: color.g as f64,
-                                blue: color.b as f64,
-                                alpha: color.a as f64
+                                red: color.x as f64,
+                                green: color.y as f64,
+                                blue: color.z as f64,
+                                alpha: color.w as f64
                             }];
                         }
                     }
@@ -251,10 +251,10 @@ impl Cx {
                     unsafe {
                         let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
                         let () = msg_send![color_attachment, setClearColor: MTLClearColor {
-                            red: color.r as f64,
-                            green: color.g as f64,
-                            blue: color.b as f64,
-                            alpha: color.a as f64
+                            red: color.x as f64,
+                            green: color.y as f64,
+                            blue: color.z as f64,
+                            alpha: color.w as f64
                         }];
                     }
                 }

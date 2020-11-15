@@ -10,7 +10,6 @@ use crate::builtin::{self, Builtin};
 use crate::ident::{Ident, IdentPath, QualifiedIdentPath};
 use crate::livetypes::*;
 use crate::detok::{DeTokParserImpl};
-use crate::colors::Color;
 use crate::ty::{TyLit, TyExpr, TyExprKind};
 use crate::math::*;
 use std::fmt;
@@ -53,17 +52,17 @@ pub struct LiveDrawInput {
 }
 
 impl LiveDrawInput {
-    pub fn add_uniform(&mut self, modpath: &str, cls:&str, name: &str, ty_expr: TyExpr) {
-        if let TyExprKind::Lit{ty_lit,..} = ty_expr.kind{
-            if ty_lit == TyLit::Texture2D{
+    pub fn add_uniform(&mut self, modpath: &str, cls: &str, name: &str, ty_expr: TyExpr) {
+        if let TyExprKind::Lit {ty_lit, ..} = ty_expr.kind {
+            if ty_lit == TyLit::Texture2D {
                 self.textures.push(LiveDrawInputDef::new(modpath, cls, name, ty_expr));
                 return
             }
         }
         self.uniforms.push(LiveDrawInputDef::new(modpath, cls, name, ty_expr));
     }
-
-    pub fn add_instance(&mut self, modpath: &str, cls:&str, name: &str, ty_expr: TyExpr) {
+    
+    pub fn add_instance(&mut self, modpath: &str, cls: &str, name: &str, ty_expr: TyExpr) {
         self.instances.push(LiveDrawInputDef::new(modpath, cls, name, ty_expr));
     }
 }
@@ -76,7 +75,7 @@ pub struct LiveDrawInputDef {
 }
 
 impl LiveDrawInputDef {
-    pub fn new(modpath: &str, cls:&str, name: &str, ty_expr: TyExpr) -> LiveDrawInputDef {
+    pub fn new(modpath: &str, cls: &str, name: &str, ty_expr: TyExpr) -> LiveDrawInputDef {
         let ident = IdentPath::from_three(Ident::new("self"), Ident::new(cls), Ident::new(name));
         Self {
             qualified_ident_path: ident.qualify(modpath),
@@ -118,7 +117,6 @@ pub struct LiveStyles {
     pub vec2s: HashMap<LiveItemId, Vec2>,
     pub vec3s: HashMap<LiveItemId, Vec3>,
     pub vec4s: HashMap<LiveItemId, Vec4>,
-    pub colors: HashMap<LiveItemId, Color>,
     pub text_styles: HashMap<LiveItemId, TextStyle>,
     pub layouts: HashMap<LiveItemId, Layout>,
     pub walks: HashMap<LiveItemId, Walk>,
@@ -153,7 +151,6 @@ pub enum LiveTokensType {
     Vec2,
     Vec3,
     Vec4,
-    Color,
     TextStyle,
     Layout,
     Walk,
@@ -335,9 +332,6 @@ impl LiveStyles {
                 LiveTokensType::Vec4 => {
                     self.vec4s.remove(&live_item_id);
                 },
-                LiveTokensType::Color => {
-                    self.colors.remove(&live_item_id);
-                },
                 LiveTokensType::TextStyle => {
                     self.text_styles.remove(&live_item_id);
                 },
@@ -404,16 +398,7 @@ impl LiveStyles {
             return *v
         }
         self.live_access_errors.borrow_mut().push(format!("Vec4 not found {}", name));
-        return Vec4::all(0.);
-    }
-    
-    pub fn get_color(&self, live_item_id: LiveItemId, name: &str) -> Color {
-        let live_item_id = self.find_remap(live_item_id);
-        if let Some(v) = self.colors.get(&live_item_id) {
-            return *v
-        }
-        self.live_access_errors.borrow_mut().push(format!("Color not found {}", name));
-        return Color {r: 1.0, g: 0.0, b: 1.0, a: 1.0};
+        return Vec4 {x: 0.0, y: 1.0, z: 0.0, w: 1.0};
     }
     
     pub fn get_text_style(&self, live_item_id: LiveItemId, name: &str) -> TextStyle {
@@ -421,7 +406,7 @@ impl LiveStyles {
         if let Some(v) = self.text_styles.get(&live_item_id) {
             return *v
         }
-        self.live_access_errors.borrow_mut().push(format!("Color not found {}", name));
+        self.live_access_errors.borrow_mut().push(format!("TextStyle not found {}", name));
         return TextStyle {
             font: Font {font_id: 0},
             font_size: 8.0,
@@ -652,12 +637,6 @@ impl LiveStyles {
                     match DeTokParserImpl::new(&swap_live_tokens.tokens, self).parse_vec4() {
                         Err(err) => {errors.push(self.live_error_to_live_body_error(err));},
                         Ok(v) => {self.vec4s.insert(live_id, v);}
-                    }
-                },
-                LiveTokensType::Color => {
-                    match DeTokParserImpl::new(&swap_live_tokens.tokens, self).parse_color() {
-                        Err(err) => {errors.push(self.live_error_to_live_body_error(err));}
-                        Ok(v) => {self.colors.insert(live_id, v);}
                     }
                 },
                 LiveTokensType::TextStyle => {

@@ -316,12 +316,12 @@ impl CxShaderMapping {
         for prop in &self.live_uniform_props.props {
             match prop.ty {
                 Ty::Vec4 => { // color or anim
-                    let color = live_styles.get_color(prop.live_item_id, &prop.name);
+                    let color = live_styles.get_vec4(prop.live_item_id, &prop.name);
                     let o = prop.offset;
-                    self.live_uniforms_buf[o + 0] = color.r;
-                    self.live_uniforms_buf[o + 1] = color.g;
-                    self.live_uniforms_buf[o + 2] = color.b;
-                    self.live_uniforms_buf[o + 3] = color.a;
+                    self.live_uniforms_buf[o + 0] = color.x;
+                    self.live_uniforms_buf[o + 1] = color.y;
+                    self.live_uniforms_buf[o + 2] = color.z;
+                    self.live_uniforms_buf[o + 3] = color.w;
                 },
                 Ty::Float => { // float or anim
                     let float = live_styles.get_float(prop.live_item_id, &prop.name);

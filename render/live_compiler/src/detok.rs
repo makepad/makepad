@@ -4,7 +4,6 @@ use crate::ident::{Ident, IdentPath, QualifiedIdentPath};
 use crate::span::{Span, LiveBodyId};
 use crate::lit::Lit;
 use crate::ty::TyLit;
-use crate::colors::Color;
 use crate::math::*;
 use crate::livestyles::{LiveStyles, LiveStyle};
 use crate::livetypes::{Font, LiveItemId, Play, Anim, Ease, Track};
@@ -399,25 +398,22 @@ impl DeTok for Vec3 {
 
 impl DeTok for Vec4 {
     fn de_tok(p: &mut dyn DeTokParser) -> Result<Vec4, LiveError> {
-        p.expect_token(Token::TyLit(TyLit::Vec4)) ?;
-        p.expect_token(Token::LeftParen) ?;
-        let x = f32::de_tok(p) ?;
-        p.expect_token(Token::Comma) ?;
-        let y = f32::de_tok(p) ?;
-        p.expect_token(Token::Comma) ?;
-        let z = f32::de_tok(p) ?;
-        p.expect_token(Token::Comma) ?;
-        let w = f32::de_tok(p) ?;
-        p.accept_token(Token::Comma);
-        p.expect_token(Token::RightParen) ?;
-        Ok(Vec4 {x, y, z, w})
-    }
-}
-
-impl DeTok for Color {
-    fn de_tok(p: &mut dyn DeTokParser) -> Result<Color, LiveError> {
         match p.peek_token() {
-            Token::Lit(Lit::Color(c)) => {
+            Token::TyLit(TyLit::Vec4)=>{
+                 p.expect_token(Token::TyLit(TyLit::Vec4)) ?;
+                p.expect_token(Token::LeftParen) ?;
+                let x = f32::de_tok(p) ?;
+                p.expect_token(Token::Comma) ?;
+                let y = f32::de_tok(p) ?;
+                p.expect_token(Token::Comma) ?;
+                let z = f32::de_tok(p) ?;
+                p.expect_token(Token::Comma) ?;
+                let w = f32::de_tok(p) ?;
+                p.accept_token(Token::Comma);
+                p.expect_token(Token::RightParen) ?;
+                Ok(Vec4 {x, y, z, w})
+            },
+            Token::Lit(Lit::Vec4(c)) => {
                 p.skip_token();
                 return Ok(c);
             },
@@ -425,10 +421,10 @@ impl DeTok for Color {
                 let ident_path = p.parse_ident_path() ?;
                 let qualified_ident_path = p.qualify_ident_path(&ident_path);
                 let live_item_id = qualified_ident_path.to_live_item_id();
-                if let Some(color) = p.get_live_styles().colors.get(&live_item_id) {
+                if let Some(color) = p.get_live_styles().vec4s.get(&live_item_id) {
                     return Ok(*color);
                 }
-                return Err(p.error(format!("Color {} not found", ident_path)));
+                return Err(p.error(format!("Vec4 {} not found", ident_path)));
             },
             token => {
                 return Err(p.error(format!("Expected color {}", token)));
@@ -465,9 +461,6 @@ fn parse_track_rhs(p: &mut dyn DeTokParser, time: f64, track: &mut Track) -> Res
         }
         Track::Vec4 {keys, ..} => {
             keys.push((time, Vec4::de_tok(p) ?));
-        }
-        Track::Color {keys, ..} => {
-            keys.push((time, Color::de_tok(p) ?));
         }
     }
     Ok(())
@@ -639,16 +632,6 @@ impl DeTok for Anim {
                     }
                     else if ident == Ident::new("Vec4") {
                         let mut track = Track::Vec4 {
-                            bind_to: LiveItemId(tracks.len() as u64),
-                            ease: Ease::Lin,
-                            cut_init: None,
-                            keys: Vec::new()
-                        };
-                        parse_track(p, &mut track) ?;
-                        tracks.push(track);
-                    }
-                    else if ident == Ident::new("Color") {
-                        let mut track = Track::Color {
                             bind_to: LiveItemId(tracks.len() as u64),
                             ease: Ease::Lin,
                             cut_init: None,
