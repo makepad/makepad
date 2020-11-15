@@ -6,7 +6,7 @@ besides the well known shader toy SDF programs. This makes shader coding possibl
 for more compute constrained environments like VR goggles or mobiles.
 Try makepad now on a Quest in the quest browser, click the goggles top right of the UI. Try touching the leaves of the tree with your hands! Magic!
 
-https://makepad.dev
+https://makepad.nl
 
 The Makepad development platform and library ecosystem are MIT licensed,
 for the Quest and in the future iOS we will provide paid, native version
