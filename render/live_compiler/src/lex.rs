@@ -1,6 +1,7 @@
 use crate::error::LiveError;
 use crate::ident::Ident;
-use crate::lit::{Lit,TyLit};
+use crate::lit::{Lit};
+use crate::ty::TyLit;
 use crate::span::{Span,LiveBodyId};
 use crate::token::{Token, TokenWithSpan};
 use crate::colors::Color;

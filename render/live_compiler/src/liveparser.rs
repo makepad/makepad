@@ -1,5 +1,6 @@
 use crate::error::LiveError;
-use crate::lit::{Lit, TyLit};
+use crate::lit::Lit;
+use crate::ty::TyLit;
 use crate::ident::{Ident};
 use crate::token::{Token, TokenWithSpan};
 use crate::livetypes::*;

@@ -27,16 +27,16 @@ pub struct TrapezoidText {
     trapezoidator: Trapezoidator
 }
 
-const TRAPEZOID_TEXT_SLOTS: usize = 5;
+const TRAPEZOID_TEXT_SLOTS: usize = 7;
 
 impl TrapezoidText {
     
     pub fn register_draw_input(cx: &mut Cx) {
         let mut def = LiveDrawInput::default();
         let mp = module_path!();
-        def.add_instance(mp, "a_xs", "Vec2");
-        def.add_instance(mp, "a_ys", "Vec4");
-        def.add_instance(mp, "chan", "f32");
+        def.add_instance(mp, "TrapezoidText", "a_xs", Vec2::ty_expr());
+        def.add_instance(mp, "TrapezoidText", "a_ys", Vec4::ty_expr());
+        def.add_instance(mp, "TrapezoidText", "chan", f32::ty_expr());
         cx.live_styles.register_draw_input(live_item_id!(self::TrapezoidText), def)
     }
     
@@ -207,7 +207,7 @@ impl TrapezoidText {
     
     // atlas drawing function used by CxAfterDraw
     pub fn draw_todo(&mut self, cx: &mut Cx, todo: CxFontsAtlasTodo) {
-        let inst = cx.new_instance(live_shader!(cx, self::trapezoid_shader), None, 1);
+        let mut lock = cx.lock_instances(live_shader!(cx, self::trapezoid_shader), TRAPEZOID_TEXT_SLOTS);
         
         let mut size = 1.0;
         for i in 0..3 {
@@ -269,9 +269,11 @@ impl TrapezoidText {
                     trapezoid.ys[3],
                     i as f32
                 ];
-                inst.push_slice(cx, &data);
+                lock.instances.extend_from_slice(&data);
             }
         }
+
+        cx.unlock_instances(lock);
     }
 }
 
@@ -367,7 +369,7 @@ pub struct CxFontsAtlasTodo {
 
 #[derive(Default)]
 pub struct CxFontsAtlas {
-    pub texture_id: usize,
+    pub texture_id: u32,
     pub texture_size: Vec2,
     pub clear_buffer: bool,
     pub alloc_xpos: f32,

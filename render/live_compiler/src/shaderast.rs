@@ -1,8 +1,8 @@
 use crate::env::VarKind;
 use crate::ident::{Ident, IdentPath, QualifiedIdentPath, IdentPathWithSpan};
-use crate::lit::{Lit, TyLit};
+use crate::lit::{Lit};
 use crate::span::{Span, LiveBodyId};
-use crate::ty::Ty;
+use crate::ty::{Ty,TyLit,TyExpr};
 use crate::val::Val;
 use crate::livestyles::LiveStyles;
 use std::cell::{Cell, RefCell};
@@ -26,24 +26,24 @@ pub struct ShaderAst {
 
 impl ShaderAst {
     
-    pub fn convert_draw_input_to_decls(&mut self, live_styles: &LiveStyles, span: Span) -> Result<(), (Span,String)> {
+    pub fn convert_draw_input_to_decls(&mut self, live_styles: &LiveStyles, span: Span) -> Result<(), (Span, String)> {
         // we convert the draw inputs to decls
         if self.draw_input.is_none() {
-            return Err((span,format!("please define draw_input for shader")))
+            return Err((span, format!("please define draw_input for shader")))
         }
         let (inp_span, qualified_ident_path) = self.draw_input.as_ref().unwrap();
-
+        
         // lets find draw_input
         let draw_input = live_styles.draw_inputs.get(&qualified_ident_path.to_live_item_id());
-        if draw_input.is_none(){
+        if draw_input.is_none() {
             return Err((inp_span.clone(), format!("draw_input {} not registered", qualified_ident_path)));
         }
         let draw_input = draw_input.unwrap();
-
+        
         if draw_input.instances.len() == 0 {
             return Err((inp_span.clone(), format!("please define atleast 1 float in the instance data")))
         }
-
+        
         for instance in &draw_input.instances {
             self.decls.push(
                 Decl::Instance(InstanceDecl {
@@ -307,44 +307,6 @@ pub enum Stmt {
         span: Span,
         expr: Expr,
     },
-}
-
-#[derive(Clone, Debug)]
-pub struct TyExpr {
-    pub ty: RefCell<Option<Ty >>,
-    pub kind: TyExprKind,
-}
-
-#[derive(Clone, Debug)]
-pub enum TyExprKind {
-    Array {
-        span: Span,
-        elem_ty_expr: Box<TyExpr>,
-        len: u32,
-    },
-    Var {
-        span: Span,
-        ident: Ident,
-    },
-    Lit {
-        span: Span,
-        ty_lit: TyLit,
-    },
-}
-
-impl TyExpr {
-    pub fn from_rust_type_str(rust_type: &str) -> Option<TyExpr> {
-        if let Some(ty_lit) = TyLit::from_rust_type_str(rust_type) {
-            return Some(TyExpr {
-                ty: RefCell::new(None),
-                kind: TyExprKind::Lit {
-                    span: Span::default(),
-                    ty_lit: ty_lit
-                }
-            })
-        }
-        return None
-    }
 }
 
 #[derive(Clone, Debug)]

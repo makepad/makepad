@@ -69,6 +69,11 @@ impl WebSocketChannels{
             let mut data = [0u8; 1024];
             match tcp_stream.read(&mut data) {
                 Ok(n) => {
+                    if n == 0{
+                        let _ = tcp_stream.shutdown(Shutdown::Both);
+                        self.remove_socket(url, socket_id);
+                        return
+                    }
                     for result in web_socket.parse(&data[0..n]){
                         match result{
                             WebSocketResult::Ping(_)=>{},
