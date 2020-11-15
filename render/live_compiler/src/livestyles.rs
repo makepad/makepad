@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
-use crate::shaderast::{ShaderAst, TyExpr};
+use crate::shaderast::ShaderAst;
 use crate::span::LiveBodyId;
 use crate::lex;
 use crate::analyse::{ShaderCompileOptions, ShaderAnalyser};
@@ -11,6 +11,7 @@ use crate::ident::{Ident, IdentPath, QualifiedIdentPath};
 use crate::livetypes::*;
 use crate::detok::{DeTokParserImpl};
 use crate::colors::Color;
+use crate::ty::{TyLit, TyExpr, TyExprKind};
 use crate::math::*;
 use std::fmt;
 use crate::error::LiveError;
@@ -45,20 +46,25 @@ pub enum LiveChangeType {
 
 #[derive(Clone, Debug, Default)]
 pub struct LiveDrawInput {
+    pub cls: String,
     pub uniforms: Vec<LiveDrawInputDef>,
     pub instances: Vec<LiveDrawInputDef>,
     pub textures: Vec<LiveDrawInputDef>,
 }
 
 impl LiveDrawInput {
-    pub fn add_uniform(&mut self, modpath: &str, name: &str, ty: &str) {
-        self.uniforms.push(LiveDrawInputDef::new(modpath, name, ty));
+    pub fn add_uniform(&mut self, modpath: &str, cls:&str, name: &str, ty_expr: TyExpr) {
+        if let TyExprKind::Lit{ty_lit,..} = ty_expr.kind{
+            if ty_lit == TyLit::Texture2D{
+                self.textures.push(LiveDrawInputDef::new(modpath, cls, name, ty_expr));
+                return
+            }
+        }
+        self.uniforms.push(LiveDrawInputDef::new(modpath, cls, name, ty_expr));
     }
-    pub fn add_texture(&mut self, modpath: &str, name: &str, ty: &str) {
-        self.textures.push(LiveDrawInputDef::new(modpath, name, ty));
-    }
-    pub fn add_instance(&mut self, modpath: &str, name: &str, ty: &str) {
-        self.instances.push(LiveDrawInputDef::new(modpath, name, ty));
+
+    pub fn add_instance(&mut self, modpath: &str, cls:&str, name: &str, ty_expr: TyExpr) {
+        self.instances.push(LiveDrawInputDef::new(modpath, cls, name, ty_expr));
     }
 }
 
@@ -70,15 +76,14 @@ pub struct LiveDrawInputDef {
 }
 
 impl LiveDrawInputDef {
-    pub fn new(modpath: &str, name: &str, ty: &str) -> LiveDrawInputDef {
-        let ident = IdentPath::from_two(Ident::new("self"), Ident::new(name));
+    pub fn new(modpath: &str, cls:&str, name: &str, ty_expr: TyExpr) -> LiveDrawInputDef {
+        let ident = IdentPath::from_three(Ident::new("self"), Ident::new(cls), Ident::new(name));
         Self {
             qualified_ident_path: ident.qualify(modpath),
             ident: Ident::new(name),
-            ty_expr: TyExpr::from_rust_type_str(ty).expect(&format!("Rust type can't be mapped to shader {}", ty))
+            ty_expr
         }
     }
-    
 }
 
 #[derive(Clone, Debug, Default)]

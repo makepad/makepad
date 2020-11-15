@@ -6,59 +6,6 @@ pub enum DrawType {
     DrawText
 }
 
-#[derive(PartialEq)]
-enum ShaderType {
-    Float,
-    Vec2,
-    Vec3,
-    Vec4,
-    Mat2,
-    Mat3,
-    Mat4,
-    Texture2D
-}
-
-impl ShaderType {
-    fn parse(ts: &str) -> Result<ShaderType, TokenStream> {
-        match ts{
-            "f32" => Ok(ShaderType::Float),
-            "Vec2" => Ok(ShaderType::Vec2),
-            "Vec3" => Ok(ShaderType::Vec3),
-            "Vec4" => Ok(ShaderType::Vec4),
-            "Mat2" => Ok(ShaderType::Mat2),
-            "Mat3" => Ok(ShaderType::Mat3),
-            "Mat4" => Ok(ShaderType::Mat4),
-            "Texture2D" => Ok(ShaderType::Texture2D),
-            _ => Err(error("Unexpected type, only f32, Vec2, Vec3, Vec4, Mat2, Mat3, Mat4 supported"))
-        }
-    }
-
-    fn slots(self) -> usize {
-        match self {
-            ShaderType::Texture2D => 0,
-            ShaderType::Float => 1,
-            ShaderType::Vec2 => 2,
-            ShaderType::Vec3 => 3,
-            ShaderType::Vec4 => 4,
-            ShaderType::Mat2 => 4,
-            ShaderType::Mat3 => 9,
-            ShaderType::Mat4 => 16
-        }
-    }
-    
-    fn to_uniform_write(self) -> &'static str {
-        match self {
-            ShaderType::Texture2D => panic!("invalid"),
-            ShaderType::Float => "write_uniform_float",
-            ShaderType::Vec2 => "write_uniform_vec2",
-            ShaderType::Vec3 => "write_uniform_vec3",
-            ShaderType::Vec4 => "write_uniform_vec4",
-            ShaderType::Mat2 => "write_uniform_mat2",
-            ShaderType::Mat3 => "write_uniform_mat3",
-            ShaderType::Mat4 => "write_uniform_mat4",
-        }
-    }
-}
 
 pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream {
     let mut parser = TokenParser::new(input);
@@ -89,13 +36,11 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             with_shader.add("pub fn with_shader ( cx : & mut Cx , shader : Shader , slots : usize ) -> Self {");
             with_shader.add("Self {");
              
-            let mut total_slots = 0;
             let mut base_type = None;
             let mut default_shader = None;
             let mut uniforms = Vec::new();
             let mut instances = Vec::new();
-            let mut textures = Vec::new();
-            
+            let mut type_slot_concat = TokenBuilder::new();
             for field in &fields {
                 for attr in &field.attrs{
                     if attr.name == "default_shader"{
@@ -107,26 +52,17 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
                 }
                 else { // only accept uniforms
                     // spit out attrib
-                    let _st = match ShaderType::parse(&field.ty.to_string()){
-                        Err(e)=>return e,
-                        Ok(st)=>{
-                            if st == ShaderType::Texture2D{
-                                if !base_type.is_none(){
-                                    return error("Texture2D not allowed in instance position, please move before 'base'");
-                                }
-                                textures.push((field.name.clone(), field.ty.to_string()));
-                            }
-                            else{
-                                if base_type.is_none(){
-                                    uniforms.push((field.name.clone(), field.ty.to_string()));
-                                }
-                                else{
-                                    total_slots += st.slots();
-                                    instances.push((field.name.clone(), field.ty.to_string()));
-                                }
-                            }
+                    if base_type.is_none(){
+                        uniforms.push((field.name.clone(), field.ty.to_string()));
+                    }
+                    else{
+                        if !type_slot_concat.is_empty(){
+                            type_slot_concat.add("+");
                         }
-                    };
+                        type_slot_concat.stream(Some(field.ty.clone()));
+                        type_slot_concat.add(":: slots ( )");
+                        instances.push((field.name.clone(), field.ty.to_string()));
+                    }
                 }
             }
             let base_type = if let Some(bt) = base_type {bt} else {
@@ -141,13 +77,13 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             // ok we have fields and attribs
             tb.add("impl").ident(&struct_name).add("{");
             tb.add("pub fn new ( cx : & mut Cx , shader : Shader ) -> Self {");
-            tb.add("Self :: with_slot_count ( cx , default_shader_overload ! ( cx , shader ,").stream(default_shader).add(") , 0 )");
+            tb.add("Self :: with_slots ( cx , default_shader_overload ! ( cx , shader ,").stream(default_shader).add(") , 0 )");
             tb.add("}");
             
-            tb.add("pub fn with_slot_count ( cx : & mut Cx , shader : Shader , slots : usize ) -> Self {");
+            tb.add("pub fn with_slots ( cx : & mut Cx , shader : Shader , slots : usize ) -> Self {");
             tb.add("Self {");
             tb.add("base :").ident(&base_type.to_string());
-            tb.add(":: with_slot_count ( cx , shader , slots +").unsuf_usize(total_slots).add(") ,");
+            tb.add(":: with_slots ( cx , shader , slots +").stream(Some(type_slot_concat.end())).add(") ,");
             // now add initializers for all values
             for field in &fields {
                 if field.name != "base" {
@@ -162,20 +98,16 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
 
             for (name, ty) in &uniforms {
                 tb.add("def . add_uniform ( module_path ! ( ) , ");
+                tb.string(&base_type.to_string()).add(" , ");
                 tb.string(name).add(" , ");
-                tb.string(ty).add(" ) ;");
+                tb.ident(ty).add(" :: ty_expr ( ) ) ;");
             }
 
             for (name, ty) in &instances {
                 tb.add("def . add_instance ( module_path ! ( ) , ");
+                tb.string(&base_type.to_string()).add(" , ");
                 tb.string(name).add(" , ");
-                tb.string(ty).add(" ) ;");
-            }
-
-            for (name, ty) in &textures {
-                tb.add("def . add_texture ( module_path ! ( ) , ");
-                tb.string(name).add(" , ");
-                tb.string(ty).add(" ) ;");
+                tb.ident(ty).add(" :: ty_expr ( ) ) ;");
             }
 
             tb.add("return def ; }");
@@ -186,30 +118,30 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             tb.add("}");
             
             tb.add("pub fn write_uniforms ( & self , cx : & mut Cx ) {");
-            tb.add("if self . area ( ) . need_uniforms_now ( ) {");
-            for (name, ty) in &uniforms {
-                let st = ShaderType::parse(&ty).unwrap();
-                tb.add("self . area ( ) .").ident(st.to_uniform_write()).add("( cx , live_item_id ! (");
-                tb.add("self :: ").ident(&base_type.to_string()).add("::").ident(&name);
-                tb.add(") , self .").ident(&name).add(") ;");
+            tb.add("if self . area ( ) . is_first_instance ( ) { ");
+            for (name, _) in &uniforms {
+                tb.add("self .").ident(&name).add(". write_draw_input ( cx , self . area ( ) ,");
+                tb.add(" live_item_id ! ( self :: ").ident(&base_type.to_string()).add("::").ident(&name).add(")");
+                tb.add(",").string(&format!("self::{}::{}", base_type.to_string(), name)).add(") ;");
             }
             
             tb.add("} }");
-            
             
             match draw_type {
                 DrawType::DrawText => {
                     tb.add("pub fn area ( & self ) -> Area { self . base . area ( ) }");
                     tb.add("pub fn get_monospace_base ( & self , cx : & mut Cx ) -> Vec2 { self . base . get_monospace_base ( cx ) }");
                     tb.add("pub fn find_closest_offset ( & self , cx : & Cx , pos : Vec2 ) -> usize { self . base . find_closest_offset ( cx , pos ) }");
-                    tb.add("pub fn draw_text ( & mut self , cx : & mut Cx , text : & str ) -> bool { if self . base . draw_text ( cx , text ) { self . write_uniforms ( cx ) } else { false } }");
+                    tb.add("pub fn draw_text ( & mut self , cx : & mut Cx , text : & str ) { self . base . draw_text ( cx , text ) ; self . write_uniforms ( cx ) }");
                     tb.add("pub fn lock_aligned_text ( & mut self , cx : & mut Cx ) { self . base . lock_aligned_text ( cx ) }");
                     tb.add("pub fn lock_text ( & mut self , cx : & mut Cx ) { self . base . lock_text ( cx ) }");
                     tb.add("pub fn unlock_text ( & mut self , cx : & mut Cx ) { self . base . unlock_text ( cx ) ; self . write_uniforms ( cx ) }");
                     tb.add("pub fn add_text ( & mut self , cx : & mut Cx , geom_x : f32 , geom_y : f32 , text : & str ) { self . base . add_text ( cx , geom_x , geom_y , text ) }");
                     tb.add("pub fn add_text_chunk < F > (  & mut self , cx : & mut Cx , geom_x : f32 , geom_y : f32 , char_offset : usize , chunk : & [ char ] , mut char_callback : F )");
                     tb.add("where F : FnMut ( char , usize , f32 , f32 ) -> f32 { self . base . add_text_chunk ( cx , geom_x , geom_y , char_offset , chunk , char_callback ) }");
+                    
                 },
+                
                 DrawType::DrawQuad => {
                     // quad forward implementation
                     tb.add("pub fn area ( & self ) -> Area { self . base . area ( ) }");
@@ -226,8 +158,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             }
             
             tb.add("}");
-            tb.eprint();
-            return tb.end();
+            return tb.end(); 
         }
     }
     parser.unexpected()

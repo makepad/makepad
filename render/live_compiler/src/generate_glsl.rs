@@ -7,9 +7,8 @@ use {
         generate::{BackendWriter, BlockGenerator, ExprGenerator},
         ident::{Ident, IdentPath},
         livestyles::LiveStyles,
-        lit::TyLit,
         swizzle::Swizzle,
-        ty::Ty,
+        ty::{Ty,TyLit}
     },
     std::collections::HashSet,
     std::fmt::Write,
