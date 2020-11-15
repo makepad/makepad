@@ -12,7 +12,6 @@ pub enum AnimLastValue {
     Vec2(Vec2), 
     Vec3(Vec3),
     Vec4(Vec4),
-    Color(Color),
 }
 
 #[derive(Default, Clone)]
@@ -44,15 +43,6 @@ impl Animator {
             // we dont have a last float, find it in the tracks
             let bind_id = track.bind_id();
             match track {
-                Track::Color{keys,..} => {
-                    let val = if keys.len()>0 {keys.last().unwrap().1}else {Color::default()};
-                    if let Some((_name, value)) = self.last_values.iter_mut().find( | (name, _) | *name == bind_id) {
-                        *value = AnimLastValue::Color(val);
-                    }
-                    else {
-                        self.last_values.push((bind_id, AnimLastValue::Color(val)));
-                    }
-                },
                 Track::Vec4{keys,..} => {
                     let val = if keys.len()>0 {keys.last().unwrap().1}else {Vec4::default()};
                     if let Some((_name, value)) = self.last_values.iter_mut().find( | (name, _) | *name == bind_id) {
@@ -362,53 +352,6 @@ impl Animator {
         }
     }
     
-    pub fn calc_color(&mut self, cx: &mut Cx, live_item_id: LiveItemId, time: f64) -> Color {
-        if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(live_item_id) {
-                if let Track::Color{keys, cut_init, ease, ..} = &mut self.current.as_mut().unwrap().tracks[track_index] {
-                    let last = Self::_last_color(live_item_id, &self.last_values);
-                    let ret = Track::compute_track_color(time, keys, cut_init, last, ease);
-                    self.set_last_color(live_item_id, ret);
-                    return ret
-                }
-            }
-        }
-        
-        return Color::default();
-    }
-    
-    pub fn last_color(&self, _cx: &Cx, live_item_id: LiveItemId) -> Color {
-        if let Some((_, value)) = self.last_values.iter().find( | v | v.0 == live_item_id) {
-            if let AnimLastValue::Color(value) = value {
-                return *value
-            }
-        }
-        Color::default()
-    }
-    
-    pub fn _last_color(live_item_id: LiveItemId, last_values: &Vec<(LiveItemId, AnimLastValue)>) -> Color {
-        if let Some((_, value)) = last_values.iter().find( | v | v.0 == live_item_id) {
-            if let AnimLastValue::Color(value) = value {
-                return *value
-            }
-        }
-        
-        return Color::default()
-    }
-    
-    pub fn set_last_color(&mut self, live_item_id: LiveItemId, value: Color) {
-        Self::_set_last_color(live_item_id, value, &mut self.last_values);
-    }
-    
-    pub fn _set_last_color(live_item_id: LiveItemId, value: Color, last_values: &mut Vec<(LiveItemId, AnimLastValue)>) {
-        if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == live_item_id) {
-            *last = AnimLastValue::Color(value)
-        }
-        else {
-            last_values.push((live_item_id, AnimLastValue::Color(value)))
-        }
-    }
-    
     pub fn last_area(&mut self, _cx: &mut Cx, _area: Area, _time: f64) {
         
     }
@@ -420,13 +363,6 @@ impl Animator {
             for track_index in 0..self.current.as_ref().unwrap().tracks.len() {
                 //if let Some((time, track_index)) = self.fetch_calc_track(cx, ident, time) {
                 match &mut self.current.as_mut().unwrap().tracks[track_index] {
-                    Track::Color{bind_to, keys, cut_init, ease} => {
-                        let init = Self::_last_color(*bind_to, &self.last_values);
-                        let ret = Track::compute_track_color(time, keys, cut_init, init, ease);
-                        Self::_set_last_color(*bind_to, ret, &mut self.last_values);
-                        //(*bind_to).
-                        //area.write_color(cx, *bind_to, ret);
-                    },
                     Track::Vec4{bind_to, keys, cut_init, ease} => {
                         let init = Self::_last_vec4(*bind_to, &self.last_values);
                         let ret = Track::compute_track_vec4(time, keys, cut_init, init, ease);

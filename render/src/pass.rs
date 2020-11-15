@@ -79,7 +79,7 @@ impl Pass {
         cxpass.pass_size = pass_size;
     }
     
-    pub fn set_window_clear_color(&mut self, cx: &mut Cx, clear_color: Color) {
+    pub fn set_window_clear_color(&mut self, cx: &mut Cx, clear_color: Vec4) {
         let pass_id = self.pass_id.expect("Please call set_window_clear_color after begin_pass");
         let cxpass = &mut cx.passes[pass_id];
         cxpass.clear_color = clear_color;
@@ -134,13 +134,13 @@ impl Pass {
 
 #[derive(Clone)]
 pub enum ClearColor {
-    InitWith(Color),
-    ClearWith(Color)
+    InitWith(Vec4),
+    ClearWith(Vec4)
 }
 
 impl Default for ClearColor {
     fn default() -> Self {
-        ClearColor::ClearWith(Color::default())
+        ClearColor::ClearWith(Vec4::default())
     }
 }
 
@@ -188,7 +188,7 @@ pub struct CxPass {
     pub depth_texture: Option<u32>,
     pub clear_depth: ClearDepth,
     pub depth_init: f64,
-    pub clear_color: Color,
+    pub clear_color: Vec4,
     pub override_dpi_factor: Option<f32>,
     pub main_view_id: Option<usize>,
     pub dep_of: CxPassDepOf,
@@ -210,7 +210,7 @@ impl Default for CxPass {
             depth_texture: None,
             override_dpi_factor: None,
             clear_depth: ClearDepth::ClearWith(1.0),
-            clear_color: Color::default(),
+            clear_color: Vec4::default(),
             depth_init: 1.0,
             main_view_id: None,
             dep_of: CxPassDepOf::None,

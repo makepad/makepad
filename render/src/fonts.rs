@@ -311,10 +311,10 @@ impl CxAfterDraw {
             self.atlas_pass.set_size(cx, cx.fonts_atlas.texture_size);
             let clear = if cx.fonts_atlas.clear_buffer {
                 cx.fonts_atlas.clear_buffer = false;
-                ClearColor::ClearWith(Color::default())
+                ClearColor::ClearWith(Vec4::default())
             }
             else {
-                ClearColor::InitWith(Color::default())
+                ClearColor::InitWith(Vec4::default())
             };
             self.atlas_pass.add_color_texture(cx, self.atlas_texture, clear);
 

@@ -408,10 +408,10 @@ impl Event {
             },
             Event::FingerScroll(fe) => {
                 let rect = area.get_rect(&cx);
-                if rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
+                if rect.contains_with_margin(fe.abs, &opt.margin) {
                     //fe.handled = true;
                     return Event::FingerScroll(FingerScrollEvent {
-                        rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
+                        rel: fe.abs - rect.pos,
                         rect: rect,
                         ..fe.clone()
                     })
@@ -428,7 +428,7 @@ impl Event {
                             break;
                         }
                     }
-                    if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
+                    if !fe.handled && rect.contains_with_margin(fe.abs, &opt.margin) {
                         fe.handled = true;
                         if let HoverState::Out = fe.hover_state {
                             //    cx.finger_over_last_area = Area::Empty;
@@ -455,7 +455,7 @@ impl Event {
                     }
                 }
                 else {
-                    if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
+                    if !fe.handled && rect.contains_with_margin(fe.abs, &opt.margin) {
                         let mut any_down = false;
                         for finger in &cx.fingers {
                             if finger.captured == area {
@@ -487,7 +487,7 @@ impl Event {
                         rel: area.abs_to_rel(cx, fe.abs),
                         rel_start: rel_start,
                         rect: rect,
-                        is_over: rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin),
+                        is_over: rect.contains_with_margin(fe.abs, &opt.margin),
                         ..fe.clone()
                     })
                 }
@@ -495,7 +495,7 @@ impl Event {
             Event::FingerDown(fe) => {
                 if !fe.handled {
                     let rect = area.get_rect(&cx);
-                    if rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
+                    if rect.contains_with_margin(fe.abs, &opt.margin) {
                         // scan if any of the fingers already captured this area
                         if !opt.use_multi_touch {
                             for finger in &cx.fingers {
@@ -524,7 +524,7 @@ impl Event {
                     let rel_start = cx.fingers[fe.digit].down_rel_start;
                     let rect = area.get_rect(&cx);
                     return Event::FingerUp(FingerUpEvent {
-                        is_over: rect.contains(fe.abs.x, fe.abs.y),
+                        is_over: rect.contains(fe.abs),
                         abs_start: abs_start,
                         rel_start: rel_start,
                         rel: area.abs_to_rel(cx, fe.abs),

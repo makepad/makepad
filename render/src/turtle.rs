@@ -46,7 +46,7 @@ impl Cx {
         // abs origin overrides the computation of width/height to use the parent abs_origin
         let (width, min_width) = self.eval_width(&layout.walk.width, layout.walk.margin, is_abs_origin, abs_size.x);
         let (height, min_height) = self.eval_height(&layout.walk.height, layout.walk.margin, is_abs_origin, abs_size.y);
-
+        
         let turtle = Turtle {
             align_list_x: self.align_list.len(),
             align_list_y: self.align_list.len(),
@@ -116,7 +116,7 @@ impl Cx {
             let abs_origin = if let Some(abs_origin) = old.layout.abs_origin {abs_origin} else {Vec2::default()};
             let w = if let Width::Fix(vw) = w {vw} else {0.};
             let h = if let Height::Fix(vh) = h {vh} else {0.};
-            return Rect {x: abs_origin.x, y: abs_origin.y, w: w, h: h};
+            return Rect {pos: abs_origin, size: vec2(w, h)};
         }
         
         return self.walk_turtle_with_old(Walk {width: w, height: h, margin}, Some(&old))
@@ -130,8 +130,8 @@ impl Cx {
     pub fn walk_turtle_with_old(&mut self, walk: Walk, old_turtle: Option<&Turtle>) -> Rect {
         let mut align_dx = 0.0;
         let mut align_dy = 0.0;
-        let (w,_mw) = self.eval_width(&walk.width, walk.margin, false, 0.0);
-        let (h,_mh) = self.eval_height(&walk.height, walk.margin, false, 0.0);
+        let (w, _mw) = self.eval_width(&walk.width, walk.margin, false, 0.0);
+        let (h, _mh) = self.eval_height(&walk.height, walk.margin, false, 0.0);
         
         let ret = if let Some(turtle) = self.turtles.last_mut() {
             let (x, y) = match turtle.layout.direction {
@@ -139,7 +139,7 @@ impl Cx {
                     match turtle.layout.line_wrap {
                         LineWrap::NewLine => {
                             if (turtle.pos.x + walk.margin.l + w) >
-                            (turtle.origin.x + turtle.width - turtle.layout.padding.r)+ 0.01 {
+                            (turtle.origin.x + turtle.width - turtle.layout.padding.r) + 0.01 {
                                 // what is the move delta.
                                 let old_x = turtle.pos.x;
                                 let old_y = turtle.pos.y;
@@ -248,20 +248,10 @@ impl Cx {
             }
             // we could directly h or v align this thing
             
-            Rect {
-                x: x,
-                y: y,
-                w: w,
-                h: h
-            }
+            Rect {pos: vec2(x, y), size: vec2(w, h)}
         }
         else {
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                w: w,
-                h: h
-            }
+            Rect {pos: vec2(0.0, 0.0), size: vec2(w, h)}
         };
         
         if align_dx != 0.0 {
@@ -311,12 +301,7 @@ impl Cx {
                 None
             }
             else {
-                Some(Rect {
-                    x: x,
-                    y: y,
-                    w: w,
-                    h: h
-                })
+                Some(Rect {pos:vec2(x,y),size:vec2(w,h)})
             }
         }
         else {
@@ -410,10 +395,8 @@ impl Cx {
     pub fn get_turtle_rect(&self) -> Rect {
         if let Some(turtle) = self.turtles.last() {
             return Rect {
-                x: turtle.origin.x,
-                y: turtle.origin.y,
-                w: turtle.width,
-                h: turtle.height
+                pos: turtle.origin,
+                size: vec2(turtle.width, turtle.height)
             }
         };
         return Rect::default();
@@ -494,13 +477,7 @@ impl Cx {
     
     pub fn visible_in_turtle(&self, geom: Rect, scroll: Vec2) -> bool {
         if let Some(turtle) = self.turtles.last() {
-            let view = Rect {
-                x: scroll.x, //- margin.l,
-                y: scroll.y, // - margin.t,
-                w: turtle.width, // + margin.l + margin.r,
-                h: turtle.height, // + margin.t + margin.b
-            };
-            
+            let view = Rect {pos: scroll, size: vec2(turtle.width, turtle.height)};
             return view.intersects(geom)
         }
         else {
@@ -567,7 +544,7 @@ impl Cx {
     }
     
     // used for a<b>c layouts horizontally
-    pub fn change_turtle_align_x(&mut self, fx: f32, width_used:bool) {
+    pub fn change_turtle_align_x(&mut self, fx: f32, width_used: bool) {
         let (dx, align_origin_x) = if let Some(turtle) = self.turtles.last_mut() {
             (Self::compute_align_turtle_x(&turtle), turtle.align_list_x)
         }
@@ -581,7 +558,7 @@ impl Cx {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.align_list_x = self.align_list.len();
             turtle.layout.align.fx = fx;
-            turtle.width_used = if width_used{turtle.bound_right_bottom.x - turtle.origin.x}else{0.0};
+            turtle.width_used = if width_used {turtle.bound_right_bottom.x - turtle.origin.x}else {0.0};
             turtle.bound_right_bottom.x = std::f32::NEG_INFINITY;
         }
     }
@@ -595,9 +572,9 @@ impl Cx {
     pub fn change_turtle_align_y_cab(&mut self, fx: f32) {
         self.change_turtle_align_y(fx, true);
     }
-
+    
     // used for a<b>c layouts vertically
-    pub fn change_turtle_align_y(&mut self, fy: f32, height_used:bool) {
+    pub fn change_turtle_align_y(&mut self, fy: f32, height_used: bool) {
         let (dy, align_origin_y) = if let Some(turtle) = self.turtles.last_mut() {
             (Self::compute_align_turtle_y(&turtle), turtle.align_list_y)
         }
@@ -611,7 +588,7 @@ impl Cx {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.align_list_y = self.align_list.len();
             turtle.layout.align.fy = fy;
-            turtle.height_used = if height_used{turtle.bound_right_bottom.y - turtle.origin.y}else{0.0};
+            turtle.height_used = if height_used {turtle.bound_right_bottom.y - turtle.origin.y}else {0.0};
             turtle.bound_right_bottom.y = std::f32::NEG_INFINITY;
         }
     }
@@ -762,31 +739,31 @@ impl Cx {
     }
     
     
-    pub fn eval_width(&self, width: &Width, margin: Margin, abs: bool, abs_pos: f32) -> (f32,f32) {
+    pub fn eval_width(&self, width: &Width, margin: Margin, abs: bool, abs_pos: f32) -> (f32, f32) {
         match width {
-            Width::Compute => (std::f32::NAN,0.),
-            Width::ComputeFill => (std::f32::NAN,self._get_width_left(abs, abs_pos) - (margin.l + margin.r)),
-            Width::Fix(v) => (max_zero_keep_nan(*v),0.),
-            Width::Fill => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - (margin.l + margin.r)),0.),
-            Width::FillPad(p) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - p - (margin.l + margin.r)),0.),
-            Width::FillScale(s) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) * s - (margin.l + margin.r)),0.),
-            Width::FillScalePad(s, p) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) * s - p - (margin.l + margin.r)),0.),
-            Width::Scale(s) => (max_zero_keep_nan(self._get_width_total(abs, abs_pos) * s - (margin.l + margin.r)),0.),
-            Width::ScalePad(s, p) => (max_zero_keep_nan(self._get_width_total(abs, abs_pos) * s - p - (margin.l + margin.r)),0.),
+            Width::Compute => (std::f32::NAN, 0.),
+            Width::ComputeFill => (std::f32::NAN, self._get_width_left(abs, abs_pos) - (margin.l + margin.r)),
+            Width::Fix(v) => (max_zero_keep_nan(*v), 0.),
+            Width::Fill => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - (margin.l + margin.r)), 0.),
+            Width::FillPad(p) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - p - (margin.l + margin.r)), 0.),
+            Width::FillScale(s) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) * s - (margin.l + margin.r)), 0.),
+            Width::FillScalePad(s, p) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) * s - p - (margin.l + margin.r)), 0.),
+            Width::Scale(s) => (max_zero_keep_nan(self._get_width_total(abs, abs_pos) * s - (margin.l + margin.r)), 0.),
+            Width::ScalePad(s, p) => (max_zero_keep_nan(self._get_width_total(abs, abs_pos) * s - p - (margin.l + margin.r)), 0.),
         }
     }
-
-    pub fn eval_height(&self, height: &Height, margin: Margin, abs: bool, abs_pos: f32) -> (f32,f32) {
+    
+    pub fn eval_height(&self, height: &Height, margin: Margin, abs: bool, abs_pos: f32) -> (f32, f32) {
         match height {
-            Height::Compute => (std::f32::NAN,0.),
-            Height::ComputeFill => (std::f32::NAN,self._get_height_left(abs, abs_pos) - (margin.t + margin.b)),
-            Height::Fix(v) => (max_zero_keep_nan(*v),0.),
-            Height::Fill => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - (margin.t + margin.b)),0.),
-            Height::FillPad(p) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - p - (margin.t + margin.b)),0.),
-            Height::FillScale(s) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) * s - (margin.t + margin.b)),0.),
-            Height::FillScalePad(s, p) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) * s - p - (margin.t + margin.b)),0.),
-            Height::Scale(s) => (max_zero_keep_nan(self._get_height_total(abs, abs_pos) * s - (margin.t + margin.b)),0.),
-            Height::ScalePad(s, p) => (max_zero_keep_nan(self._get_height_total(abs, abs_pos) * s - p - (margin.t + margin.b)),0.),
+            Height::Compute => (std::f32::NAN, 0.),
+            Height::ComputeFill => (std::f32::NAN, self._get_height_left(abs, abs_pos) - (margin.t + margin.b)),
+            Height::Fix(v) => (max_zero_keep_nan(*v), 0.),
+            Height::Fill => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - (margin.t + margin.b)), 0.),
+            Height::FillPad(p) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - p - (margin.t + margin.b)), 0.),
+            Height::FillScale(s) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) * s - (margin.t + margin.b)), 0.),
+            Height::FillScalePad(s, p) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) * s - p - (margin.t + margin.b)), 0.),
+            Height::Scale(s) => (max_zero_keep_nan(self._get_height_total(abs, abs_pos) * s - (margin.t + margin.b)), 0.),
+            Height::ScalePad(s, p) => (max_zero_keep_nan(self._get_height_total(abs, abs_pos) * s - p - (margin.t + margin.b)), 0.),
         }
     }
 }

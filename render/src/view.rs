@@ -174,8 +174,8 @@ impl View {
         if !self.always_redraw && cx.views[view_id].draw_calls_len != 0 && !cx.view_will_redraw(view_id) {
             
             // walk the turtle because we aren't drawing
-            let w = Width::Fix(cx.views[view_id].rect.w);
-            let h = Height::Fix(cx.views[view_id].rect.h);
+            let w = Width::Fix(cx.views[view_id].rect.size.x);
+            let h = Height::Fix(cx.views[view_id].rect.size.y);
             cx.walk_turtle(Walk {width: w, height: h, margin: override_layout.walk.margin});
             return Err(());
         }
@@ -681,7 +681,7 @@ impl DrawCall {
         y1 = self.draw_uniforms.draw_clip_y1.max(y1).min(self.draw_uniforms.draw_clip_y2);
         x2 = self.draw_uniforms.draw_clip_x1.max(x2).min(self.draw_uniforms.draw_clip_x2);
         y2 = self.draw_uniforms.draw_clip_y1.max(y2).min(self.draw_uniforms.draw_clip_y2);
-        return Rect {x: x1, y: y1, w: x2 - x1, h: y2 - y1};
+        return Rect {pos: vec2(x1, y1), size:vec2(x2 - x1, y2 - y1)};
     }
 }
 
@@ -733,28 +733,24 @@ impl CxView {
     
     pub fn get_scrolled_rect(&self) -> Rect {
         Rect {
-            x: self.rect.x + self.parent_scroll.x,
-            y: self.rect.y + self.parent_scroll.y,
-            w: self.rect.w,
-            h: self.rect.h,
+            pos: self.rect.pos + self.parent_scroll,
+            size: self.rect.size
         }
     }
     
     pub fn get_inverse_scrolled_rect(&self) -> Rect {
         Rect {
-            x: self.rect.x - self.parent_scroll.x,
-            y: self.rect.y - self.parent_scroll.y,
-            w: self.rect.w,
-            h: self.rect.h,
+            pos: self.rect.pos - self.parent_scroll,
+            size: self.rect.size
         }
     }
     
     pub fn intersect_clip(&self, clip: (Vec2, Vec2)) -> (Vec2, Vec2) {
         if self.clipped {
-            let min_x = self.rect.x - self.parent_scroll.x;
-            let min_y = self.rect.y - self.parent_scroll.y;
-            let max_x = self.rect.x + self.rect.w - self.parent_scroll.x;
-            let max_y = self.rect.y + self.rect.h - self.parent_scroll.y;
+            let min_x = self.rect.pos.x - self.parent_scroll.x;
+            let min_y = self.rect.pos.y - self.parent_scroll.y;
+            let max_x = self.rect.pos.x + self.rect.size.x - self.parent_scroll.x;
+            let max_y = self.rect.pos.y + self.rect.size.y - self.parent_scroll.y;
             
             (Vec2 {
                 x: min_x.max(clip.0.x),
