@@ -157,10 +157,8 @@ impl Area{
             Area::View(view_area)=>{
                 let cxview = &cx.views[view_area.view_id];
                 Rect{
-                    x:cxview.rect.x - cxview.parent_scroll.x,
-                    y:cxview.rect.y - cxview.parent_scroll.y,
-                    w:cxview.rect.w,
-                    h:cxview.rect.h
+                    pos: cxview.rect.pos - cxview.parent_scroll,
+                    size: cxview.rect.size
                 }
             },
             _=>Rect::default(),
@@ -195,9 +193,9 @@ impl Area{
             },
             Area::View(view_area)=>{
                 let cxview = &cx.views[view_area.view_id];
-                return Vec2{
-                    x:abs.x - cxview.rect.x + cxview.parent_scroll.x + cxview.unsnapped_scroll.x,
-                    y:abs.y - cxview.rect.y - cxview.parent_scroll.y + cxview.unsnapped_scroll.y
+                Vec2{
+                    x:abs.x - cxview.rect.pos.x + cxview.parent_scroll.x + cxview.unsnapped_scroll.x,
+                    y:abs.y - cxview.rect.pos.y - cxview.parent_scroll.y + cxview.unsnapped_scroll.y
                 }
             },
             _=>abs,
@@ -216,16 +214,16 @@ impl Area{
                 let sh = &cx.shaders[draw_call.shader.shader_id];        // ok now we have to patch x/y/w/h into it
                 
                 if let Some(ix) = sh.mapping.rect_instance_props.x{
-                    draw_call.instances[inst.instance_offset + ix] = rect.x;
+                    draw_call.instances[inst.instance_offset + ix] = rect.pos.x;
                 }
                 if let Some(iy) = sh.mapping.rect_instance_props.y{
-                    draw_call.instances[inst.instance_offset + iy] = rect.y;
+                    draw_call.instances[inst.instance_offset + iy] = rect.pos.y;
                 }
                 if let Some(iw) = sh.mapping.rect_instance_props.w{
-                    draw_call.instances[inst.instance_offset + iw] = rect.w;
+                    draw_call.instances[inst.instance_offset + iw] = rect.size.x;
                 }
                 if let Some(ih) = sh.mapping.rect_instance_props.h{
-                    draw_call.instances[inst.instance_offset + ih] = rect.h;
+                    draw_call.instances[inst.instance_offset + ih] = rect.size.y;
                 }
             },
             Area::View(view_area)=>{

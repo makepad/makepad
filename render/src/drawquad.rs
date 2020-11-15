@@ -114,21 +114,21 @@ impl DrawQuad {
     
     pub fn draw_quad(&mut self, cx: &mut Cx, walk: Walk) {
         let rect = cx.walk_turtle(walk);
-        self.rect_pos = vec2(rect.x, rect.y);
-        self.rect_size = vec2(rect.w, rect.h);
+        self.rect_pos = rect.pos;
+        self.rect_size = rect.size;
         self.area = cx.add_aligned_instance(self.shader, self.as_slice());
     }
     
     pub fn draw_quad_rel(&mut self, cx: &mut Cx, rect: Rect) {
         let rect = rect.translate(cx.get_turtle_origin());
-        self.rect_pos = vec2(rect.x, rect.y);
-        self.rect_size = vec2(rect.w, rect.h);
+        self.rect_pos = rect.pos;
+        self.rect_size = rect.size;
         self.area = cx.add_aligned_instance(self.shader, self.as_slice())
     }
     
     pub fn draw_quad_abs(&mut self, cx: &mut Cx, rect: Rect) {
-        self.rect_pos = vec2(rect.x, rect.y);
-        self.rect_size = vec2(rect.w, rect.h);
+        self.rect_pos = rect.pos;
+        self.rect_size = rect.size;
         self.area = cx.add_instance(self.shader, self.as_slice());
     }
     
@@ -151,8 +151,8 @@ impl DrawQuad {
     }
     
     pub fn add_quad(&mut self, rect: Rect) {
-        self.rect_pos = vec2(rect.x, rect.y);
-        self.rect_size = vec2(rect.w, rect.h);
+        self.rect_pos = rect.pos;
+        self.rect_size = rect.size;
         unsafe {
             if let Some(li) = &mut self.lock {
                 li.instances.extend_from_slice(std::slice::from_raw_parts(&self.rect_pos as *const _ as *const f32, self.slots));

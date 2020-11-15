@@ -4,7 +4,7 @@ use crate::lit::{Lit};
 use crate::ty::TyLit;
 use crate::span::{Span,LiveBodyId};
 use crate::token::{Token, TokenWithSpan};
-use crate::colors::Color;
+use crate::math::Vec4;
 
 #[derive(Clone, Debug)]
 pub struct Lex<C> {
@@ -91,8 +91,8 @@ where
                 while let Some(ch) = self.read_char_if(|ch| ch.is_ascii_hexdigit()) {
                     hex.push(ch as u8)
                 }
-                if let Ok(color) = Color::parse_hex(&hex){
-                    Token::Lit(Lit::Color(color))
+                if let Ok(color) = Vec4::from_hex_bytes(&hex){
+                    Token::Lit(Lit::Vec4(color))
                 }
                 else{
                     return Err(span.error(self, "Cannot parse color".into()));

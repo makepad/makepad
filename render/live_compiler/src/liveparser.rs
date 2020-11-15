@@ -7,7 +7,6 @@ use crate::livetypes::*;
 use crate::detok::*;
 use std::collections::HashSet;
 use crate::livestyles::{LiveTokensType, LiveStyle, LiveTokens};
-use crate::colors::Color;
 use crate::math::*;
 
 impl<'a> DeTokParserImpl<'a> {
@@ -55,19 +54,6 @@ impl<'a> DeTokParserImpl<'a> {
                 return Vec4::de_tok(self)
             },
             _ => return Err(self.error(format!("Unexpected {} while parsing vec4", self.peek_token())))
-        }
-    }
-    
-    pub fn parse_color(&mut self) -> Result<Color, LiveError> {
-        // check what we are up against.
-        match self.peek_token() {
-            Token::Lit(Lit::Color(v)) => {
-                return Ok(v);
-            }
-            Token::Ident(ident) if ident == Ident::new("Color") => {
-                return Color::de_tok(self)
-            },
-            _ => return Err(self.error(format!("Unexpected {} while parsing color", self.peek_token())))
         }
     }
     
@@ -287,18 +273,18 @@ impl<'a> DeTokParserImpl<'a> {
                     });
                     self.expect_token(Token::Semi) ?;
                 }
-                Token::Lit(Lit::Color(_)) => {
+                Token::Lit(Lit::Vec4(_)) => {
                     self.clear_token_clone();
                     self.skip_token();
                     //let value = f32::de_tok(self) ?;
                     let tokens = self.get_token_clone();
                     self.live_styles.update_deps(live_item_id, HashSet::new());
-                    self.live_styles.add_changed_deps(live_item_id, &tokens, LiveTokensType::Color);
+                    self.live_styles.add_changed_deps(live_item_id, &tokens, LiveTokensType::Vec4);
                     self.live_styles.tokens.insert(live_item_id, LiveTokens {
                         ident_path,
                         qualified_ident_path,
                         tokens,
-                        live_tokens_type: LiveTokensType::Color
+                        live_tokens_type: LiveTokensType::Vec4
                     });
                     self.expect_token(Token::Semi) ?;
                 }

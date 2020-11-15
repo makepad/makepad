@@ -887,15 +887,6 @@ impl Cx {
     }
 }
 
-// palette types
-
-
-#[derive(Clone)]
-pub enum StyleValue {
-    Color(Color),
-    Font(String),
-    Size(f64)
-}
 
 #[macro_export]
 macro_rules!main_app {
