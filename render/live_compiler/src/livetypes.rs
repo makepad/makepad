@@ -29,7 +29,7 @@ pub struct Geometry {
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct Texture {
-    pub texture_id: usize,
+    pub texture_id: u32,
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]

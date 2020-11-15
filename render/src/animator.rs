@@ -424,31 +424,37 @@ impl Animator {
                         let init = Self::_last_color(*bind_to, &self.last_values);
                         let ret = Track::compute_track_color(time, keys, cut_init, init, ease);
                         Self::_set_last_color(*bind_to, ret, &mut self.last_values);
-                        area.write_color(cx, *bind_to, ret);
+                        //(*bind_to).
+                        //area.write_color(cx, *bind_to, ret);
                     },
                     Track::Vec4{bind_to, keys, cut_init, ease} => {
                         let init = Self::_last_vec4(*bind_to, &self.last_values);
                         let ret = Track::compute_track_vec4(time, keys, cut_init, init, ease);
                         Self::_set_last_vec4(*bind_to, ret, &mut self.last_values);
-                        area.write_vec4(cx, *bind_to, ret);
+                        ret.write_draw_input(cx, area, *bind_to, "animator");
+                        //ret.write_draw_input(cx, area, *bind_to, )
+                        //area.write_vec4(cx, *bind_to, ret);
                     },
                     Track::Vec3{bind_to, keys, cut_init, ease} => {
                         let init = Self::_last_vec3(*bind_to, &self.last_values);
                         let ret = Track::compute_track_vec3(time, keys, cut_init, init, ease);
                         Self::_set_last_vec3(*bind_to, ret, &mut self.last_values);
-                        area.write_vec3(cx, *bind_to, ret);
+                        ret.write_draw_input(cx, area, *bind_to, "animator");
+                       // area.write_vec3(cx, *bind_to, ret);
                     },
                     Track::Vec2{bind_to, keys, cut_init, ease} => {
                         let init = Self::_last_vec2(*bind_to, &self.last_values);
                         let ret = Track::compute_track_vec2(time, keys, cut_init, init, ease);
                         Self::_set_last_vec2(*bind_to, ret, &mut self.last_values);
-                        area.write_vec2(cx, *bind_to, ret);
+                        ret.write_draw_input(cx, area, *bind_to, "animator");
+                       // area.write_vec2(cx, *bind_to, ret);
                     },
                     Track::Float{bind_to, keys, cut_init, ease} => {
                         let init = Self::_last_float(*bind_to, &self.last_values);
                         let ret = Track::compute_track_float(time, keys, cut_init, init, ease);
                         Self::_set_last_float(*bind_to, ret, &mut self.last_values);
-                        area.write_float(cx, *bind_to, ret);
+                        ret.write_draw_input(cx, area, *bind_to, "animator");
+                      //  area.write_float(cx, *bind_to, ret);
                     }
                 };
             }

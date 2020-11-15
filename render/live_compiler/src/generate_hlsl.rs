@@ -7,8 +7,7 @@ use {
         generate::{BackendWriter, BlockGenerator, ExprGenerator},
         ident::{Ident,IdentPath},
         livestyles::LiveStyles,
-        lit::TyLit,
-        ty::Ty,
+        ty::{Ty,TyLit}
     },
     std::{
         cell::{Cell},

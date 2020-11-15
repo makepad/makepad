@@ -28,6 +28,10 @@ impl TokenBuilder {
         }
     }
     
+    pub fn is_empty(&self) -> bool{
+        !self.groups.len() > 1 || self.groups[0].1.is_empty()
+    }
+    
     pub fn end(mut self) -> TokenStream {
         if self.groups.len() != 1 {
             panic!("Groups not empty, you missed a pop_group")

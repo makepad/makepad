@@ -214,7 +214,7 @@ impl Cx {
                 is_initial = true;
             }
             else {
-                let cxtexture = &mut self.textures[color_texture.texture_id];
+                let cxtexture = &mut self.textures[color_texture.texture_id as usize];
                 is_initial = metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, false);
                 
                 if let Some(mtl_texture) = cxtexture.platform.mtl_texture {
@@ -262,7 +262,7 @@ impl Cx {
         }
         // attach depth texture
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
-            let cxtexture = &mut self.textures[depth_texture_id];
+            let cxtexture = &mut self.textures[depth_texture_id as usize];
             let is_initial = metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, true);
             
             let depth_attachment: id = unsafe {msg_send![render_pass_descriptor, depthAttachment]};

@@ -153,7 +153,7 @@ pub enum ClearDepth {
 #[derive(Default, Clone)]
 pub struct CxPassColorTexture {
     pub clear_color: ClearColor,
-    pub texture_id: usize
+    pub texture_id: u32
 }
 
 #[derive(Default, Clone)]
@@ -185,7 +185,7 @@ pub struct CxPass {
     pub debug: bool,
     pub matrix_mode: PassMatrixMode,
     pub color_textures: Vec<CxPassColorTexture>,
-    pub depth_texture: Option<usize>,
+    pub depth_texture: Option<u32>,
     pub clear_depth: ClearDepth,
     pub depth_init: f64,
     pub clear_color: Color,

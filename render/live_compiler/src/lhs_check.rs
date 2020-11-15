@@ -4,7 +4,8 @@ use {
         env::{Env, Sym, VarKind},
         error::LiveError,
         ident::{Ident, IdentPath},
-        lit::{Lit, TyLit},
+        lit::Lit,
+        ty::TyLit,
         span::Span,
         livetypes::LiveItemId
     },

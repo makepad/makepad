@@ -40,6 +40,139 @@ impl Cx {
     }
 }
 
+pub trait DrawInputType {
+    fn slots() -> usize;
+    fn ty_expr() -> TyExpr;
+    // this writes a value to the area (wether texture, uniform or instance)
+    fn write_draw_input(self, cx: &mut Cx, area: Area, live_item_id: LiveItemId, name: &str);
+}
+
+impl DrawInputType for f32 {
+    fn slots() -> usize {1}
+    
+    fn ty_expr() -> TyExpr {
+        TyLit::Float.to_ty_expr()
+    }
+    
+    fn write_draw_input(self, cx: &mut Cx, area: Area, live_item_id: LiveItemId, name: &str) {
+        if let Some(wr) = area.get_write_ref(cx, live_item_id, Ty::Float, name){
+            for i in 0..wr.repeat{
+                wr.buffer[i * wr.stride] = self;
+            }
+        }
+    }
+    
+}
+
+impl DrawInputType for Vec2 {
+    fn slots() -> usize {2}
+    
+    fn ty_expr() -> TyExpr {
+        TyLit::Vec2.to_ty_expr()
+    }
+    
+    fn write_draw_input(self, cx: &mut Cx, area: Area, live_item_id: LiveItemId, name: &str) {
+        if let Some(wr) = area.get_write_ref(cx, live_item_id, Ty::Vec2, name){
+            for i in 0..wr.repeat{
+                wr.buffer[i * wr.stride + 0] = self.x;
+                wr.buffer[i * wr.stride + 1] = self.y;
+            }
+        }
+    }
+}
+
+impl DrawInputType for Vec3 {
+    fn slots() -> usize {3}
+    
+    fn ty_expr() -> TyExpr {
+        TyLit::Vec3.to_ty_expr()
+    }
+    
+    fn write_draw_input(self, cx: &mut Cx, area: Area, live_item_id: LiveItemId, name: &str) {
+        if let Some(wr) = area.get_write_ref(cx, live_item_id, Ty::Vec3, name){
+            for i in 0..wr.repeat{
+                wr.buffer[i * wr.stride + 0] = self.x;
+                wr.buffer[i * wr.stride + 1] = self.y;
+                wr.buffer[i * wr.stride + 2] = self.z;
+            }
+        }
+    }
+}
+
+impl DrawInputType for Vec4 {
+    fn slots() -> usize {4}
+    
+    fn ty_expr() -> TyExpr {
+        TyLit::Vec4.to_ty_expr()
+    }
+    
+    fn write_draw_input(self, cx: &mut Cx, area: Area, live_item_id: LiveItemId, name: &str) {
+        if let Some(wr) = area.get_write_ref(cx, live_item_id, Ty::Vec4, name){
+            for i in 0..wr.repeat{
+                wr.buffer[i * wr.stride + 0] = self.x;
+                wr.buffer[i * wr.stride + 1] = self.y;
+                wr.buffer[i * wr.stride + 2] = self.z;
+                wr.buffer[i * wr.stride + 3] = self.w;
+            }
+        }
+    }
+}
+
+impl DrawInputType for Mat4 {
+    fn slots() -> usize {16}
+    
+    fn ty_expr() -> TyExpr {
+        TyLit::Mat4.to_ty_expr()
+    }
+    
+    // find uniform, then find instance prop
+    fn write_draw_input(self, cx: &mut Cx, area: Area, live_item_id: LiveItemId, name: &str) {
+        if let Some(wr) = area.get_write_ref(cx, live_item_id, Ty::Vec4, name){
+            for i in 0..wr.repeat{
+                for j in 0..16{
+                    wr.buffer[i * wr.stride + j] = self.v[j];
+                }
+            }
+        }
+    }
+}
+
+impl DrawInputType for Texture2D {
+    fn slots() -> usize {0}
+    
+    fn ty_expr() -> TyExpr {
+        TyLit::Texture2D.to_ty_expr()
+    }
+    
+    fn write_draw_input(self, cx: &mut Cx, area: Area, live_item_id: LiveItemId, name: &str) {
+        if let Some(u) = self.0{
+            area.write_texture_2d_id(cx, live_item_id, name, u as usize)
+        }
+    }
+}
+
+#[macro_export]
+macro_rules!write_draw_input {
+    ( $ cx: ident, $ area: expr, $ path: path, $ value: expr) => {
+        ($value).write_draw_input( $ cx, $ area, live_str_to_id(module_path!(), stringify!( $ path)), stringify!( $ path))
+    }
+}
+
+#[macro_export]
+macro_rules!draw_input_uniform {
+    ( $ def: ident, $ path: path, $ ty: ty) => {
+        ($value).write_draw_input( $ cx, $ area, live_str_to_id(module_path!(), stringify!( $ path)), stringify!( $ path))
+    }
+}
+
+#[macro_export]
+macro_rules!draw_input_instance {
+    ( $ cx: ident, $ area: expr, $ path: path, $ value: expr) => {
+        ($value).write_draw_input( $ cx, $ area, live_str_to_id(module_path!(), stringify!( $ path)), stringify!( $ path))
+    }
+}
+
+
 #[macro_export]
 macro_rules!uid {
     () => {{
@@ -65,10 +198,10 @@ macro_rules!live_body {
 #[macro_export]
 macro_rules!live_draw_input {
     ( $ cx: ident, $ path: path) => {
-        $cx.live_styles.add_live_draw_input(
+        $ cx.live_styles.add_live_draw_input(
             live_str_to_id(module_path!(), stringify!( $ path)),
             stringify!( $ path),
-            $path :: draw_input_def()
+            $ path ::draw_input_def()
         )
     }
 }
