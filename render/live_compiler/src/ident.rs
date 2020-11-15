@@ -210,6 +210,14 @@ impl IdentPath {
             len: 2
         }
     }
+    
+    pub fn from_three(one: Ident, two: Ident, three:Ident) -> Self {
+        IdentPath {
+            segs: [one, two, three, Ident(0)],
+            len: 3
+        }
+    }
+    
     pub fn get_single(&self) -> Option<Ident> {
         if self.len != 1 {
             return None

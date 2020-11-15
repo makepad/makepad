@@ -280,7 +280,7 @@ impl View {
 }
 
 impl Cx {
-    
+    /*
     pub fn new_instance_draw_call(&mut self, shader: Shader, geometry: Option<Geometry>, instance_count: usize) -> InstanceArea {
         let shader_id = shader.shader_id;
         let sh = &self.shaders[shader_id];
@@ -374,7 +374,6 @@ impl Cx {
         self.new_instance_draw_call(shader, geometry, instance_count)
     }
     
-    
     pub fn align_instance(&mut self, instance_area: InstanceArea) -> AlignedInstance {
         let align_index = self.align_list.len();
         self.align_list.push(Area::Instance(instance_area.clone()));
@@ -388,7 +387,7 @@ impl Cx {
         if let Area::Instance(instance) = &mut self.align_list[aligned_instance.index] {
             instance.instance_count = aligned_instance.inst.instance_count;
         }
-    }
+    }*/
     
     pub fn new_draw_call(&mut self, shader: Shader) -> &mut DrawCall {
         return self.get_draw_call(false, shader, None);

@@ -2,14 +2,15 @@ use crate::shaderast::*;
 use crate::error::LiveError;
 use crate::ident::{Ident, IdentPath, IdentPathWithSpan, QualifiedIdentPath};
 use crate::lit::{Lit};
+use crate::ty::{TyExpr, TyExprKind};
 use crate::detok::*;
 use crate::span::{Span};
 use crate::token::{Token};
 use std::cell::{Cell, RefCell};
 
-impl<'a> DeTokParserImpl<'a>{
+impl<'a> DeTokParserImpl<'a> {
     
-    pub fn parse_shader(&mut self, qualified_ident_path:QualifiedIdentPath) -> Result<ShaderAst, LiveError> {
+    pub fn parse_shader(&mut self, qualified_ident_path: QualifiedIdentPath) -> Result<ShaderAst, LiveError> {
         self.skip_token();
         
         let mut shader_ast = ShaderAst::default();
@@ -61,13 +62,13 @@ impl<'a> DeTokParserImpl<'a>{
                 }
                 */
                 Token::Ident(ident) if ident == Ident::new("draw_input") => {
-
+                    
                     self.skip_token();
                     self.expect_token(Token::Colon) ?;
                     let span = self.begin_span();
                     let ident_path = self.parse_ident_path() ?;
                     let qualified_ident_path = self.qualify_ident_path(&ident_path);
-                    shader_ast.draw_input = Some((span.end(self, | span | span),qualified_ident_path));
+                    shader_ast.draw_input = Some((span.end(self, | span | span), qualified_ident_path));
                     self.expect_token(Token::Semi) ?;
                 }
                 Token::Ident(ident) if ident == Ident::new("texture") => {
@@ -254,7 +255,7 @@ impl<'a> DeTokParserImpl<'a>{
         let ident = self.parse_ident() ?;
         self.expect_token(Token::Colon) ?;
         let ty_expr = self.parse_prim_ty_expr() ?;
-        self.expect_ident("in")?;
+        self.expect_ident("in") ?;
         let block_ident = Some(self.parse_ident() ?);
         self.expect_token(Token::Semi) ?;
         Ok(span.end(self, | span | UniformDecl {

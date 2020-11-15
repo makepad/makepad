@@ -67,10 +67,10 @@ impl Clone for DrawText {
 impl DrawText {
     
     pub fn new(cx: &mut Cx) -> Self {
-        Self::with_shader(cx, live_shader!(cx, self::shader), 0)
+        Self::with_slots(cx, live_shader!(cx, self::shader), 0)
     }
     
-    pub fn with_shader(cx: &mut Cx, shader: Shader, slots: usize) -> Self {
+    pub fn with_slots(cx: &mut Cx, shader: Shader, slots: usize) -> Self {
         Self {
             shader: shader,
             area: Area::Empty,
@@ -103,21 +103,21 @@ impl DrawText {
     pub fn live_draw_input() -> LiveDrawInput {
         let mut def = LiveDrawInput::default();
         let mp = module_path!();
-        def.add_uniform(mp, "brightness", "f32");
-        def.add_uniform(mp, "curve", "f32");
         
-        def.add_texture(mp, "texture", "Texture2D");
+        def.add_uniform(mp, "DrawText", "brightness", f32::ty_expr());
+        def.add_uniform(mp, "DrawText", "curve", f32::ty_expr());
+        def.add_uniform(mp, "DrawText", "texture", Texture2D::ty_expr());
         
-        def.add_instance(mp, "font_t1", "Vec2");
-        def.add_instance(mp, "font_t2", "Vec2");
-        def.add_instance(mp, "color", "Vec4");
-        def.add_instance(mp, "rect_pos", "Vec2");
-        def.add_instance(mp, "rect_size", "Vec2");
-        def.add_instance(mp, "char_z", "f32");
-        def.add_instance(mp, "base", "Vec2");
-        def.add_instance(mp, "font_size", "f32");
-        def.add_instance(mp, "char_offset", "f32");
-        def.add_instance(mp, "marker", "f32");
+        def.add_instance(mp, "DrawText", "font_t1", Vec2::ty_expr());
+        def.add_instance(mp, "DrawText", "font_t2", Vec2::ty_expr());
+        def.add_instance(mp, "DrawText", "color", Vec4::ty_expr());
+        def.add_instance(mp, "DrawText", "rect_pos", Vec2::ty_expr());
+        def.add_instance(mp, "DrawText", "rect_size", Vec2::ty_expr());
+        def.add_instance(mp, "DrawText", "char_z", f32::ty_expr());
+        def.add_instance(mp, "DrawText", "base", Vec2::ty_expr());
+        def.add_instance(mp, "DrawText", "font_size", f32::ty_expr());
+        def.add_instance(mp, "DrawText", "char_offset", f32::ty_expr());
+        def.add_instance(mp, "DrawText", "marker", f32::ty_expr());
         
         return def
     }
@@ -260,15 +260,15 @@ impl DrawText {
         self.lock = Some(cx.lock_instances(self.shader, self.slots));
     }
     
-    pub fn write_uniforms(&mut self, cx:&mut Cx){
-        if self.area().need_uniforms_now(){
-            self.area().write_texture_2d_id(cx, live_item_id!(self::DrawText::texture), cx.fonts_atlas.texture_id);
-            self.area().write_uniform_float(cx, live_item_id!(self::DrawText::brightness), self.text_style.brightness);
-            self.area().write_uniform_float(cx, live_item_id!(self::DrawText::curve), self.text_style.curve);
+    pub fn write_uniforms(&mut self, cx: &mut Cx) {
+        if self.area().is_first_instance() {
+            write_draw_input!(cx, self.area(), self::DrawText::texture, Texture2D(Some(cx.fonts_atlas.texture_id)));
+            write_draw_input!(cx, self.area(), self::DrawText::brightness, self.text_style.brightness);
+            write_draw_input!(cx, self.area(), self::DrawText::curve, self.text_style.curve);
         }
     }
     
-    pub fn area(&self)->Area{
+    pub fn area(&self) -> Area {
         self.area
     }
     
@@ -504,47 +504,51 @@ impl DrawText {
     // looks up text with the behavior of a text selection mouse cursor
     pub fn find_closest_offset(&self, cx: &Cx, pos: Vec2) -> usize {
         let area = unsafe {&self.area};
+        
+        if !area.is_valid(cx) {
+            return 0
+        }
+        
         let scroll_pos = area.get_scroll_pos(cx);
         let spos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
-        let x_o = area.get_instance_offset(cx, live_item_id!(self::shader::base_x), Ty::Float).unwrap();
-        let y_o = area.get_instance_offset(cx, live_item_id!(self::shader::base_y), Ty::Float).unwrap();
-        let w_o = area.get_instance_offset(cx, live_item_id!(self::shader::w), Ty::Float).unwrap();
-        let font_size_o = area.get_instance_offset(cx, live_item_id!(self::shader::font_size), Ty::Float).unwrap();
-        let char_offset_o = area.get_instance_offset(cx, live_item_id!(self::shader::char_offset), Ty::Float).unwrap();
-        let read = area.get_read_ref(cx);
+        
+        let base = area.get_read_ref(cx, live_item_id!(self::shader::base), Ty::Vec2).unwrap();
+        let rect_size = area.get_read_ref(cx, live_item_id!(self::shader::rect_size), Ty::Vec2).unwrap();
+        let font_size = area.get_read_ref(cx, live_item_id!(self::shader::font_size), Ty::Float).unwrap();
+        let char_offset = area.get_read_ref(cx, live_item_id!(self::shader::font_size), Ty::Float).unwrap();
+        
         let text_style = unsafe {&self.text_style};
         let line_spacing = text_style.line_spacing;
-        let mut index = 0;
-        if let Some(read) = read {
-            while index < read.count {
-                let y = read.instances[read.offset + y_o + index * read.slots];
-                let font_size = read.instances[read.offset + font_size_o + index * read.slots];
-                if y + font_size * line_spacing > spos.y { // alright lets find our next x
-                    while index < read.count {
-                        let x = read.instances[read.offset + x_o + index * read.slots];
-                        let y = read.instances[read.offset + y_o + index * read.slots];
-                        //let font_size = read.buffer[read.offset + font_size_o + index* read.slots];
-                        let w = read.instances[read.offset + w_o + index * read.slots];
-                        if x > spos.x + w * 0.5 || y > spos.y {
-                            let prev_index = if index == 0 {0}else {index - 1};
-                            let prev_x = read.instances[read.offset + x_o + prev_index * read.slots];
-                            let prev_w = read.instances[read.offset + w_o + prev_index * read.slots];
-                            if index < read.count - 1 && prev_x > spos.x + prev_w { // fix newline jump-back
-                                return read.instances[read.offset + char_offset_o + index * read.slots] as usize;
-                            }
-                            return read.instances[read.offset + char_offset_o + prev_index * read.slots] as usize;
+        
+        let mut i = 0;
+        while i < base.repeat {
+            let index = base.stride * i;
+            
+            let y = base.buffer[index + 1];
+            let fs = font_size.buffer[index];
+            
+            if y + fs * line_spacing > spos.y { // alright lets find our next x
+                while i < base.repeat {
+                    let index = base.stride * i;
+                    let x = base.buffer[index + 0];
+                    let y = base.buffer[index + 1];
+                    let w = rect_size.buffer[index + 0];
+                    
+                    if x > spos.x + w * 0.5 || y > spos.y {
+                        let prev_index = if i == 0 {0}else {base.stride * (i - 1)};
+                        let prev_x = base.buffer[prev_index + 0];
+                        let prev_w = rect_size.buffer[prev_index + 0];
+                        if i < base.repeat - 1 && prev_x > spos.x + prev_w { // fix newline jump-back
+                            return char_offset.buffer[index] as usize;
                         }
-                        index += 1;
+                        return char_offset.buffer[prev_index] as usize;
                     }
+                    i += 1;
                 }
-                index += 1;
             }
-            if read.count == 0 {
-                return 0
-            }
-            return read.instances[read.offset + char_offset_o + (read.count - 1) * read.slots] as usize;
+            i += 1;
         }
-        return 0
+        return char_offset.buffer[(base.repeat - 1) * base.stride] as usize;
     }
     
     pub fn get_monospace_base(&self, cx: &Cx) -> Vec2 {

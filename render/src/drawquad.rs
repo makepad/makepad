@@ -27,10 +27,10 @@ impl Clone for DrawQuad {
 
 impl DrawQuad {
     pub fn new(cx: &mut Cx, shader: Shader) -> Self {
-        Self::with_slot_count(cx, default_shader_overload!(cx, shader, self::shader), 0)
+        Self::with_slots(cx, default_shader_overload!(cx, shader, self::shader), 0)
     }
     
-    pub fn with_slot_count(_cx: &mut Cx, shader: Shader, slots: usize) -> Self {
+    pub fn with_slots(_cx: &mut Cx, shader: Shader, slots: usize) -> Self {
         Self {
             shader: shader,
             slots: slots + 5,
@@ -96,9 +96,9 @@ impl DrawQuad {
     pub fn live_draw_input() -> LiveDrawInput {
         let mut def = LiveDrawInput::default();
         let mp = module_path!();
-        def.add_instance(mp, "rect_pos", "Vec2");
-        def.add_instance(mp, "rect_size", "Vec2");
-        def.add_instance(mp, "instance_z", "f32");
+        def.add_instance(mp, "DrawQuad", "rect_pos", Vec2::ty_expr());
+        def.add_instance(mp, "DrawQuad", "rect_size", Vec2::ty_expr());
+        def.add_instance(mp, "DrawQuad", "instance_z", f32::ty_expr());
         return def
     }
     

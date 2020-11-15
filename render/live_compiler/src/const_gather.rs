@@ -1,9 +1,9 @@
 use crate::shaderast::*;
 use crate::env::VarKind;
 use crate::ident::{Ident,IdentPath};
-use crate::lit::{Lit, TyLit};
+use crate::lit::{Lit};
 use crate::span::Span;
-use crate::ty::Ty;
+use crate::ty::{Ty,TyLit};
 use crate::val::Val;
 use std::cell::Cell;
 
