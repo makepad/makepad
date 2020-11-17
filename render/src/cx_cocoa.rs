@@ -1809,7 +1809,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     extern fn has_marked_text(this: &Object, _sel: Sel) -> BOOL {
         unsafe {
             let marked_text: id = *this.get_ivar("markedText");
-            (marked_text.length() >0) as i8
+            (marked_text.length() >0) as BOOL
         }
     }
     
