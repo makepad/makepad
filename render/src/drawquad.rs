@@ -132,14 +132,13 @@ impl DrawQuad {
         self.area = cx.add_instance(self.shader, self.as_slice());
     }
     
-    pub fn animate(&mut self, _animator: &mut Animator, _time: f64) {
-    }
-    
     pub fn area(&self) -> Area {
         self.area
     }
     
     pub fn last_animator(&mut self, _animator: &Animator) {
+        // set values to the animator track last values
+        
     }
     
     pub fn lock_quad(&mut self, cx: &mut Cx) {
