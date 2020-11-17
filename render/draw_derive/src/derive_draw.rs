@@ -6,7 +6,6 @@ pub enum DrawType {
     DrawText
 }
 
-
 pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
@@ -23,7 +22,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
     
     parser.eat_ident("pub");
     if parser.eat_ident("struct") {
-        if let Some(struct_name) = parser.eat_any_ident() {
+        if let Some(struct_name) = parser.eat_any_ident() {d
             // lets eat all the fields
             let fields = if let Some(fields) = parser.eat_all_struct_fields() {
                 fields
@@ -56,9 +55,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
                         uniforms.push((field.name.clone(), field.ty.to_string()));
                     }
                     else{
-                        if !type_slot_concat.is_empty(){
-                            type_slot_concat.add("+");
-                        }
+                        type_slot_concat.add("+");
                         type_slot_concat.stream(Some(field.ty.clone()));
                         type_slot_concat.add(":: slots ( )");
                         instances.push((field.name.clone(), field.ty.to_string()));
@@ -83,7 +80,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             tb.add("pub fn with_slots ( cx : & mut Cx , shader : Shader , slots : usize ) -> Self {");
             tb.add("Self {");
             tb.add("base :").ident(&base_type.to_string());
-            tb.add(":: with_slots ( cx , shader , slots +").stream(Some(type_slot_concat.end())).add(") ,");
+            tb.add(":: with_slots ( cx , shader , slots").stream(Some(type_slot_concat.end())).add(") ,");
             // now add initializers for all values
             for field in &fields {
                 if field.name != "base" {
@@ -158,6 +155,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             }
             
             tb.add("}");
+            //tb.eprint();
             return tb.end(); 
         }
     }

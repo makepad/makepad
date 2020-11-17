@@ -3,13 +3,9 @@ use crate::buttonlogic::*;
 
 #[derive(Clone, DrawQuad)]
 #[repr(C)]
-struct NormalButtonBg {
-    #[default_shader(self::shader_bg)],
-
-    bla: f32,
-    
+struct DrawNormalButton {
+    #[default_shader(self::shader_bg)]
     base: DrawQuad,
-
     hover: f32,
     down: f32,
 }
@@ -17,8 +13,8 @@ struct NormalButtonBg {
 #[derive(Clone)]
 pub struct NormalButton {
     pub button: ButtonLogic,
-    pub bg: NormalButtonBg,
-    pub text: Text,
+    pub bg: DrawNormalButton,
+    pub text: DrawText,
     pub animator: Animator,
     pub _bg_area: Area,
     pub _text_area: Area
@@ -28,18 +24,16 @@ impl NormalButton {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             button: ButtonLogic::default(),
-            bg: NormalButtonBg::new(cx, live_default_shader!(cx, self::shader_bg)),
-            text: Text{
-                shader: live_shader!(cx, makepad_render::text::shader),
-                ..Text::new(cx)
-            },
+            bg: DrawNormalButton::new(cx, live_shader!(cx, self::shader_bg)),
+            text: DrawText::new(cx, default_shader!()),
             animator: Animator::default(),
             _bg_area: Area::Empty,
             _text_area: Area::Empty,
         }
     }
     pub fn style(cx: &mut Cx) {
-        live_draw_input!(cx, self::NormalButtonBg);
+        self::DrawNormalButton::register_draw_input(cx);
+
         live_body!(cx, r#"
             self::layout_bg: Layout {
                 align: all(0.5),
@@ -57,28 +51,28 @@ impl NormalButton {
             
             self::anim_default: Anim {
                 play: Cut {duration: 0.1}
-                tracks:[
-                    Float {keys:{1.0: 0.0}, bind_to: self::NormalButtonBg::hover}
-                    Float {keys:{1.0: 0.0}, bind_to: self::NormalButtonBg::down}
-                    Color {keys:{1.0: #9}, bind_to: makepad_render::drawwtext::DrawText::color}
+                tracks: [
+                    Float {keys: {1.0: 0.0}, bind_to: self::NormalButtonBg::hover}
+                    Float {keys: {1.0: 0.0}, bind_to: self::NormalButtonBg::down}
+                    Color {keys: {1.0: #9}, bind_to: makepad_render::drawwtext::DrawText::color}
                 ]
             }
             
             self::anim_over: Anim {
                 play: Cut {duration: 0.1},
-                tracks:[
-                    Float {keys:{0.0: 1.0, 1.0: 1.0}, bind_to: self::shader_bg::hover},
-                    Float {keys:{1.0: 0.0}, bind_to: self::shader_bg::down},
-                    Color {keys:{0.0: #f}, bind_to: makepad_render::text::shader::color}
+                tracks: [
+                    Float {keys: {0.0: 1.0, 1.0: 1.0}, bind_to: self::NormalButtonBg::hover},
+                    Float {keys: {1.0: 0.0}, bind_to: self::NormalButtonBg::down},
+                    Color {keys: {0.0: #f}, bind_to: makepad_render::drawwtext::DrawText::color}
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.2},
-                tracks:[
-                    Float {keys:{0.0: 1.0, 1.0: 1.0}, bind_to: self::shader_bg::down},
-                    Float {keys:{1.0: 1.0}, bind_to: self::shader_bg::hover},
-                    Color {keys:{0.0: #c}, bind_to: makepad_render::text::shader::color},
+                tracks: [
+                    Float {keys: {0.0: 1.0, 1.0: 1.0}, bind_to: self::NormalButtonBg::down},
+                    Float {keys: {1.0: 1.0}, bind_to: self::NormalButtonBg::hover},
+                    Color {keys: {0.0: #c}, bind_to: makepad_render::drawwtext::DrawText::color},
                 ]
             }
             
@@ -121,7 +115,7 @@ impl NormalButton {
     }
     
     pub fn draw_normal_button(&mut self, cx: &mut Cx, label: &str) {
-        
+        /*
         self.bg.shader = live_shader!(cx, self::shader_bg);
         
         self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
@@ -136,12 +130,12 @@ impl NormalButton {
         self._text_area = self.text.draw_text(cx, label);
         
         self._bg_area = self.bg.end_quad(cx, bg_inst);
-        self.animator.set_area(cx, self._bg_area);
+        self.animator.set_area(cx, self._bg_area);*/
         
         
         
         //---- IS NOW ----
-            self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
+        self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
         
         self.bg.last_animator(&self.animator);
         self.bg.begin_quad(cx, live_layout!(cx, self::layout_bg));

@@ -196,17 +196,6 @@ macro_rules!live_body {
 }
 
 #[macro_export]
-macro_rules!live_draw_input {
-    ( $ cx: ident, $ path: path) => {
-        $ cx.live_styles.add_live_draw_input(
-            live_str_to_id(module_path!(), stringify!( $ path)),
-            stringify!( $ path),
-            $ path ::draw_input_def()
-        )
-    }
-}
-
-#[macro_export]
 macro_rules!live_item_id {
     ( $ path: path) => {
         live_str_to_id(module_path!(), stringify!( $ path))

@@ -58,6 +58,7 @@ impl BareExampleApp {
                 use makepad_render::drawtext::shader::*;
                 draw_input: self::ButtonText;
                 fn get_color() -> vec4 {
+                    //return #f;
                     return mix(#f00, #0f0, abs(sin(counter + char_offset * 0.2)));
                 }
             }
@@ -96,13 +97,13 @@ impl BareExampleApp {
             self.quad.some += 1.1;
             let msg = format!("HELLO WORLD");
 
-            for i in 0..20000 {
-                let v = 0.3 * (i as f32);
+            for i in 0..10000 {
+                let v = 0.5 * (i as f32);
                 self.quad.counter += 0.01; //= (i as f32).sin();
-                let x = 300. + (v + self.count).sin() * 100.;
-                let y = 300. + (v + self.count * 8.).cos() * 100.;
-
-                self.quad.add_quad(Rect { pos: vec2(x,y), size:vec2(10.,10.0) });
+                let x = 400. + (v + self.count).sin() * 400.;
+                let y = 400. + (v*1.12 + self.count * 18.).cos() * 400.;
+ 
+                //self.quad.add_quad(Rect { pos: vec2(x,y), size:vec2(10.,10.0) });
 
                 self.text.add_text(
                     cx,
