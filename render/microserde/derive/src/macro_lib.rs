@@ -29,7 +29,7 @@ impl TokenBuilder {
     }
     
     pub fn is_empty(&self) -> bool{
-        !self.groups.len() > 1 || self.groups[0].1.is_empty()
+        self.groups.len() == 1 && self.groups[0].1.is_empty()
     }
     
     pub fn end(mut self) -> TokenStream {

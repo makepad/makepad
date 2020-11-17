@@ -3,7 +3,7 @@ use makepad_render::*;
 #[derive(Clone)]
 pub struct ScrollBar {
     
-    pub bg: Quad,
+    pub bg: DrawScrollBar,
     pub bar_size: f32,
     pub min_handle_size: f32, //minimum size of the handle in pixels
     pub axis: Axis,
@@ -11,7 +11,6 @@ pub struct ScrollBar {
     pub use_vertical_finger_scroll: bool,
     pub _visible: bool,
     pub smoothing: Option<f32>,
-    pub _bg_area: Area,
     pub _bar_side_margin: f32,
     pub _view_area: Area,
     pub _view_total: f32, // the total view area
@@ -23,6 +22,15 @@ pub struct ScrollBar {
     pub _scroll_delta: f32,
     
     pub _drag_point: Option<f32>, // the point in pixels where we are dragging
+}
+
+#[derive(Clone, DrawQuad)]
+#[repr(C)]
+struct DrawScrollBar {
+    #[default_shader(self::shader_bg)]
+    base: DrawQuad,
+    hover: f32,
+    down: f32,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -41,7 +49,7 @@ impl ScrollBar {
             
             axis: Axis::Horizontal,
             animator: Animator::default(),
-            bg: Quad {
+            bg: DrawScrollBar::new(cx, live_shader!(cx, self::shader_bg)) {
                 z: 2.5,
                 ..Quad::new(cx)
             },
