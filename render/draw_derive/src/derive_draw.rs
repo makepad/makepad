@@ -39,6 +39,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             let mut default_shader = None;
             let mut uniforms = Vec::new();
             let mut instances = Vec::new();
+            let mut uni_insts = Vec::new();
             let mut type_slot_concat = TokenBuilder::new();
             for field in &fields {
                 for attr in &field.attrs{
@@ -53,12 +54,14 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
                     // spit out attrib
                     if base_type.is_none(){
                         uniforms.push((field.name.clone(), field.ty.to_string()));
+                        uni_insts.push((field.name.clone(), field.ty.to_string()));
                     }
                     else{
                         type_slot_concat.add("+");
                         type_slot_concat.stream(Some(field.ty.clone()));
                         type_slot_concat.add(":: slots ( )");
                         instances.push((field.name.clone(), field.ty.to_string()));
+                        uni_insts.push((field.name.clone(), field.ty.to_string()));
                     }
                 }
             }
@@ -125,7 +128,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             
             tb.add("} }");
             
-            for (name, ty) in &uniforms {
+            for (name, ty) in &uni_insts {
                 tb.add("pub fn").ident(&format!("set_{}", name)).add("( & mut self , cx : & mut Cx , v :").ident(ty).add(") {");
                 tb.add("self .").ident(name).add("= v ;");
                 tb.add("v . write_draw_input ( cx , self . area ( ) ,");
@@ -134,26 +137,36 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
                 tb.add("}");
             }
 
-            for (name, ty) in &instances {
-                tb.add("pub fn").ident(&format!("set_{}", name)).add("( & mut self , cx : & mut Cx , v :").ident(ty).add(") {");
-                tb.add("self .").ident(name).add("= v ;");
-                tb.add("v . write_draw_input ( cx , self . area ( ) ,");
-                tb.add("live_item_id ! ( self :: ").ident(&base_type.to_string()).add("::").ident(&name).add(")");
-                tb.add(",").string(&format!("self::{}::{}", base_type.to_string(), name)).add(") ;");
+            for (name, ty) in &uni_insts {
+                tb.add("pub fn").ident(&format!("with_{}", name)).add("( self ,").ident(name).add(":").ident(ty).add(") -> Self {");
+                tb.add("Self {").ident(name).add(", .. self }");
                 tb.add("}");
             }
             
-            for (name, ty) in &uniforms {
-                tb.add("pub fn").ident(&format!("with_{}", name)).add("( self ,").ident(name).add(":").ident(ty).add(") -> Self {");
-                tb.add("Self {").ident(name).add(", .. self }");
+            tb.add("pub fn animate ( & mut self , cx : & mut Cx , a : & mut Animator , t : f64 ) {");
+
+            for (name, ty) in &uni_insts {
+                tb.add("if let Some ( v ) = ").ident(ty).add(":: animate ( cx , a , t ,");
+                tb.add("live_item_id ! ( self :: ").ident(&base_type.to_string()).add("::").ident(&name).add(")");
+                tb.add(") {");
+                tb.add("self .").ident(&format!("set_{}",name)).add("( cx , v ) ;");
+                tb.add("}");
+            }
+            
+            tb.add("}");
+            
+            tb.add("pub fn last_animate ( & mut self , a : & mut Animator ) {");
+
+            for (name, ty) in &uni_insts {
+                tb.add("if let Some ( v ) = ").ident(ty).add(":: last_animate ( a ,");
+                tb.add("live_item_id ! ( self :: ").ident(&base_type.to_string()).add("::").ident(&name).add(")");
+                tb.add(") {");
+                tb.add("self .").ident(name).add(" = v ;");
                 tb.add("}");
             }
 
-            for (name, ty) in &instances {
-                tb.add("pub fn").ident(&format!("with_{}", name)).add("( self ,").ident(name).add(":").ident(ty).add(") -> Self {");
-                tb.add("Self {").ident(name).add(", .. self }");
-                tb.add("}");
-            }
+            tb.add("}");
+            
             
             match draw_type {
                 DrawType::DrawText => {
