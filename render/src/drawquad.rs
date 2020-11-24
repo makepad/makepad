@@ -123,19 +123,19 @@ impl DrawQuad {
     }
 
     pub fn last_animate(&mut self, animator:&Animator){
-        if let Some(v) = Vec2::last_value(animator, live_item_id!(self::DrawQuad::rect_pos)){
+        if let Some(v) = Vec2::last_animate(animator, live_item_id!(self::DrawQuad::rect_pos)){
             self.rect_pos = v;
         }
-        if let Some(v) = Vec2::last_value(animator, live_item_id!(self::DrawQuad::rect_size)){
+        if let Some(v) = Vec2::last_animate(animator, live_item_id!(self::DrawQuad::rect_size)){
             self.rect_size = v;
         }
     }
     
     pub fn animate(&mut self, cx: &mut Cx, animator:&mut Animator, time:f64){
-        if let Some(v) = Vec2::calc_value(cx, animator, time, live_item_id!(self::DrawQuad::rect_pos)){
+        if let Some(v) = Vec2::animate(cx, animator, time, live_item_id!(self::DrawQuad::rect_pos)){
             self.set_rect_pos(cx, v);
         }
-        if let Some(v) = Vec2::calc_value(cx, animator, time, live_item_id!(self::DrawQuad::rect_size)){
+        if let Some(v) = Vec2::animate(cx, animator, time, live_item_id!(self::DrawQuad::rect_size)){
             self.set_rect_size(cx, v);
         }
     }
