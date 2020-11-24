@@ -2,23 +2,28 @@ use makepad_render::*;
 
 #[derive(Clone)]
 pub struct Tab {
-    pub bg: Quad,
-    pub text: Text,
-   // pub tab_close: TabClose,
+    pub bg: DrawTab,
+    pub text: DrawText,
     pub label: String,
-    //pub is_closeable: bool,
     pub animator: Animator,
-    pub z: f32,
+    pub draw_depth: f32,
     pub abs_origin: Option<Vec2>,
     pub _is_selected: bool,
     pub _is_focussed: bool,
-    pub _bg_area: Area,
     pub _bg_inst: Option<InstanceArea>,
-    pub _text_area: Area,
     pub _close_anim_rect: Rect,
     pub _is_down: bool,
     pub _is_drag: bool
 }
+
+#[derive(Clone, DrawQuad)]
+#[repr(C)]
+pub struct DrawTab {
+    #[default_shader(self::shader_bg)]
+    base: DrawColor,
+    border_color: Vec4,
+}
+
 
 #[derive(Clone, PartialEq)]
 pub enum TabEvent {
@@ -35,10 +40,10 @@ impl Tab {
         let mut tab = Self {
             label: "Tab".to_string(),
             //is_closeable: true,
-            z: 0.,
-            bg: Quad ::new(cx),
+            draw_depth: 0.,
+            bg: DrawTab ::new(cx, default_shader!()),
             //tab_close: TabClose::new(cx),
-            text: Text{z:0.1,..Text::new(cx)},
+            text: DrawText::new(cx, default_shader!()).with_draw_depth(0.1),
             animator: Animator::default(),
             abs_origin: None,
             _is_selected: false,
@@ -46,16 +51,17 @@ impl Tab {
             _is_down: false,
             _is_drag: false,
             _close_anim_rect: Rect::default(),
-            _text_area: Area::Empty,
-            _bg_area: Area::Empty,
-            _bg_inst: None,
         };
         tab.animator.set_anim_as_last_values(&tab.anim_default(cx));
         tab
     }
+    
+    pub fn with_draw_depth(self, draw_depth:f32)->Self{
+        Self{draw_depth,..self}
+    }
 
     pub fn style(cx: &mut Cx) {
-        
+        self::DrawTab::register_draw_input(cx);
         live_body!(cx, r#"
             
             self::color_bg_selected: #28;
@@ -78,8 +84,8 @@ impl Tab {
             
             self::shader_bg: Shader {
                 use makepad_render::quad::shader::*;
-                
-                instance border_color: vec4;
+
+                draw_input: self::DrawTab;
                 
                 const border_width: float = 1.0;
                 
@@ -133,19 +139,19 @@ impl Tab {
                 Track::Color {
                     ease: Ease::Lin,
                     keys: vec![(1.0, self.get_bg_color(cx))],
-                    bind_to: live_item_id!(makepad_render::quad::shader::color),
+                    bind_to: live_item_id!(makepad_render::drawcolor::DrawColor::color),
                     cut_init: None
                 },
                 Track::Color {
                     ease: Ease::Lin,
                     keys: vec![(1.0, live_color!(cx, self::color_bg_selected))],
-                    bind_to: live_item_id!(self::shader_bg::border_color),
+                    bind_to: live_item_id!(self::DrawTab::border_color),
                     cut_init: None
                 },
                 Track::Color {
                     ease: Ease::Lin,
                     keys: vec![(1.0, self.get_text_color(cx))],
-                    bind_to: live_item_id!(makepad_render::text::shader::color),
+                    bind_to: live_item_id!(makepad_render::drawtext::DrawText::color),
                     cut_init: None
                 },
             ]

@@ -1,17 +1,4 @@
-/**
-Gets a reference to a `Class`.
 
-Panics if no class with the given name can be found.
-To check for a class that may not exist, use `Class::get`.
-
-# Example
-``` no_run
-# #[macro_use] extern crate objc;
-# fn main() {
-let cls = class!(NSObject);
-# }
-```
-*/
 #[macro_export]
 macro_rules! class {
     ($name:ident) => ({
@@ -67,46 +54,13 @@ macro_rules! sel_impl {
     })
 }
 
-/**
-Registers a selector, returning a `Sel`.
-
-# Example
-```
-# #[macro_use] extern crate objc;
-# fn main() {
-let sel = sel!(description);
-let sel = sel!(setObject:forKey:);
-# }
-```
-*/
 #[macro_export]
 macro_rules! sel {
     ($name:ident) => ({sel_impl!(concat!(stringify!($name), '\0'))});
     ($($name:ident :)+) => ({sel_impl!(concat!($(stringify!($name), ':'),+, '\0'))});
 }
 
-/**
-Sends a message to an object.
 
-The first argument can be any type that dereferences to a type that implements
-`Message`, like a reference, pointer, or an `Id`.
-The syntax is similar to the message syntax in Objective-C.
-Variadic arguments are not currently supported.
-
-# Example
-``` no_run
-# #[macro_use] extern crate objc;
-# use objc::runtime::Object;
-# fn main() {
-# unsafe {
-let obj: *mut Object;
-# let obj: *mut Object = 0 as *mut Object;
-let description: *const Object = msg_send![obj, description];
-let _: () = msg_send![obj, setArg1:1 arg2:2];
-# }
-# }
-```
-*/
 #[macro_export]
 macro_rules! msg_send {
     (super($obj:expr, $superclass:expr), $name:ident) => ({

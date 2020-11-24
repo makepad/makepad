@@ -38,6 +38,8 @@ mod cx_wasm32;
 #[cfg(all(not(feature="ipc"),any(target_os = "linux", target_os="macos", target_os="windows")))]
 mod cx_desktop;
 
+mod cx_style;
+
 mod turtle;
 mod fonts;
 mod cursor;
@@ -52,7 +54,9 @@ mod geometrygen;
 
 mod drawquad;
 mod drawtext;
-
+mod drawcolor;
+mod drawcube;
+mod drawimage;
 mod events;
 mod menu; 
 mod geometry;
@@ -63,8 +67,10 @@ mod gpuinfo;
 pub use crate::cx::*;
 pub use crate::drawquad::*;
 pub use crate::drawtext::*;
-//pub use crate::cube::*;
-//pub use crate::blit::*;
+pub use crate::drawcolor::*;
+pub use crate::drawcube::*;
+pub use crate::drawimage::*;
+
 pub use crate::elements::*;
 
 use std::time::{Instant};

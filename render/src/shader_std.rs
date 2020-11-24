@@ -1,22 +1,5 @@
 use crate::cx::*;
-use crate::fonts::TrapezoidText;
 
-use crate::drawquad::DrawQuad;
-use crate::drawtext::DrawText;
-
-
-impl Cx{
-    pub fn style(&mut self){
-        define_shader_stdlib(self);
-        TrapezoidText::style(self);
-        //Cube::style(self);
-        //Quad::style(self);
-        //Text::style(self);
-        //Blit::style(self);
-        DrawQuad::style(self);
-        DrawText::style(self);
-    }
-}
 
 pub fn define_shader_stdlib(cx: &mut Cx) {
 

@@ -1,4 +1,43 @@
 use crate::cx::*;
+use crate::drawquad::DrawQuad;
+
+#[derive(Clone, DrawQuad)]
+#[repr(C)]
+pub struct DrawImage {
+    #[default_shader(self::shader_bg)]
+    pub texture: Texture2D,
+    pub base: DrawQuad,
+    pub p1: Vec2,
+    pub p2: Vec2,
+    pub alpha: f32
+}
+
+impl DrawImage{
+    
+    pub fn with_color(self, color:Vec4)->Self{
+        Self{
+            color:color,
+            ..self
+        }
+    }
+    
+    pub fn style(cx:&mut Cx){
+        self::DrawImage::register_draw_input(cx);
+        live_body!(cx, r#"
+            self::shader: Shader {
+                use makepad_render::quad::shader::*;
+                draw_input: self::DrawColor,
+                fn pixel() -> vec4 {
+                    return vec4(color.rgb*color.a, color.a)
+                }
+            }
+        "#);
+    }
+}
+
+
+
+use crate::cx::*;
 
 #[derive(Clone)]
 pub struct Blit {

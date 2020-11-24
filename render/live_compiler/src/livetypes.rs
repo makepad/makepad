@@ -31,7 +31,7 @@ pub struct Texture {
     pub texture_id: u32,
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, Default, PartialEq, Debug)]
 pub struct Texture2D(pub Option<u32>);
 
 impl Into<Texture2D> for Texture {

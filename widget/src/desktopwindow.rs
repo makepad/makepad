@@ -19,8 +19,8 @@ pub struct DesktopWindow {
     pub close_btn: DesktopButton,
     pub xr_btn: DesktopButton,
     pub fullscreen_btn: DesktopButton,
-    pub caption_text: Text,
-    pub caption_bg: Quad,
+    pub caption_text: DrawText,
+    pub caption_bg: DrawColor,
     pub caption_size: Vec2,
     pub caption: String,
     
@@ -46,7 +46,7 @@ impl DesktopWindow {
         Self {
             window: Window::new(cx),
             pass: Pass::default(),
-            clear_color: Color::parse_hex_str("1e").unwrap(),
+            clear_color: Vec4::color("1e"),
             color_texture: Texture::new(cx),
             depth_texture: Texture::new(cx),
             main_view: View::new(cx),
@@ -65,9 +65,9 @@ impl DesktopWindow {
                     Menu::item("Quit App", Cx::command_quit()),
                 ]),
             ]),
-            caption_text: Text::new(cx),
+            caption_text: DrawText::new(cx, default_shader!()),
             //caption_bg_color: Color_bg_selected_over::id(cx),
-            caption_bg: Quad::new(cx),
+            caption_bg: DrawColor::new(cx, default_shader!()),
             caption_size: Vec2::default(),
             caption: "Makepad".to_string(),
             inner_over_chrome: false,
@@ -183,7 +183,7 @@ impl DesktopWindow {
             ..Layout::default()
         }).is_ok() {
             self.caption_text.text_style = live_text_style!(cx, self::text_style_window_caption);
-            self.caption_bg.color = live_color!(cx, self::color_bg_selected_over); //cx.colors[self.caption_bg_color];
+            self.caption_bg.color = live_vec4!(cx, self::color_bg_selected_over); //cx.colors[self.caption_bg_color];
             // alright here we draw our platform buttons.
             let process_chrome = match cx.platform_type {
                 PlatformType:: Linux {custom_window_chrome}=>custom_window_chrome,
@@ -193,7 +193,7 @@ impl DesktopWindow {
                 match cx.platform_type {
                     PlatformType::Windows | PlatformType::Unknown | PlatformType::Linux {..} => {
                         
-                        let bg_inst = self.caption_bg.begin_quad(cx, Layout {
+                        self.caption_bg.begin_quad(cx, Layout {
                             align: Align::right_top(),
                             walk: Walk::wh(Width::Fill, Height::Compute),
                             ..Default::default()
@@ -223,7 +223,7 @@ impl DesktopWindow {
                         // we need to store our caption rect somewhere.
                         self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
                         self.caption_text.draw_text(cx, &self.caption);
-                        self.caption_bg.end_quad(cx, bg_inst);
+                        self.caption_bg.end_quad(cx);
                         cx.turtle_new_line();
                     },
                     
@@ -234,24 +234,24 @@ impl DesktopWindow {
                         else {
                             cx.update_menu(&self.default_menu);
                         }
-                        let bg_inst = self.caption_bg.begin_quad(cx, Layout {
+                        self.caption_bg.begin_quad(cx, Layout {
                             align: Align::center(),
                             walk: Walk::wh(Width::Fill, Height::Fix(22.)),
                             ..Default::default()
                         });
                         self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
                         self.caption_text.draw_text(cx, &self.caption);
-                        self.caption_bg.end_quad(cx, bg_inst);
+                        self.caption_bg.end_quad(cx);
                         cx.turtle_new_line();
                     },
                     PlatformType::Web{..} => {
                         if self.window.is_fullscreen(cx) { // put a bar at the top
-                            let bg_inst = self.caption_bg.begin_quad(cx, Layout {
+                            self.caption_bg.begin_quad(cx, Layout {
                                 align: Align::center(),
                                 walk: Walk::wh(Width::Fill, Height::Fix(22.)),
                                 ..Default::default()
                             });
-                            self.caption_bg.end_quad(cx, bg_inst);
+                            self.caption_bg.end_quad(cx);
                             cx.turtle_new_line();
                         }
                     }

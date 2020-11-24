@@ -130,7 +130,7 @@ impl JSTokenizer {
                 return TokenType::Eof
             }
             state.advance_with_cur();
-            match state.cur {
+            match state.cur { 
                 
                 '\0' => { // eof insert a terminating space and end
                     chunk.push('\0');
@@ -138,11 +138,11 @@ impl JSTokenizer {
                 },
                 '\n' => {
                     chunk.push('\n');
-                    return TokenType::Newline
+                    return TokenType::Newline 
                 },
                 ' ' | '\t' => { // eat as many spaces as possible
-                    chunk.push(state.cur);
-                    while state.next == ' ' {
+                    chunk.push(state.cur); 
+                    while state.next == ' ' { 
                         chunk.push(state.next);
                         state.advance();
                     }

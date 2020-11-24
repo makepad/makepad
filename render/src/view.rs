@@ -36,6 +36,10 @@ impl View {
         }
     }
     
+    pub fn with_is_clipped(self, is_clipped:bool)->Self{Self{is_clipped,..self}}
+    pub fn with_is_overlay(self, is_overlay:bool)->Self{Self{is_overlay,..self}}
+    pub fn with_always_redrawd(self, always_redraw:bool)->Self{Self{always_redraw,..self}}
+    
     pub fn lock_view_transform(&self, cx: &mut Cx, mat: &Mat4) {
         if let Some(view_id) = self.view_id {
             let cxview = &mut cx.views[view_id];
@@ -68,7 +72,7 @@ impl View {
     
     pub fn begin_view(&mut self, cx: &mut Cx, layout: Layout) -> ViewRedraw {
         
-        if !cx.is_in_redraw_cycle {
+        if !cx.in_redraw_cycle {
             panic!("calling begin_view outside of redraw cycle is not possible!");
         }
         

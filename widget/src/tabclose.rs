@@ -8,13 +8,19 @@ pub struct TabClose {
     pub _bg_area: Area,
 }
 
+
+#[derive(Clone, DrawQuad)]
+#[repr(C)]
+pub struct DrawSplitter {
+    #[default_shader(self::shader_bg)]
+    base: DrawQuad,
+    color: Vec4,
+}
+
 impl TabClose {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            bg: Quad{
-                z:1.3,
-                ..Quad::new(cx)
-            },
+            bg: DrawSplitter::new(cx, default_shader!()).with_draw_depth(1.3),
             animator: Animator::default(),
             _bg_area: Area::Empty,
         }

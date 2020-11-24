@@ -49,10 +49,7 @@ impl ScrollBar {
             
             axis: Axis::Horizontal,
             animator: Animator::default(),
-            bg: DrawScrollBar::new(cx, live_shader!(cx, self::shader_bg)) {
-                z: 2.5,
-                ..Quad::new(cx)
-            },
+            bg: DrawScrollBar::new(cx, live_shader!(cx, self::shader_bg)).with_draw_depth(2.5),
             use_vertical_finger_scroll: false,
             _visible: false,
             
@@ -67,14 +64,13 @@ impl ScrollBar {
             _scroll_delta: 0.0,
             
             _drag_point: None,
-            _bg_area: Area::Empty,
         }
     }
     
     pub fn style(cx: &mut Cx) {
         
         live_body!(cx, r#"
-            self::bar_size: 12.0;
+            self::bar_size: 1.000;
             
             self::color_base: #5;
             self::color_over: #7;
@@ -123,6 +119,11 @@ impl ScrollBar {
             }
         "#);
     }
+    
+    pub fn with_bar_size(self, bar_size:f32)->Self{Self{bar_size, ..self}}
+    pub fn with_smoothing(self, s:f32)->Self{Self{smoothing:Some(s), ..self}}
+    pub fn with_use_vertical_finger_scroll(self, use_vertical_finger_scroll:bool)->Self{Self{use_vertical_finger_scroll, ..self}}
+    
     // reads back normalized scroll position info
     pub fn get_normalized_scroll_pos(&self) -> (f32, f32) {
         // computed handle size normalized
