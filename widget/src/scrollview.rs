@@ -20,7 +20,15 @@ impl ScrollView{
             }),
         }
     }
-    
+   
+    pub fn with_scroll_h(self, s:ScrollBar)->Self{
+        Self{scroll_h:Some(s), ..}
+    }
+      
+    pub fn with_scroll_v(self, s:ScrollBar)->Self{
+        Self{scroll_v:Some(s), ..}
+    }
+
     pub fn proto_no_scroll(cx: &mut Cx) -> Self {
         Self {
             view: View::new(cx),

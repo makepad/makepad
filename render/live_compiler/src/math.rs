@@ -71,6 +71,10 @@ impl Vec2 {
         let dy = self.y - other.y;
         (dx * dx + dy * dy).sqrt()
     }
+
+    pub fn to_vec3(&self) -> Vec3 {
+        Vec3 {x: self.x, y: self.y, z: 0.0}
+    }
 }
 
 pub fn vec2(x: f32, y: f32) -> Vec2 {Vec2 {x, y}}

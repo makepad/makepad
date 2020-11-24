@@ -24,7 +24,11 @@ pub struct Animator {
 }
 
 impl Animator {
-
+    
+    pub fn need_init(&mut self, cx: &mut Cx)->bool{
+        self.live_update_id != cx.live_update_id
+    }
+    
     pub fn init<F>(&mut self, cx: &mut Cx, cb: F)
     where F: Fn(&Cx) -> Anim {
         if self.live_update_id != cx.live_update_id {
@@ -192,170 +196,134 @@ impl Animator {
         None
     }
     
-    pub fn calc_float(&mut self, cx: &mut Cx, bind_id: LiveItemId, time: f64) -> f32 {
-        let last = Self::_last_float(bind_id, &self.last_values);
-        let mut ret = last;
+    pub fn calc_float(&mut self, cx: &mut Cx, bind_id: LiveItemId, time: f64) -> Option<f32> {
+        let last = self.last_float(bind_id);
         if let Some(time) = self.update_anim_track(cx, time) {
             if let Some(track_index) = self.find_track_index(bind_id) {
                 if let Track::Float{keys, cut_init, ease, ..} = &mut self.current.as_mut().unwrap().tracks[track_index] {
-                    ret = Track::compute_track_float(time, keys, cut_init, last, ease);
+                    let ret = Track::compute_track_float(time, keys, cut_init, last.unwrap_or(0.0), ease);
+                    self.set_last_float(bind_id, ret);
+                    return Some(ret)
                 }
             }
         }
-        self.set_last_float(bind_id, ret);
-        return ret
+        None
     }
     
-    pub fn last_float(&self, _cx: &Cx, bind_id: LiveItemId) -> f32 {
-        Self::_last_float(bind_id, &self.last_values)
-    }
-    
-    pub fn _last_float(bind_id: LiveItemId, last_float: &Vec<(LiveItemId, AnimLastValue)>) -> f32 {
-        if let Some((_, value)) = last_float.iter().find( | v | v.0 == bind_id) {
+    pub fn last_float(&self, bind_id: LiveItemId) -> Option<f32> {
+        if let Some((_, value)) = self.last_values.iter().find( | v | v.0 == bind_id) {
             if let AnimLastValue::Float(value) = value {
-                return *value
+                return Some(*value)
             }
         }
-        return 0.0
+        None
     }
     
     pub fn set_last_float(&mut self, bind_id: LiveItemId, value: f32) {
-        Self::_set_last_float(bind_id, value, &mut self.last_values)
-    }
-    
-    pub fn _set_last_float(bind_id: LiveItemId, value: f32, last_values: &mut Vec<(LiveItemId, AnimLastValue)>) {
-        if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == bind_id) {
+        if let Some((_, last)) = self.last_values.iter_mut().find( | v | v.0 == bind_id) {
             *last = AnimLastValue::Float(value);
         }
         else {
-            last_values.push((bind_id, AnimLastValue::Float(value)))
+            self.last_values.push((bind_id, AnimLastValue::Float(value)))
         }
     }
     
-    pub fn calc_vec2(&mut self, cx: &mut Cx, bind_id: LiveItemId, time: f64) -> Vec2 {
-        let last = Self::_last_vec2(bind_id, &self.last_values);
-        let mut ret = last;
+    pub fn calc_vec2(&mut self, cx: &mut Cx, bind_id: LiveItemId, time: f64) -> Option<Vec2> {
+        let last = self.last_vec2(bind_id);
         if let Some(time) = self.update_anim_track(cx, time) {
             if let Some(track_index) = self.find_track_index(bind_id) {
                 if let Track::Vec2{keys, cut_init, ease, ..} = &mut self.current.as_mut().unwrap().tracks[track_index] {
-                    ret = Track::compute_track_vec2(time, keys, cut_init, last, ease);
+                    let ret = Track::compute_track_vec2(time, keys, cut_init, last.unwrap_or(vec2(0.,0.)), ease);
+                    self.set_last_vec2(bind_id, ret);
+                    return Some(ret);
                 }
             }
         }
-        self.set_last_vec2(bind_id, ret);
-        return ret
+        None
     }
     
-    pub fn last_vec2(&self, _cx: &Cx, bind_id: LiveItemId) -> Vec2 {
-        Self::_last_vec2(bind_id, &self.last_values)
-    }
-    
-    pub fn _last_vec2(live_item_id: LiveItemId, last_values: &Vec<(LiveItemId, AnimLastValue)>) -> Vec2 {
-        if let Some((_, value)) = last_values.iter().find( | v | v.0 == live_item_id) {
+    pub fn last_vec2(&self, live_item_id: LiveItemId) -> Option<Vec2> {
+        if let Some((_, value)) = self.last_values.iter().find( | v | v.0 == live_item_id) {
             if let AnimLastValue::Vec2(value) = value {
-                return *value
+                return Some(*value)
             }
         }
-        return Vec2::default()
+        return None
     }
     
     pub fn set_last_vec2(&mut self, live_item_id: LiveItemId, value: Vec2) {
-        Self::_set_last_vec2(live_item_id, value, &mut self.last_values);
-    }
-    
-    pub fn _set_last_vec2(live_item_id: LiveItemId, value: Vec2, last_values: &mut Vec<(LiveItemId, AnimLastValue)>) {
-        if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == live_item_id) {
+        if let Some((_, last)) = self.last_values.iter_mut().find( | v | v.0 == live_item_id) {
             *last = AnimLastValue::Vec2(value);
         }
         else {
-            last_values.push((live_item_id, AnimLastValue::Vec2(value)))
+            self.last_values.push((live_item_id, AnimLastValue::Vec2(value)))
         }
     }
     
-    pub fn calc_vec3(&mut self, cx: &mut Cx, live_item_id: LiveItemId, time: f64) -> Vec3 {
-        let last = Self::_last_vec3(live_item_id, &self.last_values);
-        let mut ret = last;
+    pub fn calc_vec3(&mut self, cx: &mut Cx, live_item_id: LiveItemId, time: f64) -> Option<Vec3> {
+        let last = self.last_vec3(live_item_id);
         if let Some(time) = self.update_anim_track(cx, time) {
             if let Some(track_index) = self.find_track_index(live_item_id) {
                 if let Track::Vec3{keys, cut_init, ease, ..} = &mut self.current.as_mut().unwrap().tracks[track_index] {
-                    ret = Track::compute_track_vec3(time, keys, cut_init, last, ease);
+                    let ret = Track::compute_track_vec3(time, keys, cut_init, last.unwrap_or(Vec3::all(0.)), ease);
+                    self.set_last_vec3(live_item_id, ret);
+                    return Some(ret)
                 }
             }
         }
-        self.set_last_vec3(live_item_id, ret);
-        return ret
+        None
     }
     
-    pub fn last_vec3(&self, _cx: &Cx, live_item_id: LiveItemId) -> Vec3 {
-        Self::_last_vec3(live_item_id, &self.last_values)
-    }
-    
-    pub fn _last_vec3(live_item_id: LiveItemId, last_values: &Vec<(LiveItemId, AnimLastValue)>) -> Vec3 {
-        if let Some((_, value)) = last_values.iter().find( | v | v.0 == live_item_id) {
+    pub fn last_vec3(&self, live_item_id: LiveItemId) -> Option<Vec3> {
+        if let Some((_, value)) = self.last_values.iter().find( | v | v.0 == live_item_id) {
             if let AnimLastValue::Vec3(value) = value {
-                return *value
+                return Some(*value)
             }
         }
-        return Vec3::default()
+        None
     }
-    
     pub fn set_last_vec3(&mut self, live_item_id: LiveItemId, value: Vec3) {
-        Self::_set_last_vec3(live_item_id, value, &mut self.last_values);
-    }
-    
-    pub fn _set_last_vec3(live_item_id: LiveItemId, value: Vec3, last_values: &mut Vec<(LiveItemId, AnimLastValue)>) {
-        if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == live_item_id) {
+        if let Some((_, last)) = self.last_values.iter_mut().find( | v | v.0 == live_item_id) {
             *last = AnimLastValue::Vec3(value);
         }
         else {
-            last_values.push((live_item_id, AnimLastValue::Vec3(value)))
+            self.last_values.push((live_item_id, AnimLastValue::Vec3(value)))
         }
     }
     
-    pub fn calc_vec4(&mut self, cx: &mut Cx, live_item_id: LiveItemId, time: f64) -> Vec4 {
-        let last = Self::_last_vec4(live_item_id, &self.last_values);
-        let mut ret = last;
+    pub fn calc_vec4(&mut self, cx: &mut Cx, live_item_id: LiveItemId, time: f64) -> Option<Vec4> {
+        let last = self.last_vec4(live_item_id);
         if let Some(time) = self.update_anim_track(cx, time) {
             if let Some(track_index) = self.find_track_index(live_item_id) {
                 if let Track::Vec4{keys, cut_init, ease, ..} = &mut self.current.as_mut().unwrap().tracks[track_index] {
-                    ret = Track::compute_track_vec4(time, keys, cut_init, last, ease);
+                    let ret = Track::compute_track_vec4(time, keys, cut_init, last.unwrap_or(Vec4::all(0.0)), ease);
+                    self.set_last_vec4(live_item_id, ret);
+                    return Some(ret)
                 }
             }
         }
-        self.set_last_vec4(live_item_id, ret);
-        return ret
+        return None
     }
-    
-    pub fn last_vec4(&self, _cx: &Cx, live_item_id: LiveItemId) -> Vec4 {
-        Self::_last_vec4(live_item_id, &self.last_values)
-    }
-    
-    pub fn _last_vec4(live_item_id: LiveItemId, last_values: &Vec<(LiveItemId, AnimLastValue)>) -> Vec4 {
-        if let Some((_, value)) = last_values.iter().find( | v | v.0 == live_item_id) {
+
+    pub fn last_vec4(&self, live_item_id: LiveItemId) -> Option<Vec4> {
+        if let Some((_, value)) = self.last_values.iter().find( | v | v.0 == live_item_id) {
             if let AnimLastValue::Vec4(value) = value {
-                return *value
+                return Some(*value)
             }
         }
-        return Vec4::default()
+        None
     }
     
     pub fn set_last_vec4(&mut self, live_item_id: LiveItemId, value: Vec4) {
-        Self::_set_last_vec4(live_item_id, value, &mut self.last_values);
-    }
-    
-    pub fn _set_last_vec4(live_item_id: LiveItemId, value: Vec4, last_values: &mut Vec<(LiveItemId, AnimLastValue)>) {
-        if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == live_item_id) {
+        if let Some((_, last)) = self.last_values.iter_mut().find( | v | v.0 == live_item_id) {
             *last = AnimLastValue::Vec4(value);
         }
         else {
-            last_values.push((live_item_id, AnimLastValue::Vec4(value)))
+            self.last_values.push((live_item_id, AnimLastValue::Vec4(value)))
         }
     }
     
-    pub fn last_area(&mut self, _cx: &mut Cx, _area: Area, _time: f64) {
-        
-    }
-    
+    /*
     pub fn calc_area(&mut self, cx: &mut Cx, area: Area, time: f64) {
         
         if let Some(time) = self.update_anim_track(cx, time) {
@@ -396,6 +364,6 @@ impl Animator {
             }
             //}
         }
-    }
+    }*/
 }
 

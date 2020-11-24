@@ -123,7 +123,7 @@ where ID: std::cmp::Ord + std::hash::Hash + Clone
     // if you don't atleast get_draw 1 item
     // you have to call mark for sweep to work
     pub fn mark(&mut self, cx: &Cx) {
-        if !cx.is_in_redraw_cycle {
+        if !cx.in_redraw_cycle {
             panic!("Cannot call mark outside of redraw cycle!")
         }
         self.redraw_id = cx.redraw_id;
@@ -132,7 +132,7 @@ where ID: std::cmp::Ord + std::hash::Hash + Clone
     // destructs all the items that didn't get a mark/get_draw call this time
     pub fn sweep<F>(&mut self, cx: &mut Cx, mut destruct_callback: F)
     where F: FnMut(&mut Cx, &mut T) {
-        if !cx.is_in_redraw_cycle {
+        if !cx.in_redraw_cycle {
             panic!("Cannot call sweep outside of redraw cycle!")
         }
         let mut i = 0;
@@ -209,7 +209,7 @@ where ID: std::cmp::Ord + std::hash::Hash + Clone
     
     pub fn get_draw<F>(&mut self, cx: &mut Cx, index: ID, mut insert_callback: F) -> &mut T
     where F: FnMut(&mut Cx, &TEMPL) -> T {
-        if !cx.is_in_redraw_cycle {
+        if !cx.in_redraw_cycle {
             panic!("Cannot call get_draw outside of redraw cycle!")
         }
         self.mark(cx);
@@ -276,7 +276,7 @@ where T:Clone{
     
     pub fn get_draw(&mut self, cx: &mut Cx) -> &mut T 
     where T:Clone{
-        if !cx.is_in_redraw_cycle {
+        if !cx.in_redraw_cycle {
             panic!("Cannot call get_draw outside of redraw cycle!")
         }
         if self.elements.redraw_id != cx.redraw_id {

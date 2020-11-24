@@ -8,7 +8,7 @@ pub struct DrawQuad {
     pub slots: usize,
     pub rect_pos: Vec2,
     pub rect_size: Vec2,
-    pub instance_z: f32
+    pub draw_depth: f32
 }
 
 impl Clone for DrawQuad {
@@ -20,7 +20,7 @@ impl Clone for DrawQuad {
             slots: self.slots,
             rect_pos: Vec2::default(),
             rect_size: Vec2::default(),
-            instance_z: self.instance_z
+            draw_depth: self.draw_depth
         }
     }
 }
@@ -38,10 +38,11 @@ impl DrawQuad {
             lock: None,
             rect_pos: Vec2::default(),
             rect_size: Vec2::default(),
-            instance_z: 0.0
+            draw_depth: 0.0
         }
     }
     
+        
     pub fn style(cx: &mut Cx) {
         
         Self::register_draw_input(cx);
@@ -77,7 +78,7 @@ impl DrawQuad {
                     return camera_projection * (camera_view * (view_transform * vec4(
                         clipped.x,
                         clipped.y,
-                        instance_z + draw_zbias,
+                        draw_depth + draw_zbias,
                         1.
                     )));
                 }
@@ -89,6 +90,25 @@ impl DrawQuad {
         "#);
     }
     
+    pub fn with_draw_depth(self, draw_depth: f32) -> Self {Self {draw_depth, ..self}}
+    pub fn with_rect_pos(self, rect_pos: Vec2) -> Self {Self {rect_pos, ..self}}
+    pub fn with_rect_size(self, rect_size: Vec2) -> Self {Self {rect_size, ..self}}
+    
+    pub fn set_draw_depth(&mut self, cx:&mut Cx, v: f32) {
+        self.draw_depth = v;
+        write_draw_input!(cx, self.area(), Self::DrawQuad::draw_depth, v);
+    }
+
+    pub fn set_rect_pos(&mut self, cx:&mut Cx, v: Vec2) {
+        self.rect_pos = v;
+        write_draw_input!(cx, self.area(), Self::DrawQuad::rect_pos, v);
+    }
+
+    pub fn set_rect_size(&mut self, cx:&mut Cx, v: Vec2) {
+        self.rect_size = v;
+        write_draw_input!(cx, self.area(), Self::DrawQuad::rect_size, v);
+    }
+    
     pub fn register_draw_input(cx: &mut Cx) {
         cx.live_styles.register_draw_input(live_item_id!(self::DrawQuad), Self::live_draw_input())
     }
@@ -98,8 +118,26 @@ impl DrawQuad {
         let mp = module_path!();
         def.add_instance(mp, "DrawQuad", "rect_pos", Vec2::ty_expr());
         def.add_instance(mp, "DrawQuad", "rect_size", Vec2::ty_expr());
-        def.add_instance(mp, "DrawQuad", "instance_z", f32::ty_expr());
+        def.add_instance(mp, "DrawQuad", "draw_depth", f32::ty_expr());
         return def
+    }
+
+    pub fn last_animate(&mut self, animator:&Animator){
+        if let Some(v) = Vec2::last_value(animator, live_item_id!(self::DrawQuad::rect_pos)){
+            self.rect_pos = v;
+        }
+        if let Some(v) = Vec2::last_value(animator, live_item_id!(self::DrawQuad::rect_size)){
+            self.rect_size = v;
+        }
+    }
+    
+    pub fn animate(&mut self, cx: &mut Cx, animator:&mut Animator, time:f64){
+        if let Some(v) = Vec2::calc_value(cx, animator, time, live_item_id!(self::DrawQuad::rect_pos)){
+            self.set_rect_pos(cx, v);
+        }
+        if let Some(v) = Vec2::calc_value(cx, animator, time, live_item_id!(self::DrawQuad::rect_size)){
+            self.set_rect_size(cx, v);
+        }
     }
     
     pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) {
@@ -107,40 +145,48 @@ impl DrawQuad {
         cx.begin_turtle(layout, self.area);
     }
     
-    pub fn end_quad(&mut self, cx: &mut Cx)  {
+    pub fn end_quad(&mut self, cx: &mut Cx) {
         let rect = cx.end_turtle(self.area);
         unsafe {self.area.set_rect(cx, &rect)};
     }
     
-    pub fn draw_quad(&mut self, cx: &mut Cx, walk: Walk) {
+    pub fn draw_quad_walk(&mut self, cx: &mut Cx, walk: Walk) {
         let rect = cx.walk_turtle(walk);
         self.rect_pos = rect.pos;
         self.rect_size = rect.size;
-        self.area = cx.add_aligned_instance(self.shader, self.as_slice());
+        self.draw_quad_aligned(cx);
     }
-    
+
+
+    pub fn draw_quad_abs(&mut self, cx: &mut Cx, rect: Rect) {
+        self.rect_pos = rect.pos;
+        self.rect_size = rect.size;
+        self.draw_quad(cx);
+    }
+
     pub fn draw_quad_rel(&mut self, cx: &mut Cx, rect: Rect) {
         let rect = rect.translate(cx.get_turtle_origin());
         self.rect_pos = rect.pos;
         self.rect_size = rect.size;
-        self.area = cx.add_aligned_instance(self.shader, self.as_slice())
+        self.draw_quad_aligned(cx);
+    }
+
+    pub fn draw_quad(&mut self, cx: &mut Cx) {
+        self.area = cx.add_instance(self.shader, self.as_slice())
     }
     
-    pub fn draw_quad_abs(&mut self, cx: &mut Cx, rect: Rect) {
-        self.rect_pos = rect.pos;
-        self.rect_size = rect.size;
-        self.area = cx.add_instance(self.shader, self.as_slice());
+    pub fn draw_quad_aligned(&mut self, cx: &mut Cx) {
+        self.area = cx.add_aligned_instance(self.shader, self.as_slice())
     }
     
     pub fn area(&self) -> Area {
         self.area
     }
-    
-    pub fn last_animator(&mut self, _animator: &Animator) {
-        // set values to the animator track last values
-        
+
+    pub fn set_area(&mut self, area:Area) {
+        self.area = area
     }
-    
+
     pub fn lock_quad(&mut self, cx: &mut Cx) {
         self.lock = Some(cx.lock_instances(self.shader, self.slots))
     }
@@ -149,9 +195,7 @@ impl DrawQuad {
         self.lock = Some(cx.lock_aligned_instances(self.shader, self.slots))
     }
     
-    pub fn add_quad(&mut self, rect: Rect) {
-        self.rect_pos = rect.pos;
-        self.rect_size = rect.size;
+    pub fn add_quad(&mut self) {
         unsafe {
             if let Some(li) = &mut self.lock {
                 li.instances.extend_from_slice(std::slice::from_raw_parts(&self.rect_pos as *const _ as *const f32, self.slots));
@@ -187,3 +231,5 @@ impl DrawQuad {
         }
     }
 }
+
+

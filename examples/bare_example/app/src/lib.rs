@@ -44,13 +44,13 @@ impl BareExampleApp {
         
         ButtonQuad::register_draw_input(cx);
         ButtonText::register_draw_input(cx);
-
+        
         live_body!(cx, r#"
             self::shader_quad: Shader {
                 use makepad_render::drawquad::shader::*;
                 draw_input: self::ButtonQuad;
                 fn pixel() -> vec4 {
-                    return mix(#f00, #0f0, abs(sin(counter+some)));
+                    return mix(#f00, #0f0, abs(sin(counter + some)));
                 }
             }
             
@@ -78,15 +78,17 @@ impl BareExampleApp {
     }
     
     pub fn draw_app(&mut self, cx: &mut Cx) {
+        
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
         self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(Vec4::color("300")));
         if self.main_view.begin_view(cx, Layout::default()).is_ok() {
-             cx.profile_start(1);
+            cx.profile_start(1);
             
             //let x = 1.0f32;
             //let y = x.sin();
             self.quad.counter = 0.;
+            
             self.quad.lock_quad(cx);
             //self.quad.base.shader = live_shader!(cx, self::bg_shader);
             //println!("{}", self.quad.base.slots);
@@ -96,18 +98,17 @@ impl BareExampleApp {
             self.quad.counter = 0.;
             self.quad.some += 1.1;
             let msg = format!("HELLO WORLD");
-
-            for i in 0..10000 {
+            
+            for i in 0..100000 {
                 let v = 0.5 * (i as f32);
                 self.quad.counter += 0.01; //= (i as f32).sin();
                 let x = 400. + (v + self.count).sin() * 400.;
-                let y = 400. + (v*1.12 + self.count * 18.).cos() * 400.;
- 
+                let y = 400. + (v * 1.12 + self.count * 18.).cos() * 400.;
                 //self.quad.add_quad(Rect { pos: vec2(x,y), size:vec2(10.,10.0) });
-
+                
                 self.text.add_text(
                     cx,
-                    vec2(x,y),
+                    vec2(x, y),
                     &msg
                 );
             }

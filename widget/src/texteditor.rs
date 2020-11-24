@@ -5,24 +5,54 @@ use crate::textcursor::*;
 use crate::scrollshadow::*;
 use crate::tokentype::*;
 
+#[derive(Clone, DrawQuad)]
+#[repr(C)]
+pub struct DrawIndentLines {
+    #[default_shader(self::shader_indent_lines)]
+    pub indent_sel: f32,
+    pub base: DrawQuad,
+    pub ident_id: f32
+}
+
+#[derive(Clone, DrawQuad)]
+#[repr(C)]
+pub struct DrawCursor {
+    #[default_shader(self::shader_cursor)]
+    pub blink: f32,
+    pub base: DrawColor,
+}
+
+
+#[derive(Clone, DrawQuad)]
+#[repr(C)]
+pub struct DrawSelection {
+    #[default_shader(self::shader_selection)]
+    pub base: DrawColor,
+    pub prev_x: f32,
+    pub prev_w: f32,
+    pub next_x: f32,
+    pub next_w: f32
+}
+
+
 #[derive(Clone)]
 pub struct TextEditor {
     pub view: ScrollView,
     //pub view_layout: Layout,
-    pub bg: Quad,
-    pub gutter_bg: Quad,
-    pub cursor: Quad,
-    pub selection: Quad,
-    pub token_highlight: Quad,
+    pub bg: DrawColor,
+    pub gutter_bg: DrawColor,
+    pub cursor: DrawCursor,
+    pub selection: DrawSelection,
+    pub token_highlight: DrawColor,
     //pub select_highlight: Quad,
-    pub cursor_row: Quad,
-    pub paren_pair: Quad,
-    pub indent_lines: Quad,
+    pub cursor_row: DrawColor,
+    pub paren_pair: DrawColor,
+    pub indent_lines: DrawIndentLines,
     pub shadow: ScrollShadow,
-    pub message_marker: Quad,
-    pub search_marker: Quad,
-    pub text: Text,
-    pub line_number_text: Text,
+    pub message_marker: DrawColor,
+    pub search_marker: DrawColor,
+    pub text: DrawText,
+    pub line_number_text: DrawText,
     pub cursors: TextCursorSet,
     
     //pub base_font_size: f32,
@@ -61,11 +91,11 @@ pub struct TextEditor {
     pub _scroll_pos: Vec2,
     pub _last_finger_move: Option<Vec2>,
     pub _paren_stack: Vec<ParenItem>,
-    pub _indent_stack: Vec<(Color, f32)>,
+    pub _indent_stack: Vec<(Vec4, f32)>,
     pub _indent_id_alloc: f32,
     pub _indent_line_inst: Area,
     pub _bg_inst: Option<InstanceArea>,
-    pub _last_indent_color: Color,
+    pub _last_indent_color: Vec4,
     
     pub _line_geometry: Vec<LineGeom>,
     pub _anim_select: Vec<AnimSelect>,
@@ -97,7 +127,7 @@ pub struct TextEditor {
     
     pub _cursor_blink_timer: Timer,
     pub _cursor_blink_flipflop: f32,
-    pub _cursor_area: Area,
+    //pub _cursor_area: Area,
     pub _highlight_visibility: f32,
     
     pub _last_tabs: usize,
@@ -122,38 +152,38 @@ pub enum TextEditorEvent {
 
 #[derive(Default, Clone)]
 pub struct CodeEditorColors {
-    indent_line_unknown: Color,
-    indent_line_fn: Color,
-    indent_line_typedef: Color,
-    indent_line_looping: Color,
-    indent_line_flow: Color,
-    paren_pair_match: Color,
-    paren_pair_fail: Color,
-    message_marker_error: Color,
-    message_marker_warning: Color,
-    message_marker_log: Color,
-    line_number_normal: Color,
-    line_number_highlight: Color,
-    whitespace: Color,
-    keyword: Color,
-    flow: Color,
-    looping: Color,
-    identifier: Color,
-    call: Color,
-    type_name: Color,
-    theme_name: Color,
-    string: Color,
-    number: Color,
-    comment: Color,
-    doc_comment: Color,
-    paren_d1: Color,
-    paren_d2: Color,
-    operator: Color,
-    delimiter: Color,
-    unexpected: Color,
-    warning: Color,
-    error: Color,
-    defocus: Color,
+    indent_line_unknown: Vec4,
+    indent_line_fn: Vec4,
+    indent_line_typedef: Vec4,
+    indent_line_looping: Vec4,
+    indent_line_flow: Vec4,
+    paren_pair_match: Vec4,
+    paren_pair_fail: Vec4,
+    message_marker_error: Vec4,
+    message_marker_warning: Vec4,
+    message_marker_log: Vec4,
+    line_number_normal: Vec4,
+    line_number_highlight: Vec4,
+    whitespace: Vec4,
+    keyword: Vec4,
+    flow: Vec4,
+    looping: Vec4,
+    identifier: Vec4,
+    call: Vec4,
+    type_name: Vec4,
+    theme_name: Vec4,
+    string: Vec4,
+    number: Vec4,
+    comment: Vec4,
+    doc_comment: Vec4,
+    paren_d1: Vec4,
+    paren_d2: Vec4,
+    operator: Vec4,
+    delimiter: Vec4,
+    unexpected: Vec4,
+    warning: Vec4,
+    error: Vec4,
+    defocus: Vec4,
 }
 
 impl TextEditor {
@@ -163,45 +193,40 @@ impl TextEditor {
             read_only: false,
             multiline: true,
             cursors: TextCursorSet::new(),
-            indent_lines: Quad {
-                z: 0.001,
-                ..Quad::new(cx)
-            },
+
+            indent_lines: DrawIndentLines::new(cx, default_shader!())
+                .with_draw_depth(0.001),
+
             view: ScrollView::new(cx),
-            bg: Quad ::new(cx),
-            shadow: ScrollShadow {
-                z: 1.,
-                ..ScrollShadow::new(cx)
-            },
-            gutter_bg: Quad {
-                z: 1.1,
-                ..Quad::new(cx)
-            },
+
+            bg: DrawColor::new(cx, live_shader!(cx, self::shader_bg)),
+
+            shadow: ScrollShadow::new(cx)
+                .with_draw_depth(1.0),
+
+            gutter_bg: DrawColor::new(cx, default_shader!())
+                .with_draw_depth(1.1),
+
             colors: CodeEditorColors::default(),
-            selection: Quad {
-                z: 0.,
-                ..Quad::new(cx)
-            },
-            token_highlight: Quad::new(cx),
-            cursor: Quad::new(cx),
-            cursor_row: Quad::new(cx),
-            paren_pair: Quad::new(cx),
-            message_marker: Quad::new(cx),
-            search_marker: Quad::new(cx),
+            
+            selection: DrawSelection::new(cx, default_shader!())
+                .with_draw_depth(0.0),
+                
+            token_highlight: DrawColor::new(cx, default_shader!()),
+            cursor: DrawCursor::new(cx, default_shader!()),
+            cursor_row: DrawColor::new(cx, live_shader!(cx, self::shader_cursor_row)),
+            paren_pair: DrawColor::new(cx, live_shader!(cx, self::shader_paren_pair)),
+            message_marker: DrawColor::new(cx,live_shader!(cx, self::shader_message_marker)),
+            search_marker: DrawColor::new(cx, live_shader!(cx, self::shader_search_marker)),
             //code_icon: CodeIcon::proto(cx),
             //view_layout: Layout::default(),
-            text: Text {
-                z: 0.5,
-                shader: live_shader!(cx, makepad_render::text::shader),
-                wrapping: Wrapping::Line,
-                ..Text::new(cx)
-            },
-            line_number_text: Text {
-                z: 1.2,
-                shader: live_shader!(cx, makepad_render::text::shader),
-                wrapping: Wrapping::Line,
-                ..Text::new(cx)
-            },
+            text: DrawText::new(cx, default_shader!())
+                .with_draw_depth(0.5)
+                .with_wrapping(Wrapping::Line),
+
+            line_number_text: DrawText::new(cx, default_shader!())
+                .with_draw_depth(1.2)
+                .with_wrapping(Wrapping::Line),
             //base_font_size: 8.0,
             open_font_scale: 1.0,
             folded_font_scale: 0.07,
@@ -234,7 +259,7 @@ impl TextEditor {
             _anim_select: Vec::new(),
             _grid_select_corner: None,
             _is_row_select: false,
-            _view_area: Area::Empty,
+            //_view_area: Area::Empty,
             //_bg_area: Area::Empty,
             _highlight_area: Area::Empty,
             _highlight_visibility: 0.,
@@ -267,11 +292,11 @@ impl TextEditor {
             //_highlight_selection: Vec::new(),
             //_highlight_token: Vec::new(),
             _last_cursor_pos: TextPos::zero(),
-            _last_indent_color: Color::default(),
+            _last_indent_color: Vec4::default(),
             
             _cursor_blink_timer: Timer::empty(),
             _cursor_blink_flipflop: 0.,
-            _cursor_area: Area::Empty,
+            //_cursor_area: Area::Empty,
             _last_lag_mutation_id: 0,
             _last_tabs: 0,
             _newline_tabs: 0,
@@ -279,6 +304,10 @@ impl TextEditor {
     }
     
     pub fn style(cx: &mut Cx) {
+        
+        DrawIndentLines::register_draw_input(cx);
+        DrawCursor::register_draw_input(cx);
+        DrawSelection::register_draw_input(cx);
         
         live_body!(cx, r#"
             self::layout_bg: Layout {}
@@ -305,9 +334,9 @@ impl TextEditor {
             self::color_message_marker_error: #c80000;
             self::color_message_marker_warning: #00c800;
             self::color_message_marker_log: #c8;
-    
+            
             self::color_search_marker: #804000;
-    
+            
             self::color_line_number_normal: #88;
             self::color_line_number_highlight: #d4;
             
@@ -343,11 +372,9 @@ impl TextEditor {
             }
             
             self::shader_indent_lines: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawquad::shader::*;
                 
-                instance indent_id: float;
-                
-                uniform indent_sel: float;
+                draw_input: self::DrawIndentLines;
                 
                 fn pixel() -> vec4 {
                     let col = color;
@@ -367,9 +394,8 @@ impl TextEditor {
             }
             
             self::shader_cursor: Shader {
-                use makepad_render::quad::shader::*;
-                
-                uniform blink: float;
+                use makepad_render::drawquad::shader::*;
+                draw_input: self::DrawShaderCursor;
                 
                 fn pixel() -> vec4 {
                     if blink<0.5 {
@@ -382,12 +408,9 @@ impl TextEditor {
             }
             
             self::shader_selection: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawquad::shader::*;
                 
-                instance prev_x: float;
-                instance prev_w: float;
-                instance next_x: float;
-                instance next_w: float;
+                draw_input: self::DrawSelection;
                 
                 const gloopiness: float = 8.;
                 const border_radius: float = 2.;
@@ -420,7 +443,7 @@ impl TextEditor {
             }
             
             self::shader_paren_pair: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawcolor::shader::*;
                 fn pixel() -> vec4 {
                     let cx = Df::viewport(pos * vec2(w, h));
                     cx.rect(0., h - 1.5 - dpi_dilate, w, 1.5 + dpi_dilate);
@@ -429,7 +452,7 @@ impl TextEditor {
             }
             
             self::shader_cursor_row: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawcolor::shader::*;
                 fn pixel() -> vec4 {
                     let cx = Df::viewport(pos * vec2(w, h));
                     cx.rect(0., 0., w, h);
@@ -438,7 +461,7 @@ impl TextEditor {
             }
             
             self::shader_search_marker: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawcolor::shader::*;
                 fn pixel() -> vec4 {
                     let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
                     let cx = Df::viewport(pos2 * vec2(w, h));
@@ -449,7 +472,7 @@ impl TextEditor {
             }
             
             self::shader_message_marker: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawcolor::shader::*;
                 fn pixel() -> vec4 {
                     let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
                     let cx = Df::viewport(pos2 * vec2(w, h));
@@ -461,7 +484,7 @@ impl TextEditor {
             }
             
             self::shader_bg: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawcolor::shader::*;
                 fn pixel() -> vec4 {
                     return vec4(color.rgb * color.a, color.a);
                 }
@@ -471,54 +494,54 @@ impl TextEditor {
     
     pub fn apply_style(&mut self, cx: &mut Cx) {
         // copy over colors
-        self.colors.indent_line_unknown = live_color!(cx, self::color_indent_line_unknown);
-        self.colors.indent_line_fn = live_color!(cx, self::color_indent_line_fn);
-        self.colors.indent_line_typedef = live_color!(cx, self::color_indent_line_typedef);
-        self.colors.indent_line_looping = live_color!(cx, self::color_indent_line_looping);
-        self.colors.indent_line_flow = live_color!(cx, self::color_indent_line_flow);
-        self.search_marker.color = live_color!(cx, self::color_search_marker);
-        self.colors.paren_pair_match = live_color!(cx, self::color_paren_pair_match);
-        self.colors.paren_pair_fail = live_color!(cx, self::color_paren_pair_fail);
-        self.colors.message_marker_error = live_color!(cx, self::color_message_marker_error);
-        self.colors.message_marker_warning = live_color!(cx, self::color_message_marker_warning);
-        self.colors.message_marker_log = live_color!(cx, self::color_message_marker_log);
-        self.colors.line_number_normal = live_color!(cx, self::color_line_number_normal);
-        self.colors.line_number_highlight = live_color!(cx, self::color_line_number_highlight);
-        self.colors.whitespace = live_color!(cx, self::color_whitespace);
-        self.colors.keyword = live_color!(cx, self::color_keyword);
-        self.colors.flow = live_color!(cx, self::color_flow);
-        self.colors.looping = live_color!(cx, self::color_looping);
-        self.colors.identifier = live_color!(cx, self::color_identifier);
-        self.colors.call = live_color!(cx, self::color_call);
-        self.colors.type_name = live_color!(cx, self::color_type_name);
-        self.colors.theme_name = live_color!(cx, self::color_theme_name);
-        self.colors.string = live_color!(cx, self::color_string);
-        self.colors.number = live_color!(cx, self::color_number);
-        self.colors.comment = live_color!(cx, self::color_comment);
-        self.colors.doc_comment = live_color!(cx, self::color_doc_comment);
-        self.colors.paren_d1 = live_color!(cx, self::color_paren_d1);
-        self.colors.paren_d2 = live_color!(cx, self::color_paren_d2);
-        self.colors.operator = live_color!(cx, self::color_operator);
-        self.colors.delimiter = live_color!(cx, self::color_delimiter);
-        self.colors.unexpected = live_color!(cx, self::color_unexpected);
-        self.colors.warning = live_color!(cx, self::color_warning);
-        self.colors.error = live_color!(cx, self::color_error);
-        self.colors.defocus = live_color!(cx, self::color_defocus);
-        self.bg.color = live_color!(cx, self::color_bg);
-        self.gutter_bg.color = live_color!(cx, self::color_gutter_bg);
+        self.colors.indent_line_unknown = live_vec4!(cx, self::color_indent_line_unknown);
+        self.colors.indent_line_fn = live_vec4!(cx, self::color_indent_line_fn);
+        self.colors.indent_line_typedef = live_vec4!(cx, self::color_indent_line_typedef);
+        self.colors.indent_line_looping = live_vec4!(cx, self::color_indent_line_looping);
+        self.colors.indent_line_flow = live_vec4!(cx, self::color_indent_line_flow);
+        self.search_marker.color = live_vec4!(cx, self::color_search_marker);
+        self.colors.paren_pair_match = live_vec4!(cx, self::color_paren_pair_match);
+        self.colors.paren_pair_fail = live_vec4!(cx, self::color_paren_pair_fail);
+        self.colors.message_marker_error = live_vec4!(cx, self::color_message_marker_error);
+        self.colors.message_marker_warning = live_vec4!(cx, self::color_message_marker_warning);
+        self.colors.message_marker_log = live_vec4!(cx, self::color_message_marker_log);
+        self.colors.line_number_normal = live_vec4!(cx, self::color_line_number_normal);
+        self.colors.line_number_highlight = live_vec4!(cx, self::color_line_number_highlight);
+        self.colors.whitespace = live_vec4!(cx, self::color_whitespace);
+        self.colors.keyword = live_vec4!(cx, self::color_keyword);
+        self.colors.flow = live_vec4!(cx, self::color_flow);
+        self.colors.looping = live_vec4!(cx, self::color_looping);
+        self.colors.identifier = live_vec4!(cx, self::color_identifier);
+        self.colors.call = live_vec4!(cx, self::color_call);
+        self.colors.type_name = live_vec4!(cx, self::color_type_name);
+        self.colors.theme_name = live_vec4!(cx, self::color_theme_name);
+        self.colors.string = live_vec4!(cx, self::color_string);
+        self.colors.number = live_vec4!(cx, self::color_number);
+        self.colors.comment = live_vec4!(cx, self::color_comment);
+        self.colors.doc_comment = live_vec4!(cx, self::color_doc_comment);
+        self.colors.paren_d1 = live_vec4!(cx, self::color_paren_d1);
+        self.colors.paren_d2 = live_vec4!(cx, self::color_paren_d2);
+        self.colors.operator = live_vec4!(cx, self::color_operator);
+        self.colors.delimiter = live_vec4!(cx, self::color_delimiter);
+        self.colors.unexpected = live_vec4!(cx, self::color_unexpected);
+        self.colors.warning = live_vec4!(cx, self::color_warning);
+        self.colors.error = live_vec4!(cx, self::color_error);
+        self.colors.defocus = live_vec4!(cx, self::color_defocus);
+        self.bg.color = live_vec4!(cx, self::color_bg);
+        self.gutter_bg.color = live_vec4!(cx, self::color_gutter_bg);
         
         self.line_number_width = live_float!(cx, self::gutter_width);
         self.top_padding = live_float!(cx, self::padding_top);
         
-        self.selection.color = if self.has_key_focus(cx) {
+        self.selection.base.color = if self.has_key_focus(cx) {
             live_color!(cx, self::color_selection)
         }else {
             live_color!(cx, self::color_selection_defocus)
         };
         
-        self.token_highlight.color = live_color!(cx, self::color_highlight);
-        self.cursor.color = live_color!(cx, self::color_cursor);
-        self.cursor_row.color = live_color!(cx, self::color_cursor_row);
+        self.token_highlight.color = live_vec4!(cx, self::color_highlight);
+        self.cursor.base.color = live_vec4!(cx, self::color_cursor);
+        self.cursor_row.color = live_vec4!(cx, self::color_cursor_row);
         self.text.text_style = live_text_style!(cx, self::text_style_editor_text);
         self.line_number_text.text_style = live_text_style!(cx, self::text_style_editor_text);
         
@@ -661,7 +684,7 @@ impl TextEditor {
         self.reset_cursor_blinker(cx);
     }
     
-    fn handle_key_down(&mut self, cx: &mut Cx, ke: &KeyEvent, text_buffer: &mut TextBuffer) -> bool{
+    fn handle_key_down(&mut self, cx: &mut Cx, ke: &KeyEvent, text_buffer: &mut TextBuffer) -> bool {
         let cursor_moved = match ke.key_code {
             KeyCode::KeyE => {
                 if ke.modifiers.logo || ke.modifiers.control {
@@ -1139,10 +1162,10 @@ impl TextEditor {
             TextEditorEvent::Change
         }
         else {
-            if cursor_moved{
+            if cursor_moved {
                 TextEditorEvent::CursorMove
             }
-            else{
+            else {
                 TextEditorEvent::None
             }
         }
