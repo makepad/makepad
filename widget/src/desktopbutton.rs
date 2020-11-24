@@ -18,6 +18,16 @@ pub enum DesktopButtonType {
     Fullscreen
 }
 
+#[derive(Clone, DrawQuad)]
+#[repr(C)]
+struct DrawDesktopButton {
+    #[default_shader(self::shader_bg)]
+    base: DrawQuad,
+    hover: f32,
+    down: f32,
+    button_type: f32
+}
+
 impl DesktopButtonType {
     fn shader_float(&self) -> f32 {
         match self {
@@ -35,7 +45,7 @@ impl DesktopButton {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             button: ButtonLogic::default(),
-            bg: Quad::new(cx),
+            bg: DrawDesktopButton::new(cx, default_shader!()),
             animator: Animator::default(),
             _bg_area: Area::Empty,
         }

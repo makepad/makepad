@@ -45,6 +45,9 @@ pub trait DrawInputType {
     fn ty_expr() -> TyExpr;
     // this writes a value to the area (wether texture, uniform or instance)
     fn write_draw_input(self, cx: &mut Cx, area: Area, live_item_id: LiveItemId, name: &str);
+    
+    fn last_value(animator:&Animator, live_item_id: LiveItemId)->Option<Self> where Self: Sized;
+    fn calc_value(cx: &mut Cx, animator:&mut Animator, time:f64, live_item_id: LiveItemId)->Option<Self> where Self: Sized;
 }
 
 impl DrawInputType for f32 {
@@ -61,7 +64,14 @@ impl DrawInputType for f32 {
             }
         }
     }
+
+    fn last_value(animator:&Animator, live_item_id: LiveItemId)->Option<Self> where Self: Sized{
+        animator.last_float(live_item_id)
+    }
     
+    fn calc_value(cx: &mut Cx, animator:&mut Animator, time:f64, live_item_id: LiveItemId)->Option<Self> where Self: Sized{
+        animator.calc_float(cx, live_item_id, time)
+    }
 }
 
 impl DrawInputType for Vec2 {
@@ -78,6 +88,14 @@ impl DrawInputType for Vec2 {
                 wr.buffer[i * wr.stride + 1] = self.y;
             }
         }
+    }
+
+    fn last_value(animator:&Animator, live_item_id: LiveItemId)->Option<Self> where Self: Sized{
+        animator.last_vec2(live_item_id)
+    }
+    
+    fn calc_value(cx: &mut Cx, animator:&mut Animator, time:f64, live_item_id: LiveItemId)->Option<Self> where Self: Sized{
+        animator.calc_vec2(cx, live_item_id, time)
     }
 }
 
@@ -97,6 +115,16 @@ impl DrawInputType for Vec3 {
             }
         }
     }
+
+
+    fn last_value( animator:&Animator, live_item_id: LiveItemId)->Option<Self> where Self: Sized{
+        animator.last_vec3(live_item_id)
+    }
+    
+    fn calc_value(cx: &mut Cx, animator:&mut Animator, time:f64, live_item_id: LiveItemId)->Option<Self> where Self: Sized{
+        animator.calc_vec3(cx, live_item_id, time)
+    }
+
 }
 
 impl DrawInputType for Vec4 {
@@ -116,6 +144,16 @@ impl DrawInputType for Vec4 {
             }
         }
     }
+
+
+    fn last_value(animator:&Animator, live_item_id: LiveItemId)->Option<Self> where Self: Sized{
+        animator.last_vec4(live_item_id)
+    }
+    
+    fn calc_value(cx: &mut Cx, animator:&mut Animator, time:f64, live_item_id: LiveItemId)->Option<Self> where Self: Sized{
+        animator.calc_vec4(cx, live_item_id, time)
+    }
+
 }
 
 impl DrawInputType for Mat4 {
@@ -135,6 +173,15 @@ impl DrawInputType for Mat4 {
             }
         }
     }
+
+    fn last_value(_animator:&Animator, _live_item_id: LiveItemId)->Option<Self> where Self: Sized{
+        None
+    }
+    
+    fn calc_value(_cx: &mut Cx, _animator:&mut Animator, _time:f64, _live_item_id: LiveItemId)->Option<Self> where Self: Sized{
+        None
+    }
+
 }
 
 impl DrawInputType for Texture2D {
@@ -149,6 +196,14 @@ impl DrawInputType for Texture2D {
             area.write_texture_2d_id(cx, live_item_id, name, u as usize)
         }
     }
+
+    fn last_value(_animator:&Animator, _live_item_id: LiveItemId)->Option<Self> where Self: Sized{
+        None
+    }
+    
+    fn calc_value(_cx: &mut Cx, _animator:&mut Animator, _time:f64, _live_item_id: LiveItemId)->Option<Self> where Self: Sized{
+        None
+    }
 }
 
 #[macro_export]
@@ -157,21 +212,6 @@ macro_rules!write_draw_input {
         ( $ value).write_draw_input( $ cx, $ area, live_str_to_id(module_path!(), stringify!( $ path)), stringify!( $ path))
     }
 }
-
-#[macro_export]
-macro_rules!draw_input_uniform {
-    ( $ def: ident, $ path: path, $ ty: ty) => {
-        ( $ value).write_draw_input( $ cx, $ area, live_str_to_id(module_path!(), stringify!( $ path)), stringify!( $ path))
-    }
-}
-
-#[macro_export]
-macro_rules!draw_input_instance {
-    ( $ cx: ident, $ area: expr, $ path: path, $ value: expr) => {
-        ( $ value).write_draw_input( $ cx, $ area, live_str_to_id(module_path!(), stringify!( $ path)), stringify!( $ path))
-    }
-}
-
 
 #[macro_export]
 macro_rules!uid {

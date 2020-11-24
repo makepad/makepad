@@ -1,8 +1,3 @@
-//! A Rust interface for the functionality of the Objective-C runtime.
-//!
-//! For more information on foreign functions, see Apple's documentation:
-//! <https://developer.apple.com/library/mac/documentation/Cocoa/Reference/ObjCRuntimeRef/index.html>
-
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::os::raw::{c_char, c_int, c_uint, c_void};
@@ -13,15 +8,12 @@ use malloc_buf::MallocBuffer;
 use encode;
 use {Encode, Encoding};
 
-/// The Objective-C `BOOL` type.
-///
-/// To convert an Objective-C `BOOL` into a Rust `bool`, compare it with `NO`.
 #[cfg(not(target_arch = "aarch64"))]
 pub type BOOL = ::std::os::raw::c_schar;
-/// The equivalent of true for Objective-C's `BOOL` type.
+
 #[cfg(not(target_arch = "aarch64"))]
 pub const YES: BOOL = 1;
-/// The equivalent of false for Objective-C's `BOOL` type.
+
 #[cfg(not(target_arch = "aarch64"))]
 pub const NO: BOOL = 0;
 
@@ -32,47 +24,38 @@ pub const YES: BOOL = true;
 #[cfg(target_arch = "aarch64")]
 pub const NO: BOOL = false;
 
-/// A type that represents a method selector.
 #[repr(C)]
 pub struct Sel {
     ptr: *const c_void,
 }
 
-/// A marker type to be embedded into other types just so that they cannot be
-/// constructed externally.
 type PrivateMarker = [u8; 0];
 
-/// A type that represents an instance variable.
 #[repr(C)]
 pub struct Ivar {
     _priv: PrivateMarker,
 }
 
-/// A type that represents a method in a class definition.
 #[repr(C)]
 pub struct Method {
     _priv: PrivateMarker,
 }
 
-/// A type that represents an Objective-C class.
 #[repr(C)]
 pub struct Class {
     _priv: PrivateMarker,
 }
 
-/// A type that represents an Objective-C protocol.
 #[repr(C)]
 pub struct Protocol {
     _priv: PrivateMarker
 }
 
-/// A type that represents an instance of a class.
 #[repr(C)]
 pub struct Object {
     _priv: PrivateMarker,
 }
 
-/// A pointer to the start of a method implementation.
 pub type Imp = unsafe extern fn();
 
 #[link(name = "objc", kind = "dylib")]

@@ -23,65 +23,26 @@ pub struct XRChannel {
 }
 
 #[derive(Clone)]
-pub struct XRCube {
-    pub cube: Cube,
-    pub _area: Area,
-    pub _mat: Mat4,
-}
-
-#[derive(Clone)]
 pub struct XRCursor {
-    pub quad: Quad,
-    pub cursor_size: f32,
-    pub _area: Area,
-    pub _pt: Vec2,
-}
-
-impl XRCube {
-    pub fn new(cx: &mut Cx) -> Self {
-        Self {
-            cube: Cube::new(cx),
-            _area: Area::Empty,
-            _mat: Mat4::identity()
-        }
-    }
-    
-    pub fn set_mat(&mut self, cx: &mut Cx, mat: Mat4) {
-        self._mat = mat;
-        self._area.write_mat4(cx, live_item_id!(makepad_render::cube::shader::transform), &mat);
-    }
-    
-    pub fn draw_cube(&mut self, cx: &mut Cx, size: Vec3, pos: Vec3) {
-        self._area = self.cube.draw_cube(cx, size, pos, &self._mat).into();
-    }
+    pub quad: DrawQuad,
 }
 
 impl XRCursor {
     fn new(cx: &mut Cx) -> Self {
         Self {
-            quad: Quad {
-                z: 3.0,
-                ..Quad::new(cx)
-            },
-            cursor_size: 10.,
-            _area: Area::Empty,
-            _pt: Vec2::default()
+            quad: DrawQuad::new(cx, live_shader!(cx, self::shader_cursor))
+                .with_draw_depth(3.0)
+                .with_rect_size(Vec2::all(10.)),
         }
     }
     
     fn set_pt(&mut self, cx: &mut Cx, pt: Vec2) {
-        self._pt = pt;
-        self._area.write_float(cx, live_item_id!(makepad_render::quad::shader::x), pt.x - 0.5 * self.cursor_size);
-        self._area.write_float(cx, live_item_id!(makepad_render::quad::shader::y), pt.y - 0.5 * self.cursor_size);
+        let pt = pt - 0.5 * self.quad.rect_size.x;
+        self.quad.set_rect_pos(cx, pt);
     }
     
     fn draw_cursor(&mut self, cx: &mut Cx) {
-        self._area = self.quad.draw_quad_rel(cx, Rect {
-            x: self._pt.x - 0.5 * self.cursor_size,
-            y: self._pt.y - 0.5 * self.cursor_size,
-            w: self.cursor_size,
-            h: self.cursor_size
-        }).into();
+        self.quad.emit_quad(cx);
     }
 }
 
@@ -160,29 +121,36 @@ impl XRAvatarState {
 #[derive(Clone)]
 pub struct XRAvatar {
     state: XRAvatarState,
-    left_hand: XRCube,
-    right_hand: XRCube,
-    head: XRCube,
+    left_hand: DrawCube,
+    right_hand: DrawCube,
+    head: DrawCube,
     angle: f32,
-    ui: XRCube,
-    ui_rect: Rect,
+    ui: DrawCube,
     last_user: Option<XRChannelUser>
 }
 
 impl XRAvatar {
     fn new(cx: &mut Cx) -> Self {
+        let ds = default_shader!();
+        let hand_size = Vec3 {x: 0.02, y: 0.02, z: 0.12};
+
         Self {
             state: XRAvatarState::Joining(1.0),
-            left_hand: XRCube::new(cx),
-            right_hand: XRCube::new(cx),
+
+            left_hand: DrawCube::new(cx, ds)
+                .with_cube_size(hand_size),
+
+            right_hand: DrawCube::new(cx, ds)
+                .with_cube_size(hand_size),
+
             last_user: None,
             angle: 180.0,
-            head: XRCube::new(cx),
-            ui: XRCube::new(cx),
-            ui_rect: Rect::default()
-        }
-    }
-    
+
+            head: DrawCube::new(cx, ds)
+                .with_cube_size(Vec3 {x: 0.20, y: 0.08, z: 0.10}),
+
+            ui: DrawCube::new(cx, ds),
+        }}
     
     fn update_avatar(&mut self, cx: &mut Cx, user: Option<&XRChannelUser>, ui_rect: Rect) {
         
@@ -202,30 +170,21 @@ impl XRAvatar {
         } else {
             if let Some(xe) = &self.last_user {xe} else {return}
         };
-        self.left_hand.set_mat(cx, Mat4::mul(&user.left_input.ray.to_mat4(), &personal_mat));
-        self.right_hand.set_mat(cx, Mat4::mul(&user.right_input.ray.to_mat4(), &personal_mat));
-        self.head.set_mat(cx, Mat4::mul(&user.head_transform.to_mat4(), &personal_mat));
-        self.ui.set_mat(cx, Mat4::mul(&user.window_mat, &personal_mat));
-        self.ui_rect = ui_rect;
+
+        self.left_hand.set_transform(cx, Mat4::mul(&user.left_input.ray.to_mat4(), &personal_mat));
+        self.right_hand.set_transform(cx, Mat4::mul(&user.right_input.ray.to_mat4(), &personal_mat));
+        self.head.set_transform(cx, Mat4::mul(&user.head_transform.to_mat4(), &personal_mat));
+
+        self.ui.set_transform(cx, Mat4::mul(&user.window_mat, &personal_mat));
+        self.ui.set_cube_pos(cx, (ui_rect.pos + 0.5 * ui_rect.size).to_vec3() );
+        self.ui.set_cube_size(cx, Vec3 {x: ui_rect.size.x, y: ui_rect.size.y, z: 25.0});
     }
     
     fn draw_avatar(&mut self, cx: &mut Cx) {
-        self.left_hand.cube.shader = live_shader!(cx, self::shader_hand);
-        self.right_hand.cube.shader = live_shader!(cx, self::shader_hand);
-        self.head.cube.shader = live_shader!(cx, self::shader_hand);
-        let hand_size = Vec3 {x: 0.02, y: 0.02, z: 0.12};
-        let hand_pos = Vec3 {x: 0., y: 0., z: 0.0};
-        
-        self.left_hand.draw_cube(cx, hand_size, hand_pos);
-        self.right_hand.draw_cube(cx, hand_size, hand_pos);
-        
-        let head_pos = Vec3 {x: 0., y: 0., z: 0.0};
-        let head_size = Vec3 {x: 0.20, y: 0.08, z: 0.10};
-        self.head.draw_cube(cx, head_size, head_pos);
-        
-        let ui_pos = Vec3 {x: self.ui_rect.x + 0.5 * self.ui_rect.w, y: self.ui_rect.y + 0.5 * self.ui_rect.h, z: 0.};
-        let ui_size = Vec3 {x: self.ui_rect.w, y: self.ui_rect.h, z: 25.0};
-        self.ui.draw_cube(cx, ui_size, ui_pos);
+        self.left_hand.draw_cube(cx);
+        self.right_hand.draw_cube(cx);
+        self.head.draw_cube(cx);
+        self.ui.draw_cube(cx);
     }
 }
 
@@ -237,8 +196,8 @@ pub struct XRControl {
     
     pub xr_avatars: BTreeMap<XRUserId, XRAvatar>,
     
-    pub left_hand: XRCube,
-    pub right_hand: XRCube,
+    pub left_hand: DrawCube,
+    pub right_hand: DrawCube,
     pub left_cursor: XRCursor,
     pub right_cursor: XRCursor,
     pub smooth_window: Option<Transform>,
@@ -251,23 +210,26 @@ pub enum XRControlEvent {
 
 impl XRControl {
     pub fn new(cx: &mut Cx) -> Self {
+        let hand_size = Vec3 {x: 0.02, y: 0.02, z: 0.12};
         Self {
             space_view: View::new(cx),
             cursor_view: View::new(cx),
             last_xr_update: None,
-            left_hand: XRCube::new(cx),
-            right_hand: XRCube::new(cx),
+            left_hand: DrawCube::new(cx, default_shader!())
+                .with_cube_size(hand_size),
+            right_hand: DrawCube::new(cx, default_shader!())
+                .with_cube_size(hand_size),
             left_cursor: XRCursor::new(cx),
             right_cursor: XRCursor::new(cx),
             xr_avatars: BTreeMap::new(),
-            smooth_window:None,
+            smooth_window: None,
             window_mat: None,
         }
     }
     
     fn get_window_matrix(view_rect: Rect, align: Vec2, translate: Vec3) -> Mat4 {
         Mat4::txyz_s_ry_rx_txyz(
-            Vec3 {x: -view_rect.w * align.x, y: -view_rect.h * align.y, z: 0.0},
+            Vec3 {x: -view_rect.size.x * align.x, y: -view_rect.size.y * align.y, z: 0.0},
             -0.0005,
             -180.0,
             -30.0,
@@ -281,11 +243,11 @@ impl XRControl {
         // lets define the shader
         live_body!(cx, r#"
             self::shader_hand: Shader {
-                use makepad_render::cube::shader::*;
+                use makepad_render::drawcube::shader::*;
             }
             
             self::shader_cursor: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawquad::shader::*;
                 fn pixel() -> vec4 {
                     let df = Df::viewport(pos * vec2(w, h));
                     df.circle(0.5 * w, 0.5 * h, 0.5 * w);
@@ -373,15 +335,15 @@ impl XRControl {
         // lets send our avatar over the socket
         let view_rect = window_view.get_rect(cx);
         // lets set the left_input matrix
-        self.left_hand.set_mat(cx, xr_event.left_input.ray.to_mat4());
-        self.right_hand.set_mat(cx, xr_event.right_input.ray.to_mat4());
+        self.left_hand.set_transform(cx, xr_event.left_input.ray.to_mat4());
+        self.right_hand.set_transform(cx, xr_event.right_input.ray.to_mat4());
         
         if xr_event.left_input.buttons[1].pressed {
             // if the distance between smooth and left is small, smooth it, otherwise set it
-            if let Some(smooth_window) = &mut self.smooth_window{
+            if let Some(smooth_window) = &mut self.smooth_window {
                 *smooth_window = Transform::from_lerp(*smooth_window, xr_event.left_input.ray, 0.2);
             }
-            else{
+            else {
                 self.smooth_window = Some(xr_event.left_input.ray);
             }
             self.window_mat = Some(Mat4::mul(
@@ -395,13 +357,13 @@ impl XRControl {
         }
         else if xr_event.right_input.buttons[1].pressed {
             // lets calculate the angle
-            if let Some(smooth_window) = &mut self.smooth_window{ 
+            if let Some(smooth_window) = &mut self.smooth_window {
                 *smooth_window = Transform::from_lerp(*smooth_window, xr_event.right_input.ray, 0.2);
             }
-            else{
+            else {
                 self.smooth_window = Some(xr_event.right_input.ray);
             }
-
+            
             self.window_mat = Some(Mat4::mul(
                 &Self::get_window_matrix(
                     view_rect,
@@ -447,12 +409,12 @@ impl XRControl {
         // we now simply need to intersect with the plane view_rect.w, view_rect.h, 0.
         let window_plane = Plane::from_points(
             Vec3 {x: 0., y: 0., z: 0.},
-            Vec3 {x: view_rect.w, y: 0., z: 0.},
-            Vec3 {x: 0., y: view_rect.h, z: 0.}
+            Vec3 {x: view_rect.size.x, y: 0., z: 0.},
+            Vec3 {x: 0., y: view_rect.size.y, z: 0.}
         );
         
-        self.left_cursor.set_pt(cx, get_intersect_pt(&window_plane, &inv_window_mat, &self.left_hand._mat));
-        self.right_cursor.set_pt(cx, get_intersect_pt(&window_plane, &inv_window_mat, &self.right_hand._mat));
+        self.left_cursor.set_pt(cx, get_intersect_pt(&window_plane, &inv_window_mat, &self.left_hand.transform));
+        self.right_cursor.set_pt(cx, get_intersect_pt(&window_plane, &inv_window_mat, &self.right_hand.transform));
         
         let mut events = Vec::new();
         
@@ -546,15 +508,10 @@ impl XRControl {
     }
     
     pub fn draw_xr_control(&mut self, cx: &mut Cx) {
-        self.left_hand.cube.shader = live_shader!(cx, self::shader_hand);
-        self.right_hand.cube.shader = live_shader!(cx, self::shader_hand);
-        self.left_cursor.quad.shader = live_shader!(cx, self::shader_cursor);
-        self.right_cursor.quad.shader = live_shader!(cx, self::shader_cursor);
         
         // THIS HAS A VERY STRANGE BUG. if i reverse these, the dots are broken on wasm+quest
         if self.space_view.begin_view(cx, Layout::abs_origin_zero()).is_ok() {
             self.space_view.lock_view_transform(cx, &Mat4::identity());
-            let hand_size = Vec3 {x: 0.02, y: 0.02, z: 0.12};
             let hand_pos = Vec3 {x: 0., y: 0., z: 0.0};
             
             self.left_hand.draw_cube(cx, hand_size, hand_pos);

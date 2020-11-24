@@ -9,11 +9,10 @@ pub struct Splitter {
     
     pub min_size: f32,
     pub split_size: f32,
-    pub bg: Quad,
+    pub bg: DrawSplitter,
     pub animator: Animator,
     pub realign_dist: f32,
     pub split_view: View,
-    pub _split_area: Area,
     pub _calc_pos: f32,
     pub _is_moving: bool,
     pub _drag_point: f32,
@@ -36,6 +35,16 @@ pub enum SplitterEvent {
     MovingEnd {new_align: SplitterAlign, new_pos: f32}
 }
 
+
+#[derive(Clone, DrawQuad)]
+#[repr(C)]
+pub struct DrawSplitter {
+    #[default_shader(self::shader_bg)]
+    base: DrawQuad,
+    color: Vec4,
+}
+
+
 impl Splitter {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
@@ -43,7 +52,6 @@ impl Splitter {
             align: SplitterAlign::First,
             pos: 0.0,
             
-            _split_area: Area::Empty,
             _calc_pos: 0.0,
             _is_moving: false,
             _drag_point: 0.,
@@ -54,13 +62,13 @@ impl Splitter {
             split_size: 2.0,
             min_size: 25.0,
             split_view: View::new(cx),
-            bg: Quad::new(cx),
+            bg: DrawSplitter::new(cx, default_shader!()),
             animator: Animator::default(),
         }
     }
     
     pub fn style(cx: &mut Cx) {
-        
+        self::DrawSplitter::register_draw_input(cx);
         live_body!(cx, r#"
             
             self::color_bg: #19;
@@ -91,7 +99,7 @@ impl Splitter {
             
             self::shader_bg: Shader {
                 use makepad_render::quad::shader::*;
-                
+                draw_input: self::DrawSplitter,
                 fn pixel() -> vec4 {
                     let df = Df::viewport(pos * vec2(w, h));
                     df.box(0., 0., w, h, 0.5);
@@ -103,9 +111,9 @@ impl Splitter {
     }
     
     pub fn handle_splitter(&mut self, cx: &mut Cx, event: &mut Event) -> SplitterEvent {
-        match event.hits(cx, self._split_area, HitOpt {margin: self._hit_state_margin, ..Default::default()}) {
+        match event.hits(cx, self.bg.area(), HitOpt {margin: self._hit_state_margin, ..Default::default()}) {
             Event::Animate(ae) => {
-                self.animator.calc_area(cx, self._split_area, ae.time);
+                self.animator.calc_area(cx, self.bg.area(), ae.time);
             },
             Event::AnimEnded(_) => self.animator.end(),
             Event::FingerDown(fe) => {
