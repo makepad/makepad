@@ -107,7 +107,7 @@ pub struct Cx {
     
     pub shaders: Vec<CxShader>,
     
-    pub is_in_redraw_cycle: bool,
+    pub in_redraw_cycle: bool,
     pub default_dpi_factor: f32,
     pub current_dpi_factor: f32,
     pub window_stack: Vec<usize>,
@@ -223,7 +223,7 @@ impl Default for Cx {
             
             default_dpi_factor: 1.0,
             current_dpi_factor: 1.0,
-            is_in_redraw_cycle: false,
+            in_redraw_cycle: false,
             window_stack: Vec::new(),
             pass_stack: Vec::new(),
             view_stack: Vec::new(),
@@ -252,7 +252,7 @@ impl Default for Cx {
             
             down_mouse_cursor: None,
             hover_mouse_cursor: None,
-            fingers: fingers,
+            fingers: fingers, 
             
             live_styles: LiveStyles::new(),
             
@@ -265,7 +265,7 @@ impl Default for Cx {
             _frame_callbacks: HashSet::new(),
             profiles: HashMap::new(),
             
-            signals: HashMap::new(),
+            signals: HashMap::new(), 
             
             triggers: HashMap::new(),
             
@@ -499,7 +499,7 @@ impl Cx {
     }
     
     pub fn is_xr_presenting(&mut self) -> bool {
-        if !self.is_in_redraw_cycle {
+        if !self.in_redraw_cycle {
             panic!("Cannot call is_xr_presenting outside of redraw flow");
         }
         if self.window_stack.len() == 0 {
@@ -702,7 +702,7 @@ impl Cx {
     pub fn call_draw_event(&mut self)
     {
         // self.profile();
-        self.is_in_redraw_cycle = true;
+        self.in_redraw_cycle = true;
         self.redraw_id += 1;
         self.counter = 0;
         std::mem::swap(&mut self._redraw_child_areas, &mut self.redraw_child_areas);
@@ -711,7 +711,7 @@ impl Cx {
         self.redraw_child_areas.truncate(0);
         self.redraw_parent_areas.truncate(0);
         self.call_event_handler(&mut Event::Draw);
-        self.is_in_redraw_cycle = false;
+        self.in_redraw_cycle = false;
         if self.live_styles.style_stack.len()>0 {
             panic!("Style stack disaligned, forgot a cx.end_style()");
         }

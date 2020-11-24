@@ -11,9 +11,9 @@ pub struct TabControl {
     pub drag_tab_view: View,
     pub drag_tab: Tab,
     pub page_view: View,
-    pub hover: Quad,
+    pub hover: DrawColor,
     //pub tab_fill_color: ColorId,
-    pub tab_fill: Quad,
+    pub tab_fill: DrawColor,
     pub animator: Animator,
     
     pub _dragging_tab: Option<(FingerMoveEvent, usize)>,
@@ -33,35 +33,34 @@ pub enum TabControlEvent {
 }
 
 impl TabControl {
-
+    
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            tabs_view: ScrollView {
-                scroll_h: Some(ScrollBar {
-                    bar_size: 8.0,
-                    smoothing: Some(0.15),
-                    use_vertical_finger_scroll: true,
-                    ..ScrollBar::new(cx)
-                }),
-                ..ScrollView::new(cx)
-            },
+            tabs_view: ScrollView::new(cx)
+                .with_scroll_h(ScrollBar::new(cx)
+                    .with_bar_size(8.0)
+                    .with_smoothing(0.15)
+                    .with_use_vertical_finger_scroll(true) 
+                ),
+
             page_view: View::new(cx),
+
             tabs: Elements::new(Tab::new(cx)),
-            drag_tab: Tab {
-                z: 10.,
-                ..Tab::new(cx)
-            },
-            drag_tab_view: View {
-                is_overlay: true,
-                ..View::new(cx)
-            },
-            hover: Quad {
-                color: Color::parse_name("purple").unwrap(),
-                ..Quad::new(cx)
-            },
+
+            drag_tab: Tab::new(cx)
+                .with_draw_depth(10.0),
+
+            drag_tab_view: View::new(cx)
+                .with_is_overlay(true),
+
+            hover: DrawColor::new(cx, default_shader!())
+                .with_color(Vec4::color("purple")),
+                
             //tab_fill_color: Color_bg_normal::id(),
-            tab_fill: Quad::new(cx),
+            tab_fill: DrawColor::new(cx, default_shader!()),
+            
             animator: Animator::default(),
+            
             _dragging_tab: None,
             _tab_now_selected: None,
             _tab_last_selected: None,
@@ -80,7 +79,7 @@ impl TabControl {
             
         "#)
     }
-        
+    
     pub fn handle_tab_control(&mut self, cx: &mut Cx, event: &mut Event) -> TabControlEvent {
         let mut tab_control_event = TabControlEvent::None;
         
@@ -152,8 +151,8 @@ impl TabControl {
         tab_control_event
     }
     
-    pub fn close_tab(&self, cx:&mut Cx, tab_id: usize){
-        if let Some(tab) = self.tabs.get(tab_id){
+    pub fn close_tab(&self, cx: &mut Cx, tab_id: usize) {
+        if let Some(tab) = self.tabs.get(tab_id) {
             tab.close_tab(cx);
         }
     }
@@ -180,12 +179,7 @@ impl TabControl {
     pub fn get_content_drop_rect(&mut self, cx: &Cx) -> Rect {
         let pr = self.page_view.get_rect(cx);
         // we now need to change the y and the new height
-        Rect {
-            x: pr.x,
-            y: pr.y,
-            w: pr.w,
-            h: pr.h
-        }
+        pr
     }
     
     // data free APIs for the win!
@@ -226,7 +220,7 @@ impl TabControl {
     }
     
     pub fn end_tabs(&mut self, cx: &mut Cx) {
-        self.tab_fill.color = live_color!(cx, self::color_bg_normal);
+        self.tab_fill.color = live_vec4!(cx, self::color_bg_normal);
         self.tab_fill.draw_quad(cx, Walk::wh(Width::Fill, Height::Fill));
         self.tabs.sweep(cx, | _, _ | ());
         if let Some((fe, id)) = &self._dragging_tab {
@@ -247,7 +241,7 @@ impl TabControl {
             // lets scroll the thing into view
             if let Some(tab_id) = self._tab_now_selected {
                 if let Some(tab) = self.tabs.get(tab_id) {
-                    let tab_rect = tab._bg_area.get_rect(cx);
+                    let tab_rect = tab.bg.area().get_rect(cx);
                     self.tabs_view.scroll_into_view_abs(cx, tab_rect);
                 }
             }

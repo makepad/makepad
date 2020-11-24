@@ -19,7 +19,7 @@ pub struct DrawText {
     pub text_style: TextStyle,
     pub wrapping: Wrapping,
     pub font_scale: f32,
-    pub instance_z: f32,
+    pub draw_depth: f32,
     
     // instances
     pub font_t1: Vec2,
@@ -27,7 +27,7 @@ pub struct DrawText {
     pub color: Vec4,
     pub rect_pos: Vec2,
     pub rect_size: Vec2,
-    pub char_z: f32,
+    pub char_depth: f32,
     pub base: Vec2,
     pub font_size: f32,
     pub char_offset: f32,
@@ -47,7 +47,7 @@ impl Clone for DrawText {
             text_style: self.text_style,
             wrapping: self.wrapping,
             font_scale: self.font_scale,
-            instance_z: self.instance_z,
+            draw_depth: self.draw_depth,
             
             //instances
             font_t1: Vec2::all(0.0),
@@ -55,7 +55,7 @@ impl Clone for DrawText {
             color: self.color,
             rect_pos: Vec2::all(0.0),
             rect_size: Vec2::all(0.0),
-            char_z: 0.0,
+            char_depth: 0.0,
             base: Vec2::all(0.0),
             font_size: 0.0,
             char_offset: 0.0,
@@ -66,9 +66,12 @@ impl Clone for DrawText {
 
 impl DrawText {
     
-    pub fn new(cx: &mut Cx) -> Self {
-        Self::with_slots(cx, live_shader!(cx, self::shader), 0)
+    pub fn new(cx: &mut Cx, shader: Shader) -> Self {
+        Self::with_slots(cx, default_shader_overload!(cx, shader, self::shader), 0)
     }
+    
+    pub fn with_draw_depth(self, draw_depth: f32) -> Self {Self {draw_depth, ..self}}
+    pub fn with_wrapping(self, wrapping: Wrapping) -> Self {Self {wrapping, ..self}}
     
     pub fn with_slots(cx: &mut Cx, shader: Shader, slots: usize) -> Self {
         Self {
@@ -81,14 +84,14 @@ impl DrawText {
             text_style: live_text_style!(cx, self::text_style_unscaled),
             wrapping: Wrapping::Word,
             font_scale: 1.0,
-            instance_z: 0.0,
+            draw_depth: 0.0,
             
             font_t1: Vec2::all(0.0),
             font_t2: Vec2::all(0.0),
             color: Vec4::from_color_name("white").unwrap(),
             rect_pos: Vec2::all(0.0),
             rect_size: Vec2::all(0.0),
-            char_z: 0.0,
+            char_depth: 0.0,
             base: Vec2::all(0.0),
             font_size: 0.0,
             char_offset: 0.0,
@@ -113,7 +116,7 @@ impl DrawText {
         def.add_instance(mp, "DrawText", "color", Vec4::ty_expr());
         def.add_instance(mp, "DrawText", "rect_pos", Vec2::ty_expr());
         def.add_instance(mp, "DrawText", "rect_size", Vec2::ty_expr());
-        def.add_instance(mp, "DrawText", "char_z", f32::ty_expr());
+        def.add_instance(mp, "DrawText", "char_depth", f32::ty_expr());
         def.add_instance(mp, "DrawText", "base", Vec2::ty_expr());
         def.add_instance(mp, "DrawText", "font_size", f32::ty_expr());
         def.add_instance(mp, "DrawText", "char_offset", f32::ty_expr());
@@ -241,7 +244,7 @@ impl DrawText {
                     return camera_projection * (camera_view * (view_transform * vec4(
                         clipped.x,
                         clipped.y,
-                        char_z + draw_zbias,
+                        char_depth + draw_zbias,
                         1.
                     )));
                 }
@@ -271,6 +274,11 @@ impl DrawText {
     pub fn area(&self) -> Area {
         self.area
     }
+
+    pub fn set_area(&mut self, area:Area) {
+        self.area = area
+    }
+    
     
     pub fn unlock_text(&mut self, cx: &mut Cx) {
         unsafe {
@@ -390,7 +398,7 @@ impl DrawText {
             self.font_t2.y = tc.ty2;
             self.rect_pos = vec2(scaled_min_pos_x, scaled_min_pos_y);
             self.rect_size = vec2(w * self.font_scale / dpi_factor, h * self.font_scale / dpi_factor);
-            self.char_z = self.instance_z + 0.00001 * min_pos_x;
+            self.char_depth = self.draw_depth + 0.00001 * min_pos_x;
             self.base.x = walk_x;
             self.base.y = pos.y;
             self.font_size = text_style.font_size;

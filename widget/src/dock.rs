@@ -14,7 +14,7 @@ where TItem: Clone
     pub tab_controls: Elements<usize, TabControl, TabControl>,
     
     pub drop_size: Vec2,
-    pub drop_quad: Quad,
+    pub drop_quad: DrawColor,
     pub drop_quad_view: View,
     //pub drop_quad_color: ColorId,
     pub _drag_move: Option<FingerMoveEvent>,
@@ -404,10 +404,10 @@ where TItem: Clone
             // dock_items:None,
             drop_size: Vec2 {x: 100., y: 70.},
             //drop_quad_color: Color_drop_quad::id(),
-            drop_quad: Quad {
-                z: 3.,
-                ..Quad::new(cx)
-            },
+            
+            drop_quad: DrawColor::new(cx, default_shader!())
+                .with_draw_depth(3.),
+                
             splitters: Elements::new(Splitter::new(cx)),
             tab_controls: Elements::new(TabControl::new(cx)),
             drop_quad_view: View::proto_overlay(cx),

@@ -22,7 +22,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
     
     parser.eat_ident("pub");
     if parser.eat_ident("struct") {
-        if let Some(struct_name) = parser.eat_any_ident() {d
+        if let Some(struct_name) = parser.eat_any_ident() {
             // lets eat all the fields
             let fields = if let Some(fields) = parser.eat_all_struct_fields() {
                 fields
@@ -116,6 +116,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             
             tb.add("pub fn write_uniforms ( & self , cx : & mut Cx ) {");
             tb.add("if self . area ( ) . is_first_instance ( ) { ");
+
             for (name, _) in &uniforms {
                 tb.add("self .").ident(&name).add(". write_draw_input ( cx , self . area ( ) ,");
                 tb.add(" live_item_id ! ( self :: ").ident(&base_type.to_string()).add("::").ident(&name).add(")");
@@ -124,9 +125,41 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             
             tb.add("} }");
             
+            for (name, ty) in &uniforms {
+                tb.add("pub fn").ident(&format!("set_{}", name)).add("( & mut self , cx : & mut Cx , v :").ident(ty).add(") {");
+                tb.add("self .").ident(name).add("= v ;");
+                tb.add("v . write_draw_input ( cx , self . area ( ) ,");
+                tb.add("live_item_id ! ( self :: ").ident(&base_type.to_string()).add("::").ident(&name).add(")");
+                tb.add(",").string(&format!("self::{}::{}", base_type.to_string(), name)).add(") ;");
+                tb.add("}");
+            }
+
+            for (name, ty) in &instances {
+                tb.add("pub fn").ident(&format!("set_{}", name)).add("( & mut self , cx : & mut Cx , v :").ident(ty).add(") {");
+                tb.add("self .").ident(name).add("= v ;");
+                tb.add("v . write_draw_input ( cx , self . area ( ) ,");
+                tb.add("live_item_id ! ( self :: ").ident(&base_type.to_string()).add("::").ident(&name).add(")");
+                tb.add(",").string(&format!("self::{}::{}", base_type.to_string(), name)).add(") ;");
+                tb.add("}");
+            }
+            
+            for (name, ty) in &uniforms {
+                tb.add("pub fn").ident(&format!("with_{}", name)).add("( self ,").ident(name).add(":").ident(ty).add(") -> Self {");
+                tb.add("Self {").ident(name).add(", .. self }");
+                tb.add("}");
+            }
+
+            for (name, ty) in &instances {
+                tb.add("pub fn").ident(&format!("with_{}", name)).add("( self ,").ident(name).add(":").ident(ty).add(") -> Self {");
+                tb.add("Self {").ident(name).add(", .. self }");
+                tb.add("}");
+            }
+            
             match draw_type {
                 DrawType::DrawText => {
+                    tb.add("pub fn with_draw_depth ( self , depth : f32 ) -> Self { Self { base : self . base . with_draw_depth ( depth ) , .. self } }");
                     tb.add("pub fn area ( & self ) -> Area { self . base . area ( ) }");
+                    tb.add("pub fn set_area ( & mut self , area : Area ) { self . base . set_area ( area ) }");
                     tb.add("pub fn get_monospace_base ( & self , cx : & mut Cx ) -> Vec2 { self . base . get_monospace_base ( cx ) }");
                     tb.add("pub fn find_closest_offset ( & self , cx : & Cx , pos : Vec2 ) -> usize { self . base . find_closest_offset ( cx , pos ) }");
                     tb.add("pub fn draw_text ( & mut self , cx : & mut Cx , text : & str ) { self . base . draw_text ( cx , text ) ; self . write_uniforms ( cx ) }");
@@ -136,21 +169,27 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
                     tb.add("pub fn add_text ( & mut self , cx : & mut Cx , pos : Vec2 , text : & str ) { self . base . add_text ( cx , pos , text ) }");
                     tb.add("pub fn add_text_chunk < F > (  & mut self , cx : & mut Cx , pos : Vec2 , char_offset : usize , chunk : & [ char ] , mut char_callback : F )");
                     tb.add("where F : FnMut ( char , usize , f32 , f32 ) -> f32 { self . base . add_text_chunk ( cx , pos , char_offset , chunk , char_callback ) }");
-                    
                 },
                 
                 DrawType::DrawQuad => {
                     // quad forward implementation
+                    tb.add("pub fn with_draw_depth ( self , depth : f32 ) -> Self { Self { base : self . base . with_draw_depth ( depth ) , .. self } }");
                     tb.add("pub fn area ( & self ) -> Area { self . base . area ( ) }");
+                    tb.add("pub fn set_area ( & mut self , area : Area ) { self . base . set_area ( area ) }");
                     tb.add("pub fn begin_quad ( & mut self , cx : & mut Cx , layout : Layout ) { self . base . begin_quad ( cx , layout ) }");
                     tb.add("pub fn end_quad ( & mut self , cx : & mut Cx )  { self . base . end_quad ( cx ) ; self . write_uniforms ( cx ) }");
-                    tb.add("pub fn draw_quad ( & mut self , cx : & mut Cx , walk : Walk )  { self . base . draw_quad ( cx , walk ) ; self . write_uniforms ( cx ) }");
+
+                    tb.add("pub fn draw_quad_walk ( & mut self , cx : & mut Cx , walk : Walk )  { self . base . draw_quad_walk ( cx , walk ) ; self . write_uniforms ( cx ) }");
+                    tb.add("pub fn draw_quad_aligned ( & mut self , cx : & mut Cx ) { self . base . draw_quad_aligned ( cx ) ; self . write_uniforms ( cx ) }");
+                    tb.add("pub fn draw_quad ( & mut self , cx : & mut Cx ) { self . base . draw_quad ( cx ) ; self . write_uniforms ( cx ) }");
                     tb.add("pub fn draw_quad_rel ( & mut self , cx : & mut Cx , rect : Rect ) { self . base . draw_quad_rel ( cx , rect ) ; self . write_uniforms ( cx ) }");
                     tb.add("pub fn draw_quad_abs ( & mut self , cx : & mut Cx , rect : Rect ) { self . base . draw_quad_abs ( cx , rect ) ; self . write_uniforms ( cx ) }");
+
                     tb.add("pub fn lock_aligned_quad ( & mut self , cx : & mut Cx ) { self . base . lock_aligned_quad ( cx ) }");
                     tb.add("pub fn lock_quad ( & mut self , cx : & mut Cx ) { self . base . lock_quad ( cx ) }");
-                    tb.add("pub fn add_quad ( & mut self , rect : Rect ) { self . base . add_quad ( rect ) }");
+                    tb.add("pub fn add_quad ( & mut self ) { self . base . add_quad ( ) }");
                     tb.add("pub fn unlock_quad ( & mut self , cx : & mut Cx ) { self . base . unlock_quad ( cx ) ; self . write_uniforms ( cx ) }");
+                    
                 }
             }
             

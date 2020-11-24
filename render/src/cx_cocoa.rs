@@ -5,15 +5,16 @@ use std::collections::{HashMap,BTreeSet};
 use crate::cx_apple::*;
 use std::os::raw::c_void;
 use std::sync::{Mutex};
+use std::time::Instant;
 //use core_graphics::display::CGDisplay;
 //use time::precise_time_ns;
 
 static mut GLOBAL_COCOA_APP: *mut CocoaApp = 0 as *mut _;
 
 
-extern {
-    pub fn mach_absolute_time() -> u64;
-}
+//extern {
+//    pub fn mach_absolute_time() -> u64;
+//}
 
 use crate::cx::*;
 
@@ -28,7 +29,7 @@ pub struct CocoaWindow {
     pub cocoa_app: *mut CocoaApp,
     pub last_window_geom: Option<WindowGeom>,
     pub ime_spot: Vec2,
-    pub time_start: u64,
+    pub time_start: Instant,
     pub is_fullscreen: bool,
     pub fingers_down: Vec<bool>,
     pub last_mouse_pos: Vec2,
@@ -54,7 +55,7 @@ pub struct CocoaApp {
     pub app_delegate_instance: id,
     pub const_attributes_for_marked_text: id,
     pub const_empty_string: id,
-    pub time_start: u64,
+    pub time_start: Instant,
     pub timer_delegate_instance: id,
     pub timers: Vec<CocoaTimer>,
     pub cocoa_windows: Vec<(id, id)>,
@@ -105,7 +106,7 @@ impl CocoaApp {
                 startup_focus_hack_ran: false,
                 const_empty_string: str_to_nsstring(""),
                 pasteboard: msg_send![class!(NSPasteboard), generalPasteboard],
-                time_start: mach_absolute_time(),
+                time_start: Instant::now(),
                 timer_delegate_instance: timer_delegate_instance,
                 timer_delegate_class: timer_delegate_class,
                 post_delegate_class: define_cocoa_post_delegate(),
@@ -287,8 +288,8 @@ impl CocoaApp {
     }
     
     pub fn time_now(&self) -> f64 {
-        let time_now = unsafe {mach_absolute_time()};
-        (time_now - self.time_start) as f64 / 1_000_000_000.0
+        let time_now = Instant::now();//unsafe {mach_absolute_time()};
+        (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
     }
     
     unsafe fn process_ns_event(&mut self, ns_event: id) {
@@ -863,8 +864,8 @@ impl CocoaWindow {
     }
     
     pub fn time_now(&self) -> f64 {
-        let time_now = unsafe {mach_absolute_time()};
-        (time_now - self.time_start) as f64 / 1_000_000_000.0
+        let time_now = Instant::now();//unsafe {mach_absolute_time()};
+        (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
     }
     
     pub fn get_window_geom(&self) -> WindowGeom {
@@ -1809,7 +1810,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     extern fn has_marked_text(this: &Object, _sel: Sel) -> BOOL {
         unsafe {
             let marked_text: id = *this.get_ivar("markedText");
-            (marked_text.length() >0) as i8
+            (marked_text.length() >0) as BOOL
         }
     }
     

@@ -123,6 +123,29 @@ impl Area{
             _=>Vec2::default(),
         }
     }
+    
+    pub fn set_do_scroll(&self, cx:&mut Cx, hor:bool, ver:bool){
+        return match self{
+            Area::Instance(inst)=>{
+                let cxview = &mut cx.views[inst.view_id];
+                if cxview.redraw_id != inst.redraw_id {
+                    return
+                }
+                else{
+                    let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
+                    draw_call.do_h_scroll = hor;
+                    draw_call.do_v_scroll = ver;
+                }
+            },
+            Area::View(view_area)=>{
+                let cxview = &mut cx.views[view_area.view_id];
+                cxview.do_h_scroll = hor;
+                cxview.do_v_scroll = ver;
+            },
+            _=>(),
+        }
+    }
+    
     // returns the final screen rect
     pub fn get_rect(&self, cx:&Cx)->Rect{
 
@@ -281,11 +304,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let cxview = &mut cx.views[inst.view_id];
-                let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
                 if cxview.redraw_id != inst.redraw_id {
-                    println!("get_write_ref {} called on invalid area pointer, use mark/sweep correctly!", name);
                     return None;
                 }
+                let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
                 let sh = &cx.shaders[draw_call.shader.shader_id];
                 if let Some(prop_id) = sh.mapping.user_uniform_props.prop_map.get(&live_item_id){
                     let prop = &sh.mapping.user_uniform_props.props[*prop_id];

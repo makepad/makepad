@@ -4,7 +4,6 @@ name = "makepad-objc-sys"
 version = "0.2.7"
 authors = ["Steven Sheldon"]
 description = "Objective-C Runtime bindings and wrapper for Rust."
-documentation = "http://ssheldon.github.io/rust-objc/objc/"
 keywords = ["objective-c", "osx", "ios", "cocoa", "uikit"]
 license = "MIT"
 repository = "http://github.com/SSheldon/rust-objc"
