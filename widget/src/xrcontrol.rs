@@ -132,8 +132,9 @@ pub struct XRAvatar {
 impl XRAvatar {
     fn new(cx: &mut Cx) -> Self {
         let ds = default_shader!();
+        
         let hand_size = Vec3 {x: 0.02, y: 0.02, z: 0.12};
-
+        
         Self {
             state: XRAvatarState::Joining(1.0),
 
@@ -150,7 +151,8 @@ impl XRAvatar {
                 .with_cube_size(Vec3 {x: 0.20, y: 0.08, z: 0.10}),
 
             ui: DrawCube::new(cx, ds),
-        }}
+        }
+    }
     
     fn update_avatar(&mut self, cx: &mut Cx, user: Option<&XRChannelUser>, ui_rect: Rect) {
         
@@ -164,6 +166,7 @@ impl XRAvatar {
                 Vec3 {x: 0.0, y: 0.0, z: -1.5},
             )
         );
+        
         let user = if let Some(xe) = user {
             self.last_user = Some(xe.clone());
             xe
@@ -210,14 +213,15 @@ pub enum XRControlEvent {
 
 impl XRControl {
     pub fn new(cx: &mut Cx) -> Self {
+        let ds = default_shader!();
         let hand_size = Vec3 {x: 0.02, y: 0.02, z: 0.12};
         Self {
             space_view: View::new(cx),
             cursor_view: View::new(cx),
             last_xr_update: None,
-            left_hand: DrawCube::new(cx, default_shader!())
+            left_hand: DrawCube::new(cx, ds)
                 .with_cube_size(hand_size),
-            right_hand: DrawCube::new(cx, default_shader!())
+            right_hand: DrawCube::new(cx, ds)
                 .with_cube_size(hand_size),
             left_cursor: XRCursor::new(cx),
             right_cursor: XRCursor::new(cx),
@@ -512,10 +516,9 @@ impl XRControl {
         // THIS HAS A VERY STRANGE BUG. if i reverse these, the dots are broken on wasm+quest
         if self.space_view.begin_view(cx, Layout::abs_origin_zero()).is_ok() {
             self.space_view.lock_view_transform(cx, &Mat4::identity());
-            let hand_pos = Vec3 {x: 0., y: 0., z: 0.0};
             
-            self.left_hand.draw_cube(cx, hand_size, hand_pos);
-            self.right_hand.draw_cube(cx, hand_size, hand_pos);
+            self.left_hand.draw_cube(cx);
+            self.right_hand.draw_cube(cx);
             
             for (_id, avatar) in &mut self.xr_avatars {
                 avatar.draw_avatar(cx);
