@@ -25,7 +25,7 @@ impl Viewport3D {
             camera_pos: Vec3 {x: 0.0, y: -0.5, z: -1.1},
             camera_rot: Vec3 {x: 0.0, y: 0.0, z: 0.0},
             camera_start: None,
-            clear_color: Color::parse_hex_str("040").unwrap(),
+            clear_color: Vec4::parse_hex_str("040").unwrap(),
             color_texture: Texture::new(cx),
             depth_texture: Texture::new(cx),
             view_3d: View::new(cx),
@@ -40,7 +40,6 @@ impl Viewport3D {
             self::pos: vec3(0., 0.0, -1.1);
         "#);
     }
-    
      
     pub fn handle_viewport_2d(&mut self, cx: &mut Cx, event: &mut Event) {
         match event.hits(cx, self.view_2d.get_view_area(cx), HitOpt::default()) {
