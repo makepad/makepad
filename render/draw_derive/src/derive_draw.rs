@@ -144,7 +144,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             }
             
             tb.add("pub fn animate ( & mut self , cx : & mut Cx , a : & mut Animator , t : f64 ) {");
-
+            tb.add("self . base . animate ( cx , a , t ) ;");
             for (name, ty) in &uni_insts {
                 tb.add("if let Some ( v ) = ").ident(ty).add(":: animate ( cx , a , t ,");
                 tb.add("live_item_id ! ( self :: ").ident(&base_type.to_string()).add("::").ident(&name).add(")");
@@ -156,7 +156,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             tb.add("}");
             
             tb.add("pub fn last_animate ( & mut self , a : & mut Animator ) {");
-
+            tb.add("self . base . last_animate ( a ) ;");
             for (name, ty) in &uni_insts {
                 tb.add("if let Some ( v ) = ").ident(ty).add(":: last_animate ( a ,");
                 tb.add("live_item_id ! ( self :: ").ident(&base_type.to_string()).add("::").ident(&name).add(")");

@@ -251,8 +251,22 @@ impl DrawText {
             }
         "#);
     }
+
+    pub fn set_color(&mut self, cx:&mut Cx, v: Vec4) {
+        self.color = v;
+        write_draw_input!(cx, self.area(), Self::DrawText::color, v);
+    }
+
+    pub fn last_animate(&mut self, animator:&Animator){
+        if let Some(v) = Vec4::last_animate(animator, live_item_id!(self::DrawText::color)){
+            self.color = v;
+        }
+    }
     
-    pub fn last_animator(&mut self, _cx: &mut Cx) {
+    pub fn animate(&mut self, cx: &mut Cx, animator:&mut Animator, time:f64){
+        if let Some(v) = Vec4::animate(cx, animator, time, live_item_id!(self::DrawText::color)){
+            self.set_color(cx, v);
+        }
     }
     
     pub fn lock_aligned_text(&mut self, cx: &mut Cx) {
