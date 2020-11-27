@@ -249,7 +249,7 @@ impl Cx {
             
             self.process_live_style_errors();
             
-            if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
+            if self.playing_animator_ids.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.next_frames.len() == 0 {
                 true
             } else {
                 false

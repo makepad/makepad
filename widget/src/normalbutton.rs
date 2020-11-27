@@ -3,7 +3,7 @@ use crate::buttonlogic::*;
 
 #[derive(Clone, DrawQuad)]
 #[repr(C)]
-struct DrawNormalButton {
+pub struct DrawNormalButton {
     #[default_shader(self::shader_bg)]
     base: DrawQuad,
     hover: f32,
@@ -16,8 +16,6 @@ pub struct NormalButton {
     pub bg: DrawNormalButton,
     pub text: DrawText,
     pub animator: Animator,
-    pub _bg_area: Area,
-    pub _text_area: Area
 }
 
 impl NormalButton {
@@ -27,13 +25,11 @@ impl NormalButton {
             bg: DrawNormalButton::new(cx, live_shader!(cx, self::shader_bg)),
             text: DrawText::new(cx, default_shader!()),
             animator: Animator::default(),
-            _bg_area: Area::Empty,
-            _text_area: Area::Empty,
         }
     }
     pub fn style(cx: &mut Cx) {
         self::DrawNormalButton::register_draw_input(cx);
-
+        
         live_body!(cx, r#"
             self::layout_bg: Layout {
                 align: all(0.5),
@@ -101,13 +97,11 @@ impl NormalButton {
     pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
         //let mut ret_event = ButtonEvent::None;
         let animator = &mut self.animator;
-        let text_area = self._text_area;
-        self.button.handle_button_logic(cx, event, self._bg_area, | cx, logic_event, area | match logic_event {
-            ButtonLogicEvent::Animate(ae) => {
-                animator.calc_area(cx, area, ae.time);
-                animator.calc_area(cx, text_area, ae.time);
-            },
-            ButtonLogicEvent::AnimEnded(_) => animator.end(),
+        if let Some(ae) = event.is_animate(cx, animator) {
+            self.bg.animate(cx, animator, ae.time);
+            self.text.animate(cx, animator, ae.time);
+        }
+        self.button.handle_button_logic(cx, event, self.bg.area(), | cx, logic_event, _ | match logic_event {
             ButtonLogicEvent::Down => animator.play_anim(cx, live_anim!(cx, self::anim_down)),
             ButtonLogicEvent::Default => animator.play_anim(cx, live_anim!(cx, self::anim_default)),
             ButtonLogicEvent::Over => animator.play_anim(cx, live_anim!(cx, self::anim_over))
@@ -115,36 +109,17 @@ impl NormalButton {
     }
     
     pub fn draw_normal_button(&mut self, cx: &mut Cx, label: &str) {
-        /*
-        self.bg.shader = live_shader!(cx, self::shader_bg);
+        if self.animator.need_init(cx) {
+            self.animator.init(cx, live_anim!(cx, self::anim_default));
+            self.bg.last_animate(&self.animator);
+            self.text.last_animate(&self.animator);
+        }
         
-        self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
-        
-        let bg_inst = self.bg.begin_quad(cx, live_layout!(cx, self::layout_bg));
-        
-        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::hover));
-        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::down));
-        
-        self.text.text_style = live_text_style!(cx, self::text_style_label);
-        self.text.color = self.animator.last_color(cx, live_item_id!(makepad_render::text::shader::color));
-        self._text_area = self.text.draw_text(cx, label);
-        
-        self._bg_area = self.bg.end_quad(cx, bg_inst);
-        self.animator.set_area(cx, self._bg_area);*/
-        
-        
-        
-        //---- IS NOW ----
-        self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
-        
-        self.bg.last_animator(&self.animator);
         self.bg.begin_quad(cx, live_layout!(cx, self::layout_bg));
         
         self.text.text_style = live_text_style!(cx, self::text_style_label);
-        self.text.last_animator(&self.animator);
         self.text.draw_text(cx, label);
         
         self.bg.end_quad(cx);
-        self.animator.set_area(cx, self.bg.area());
     }
 }

@@ -11,6 +11,7 @@ pub struct ScrollBar {
     pub use_vertical_finger_scroll: bool,
     pub _visible: bool,
     pub smoothing: Option<f32>,
+    pub next_frame: NextFrame,
     pub _bar_side_margin: f32,
     pub _view_area: Area,
     pub _view_total: f32, // the total view area
@@ -26,11 +27,12 @@ pub struct ScrollBar {
 
 #[derive(Clone, DrawQuad)]
 #[repr(C)]
-struct DrawScrollBar {
+pub struct DrawScrollBar {
     #[default_shader(self::shader_bg)]
-    base: DrawQuad,
-    hover: f32,
-    down: f32,
+    base: DrawColor,
+    is_vertical: f32,
+    norm_handle: f32,
+    norm_scroll: f32
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -47,6 +49,7 @@ impl ScrollBar {
             min_handle_size: 30.0,
             smoothing: None,
             
+            next_frame: NextFrame::default(),
             axis: Axis::Horizontal,
             animator: Animator::default(),
             bg: DrawScrollBar::new(cx, live_shader!(cx, self::shader_bg)).with_draw_depth(2.5),
@@ -68,6 +71,7 @@ impl ScrollBar {
     }
     
     pub fn style(cx: &mut Cx) {
+        self::DrawScrollBar::register_draw_input(cx);
         
         live_body!(cx, r#"
             self::bar_size: 1.000;
@@ -98,11 +102,9 @@ impl ScrollBar {
             }
             
             self::shader_bg: Shader {
-                use makepad_render::quad::shader::*;
-
-                instance is_vertical: float;
-                instance norm_handle: float;
-                instance norm_scroll: float;
+                use makepad_render::drawcolor::shader::*;
+                
+                draw_input: self::DrawScrollBar;
                 
                 const border_radius: float = 1.5;
                 
@@ -120,9 +122,9 @@ impl ScrollBar {
         "#);
     }
     
-    pub fn with_bar_size(self, bar_size:f32)->Self{Self{bar_size, ..self}}
-    pub fn with_smoothing(self, s:f32)->Self{Self{smoothing:Some(s), ..self}}
-    pub fn with_use_vertical_finger_scroll(self, use_vertical_finger_scroll:bool)->Self{Self{use_vertical_finger_scroll, ..self}}
+    pub fn with_bar_size(self, bar_size: f32) -> Self {Self {bar_size, ..self}}
+    pub fn with_smoothing(self, s: f32) -> Self {Self {smoothing: Some(s), ..self}}
+    pub fn with_use_vertical_finger_scroll(self, use_vertical_finger_scroll: bool) -> Self {Self {use_vertical_finger_scroll, ..self}}
     
     // reads back normalized scroll position info
     pub fn get_normalized_scroll_pos(&self) -> (f32, f32) {
@@ -159,7 +161,7 @@ impl ScrollBar {
     // writes the norm_scroll value into the shader
     pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
         let (norm_scroll, _) = self.get_normalized_scroll_pos();
-        self._bg_area.write_float(cx, live_item_id!(self::shader_bg::norm_scroll), norm_scroll);
+        self.bg.set_norm_scroll(cx, norm_scroll);
     }
     
     // turns scroll_pos into an event on this.event
@@ -211,7 +213,7 @@ impl ScrollBar {
             self._scroll_pos = scroll_pos;
             self._scroll_target = scroll_pos;
             self.update_shader_scroll_pos(cx);
-            cx.next_frame(self._bg_area);
+            self.next_frame = cx.new_next_frame();
             return true
         };
         return false
@@ -236,7 +238,7 @@ impl ScrollBar {
         if self._scroll_target != new_target {
             self._scroll_target = new_target;
             self._scroll_delta = new_target - self._scroll_pos;
-            cx.next_frame(self._bg_area);
+            self.next_frame = cx.new_next_frame();
             return true
         };
         return false
@@ -275,7 +277,7 @@ impl ScrollBar {
                     Axis::Vertical => fe.handled_y
                 } {
                     let rect = self._view_area.get_rect(cx);
-                    if rect.contains(fe.abs.x, fe.abs.y) { // handle mousewheel
+                    if rect.contains(fe.abs) { // handle mousewheel
                         // we should scroll in either x or y
                         let scroll = match self.axis {
                             Axis::Horizontal => if self.use_vertical_finger_scroll {fe.scroll.y}else {fe.scroll.x},
@@ -309,18 +311,17 @@ impl ScrollBar {
             _ => ()
         };
         if self._visible {
-            match event.hits(cx, self._bg_area, HitOpt::default()) {
-                Event::Animate(ae) => {
-                    self.animator.calc_area(cx, self._bg_area, ae.time);
-                },
-                Event::AnimEnded(_) => self.animator.end(),
-                Event::Frame(_ae) => {
-                    
-                    if self.move_towards_scroll_target(cx) {
-                        cx.next_frame(self._bg_area);
-                    }
-                    return self.make_scroll_event()
-                },
+            if let Some(ae) = event.is_animate(cx, &self.animator) {
+                self.bg.animate(cx, &mut self.animator, ae.time);
+            }
+            if let Some(_) = event.is_next_frame(cx, self.next_frame) {
+                if self.move_towards_scroll_target(cx) {
+                    self.next_frame = cx.new_next_frame();
+                }
+                return self.make_scroll_event()
+            }
+            
+            match event.hits(cx, self.bg.area(), HitOpt::default()) {
                 Event::FingerDown(fe) => {
                     self.animator.play_anim(cx, live_anim!(cx, self::anim_down));
                     let rel = match self.axis {
@@ -392,83 +393,73 @@ impl ScrollBar {
         ScrollBarEvent::None
     }
     
-    pub fn draw_scroll_bar(&mut self, cx: &mut Cx, axis: Axis, view_area: Area, view_rect: Rect, view_total: Vec2) -> f32 {
-        self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
-        self.bg.shader = live_shader!(cx, self::shader_bg);
-        self.bg.color = self.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
-        self._bg_area = Area::Empty;
-        self._view_area = view_area;
+    pub fn draw_scroll_bar(&mut self, cx: &mut Cx, axis: Axis, view_rect: Rect, view_total: Vec2) -> f32 {
+
+        if self.animator.need_init(cx) {
+            self.animator.init(cx, live_anim!(cx, self::anim_default));
+            self.bg.last_animate(&self.animator);
+        }
+
         self.axis = axis;
         self.bar_size = live_float!(cx, self::bar_size);
+        
         match self.axis {
             Axis::Horizontal => {
-                self._visible = view_total.x > view_rect.w + 0.1;
-                self._scroll_size = if view_total.y > view_rect.h + 0.1 {
-                    view_rect.w - self.bar_size
+                self._visible = view_total.x > view_rect.size.x + 0.1;
+                self._scroll_size = if view_total.y > view_rect.size.y + 0.1 {
+                    view_rect.size.x - self.bar_size
                 }
                 else {
-                    view_rect.w
+                    view_rect.size.x
                 } -self._bar_side_margin * 2.;
                 self._view_total = view_total.x;
-                self._view_visible = view_rect.w;
+                self._view_visible = view_rect.size.x;
                 self._scroll_pos = self._scroll_pos.min(self._view_total - self._view_visible).max(0.);
                 
                 if self._visible {
-                    let bg_inst = self.bg.draw_quad_rel(
+                    let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
+                    self.bg.is_vertical = 0.0;
+                    self.bg.norm_scroll = norm_scroll;
+                    self.bg.norm_handle = norm_handle;
+                    self.bg.draw_quad_rel(
                         cx,
                         Rect {
-                            x: self._bar_side_margin,
-                            y: view_rect.h - self.bar_size,
-                            w: self._scroll_size,
-                            h: self.bar_size,
+                            pos: vec2(self._bar_side_margin, view_rect.size.y - self.bar_size),
+                            size: vec2( self._scroll_size, self.bar_size),
                         }
                     );
-                    bg_inst.set_do_scroll(cx, false, false);
-                    //is_vertical
-                    let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
-                    bg_inst.push_float(cx, 0.0);
-                    bg_inst.push_float(cx, norm_handle);
-                    bg_inst.push_float(cx, norm_scroll);
-                    self._bg_area = bg_inst.into();
+                    self.bg.area().set_do_scroll(cx, false, false);
                 }
             },
             Axis::Vertical => {
                 // compute if we need a horizontal one
-                self._visible = view_total.y > view_rect.h + 0.1;
-                self._scroll_size = if view_total.x > view_rect.w + 0.1 {
-                    view_rect.h - self.bar_size
+                self._visible = view_total.y > view_rect.size.y + 0.1;
+                self._scroll_size = if view_total.x > view_rect.size.x + 0.1 {
+                    view_rect.size.y - self.bar_size
                 }
                 else {
-                    view_rect.h
+                    view_rect.size.y
                 } -self._bar_side_margin * 2.;
                 self._view_total = view_total.y;
-                self._view_visible = view_rect.h;
+                self._view_visible = view_rect.size.y;
                 self._scroll_pos = self._scroll_pos.min(self._view_total - self._view_visible).max(0.);
                 if self._visible {
-                    let bg_inst = self.bg.draw_quad_rel(
+                    let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
+                    self.bg.is_vertical = 1.0;
+                    self.bg.norm_scroll = norm_scroll;
+                    self.bg.norm_handle = norm_handle;
+                    self.bg.draw_quad_rel(
                         cx,
                         Rect {
-                            x: view_rect.w - self.bar_size,
-                            y: self._bar_side_margin,
-                            w: self.bar_size,
-                            h: self._scroll_size
+                            pos: vec2(view_rect.size.x - self.bar_size, self._bar_side_margin),
+                            size: vec2(self.bar_size, self._scroll_size)
                         }
                     );
-                    bg_inst.set_do_scroll(cx, false, false);
-                    //is_vertical
-                    let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
-                    bg_inst.push_float(cx, 1.0);
-                    bg_inst.push_float(cx, norm_handle);
-                    bg_inst.push_float(cx, norm_scroll);
-                    self._bg_area = bg_inst.into();
+                    self.bg.area().set_do_scroll(cx, false, false);
                 }
             }
         }
         
-        // push the var added to the sb shader
-        if self._visible {
-            self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
-        }
         
         // see if we need to clamp
         let clamped_pos = self._scroll_pos.min(self._view_total - self._view_visible).max(0.);
@@ -476,7 +467,7 @@ impl ScrollBar {
             self._scroll_pos = clamped_pos;
             self._scroll_target = clamped_pos;
             // ok so this means we 'scrolled' this can give a problem for virtual viewport widgets
-            cx.next_frame(self._bg_area);
+            self.next_frame = cx.new_next_frame();
         }
         
         self._scroll_pos

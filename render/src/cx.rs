@@ -125,6 +125,8 @@ pub struct Cx {
     pub repaint_id: u64,
     pub event_id: u64,
     pub timer_id: u64,
+    pub animator_id: u64,
+    pub next_frame_id: u64,
     pub signal_id: usize,
     pub live_update_id: u64,
     pub anim_time: f64,
@@ -140,11 +142,10 @@ pub struct Cx {
     pub hover_mouse_cursor: Option<MouseCursor>,
     pub fingers: Vec<CxPerFinger>,
     
-    pub playing_anim_areas: BTreeMap<Area, AnimInfo>,
-    pub ended_anim_areas: BTreeMap<Area ,AnimInfo>,
+    pub playing_animator_ids: BTreeMap<AnimatorId, AnimInfo>,
     
-    pub frame_callbacks: HashSet<Area>,
-    pub _frame_callbacks: HashSet<Area>,
+    pub next_frames: HashSet<NextFrame>,
+    pub _next_frames: HashSet<NextFrame>,
     
     pub triggers: HashMap<Area, BTreeSet<TriggerId>>,
     pub signals: HashMap<Signal, BTreeSet<StatusId >>,
@@ -162,6 +163,9 @@ pub struct Cx {
     // this cuts the compiletime of an end-user application in half
     pub event_handler: Option<*mut dyn FnMut(&mut Cx, &mut Event)>,
 }
+
+#[derive(Clone, Default, Eq, PartialEq, Copy, Hash)]
+pub struct NextFrame(u64);
 
 #[derive(Clone, Copy, Default)]
 pub struct CxCommandSetting {
@@ -241,6 +245,8 @@ impl Default for Cx {
             timer_id: 1,
             signal_id: 1,
             live_update_id: 1,
+            animator_id: 1,
+            next_frame_id: 1,
             anim_time: 0.0,
             
             next_key_focus: Area::Empty,
@@ -258,11 +264,10 @@ impl Default for Cx {
             
             command_settings: HashMap::new(),
             
-            playing_anim_areas: BTreeMap::new(),
-            ended_anim_areas: BTreeMap::new(),
+            playing_animator_ids: BTreeMap::new(),
             
-            frame_callbacks: HashSet::new(),
-            _frame_callbacks: HashSet::new(),
+            next_frames: HashSet::new(),
+            _next_frames: HashSet::new(),
             profiles: HashMap::new(),
             
             signals: HashMap::new(), 
@@ -590,15 +595,16 @@ impl Cx {
         false
     }
     
-    pub fn check_ended_anim_areas(&mut self, time: f64) {
-        self.ended_anim_areas.clear();
-        for (area, anim_info) in &self.playing_anim_areas{
+    pub fn check_ended_animator_ids(&mut self, time: f64) {
+        let mut ended_animator_ids = BTreeSet::new();
+        //self.ended_animator_ids.clear();
+        for (anim_id, anim_info) in &self.playing_animator_ids{
             if anim_info.start_time.is_nan() || time - anim_info.start_time >= anim_info.total_time {
-                self.ended_anim_areas.insert(*area, anim_info.clone());
+                ended_animator_ids.insert(*anim_id);
             }
         }
-        for (area, _) in &self.ended_anim_areas{
-            self.playing_anim_areas.remove(area);
+        for anim_id in &ended_animator_ids{
+            self.playing_animator_ids.remove(anim_id);
         }
     }
     
@@ -606,11 +612,6 @@ impl Cx {
         if old_area == Area::Empty || old_area == Area::All {
             return new_area
         }
-        
-        if let Some(anim_info) = self.playing_anim_areas.get(&old_area).cloned() {
-            self.playing_anim_areas.insert(new_area, anim_info);
-        }
-        self.playing_anim_areas.remove(&old_area);
         
         for finger in &mut self.fingers {
             if finger.captured == old_area {
@@ -633,12 +634,6 @@ impl Cx {
             self.next_key_focus = new_area.clone()
         }
         
-        //
-        if self.frame_callbacks.contains(&old_area){
-            self.frame_callbacks.insert(new_area);
-            self.frame_callbacks.remove(&old_area);
-        }
-
         new_area
     }
     
@@ -730,27 +725,24 @@ impl Cx {
         //self.profile();
     }
     
-    pub fn call_animation_event(&mut self, time: f64)
+    pub fn call_animate_event(&mut self, time: f64)
     {
         self.call_event_handler(&mut Event::Animate(AnimateEvent {time: time, frame: self.repaint_id}));
-        self.check_ended_anim_areas(time);
-        if self.ended_anim_areas.len() > 0 {
-            self.call_event_handler(&mut Event::AnimEnded(AnimateEvent {time: time, frame: self.repaint_id}));
-        }
+        self.check_ended_animator_ids(time);
     }
     
-    pub fn call_frame_event(&mut self, time: f64)
+    pub fn call_next_frame_event(&mut self, time: f64)
     {
-        std::mem::swap(&mut self._frame_callbacks, &mut self.frame_callbacks);
-        self.frame_callbacks.clear();
-        self.call_event_handler(&mut Event::Frame(FrameEvent {time: time, frame: self.repaint_id}));
+        std::mem::swap(&mut self._next_frames, &mut self.next_frames);
+        self.next_frames.clear();
+        self.call_event_handler(&mut Event::NextFrame(NextFrameEvent {time: time, frame: self.repaint_id}));
     }
     
-    pub fn next_frame(&mut self, area: Area) {
-        if let Some(_) = self.frame_callbacks.iter().position( | a | *a == area) {
-            return;
-        }
-        self.frame_callbacks.insert(area);
+    pub fn new_next_frame(&mut self) -> NextFrame {
+        let res = NextFrame(self.next_frame_id);
+        self.next_frame_id += 1;
+        self.next_frames.insert(res);
+        res
     }
     
     pub fn new_signal(&mut self) -> Signal {

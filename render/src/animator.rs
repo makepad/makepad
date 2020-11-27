@@ -1,7 +1,11 @@
 use crate::cx::*;
 
-#[derive(Clone)]
+#[derive(Clone, Default, Ord, PartialOrd, PartialEq, Eq, Copy)]
 pub struct AnimatorId(u64);
+
+impl AnimatorId{
+    fn is_valid(&self)->bool{self.0 != 0}
+}
 
 #[derive(Clone)]
 pub struct AnimInfo {
@@ -21,9 +25,17 @@ pub enum AnimLastValue {
 pub struct Animator {
     current: Option<Anim>,
     next: Option<Anim>,
-    pub area: Area,
+    pub animator_id: AnimatorId,
     pub live_update_id: u64,
     pub last_values: Vec<(LiveItemId, AnimLastValue)>,
+}
+
+impl Cx{
+    pub fn new_animator_id(&mut self)->AnimatorId{
+        let res = AnimatorId(self.animator_id);
+        self.animator_id += 1;
+        res
+    }
 }
 
 impl Animator {
@@ -32,17 +44,13 @@ impl Animator {
         self.live_update_id != cx.live_update_id
     }
     
-    pub fn init<F>(&mut self, cx: &mut Cx, cb: F)
-    where F: Fn(&Cx) -> Anim {
-        if self.live_update_id != cx.live_update_id {
-            self.live_update_id = cx.live_update_id;
-            let anim = cb(cx);
-            // lets stop all animations if we had any
-            if let Some(anim_area) = cx.playing_anim_areas.get_mut(&self.area) {
-                anim_area.total_time = 0.;
-            }
-            self.set_anim_as_last_values(&anim);
+    pub fn init(&mut self, cx: &mut Cx, def_anim:Anim){
+        self.live_update_id = cx.live_update_id;
+        // lets stop all animations if we had any
+        if let Some(anim_area) = cx.playing_animator_ids.get_mut(&self.animator_id) {
+            anim_area.total_time = 0.;
         }
+        self.set_anim_as_last_values(&def_anim);
     }
     
     pub fn set_anim_as_last_values(&mut self, anim: &Anim) {
@@ -117,14 +125,15 @@ impl Animator {
             }
         }
 
-        if !self.area.is_valid(cx) {
+        if !self.animator_id.is_valid() {
+            self.animator_id = cx.new_animator_id();
             self.set_anim_as_last_values(&anim);
             self.current = Some(anim);
             return
         }
         // alright first we find area, it already exists
-        if let Some(anim_info) = cx.playing_anim_areas.get_mut(&self.area){
-            //do we cut the animation in right now?
+        if let Some(anim_info) = cx.playing_animator_ids.get_mut(&self.animator_id){
+
             if anim.play.cut() || self.current.is_none() {
                 self.current = Some(anim);
                 anim_info.start_time = std::f64::NAN;
@@ -137,20 +146,24 @@ impl Animator {
                 anim_info.total_time = self.current.as_ref().unwrap().play.total_time() + self.next.as_ref().unwrap().play.total_time()
             }
         }
-        else if self.area != Area::Empty { // its new
+        else{
             self.current = Some(anim);
             self.next = None;
-            cx.playing_anim_areas.insert(self.area, AnimInfo {
+            cx.playing_animator_ids.insert(self.animator_id, AnimInfo {
                 start_time: std::f64::NAN,
                 total_time: self.current.as_ref().unwrap().play.total_time()
             });
         }
     }
     
-    pub fn set_area(&mut self, cx: &mut Cx, area: Area) {
-        self.area = cx.update_area_refs(self.area, area.clone());
+    pub fn anim_ended(&self, cx: &Cx, time: f64)->bool{
+        if let Some(anim_info) = cx.playing_animator_ids.get(&self.animator_id){
+            if anim_info.start_time.is_nan() || time - anim_info.start_time < anim_info.total_time{
+                return false;
+            }
+        }
+        true
     }
-    
     
     pub fn update_anim_track(&mut self, cx: &mut Cx, time: f64) -> Option<f64> {
 
@@ -158,11 +171,11 @@ impl Animator {
 
         // fetch current anim
         if self.current.is_none() { // remove anim
-            cx.playing_anim_areas.remove(&self.area);
+            cx.playing_animator_ids.remove(&self.animator_id);
             return None
         }
         
-        if let Some(anim_info) = cx.playing_anim_areas.get_mut(&self.area){
+        if let Some(anim_info) = cx.playing_animator_ids.get_mut(&self.animator_id){
             if anim_info.start_time.is_nan(){
                 anim_info.start_time = time;
             }
