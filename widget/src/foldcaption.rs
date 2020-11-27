@@ -240,7 +240,7 @@ impl FoldCaption {
         self.text.text_style = live_text_style!(cx, self::text_style_label);
         let wleft = cx.get_width_left();
         self.text.wrapping = Wrapping::Ellipsis(wleft - 10.0);
-        self.text.draw_text(cx, label);
+        self.text.draw_text_walk(cx, label);
 
         self.bg.end_quad(cx);
     }
