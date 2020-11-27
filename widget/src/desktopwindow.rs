@@ -222,7 +222,7 @@ impl DesktopWindow {
                         cx.move_turtle(50., 0.);
                         // we need to store our caption rect somewhere.
                         self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
-                        self.caption_text.draw_text(cx, &self.caption);
+                        self.caption_text.draw_text_walk(cx, &self.caption);
                         self.caption_bg.end_quad(cx);
                         cx.turtle_new_line();
                     },
@@ -240,7 +240,7 @@ impl DesktopWindow {
                             ..Default::default()
                         });
                         self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
-                        self.caption_text.draw_text(cx, &self.caption);
+                        self.caption_text.draw_text_walk(cx, &self.caption);
                         self.caption_bg.end_quad(cx);
                         cx.turtle_new_line();
                     },
