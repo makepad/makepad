@@ -474,11 +474,11 @@ impl Cx {
         dc
     }
     
-    pub fn lock_instances(&mut self, shader: Shader, slots:usize) -> LockedInstances {
+    pub fn begin_many_instances(&mut self, shader: Shader, slots:usize) -> ManyInstances {
         let dc = self.append_to_draw_call(shader, slots);
         let mut instances = Vec::new();
         std::mem::swap(&mut instances, &mut dc.instances);
-        LockedInstances {
+        ManyInstances {
             instance_area: InstanceArea {
                 view_id: dc.view_id,
                 draw_call_id: dc.draw_call_id,
@@ -491,20 +491,20 @@ impl Cx {
         }
     }
     
-    pub fn lock_aligned_instances(&mut self, shader: Shader, slots:usize) -> LockedInstances {
-        let mut li = self.lock_instances(shader, slots);
+    pub fn begin_many_aligned_instances(&mut self, shader: Shader, slots:usize) -> ManyInstances {
+        let mut li = self.begin_many_instances(shader, slots);
         li.aligned = Some(self.align_list.len());
         self.align_list.push(Area::Empty);
         li
     }
     
-    pub fn unlock_instances(&mut self, mut locked_instances: LockedInstances) -> Area {
-        let mut ia = locked_instances.instance_area;
+    pub fn end_many_instances(&mut self, mut many_instances: ManyInstances) -> Area {
+        let mut ia = many_instances.instance_area;
         let cxview = &mut self.views[ia.view_id];
         let dc = &mut cxview.draw_calls[ia.draw_call_id];
-        std::mem::swap(&mut locked_instances.instances, &mut dc.instances);
+        std::mem::swap(&mut many_instances.instances, &mut dc.instances);
         ia.instance_count = (dc.instances.len() - ia.instance_offset) / dc.total_instance_slots;
-        if let Some(aligned) = locked_instances.aligned {
+        if let Some(aligned) = many_instances.aligned {
             self.align_list[aligned] = ia.clone().into();
         }
         ia.into()
@@ -560,7 +560,7 @@ impl Cx {
     }
 }
 
-pub struct LockedInstances{
+pub struct ManyInstances{
     pub instance_area: InstanceArea,
     pub aligned: Option<usize>,
     pub instances:Vec<f32>
