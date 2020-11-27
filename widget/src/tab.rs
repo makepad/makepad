@@ -301,7 +301,7 @@ impl Tab {
         self.bg.begin_quad(cx, layout);
 
         self.text.text_style = live_text_style!(cx, self::text_style_title);
-        self.text.draw_text(cx, &self.label);
+        self.text.draw_text_walk(cx, &self.label);
         
         cx.turtle_align_y();
         

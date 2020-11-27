@@ -118,7 +118,7 @@ impl NormalButton {
         self.bg.begin_quad(cx, live_layout!(cx, self::layout_bg));
         
         self.text.text_style = live_text_style!(cx, self::text_style_label);
-        self.text.draw_text(cx, label);
+        self.text.draw_text_walk(cx, label);
         
         self.bg.end_quad(cx);
     }
