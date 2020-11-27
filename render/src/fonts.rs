@@ -146,7 +146,7 @@ impl TrapezoidText {
     // test api for directly drawing a glyph
     pub fn draw_char(&mut self, cx: &mut Cx, c: char, font_id: usize, font_size: f32) {
         // now lets make a draw_character function
-        let mut lock = cx.lock_instances(live_shader!(cx, self::trapezoid_shader), TRAPEZOID_TEXT_SLOTS);
+        let mut many = cx.begin_many_instances(live_shader!(cx, self::trapezoid_shader), TRAPEZOID_TEXT_SLOTS);
         
         let trapezoids = {
             let cxfont = &cx.fonts[font_id];
@@ -199,15 +199,15 @@ impl TrapezoidText {
                 trapezoid.ys[3],
                 3.0
             ];
-            lock.instances.extend_from_slice(&data);
+            many.instances.extend_from_slice(&data);
         }
 
-        cx.unlock_instances(lock);
+        cx.end_many_instances(many);
     }
     
     // atlas drawing function used by CxAfterDraw
     pub fn draw_todo(&mut self, cx: &mut Cx, todo: CxFontsAtlasTodo) {
-        let mut lock = cx.lock_instances(live_shader!(cx, self::trapezoid_shader), TRAPEZOID_TEXT_SLOTS);
+        let mut many = cx.begin_many_instances(live_shader!(cx, self::trapezoid_shader), TRAPEZOID_TEXT_SLOTS);
         
         let mut size = 1.0;
         for i in 0..3 {
@@ -269,11 +269,11 @@ impl TrapezoidText {
                     trapezoid.ys[3],
                     i as f32
                 ];
-                lock.instances.extend_from_slice(&data);
+                many.instances.extend_from_slice(&data);
             }
         }
 
-        cx.unlock_instances(lock);
+        cx.end_many_instances(many);
     }
 }
 

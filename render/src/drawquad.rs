@@ -4,7 +4,7 @@ use crate::cx::*;
 pub struct DrawQuad {
     pub shader: Shader,
     pub area: Area,
-    pub lock: Option<LockedInstances>,
+    pub many: Option<ManyInstances>,
     pub slots: usize,
     pub rect_pos: Vec2,
     pub rect_size: Vec2,
@@ -16,7 +16,7 @@ impl Clone for DrawQuad {
         Self {
             shader: unsafe {self.shader.clone()},
             area: Area ::Empty,
-            lock: None,
+            many: None,
             slots: self.slots,
             rect_pos: Vec2::default(),
             rect_size: Vec2::default(),
@@ -35,13 +35,12 @@ impl DrawQuad {
             shader: shader,
             slots: slots + 5,
             area: Area::Empty,
-            lock: None,
+            many: None,
             rect_pos: Vec2::default(),
             rect_size: Vec2::default(),
             draw_depth: 0.0
         }
     }
-    
         
     pub fn style(cx: &mut Cx) {
         
@@ -154,9 +153,8 @@ impl DrawQuad {
         let rect = cx.walk_turtle(walk);
         self.rect_pos = rect.pos;
         self.rect_size = rect.size;
-        self.draw_quad_aligned(cx);
+        self.draw_quad(cx);
     }
-
 
     pub fn draw_quad_abs(&mut self, cx: &mut Cx, rect: Rect) {
         self.rect_pos = rect.pos;
@@ -168,14 +166,20 @@ impl DrawQuad {
         let rect = rect.translate(cx.get_turtle_origin());
         self.rect_pos = rect.pos;
         self.rect_size = rect.size;
-        self.draw_quad_aligned(cx);
-    }
-
-    pub fn draw_quad(&mut self, cx: &mut Cx) {
-        self.area = cx.add_instance(self.shader, self.as_slice())
+        self.draw_quad(cx);
     }
     
-    pub fn draw_quad_aligned(&mut self, cx: &mut Cx) {
+    pub fn draw_quad(&mut self, cx: &mut Cx) {
+        unsafe {
+            if let Some(mi) = &mut self.many {
+                if let Area::Instance(ia) = &mut self.area{
+                    ia.instance_count = 1;
+                    ia.instance_offset=  mi.instances.len();
+                }
+                mi.instances.extend_from_slice(std::slice::from_raw_parts(&self.rect_pos as *const _ as *const f32, self.slots));
+                return
+            }
+        }
         self.area = cx.add_aligned_instance(self.shader, self.as_slice())
     }
     
@@ -187,40 +191,20 @@ impl DrawQuad {
         self.area = area
     }
 
-    pub fn lock_quad(&mut self, cx: &mut Cx) {
-        self.lock = Some(cx.lock_instances(self.shader, self.slots))
+    pub fn begin_many(&mut self, cx: &mut Cx) {
+        let mi = cx.begin_many_aligned_instances(self.shader, self.slots);
+        self.area = Area::Instance(InstanceArea {
+            instance_count: 0,
+            instance_offset: mi.instances.len(),
+            ..mi.instance_area.clone()
+        });
+        self.many = Some(mi);
     }
     
-    pub fn lock_aligned_quad(&mut self, cx: &mut Cx) {
-        self.lock = Some(cx.lock_aligned_instances(self.shader, self.slots))
-    }
-    
-    pub fn add_quad(&mut self) {
+    pub fn end_many(&mut self, cx: &mut Cx) {
         unsafe {
-            if let Some(li) = &mut self.lock {
-                li.instances.extend_from_slice(std::slice::from_raw_parts(&self.rect_pos as *const _ as *const f32, self.slots));
-            }
-        }
-    }
-    
-    pub fn get_next_locked_area(&mut self) -> Area {
-        unsafe {
-            if let Some(li) = &mut self.lock {
-                // return the area for the last locked item
-                return Area::Instance(InstanceArea {
-                    instance_count: 1,
-                    instance_offset: li.instances.len(),
-                    ..li.instance_area.clone()
-                })
-            }
-        }
-        Area::Empty
-    }
-    
-    pub fn unlock_quad(&mut self, cx: &mut Cx) {
-        unsafe {
-            if let Some(li) = self.lock.take() {
-                self.area = cx.unlock_instances(li);
+            if let Some(li) = self.many.take() {
+                self.area = cx.end_many_instances(li);
             }
         }
     }

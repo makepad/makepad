@@ -13,7 +13,7 @@ pub enum Wrapping {
 pub struct DrawText {
     pub shader: Shader,
     pub area: Area,
-    pub lock: Option<LockedInstances>,
+    pub many: Option<ManyInstances>,
     pub slots: usize,
     pub buf: Vec<char>,
     pub text_style: TextStyle,
@@ -40,7 +40,7 @@ impl Clone for DrawText {
         Self {
             shader: unsafe {self.shader.clone()},
             area: Area ::Empty,
-            lock: None,
+            many: None,
             slots: self.slots,
             buf: Vec::new(),
             
@@ -77,7 +77,7 @@ impl DrawText {
         Self {
             shader: shader,
             area: Area::Empty,
-            lock: None,
+            many: None,
             slots: slots + 18,
             buf: Vec::new(),
             
@@ -269,12 +269,8 @@ impl DrawText {
         }
     }
     
-    pub fn lock_aligned_text(&mut self, cx: &mut Cx) {
-        self.lock = Some(cx.lock_aligned_instances(self.shader, self.slots));
-    }
-    
-    pub fn lock_text(&mut self, cx: &mut Cx) {
-        self.lock = Some(cx.lock_instances(self.shader, self.slots));
+    pub fn begin_many(&mut self, cx: &mut Cx) {
+        self.many = Some(cx.begin_many_aligned_instances(self.shader, self.slots));
     }
     
     pub fn write_uniforms(&mut self, cx: &mut Cx) {
@@ -293,11 +289,10 @@ impl DrawText {
         self.area = area
     }
     
-    
-    pub fn unlock_text(&mut self, cx: &mut Cx) {
+    pub fn end_many(&mut self, cx: &mut Cx) {
         unsafe {
-            if let Some(li) = self.lock.take() {
-                self.area = cx.unlock_instances(li);
+            if let Some(mi) = self.many.take() {
+                self.area = cx.end_many_instances(mi);
                 self.write_uniforms(cx);
             }
         }
@@ -323,26 +318,38 @@ impl DrawText {
         }
     }
     
-    pub fn add_text_buf(&mut self, cx: &mut Cx, pos: Vec2) {
+    pub fn draw_text(&mut self, cx: &mut Cx, pos: Vec2) {
         let mut buf = Vec::new();
         std::mem::swap(&mut buf, unsafe {&mut self.buf});
-        self.add_text_chunk(cx, pos, 0, &buf, | _, _, _, _ | {0.0});
+        self.draw_text_chunk(cx, pos, 0, &buf, | _, _, _, _ | {0.0});
         std::mem::swap(&mut buf, unsafe {&mut self.buf});
     }
-    
-    pub fn add_text_str(&mut self, cx: &mut Cx, pos: Vec2, val:&str) {
+
+    pub fn draw_text_rel(&mut self, cx: &mut Cx, pos: Vec2, val:&str) {
         self.buf_truncate(0);
         self.buf_push_str(val);
-        self.add_text_buf(cx, pos);
+        self.draw_text(cx, pos + cx.get_turtle_origin());
     }
     
-    pub fn add_text_chunk<F>(&mut self, cx: &mut Cx, pos: Vec2, char_offset: usize, chunk: &[char], mut char_callback: F)
+    pub fn draw_text_abs(&mut self, cx: &mut Cx, pos: Vec2, val:&str) {
+        self.buf_truncate(0);
+        self.buf_push_str(val);
+        self.draw_text(cx, pos);
+    }
+    
+    pub fn draw_text_chunk<F>(&mut self, cx: &mut Cx, pos: Vec2, char_offset: usize, chunk: &[char], mut char_callback: F)
     where F: FnMut(char, usize, f32, f32) -> f32
     {
         if pos.x.is_nan() || pos.y.is_nan() {
             return
         }
         
+        let in_many = unsafe{self.many.is_some()};
+        
+        if !in_many{ 
+            self.begin_many(cx);
+        }
+                
         let text_style = unsafe {&self.text_style};
         
         let mut walk_x = pos.x;
@@ -362,8 +369,9 @@ impl DrawText {
         let font_size_pixels = font_size_logical * dpi_factor;
         
         let atlas_page = &mut cxfont.atlas_pages[atlas_page_id];
+
         
-        let li = unsafe {if let Some(li) = &mut self.lock {li} else {return}};
+        let li = unsafe {if let Some(mi) = &mut self.many {mi} else {return}};
         
         for wc in chunk {
             
@@ -451,10 +459,18 @@ impl DrawText {
             walk_x += advance;
             char_offset += 1;
         }
+        
+        if !in_many{
+            self.end_many(cx)
+        }
     }
     
-    pub fn draw_text(&mut self, cx: &mut Cx, text: &str) {
-        self.lock_aligned_text(cx);
+    pub fn draw_text_walk(&mut self, cx: &mut Cx, text: &str) {
+        let in_many = unsafe{self.many.is_some()};
+        
+        if !in_many{ 
+            self.begin_many(cx);
+        }
         
         let mut buf = Vec::new();
         std::mem::swap(&mut buf, unsafe {&mut self.buf});
@@ -531,7 +547,7 @@ impl DrawText {
                     margin: Margin::zero()
                 });
                 
-                self.add_text_chunk(cx, rect.pos, 0, &buf, | _, _, _, _ | {0.0});
+                self.draw_text_chunk(cx, rect.pos, 0, &buf, | _, _, _, _ | {0.0});
                 
                 width = 0.0;
                 buf.truncate(0);
@@ -541,12 +557,13 @@ impl DrawText {
             }
         }
         std::mem::swap(&mut buf, unsafe {&mut self.buf});
-        
-        self.unlock_text(cx)
+        if !in_many{
+            self.end_many(cx)
+        }
     }
     
     // looks up text with the behavior of a text selection mouse cursor
-    pub fn find_closest_offset(&self, cx: &Cx, pos: Vec2) -> usize {
+    pub fn closest_text_offset(&self, cx: &Cx, pos: Vec2) -> usize {
         let area = unsafe {&self.area};
         
         if !area.is_valid(cx) {
