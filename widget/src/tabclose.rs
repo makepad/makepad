@@ -42,7 +42,7 @@ impl TabClose {
             self::anim_default: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Color {keys: {1.0: self::color_deselected_focus}, bind_to: makepad_render::drawcolor::DrawColor::color},
+                    Vec4 {keys: {1.0: self::color_deselected_focus}, bind_to: makepad_render::drawcolor::DrawColor::color},
                     Float {keys: {1.0: 0.0}, bind_to: self::DrawTabClose::hover},
                     Float {keys: {1.0: 0.0}, bind_to: self::DrawTabClose::down},
                 ]
@@ -51,7 +51,7 @@ impl TabClose {
             self::anim_over: Anim {
                 play: Cut {duration: 0.1},
                 tracks: [
-                    Color {keys: {0.0: self::color_selected_focus}, bind_to: makepad_render::drawcolor::DrawColor::color},
+                    Vec4 {keys: {0.0: self::color_selected_focus}, bind_to: makepad_render::drawcolor::DrawColor::color},
                     Float {keys: {1.0: 1.0}, bind_to: self::DrawTabClose::hover},
                     Float {keys: {1.0: 0.0}, bind_to: self::DrawTabClose::down},
                 ]
@@ -60,23 +60,22 @@ impl TabClose {
             self::anim_down: Anim {
                 play: Cut {duration: 0.2}
                 tracks: [
-                    Color {keys: {0.0: self::color_selected_focus}, bind_to: makepad_render::drawcolor::DrawColor::color},
+                    Vec4 {keys: {0.0: self::color_selected_focus}, bind_to: makepad_render::drawcolor::DrawColor::color},
                     Float {keys: {1.0: 1.0}, bind_to: self::DrawTabClose::hover},
                     Float {keys: {0.0: 0.0, 1.0: 0.0}, bind_to: self::DrawTabClose::down},
                 ]
             }
             
             self::shader_bg: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawquad::shader::*;
                 
-                instance hover: float;
-                instance down: float;
+                draw_input: self::DrawTabClose;
 
                 fn pixel() -> vec4 {
-                    let cx = Df::viewport(pos * vec2(w, h));
+                    let cx = Df::viewport(pos * rect_size);
                     let hover_max: float = (hover * 0.5 + 0.3) * 0.5;
                     let hover_min: float = 1. - hover_max;
-                    let c: vec2 = vec2(w, h) * 0.5;
+                    let c: vec2 = rect_size * 0.5;
                     cx.circle(c.x, c.y, 12.);
                     cx.stroke_keep(#4000,1.);
                     cx.fill(mix(#3332,#555f,hover));

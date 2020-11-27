@@ -142,7 +142,7 @@ impl FoldCaption {
                 tracks:[
                     Float {keys:{1.0: 0.0}, bind_to: self::DrawFoldCaption::hover}
                     Float {keys:{1.0: 0.0}, bind_to: self::DrawFoldCaption::down}
-                    Color {keys:{1.0: #9}, bind_to: makepad_render::drawtext::DrawText::color}
+                    Vec4 {keys:{1.0: #9}, bind_to: makepad_render::drawtext::DrawText::color}
                 ]
             }
             
@@ -151,7 +151,7 @@ impl FoldCaption {
                 tracks:[
                     Float {keys:{0.0: 1.0, 1.0: 1.0}, bind_to: self::DrawFoldCaption::hover},
                     Float {keys:{1.0: 0.0}, bind_to: self::DrawFoldCaption::down},
-                    Color {keys:{0.0: #f}, bind_to: makepad_render::drawtext::DrawText::color}
+                    Vec4 {keys:{0.0: #f}, bind_to: makepad_render::drawtext::DrawText::color}
                 ]
             }
             
@@ -160,7 +160,7 @@ impl FoldCaption {
                 tracks:[
                     Float {keys:{0.0: 1.0, 1.0: 1.0}, bind_to: self::DrawFoldCaption::down},
                     Float {keys:{1.0: 1.0}, bind_to: self::DrawFoldCaption::hover},
-                    Color {keys:{0.0: #c}, bind_to: makepad_render::drawtext::DrawText::color},
+                    Vec4 {keys:{0.0: #c}, bind_to: makepad_render::drawtext::DrawText::color},
                 ]
             }
             
@@ -175,8 +175,8 @@ impl FoldCaption {
                 
                 fn pixel() -> vec4 {
                     let sz = 3.;
-                    let c = vec2(5.0,0.5*h);
-                    let df = Df::viewport(pos * vec2(w, h));
+                    let c = vec2(5.0,0.5*rect_size.y);
+                    let df = Df::viewport(pos * rect_size);
                     df.clear(#2);
                     // we have 3 points, and need to rotate around its center
                     df.rotate(open*0.5*PI+0.5*PI, c.x, c.y);

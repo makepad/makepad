@@ -147,7 +147,7 @@ impl FileTree {
         Anim {
             play: Play::Chain {duration: 0.01},
             tracks: vec![
-                Track::Color {
+                Track::Vec4 {
                     bind_to: live_item_id!(makepad_render::quad::shader::color),
                     ease: Ease::Lin,
                     keys: vec![(1.0, default_color)],
@@ -168,7 +168,7 @@ impl FileTree {
         Anim {
             play: Play::Cut {duration: 0.02},
             tracks: vec![
-                Track::Color {
+                Track::Vec4 {
                     bind_to: live_item_id!(makepad_render::quad::shader::color),
                     ease: Ease::Lin,
                     keys: vec![(0., over_color), (1., over_color)],

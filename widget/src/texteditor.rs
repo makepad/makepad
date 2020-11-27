@@ -380,16 +380,16 @@ impl TextEditor {
                     else {
                         col *= vec4(0.75, 0.75, 0.75, 0.75);
                     }
-                    let cx = Df::viewport(pos * vec2(w, h));
+                    let cx = Df::viewport(pos * rect_size);
                     cx.move_to(1., -1.);
-                    cx.line_to(1., h + 1.);
+                    cx.line_to(1., rect_size.y + 1.);
                     return cx.stroke(col, thickness);
                 }
             }
             
             self::shader_cursor: Shader {
                 use makepad_render::drawquad::shader::*;
-                draw_input: self::DrawShaderCursor;
+                draw_input: self::DrawCursor;
                 
                 fn pixel() -> vec4 {
                     if blink<0.5 {
@@ -412,23 +412,23 @@ impl TextEditor {
                 fn vertex() -> vec4 { // custom vertex shader because we widen the draweable area a bit for the gloopiness
                     let shift: vec2 = -draw_scroll.xy;
                     let clipped: vec2 = clamp(
-                        geom * vec2(w + 16., h) + vec2(x, y) + shift - vec2(8., 0.),
+                        geom * vec2(rect_size.x + 16., rect_size.y) + rect_pos + shift - vec2(8., 0.),
                         draw_clip.xy,
                         draw_clip.zw
                     );
-                    pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
-                    return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + draw_zbias, 1.)));
+                    pos = (clipped - shift - rect_pos) / rect_size;
+                    return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, draw_depth + draw_zbias, 1.)));
                 }
                 
                 fn pixel() -> vec4 {
-                    let cx = Df::viewport(pos * vec2(w, h));
-                    cx.box(0., 0., w, h, border_radius);
+                    let cx = Df::viewport(pos * rect_size);
+                    cx.box(0., 0., rect_size.x, rect_size.y, border_radius);
                     if prev_w > 0. {
-                        cx.box(prev_x, -h, prev_w, h, border_radius);
+                        cx.box(prev_x, -rect_size.y, prev_w, rect_size.y, border_radius);
                         cx.gloop(gloopiness);
                     }
                     if next_w > 0. {
-                        cx.box(next_x, h, next_w, h, border_radius);
+                        cx.box(next_x, rect_size.y, next_w, rect_size.y, border_radius);
                         cx.gloop(gloopiness);
                     }
                     //df_shape *= cos(pos.x*8.)+cos(pos.y*16.);
@@ -439,8 +439,8 @@ impl TextEditor {
             self::shader_paren_pair: Shader {
                 use makepad_render::drawcolor::shader::*;
                 fn pixel() -> vec4 {
-                    let cx = Df::viewport(pos * vec2(w, h));
-                    cx.rect(0., h - 1.5 - dpi_dilate, w, 1.5 + dpi_dilate);
+                    let cx = Df::viewport(pos * rect_size);
+                    cx.rect(0., rect_size.y - 1.5 - dpi_dilate, rect_size.x, 1.5 + dpi_dilate);
                     return cx.fill(color);
                 }
             }
@@ -448,8 +448,8 @@ impl TextEditor {
             self::shader_cursor_row: Shader {
                 use makepad_render::drawcolor::shader::*;
                 fn pixel() -> vec4 {
-                    let cx = Df::viewport(pos * vec2(w, h));
-                    cx.rect(0., 0., w, h);
+                    let cx = Df::viewport(pos * rect_size);
+                    cx.rect(0., 0., rect_size.x, rect_size.y);
                     return cx.fill(color);
                 }
             }
@@ -457,10 +457,10 @@ impl TextEditor {
             self::shader_search_marker: Shader {
                 use makepad_render::drawcolor::shader::*;
                 fn pixel() -> vec4 {
-                    let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
-                    let cx = Df::viewport(pos2 * vec2(w, h));
-                    cx.move_to(0., h - 1.);
-                    cx.line_to(w, h - 1.);
+                    let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * rect_size.x));
+                    let cx = Df::viewport(pos2 * rect_size);
+                    cx.move_to(0., rect_size.y - 1.);
+                    cx.line_to(rect_size.x, rect_size.y - 1.);
                     return cx.stroke(#AB6363, 0.8);
                 }
             }
@@ -468,11 +468,11 @@ impl TextEditor {
             self::shader_message_marker: Shader {
                 use makepad_render::drawcolor::shader::*;
                 fn pixel() -> vec4 {
-                    let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
-                    let cx = Df::viewport(pos2 * vec2(w, h));
+                    let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * rect_size.x));
+                    let cx = Df::viewport(pos2 * rect_size);
                     //df_rect(0.,0.,w,h);
-                    cx.move_to(0., h - 1.);
-                    cx.line_to(w, h - 1.);
+                    cx.move_to(0., rect_size.y - 1.);
+                    cx.line_to(rect_size.x, rect_size.y - 1.);
                     return cx.stroke(color, 0.8);
                 }
             }
