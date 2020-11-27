@@ -577,7 +577,7 @@ impl TextEditor {
             self._is_row_select = true;
         }
         else {
-            offset = self.text.find_closest_offset(cx, fe.abs);
+            offset = self.text.closest_text_offset(cx, fe.abs);
             match fe.tap_count {
                 1 => {
                 },
@@ -652,7 +652,7 @@ impl TextEditor {
             self.cursors.set_last_cursor_head(offset, text_buffer)
         }
         else {
-            let offset = self.text.find_closest_offset(cx, fe.abs);
+            let offset = self.text.closest_text_offset(cx, fe.abs);
             self.cursors.set_last_cursor_head(offset, text_buffer)
         };
         self._last_finger_move = Some(fe.abs);
@@ -985,7 +985,7 @@ impl TextEditor {
                     self.cursors.grid_select(grid_select_corner, pos, text_buffer);
                 }
                 else {
-                    let offset = self.text.find_closest_offset(cx, last_finger_move);
+                    let offset = self.text.closest_text_offset(cx, last_finger_move);
                     self.cursors.set_last_cursor_head(offset, text_buffer);
                 }
             }
@@ -1179,17 +1179,17 @@ impl TextEditor {
         self.reset_cursor_blinker(cx);
     }
     
-    pub fn lock_draw_objects(&mut self, cx: &mut Cx, line_number_bg: bool) {
+    pub fn begin_draw_objects(&mut self, cx: &mut Cx, line_number_bg: bool) {
         // layering, this sets the draw call order
-        self.token_highlight.lock_quad(cx);
-        self.cursor_row.lock_quad(cx);
-        self.selection.lock_quad(cx);
-        self.message_marker.lock_quad(cx);
-        self.search_marker.lock_quad(cx);
-        self.paren_pair.lock_quad(cx);
-        self.text.lock_text(cx);
-        self.indent_lines.lock_quad(cx);
-        self.cursor.lock_quad(cx);
+        self.token_highlight.begin_many(cx);
+        self.cursor_row.begin_many(cx);
+        self.selection.begin_many(cx);
+        self.message_marker.begin_many(cx);
+        self.search_marker.begin_many(cx);
+        self.paren_pair.begin_many(cx);
+        self.text.begin_many(cx);
+        self.indent_lines.begin_many(cx);
+        self.cursor.begin_many(cx);
         
         if self.draw_line_numbers {
             if line_number_bg {
@@ -1199,22 +1199,20 @@ impl TextEditor {
                 });
                 self.gutter_bg.area().set_do_scroll(cx, false, false);
             }
-            self.line_number_text.lock_text(cx);
+            self.line_number_text.begin_many(cx);
         }
     }
     
-    pub fn unlock_draw_objects(&mut self, cx: &mut Cx) {
-        
-        self.token_highlight.unlock_quad(cx);
-        self.cursor_row.unlock_quad(cx);
-        self.selection.unlock_quad(cx);
-        self.message_marker.unlock_quad(cx);
-        self.search_marker.unlock_quad(cx);
-        self.paren_pair.unlock_quad(cx);
-        self.text.unlock_text(cx);
-        self.indent_lines.unlock_quad(cx);
-        self.cursor.unlock_quad(cx);
-        
+    pub fn end_draw_objects(&mut self, cx: &mut Cx) {
+        self.token_highlight.end_many(cx);
+        self.cursor_row.end_many(cx);
+        self.selection.end_many(cx);
+        self.message_marker.end_many(cx);
+        self.search_marker.end_many(cx);
+        self.paren_pair.end_many(cx);
+        self.text.end_many(cx);
+        self.indent_lines.end_many(cx);
+        self.cursor.end_many(cx);
     }
     
     pub fn init_draw_state(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
@@ -1256,7 +1254,7 @@ impl TextEditor {
             //    ..self.bg_layout.clone()
             //});
             self.text.color = live_vec4!(cx, self::loading_color);
-            self.text.draw_text(cx, "...");
+            self.text.draw_text_walk(cx, "...");
             //self.bg.end_quad_fill(cx, inst);
             //self.bg.end_quad(cx, &bg_inst);
             //self._bg_area = bg_inst.into_area();
@@ -1272,7 +1270,7 @@ impl TextEditor {
             
             self.bg.draw_quad_rel(cx, cx.get_turtle_rect());
             
-            self.lock_draw_objects(cx, true);
+            self.begin_draw_objects(cx, true);
             
             if let Some(select_scroll) = &mut self._select_scroll {
                 let scroll_pos = self.view.get_scroll_pos(cx);
@@ -1404,7 +1402,7 @@ impl TextEditor {
                 self.line_number_text.color = self.colors.line_number_normal;
             }
             let chunk_width = self._monospace_size.x * 5.0;
-            self.line_number_text.add_text_buf(
+            self.line_number_text.draw_text(
                 cx,
                 vec2(
                     origin.x + (self.line_number_width - chunk_width - self.line_number_click_margin),
@@ -1693,7 +1691,7 @@ impl TextEditor {
             //self.text.z = z;
             //let line_chunk = &mut self._line_chunk;
             if search_cursors.len() > 0 { // slow loop
-                self.text.add_text_chunk(cx, geom.pos, offset, chunk, | ch, offset, x, w | {
+                self.text.draw_text_chunk(cx, geom.pos, offset, chunk, | ch, offset, x, w | {
                     //line_chunk.push((x, ch));
                     draw_search.mark_text_select_only(search_cursors, offset, x, geom.pos.y, w, height);
                     draw_messages.mark_text_select_only(&markers.message_cursors, offset, x, geom.pos.y, w, height);
@@ -1701,7 +1699,7 @@ impl TextEditor {
                 });
             }
             else {
-                self.text.add_text_chunk(cx, geom.pos, offset, &chunk, | ch, offset, x, w | {
+                self.text.draw_text_chunk(cx, geom.pos, offset, &chunk, | ch, offset, x, w | {
                     //line_chunk.push((x, ch));
                     draw_messages.mark_text_select_only(&markers.message_cursors, offset, x, geom.pos.y, w, height);
                     draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.pos.y, w, height, z, last_cursor, mark_spaces)
@@ -1836,7 +1834,7 @@ impl TextEditor {
         self.draw_shadows(cx);
         //self.bg.end_quad_fill(cx, self._bg_inst.take().unwrap());
         
-        self.unlock_draw_objects(cx);
+        self.end_draw_objects(cx);
         
         self.view.end_view(cx);
         
@@ -1989,7 +1987,7 @@ impl TextEditor {
                 self.cursors.grid_select(grid_select_corner, pos, text_buffer);
             }
             else {
-                let offset = self.text.find_closest_offset(cx, select_scroll.abs);
+                let offset = self.text.closest_text_offset(cx, select_scroll.abs);
                 self.cursors.set_last_cursor_head(offset, text_buffer);
             }
             if select_scroll.at_end {
