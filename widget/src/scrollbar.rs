@@ -83,21 +83,21 @@ impl ScrollBar {
             self::anim_default: Anim {
                 play: Cut {duration: 0.5}
                 tracks: [
-                    Color {keys: {1.0: self::color_base}, bind_to: makepad_render::quad::shader::color}
+                    Vec4 {keys: {1.0: self::color_base}, bind_to: makepad_render::quad::shader::color}
                 ]
             }
             
             self::anim_over: Anim {
                 play: Cut {duration: 0.05}
                 tracks: [
-                    Color {keys: {1.0: self::color_over}, bind_to: makepad_render::quad::shader::color}
+                    Vec4 {keys: {1.0: self::color_over}, bind_to: makepad_render::quad::shader::color}
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.05}
                 tracks: [
-                    Color {keys: {1.0: self::color_down}, bind_to: makepad_render::quad::shader::color}
+                    Vec4 {keys: {1.0: self::color_down}, bind_to: makepad_render::quad::shader::color}
                 ]
             }
             
@@ -109,12 +109,12 @@ impl ScrollBar {
                 const border_radius: float = 1.5;
                 
                 fn pixel() -> vec4 {
-                    let df = Df::viewport(pos * vec2(w, h));
+                    let df = Df::viewport(pos * rect_size);
                     if is_vertical > 0.5 {
-                        df.box(1., h * norm_scroll, w * 0.5, h * norm_handle, border_radius);
+                        df.box(1., rect_size.y * norm_scroll, rect_size.x * 0.5, rect_size.y * norm_handle, border_radius);
                     }
                     else {
-                        df.box(w * norm_scroll, 1., w * norm_handle, h * 0.5, border_radius);
+                        df.box(rect_size.x * norm_scroll, 1., rect_size.x * norm_handle, rect_size.y * 0.5, border_radius);
                     }
                     return df.fill_keep(color);
                 }

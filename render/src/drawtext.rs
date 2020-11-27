@@ -288,7 +288,11 @@ impl DrawText {
     pub fn set_area(&mut self, area: Area) {
         self.area = area
     }
-    
+
+    pub fn set_shader(&mut self, shader: Shader){
+        self.shader = shader;
+    }
+        
     pub fn end_many(&mut self, cx: &mut Cx) {
         unsafe {
             if let Some(mi) = self.many.take() {

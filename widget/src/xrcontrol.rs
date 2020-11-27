@@ -256,8 +256,8 @@ impl XRControl {
             self::shader_cursor: Shader {
                 use makepad_render::drawquad::shader::*;
                 fn pixel() -> vec4 {
-                    let df = Df::viewport(pos * vec2(w, h));
-                    df.circle(0.5 * w, 0.5 * h, 0.5 * w);
+                    let df = Df::viewport(pos * rect_size);
+                    df.circle(0.5 * rect_size.x, 0.5 * rect_size.y, 0.5 * rect_size.x);
                     return df.fill(#f);
                 }
             }

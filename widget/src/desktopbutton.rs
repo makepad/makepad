@@ -77,15 +77,15 @@ impl DesktopButton {
             }
             
             self::shader_bg: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawquad::shader::*;
 
                 draw_input: self::DrawDesktopButton;
                 
                 fn pixel() -> vec4 {
-                    let df = Df::viewport(pos * vec2(w, h)); // );
+                    let df = Df::viewport(pos * rect_size); // );
                     df.aa *= 3.0;
                     let sz = 4.5;
-                    let c = vec2(w, h) * vec2(0.5, 0.5);
+                    let c = rect_size * vec2(0.5, 0.5);
                     // WindowsMin
                     if abs(button_type - 1.) < 0.1 {
                         df.clear(mix(#3, mix(#6, #9, down), hover));
