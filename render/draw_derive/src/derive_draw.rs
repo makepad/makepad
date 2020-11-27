@@ -79,6 +79,11 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             tb.add("pub fn new ( cx : & mut Cx , shader : Shader ) -> Self {");
             tb.add("Self :: with_slots ( cx , default_shader_overload ! ( cx , shader ,").stream(default_shader).add(") , 0 )");
             tb.add("}");
+
+            tb.add("pub fn set_shader ( & mut self , shader : Shader ) {");
+            tb.add("self . base . set_shader ( shader )");
+            tb.add("}");
+
             
             tb.add("pub fn with_slots ( cx : & mut Cx , shader : Shader , slots : usize ) -> Self {");
             tb.add("Self {");
@@ -212,7 +217,6 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
 
                     tb.add("pub fn begin_many ( & mut self , cx : & mut Cx ) { self . base . begin_many ( cx ) }");
                     tb.add("pub fn end_many ( & mut self , cx : & mut Cx ) { self . base . end_many ( cx ) ; self . write_uniforms ( cx ) }");
-                    
                 }
             }
             
