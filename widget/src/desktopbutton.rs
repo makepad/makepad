@@ -4,9 +4,8 @@ use crate::buttonlogic::*;
 #[derive(Clone)]
 pub struct DesktopButton {
     pub button: ButtonLogic,
-    pub bg: Quad,
+    pub bg: DrawDesktopButton,
     pub animator: Animator,
-    pub _bg_area: Area,
 }
 
 pub enum DesktopButtonType {
@@ -20,7 +19,7 @@ pub enum DesktopButtonType {
 
 #[derive(Clone, DrawQuad)]
 #[repr(C)]
-struct DrawDesktopButton {
+pub struct DrawDesktopButton {
     #[default_shader(self::shader_bg)]
     base: DrawQuad,
     hover: f32,
@@ -47,43 +46,40 @@ impl DesktopButton {
             button: ButtonLogic::default(),
             bg: DrawDesktopButton::new(cx, default_shader!()),
             animator: Animator::default(),
-            _bg_area: Area::Empty,
         }
     }
     
     pub fn style(cx: &mut Cx) {
-        
+        self::DrawDesktopButton::register_draw_input(cx);
         live_body!(cx, r#"
             self::anim_default: Anim {
                 play: Cut {duration: 0.1}
                 tracks: [
-                    Float {keys: {1.0: 0.0}, bind_to: self::shader_bg::hover}
-                    Float {keys: {1.0: 0.0}, bind_to: self::shader_bg::down}
+                    Float {keys: {1.0: 0.0}, bind_to: self::DrawDesktopButton::hover}
+                    Float {keys: {1.0: 0.0}, bind_to: self::DrawDesktopButton::down}
                 ]
             }
             
             self::anim_over: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {keys: {1.0: 0.0}, bind_to: self::shader_bg::down},
-                    Float {keys: {0.0: 1.0, 1.0: 1.0}, bind_to: self::shader_bg::hover},
+                    Float {keys: {1.0: 0.0}, bind_to: self::DrawDesktopButton::down},
+                    Float {keys: {0.0: 1.0, 1.0: 1.0}, bind_to: self::DrawDesktopButton::hover},
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {keys: {0.0: 1.0, 1.0: 1.0}, bind_to: self::shader_bg::down},
-                    Float {keys: {1.0: 1.0}, bind_to: self::shader_bg::hover},
+                    Float {keys: {0.0: 1.0, 1.0: 1.0}, bind_to: self::DrawDesktopButton::down},
+                    Float {keys: {1.0: 1.0}, bind_to: self::DrawDesktopButton::hover},
                 ]
             }
             
             self::shader_bg: Shader {
                 use makepad_render::quad::shader::*;
 
-                instance hover: float;
-                instance down: float;
-                instance button_type: float;
+                draw_input: self::DrawDesktopButton;
                 
                 fn pixel() -> vec4 {
                     let df = Df::viewport(pos * vec2(w, h)); // );
@@ -171,9 +167,10 @@ impl DesktopButton {
     pub fn handle_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
         //let mut ret_event = ButtonEvent::None;
         let animator = &mut self.animator;
-        self.button.handle_button_logic(cx, event, self._bg_area, | cx, logic_event, area | match logic_event {
-            ButtonLogicEvent::Animate(ae) => animator.calc_area(cx, area, ae.time),
-            ButtonLogicEvent::AnimEnded(_) => animator.end(),
+        if let Some(ae) = event.is_animate(cx, animator){
+            self.bg.animate(cx, animator, ae.time);
+        }
+        self.button.handle_button_logic(cx, event, self.bg.area(), | cx, logic_event, _ | match logic_event {
             ButtonLogicEvent::Down => animator.play_anim(cx, live_anim!(cx, self::anim_down)),
             ButtonLogicEvent::Default => animator.play_anim(cx,live_anim!(cx, self::anim_default)),
             ButtonLogicEvent::Over => animator.play_anim(cx, live_anim!(cx, self::anim_over))
@@ -182,7 +179,11 @@ impl DesktopButton {
     
     pub fn draw_desktop_button(&mut self, cx: &mut Cx, ty: DesktopButtonType) {
         //self.bg.color = self.animator.last_color(cx, Quad_color::id());
-        self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
+        if self.animator.need_init(cx){
+            self.animator.init(cx, live_anim!(cx, self::anim_default));
+            self.bg.last_animate(&self.animator);
+        }
+
         let (w, h) = match ty {
             DesktopButtonType::WindowsMin
                 | DesktopButtonType::WindowsMax
@@ -191,12 +192,8 @@ impl DesktopButton {
             DesktopButtonType::XRMode => (50., 36.),
             DesktopButtonType::Fullscreen => (50., 36.),
         };
-        self.bg.shader = live_shader!(cx, self::shader_bg);
-        let bg_inst = self.bg.draw_quad(cx, Walk::wh(Width::Fix(w), Height::Fix(h)));
-        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::down));
-        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::hover));
-        bg_inst.push_float(cx, ty.shader_float());
-        self._bg_area = bg_inst.into();
-        self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
+
+        self.bg.button_type = ty.shader_float();
+        self.bg.draw_quad_walk(cx, Walk::wh(Width::Fix(w), Height::Fix(h)));
     }
 }

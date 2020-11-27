@@ -6,8 +6,6 @@ pub struct ButtonLogic {
 
 #[derive(Clone, PartialEq)]
 pub enum ButtonLogicEvent {
-    Animate(AnimateEvent),
-    AnimEnded(AnimateEvent),
     Over,
     Default,
     Down,
@@ -27,8 +25,6 @@ impl ButtonLogic {
     where F: FnMut(&mut Cx, ButtonLogicEvent, Area)
     {
         match event.hits(cx, area, HitOpt::default()) {
-            Event::Animate(ae) => cb(cx, ButtonLogicEvent::Animate(ae), area),
-            Event::AnimEnded(ae) => cb(cx, ButtonLogicEvent::AnimEnded(ae), area),
             Event::FingerDown(_fe) => {
                 cb(cx, ButtonLogicEvent::Down, area);
                 return ButtonEvent::Down;

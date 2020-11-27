@@ -84,7 +84,7 @@ impl FoldOpenState{
 
 #[derive(Clone, DrawQuad)]
 #[repr(C)]
-struct DrawFoldCaption  {
+pub struct DrawFoldCaption  {
     #[default_shader(self::shader_bg)]
     base: DrawQuad,
     hover: f32,
@@ -196,14 +196,13 @@ impl FoldCaption {
         //let mut ret_event = ButtonEvent::None;
         let animator = &mut self.animator;
         let open_state = &mut self.open_state;
-        let text = &mut self.text;
-        let bg = &mut self.bg;
-        self.button.handle_button_logic(cx, event, bg.area(), | cx, logic_event, area | match logic_event {
-            ButtonLogicEvent::Animate(ae) => {
-                self.bg.animate(cx, &mut self.animator, ae.time);
-                self.text.animate(cx, &mut self.animator, ae.time);
-            },
-            ButtonLogicEvent::AnimEnded(_) => animator.end(),
+
+        if let Some(ae) = event.is_animate(cx, animator) {
+            self.bg.animate(cx, animator, ae.time);
+            self.text.animate(cx, animator, ae.time);
+        }
+
+        self.button.handle_button_logic(cx, event, self.bg.area(), | cx, logic_event, area | match logic_event {
             ButtonLogicEvent::Down => {
                 // lets toggle our anim state
                 open_state.toggle();
@@ -219,8 +218,8 @@ impl FoldCaption {
 
         if self.animator.need_init(cx){
             self.animator.init(cx, live_anim!(cx, self::anim_default));
-            self.bg.last_animate(cx, &self.animator);
-            self.text.last_animate(cx, &self.animator);
+            self.bg.last_animate(&self.animator);
+            self.text.last_animate(&self.animator);
         }
         
         let open_value = self.open_state.get_value();

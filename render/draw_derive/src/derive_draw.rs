@@ -155,7 +155,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             
             tb.add("}");
             
-            tb.add("pub fn last_animate ( & mut self , a : & mut Animator ) {");
+            tb.add("pub fn last_animate ( & mut self , a : & Animator ) {");
             tb.add("self . base . last_animate ( a ) ;");
             for (name, ty) in &uni_insts {
                 tb.add("if let Some ( v ) = ").ident(ty).add(":: last_animate ( a ,");

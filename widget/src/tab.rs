@@ -10,7 +10,6 @@ pub struct Tab {
     pub abs_origin: Option<Vec2>,
     pub _is_selected: bool,
     pub _is_focussed: bool,
-    pub _bg_inst: Option<InstanceArea>,
     pub _close_anim_rect: Rect,
     pub _is_down: bool,
     pub _is_drag: bool
@@ -43,7 +42,8 @@ impl Tab {
             draw_depth: 0.,
             bg: DrawTab ::new(cx, default_shader!()),
             //tab_close: TabClose::new(cx),
-            text: DrawText::new(cx, default_shader!()).with_draw_depth(0.1),
+            text: DrawText::new(cx, default_shader!())
+                .with_draw_depth(0.1),
             animator: Animator::default(),
             abs_origin: None,
             _is_selected: false,
@@ -56,10 +56,10 @@ impl Tab {
         tab
     }
     
-    pub fn with_draw_depth(self, draw_depth:f32)->Self{
-        Self{draw_depth,..self}
+    pub fn with_draw_depth(self, draw_depth: f32) -> Self {
+        Self {draw_depth, ..self}
     }
-
+    
     pub fn style(cx: &mut Cx) {
         self::DrawTab::register_draw_input(cx);
         live_body!(cx, r#"
@@ -67,7 +67,7 @@ impl Tab {
             self::color_bg_selected: #28;
             self::color_bg_normal: #34;
             
-            self::color_text_selected_focus: #f;
+            self::color_text_selected_focus: #FFFFFF;
             self::color_text_deselected_focus: #9d;
             self::color_text_selected_defocus: #9d;
             self::color_text_deselected_defocus: #82;
@@ -84,7 +84,7 @@ impl Tab {
             
             self::shader_bg: Shader {
                 use makepad_render::quad::shader::*;
-
+                
                 draw_input: self::DrawTab;
                 
                 const border_width: float = 1.0;
@@ -104,30 +104,30 @@ impl Tab {
         "#)
     }
     
-    pub fn get_bg_color(&self, cx: &Cx) -> Color {
+    pub fn get_bg_color(&self, cx: &Cx) -> Vec4 {
         if self._is_selected {
-            live_color!(cx, self::color_bg_selected)
+            live_vec4!(cx, self::color_bg_selected)
         }
         else {
-            live_color!(cx, self::color_bg_normal)
+            live_vec4!(cx, self::color_bg_normal)
         }
     }
     
-    pub fn get_text_color(&self, cx: &Cx) -> Color {
+    pub fn get_text_color(&self, cx: &Cx) -> Vec4 {
         if self._is_selected {
             if self._is_focussed {
-                live_color!(cx, self::color_text_selected_focus)
+                live_vec4!(cx, self::color_text_selected_focus)
             }
             else {
-                live_color!(cx, self::color_text_selected_defocus)
+                live_vec4!(cx, self::color_text_selected_defocus)
             }
         }
         else {
             if self._is_focussed {
-                live_color!(cx, self::color_text_deselected_focus)
+                live_vec4!(cx, self::color_text_deselected_focus)
             }
             else {
-                live_color!(cx, self::color_text_deselected_defocus)
+                live_vec4!(cx, self::color_text_deselected_defocus)
             }
         }
     }
@@ -136,19 +136,19 @@ impl Tab {
         Anim {
             play: Play::Cut {duration: 0.05},
             tracks: vec![
-                Track::Color {
+                Track::Vec4 {
                     ease: Ease::Lin,
                     keys: vec![(1.0, self.get_bg_color(cx))],
                     bind_to: live_item_id!(makepad_render::drawcolor::DrawColor::color),
                     cut_init: None
                 },
-                Track::Color {
+                Track::Vec4 {
                     ease: Ease::Lin,
-                    keys: vec![(1.0, live_color!(cx, self::color_bg_selected))],
+                    keys: vec![(1.0, live_vec4!(cx, self::color_bg_selected))],
                     bind_to: live_item_id!(self::DrawTab::border_color),
                     cut_init: None
                 },
-                Track::Color {
+                Track::Vec4 {
                     ease: Ease::Lin,
                     keys: vec![(1.0, self.get_text_color(cx))],
                     bind_to: live_item_id!(makepad_render::drawtext::DrawText::color),
@@ -159,30 +159,16 @@ impl Tab {
     }
     
     pub fn anim_over(&self, cx: &Cx) -> Anim {
-        Anim{
+        Anim {
             play: Play::Cut {duration: 0.01},
             ..self.anim_default(cx)
         }
     }
     
     pub fn anim_down(&self, cx: &Cx) -> Anim {
-        Anim{
+        Anim {
             play: Play::Cut {duration: 0.01},
             ..self.anim_default(cx)
-        }
-    }
-    
-    pub fn anim_close(&self, _cx: &Cx) -> Anim {
-        Anim{
-            play: Play::Single {duration: 2.1, cut: true, term: true, end: 1.0},
-            tracks: vec![
-                Track::Float{
-                    bind_to: live_item_id!(self::tab_closing),
-                    ease: Ease::OutExp,
-                    keys: vec![(0.0, 1.0), (1.0, 0.0)],
-                    cut_init: None
-                }
-            ]
         }
     }
     
@@ -206,47 +192,29 @@ impl Tab {
         self.animator.set_anim_as_last_values(&self.anim_default(cx));
     }
     
-    pub fn close_tab(&self, cx: &mut Cx){
-        cx.send_trigger(self._bg_area, Self::trigger_close());
+    pub fn close_tab(&self, cx: &mut Cx) {
+        cx.send_trigger(self.bg.area(), Self::trigger_close());
     }
-
+    
     pub fn trigger_close() -> TriggerId {uid!()}
-
+    
     pub fn handle_tab(&mut self, cx: &mut Cx, event: &mut Event) -> TabEvent {
+        if let Some(ae) = event.is_animate(cx, &self.animator) {
+            self.bg.animate(cx, &mut self.animator, ae.time);
+            self.text.animate(cx, &mut self.animator, ae.time);
+        }
         
-        match event.hits(cx, self._bg_area, HitOpt::default()) {
-            Event::Trigger(_ti)=>{
+        match event.hits(cx, self.bg.area(), HitOpt::default()) {
+            Event::Trigger(_ti) => {
                 //TODO figure out why close animations mess everything up
                 //f !self.animator.term_anim_playing() {
-                    return TabEvent::Close;
-                    //self._close_anim_rect = self._bg_area.get_rect(cx);
-                    //self.animator.play_anim(cx, self.anim_close(cx));
-                    //return TabEvent::Closing;
+                return TabEvent::Close;
+                //self._close_anim_rect = self._bg_area.get_rect(cx);
+                //self.animator.play_anim(cx, self.anim_close(cx));
+                //return TabEvent::Closing;
                 //}
             },
-            Event::Animate(ae) => {
-                // its playing the term anim, run a redraw
-                if self.animator.term_anim_playing() {
-                    self.animator.calc_float(cx, live_item_id!(self::tab_closing), ae.time);
-                    cx.redraw_child_area(self._bg_area);
-                }
-                else {
-                    self.animator.calc_area(cx, self._bg_area, ae.time);
-                    self.animator.calc_area(cx, self._text_area, ae.time);
-                }
-            },
-            Event::AnimEnded(_ae) => {
-                if self.animator.term_anim_playing() {
-                    return TabEvent::Close;
-                }
-                else {
-                    self.animator.end();
-                }
-            },
             Event::FingerDown(_fe) => {
-                if self.animator.term_anim_playing() {
-                    return TabEvent::None
-                }
                 cx.set_down_mouse_cursor(MouseCursor::Hand);
                 self._is_down = true;
                 self._is_drag = false;
@@ -309,62 +277,39 @@ impl Tab {
     }
     
     pub fn get_tab_rect(&mut self, cx: &Cx) -> Rect {
-        self._bg_area.get_rect(cx)
+        self.bg.area().get_rect(cx)
     }
     
     pub fn begin_tab(&mut self, cx: &mut Cx) -> Result<(), ()> {
         // pull the bg color from our animation system, uses 'default' value otherwise
-        self.bg.shader = live_shader!(cx, self::shader_bg);
-        self.bg.z = self.z;
-        self.bg.color = self.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
         
-        // check if we are closing
-        if self.animator.term_anim_playing() {
-            // so so BUT how would we draw this thing with its own clipping
-            let bg_inst = self.bg.draw_quad(
-                cx,
-                Walk::wh(
-                    Width::Fix(self._close_anim_rect.w * self.animator.last_float(cx, live_item_id!(self::tab_closing))),
-                    Height::Fix(self._close_anim_rect.h),
-                )
-            );
-            bg_inst.push_last_color(cx, &self.animator, live_item_id!(self::shader_bg::border_color));
-            self._bg_area = bg_inst.into();
-            self.animator.set_area(cx, self._bg_area);
-            return Err(())
+        if self.animator.need_init(cx) {
+            self.animator.init(cx, live_anim!(cx, self::anim_default));
+            self.bg.last_animate(&self.animator);
+            self.text.last_animate(&self.animator);
+        }
+        
+        self.bg.base.base.draw_depth = self.draw_depth;
+        self.text.draw_depth = self.draw_depth;
+        
+        let layout = if let Some(abs_origin) = self.abs_origin {
+            Layout {abs_origin: Some(abs_origin), ..live_layout!(cx, self::layout_bg)}
         }
         else {
-            let layout = if let Some(abs_origin) = self.abs_origin {
-                Layout {abs_origin: Some(abs_origin), ..live_layout!(cx, self::layout_bg)}
-            }
-            else {
-                live_layout!(cx, self::layout_bg)
-            };
-            let bg_inst = self.bg.begin_quad(cx, layout);
-            bg_inst.push_last_color(cx, &self.animator, live_item_id!(self::shader_bg::border_color));
-            /*
-            if self.is_closeable {
-                self.tab_close.draw_tab_close(cx);
-                cx.turtle_align_y();
-            }*/
-            // push the 2 vars we added to bg shader
-            self.text.z = self.z;
-            self.text.text_style = live_text_style!(cx, self::text_style_title);
-            self.text.color = self.animator.last_color(cx, live_item_id!(makepad_render::text::shader::color));
-            self._text_area = self.text.draw_text(cx, &self.label);
-            
-            cx.turtle_align_y();
-            self._bg_inst = Some(bg_inst);
-            
-            return Ok(())
-        }
+            live_layout!(cx, self::layout_bg)
+        };
+        self.bg.begin_quad(cx, layout);
+
+        self.text.text_style = live_text_style!(cx, self::text_style_title);
+        self.text.draw_text(cx, &self.label);
+        
+        cx.turtle_align_y();
+        
+        return Ok(())
     }
     
     pub fn end_tab(&mut self, cx: &mut Cx) {
-        if let Some(bg_inst) = self._bg_inst.take() {
-            self._bg_area = self.bg.end_quad(cx, bg_inst);
-            self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
-        }
+        self.bg.end_quad(cx);
     }
     
     pub fn draw_tab(&mut self, cx: &mut Cx) {

@@ -376,7 +376,15 @@ impl Rect {
             return self.contains(pos);
         }
     }
+    
+    pub fn from_lerp(a: Rect, b: Rect, f: f32) -> Rect {
+        Rect {
+            pos: ( b.pos - a.pos ) * f + a.pos,
+            size: ( b.size - a.size ) * f + a.size
+        }
+    }
 }
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Anim {

@@ -121,7 +121,7 @@ impl TextInput {
         
         if text_buffer.is_empty() {
             let pos = cx.get_turtle_pos();
-            self.text_editor.text.color = live_color!(cx, self::color_empty_message);
+            self.text_editor.text.color = live_vec4!(cx, self::color_empty_message);
             self.text_editor.text.draw_text(cx, &self.empty_message);
             cx.set_turtle_pos(pos);
         }
