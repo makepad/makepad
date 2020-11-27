@@ -4,7 +4,7 @@ use crate::cx::*;
 pub struct DrawCube {
     pub shader: Shader,
     pub area: Area,
-    pub lock: Option<LockedInstances>,
+    pub many: Option<ManyInstances>,
     pub slots: usize,
     
     pub transform: Mat4,
@@ -18,7 +18,7 @@ impl Clone for DrawCube {
         Self {
             shader: unsafe {self.shader.clone()},
             area: Area ::Empty,
-            lock: None,
+            many: None,
             slots: self.slots,
             transform: self.transform,
             color: self.color,
@@ -39,7 +39,7 @@ impl DrawCube {
             shader: shader,
             slots: slots + 26,
             area: Area::Empty,
-            lock: None,
+            many: None,
             
             transform: Mat4::identity(),
             color: vec4(1.0, 0.0, 0.0, 1.0),
@@ -134,22 +134,22 @@ impl DrawCube {
         self.area = cx.add_instance(self.shader, self.as_slice());
     }
     
-    pub fn lock_cube(&mut self, cx: &mut Cx) {
-        self.lock = Some(cx.lock_instances(self.shader, self.slots))
+    pub fn begin_many(&mut self, cx: &mut Cx) {
+        self.many = Some(cx.begin_many_instances(self.shader, self.slots))
     }
     
     pub fn add_cube(&mut self) {
         unsafe {
-            if let Some(li) = &mut self.lock {
+            if let Some(li) = &mut self.many {
                 li.instances.extend_from_slice(std::slice::from_raw_parts(&self.transform as *const _ as *const f32, self.slots));
             }
         }
     }
     
-    pub fn unlock_cube(&mut self, cx: &mut Cx) {
+    pub fn end_many(&mut self, cx: &mut Cx) {
         unsafe {
-            if let Some(li) = self.lock.take() {
-                self.area = cx.unlock_instances(li);
+            if let Some(li) = self.many.take() {
+                self.area = cx.end_many_instances(li);
             }
         }
     }

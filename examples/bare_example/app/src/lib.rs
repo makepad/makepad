@@ -89,31 +89,27 @@ impl BareExampleApp {
             //let y = x.sin();
             self.quad.counter = 0.;
             
-            self.quad.lock_quad(cx);
+            //self.quad.begin_many(cx);
             //self.quad.base.shader = live_shader!(cx, self::bg_shader);
             //println!("{}", self.quad.base.slots);
             self.text.counter += 0.01;
             
-            self.text.lock_text(cx);
+            //self.text.begin_many(cx);
             self.quad.counter = 0.;
             self.quad.some += 1.1;
             let msg = format!("HELLO WORLD");
             
-            for i in 0..100000 {
+            for i in 0..1000000 {
                 let v = 0.5 * (i as f32);
                 self.quad.counter += 0.01; //= (i as f32).sin();
-                let x = 400. + (v + self.count).sin() * 400.;
-                let y = 400. + (v * 1.12 + self.count * 18.).cos() * 400.;
-                //self.quad.add_quad(Rect { pos: vec2(x,y), size:vec2(10.,10.0) });
+                let x = 0.0;//400. + (v + self.count).sin() * 400.;
+                let y = 0.0;//400. + (v * 1.12 + self.count * 18.).cos() * 400.;
+                self.quad.draw_quad_abs(cx, Rect {pos: vec2(x, y), size: vec2(10., 10.0)});
                 
-                self.text.add_text(
-                    cx,
-                    vec2(x, y),
-                    &msg
-                );
+                //self.text.draw_text_abs(cx, vec2(x, y), &msg);
             }
-            self.text.unlock_text(cx);
-            self.quad.unlock_quad(cx);
+            //self.text.end_many(cx);
+            //self.quad.end_many(cx);
             self.count += 0.001;
             
             cx.profile_end(1);
