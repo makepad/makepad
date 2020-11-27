@@ -122,6 +122,11 @@ impl DrawCube {
         write_draw_input!(cx, self.area(), self::DrawCube::cube_size, cube_size);
     }
     
+    pub fn get_transform(&mut self)->&Mat4 {
+        unsafe{&self.transform}
+    }
+    
+    
     pub fn draw_cube(
         &mut self,
         cx: &mut Cx,

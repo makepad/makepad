@@ -3,30 +3,31 @@ use crate::buttonlogic::*;
 
 #[derive(Clone)]
 pub struct TabClose {
-    pub bg: Quad,
+    pub bg: DrawTabClose,
     pub animator: Animator,
-    pub _bg_area: Area,
 }
-
 
 #[derive(Clone, DrawQuad)]
 #[repr(C)]
-pub struct DrawSplitter {
+pub struct DrawTabClose {
     #[default_shader(self::shader_bg)]
-    base: DrawQuad,
-    color: Vec4,
+    base: DrawColor,
+    hover: f32,
+    down: f32,
 }
 
 impl TabClose {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            bg: DrawSplitter::new(cx, default_shader!()).with_draw_depth(1.3),
+            bg: DrawTabClose::new(cx, default_shader!())
+                .with_draw_depth(1.3),
             animator: Animator::default(),
-            _bg_area: Area::Empty,
         }
     }
     
     pub fn style(cx: &mut Cx) {
+
+        self::DrawTabClose::register_draw_input(cx);
         
         live_body!(cx, r#"
             self::color_selected_focus: #f;
@@ -41,27 +42,27 @@ impl TabClose {
             self::anim_default: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Color {keys: {1.0: self::color_deselected_focus}, bind_to: makepad_render::quad::shader::color},
-                    Float {keys: {1.0: 0.0}, bind_to: self::shader_bg::hover},
-                    Float {keys: {1.0: 0.0}, bind_to: self::shader_bg::down},
+                    Color {keys: {1.0: self::color_deselected_focus}, bind_to: makepad_render::drawcolor::DrawColor::color},
+                    Float {keys: {1.0: 0.0}, bind_to: self::DrawTabClose::hover},
+                    Float {keys: {1.0: 0.0}, bind_to: self::DrawTabClose::down},
                 ]
             }
             
             self::anim_over: Anim {
                 play: Cut {duration: 0.1},
                 tracks: [
-                    Color {keys: {0.0: self::color_selected_focus}, bind_to: makepad_render::quad::shader::color},
-                    Float {keys: {1.0: 1.0}, bind_to: self::shader_bg::hover},
-                    Float {keys: {1.0: 0.0}, bind_to: self::shader_bg::down},
+                    Color {keys: {0.0: self::color_selected_focus}, bind_to: makepad_render::drawcolor::DrawColor::color},
+                    Float {keys: {1.0: 1.0}, bind_to: self::DrawTabClose::hover},
+                    Float {keys: {1.0: 0.0}, bind_to: self::DrawTabClose::down},
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.2}
                 tracks: [
-                    Color {keys: {0.0: self::color_selected_focus}, bind_to: makepad_render::quad::shader::color},
-                    Float {keys: {1.0: 1.0}, bind_to: self::shader_bg::hover},
-                    Float {keys: {0.0: 0.0, 1.0: 0.0}, bind_to: self::shader_bg::down},
+                    Color {keys: {0.0: self::color_selected_focus}, bind_to: makepad_render::drawcolor::DrawColor::color},
+                    Float {keys: {1.0: 1.0}, bind_to: self::DrawTabClose::hover},
+                    Float {keys: {0.0: 0.0, 1.0: 0.0}, bind_to: self::DrawTabClose::down},
                 ]
             }
             
@@ -92,11 +93,15 @@ impl TabClose {
     }
     
     pub fn handle_tab_close(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
-        match event.hits(cx, self._bg_area, HitOpt {
+
+        if let Some(ae) = event.is_animate(cx, &self.animator) {
+            self.bg.animate(cx, &mut self.animator, ae.time);
+        }
+
+        match event.hits(cx, self.bg.area(), HitOpt {
             margin: Some(Margin {l: 5., t: 5., r: 5., b: 5.}),
             ..Default::default()
         }) {
-            Event::Animate(ae) => self.animator.calc_area(cx, self._bg_area, ae.time),
             Event::FingerDown(_fe) => {
                 self.animator.play_anim(cx, live_anim!(cx, self::anim_down));
                 cx.set_down_mouse_cursor(MouseCursor::Hand);
@@ -130,15 +135,11 @@ impl TabClose {
     }
     
     pub fn draw_tab_close(&mut self, cx: &mut Cx) {
-        self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
-        self.bg.shader = live_shader!(cx, self::shader_bg);
-        self.bg.color = self.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
-        
-        let bg_inst = self.bg.draw_quad_rel(cx, Rect{x:1.0,y:1.0,w:25.0,h:25.0});
+        if self.animator.need_init(cx) {
+            self.animator.init(cx, live_anim!(cx, self::anim_default));
+            self.bg.last_animate(&self.animator);
+        }
 
-        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::hover));
-        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::down));
-        self._bg_area = bg_inst.into();
-        self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
+        self.bg.draw_quad_rel(cx, Rect{pos:vec2(1.0,1.0), size:vec2(25.0,25.0)});
     }
 }
