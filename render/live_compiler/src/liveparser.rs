@@ -53,6 +53,9 @@ impl<'a> DeTokParserImpl<'a> {
             Token::TyLit(tylit) if tylit == TyLit::Vec4 => {
                 return Vec4::de_tok(self)
             },
+            Token::Lit(Lit::Vec4(v))=>{
+                return Ok(v)
+            },
             _ => return Err(self.error(format!("Unexpected {} while parsing vec4", self.peek_token())))
         }
     }

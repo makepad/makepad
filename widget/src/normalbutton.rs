@@ -50,7 +50,7 @@ impl NormalButton {
                 tracks: [
                     Float {keys: {1.0: 0.0}, bind_to: self::NormalButtonBg::hover}
                     Float {keys: {1.0: 0.0}, bind_to: self::NormalButtonBg::down}
-                    Color {keys: {1.0: #9}, bind_to: makepad_render::drawwtext::DrawText::color}
+                    Vec4 {keys: {1.0: #9}, bind_to: makepad_render::drawwtext::DrawText::color}
                 ]
             }
             
@@ -59,7 +59,7 @@ impl NormalButton {
                 tracks: [
                     Float {keys: {0.0: 1.0, 1.0: 1.0}, bind_to: self::NormalButtonBg::hover},
                     Float {keys: {1.0: 0.0}, bind_to: self::NormalButtonBg::down},
-                    Color {keys: {0.0: #f}, bind_to: makepad_render::drawwtext::DrawText::color}
+                    Vec4 {keys: {0.0: #f}, bind_to: makepad_render::drawwtext::DrawText::color}
                 ]
             }
             
@@ -68,26 +68,26 @@ impl NormalButton {
                 tracks: [
                     Float {keys: {0.0: 1.0, 1.0: 1.0}, bind_to: self::NormalButtonBg::down},
                     Float {keys: {1.0: 1.0}, bind_to: self::NormalButtonBg::hover},
-                    Color {keys: {0.0: #c}, bind_to: makepad_render::drawwtext::DrawText::color},
+                    Vec4 {keys: {0.0: #c}, bind_to: makepad_render::drawwtext::DrawText::color},
                 ]
             }
             
             self::shader_bg: Shader {
                 
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawquad::shader::*;
                 
-                draw_input: self::NormalButtonBg;
+                draw_input: self::DrawNormalButton;
                 
                 const shadow: float = 3.0;
                 const border_radius: float = 2.5;
                 
                 fn pixel() -> vec4 {
-                    let cx = Df::viewport(pos * vec2(w, h));
-                    cx.box(shadow, shadow, w - shadow * (1. + down), h - shadow * (1. + down), border_radius);
+                    let cx = Df::viewport(pos * rect_size);
+                    cx.box(shadow, shadow, rect_size.x - shadow * (1. + down), rect_size.y - shadow * (1. + down), border_radius);
                     cx.blur = 6.0;
                     cx.fill(mix(#0007, #0, hover));
                     cx.blur = 0.001;
-                    cx.box(shadow, shadow, w - shadow * 2., h - shadow * 2., border_radius);
+                    cx.box(shadow, shadow, rect_size.x - shadow * 2., rect_size.y - shadow * 2., border_radius);
                     return cx.fill(mix(mix(#3, #4, hover), #2a, down));
                 }
             }

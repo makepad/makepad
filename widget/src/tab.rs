@@ -83,20 +83,20 @@ impl Tab {
             }
             
             self::shader_bg: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawquad::shader::*;
                 
                 draw_input: self::DrawTab;
                 
                 const border_width: float = 1.0;
                 
                 fn pixel() -> vec4 {
-                    let cx = Df::viewport(pos * vec2(w, h));
-                    cx.rect(-1., -1., w + 2., h + 2.);
+                    let cx = Df::viewport(pos * rect_size);
+                    cx.rect(-1., -1., rect_size.x + 2., rect_size.y + 2.);
                     cx.fill(color);
-                    cx.move_to(w, 0.);
-                    cx.line_to(w, h);
+                    cx.move_to(rect_size.x, 0.);
+                    cx.line_to(rect_size.x, rect_size.y);
                     cx.move_to(0., 0.);
-                    cx.line_to(0., h);
+                    cx.line_to(0., rect_size.y);
                     return cx.stroke(border_color, 1.);
                 }
             }

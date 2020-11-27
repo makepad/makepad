@@ -70,21 +70,21 @@ impl Splitter {
             self::anim_default: Anim {
                 play: Cut {duration: 0.5}
                 tracks: [
-                    Color {keys: {1.0: self::color_bg} bind_to: makepad_render::quad::shader::color}
+                    Vec4 {keys: {1.0: self::color_bg} bind_to: makepad_render::quad::shader::color}
                 ]
             }
             
             self::anim_over: Anim {
                 play: Cut {duration: 0.05}
                 tracks: [
-                    Color {keys: {1.0: self::color_over}, bind_to: makepad_render::quad::shader::color}
+                    Vec4 {keys: {1.0: self::color_over}, bind_to: makepad_render::quad::shader::color}
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.2}
                 tracks: [
-                    Color {keys: {0.0: self::color_peak, 1.0: self::color_drag}, bind_to: makepad_render::quad::shader::color}
+                    Vec4 {keys: {0.0: self::color_peak, 1.0: self::color_drag}, bind_to: makepad_render::quad::shader::color}
                 ]
             }
             
@@ -92,8 +92,8 @@ impl Splitter {
                 use makepad_render::drawcolor::shader::*;
                 
                 fn pixel() -> vec4 {
-                    let df = Df::viewport(pos * vec2(w, h));
-                    df.box(0., 0., w, h, 0.5);
+                    let df = Df::viewport(pos * rect_size);
+                    df.box(0., 0., rect_size.x, rect_size.y, 0.5);
                     return df.fill(color);
                 }
             }

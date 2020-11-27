@@ -191,6 +191,10 @@ impl DrawQuad {
         self.area = area
     }
 
+    pub fn set_shader(&mut self, shader: Shader){
+        self.shader = shader;
+    }
+
     pub fn begin_many(&mut self, cx: &mut Cx) {
         let mi = cx.begin_many_aligned_instances(self.shader, self.slots);
         self.area = Area::Instance(InstanceArea {

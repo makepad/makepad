@@ -52,10 +52,10 @@ impl TextInput {
                 padding: all(7.),
             }
             self::shader_bg: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawcolor::shader::*;
                 fn pixel() -> vec4 {
-                    let cx = Df::viewport(pos * vec2(w, h));
-                    cx.box(0., 0., w, h, 2.5);
+                    let cx = Df::viewport(pos * rect_size);
+                    cx.box(0., 0., rect_size.x, rect_size.y, 2.5);
                     return cx.fill(color);
                 }
             }
