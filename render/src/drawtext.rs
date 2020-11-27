@@ -15,7 +15,7 @@ pub struct DrawText {
     pub area: Area,
     pub lock: Option<LockedInstances>,
     pub slots: usize,
-    pub chunk: Vec<char>,
+    pub buf: Vec<char>,
     pub text_style: TextStyle,
     pub wrapping: Wrapping,
     pub font_scale: f32,
@@ -42,7 +42,7 @@ impl Clone for DrawText {
             area: Area ::Empty,
             lock: None,
             slots: self.slots,
-            chunk: Vec::new(),
+            buf: Vec::new(),
             
             text_style: self.text_style,
             wrapping: self.wrapping,
@@ -79,7 +79,7 @@ impl DrawText {
             area: Area::Empty,
             lock: None,
             slots: slots + 18,
-            chunk: Vec::new(),
+            buf: Vec::new(),
             
             text_style: live_text_style!(cx, self::text_style_unscaled),
             wrapping: Wrapping::Word,
@@ -251,20 +251,20 @@ impl DrawText {
             }
         "#);
     }
-
-    pub fn set_color(&mut self, cx:&mut Cx, v: Vec4) {
+    
+    pub fn set_color(&mut self, cx: &mut Cx, v: Vec4) {
         self.color = v;
         write_draw_input!(cx, self.area(), Self::DrawText::color, v);
     }
-
-    pub fn last_animate(&mut self, animator:&Animator){
-        if let Some(v) = Vec4::last_animate(animator, live_item_id!(self::DrawText::color)){
+    
+    pub fn last_animate(&mut self, animator: &Animator) {
+        if let Some(v) = Vec4::last_animate(animator, live_item_id!(self::DrawText::color)) {
             self.color = v;
         }
     }
     
-    pub fn animate(&mut self, cx: &mut Cx, animator:&mut Animator, time:f64){
-        if let Some(v) = Vec4::animate(cx, animator, time, live_item_id!(self::DrawText::color)){
+    pub fn animate(&mut self, cx: &mut Cx, animator: &mut Animator, time: f64) {
+        if let Some(v) = Vec4::animate(cx, animator, time, live_item_id!(self::DrawText::color)) {
             self.set_color(cx, v);
         }
     }
@@ -288,8 +288,8 @@ impl DrawText {
     pub fn area(&self) -> Area {
         self.area
     }
-
-    pub fn set_area(&mut self, area:Area) {
+    
+    pub fn set_area(&mut self, area: Area) {
         self.area = area
     }
     
@@ -303,15 +303,37 @@ impl DrawText {
         }
     }
     
-    pub fn add_text(&mut self, cx: &mut Cx, pos: Vec2, val: &str) {
-        let mut chunk = Vec::new();
-        std::mem::swap(&mut chunk, unsafe {&mut self.chunk});
-        chunk.truncate(0);
-        for c in val.chars() {
-            chunk.push(c)
+    pub fn buf_truncate(&mut self, len:usize){
+        unsafe {
+            self.buf.truncate(len);
         }
-        self.add_text_chunk(cx, pos, 0, &chunk, | _, _, _, _ | {0.0});
-        std::mem::swap(&mut chunk, unsafe {&mut self.chunk});
+    }
+    
+    pub fn buf_push_char(&mut self, c:char){
+        unsafe{
+            self.buf.push(c);
+        }
+    }
+    
+    pub fn buf_push_str(&mut self, val:&str){
+        unsafe {
+            for c in val.chars() {
+                self.buf.push(c)
+            }
+        }
+    }
+    
+    pub fn add_text_buf(&mut self, cx: &mut Cx, pos: Vec2) {
+        let mut buf = Vec::new();
+        std::mem::swap(&mut buf, unsafe {&mut self.buf});
+        self.add_text_chunk(cx, pos, 0, &buf, | _, _, _, _ | {0.0});
+        std::mem::swap(&mut buf, unsafe {&mut self.buf});
+    }
+    
+    pub fn add_text_str(&mut self, cx: &mut Cx, pos: Vec2, val:&str) {
+        self.buf_truncate(0);
+        self.buf_push_str(val);
+        self.add_text_buf(cx, pos);
     }
     
     pub fn add_text_chunk<F>(&mut self, cx: &mut Cx, pos: Vec2, char_offset: usize, chunk: &[char], mut char_callback: F)
@@ -434,9 +456,9 @@ impl DrawText {
     pub fn draw_text(&mut self, cx: &mut Cx, text: &str) {
         self.lock_aligned_text(cx);
         
-        let mut chunk = Vec::new();
-        std::mem::swap(&mut chunk, unsafe {&mut self.chunk});
-        chunk.truncate(0);
+        let mut buf = Vec::new();
+        std::mem::swap(&mut buf, unsafe {&mut self.buf});
+        buf.truncate(0);
         
         let mut width = 0.0;
         let mut elipct = 0;
@@ -469,34 +491,34 @@ impl DrawText {
                 width += glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                 match self.wrapping {
                     Wrapping::Char => {
-                        chunk.push(c);
+                        buf.push(c);
                         emit = true
                     },
                     Wrapping::Word => {
-                        chunk.push(c);
+                        buf.push(c);
                         if c == ' ' || c == '\t' || c == ',' || c == '\n' {
                             emit = true;
                         }
                     },
                     Wrapping::Line => {
-                        chunk.push(c);
+                        buf.push(c);
                         if c == 10 as char || c == 13 as char {
                             emit = true;
                         }
                         newline = true;
                     },
                     Wrapping::None => {
-                        chunk.push(c);
+                        buf.push(c);
                     },
                     Wrapping::Ellipsis(ellipsis_width) => {
                         if width>ellipsis_width { // output ...
                             if elipct < 3 {
-                                chunk.push('.');
+                                buf.push('.');
                                 elipct += 1;
                             }
                         }
                         else {
-                            chunk.push(c)
+                            buf.push(c)
                         }
                     }
                 }
@@ -509,16 +531,16 @@ impl DrawText {
                     margin: Margin::zero()
                 });
                 
-                self.add_text_chunk(cx, rect.pos, 0, &chunk, | _, _, _, _ | {0.0});
+                self.add_text_chunk(cx, rect.pos, 0, &buf, | _, _, _, _ | {0.0});
                 
                 width = 0.0;
-                chunk.truncate(0);
+                buf.truncate(0);
                 if newline {
                     cx.turtle_new_line_min_height(font_size * line_spacing * self.font_scale);
                 }
             }
         }
-        std::mem::swap(&mut chunk, unsafe {&mut self.chunk});
+        std::mem::swap(&mut buf, unsafe {&mut self.buf});
         
         self.unlock_text(cx)
     }

@@ -7,7 +7,7 @@ use crate::windowmenu::*;
 pub struct DesktopWindow {
     pub window: Window,
     pub pass: Pass,
-    pub clear_color: Color,
+    pub clear_color: Vec4,
     pub color_texture: Texture,
     pub depth_texture: Texture,
     pub caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost

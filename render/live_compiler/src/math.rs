@@ -914,6 +914,21 @@ impl ops::DivAssign<f32> for Vec2 {
     }
 }
 
+impl ops::Neg for Vec2 {
+    type Output = Vec2;
+    fn neg(self) -> Self { Vec2{x:-self.x, y:-self.y}}
+}
+
+impl ops::Neg for Vec3{
+    type Output = Vec3;
+    fn neg(self) -> Self { Vec3{x:-self.x, y:-self.y, z:-self.z}}
+}
+
+impl ops::Neg for Vec4 {
+    type Output = Vec4;
+    fn neg(self) -> Self { Vec4{x:-self.x, y:-self.y, z:-self.z, w:-self.w}}
+}
+
 
 //------ Vec3 operators
 

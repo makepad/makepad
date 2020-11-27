@@ -25,11 +25,13 @@ pub struct XRChannel {
 #[derive(Clone)]
 pub struct XRCursor {
     pub quad: DrawQuad,
+    pub _pt: Vec2
 }
 
 impl XRCursor {
     fn new(cx: &mut Cx) -> Self {
         Self {
+            _pt: Vec2::default(),
             quad: DrawQuad::new(cx, live_shader!(cx, self::shader_cursor))
                 .with_draw_depth(3.0)
                 .with_rect_size(Vec2::all(10.)),
@@ -37,12 +39,13 @@ impl XRCursor {
     }
     
     fn set_pt(&mut self, cx: &mut Cx, pt: Vec2) {
+        self._pt = pt;
         let pt = pt - 0.5 * self.quad.rect_size.x;
         self.quad.set_rect_pos(cx, pt);
     }
     
     fn draw_cursor(&mut self, cx: &mut Cx) {
-        self.quad.emit_quad(cx);
+        self.quad.draw_quad(cx);
     }
 }
 
@@ -417,8 +420,8 @@ impl XRControl {
             Vec3 {x: 0., y: view_rect.size.y, z: 0.}
         );
         
-        self.left_cursor.set_pt(cx, get_intersect_pt(&window_plane, &inv_window_mat, &self.left_hand.transform));
-        self.right_cursor.set_pt(cx, get_intersect_pt(&window_plane, &inv_window_mat, &self.right_hand.transform));
+        self.left_cursor.set_pt(cx, get_intersect_pt(&window_plane, &inv_window_mat, self.left_hand.get_transform()));
+        self.right_cursor.set_pt(cx, get_intersect_pt(&window_plane, &inv_window_mat, self.right_hand.get_transform()));
         
         let mut events = Vec::new();
         

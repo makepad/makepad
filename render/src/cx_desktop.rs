@@ -125,15 +125,15 @@ impl Cx {
     
     pub fn process_desktop_paint_callbacks(&mut self, time: f64) -> bool
     {
-        if self.playing_anim_areas.len() != 0 {
-            self.call_animation_event(time);
+        if self.playing_animator_ids.len() != 0 {
+            self.call_animate_event(time);
         }
         
         let mut vsync = false; //self.platform.desktop.repaint_via_scroll_event;
         self.platform.desktop.repaint_via_scroll_event = false;
-        if self.frame_callbacks.len() != 0 {
-            self.call_frame_event(time);
-            if self.frame_callbacks.len() != 0 {
+        if self.next_frames.len() != 0 {
+            self.call_next_frame_event(time);
+            if self.next_frames.len() != 0 {
                 vsync = true;
             }
         }

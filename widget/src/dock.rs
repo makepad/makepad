@@ -263,12 +263,12 @@ where TItem: Clone
                             match split.handle_splitter(cx, event) {
                                 SplitterEvent::Moving {new_pos} => {
                                     *pos = new_pos;
-                                    cx.redraw_pass_of(split._split_area);
+                                    cx.redraw_pass_of(split.bg.area());
                                 },
                                 SplitterEvent::MovingEnd {new_align, new_pos} => {
                                     *align = new_align;
                                     *pos = new_pos;
-                                    cx.redraw_pass_of(split._split_area);
+                                    cx.redraw_pass_of(split.bg.area());
                                 },
                                 _ => ()
                             };
@@ -592,44 +592,36 @@ where TItem: Clone
         //    |      |    Bottom      |       |
         //    ---------------------------------
         
-        if tvr.contains(pos.x, pos.y) {
+        if tvr.contains(pos) {
             for (id, tr) in tab_rects.iter().enumerate() {
-                if tr.contains(pos.x, pos.y) {
+                if tr.contains(pos) {
                     return (DockDropKind::Tab(id), *tr)
                 }
             }
             return (DockDropKind::TabsView, tvr)
         }
-        if pos.y < cdr.y + drop_size.y {
+        if pos.y < cdr.pos.y + drop_size.y {
             return (DockDropKind::Top, Rect {
-                x: cdr.x,
-                y: cdr.y,
-                w: cdr.w,
-                h: 0.5 * cdr.h
+                pos: vec2(cdr.pos.x, cdr.pos.y),
+                size: vec2(cdr.size.x, 0.5*cdr.size.y)
             })
         }
-        if pos.y > cdr.y + cdr.h - drop_size.y {
+        if pos.y > cdr.pos.y + cdr.size.y - drop_size.y {
             return (DockDropKind::Bottom, Rect {
-                x: cdr.x,
-                y: cdr.y + 0.5 * cdr.h,
-                w: cdr.w,
-                h: 0.5 * cdr.h
+                pos: vec2(cdr.pos.x, cdr.pos.y + 0.5 * cdr.size.y),
+                size: vec2(cdr.size.x, 0.5*cdr.size.y)
             })
         }
-        if pos.x < cdr.x + drop_size.x {
+        if pos.x < cdr.pos.x + drop_size.x {
             return (DockDropKind::Left, Rect {
-                x: cdr.x,
-                y: cdr.y,
-                w: 0.5 * cdr.w,
-                h: cdr.h
+                pos: vec2(cdr.pos.x, cdr.pos.y),
+                size: vec2(0.5*cdr.size.x, cdr.size.y)
             })
         }
-        if pos.x > cdr.x + cdr.w - drop_size.x {
+        if pos.x > cdr.pos.x + cdr.size.x - drop_size.x {
             return (DockDropKind::Right, Rect {
-                x: cdr.x + 0.5 * cdr.w,
-                y: cdr.y,
-                w: 0.5 * cdr.w,
-                h: cdr.h
+                pos: vec2(cdr.pos.x + 0.5 * cdr.size.x, cdr.pos.y),
+                size: vec2(0.5*cdr.size.x, cdr.size.y)
             })
         }
         (DockDropKind::Center, cdr.clone())
@@ -674,7 +666,7 @@ where TItem: Clone
                 
                 let cdr = tab_control.get_content_drop_rect(cx);
                 let tvr = tab_control.get_tabs_view_rect(cx);
-                if tvr.contains(fe.abs.x, fe.abs.y) || cdr.contains(fe.abs.x, fe.abs.y) { // we might got dropped elsewhere
+                if tvr.contains(fe.abs) || cdr.contains(fe.abs) { // we might got dropped elsewhere
                     // ok now, we ask the tab_controls rect
                     let tab_rects = tab_control.get_tab_rects(cx);
                     let (kind, _rect) = Self::get_drop_kind(fe.abs, self.drop_size, tvr, cdr, tab_rects);
@@ -743,7 +735,7 @@ where TItem: Clone
                 
                 let cdr = tab_control.get_content_drop_rect(cx);
                 let tvr = tab_control.get_tabs_view_rect(cx);
-                if tvr.contains(fe.abs.x, fe.abs.y) || cdr.contains(fe.abs.x, fe.abs.y) {
+                if tvr.contains(fe.abs) || cdr.contains(fe.abs) {
                     let tab_rects = tab_control.get_tab_rects(cx);
                     let (_kind, rect) = Self::get_drop_kind(fe.abs, self.drop_size, tvr, cdr, tab_rects);
                     
@@ -762,18 +754,15 @@ where TItem: Clone
                         let move_speed = 0.0;
                         let alpha_speed = 0.0;
                         let alpha = old_alpha * alpha_speed + (1. - alpha_speed);
-                        let rc = Rect {
-                            x: old_rc.x * move_speed + rect.x * (1. - move_speed),
-                            y: old_rc.y * move_speed + rect.y * (1. - move_speed),
-                            w: old_rc.w * move_speed + rect.w * (1. - move_speed),
-                            h: old_rc.h * move_speed + rect.h * (1. - move_speed)
-                        };
-                        let dist = (rc.x - rect.x)
+                        let rc = Rect::from_lerp(old_rc, rect, move_speed);
+
+                        let dist = (rc.pos.x - rect.pos.x)
                             .abs()
-                            .max((rc.y - rect.y).abs())
-                            .max((rc.w - rect.w).abs())
-                            .max((rc.h - rect.h).abs())
+                            .max((rc.pos.y - rect.pos.y).abs())
+                            .max((rc.size.x - rect.size.x).abs())
+                            .max((rc.size.y - rect.size.y).abs())
                             .max(100. - alpha * 100.);
+
                         if dist>0.5 { // keep redrawing until we are close
                             // cx.redraw_previous_areas();
                             //self.drop_quad_view.redraw_view_area(cx);
@@ -781,8 +770,8 @@ where TItem: Clone
                         self._tweening_quad = Some((id, rc, alpha));
                         (rc, alpha)
                     };
-                    self.drop_quad.color = live_color!(cx, crate::widgetstyle::color_drop_quad);
-                    self.drop_quad.color.a = alpha * 0.8;
+                    self.drop_quad.color = live_vec4!(cx, crate::widgetstyle::color_drop_quad);
+                    self.drop_quad.color.w = alpha * 0.8;
                     found_drop_zone = true;
                     self.drop_quad.draw_quad_rel(cx, dr);
                 }
