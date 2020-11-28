@@ -47,7 +47,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
                     if attr.name == "default_shader"{
                         default_shader = Some(attr.args.clone());
                     }
-                    if attr.name == "debug_draw_derive"{
+                    if attr.name == "debug_draw_input"{
                         debug = true;
                     }
                 }
@@ -107,14 +107,14 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
 
             for (name, ty) in &uniforms {
                 tb.add("def . add_uniform ( module_path ! ( ) , ");
-                tb.string(&base_type.to_string()).add(" , ");
+                tb.string(&struct_name).add(" , ");
                 tb.string(name).add(" , ");
                 tb.ident(ty).add(" :: ty_expr ( ) ) ;");
             }
 
             for (name, ty) in &instances {
                 tb.add("def . add_instance ( module_path ! ( ) , ");
-                tb.string(&base_type.to_string()).add(" , ");
+                tb.string(&struct_name).add(" , ");
                 tb.string(name).add(" , ");
                 tb.ident(ty).add(" :: ty_expr ( ) ) ;");
             }
@@ -131,8 +131,8 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
 
             for (name, _) in &uniforms {
                 tb.add("self .").ident(&name).add(". write_draw_input ( cx , self . area ( ) ,");
-                tb.add(" live_item_id ! ( self :: ").ident(&base_type.to_string()).add("::").ident(&name).add(")");
-                tb.add(",").string(&format!("self::{}::{}", base_type.to_string(), name)).add(") ;");
+                tb.add(" live_item_id ! ( self :: ").ident(&struct_name).add("::").ident(&name).add(")");
+                tb.add(",").string(&format!("self::{}::{}", struct_name, name)).add(") ;");
             }
             
             tb.add("} }");
@@ -141,8 +141,8 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
                 tb.add("pub fn").ident(&format!("set_{}", name)).add("( & mut self , cx : & mut Cx , v :").ident(ty).add(") {");
                 tb.add("self .").ident(name).add("= v ;");
                 tb.add("v . write_draw_input ( cx , self . area ( ) ,");
-                tb.add("live_item_id ! ( self :: ").ident(&base_type.to_string()).add("::").ident(&name).add(")");
-                tb.add(",").string(&format!("self::{}::{}", base_type.to_string(), name)).add(") ;");
+                tb.add("live_item_id ! ( self :: ").ident(&struct_name).add("::").ident(&name).add(")");
+                tb.add(",").string(&format!("self::{}::{}", struct_name, name)).add(") ;");
                 tb.add("}");
             }
 
@@ -156,7 +156,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             tb.add("self . base . animate ( cx , a , t ) ;");
             for (name, ty) in &uni_insts {
                 tb.add("if let Some ( v ) = ").ident(ty).add(":: animate ( cx , a , t ,");
-                tb.add("live_item_id ! ( self :: ").ident(&base_type.to_string()).add("::").ident(&name).add(")");
+                tb.add("live_item_id ! ( self :: ").ident(&struct_name).add("::").ident(&name).add(")");
                 tb.add(") {");
                 tb.add("self .").ident(&format!("set_{}",name)).add("( cx , v ) ;");
                 tb.add("}");
@@ -168,7 +168,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             tb.add("self . base . last_animate ( a ) ;");
             for (name, ty) in &uni_insts {
                 tb.add("if let Some ( v ) = ").ident(ty).add(":: last_animate ( a ,");
-                tb.add("live_item_id ! ( self :: ").ident(&base_type.to_string()).add("::").ident(&name).add(")");
+                tb.add("live_item_id ! ( self :: ").ident(&struct_name).add("::").ident(&name).add(")");
                 tb.add(") {");
                 tb.add("self .").ident(name).add(" = v ;");
                 tb.add("}");
