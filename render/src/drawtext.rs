@@ -254,7 +254,7 @@ impl DrawText {
     
     pub fn set_color(&mut self, cx: &mut Cx, v: Vec4) {
         self.color = v;
-        write_draw_input!(cx, self.area(), Self::DrawText::color, v);
+        write_draw_input!(cx, self.area(), self::DrawText::color, v);
     }
     
     pub fn last_animate(&mut self, animator: &Animator) {
