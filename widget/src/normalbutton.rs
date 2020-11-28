@@ -48,8 +48,8 @@ impl NormalButton {
             self::anim_default: Anim {
                 play: Cut {duration: 0.1}
                 tracks: [
-                    Float {keys: {1.0: 0.0}, bind_to: self::NormalButtonBg::hover}
-                    Float {keys: {1.0: 0.0}, bind_to: self::NormalButtonBg::down}
+                    Float {keys: {1.0: 0.0}, bind_to: self::DrawNormalButton::hover}
+                    Float {keys: {1.0: 0.0}, bind_to: self::DrawNormalButton::down}
                     Vec4 {keys: {1.0: #9}, bind_to: makepad_render::drawwtext::DrawText::color}
                 ]
             }
@@ -57,8 +57,8 @@ impl NormalButton {
             self::anim_over: Anim {
                 play: Cut {duration: 0.1},
                 tracks: [
-                    Float {keys: {0.0: 1.0, 1.0: 1.0}, bind_to: self::NormalButtonBg::hover},
-                    Float {keys: {1.0: 0.0}, bind_to: self::NormalButtonBg::down},
+                    Float {keys: {0.0: 1.0, 1.0: 1.0}, bind_to: self::DrawNormalButton::hover},
+                    Float {keys: {1.0: 0.0}, bind_to: self::DrawNormalButton::down},
                     Vec4 {keys: {0.0: #f}, bind_to: makepad_render::drawwtext::DrawText::color}
                 ]
             }
@@ -66,8 +66,8 @@ impl NormalButton {
             self::anim_down: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {keys: {0.0: 1.0, 1.0: 1.0}, bind_to: self::NormalButtonBg::down},
-                    Float {keys: {1.0: 1.0}, bind_to: self::NormalButtonBg::hover},
+                    Float {keys: {0.0: 1.0, 1.0: 1.0}, bind_to: self::DrawNormalButton::down},
+                    Float {keys: {1.0: 1.0}, bind_to: self::DrawNormalButton::hover},
                     Vec4 {keys: {0.0: #c}, bind_to: makepad_render::drawwtext::DrawText::color},
                 ]
             }

@@ -19,33 +19,25 @@ pub struct PropDef {
 
 #[derive(Debug, Default, Clone)]
 pub struct RectInstanceProps {
-    pub x: Option<usize>,
-    pub y: Option<usize>,
-    pub w: Option<usize>,
-    pub h: Option<usize>,
+    pub rect_pos: Option<usize>,
+    pub rect_size: Option<usize>,
 }
 impl RectInstanceProps {
     pub fn construct(instances: &Vec<PropDef>) -> RectInstanceProps {
-        let mut x = None;
-        let mut y = None;
-        let mut w = None;
-        let mut h = None;
+        let mut rect_pos = None;
+        let mut rect_size = None;
         let mut slot = 0;
         for inst in instances {
             match inst.name.as_ref() {
-                "x" => x = Some(slot),
-                "y" => y = Some(slot),
-                "w" => w = Some(slot),
-                "h" => h = Some(slot),
+                "rect_pos" => rect_pos = Some(slot),
+                "rect_size" => rect_size = Some(slot),
                 _ => ()
             }
             slot += inst.ty.size(); //sg.get_type_slots(&inst.ty);
         };
         RectInstanceProps {
-            x: x,
-            y: y,
-            w: w,
-            h: h
+            rect_pos,
+            rect_size
         }
     }
 }

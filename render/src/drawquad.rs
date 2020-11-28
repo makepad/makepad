@@ -146,6 +146,7 @@ impl DrawQuad {
     
     pub fn end_quad(&mut self, cx: &mut Cx) {
         let rect = cx.end_turtle(self.area);
+        //println!("GOT RECT {:?}", rect);
         unsafe {self.area.set_rect(cx, &rect)};
     }
     

@@ -32,11 +32,11 @@ impl WidgetExampleApp {
         self.desktop_window.handle_desktop_window(cx, event);
 
         if let ButtonEvent::Clicked = self.button.handle_normal_button(cx,event){
-            log!("CLICKED Hello");  
+            log!("CLICKED Hello");
         }
         for (index,button) in self.buttons.iter().enumerate(){
             if let ButtonEvent::Clicked = button.handle_normal_button(cx, event){
-                log!("CLICKED {}", index);  
+                log!("CLICKED {}", index);
             }
         }
     }
@@ -46,9 +46,9 @@ impl WidgetExampleApp {
             return
         };
         self.button.draw_normal_button(cx, "Hello");
-        for i in 0..1000{  
+        /*for i in 0..1000{  
             self.buttons.get_draw(cx).draw_normal_button(cx, &format!("{}",i));
-        }
+        }*/
         self.desktop_window.end_desktop_window(cx);
     }
 }
