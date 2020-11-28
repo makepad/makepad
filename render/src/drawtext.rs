@@ -270,7 +270,13 @@ impl DrawText {
     }
     
     pub fn begin_many(&mut self, cx: &mut Cx) {
-        self.many = Some(cx.begin_many_aligned_instances(self.shader, self.slots));
+        let mi = cx.begin_many_aligned_instances(self.shader, self.slots, self.area);
+        self.area = Area::Instance(InstanceArea {
+            instance_count: 0,
+            instance_offset: mi.instances.len(),
+            ..mi.instance_area.clone()
+        });
+        self.many = Some(mi);
     }
     
     pub fn write_uniforms(&mut self, cx: &mut Cx) {
@@ -296,7 +302,8 @@ impl DrawText {
     pub fn end_many(&mut self, cx: &mut Cx) {
         unsafe {
             if let Some(mi) = self.many.take() {
-                self.area = cx.end_many_instances(mi);
+                let new_area = cx.end_many_instances(mi);
+                self.area = cx.update_area_refs(self.area, new_area);
                 self.write_uniforms(cx);
             }
         }

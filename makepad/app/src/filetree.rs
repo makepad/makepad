@@ -138,11 +138,11 @@ impl FileTree {
     
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         let default_color = if marked {
-            live_color!(cx, self::color_bg_marked)
+            live_vec4!(cx, self::color_bg_marked)
         } else if counter & 1 == 0 {
-            live_color!(cx, self::color_bg_selected)
+            live_vec4!(cx, self::color_bg_selected)
         } else {
-            live_color!(cx, self::color_bg_odd)
+            live_vec4!(cx, self::color_bg_odd)
         };
         Anim {
             play: Play::Chain {duration: 0.01},
@@ -159,11 +159,11 @@ impl FileTree {
     
     pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         let over_color = if marked {
-            live_color!(cx, self::color_bg_marked_over)
+            live_vec4!(cx, self::color_bg_marked_over)
         } else if counter & 1 == 0 {
-            live_color!(cx, self::color_bg_selected_over)
+            live_vec4!(cx, self::color_bg_selected_over)
         } else {
-            live_color!(cx, self::color_bg_odd_over)
+            live_vec4!(cx, self::color_bg_odd_over)
         };
         Anim {
             play: Play::Cut {duration: 0.02},
@@ -617,9 +617,9 @@ impl FileTree {
             let mut y = view_total.y;
             while y < rect_now.h {
                 self.item_draw.node_bg.color = if counter & 1 == 0 {
-                    live_color!(cx, self::color_bg_selected)
+                    live_vec4!(cx, self::color_bg_selected)
                 }else {
-                    live_color!(cx, self::color_bg_odd)
+                    live_vec4!(cx, self::color_bg_odd)
                 };
                 self.item_draw.node_bg.draw_quad(
                     cx,
@@ -643,9 +643,9 @@ impl FileTree {
                     if node_draw.marked != 0 {
                         //self.drag_bg.z = 10.0;
                         //self.item_draw.tree_text.z = 10.0;
-                        self.drag_bg.color = live_color!(cx, self::color_drag_bg);
+                        self.drag_bg.color = live_vec4!(cx, self::color_drag_bg);
                         let inst = self.drag_bg.begin_quad(cx, live_layout!(cx, self::layout_drag_bg));
-                        self.item_draw.tree_text.color = live_color!(cx, self::color_tree_folder);
+                        self.item_draw.tree_text.color = live_vec4!(cx, self::color_tree_folder);
                         self.item_draw.tree_text.draw_text(cx, match node {
                             FileNode::Folder {name, ..} => {name},
                             FileNode::File {name, ..} => {name}
@@ -841,13 +841,13 @@ impl FileTreeItemDraw {
     }
     
     pub fn apply_style(&mut self, cx: &mut Cx) {
-        self.filler.color = live_color!(cx, self::color_filler);
+        self.filler.color = live_vec4!(cx, self::color_filler);
         self.node_layout = live_layout!(cx, self::layout_node);
         self.row_height = self.node_layout.walk.height.fixed();
         self.filler_walk = live_walk!(cx, self::walk_filler);
         self.folder_walk = live_walk!(cx, self::walk_folder);
-        self.color_tree_folder = live_color!(cx, self::color_tree_folder);
-        self.color_tree_file = live_color!(cx, self::color_tree_file);
+        self.color_tree_folder = live_vec4!(cx, self::color_tree_folder);
+        self.color_tree_file = live_vec4!(cx, self::color_tree_file);
         self.tree_text.text_style = live_text_style!(cx, self::text_style_label);
         self.filler.shader = live_shader!(cx, self::shader_filler);
     }

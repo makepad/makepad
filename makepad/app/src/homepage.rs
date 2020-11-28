@@ -5,8 +5,8 @@ use makepad_widget::*;
 pub struct HomePage {
     pub view: ScrollView,
     pub shadow: ScrollShadow,
-    pub text: Text,
-    pub bg: Quad,
+    pub text: DrawText,
+    pub bg: DrawColor,
     pub email_input: TextInput,
     pub email_state: EmailState,
     pub email_signal: Signal,
@@ -28,8 +28,8 @@ impl HomePage {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             view: ScrollView::new(cx),
-            bg: Quad::new(cx),
-            text: Text::new(cx),
+            bg: DrawColor::new(cx, default_shader!()),
+            text: DrawText::new(cx, default_shader!()),
             shadow: ScrollShadow::new(cx),
             send_mail_button: NormalButton::new(cx),
             email_signal: cx.new_signal(),
@@ -134,19 +134,19 @@ impl HomePage {
     pub fn draw_home_page(&mut self, cx: &mut Cx) {
         if self.view.begin_view(cx, live_layout!(cx, self::layout_main)).is_err() {return};
 
-        self.bg.color = live_color!(cx, self::color_bg);
-        let inst =  self.bg.draw_quad_rel(cx, cx.get_turtle_rect());//let inst = self.bg.begin_quad_fill(cx);
-        inst.set_do_scroll(cx, false, false);
+        self.bg.color = live_vec4!(cx, self::color_bg);
+        self.bg.draw_quad_rel(cx, cx.get_turtle_rect());//let inst = self.bg.begin_quad_fill(cx);
+        self.bg.area().set_do_scroll(cx, false, false);
 
         let t = &mut self.text;
         
-        t.color = live_color!(cx, self::text_color);
+        t.color = live_vec4!(cx, self::text_color);
         
         t.text_style = live_text_style!(cx, self::text_style_heading);
-        t.draw_text(cx, "Introducing Makepad\n");
+        t.draw_text_walk(cx, "Introducing Makepad\n");
         
         t.text_style = live_text_style!(cx, self::text_style_body);
-        t.draw_text(cx, "\
+        t.draw_text_walk(cx, "\
             Makepad is a new VR, web and native collaborative shader programming environment. \
             It will support many different shader modes including many vertex-shaders \
             besides the well known shader toy SDF programs. This makes shader coding possible \
@@ -167,20 +167,20 @@ impl HomePage {
         
         cx.turtle_new_line();
         
-        t.draw_text(cx, "\
+        t.draw_text_walk(cx, "\
             The Makepad development platform and library ecosystem are MIT licensed, \
             for the Quest and in the future iOS we will provide paid, native versions, \
             \n");
         
-        t.draw_text(cx, "\
+        t.draw_text_walk(cx, "\
             We are still building the collaborative backend, so for now you can simply play with the shader code\
             \n");
         
         t.text_style = live_text_style!(cx, self::text_style_heading);
-        t.draw_text(cx, "How to install the native version\n");
+        t.draw_text_walk(cx, "How to install the native version\n");
         
         t.text_style = live_text_style!(cx, self::text_style_body);
-        t.draw_text(cx, "\
+        t.draw_text_walk(cx, "\
             On all platforms first install Rust. \
             On windows feel free to ignore the warnings about MSVC, makepad uses the gnu chain. \
             Copy this url to your favorite browser.\n");
@@ -190,7 +190,7 @@ impl HomePage {
         cx.turtle_new_line();
         
         t.text_style = live_text_style!(cx, self::text_style_heading);
-        t.draw_text(cx, "MacOS\n");
+        t.draw_text_walk(cx, "MacOS\n");
         
         self.example_texts.get_draw(cx).draw_text_input_static(cx, "\
             git clone https://github.com/makepad/makepad\n\
@@ -200,7 +200,7 @@ impl HomePage {
         cx.turtle_new_line();
         
         t.text_style = live_text_style!(cx, self::text_style_heading);
-        t.draw_text(cx, "Windows\n");
+        t.draw_text_walk(cx, "Windows\n");
         
         self.example_texts.get_draw(cx).draw_text_input_static(cx, "\
             Clone this repo using either gitub desktop or commandline: https://github.com/makepad/makepad\n\
@@ -210,7 +210,7 @@ impl HomePage {
         cx.turtle_new_line();
         
         t.text_style = live_text_style!(cx, self::text_style_heading);
-        t.draw_text(cx, "Linux\n");
+        t.draw_text_walk(cx, "Linux\n");
         
         self.example_texts.get_draw(cx).draw_text_input_static(cx, "\
             git clone https://github.com/makepad/makepad\n\
@@ -220,7 +220,7 @@ impl HomePage {
         cx.turtle_new_line();
         
         t.text_style = live_text_style!(cx, self::text_style_heading);
-        t.draw_text(cx, "Troubleshooting\n");
+        t.draw_text_walk(cx, "Troubleshooting\n");
         
         self.example_texts.get_draw(cx).draw_text_input_static(cx, "\
             Delete old settings unix: rm *.ron\n\

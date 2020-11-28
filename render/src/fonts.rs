@@ -146,7 +146,7 @@ impl TrapezoidText {
     // test api for directly drawing a glyph
     pub fn draw_char(&mut self, cx: &mut Cx, c: char, font_id: usize, font_size: f32) {
         // now lets make a draw_character function
-        let mut many = cx.begin_many_instances(live_shader!(cx, self::trapezoid_shader), TRAPEZOID_TEXT_SLOTS);
+        let mut many = cx.begin_many_instances(live_shader!(cx, self::trapezoid_shader), TRAPEZOID_TEXT_SLOTS, Area::Empty);
         
         let trapezoids = {
             let cxfont = &cx.fonts[font_id];
@@ -207,7 +207,7 @@ impl TrapezoidText {
     
     // atlas drawing function used by CxAfterDraw
     pub fn draw_todo(&mut self, cx: &mut Cx, todo: CxFontsAtlasTodo) {
-        let mut many = cx.begin_many_instances(live_shader!(cx, self::trapezoid_shader), TRAPEZOID_TEXT_SLOTS);
+        let mut many = cx.begin_many_instances(live_shader!(cx, self::trapezoid_shader), TRAPEZOID_TEXT_SLOTS, Area::Empty);
         
         let mut size = 1.0;
         for i in 0..3 {
@@ -294,10 +294,8 @@ impl CxAfterDraw {
         Self {
             trapezoid_text: TrapezoidText::default(),
             atlas_pass: Pass::default(),
-            atlas_view: View {
-                always_redraw: true,
-                ..View::new(cx)
-            },
+            atlas_view: View::new()
+                .with_always_redraw(true),
             atlas_texture: atlas_texture
         }
     }

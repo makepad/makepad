@@ -52,7 +52,7 @@ impl Splitter {
             realign_dist: 30.,
             split_size: 2.0,
             min_size: 25.0,
-            split_view: View::new(cx),
+            split_view: View::new(),
             bg: DrawColor::new(cx, live_shader!(cx, self::shader_bg)),
             animator: Animator::default(),
         }
