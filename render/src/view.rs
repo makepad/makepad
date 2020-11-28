@@ -512,26 +512,37 @@ impl Cx {
     
     pub fn add_instance(&mut self, shader: Shader, data: &[f32]) -> Area {
         let dc = self.append_to_draw_call(shader, data.len());
-        dc.instances.extend_from_slice(data);
-        (InstanceArea {
+        let instance_count = data.len() / dc.total_instance_slots;
+        let check = data.len() % dc.total_instance_slots;
+        if check > 0{
+            panic!("Data not multiple of total slots");
+        }
+        let ia = InstanceArea {
             view_id: dc.view_id,
             draw_call_id: dc.draw_call_id,
-            instance_count: 0,
+            instance_count: instance_count,
             instance_offset: dc.instances.len(),
             redraw_id: dc.redraw_id
-        }).into()
+        };
+        dc.instances.extend_from_slice(data);
+        ia.into()
     }
     
     pub fn add_aligned_instance(&mut self, shader: Shader, data: &[f32]) -> Area {
         let dc = self.append_to_draw_call(shader, data.len());
-        dc.instances.extend_from_slice(data);
+        let instance_count = data.len() / dc.total_instance_slots;
+        let check = data.len() % dc.total_instance_slots;
+        if check > 0{
+            panic!("Data not multiple of total slots");
+        }
         let ia:Area = (InstanceArea {
             view_id: dc.view_id,
             draw_call_id: dc.draw_call_id,
-            instance_count: 0,
+            instance_count: instance_count,
             instance_offset: dc.instances.len(),
             redraw_id: dc.redraw_id
         }).into();
+        dc.instances.extend_from_slice(data);
         self.align_list.push(ia.clone());
         ia
     }
