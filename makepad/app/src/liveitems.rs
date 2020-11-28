@@ -211,7 +211,7 @@ impl LiveItemsView {
             direction: Direction::Down,
             ..Layout::default()
         }).is_ok() {
-            self.view_bg.color = live_color!(cx, self::color_bg);
+            self.view_bg.color = live_vec4!(cx, self::color_bg);
             let bg_inst = self.view_bg.draw_quad_rel(cx, cx.get_turtle_rect());//self.view_bg.begin_quad_fill(cx);
             bg_inst.set_do_scroll(cx, false, false);
             

@@ -43,14 +43,14 @@ impl TabControl {
                     .with_use_vertical_finger_scroll(true) 
                 ),
 
-            page_view: View::new(cx),
+            page_view: View::new(),
 
             tabs: Elements::new(Tab::new(cx)),
 
             drag_tab: Tab::new(cx)
                 .with_draw_depth(10.0),
 
-            drag_tab_view: View::new(cx)
+            drag_tab_view: View::new()
                 .with_is_overlay(true),
 
             hover: DrawColor::new(cx, default_shader!())
@@ -89,7 +89,7 @@ impl TabControl {
             
             match tab.handle_tab(cx, event) {
                 TabEvent::Select => {
-                    self.page_view.redraw_view_area(cx);
+                    self.page_view.redraw_view(cx);
                     // deselect the other tabs
                     tab_control_event = TabControlEvent::TabSelect {tab_id: *id}
                 },
@@ -97,14 +97,14 @@ impl TabControl {
                     self._dragging_tab = Some((fe.clone(), *id));
                     // flag our view as dirty, to trigger
                     //cx.redraw_child_area(Area::All);
-                    self.tabs_view.redraw_view_area(cx);
-                    self.drag_tab_view.redraw_view_area(cx);
+                    self.tabs_view.redraw_view(cx);
+                    self.drag_tab_view.redraw_view(cx);
                     
                     tab_control_event = TabControlEvent::TabDragMove {fe: fe, tab_id: *id};
                 },
                 TabEvent::DragEnd(fe) => {
                     self._dragging_tab = None;
-                    self.drag_tab_view.redraw_view_area(cx);
+                    self.drag_tab_view.redraw_view(cx);
                     
                     tab_control_event = TabControlEvent::TabDragEnd {fe, tab_id: *id};
                 },

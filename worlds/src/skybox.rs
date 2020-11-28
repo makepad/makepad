@@ -2,13 +2,13 @@ use makepad_render::*;
 
 #[derive(Clone)]
 pub struct SkyBox {
-    cube: Cube,
+    cube: DrawCube,
 }
 
 impl SkyBox {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            cube: Cube::new(cx),
+            cube: DrawCube::new(cx, default_shader!())
         }
     }
     
@@ -78,11 +78,8 @@ impl SkyBox {
     
     pub fn draw_sky_box(&mut self, cx: &mut Cx) {
         self.cube.shader = live_shader!(cx, self::shader_sky_box);
-        self.cube.draw_cube(
-            cx,
-            live_vec3!(cx, self::size),
-            live_vec3!(cx, self::pos),
-            &Mat4::identity()
-        );
+        self.cube.cube_size = live_vec3!(cx, self::size);
+        self.cube.cube_pos = live_vec3!(cx, self::pos);
+        self.cube.draw_cube(cx);
     }
 }
