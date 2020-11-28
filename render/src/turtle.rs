@@ -362,8 +362,8 @@ impl Cx {
                     let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
                     let sh = &self.shaders[draw_call.shader.shader_id];
                     for i in 0..inst.instance_count {
-                        if let Some(x) = sh.mapping.rect_instance_props.x {
-                            draw_call.instances[inst.instance_offset + x + i * sh.mapping.instance_props.total_slots] += dx;
+                        if let Some(rect_pos) = sh.mapping.rect_instance_props.rect_pos {
+                            draw_call.instances[inst.instance_offset + rect_pos + i * sh.mapping.instance_props.total_slots] += dx;
                         }
                     }
                 },
@@ -382,8 +382,8 @@ impl Cx {
                     let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
                     let sh = &self.shaders[draw_call.shader.shader_id];
                     for i in 0..inst.instance_count {
-                        if let Some(y) = sh.mapping.rect_instance_props.y {
-                            draw_call.instances[inst.instance_offset + y + i * sh.mapping.instance_props.total_slots] += dy;
+                        if let Some(rect_pos) = sh.mapping.rect_instance_props.rect_pos {
+                            draw_call.instances[inst.instance_offset + rect_pos + 1 + i * sh.mapping.instance_props.total_slots] += dy;
                         }
                     }
                 },
