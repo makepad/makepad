@@ -59,7 +59,7 @@ impl NormalButton {
                 tracks: [
                     Float {keys: {0.0: 1.0, 1.0: 1.0}, bind_to: self::DrawNormalButton::hover},
                     Float {keys: {1.0: 0.0}, bind_to: self::DrawNormalButton::down},
-                    Vec4 {keys: {0.0: #f}, bind_to: makepad_render::drawtext::DrawText::color}
+                    Vec4 {keys: {1.0: #f}, bind_to: makepad_render::drawtext::DrawText::color}
                 ]
             }
             
