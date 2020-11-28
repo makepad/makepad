@@ -13,6 +13,7 @@ pub struct DesktopWindow {
     pub caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     pub main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     pub inner_view: View,
+    pub inner_layout: Layout,
     //pub caption_bg_color: ColorId,
     pub min_btn: DesktopButton,
     pub max_btn: DesktopButton,
@@ -52,7 +53,7 @@ impl DesktopWindow {
             main_view: View::new(cx),
             caption_view: View::new(cx),
             inner_view: View::new(cx),
-            
+            inner_layout: Layout::default(),
             min_btn: DesktopButton::new(cx),
             max_btn: DesktopButton::new(cx),
             close_btn: DesktopButton::new(cx),
@@ -75,10 +76,14 @@ impl DesktopWindow {
         }
     }
     
+    pub fn with_inner_layout(self, inner_layout: Layout) -> Self {
+        Self {inner_layout, ..self}
+    }
+    
     pub fn style(cx: &mut Cx) {
         live_body!(cx, r#"
             self::color_bg_selected_over: #3d;
-            self::text_style_window_caption: TextStyle{
+            self::text_style_window_caption: TextStyle {
                 ..crate::widgetstyle::text_style_unscaled
             }
         "#);
@@ -186,10 +191,10 @@ impl DesktopWindow {
             self.caption_bg.color = live_vec4!(cx, self::color_bg_selected_over); //cx.colors[self.caption_bg_color];
             // alright here we draw our platform buttons.
             let process_chrome = match cx.platform_type {
-                PlatformType:: Linux {custom_window_chrome}=>custom_window_chrome,
-                _=>true
+                PlatformType::Linux {custom_window_chrome} => custom_window_chrome,
+                _ => true
             };
-            if process_chrome{
+            if process_chrome {
                 match cx.platform_type {
                     PlatformType::Windows | PlatformType::Unknown | PlatformType::Linux {..} => {
                         
@@ -244,7 +249,7 @@ impl DesktopWindow {
                         self.caption_bg.end_quad(cx);
                         cx.turtle_new_line();
                     },
-                    PlatformType::Web{..} => {
+                    PlatformType::Web {..} => {
                         if self.window.is_fullscreen(cx) { // put a bar at the top
                             self.caption_bg.begin_quad(cx, Layout {
                                 align: Align::center(),
@@ -262,10 +267,10 @@ impl DesktopWindow {
         cx.turtle_new_line();
         
         if self.inner_over_chrome {
-            let _ = self.inner_view.begin_view(cx, Layout {abs_origin: Some(Vec2::default()), ..Layout::default()});
+            let _ = self.inner_view.begin_view(cx, Layout {abs_origin: Some(Vec2::default()), ..self.inner_layout});
         }
         else {
-            let _ = self.inner_view.begin_view(cx, Layout {..Layout::default()});
+            let _ = self.inner_view.begin_view(cx, self.inner_layout);
         }
         Ok(())
     }

@@ -12,7 +12,11 @@ impl WidgetExampleApp {
     pub fn new(cx: &mut Cx) -> Self {
         
         Self { 
-            desktop_window: DesktopWindow::new(cx),
+            desktop_window: DesktopWindow::new(cx)
+            .with_inner_layout(Layout{
+                line_wrap: LineWrap::NewLine,
+                ..Layout::default()
+            }),
             button: NormalButton::new(cx),
             buttons:ElementsCounted::new(NormalButton::new(cx)),
             menu:Menu::main(vec![
@@ -46,9 +50,9 @@ impl WidgetExampleApp {
             return
         };
         self.button.draw_normal_button(cx, "Hello");
-        /*for i in 0..1000{  
+        for i in 0..1000{  
             self.buttons.get_draw(cx).draw_normal_button(cx, &format!("{}",i));
-        }*/
+        }
         self.desktop_window.end_desktop_window(cx);
     }
 }
