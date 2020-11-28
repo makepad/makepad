@@ -181,7 +181,8 @@ impl DrawQuad {
                 return
             }
         }
-        self.area = cx.add_aligned_instance(self.shader, self.as_slice())
+        let new_area = cx.add_aligned_instance(self.shader, self.as_slice());
+        self.area = cx.update_area_refs(self.area, new_area);
     }
     
     pub fn area(&self) -> Area {
@@ -197,7 +198,7 @@ impl DrawQuad {
     }
 
     pub fn begin_many(&mut self, cx: &mut Cx) {
-        let mi = cx.begin_many_aligned_instances(self.shader, self.slots);
+        let mi = cx.begin_many_aligned_instances(self.shader, self.slots, self.area);
         self.area = Area::Instance(InstanceArea {
             instance_count: 0,
             instance_offset: mi.instances.len(),
@@ -209,7 +210,10 @@ impl DrawQuad {
     pub fn end_many(&mut self, cx: &mut Cx) {
         unsafe {
             if let Some(li) = self.many.take() {
-                self.area = cx.end_many_instances(li);
+                // update area pointer
+                let old_area = li.old_area;
+                let new_area = cx.end_many_instances(li);
+                self.area = cx.update_area_refs(old_area, new_area);
             }
         }
     }

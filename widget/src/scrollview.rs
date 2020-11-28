@@ -12,7 +12,7 @@ impl ScrollView{
 
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            view: View::new(cx),
+            view: View::new(),
             scroll_h: Some(ScrollBar::new(cx)),
             scroll_v: Some(ScrollBar {
                 smoothing: Some(0.15),
@@ -27,14 +27,6 @@ impl ScrollView{
       
     pub fn with_scroll_v(self, s:ScrollBar)->Self{
         Self{scroll_v:Some(s), ..self}
-    }
-
-    pub fn proto_no_scroll(cx: &mut Cx) -> Self {
-        Self {
-            view: View::new(cx),
-            scroll_h: None,
-            scroll_v: None
-        }
     }
     
     pub fn begin_view(&mut self, cx: &mut Cx, layout: Layout) -> ViewRedraw {
@@ -198,11 +190,11 @@ impl ScrollView{
     }
     
     
-    pub fn redraw_view_area(&self, cx: &mut Cx) {
-        self.view.redraw_view_area(cx)
+    pub fn redraw_view(&self, cx: &mut Cx) {
+        self.view.redraw_view(cx)
     }
     
-    pub fn get_view_area(&self, cx: &Cx) -> Area {
-        self.view.get_view_area(cx)
+    pub fn area(&self) -> Area {
+        self.view.area()
     }
 }

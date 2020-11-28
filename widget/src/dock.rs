@@ -211,7 +211,7 @@ where TItem: Clone
                                 TabControlEvent::TabDragMove {fe, ..} => {
                                     *self._drag_move = Some(fe);
                                     *self._drag_end = None;
-                                    self.drop_quad_view.redraw_view_area(cx);
+                                    self.drop_quad_view.redraw_view(cx);
                                 },
                                 TabControlEvent::TabDragEnd {fe, tab_id} => {
                                     *self._drag_move = None;
@@ -224,7 +224,7 @@ where TItem: Clone
                                             tab_id: tab_id
                                         }
                                     });
-                                    self.drop_quad_view.redraw_view_area(cx);
+                                    self.drop_quad_view.redraw_view(cx);
                                 },
                                 TabControlEvent::TabClose {tab_id} => {
                                     *self._close_tab = Some(DockTabIdent {
@@ -629,17 +629,17 @@ where TItem: Clone
     
     pub fn dock_drag_out(&mut self, cx: &mut Cx) {
         self._drag_move = None;
-        self.drop_quad_view.redraw_view_area(cx);
+        self.drop_quad_view.redraw_view(cx);
     }
     
     pub fn dock_drag_move(&mut self, cx: &mut Cx, fe: FingerMoveEvent) {
         self._drag_move = Some(fe);
-        self.drop_quad_view.redraw_view_area(cx);
+        self.drop_quad_view.redraw_view(cx);
     }
     
     pub fn dock_drag_cancel(&mut self, cx: &mut Cx) {
         self._drag_move = None;
-        self.drop_quad_view.redraw_view_area(cx);
+        self.drop_quad_view.redraw_view(cx);
     }
     
     pub fn dock_drag_end(&mut self, _cx: &mut Cx, fe: FingerUpEvent, new_items: Vec<DockTab<TItem >>) {

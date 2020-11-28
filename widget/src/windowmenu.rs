@@ -34,7 +34,7 @@ impl WindowMenu {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             item_draw: MenuItemDraw::new(cx),
-            view: View::new(cx),
+            view: View::new(),
         }
     }
     

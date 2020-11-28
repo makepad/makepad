@@ -29,8 +29,21 @@ impl ShaderAst {
     pub fn convert_draw_input_to_decls(&mut self, live_styles: &LiveStyles, span: Span) -> Result<(), (Span, String)> {
         // we convert the draw inputs to decls
         if self.draw_input.is_none() {
+            // lets check if we have instance decls, ifso its ok
+            for decl in &self.decls{
+                if let Decl::Instance(_) = decl{
+                    return Ok(())
+                }
+            }
             return Err((span, format!("please define draw_input for shader")))
         }
+    
+        for decl in &self.decls{
+            if let Decl::Instance(_) = decl{
+                return Err((span, format!("Both draw_input and instance vars are used, please use one or the other")))
+            }
+        }
+
         let (inp_span, qualified_ident_path) = self.draw_input.as_ref().unwrap();
         
         // lets find draw_input

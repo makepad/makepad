@@ -28,8 +28,8 @@ impl Viewport3D {
             clear_color: Vec4::color("040"),
             color_texture: Texture::new(cx),
             depth_texture: Texture::new(cx),
-            view_3d: View::new(cx),
-            view_2d: View::new(cx),
+            view_3d: View::new(),
+            view_2d: View::new(),
             measured_size: Vec2::all(1.0),
             image: DrawImage::new(cx, default_shader!())
         }
@@ -42,7 +42,7 @@ impl Viewport3D {
     }
      
     pub fn handle_viewport_2d(&mut self, cx: &mut Cx, event: &mut Event) {
-        match event.hits(cx, self.view_2d.get_view_area(cx), HitOpt::default()) {
+        match event.hits(cx, self.view_2d.area(), HitOpt::default()) {
             Event::FingerHover(_fe) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Move);
             },
@@ -115,7 +115,7 @@ impl Viewport3D {
         if self.view_2d.begin_view(cx, Layout::default()).is_err() {
             return
         };
-        self.view_3d.redraw_view_area(cx);
+        self.view_3d.redraw_view(cx);
         // blit the texture to a view rect
         self.measured_size = vec2(cx.get_width_total(), cx.get_height_total());
         self.image.draw_quad_rel(cx, Rect{pos:vec2(0.,0.), size:self.measured_size });

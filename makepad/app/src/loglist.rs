@@ -79,11 +79,11 @@ impl LogList {
     
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         let default_color = if marked {
-            live_color!(cx, self::color_bg_marked)
+            live_vec4!(cx, self::color_bg_marked)
         } else if counter & 1 == 0 {
-            live_color!(cx, self::color_bg_selected)
+            live_vec4!(cx, self::color_bg_selected)
         } else {
-            live_color!(cx, self::color_bg_odd)
+            live_vec4!(cx, self::color_bg_odd)
         };
         Anim {
             play: Play::Chain {duration: 0.01},
@@ -102,11 +102,11 @@ impl LogList {
     
     pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         let over_color = if marked {
-            live_color!(cx, self::color_bg_marked_over)
+            live_vec4!(cx, self::color_bg_marked_over)
         } else if counter & 1 == 0 {
-            live_color!(cx, self::color_bg_selected_over)
+            live_vec4!(cx, self::color_bg_selected_over)
         } else {
-            live_color!(cx, self::color_bg_odd_over)
+            live_vec4!(cx, self::color_bg_odd_over)
         };
         Anim {
             play: Play::Cut {duration: 0.02},
@@ -325,12 +325,12 @@ impl LogItemDraw {
     }
     
     pub fn draw_log_path(&mut self, cx: &mut Cx, path: &str, row: usize) {
-        self.text.color = live_color!(cx, self::color_path);
+        self.text.color = live_vec4!(cx, self::color_path);
         self.text.draw_text(cx, &format!("{}:{} - ", path, row));
     }
     
     pub fn draw_log_body(&mut self, cx: &mut Cx, body: &str) {
-        self.text.color = live_color!(cx, self::color_message);
+        self.text.color = live_vec4!(cx, self::color_message);
         if body.len()>500 {
             self.text.draw_text(cx, &body[0..500]);
         }
@@ -393,14 +393,14 @@ impl LogItemDraw {
     pub fn draw_status_line(&mut self, cx: &mut Cx, counter: usize, bm: &BuildManager) {
         // draw status line
         self.item_bg.color = if counter & 1 == 0 {
-            live_color!(cx, self::color_bg_selected)
+            live_vec4!(cx, self::color_bg_selected)
         }else {
-            live_color!(cx, self::color_bg_odd)
+            live_vec4!(cx, self::color_bg_odd)
         };
         let bg_inst = self.item_bg.begin_quad(cx, live_layout!(cx, self::layout_item));
         
         if !bm.is_any_cargo_running() {
-            self.text.color = live_color!(cx, self::color_path);
+            self.text.color = live_vec4!(cx, self::color_path);
             self.code_icon.draw_icon(cx, CodeIconType::Ok);
             cx.turtle_align_y();
             if bm.is_any_artifact_running() {
@@ -423,7 +423,7 @@ impl LogItemDraw {
         else {
             self.code_icon.draw_icon(cx, CodeIconType::Wait);
             cx.turtle_align_y();
-            self.text.color = live_color!(cx, self::color_path);
+            self.text.color = live_vec4!(cx, self::color_path);
             self.text.draw_text(cx, &format!("Building ({}) ", bm.artifacts.len()));
             for ab in &bm.active_builds {
                 if ab.build_uid.is_some() {
@@ -441,9 +441,9 @@ impl LogItemDraw {
     pub fn draw_filler(&mut self, cx: &mut Cx, counter: usize) {
         let view_total = cx.get_turtle_bounds();
         self.item_bg.color = if counter & 1 == 0 {
-            live_color!(cx, self::color_bg_selected)
+            live_vec4!(cx, self::color_bg_selected)
         } else {
-            live_color!(cx, self::color_bg_odd)
+            live_vec4!(cx, self::color_bg_odd)
         };
         self.item_bg.draw_quad(cx, live_layout!(cx, self::layout_item).walk);
         cx.set_turtle_bounds(view_total); // do this so it doesnt impact the turtle

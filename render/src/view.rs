@@ -12,6 +12,7 @@ pub type ViewRedraw = Result<(), ()>;
 #[derive(Clone)]
 pub struct View { // draw info per UI element
     pub view_id: Option<usize>,
+    pub redraw_id: u64,
     pub is_clipped: bool,
     pub is_overlay: bool, // this view is an overlay, rendered last
     pub always_redraw: bool,
@@ -20,6 +21,7 @@ pub struct View { // draw info per UI element
 impl View {
     pub fn proto_overlay(_cx: &mut Cx) -> Self {
         Self {
+            redraw_id: 0,
             is_clipped: true,
             is_overlay: true,
             always_redraw: false,
@@ -27,8 +29,9 @@ impl View {
         }
     }
     
-    pub fn new(_cx: &mut Cx) -> Self {
+    pub fn new() -> Self {
         Self {
+            redraw_id: 0,
             is_clipped: true,
             is_overlay: false,
             always_redraw: false,
@@ -38,7 +41,7 @@ impl View {
     
     pub fn with_is_clipped(self, is_clipped:bool)->Self{Self{is_clipped,..self}}
     pub fn with_is_overlay(self, is_overlay:bool)->Self{Self{is_overlay,..self}}
-    pub fn with_always_redrawd(self, always_redraw:bool)->Self{Self{always_redraw,..self}}
+    pub fn with_always_redraw(self, always_redraw:bool)->Self{Self{always_redraw,..self}}
     
     pub fn lock_view_transform(&self, cx: &mut Cx, mat: &Mat4) {
         if let Some(view_id) = self.view_id {
@@ -189,6 +192,7 @@ impl View {
         
         // update drawlist ids
         let last_redraw_id = cxview.redraw_id;
+        self.redraw_id = cx.redraw_id;
         cxview.redraw_id = cx.redraw_id;
         cxview.draw_calls_len = 0;
         
@@ -250,7 +254,7 @@ impl View {
         }
     }
     
-    pub fn redraw_view_area(&self, cx: &mut Cx) {
+    pub fn redraw_view(&self, cx: &mut Cx) {
         if let Some(view_id) = self.view_id {
             let cxview = &cx.views[view_id];
             let area = Area::View(ViewArea {view_id: view_id, redraw_id: cxview.redraw_id});
@@ -261,7 +265,7 @@ impl View {
         }
     }
     
-    pub fn redraw_view_parent_area(&self, cx: &mut Cx) {
+    pub fn redraw_view_parent(&self, cx: &mut Cx) {
         if let Some(view_id) = self.view_id {
             let cxview = &cx.views[view_id];
             let area = Area::View(ViewArea {view_id: view_id, redraw_id: cxview.redraw_id});
@@ -272,10 +276,9 @@ impl View {
         }
     }
     
-    pub fn get_view_area(&self, cx: &Cx) -> Area {
+    pub fn area(&self) -> Area {
         if let Some(view_id) = self.view_id {
-            let cxview = &cx.views[view_id];
-            Area::View(ViewArea {view_id: view_id, redraw_id: cxview.redraw_id})
+            Area::View(ViewArea {view_id: view_id, redraw_id: self.redraw_id})
         }
         else {
             Area::Empty
@@ -474,7 +477,7 @@ impl Cx {
         dc
     }
     
-    pub fn begin_many_instances(&mut self, shader: Shader, slots:usize) -> ManyInstances {
+    pub fn begin_many_instances(&mut self, shader: Shader, slots:usize, old_area:Area) -> ManyInstances {
         let dc = self.append_to_draw_call(shader, slots);
         let mut instances = Vec::new();
         std::mem::swap(&mut instances, &mut dc.instances);
@@ -486,13 +489,14 @@ impl Cx {
                 instance_offset: instances.len(),
                 redraw_id: dc.redraw_id
             },
+            old_area,
             aligned: None,
             instances
         }
     }
     
-    pub fn begin_many_aligned_instances(&mut self, shader: Shader, slots:usize) -> ManyInstances {
-        let mut li = self.begin_many_instances(shader, slots);
+    pub fn begin_many_aligned_instances(&mut self, shader: Shader, slots:usize, old_area:Area) -> ManyInstances {
+        let mut li = self.begin_many_instances(shader, slots, old_area);
         li.aligned = Some(self.align_list.len());
         self.align_list.push(Area::Empty);
         li
@@ -572,6 +576,7 @@ impl Cx {
 }
 
 pub struct ManyInstances{
+    pub old_area: Area,
     pub instance_area: InstanceArea,
     pub aligned: Option<usize>,
     pub instances:Vec<f32>
