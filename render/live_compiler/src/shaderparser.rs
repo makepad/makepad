@@ -54,13 +54,11 @@ impl<'a> DeTokParserImpl<'a> {
                     let decl = self.parse_struct_decl() ?;
                     shader_ast.decls.push(Decl::Struct(decl));
                 }
-                /*
                 Token::Ident(ident) if ident == Ident::new("instance") => {
                     self.skip_token();
                     let decl = self.parse_instance_decl(qualified_ident_path) ?;
                     shader_ast.decls.push(Decl::Instance(decl));
                 }
-                */
                 Token::Ident(ident) if ident == Ident::new("draw_input") => {
                     
                     self.skip_token();

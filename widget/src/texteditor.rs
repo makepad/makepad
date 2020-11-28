@@ -636,7 +636,7 @@ impl TextEditor {
             }
         }
         
-        self.view.redraw_view_area(cx);
+        self.view.redraw_view(cx);
         self._last_finger_move = Some(fe.abs);
         //self.update_highlight(cx, text_buffer);
         self.reset_cursor_blinker(cx);
@@ -662,7 +662,7 @@ impl TextEditor {
         //     self.update_highlight(cx, text_buffer);
         //};
         if repaint_scroll || cursor_moved {
-            self.view.redraw_view_area(cx);
+            self.view.redraw_view(cx);
         }
         if cursor_moved {
             self.reset_cursor_blinker(cx);
@@ -857,7 +857,7 @@ impl TextEditor {
                 if ke.modifiers.logo || ke.modifiers.control { // cut
                     self.cursors.select_all(text_buffer);
                     // don't scroll!
-                    self.view.redraw_view_area(cx);
+                    self.view.redraw_view(cx);
                     false
                 }
                 else {
@@ -901,7 +901,7 @@ impl TextEditor {
         if cursor_moved {
             //self.update_highlight(cx, text_buffer);
             self.scroll_last_cursor_visible(cx, text_buffer, 0.);
-            self.view.redraw_view_area(cx);
+            self.view.redraw_view(cx);
             self.reset_cursor_blinker(cx);
         }
         cursor_moved
@@ -952,7 +952,7 @@ impl TextEditor {
         }
         //self.update_highlight(cx, text_buffer);
         self.scroll_last_cursor_visible(cx, text_buffer, 0.);
-        self.view.redraw_view_area(cx);
+        self.view.redraw_view(cx);
         self.reset_cursor_blinker(cx);
         
         cx.send_signal(text_buffer.signal, TextBuffer::status_data_update());
@@ -964,7 +964,7 @@ impl TextEditor {
         self.cursors.clear_and_set_last_cursor_head_and_tail(range.1, range.0, text_buffer);
         self.cursors.replace_text(what, text_buffer, Some(TextUndoGrouping::LiveEdit(group)));
         self.scroll_last_cursor_visible(cx, text_buffer, 0.);
-        self.view.redraw_view_area(cx);
+        self.view.redraw_view(cx);
         self.reset_cursor_blinker(cx);
         /*
         // do inplace update so we don't need to re-tokenize possibly
@@ -992,7 +992,7 @@ impl TextEditor {
             // the editor actually redraws on scroll, its because we don't actually
             // generate the entire file as GPU text-buffer just the visible area
             // in JS this wasn't possible performantly but in Rust its a breeze.
-            self.view.redraw_view_area(cx);
+            self.view.redraw_view(cx);
         }
         let last_mutation_id = text_buffer.mutation_id;
         // global events
@@ -1036,7 +1036,7 @@ impl TextEditor {
                         || *status == TextBuffer::status_message_update()
                         || *status == TextBuffer::status_search_update()
                         || *status == TextBuffer::status_data_update() {
-                        self.view.redraw_view_area(cx);
+                        self.view.redraw_view(cx);
                     }
                     //else if *status == TextBuffer::status_jump_to_offset() {
                     //    if !text_buffer.is_loaded {
@@ -1070,14 +1070,14 @@ impl TextEditor {
         }
         let mut cursor_moved = false;
         // editor local
-        match event.hits(cx, self.view.get_view_area(cx), HitOpt::default()) {
+        match event.hits(cx, self.view.area(), HitOpt::default()) {
             Event::KeyFocus(_kf) => {
                 self.reset_cursor_blinker(cx);
-                self.view.redraw_view_area(cx);
+                self.view.redraw_view(cx);
                 return TextEditorEvent::KeyFocus
             },
             Event::KeyFocusLost(_kf) => {
-                self.view.redraw_view_area(cx);
+                self.view.redraw_view(cx);
                 return TextEditorEvent::KeyFocusLost
             },
             Event::FingerDown(fe) => {
@@ -1167,15 +1167,15 @@ impl TextEditor {
     }
     
     pub fn has_key_focus(&self, cx: &Cx) -> bool {
-        cx.has_key_focus(self.view.get_view_area(cx))
+        cx.has_key_focus(self.view.area())
     }
     
     pub fn set_key_focus(&mut self, cx: &mut Cx) {
-        if self.view.get_view_area(cx) == Area::Empty {
+        if self.view.area() == Area::Empty {
             self._set_key_focus_on_load = true;
             return
         }
-        cx.set_key_focus(self.view.get_view_area(cx));
+        cx.set_key_focus(self.view.area());
         self.reset_cursor_blinker(cx);
     }
     
@@ -1278,7 +1278,7 @@ impl TextEditor {
                     x: scroll_pos.x + select_scroll.delta.x,
                     y: scroll_pos.y + select_scroll.delta.y
                 }) {
-                    self.view.redraw_view_area(cx);
+                    self.view.redraw_view(cx);
                 }
                 else {
                     select_scroll.at_end = true;
@@ -1311,7 +1311,7 @@ impl TextEditor {
         if anim_folding.state.is_animating() {
             anim_folding.state.next_anim_step();
             if anim_folding.state.is_animating() {
-                self.view.redraw_view_area(cx);
+                self.view.redraw_view(cx);
             }
             anim_folding.did_animate = true;
         }
@@ -1850,7 +1850,7 @@ impl TextEditor {
                 self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height * 0.8);
             }
             
-            self.view.redraw_view_area(cx);
+            self.view.redraw_view(cx);
         }
         else if let Some(scroll_pos_on_load) = self._scroll_pos_on_load {
             self.view.set_scroll_pos(cx, scroll_pos_on_load);
@@ -1860,7 +1860,7 @@ impl TextEditor {
     
     pub fn set_last_cursor(&mut self, cx: &mut Cx, cursor: (usize, usize), at_top: bool) {
         self._set_last_cursor = Some((cursor, at_top));
-        self.view.redraw_view_area(cx);
+        self.view.redraw_view(cx);
     }
     
     
@@ -1968,7 +1968,7 @@ impl TextEditor {
                     });
                 }
             }
-            if cx.has_key_focus(self.view.get_view_area(cx)) {
+            if cx.has_key_focus(self.view.area()) {
                 let scroll_pos = self.view.get_scroll_pos(cx);
                 cx.show_text_ime(rc.x - scroll_pos.x, rc.y - scroll_pos.y);
             }
@@ -1993,7 +1993,7 @@ impl TextEditor {
             if select_scroll.at_end {
                 self._select_scroll = None;
             }
-            self.view.redraw_view_area(cx);
+            self.view.redraw_view(cx);
         }
     }
     
@@ -2049,7 +2049,7 @@ impl TextEditor {
             }
             self._anim_select.truncate(sel.len());
             if anim_select_any {
-                self.view.redraw_view_area(cx);
+                self.view.redraw_view(cx);
             }
         }
     }
@@ -2141,7 +2141,7 @@ impl TextEditor {
     
     fn compute_grid_text_pos_from_abs(&mut self, cx: &Cx, abs: Vec2) -> TextPos {
         //
-        let rel = self.view.get_view_area(cx).abs_to_rel(cx, abs);
+        let rel = self.view.area().abs_to_rel(cx, abs);
         let mut mono_size = Vec2::default();
         for (row, geom) in self._line_geometry.iter().enumerate() {
             //let geom = &self._line_geometry[pos.row];
@@ -2157,7 +2157,7 @@ impl TextEditor {
     }
     
     fn compute_offset_from_ypos(&mut self, cx: &Cx, ypos_abs: f32, text_buffer: &TextBuffer, end: bool) -> usize {
-        let rel = self.view.get_view_area(cx).abs_to_rel(cx, Vec2 {x: 0.0, y: ypos_abs});
+        let rel = self.view.area().abs_to_rel(cx, Vec2 {x: 0.0, y: ypos_abs});
         let mut mono_size;
         // = Vec2::zero();
         let end_col = if end {1 << 31}else {0};
@@ -2180,7 +2180,7 @@ impl TextEditor {
         self._anim_folding.state.do_folding(speed, 0.95);
         self._anim_folding.focussed_line = self.compute_focussed_line_for_folding(cx, text_buffer);
         //println!("FOLDING {}",self._anim_folding.focussed_line);
-        self.view.redraw_view_area(cx);
+        self.view.area();
     }
     
     fn start_code_unfolding(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
@@ -2188,7 +2188,7 @@ impl TextEditor {
         self._anim_folding.state.do_opening(speed, 0.97);
         self._anim_folding.focussed_line = self.compute_focussed_line_for_folding(cx, text_buffer);
         //println!("UNFOLDING {}",self._anim_folding.focussed_line);
-        self.view.redraw_view_area(cx);
+        self.view.redraw_view(cx);
         // return to normal size
     }
     
@@ -2268,7 +2268,7 @@ impl TextEditor {
     
     fn compute_focussed_line_for_folding(&self, cx: &Cx, text_buffer: &TextBuffer) -> usize {
         let scroll = self.view.get_scroll_pos(cx);
-        let rect = self.view.get_view_area(cx).get_rect(cx);
+        let rect = self.view.area().get_rect(cx);
         
         // first try if our last cursor is in view
         let pos = self.cursors.get_last_cursor_text_pos(text_buffer);

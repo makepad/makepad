@@ -304,16 +304,6 @@ macro_rules!live_geometry {
 }
 
 #[macro_export]
-macro_rules!live_color {
-    ( $ cx: ident, $ path: path) => {
-        $ cx.live_styles.get_color(
-            live_str_to_id(module_path!(), stringify!( $ path)),
-            stringify!( $ path)
-        )
-    }
-}
-
-#[macro_export]
 macro_rules!live_float {
     ( $ cx: ident, $ path: path) => {
         $ cx.live_styles.get_float(

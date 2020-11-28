@@ -353,9 +353,9 @@ impl SearchResultDraw {
     pub fn get_default_anim(cx: &Cx, marked: bool) -> Anim {
         
         let default_color = if marked {
-            live_color!(cx, self::color_bg_marked)
+            live_vec4!(cx, self::color_bg_marked)
         } else {
-            live_color!(cx, self::color_bg)
+            live_vec4!(cx, self::color_bg)
         };
         Anim {
             play: Play::Chain {duration: 0.01},
@@ -379,9 +379,9 @@ impl SearchResultDraw {
     
     pub fn get_over_anim(cx: &Cx, marked: bool) -> Anim {
         let over_color = if marked {
-            live_color!(cx, self::color_bg_marked_over)
+            live_vec4!(cx, self::color_bg_marked_over)
         } else {
-            live_color!(cx, self::color_bg_odd_over)
+            live_vec4!(cx, self::color_bg_odd_over)
         };
         Anim {
             play: Play::Chain {duration: 0.02},
@@ -424,7 +424,7 @@ impl SearchResultDraw {
         let tok = &text_buffer.token_chunks[token as usize];
         let pos = text_buffer.offset_to_text_pos(tok.offset);
         
-        self.text.color = live_color!(cx, self::color_path);
+        self.text.color = live_vec4!(cx, self::color_path);
         let split = path.split('/').collect::<Vec<&str >> ();
         self.text.draw_text(cx, &format!("{}:{} - {}", split.last().unwrap(), pos.row, split[0..split.len() - 1].join("/")));
         cx.turtle_new_line();
@@ -467,9 +467,9 @@ impl SearchResultDraw {
     pub fn draw_filler(&mut self, cx: &mut Cx, counter: usize) {
         let view_total = cx.get_turtle_bounds();
         self.item_bg.color = if counter & 1 == 0 {
-            live_color!(cx, self::color_bg_selected)
+            live_vec4!(cx, self::color_bg_selected)
         } else {
-            live_color!(cx, self::color_bg_odd)
+            live_vec4!(cx, self::color_bg_odd)
         };
         self.item_bg.draw_quad(cx, live_layout!(cx, self::layout_item_closed).walk);
         cx.set_turtle_bounds(view_total); // do this so it doesnt impact the turtle

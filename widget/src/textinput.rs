@@ -78,7 +78,7 @@ impl TextInput {
     pub fn set_value(&mut self, cx: &mut Cx, text: &str) {
         let text_buffer = &mut self.text_buffer;
         text_buffer.load_from_utf8(text);
-        self.text_editor.view.redraw_view_area(cx);
+        self.text_editor.view.redraw_view(cx);
     }
     
     pub fn get_value(&self) -> String {
@@ -87,7 +87,7 @@ impl TextInput {
     
     pub fn select_all(&mut self, cx: &mut Cx) {
         self.text_editor.cursors.select_all(&mut self.text_buffer);
-        self.text_editor.view.redraw_view_area(cx);
+        self.text_editor.view.redraw_view(cx);
     }
     
     pub fn draw_text_input_static(&mut self, cx: &mut Cx, text: &str) {

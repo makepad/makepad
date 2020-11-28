@@ -219,8 +219,8 @@ impl XRControl {
         let ds = default_shader!();
         let hand_size = Vec3 {x: 0.02, y: 0.02, z: 0.12};
         Self {
-            space_view: View::new(cx),
-            cursor_view: View::new(cx),
+            space_view: View::new(),
+            cursor_view: View::new(),
             last_xr_update: None,
             left_hand: DrawCube::new(cx, ds)
                 .with_cube_size(hand_size),
@@ -307,7 +307,7 @@ impl XRControl {
             }
             else {
                 self.xr_avatars.insert(*id, XRAvatar::new(cx));
-                self.space_view.redraw_view_area(cx);
+                self.space_view.redraw_view(cx);
             }
         }
         
@@ -322,12 +322,12 @@ impl XRControl {
             }
             if xa.state.gone() {
                 remove.push(*id);
-                self.space_view.redraw_view_area(cx);
+                self.space_view.redraw_view(cx);
             }
         }
         for id in remove {
             self.xr_avatars.remove(&id);
-            self.space_view.redraw_view_area(cx);
+            self.space_view.redraw_view(cx);
         }
     }
     
@@ -536,4 +536,4 @@ impl XRControl {
             self.cursor_view.end_view(cx);
         }
     }
-}
+} 
