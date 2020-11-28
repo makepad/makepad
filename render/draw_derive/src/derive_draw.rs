@@ -35,6 +35,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             with_shader.add("pub fn with_shader ( cx : & mut Cx , shader : Shader , slots : usize ) -> Self {");
             with_shader.add("Self {");
              
+             let mut debug = false;
             let mut base_type = None;
             let mut default_shader = None;
             let mut uniforms = Vec::new();
@@ -45,6 +46,9 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
                 for attr in &field.attrs{
                     if attr.name == "default_shader"{
                         default_shader = Some(attr.args.clone());
+                    }
+                    if attr.name == "debug_draw_derive"{
+                        debug = true;
                     }
                 }
                 if field.name == "base" {
@@ -207,8 +211,8 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
                     tb.add("pub fn area ( & self ) -> Area { self . base . area ( ) }");
                     tb.add("pub fn set_area ( & mut self , area : Area ) { self . base . set_area ( area ) }");
 
-                    tb.add("pub fn begin_quad ( & mut self , cx : & mut Cx , layout : Layout ) { self . base . begin_quad ( cx , layout ) }");
-                    tb.add("pub fn end_quad ( & mut self , cx : & mut Cx )  { self . base . end_quad ( cx ) ; self . write_uniforms ( cx ) }");
+                    tb.add("pub fn begin_quad ( & mut self , cx : & mut Cx , layout : Layout ) { self . base . begin_quad ( cx , layout ) ; self . write_uniforms ( cx ) }");
+                    tb.add("pub fn end_quad ( & mut self , cx : & mut Cx )  { self . base . end_quad ( cx ) }");
 
                     tb.add("pub fn draw_quad_walk ( & mut self , cx : & mut Cx , walk : Walk )  { self . base . draw_quad_walk ( cx , walk ) ; self . write_uniforms ( cx ) }");
                     tb.add("pub fn draw_quad_rel ( & mut self , cx : & mut Cx , rect : Rect ) { self . base . draw_quad_rel ( cx , rect ) ; self . write_uniforms ( cx ) }");
@@ -221,7 +225,9 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
             }
             
             tb.add("}");
-            //tb.eprint();
+            if debug{
+                tb.eprint();
+            }
             return tb.end(); 
         }
     }
