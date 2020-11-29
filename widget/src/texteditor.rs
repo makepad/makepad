@@ -988,8 +988,6 @@ impl TextEditor {
     }
     
     pub fn handle_text_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
-        let at_start = self.cursors.set[0].head;
-        
         if self.view.handle_scroll_view(cx, event) {
             if let Some(last_finger_move) = self._last_finger_move {
                 if let Some(grid_select_corner) = self._grid_select_corner {
@@ -1165,7 +1163,6 @@ impl TextEditor {
             _ => ()
         };
         
-        ///println!("{:?} {:?}", event, self.cursors.set[0]);
         
         // i need to know if selection changed, ifso
         //

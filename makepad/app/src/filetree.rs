@@ -55,7 +55,7 @@ impl FileTree {
 
             drag_bg: DrawColor::new(cx, live_shader!(cx, self::shader_drag_bg)),
 
-            view: ScrollView::new(cx)
+            view: ScrollView::new()
                 .with_scroll_v(ScrollBar::new(cx).with_smoothing(0.15)),
 
             drag_view: View::new()
