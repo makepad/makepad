@@ -2206,7 +2206,7 @@ impl TextEditor {
         self._anim_folding.state.do_folding(speed, 0.95);
         self._anim_folding.focussed_line = self.compute_focussed_line_for_folding(cx, text_buffer);
         //println!("FOLDING {}",self._anim_folding.focussed_line);
-        self.view.area();
+        self.view.redraw_view(cx);
     }
     
     fn start_code_unfolding(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
