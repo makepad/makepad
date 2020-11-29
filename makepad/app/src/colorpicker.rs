@@ -1,7 +1,19 @@
 use makepad_render::*;
 
+#[derive(Clone, DrawQuad)]
+#[repr(C)]
+pub struct DrawColorPicker {
+    #[default_shader(self::shader_wheel)]
+    base: DrawQuad,
+    hue: f32,
+    sat: f32,
+    val: f32,
+    hover: f32,
+    down: f32
+}
+
 pub enum ColorPickerEvent {
-    Change {rgba: Color},
+    Change {rgba: Vec4},
     DoneChanging,
     None
 }
@@ -12,7 +24,7 @@ pub struct ColorPicker {
     pub hue: f32,
     pub sat: f32,
     pub val: f32,
-    pub wheel: Quad,
+    pub wheel: DrawColorPicker,
     pub animator: Animator,
     pub drag_mode: ColorPickerDragMode
 }
@@ -32,7 +44,7 @@ impl ColorPicker {
             val: 0.0,
             size: 0.0,
             animator: Animator::default(),
-            wheel: Quad::new(cx),
+            wheel: DrawColorPicker::new(cx, default_shader!()),
             drag_mode: ColorPickerDragMode::None
         }
     }
@@ -58,15 +70,15 @@ impl ColorPicker {
         // lets update hue sat val directly
         let mut changed = false;
         if last_hue != self.hue {
-            self.animator.area.write_float(cx, live_item_id!(self::shader_wheel::hue), self.hue);
+            self.wheel.set_hue(cx, self.hue);
             changed = true;
         }
         if last_sat != self.sat {
-            self.animator.area.write_float(cx, live_item_id!(self::shader_wheel::sat), self.sat);
+            self.wheel.set_sat(cx, self.sat);
             changed = true;
         }
         if last_val != self.val {
-            self.animator.area.write_float(cx, live_item_id!(self::shader_wheel::val), self.val);
+            self.wheel.set_val(cx, self.val);
             changed = true;
         }
         if changed {
@@ -77,16 +89,16 @@ impl ColorPicker {
         }
     }
     
-    pub fn to_rgba(&self)->Color{
-        Color::from_hsva(Vec4{x: self.hue, y: self.sat, z: self.val, w: 1.0})
+    pub fn to_rgba(&self)->Vec4{
+        Vec4::from_hsva(Vec4{x: self.hue, y: self.sat, z: self.val, w: 1.0})
     }
     
     pub fn handle_color_picker(&mut self, cx: &mut Cx, event: &mut Event) -> ColorPickerEvent {
-        match event.hits(cx, self.animator.area, HitOpt::default()) {
-            Event::Animate(ae) => {
-                self.animator.calc_area(cx, self.animator.area, ae.time);
-            },
-            Event::AnimEnded(_) => self.animator.end(),
+        if let Some(ae) = event.is_animate(cx, &self.animator) {
+            self.wheel.animate(cx, &mut self.animator, ae.time);
+        }
+
+        match event.hits(cx, self.wheel.area(), HitOpt::default()) {
             Event::FingerHover(fe) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Arrow);
                 
@@ -142,8 +154,12 @@ impl ColorPicker {
         ColorPickerEvent::None
     }
     
-    pub fn draw_color_picker(&mut self, cx: &mut Cx, rgba:Color,  height_scale: f32) {
-        self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
+    pub fn draw_color_picker(&mut self, cx: &mut Cx, rgba:Vec4,  height_scale: f32) {
+         if self.animator.need_init(cx) {
+            self.animator.init(cx, live_anim!(cx, self::anim_default));
+            self.wheel.last_animate(&self.animator);
+        }
+        
         if self.drag_mode == ColorPickerDragMode::None {
             // lets convert to rgba
             let old_rgba  = self.to_rgba();
@@ -154,59 +170,51 @@ impl ColorPicker {
                 self.val = hsva.z;
             }
         }
-        self.wheel.shader = live_shader!(cx, self::shader_wheel);
+        //self.wheel.shader = live_shader!(cx, self::shader_wheel);
         // i wanna draw a wheel with 'width' set but height a fixed height.
-        self.size = cx.get_turtle_rect().w;
-        let k = self.wheel.draw_quad(cx, Walk {
+        self.size = cx.get_turtle_rect().size.x;
+        self.wheel.hue = self.hue;
+        self.wheel.sat = self.sat;
+        self.wheel.val = self.val;
+        
+        self.wheel.draw_quad_walk(cx, Walk {
             margin: Margin::bottom(10.*height_scale),
             width: Width::Fill,
             height: Height::Fix(self.size * height_scale)
         });
-        // lets put a hsv int here
-        k.push_float(cx, self.hue);
-        k.push_float(cx, self.sat);
-        k.push_float(cx, self.val);
-        
-        k.push_last_float(cx, &self.animator, live_item_id!(self::shader_wheel::hover()));
-        k.push_last_float(cx, &self.animator, live_item_id!(self::shader_wheel::hover()));
-        
-        self.animator.set_area(cx, k.into());
     }
 
     pub fn style(cx: &mut Cx) {
+        self::DrawColorPicker::register_draw_input(cx);
         live_body!(cx, r#"
             self::anim_default: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {bind_to: self::shader_wheel::hover, keys: {1.0: 0.0}},
-                    Float {bind_to: self::shader_wheel::down, keys: {1.0: 0.0}}
+                    Float {bind_to: self::DrawColorPicker::hover, keys: {1.0: 0.0}},
+                    Float {bind_to: self::DrawColorPicker::down, keys: {1.0: 0.0}}
                 ]
             }
             
             self::anim_hover: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {bind_to: self::shader_wheel::hover, keys: {0.0: 1.0}},
-                    Float {bind_to: self::shader_wheel::down, keys: {1.0: 0.0}}
+                    Float {bind_to: self::DrawColorPicker::hover, keys: {0.0: 1.0}},
+                    Float {bind_to: self::DrawColorPicker::down, keys: {1.0: 0.0}}
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {bind_to: self::shader_wheel::hover, keys: {1.0: 1.0}},
-                    Float {bind_to: self::shader_wheel::down, keys: {0.0: 0.0, 1.0: 1.0}}
+                    Float {bind_to: self::DrawColorPicker::hover, keys: {1.0: 1.0}},
+                    Float {bind_to: self::DrawColorPicker::down, keys: {0.0: 0.0, 1.0: 1.0}}
                 ]
             }
             
             self::shader_wheel: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawquad::shader::*;
                 
-                instance hue: float;
-                instance sat: float;
-                instance val: float;
-                instance hover: float;
-                instance down: float;
+                draw_input: self::DrawColorPicker;
                 
                 fn circ_to_rect(u: float, v: float) -> vec2 {
                     let u2 = u * u;
@@ -221,7 +229,8 @@ impl ColorPicker {
                 
                 fn pixel() -> vec4 {
                     let rgbv = Pal::hsv2rgb(vec4(hue, sat, val, 1.));
-                    
+                    let w = rect_size.x;
+                    let h = rect_size.y;
                     let df = Df::viewport(pos * vec2(w, h));
                     let cx = w * 0.5;
                     let cy = h * 0.5;

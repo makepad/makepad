@@ -28,14 +28,11 @@ impl LogList {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             item_draw: LogItemDraw::new(cx),
-            list: ListLogic {
-                multi_select: true,
-                ..ListLogic::default()
-            },
+            list: ListLogic::default()
+                .with_multi_select(true),
             view: ScrollView::new(cx),
         }
     }
-    
     
     pub fn style(cx: &mut Cx) {
         
@@ -89,7 +86,7 @@ impl LogList {
             play: Play::Chain {duration: 0.01},
             tracks: vec![
                 Track::Vec4 {
-                    bind_to: live_item_id!(makepad_render::quad::shader::color),
+                    bind_to: live_item_id!(makepad_render::drawcolor::DrawColor::color),
                     ease: Ease::Lin,
                     keys: vec![
                         (1.0, default_color)
@@ -112,7 +109,7 @@ impl LogList {
             play: Play::Cut {duration: 0.02},
             tracks: vec![
                 Track::Vec4 {
-                    bind_to: live_item_id!(makepad_render::quad::shader::color),
+                    bind_to: live_item_id!(makepad_render::drawcolor::DrawColor::color),
                     ease: Ease::Lin,
                     keys: vec![
                         (0., over_color),
@@ -157,27 +154,28 @@ impl LogList {
                 KeyCode::KeyT => if ke.modifiers.logo || ke.modifiers.control {
                     // lock scroll
                     bm.tail_log_items = true;
-                    self.view.redraw_view_area(cx);
+                    self.view.redraw_view(cx);
                 },
                 KeyCode::KeyK => if ke.modifiers.logo || ke.modifiers.control {
                     // clear and tail log
                     bm.tail_log_items = true;
                     bm.log_items.truncate(0);
-                    self.view.redraw_view_area(cx);
+                    self.view.redraw_view(cx);
                 },
                 _ => ()
             },
             Event::Signal(se) => if let Some(_) = se.signals.get(&bm.signal) {
                 // we have new things
-                self.view.redraw_view_area(cx);
+                self.view.redraw_view(cx);
                 //println!("SIGNAL!");
             },
             _ => ()
         }
         
+        let item_draw = &mut self.item_draw;
         let le = self.list.handle_list_logic(cx, event, select, false, | cx, item_event, item, item_index | match item_event {
             ListLogicEvent::Animate(ae) => {
-                item.animator.calc_area(cx, item.animator.area, ae.time);
+                item_draw.animate(cx, item.area, &mut item.animator, ae.time);
             },
             ListLogicEvent::AnimEnded => {
                 item.animator.end();
@@ -201,7 +199,7 @@ impl LogList {
         
         match le {
             ListEvent::SelectSingle(select_index) => {
-                self.view.redraw_view_area(cx);
+                self.view.redraw_view(cx);
                 let log_item = &bm.log_items[select_index];
                 if let Some(loc_message) = log_item.get_loc_message() {
                     if loc_message.path.len() == 0 {
@@ -237,7 +235,7 @@ impl LogList {
                 }
             },
             ListEvent::SelectMultiple => {
-                self.view.redraw_view_area(cx);
+                self.view.redraw_view(cx);
                 let mut items = String::new();
                 for select in &self.list.selection {
                     if let Some(loc_message) = bm.log_items[*select].get_loc_message() {
@@ -303,8 +301,8 @@ impl LogList {
 
 #[derive(Clone)]
 pub struct LogItemDraw {
-    pub text: Text,
-    pub item_bg: Quad,
+    pub text: DrawText,
+    pub item_bg: DrawColor,
     pub code_icon: CodeIcon,
     pub shadow: ScrollShadow,
 }
@@ -312,40 +310,47 @@ pub struct LogItemDraw {
 impl LogItemDraw {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            item_bg: Quad::new(cx),
-            text: Text {
-                wrapping: Wrapping::Word,
-                ..Text::new(cx)
-            },
+            item_bg: DrawColor::new(cx, default_shader!()),
+            text: DrawText::new(cx, default_shader!())
+                .with_wrapping(Wrapping::Word),
             code_icon: CodeIcon::new(cx),
             //path_color: Theme::color_text_defocus(),
             //message_color: Theme::color_text_focus(),
-            shadow: ScrollShadow {z: 0.01, ..ScrollShadow::new(cx)}
+            shadow: ScrollShadow::new(cx)
+                .with_draw_depth(0.01)
         }
+    }
+    
+    pub fn animate(&mut self, cx:&mut Cx, area:Area, animator:&mut Animator, time:f64){
+        self.item_bg.set_area(area);
+        self.item_bg.animate(cx, animator, time);
     }
     
     pub fn draw_log_path(&mut self, cx: &mut Cx, path: &str, row: usize) {
         self.text.color = live_vec4!(cx, self::color_path);
-        self.text.draw_text(cx, &format!("{}:{} - ", path, row));
+        self.text.draw_text_walk(cx, &format!("{}:{} - ", path, row));
     }
     
     pub fn draw_log_body(&mut self, cx: &mut Cx, body: &str) {
         self.text.color = live_vec4!(cx, self::color_message);
         if body.len()>500 {
-            self.text.draw_text(cx, &body[0..500]);
+            self.text.draw_text_walk(cx, &body[0..500]);
         }
         else {
-            self.text.draw_text(cx, &body);
+            self.text.draw_text_walk(cx, &body);
         }
     }
     
     pub fn draw_log_item(&mut self, cx: &mut Cx, index: usize, list_item: &mut ListItem, log_item: &HubLogItem) {
         
-        list_item.animator.init(cx, | cx | LogList::get_default_anim(cx, index, false));
+        if list_item.animator.need_init(cx) {
+            list_item.animator.init(cx, LogList::get_default_anim(cx, index, false));
+        }
+
+        self.item_bg.last_animate(&list_item.animator);
+        //self.item_bg.color = list_item.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
         
-        self.item_bg.color = list_item.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
-        
-        let bg_inst = self.item_bg.begin_quad(cx, live_layout!(cx, self::layout_item)); //&self.get_line_layout());
+        self.item_bg.begin_quad(cx, live_layout!(cx, self::layout_item)); //&self.get_line_layout());
         
         match log_item {
             HubLogItem::LocPanic(loc_msg) => {
@@ -386,8 +391,8 @@ impl LogItemDraw {
             }
         }
         
-        let bg_area = self.item_bg.end_quad(cx, bg_inst);
-        list_item.animator.set_area(cx, bg_area);
+        self.item_bg.end_quad(cx);
+        list_item.area = self.item_bg.area();
     }
     
     pub fn draw_status_line(&mut self, cx: &mut Cx, counter: usize, bm: &BuildManager) {
@@ -397,26 +402,27 @@ impl LogItemDraw {
         }else {
             live_vec4!(cx, self::color_bg_odd)
         };
-        let bg_inst = self.item_bg.begin_quad(cx, live_layout!(cx, self::layout_item));
+        
+        self.item_bg.begin_quad(cx, live_layout!(cx, self::layout_item));
         
         if !bm.is_any_cargo_running() {
             self.text.color = live_vec4!(cx, self::color_path);
             self.code_icon.draw_icon(cx, CodeIconType::Ok);
             cx.turtle_align_y();
             if bm.is_any_artifact_running() {
-                self.text.draw_text(cx, "Running - ");
+                self.text.draw_text_walk(cx, "Running - ");
                 for ab in &bm.active_builds {
                     if ab.run_uid.is_some() {
                         let bt = &ab.build_target;
-                        self.text.draw_text(cx, &format!("{}/{}/{}:{} ", bt.builder, bt.workspace, bt.package, bt.config));
+                        self.text.draw_text_walk(cx, &format!("{}/{}/{}:{} ", bt.builder, bt.workspace, bt.package, bt.config));
                     }
                 }
             }
             else {
-                self.text.draw_text(cx, "Done ");
+                self.text.draw_text_walk(cx, "Done ");
                 for ab in &bm.active_builds {
                     let bt = &ab.build_target;
-                    self.text.draw_text(cx, &format!("{}/{}/{}:{} ", bt.builder, bt.workspace, bt.package, bt.config));
+                    self.text.draw_text_walk(cx, &format!("{}/{}/{}:{} ", bt.builder, bt.workspace, bt.package, bt.config));
                 }
             }
         }
@@ -424,18 +430,18 @@ impl LogItemDraw {
             self.code_icon.draw_icon(cx, CodeIconType::Wait);
             cx.turtle_align_y();
             self.text.color = live_vec4!(cx, self::color_path);
-            self.text.draw_text(cx, &format!("Building ({}) ", bm.artifacts.len()));
+            self.text.draw_text_walk(cx, &format!("Building ({}) ", bm.artifacts.len()));
             for ab in &bm.active_builds {
                 if ab.build_uid.is_some() {
                     let bt = &ab.build_target;
-                    self.text.draw_text(cx, &format!("{}/{}/{}:{} ", bt.builder, bt.workspace, bt.package, bt.config));
+                    self.text.draw_text_walk(cx, &format!("{}/{}/{}:{} ", bt.builder, bt.workspace, bt.package, bt.config));
                 }
             }
             if bm.exec_when_done {
-                self.text.draw_text(cx, " - starting when done");
+                self.text.draw_text_walk(cx, " - starting when done");
             }
         }
-        self.item_bg.end_quad(cx, bg_inst);
+        self.item_bg.end_quad(cx);
     }
     
     pub fn draw_filler(&mut self, cx: &mut Cx, counter: usize) {
@@ -445,7 +451,7 @@ impl LogItemDraw {
         } else {
             live_vec4!(cx, self::color_bg_odd)
         };
-        self.item_bg.draw_quad(cx, live_layout!(cx, self::layout_item).walk);
+        self.item_bg.draw_quad_walk(cx, live_layout!(cx, self::layout_item).walk);
         cx.set_turtle_bounds(view_total); // do this so it doesnt impact the turtle
     }
 }

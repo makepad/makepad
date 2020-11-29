@@ -48,7 +48,7 @@ impl TreeWorld {
 
                 geometry geom: vec2;
                 
-                instance path: float;
+                instance in_path: float;
                 instance depth: float;
 
                 varying color: vec4; 

@@ -8,7 +8,6 @@ pub struct DrawScrollShadow {
     pub shadow_top: f32
 }
 
-
 #[derive(Clone)]
 pub struct ScrollShadow {
     pub bg: DrawScrollShadow,
