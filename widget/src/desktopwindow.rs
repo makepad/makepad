@@ -28,7 +28,7 @@ pub struct DesktopWindow {
     pub window_menu: WindowMenu,
     pub default_menu: Menu,
     
-    pub _last_menu: Option<Menu>,
+    last_menu: Option<Menu>,
     
     // testing
     pub inner_over_chrome: bool,
@@ -72,9 +72,12 @@ impl DesktopWindow {
             caption_size: Vec2::default(),
             caption: "Makepad".to_string(),
             inner_over_chrome: false,
-            _last_menu: None
+            last_menu: None
         }
     }
+    
+    pub fn with_window(self, window:Window)->Self{Self{window,..self}}
+    pub fn with_caption(self, caption:&str)->Self{Self{caption:caption.to_string(),..self}}
     
     pub fn with_inner_layout(self, inner_layout: Layout) -> Self {
         Self {inner_layout, ..self}

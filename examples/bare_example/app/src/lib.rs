@@ -35,7 +35,7 @@ impl BareExampleApp {
             color_texture: Texture::new(cx),
             quad: ButtonQuad::new(cx, default_shader!()),
             text: ButtonText::new(cx, default_shader!()),
-            main_view: View::new(cx),
+            main_view: View::new(),
             count: 0.
         }
     }
@@ -89,7 +89,7 @@ impl BareExampleApp {
             //let y = x.sin();
             self.quad.counter = 0.;
             
-            //self.quad.begin_many(cx);
+            self.quad.begin_many(cx);
             //self.quad.base.shader = live_shader!(cx, self::bg_shader);
             //println!("{}", self.quad.base.slots);
             self.text.counter += 0.01;
@@ -109,7 +109,7 @@ impl BareExampleApp {
                 //self.text.draw_text_abs(cx, vec2(x, y), &msg);
             }
             //self.text.end_many(cx);
-            //self.quad.end_many(cx);
+            self.quad.end_many(cx);
             self.count += 0.001;
             
             cx.profile_end(1);
@@ -172,7 +172,7 @@ impl BareExampleApp {
             cx.profile_end(4);
             */
             
-            self.main_view.redraw_view_area(cx);
+            self.main_view.redraw_view(cx);
             self.main_view.end_view(cx);
         }
         self.pass.end_pass(cx);

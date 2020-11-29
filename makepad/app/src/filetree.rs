@@ -314,6 +314,7 @@ impl FileTree {
             if let Some(ae) = event.is_animate(cx, &node_draw.animator) {
                 self.node_bg.set_area(node_draw.area);
                 self.node_bg.animate(cx, &mut node_draw.animator, ae.time);
+                //node_draw.animator.handle_end(cx, ae.time);
             }
             
             match event.hits(cx, node_draw.area, HitOpt::default()) {
@@ -488,16 +489,23 @@ impl FileTree {
             }
             let node_draw = node_draw.as_mut().unwrap();
             
+            // using set area is necessary because we don't keep one instance
+            // of the draw api with the item. 
+            self.node_bg.set_area(node_draw.area);
+            
              if node_draw.animator.need_init(cx) {
                 node_draw.animator.init(cx, Self::get_default_anim(cx, counter, false));
             }
-            
+            // because we don't keep the draw api with the item
+            // we have to pull the last values out of the animator
             self.node_bg.last_animate(&node_draw.animator);
             
             let mut node_layout = self.node_layout.clone();
             node_layout.walk.height = Height::Fix(self.row_height * scale as f32);
+
             self.node_bg.begin_quad(cx, node_layout);
             node_draw.area = self.node_bg.area();
+
             let is_marked = node_draw.marked != 0;
             
             for i in 0..(depth - 1) {

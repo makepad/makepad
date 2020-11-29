@@ -4,7 +4,7 @@ use crate::cx::*;
 pub struct AnimatorId(u64);
 
 impl AnimatorId{
-    fn is_valid(&self)->bool{self.0 != 0}
+    fn is_empty(&self)->bool{self.0 == 0}
 }
 
 #[derive(Clone)]
@@ -47,7 +47,7 @@ impl Animator {
     pub fn init(&mut self, cx: &mut Cx, def_anim:Anim){
         self.live_update_id = cx.live_update_id;
         // lets stop all animations if we had any
-        if !self.animator_id.is_valid() {
+        if self.animator_id.is_empty() {
             self.animator_id = cx.new_animator_id();
         }
         else if let Some(anim_area) = cx.playing_animator_ids.get_mut(&self.animator_id) {
@@ -128,7 +128,7 @@ impl Animator {
             }
         }
 
-        if !self.animator_id.is_valid() {
+        if self.animator_id.is_empty() {
             self.animator_id = cx.new_animator_id();
         }
 
@@ -157,11 +157,14 @@ impl Animator {
         }
     }
     
-    pub fn anim_ended(&self, cx: &Cx, time: f64)->bool{
+    pub fn handle_end(&mut self, cx: &Cx, time: f64)->bool{
         if let Some(anim_info) = cx.playing_animator_ids.get(&self.animator_id){
             if anim_info.start_time.is_nan() || time - anim_info.start_time < anim_info.total_time{
                 return false;
             }
+        }
+        if let Some(current) = self.current.take() {
+            self.set_anim_as_last_values(&current);
         }
         true
     }
