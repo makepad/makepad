@@ -433,6 +433,7 @@ impl Cx {
                 redraw_id: self.redraw_id,
                 do_h_scroll: true,
                 do_v_scroll: true,
+                in_many_instances: false,
                 sub_view_id: 0,
                 shader: shader,
                 instances: Vec::new(),
@@ -448,7 +449,7 @@ impl Cx {
                     f.resize(sh.mapping.textures.len(), 0);
                     f
                 },
-                current_instance_offset: 0,
+                //current_instance_offset: 0,
                 instance_dirty: true,
                 uniforms_dirty: true,
                 platform: CxPlatformDrawCall::default()
@@ -464,7 +465,7 @@ impl Cx {
         // truncate buffers and set update frame
         dc.redraw_id = self.redraw_id;
         dc.instances.truncate(0);
-        dc.current_instance_offset = 0;
+        //dc.current_instance_offset = 0;
         dc.total_instance_slots = sh.mapping.instance_props.total_slots;
         dc.user_uniforms.truncate(0);
         dc.user_uniforms.resize(sh.mapping.user_uniform_props.total_slots, 0.0);
@@ -477,9 +478,13 @@ impl Cx {
         dc
     }
     
-    pub fn begin_many_instances(&mut self, shader: Shader, slots:usize, old_area:Area) -> ManyInstances {
+    pub fn begin_many_instances(&mut self, shader: Shader, slots:usize) -> ManyInstances {
         let dc = self.append_to_draw_call(shader, slots);
         let mut instances = Vec::new();
+        if dc.in_many_instances{
+            panic!("please call end_many_instances before calling begin_many_instances again")
+        }
+        dc.in_many_instances = true;
         std::mem::swap(&mut instances, &mut dc.instances);
         ManyInstances {
             instance_area: InstanceArea {
@@ -489,14 +494,13 @@ impl Cx {
                 instance_offset: instances.len(),
                 redraw_id: dc.redraw_id
             },
-            old_area,
             aligned: None,
             instances
         }
     }
     
-    pub fn begin_many_aligned_instances(&mut self, shader: Shader, slots:usize, old_area:Area) -> ManyInstances {
-        let mut li = self.begin_many_instances(shader, slots, old_area);
+    pub fn begin_many_aligned_instances(&mut self, shader: Shader, slots:usize) -> ManyInstances {
+        let mut li = self.begin_many_instances(shader, slots);
         li.aligned = Some(self.align_list.len());
         self.align_list.push(Area::Empty);
         li
@@ -506,6 +510,11 @@ impl Cx {
         let mut ia = many_instances.instance_area;
         let cxview = &mut self.views[ia.view_id];
         let dc = &mut cxview.draw_calls[ia.draw_call_id];
+
+        if !dc.in_many_instances{
+            panic!("please call begin_many_instances before calling end_many_instances")
+        }
+        dc.in_many_instances = false;
         std::mem::swap(&mut many_instances.instances, &mut dc.instances);
         ia.instance_count = (dc.instances.len() - ia.instance_offset) / dc.total_instance_slots;
         if let Some(aligned) = many_instances.aligned {
@@ -576,7 +585,6 @@ impl Cx {
 }
 
 pub struct ManyInstances{
-    pub old_area: Area,
     pub instance_area: InstanceArea,
     pub aligned: Option<usize>,
     pub instances:Vec<f32>
@@ -619,10 +627,11 @@ pub struct DrawCall {
     pub sub_view_id: usize, // if not 0, its a subnode
     
     pub shader: Shader, // if shader_id changed, delete gl vao
-
+    
+    pub in_many_instances: bool,
     pub instances: Vec<f32>,
     pub total_instance_slots: usize,
-    pub current_instance_offset: usize, // offset of current instance
+    //pub current_instance_offset: usize, // offset of current instance
     
     pub draw_uniforms: DrawUniforms, // draw uniforms
     pub geometry: Option<Geometry>,
@@ -681,7 +690,7 @@ impl DrawCall {
             instance_count: 0
         })
     }
-    
+    /*
     pub fn get_current_instance_area(&self, instance_count: usize) -> InstanceArea {
         InstanceArea {
             view_id: self.view_id,
@@ -690,7 +699,7 @@ impl DrawCall {
             instance_offset: self.current_instance_offset,
             instance_count: instance_count
         }
-    }
+    }*/
     
     pub fn clip_and_scroll_rect(&self, x: f32, y: f32, w: f32, h: f32) -> Rect {
         let mut x1 = x - self.draw_uniforms.draw_scroll_x;

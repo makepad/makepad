@@ -135,7 +135,7 @@ impl DrawCube {
     }
     
     pub fn begin_many(&mut self, cx: &mut Cx) {
-        self.many = Some(cx.begin_many_instances(self.shader, self.slots, Area::Empty))
+        self.many = Some(cx.begin_many_instances(self.shader, self.slots))
     }
     
     pub fn add_cube(&mut self) {

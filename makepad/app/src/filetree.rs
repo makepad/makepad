@@ -88,7 +88,7 @@ impl FileTree {
         live_body!(cx, r#"
             self::shadow_size: 6.0;
             self::color_tree_folder: #f;
-            self::color_tree_file: #9d;
+            self::color_tree_file: #9D9D9D;
             self::color_filler: #7f;
             self::color_bg_marked: #11466e;
             self::color_bg_selected: #28;
@@ -219,48 +219,6 @@ impl FileTree {
             ]
         }
     }
-    
-    
-    /*
-    pub fn load_from_ron(&mut self, cx: &mut Cx, ron_data: &str) {
-        
-        #[derive(Deserialize, Debug)]
-        struct RonFolder {
-            name: String,
-            open: bool,
-            files: Vec<RonFile>,
-            folders: Vec<RonFolder>
-        }
-        
-        #[derive(Deserialize, Debug)]
-        struct RonFile {
-            name: String
-        }
-        
-        fn recur_walk(node: RonFolder) -> FileNode {
-            let mut out = Vec::new();
-            for folder in node.folders {
-                out.push(recur_walk(folder));
-            }
-            for file in node.files {
-                out.push(FileNode::File {
-                    name: file.name,
-                    draw: None
-                })
-            };
-            FileNode::Folder {
-                name: node.name,
-                state: if node.open {NodeState::Open} else {NodeState::Closed},
-                draw: None,
-                folder: out
-            }
-        }
-        
-        if let Ok(value) =  ron::de::from_str(ron_data) {
-            self.root_node = recur_walk(value);
-        }
-        self.view.redraw_view_area(cx);
-    }*/
     
     pub fn clear_roots(&mut self, cx: &mut Cx, names: &Vec<String>) {
         self.root_node = FileNode::Folder {
@@ -534,12 +492,12 @@ impl FileTree {
                 node_draw.animator.init(cx, Self::get_default_anim(cx, counter, false));
             }
             
-            self.node_bg.set_area(node_draw.area);
             self.node_bg.last_animate(&node_draw.animator);
             
             let mut node_layout = self.node_layout.clone();
             node_layout.walk.height = Height::Fix(self.row_height * scale as f32);
             self.node_bg.begin_quad(cx, node_layout);
+            node_draw.area = self.node_bg.area();
             let is_marked = node_draw.marked != 0;
             
             for i in 0..(depth - 1) {
