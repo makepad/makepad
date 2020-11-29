@@ -346,11 +346,11 @@ impl LogItemDraw {
         if list_item.animator.need_init(cx) {
             list_item.animator.init(cx, LogList::get_default_anim(cx, index, false));
         }
-
         self.item_bg.last_animate(&list_item.animator);
         //self.item_bg.color = list_item.animator.last_color(cx, live_item_id!(makepad_render::quad::shader::color));
         
         self.item_bg.begin_quad(cx, live_layout!(cx, self::layout_item)); //&self.get_line_layout());
+        list_item.area = self.item_bg.area();
         
         match log_item {
             HubLogItem::LocPanic(loc_msg) => {
