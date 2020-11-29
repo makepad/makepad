@@ -354,7 +354,7 @@ impl MakepadApp {
                                         }
                                     }
                                 }
-                                window.file_panel.file_tree.view.redraw_view_area(cx);
+                                window.file_panel.file_tree.view.redraw_view(cx);
                             }
                         }
                     }

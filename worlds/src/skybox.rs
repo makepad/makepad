@@ -22,7 +22,7 @@ impl SkyBox {
             self::pos: vec3(0.0, 50.0, 0.);
             
             self::shader_sky_box: Shader {
-                use makepad_render::cube::shader::*;
+                use makepad_render::drawcube::shader::*;
                 fn color_form_id() -> vec4 {
                     if geom_id>4.5 {
                         return #f00;
@@ -43,9 +43,9 @@ impl SkyBox {
                 
                     let model_view = camera_view * view_transform * transform ;
                     return camera_projection * (model_view * vec4(
-                        geom_pos.x * size.x + pos.x,
-                        geom_pos.y * size.y + pos.y,
-                        geom_pos.z * size.z + pos.z + draw_zbias,
+                        geom_pos.x * cube_size.x + cube_pos.x,
+                        geom_pos.y * cube_size.y + cube_pos.y,
+                        geom_pos.z * cube_size.z + cube_pos.z + draw_zbias,
                         1.
                     ));
                 }

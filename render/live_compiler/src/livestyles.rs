@@ -441,6 +441,7 @@ impl LiveStyles {
         if let Some(v) = self.anims.get(&live_item_id) {
             return v.clone()
         }
+        panic!();
         self.live_access_errors.borrow_mut().push(format!("Anim not found {}", name));
         return Anim::default()
     }
@@ -455,6 +456,7 @@ impl LiveStyles {
             }
         }
         else {
+            //panic!();
             eprintln!("Shader not found {}", name);
             Shader {
                 shader_id: 0,

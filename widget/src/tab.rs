@@ -284,7 +284,7 @@ impl Tab {
         // pull the bg color from our animation system, uses 'default' value otherwise
         
         if self.animator.need_init(cx) {
-            self.animator.init(cx, live_anim!(cx, self::anim_default));
+            self.animator.init(cx, self.anim_default(cx));
             self.bg.last_animate(&self.animator);
             self.text.last_animate(&self.animator);
         }
