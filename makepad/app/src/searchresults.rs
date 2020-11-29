@@ -418,7 +418,9 @@ impl SearchResultDraw {
          if list_item.animator.need_init(cx) {
             list_item.animator.init(cx, Self::get_default_anim(cx, selected));
         }
-
+        
+        self.item_bg.set_area(list_item.area);
+        
         self.item_bg.last_animate(&list_item.animator);
        
         self.item_bg.begin_quad(cx, if selected {

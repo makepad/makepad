@@ -201,7 +201,7 @@ pub fn derive_draw_impl(input: TokenStream, draw_type: DrawType) -> TokenStream 
                     tb.add("pub fn set_area ( & mut self , area : Area ) { self . base . set_area ( area ) }");
                     
                     tb.add("pub fn get_monospace_base ( & self , cx : & mut Cx ) -> Vec2 { self . base . get_monospace_base ( cx ) }");
-                    tb.add("pub fn closest_text_offset ( & self , cx : & Cx , pos : Vec2 ) -> usize { self . base . closest_text_offset ( cx , pos ) }");
+                    tb.add("pub fn closest_text_offset ( & self , cx : & Cx , pos : Vec2 ) -> Option < usize > { self . base . closest_text_offset ( cx , pos ) }");
                     
                     tb.add("pub fn buf_truncate ( & mut self , len : usize ) { self . base . buf_truncate ( len ) ; }");
                     tb.add("pub fn buf_push_char ( & mut self , c : char ) { self . base . buf_push_char ( c ) ; }");

@@ -9,20 +9,21 @@ pub struct ScrollBar {
     pub axis: Axis,
     pub animator: Animator,
     pub use_vertical_finger_scroll: bool,
-    pub _visible: bool,
     pub smoothing: Option<f32>,
-    pub next_frame: NextFrame,
-    pub _bar_side_margin: f32,
-    pub _view_area: Area,
-    pub _view_total: f32, // the total view area
-    pub _view_visible: f32, // the visible view area
-    pub _scroll_size: f32, // the size of the scrollbar
-    pub _scroll_pos: f32, // scrolling position non normalised
     
-    pub _scroll_target: f32,
-    pub _scroll_delta: f32,
+    next_frame: NextFrame,
+    visible: bool,
+    bar_side_margin: f32,
+    view_area: Area,
+    view_total: f32, // the total view area
+    view_visible: f32, // the visible view area
+    scroll_size: f32, // the size of the scrollbar
+    scroll_pos: f32, // scrolling position non normalised
     
-    pub _drag_point: Option<f32>, // the point in pixels where we are dragging
+    scroll_target: f32,
+    scroll_delta: f32,
+    
+    drag_point: Option<f32>, // the point in pixels where we are dragging
 }
 
 #[derive(Clone, DrawQuad)]
@@ -55,19 +56,20 @@ impl ScrollBar {
             bg: DrawScrollBar::new(cx, default_shader!())
                 .with_draw_depth(2.5),
             use_vertical_finger_scroll: false,
-            _visible: false,
             
-            _view_area: Area::Empty,
-            _view_total: 0.0,
-            _view_visible: 0.0,
-            _bar_side_margin: 6.0,
-            _scroll_size: 0.0,
-            _scroll_pos: 0.0,
+            visible: false,
             
-            _scroll_target: 0.0,
-            _scroll_delta: 0.0,
+            view_area: Area::Empty,
+            view_total: 0.0,
+            view_visible: 0.0,
+            bar_side_margin: 6.0,
+            scroll_size: 0.0,
+            scroll_pos: 0.0,
             
-            _drag_point: None,
+            scroll_target: 0.0,
+            scroll_delta: 0.0,
+            
+            drag_point: None,
         }
     }
     
@@ -128,28 +130,28 @@ impl ScrollBar {
     // reads back normalized scroll position info
     pub fn get_normalized_scroll_pos(&self) -> (f32, f32) {
         // computed handle size normalized
-        let vy = self._view_visible / self._view_total;
-        if !self._visible {
+        let vy = self.view_visible / self.view_total;
+        if !self.visible {
             return (0.0, 0.0);
         }
-        let norm_handle = vy.max(self.min_handle_size / self._scroll_size);
-        let norm_scroll = (1. - norm_handle) * ((self._scroll_pos / self._view_total) / (1. - vy));
+        let norm_handle = vy.max(self.min_handle_size / self.scroll_size);
+        let norm_scroll = (1. - norm_handle) * ((self.scroll_pos / self.view_total) / (1. - vy));
         return (norm_scroll, norm_handle)
     }
     
     // sets the scroll pos from finger position
     pub fn set_scroll_pos_from_finger(&mut self, cx: &mut Cx, finger: f32) -> ScrollBarEvent {
-        let vy = self._view_visible / self._view_total;
-        let norm_handle = vy.max(self.min_handle_size / self._scroll_size);
+        let vy = self.view_visible / self.view_total;
+        let norm_handle = vy.max(self.min_handle_size / self.scroll_size);
         
         let new_scroll_pos = (
-            (self._view_total * (1. - vy) * (finger / self._scroll_size)) / (1. - norm_handle)
-        ).max(0.).min(self._view_total - self._view_visible);
+            (self.view_total * (1. - vy) * (finger / self.scroll_size)) / (1. - norm_handle)
+        ).max(0.).min(self.view_total - self.view_visible);
         
         // lets snap new_scroll_pos
-        let changed = self._scroll_pos != new_scroll_pos;
-        self._scroll_pos = new_scroll_pos;
-        self._scroll_target = new_scroll_pos;
+        let changed = self.scroll_pos != new_scroll_pos;
+        self.scroll_pos = new_scroll_pos;
+        self.scroll_target = new_scroll_pos;
         if changed {
             self.update_shader_scroll_pos(cx);
             return self.make_scroll_event();
@@ -166,9 +168,9 @@ impl ScrollBar {
     // turns scroll_pos into an event on this.event
     pub fn make_scroll_event(&mut self) -> ScrollBarEvent {
         ScrollBarEvent::Scroll {
-            scroll_pos: self._scroll_pos,
-            view_total: self._view_total,
-            view_visible: self._view_visible
+            scroll_pos: self.scroll_pos,
+            view_total: self.view_total,
+            view_visible: self.view_visible
         }
     }
     
@@ -177,21 +179,21 @@ impl ScrollBar {
         if self.smoothing.is_none() {
             return false;
         }
-        if (self._scroll_target - self._scroll_pos).abs() < 0.01 {
+        if (self.scroll_target - self.scroll_pos).abs() < 0.01 {
             return false
         }
-        if self._scroll_pos > self._scroll_target { // go back
-            self._scroll_pos = self._scroll_pos + (self.smoothing.unwrap() * self._scroll_delta).min(-1.);
-            if self._scroll_pos <= self._scroll_target { // hit the target
-                self._scroll_pos = self._scroll_target;
+        if self.scroll_pos > self.scroll_target { // go back
+            self.scroll_pos = self.scroll_pos + (self.smoothing.unwrap() * self.scroll_delta).min(-1.);
+            if self.scroll_pos <= self.scroll_target { // hit the target
+                self.scroll_pos = self.scroll_target;
                 self.update_shader_scroll_pos(cx);
                 return false;
             }
         }
         else { // go forward
-            self._scroll_pos = self._scroll_pos + (self.smoothing.unwrap() * self._scroll_delta).max(1.);
-            if self._scroll_pos > self._scroll_target { // hit the target
-                self._scroll_pos = self._scroll_target;
+            self.scroll_pos = self.scroll_pos + (self.smoothing.unwrap() * self.scroll_delta).max(1.);
+            if self.scroll_pos > self.scroll_target { // hit the target
+                self.scroll_pos = self.scroll_target;
                 self.update_shader_scroll_pos(cx);
                 return false;
             }
@@ -201,16 +203,16 @@ impl ScrollBar {
     }
     
     pub fn get_scroll_pos(&self) -> f32 {
-        return self._scroll_pos;
+        return self.scroll_pos;
     }
     
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, scroll_pos: f32) -> bool {
         // clamp scroll_pos to
-        let scroll_pos = scroll_pos.min(self._view_total - self._view_visible).max(0.);
+        let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.);
         
-        if self._scroll_pos != scroll_pos {
-            self._scroll_pos = scroll_pos;
-            self._scroll_target = scroll_pos;
+        if self.scroll_pos != scroll_pos {
+            self.scroll_pos = scroll_pos;
+            self.scroll_target = scroll_pos;
             self.update_shader_scroll_pos(cx);
             self.next_frame = cx.new_next_frame();
             return true
@@ -219,24 +221,24 @@ impl ScrollBar {
     }
     
     pub fn get_scroll_target(&mut self) -> f32 {
-        return self._scroll_target
+        return self.scroll_target
     }
     
     pub fn set_scroll_view_total(&mut self, _cx: &mut Cx, view_total: f32) {
-        self._view_total = view_total;
+        self.view_total = view_total;
     }
     
     pub fn get_scroll_view_total(&self) -> f32 {
-        return self._view_total;
+        return self.view_total;
     }
     
     pub fn set_scroll_target(&mut self, cx: &mut Cx, scroll_pos_target: f32) -> bool {
         // clamp scroll_pos to
         
-        let new_target = scroll_pos_target.min(self._view_total - self._view_visible).max(0.);
-        if self._scroll_target != new_target {
-            self._scroll_target = new_target;
-            self._scroll_delta = new_target - self._scroll_pos;
+        let new_target = scroll_pos_target.min(self.view_total - self.view_visible).max(0.);
+        if self.scroll_target != new_target {
+            self.scroll_target = new_target;
+            self.scroll_delta = new_target - self.scroll_pos;
             self.next_frame = cx.new_next_frame();
             return true
         };
@@ -244,7 +246,7 @@ impl ScrollBar {
     }
     
     pub fn scroll_into_view(&mut self, cx: &mut Cx, pos: f32, size: f32, smooth: bool) {
-        if pos < self._scroll_pos { // scroll up
+        if pos < self.scroll_pos { // scroll up
             let scroll_to = pos;
             if !smooth || self.smoothing.is_none() {
                 self.set_scroll_pos(cx, scroll_to);
@@ -253,10 +255,10 @@ impl ScrollBar {
                 self.set_scroll_target(cx, scroll_to);
             }
         }
-        else if pos + size > self._scroll_pos + self._view_visible { // scroll down
-            let scroll_to = (pos + size) - self._view_visible;
-            if pos + size > self._view_total { // resize _view_total if need be
-                self._view_total = pos + size;
+        else if pos + size > self.scroll_pos + self.view_visible { // scroll down
+            let scroll_to = (pos + size) - self.view_visible;
+            if pos + size > self.view_total { // resize _view_total if need be
+                self.view_total = pos + size;
             }
             if !smooth || self.smoothing.is_none() {
                 self.set_scroll_pos(cx, scroll_to);
@@ -275,7 +277,7 @@ impl ScrollBar {
                     Axis::Horizontal => fe.handled_x,
                     Axis::Vertical => fe.handled_y
                 } {
-                    let rect = self._view_area.get_rect(cx);
+                    let rect = self.view_area.get_rect(cx);
                     if rect.contains(fe.abs) { // handle mousewheel
                         // we should scroll in either x or y
                         let scroll = match self.axis {
@@ -309,7 +311,7 @@ impl ScrollBar {
             
             _ => ()
         };
-        if self._visible {
+        if self.visible {
             if let Some(ae) = event.is_animate(cx, &self.animator) {
                 self.bg.animate(cx, &mut self.animator, ae.time);
             }
@@ -329,18 +331,18 @@ impl ScrollBar {
                     };
                     cx.set_down_mouse_cursor(MouseCursor::Default);
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
-                    let bar_start = norm_scroll * self._scroll_size;
-                    let bar_size = norm_handle * self._scroll_size;
+                    let bar_start = norm_scroll * self.scroll_size;
+                    let bar_size = norm_handle * self.scroll_size;
                     if rel < bar_start || rel > bar_start + bar_size { // clicked outside
-                        self._drag_point = Some(bar_size * 0.5);
-                        return self.set_scroll_pos_from_finger(cx, rel - self._drag_point.unwrap());
+                        self.drag_point = Some(bar_size * 0.5);
+                        return self.set_scroll_pos_from_finger(cx, rel - self.drag_point.unwrap());
                     }
                     else { // clicked on
-                        self._drag_point = Some(rel - bar_start); // store the drag delta
+                        self.drag_point = Some(rel - bar_start); // store the drag delta
                     }
                 },
                 Event::FingerHover(fe) => {
-                    if self._drag_point.is_none() {
+                    if self.drag_point.is_none() {
                         cx.set_hover_mouse_cursor(MouseCursor::Default);
                         match fe.hover_state {
                             HoverState::In => {
@@ -354,7 +356,7 @@ impl ScrollBar {
                     }
                 },
                 Event::FingerUp(fe) => {
-                    self._drag_point = None;
+                    self.drag_point = None;
                     if fe.is_over {
                         if fe.input_type.has_hovers() {
                             self.animator.play_anim(cx, live_anim!(cx, self::anim_over));
@@ -370,17 +372,17 @@ impl ScrollBar {
                 },
                 Event::FingerMove(fe) => {
                     // helper called by event code to scroll from a finger
-                    if self._drag_point.is_none() {
+                    if self.drag_point.is_none() {
                         // state should never occur.
                         //println!("Invalid state in scrollbar, fingerMove whilst drag_point is none")
                     }
                     else {
                         match self.axis {
                             Axis::Horizontal => {
-                                return self.set_scroll_pos_from_finger(cx, fe.rel.x - self._drag_point.unwrap());
+                                return self.set_scroll_pos_from_finger(cx, fe.rel.x - self.drag_point.unwrap());
                             },
                             Axis::Vertical => {
-                                return self.set_scroll_pos_from_finger(cx, fe.rel.y - self._drag_point.unwrap());
+                                return self.set_scroll_pos_from_finger(cx, fe.rel.y - self.drag_point.unwrap());
                             }
                         }
                     }
@@ -398,23 +400,23 @@ impl ScrollBar {
             self.animator.init(cx, live_anim!(cx, self::anim_default));
             self.bg.last_animate(&self.animator);
         }
-        self._view_area = view_area;
+        self.view_area = view_area;
         self.axis = axis;
         
         match self.axis {
             Axis::Horizontal => {
-                self._visible = view_total.x > view_rect.size.x + 0.1;
-                self._scroll_size = if view_total.y > view_rect.size.y + 0.1 {
+                self.visible = view_total.x > view_rect.size.x + 0.1;
+                self.scroll_size = if view_total.y > view_rect.size.y + 0.1 {
                     view_rect.size.x - self.bar_size
                 }
                 else {
                     view_rect.size.x
-                } -self._bar_side_margin * 2.;
-                self._view_total = view_total.x;
-                self._view_visible = view_rect.size.x;
-                self._scroll_pos = self._scroll_pos.min(self._view_total - self._view_visible).max(0.);
+                } -self.bar_side_margin * 2.;
+                self.view_total = view_total.x;
+                self.view_visible = view_rect.size.x;
+                self.scroll_pos = self.scroll_pos.min(self.view_total - self.view_visible).max(0.);
                 
-                if self._visible {
+                if self.visible {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                     self.bg.is_vertical = 0.0;
                     self.bg.norm_scroll = norm_scroll;
@@ -422,8 +424,8 @@ impl ScrollBar {
                     self.bg.draw_quad_rel(
                         cx,
                         Rect {
-                            pos: vec2(self._bar_side_margin, view_rect.size.y - self.bar_size),
-                            size: vec2( self._scroll_size, self.bar_size),
+                            pos: vec2(self.bar_side_margin, view_rect.size.y - self.bar_size),
+                            size: vec2( self.scroll_size, self.bar_size),
                         }
                     );
                     self.bg.area().set_do_scroll(cx, false, false);
@@ -431,17 +433,17 @@ impl ScrollBar {
             },
             Axis::Vertical => {
                 // compute if we need a horizontal one
-                self._visible = view_total.y > view_rect.size.y + 0.1;
-                self._scroll_size = if view_total.x > view_rect.size.x + 0.1 {
+                self.visible = view_total.y > view_rect.size.y + 0.1;
+                self.scroll_size = if view_total.x > view_rect.size.x + 0.1 {
                     view_rect.size.y - self.bar_size
                 }
                 else {
                     view_rect.size.y
-                } -self._bar_side_margin * 2.;
-                self._view_total = view_total.y;
-                self._view_visible = view_rect.size.y;
-                self._scroll_pos = self._scroll_pos.min(self._view_total - self._view_visible).max(0.);
-                if self._visible {
+                } -self.bar_side_margin * 2.;
+                self.view_total = view_total.y;
+                self.view_visible = view_rect.size.y;
+                self.scroll_pos = self.scroll_pos.min(self.view_total - self.view_visible).max(0.);
+                if self.visible {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                     self.bg.is_vertical = 1.0;
                     self.bg.norm_scroll = norm_scroll;
@@ -449,8 +451,8 @@ impl ScrollBar {
                     self.bg.draw_quad_rel(
                         cx,
                         Rect {
-                            pos: vec2(view_rect.size.x - self.bar_size, self._bar_side_margin),
-                            size: vec2(self.bar_size, self._scroll_size)
+                            pos: vec2(view_rect.size.x - self.bar_size, self.bar_side_margin),
+                            size: vec2(self.bar_size, self.scroll_size)
                         }
                     );
                     self.bg.area().set_do_scroll(cx, false, false);
@@ -460,14 +462,14 @@ impl ScrollBar {
         
         
         // see if we need to clamp
-        let clamped_pos = self._scroll_pos.min(self._view_total - self._view_visible).max(0.);
-        if clamped_pos != self._scroll_pos {
-            self._scroll_pos = clamped_pos;
-            self._scroll_target = clamped_pos;
+        let clamped_pos = self.scroll_pos.min(self.view_total - self.view_visible).max(0.);
+        if clamped_pos != self.scroll_pos {
+            self.scroll_pos = clamped_pos;
+            self.scroll_target = clamped_pos;
             // ok so this means we 'scrolled' this can give a problem for virtual viewport widgets
             self.next_frame = cx.new_next_frame();
         }
         
-        self._scroll_pos
+        self.scroll_pos
     }
 }

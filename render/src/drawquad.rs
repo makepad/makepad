@@ -6,6 +6,7 @@ pub struct DrawQuad {
     pub area: Area,
     pub many: Option<ManyInstances>,
     pub many_old_area: Area,
+   //pub many_set_area: bool,
     pub slots: usize,
     pub rect_pos: Vec2,
     pub rect_size: Vec2,
@@ -18,6 +19,7 @@ impl Clone for DrawQuad {
             shader: unsafe {self.shader.clone()},
             area: Area ::Empty,
             many: None,
+           // many_set_area: false,
             many_old_area: Area::Empty,
             slots: self.slots,
             rect_pos: Vec2::default(),
@@ -38,6 +40,7 @@ impl DrawQuad {
             slots: slots + 5,
             area: Area::Empty,
             many: None,
+            //many_set_area: false,
             many_old_area: Area::Empty,
             rect_pos: Vec2::default(),
             rect_size: Vec2::default(),
@@ -143,7 +146,8 @@ impl DrawQuad {
     }
     
     pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) {
-        self.area = cx.add_aligned_instance(self.shader, self.as_slice());
+        let new_area = cx.add_aligned_instance(self.shader, self.as_slice());
+        self.area = cx.update_area_refs(self.area, new_area);
         cx.begin_turtle(layout, self.area);
     }
     
@@ -176,11 +180,30 @@ impl DrawQuad {
     pub fn draw_quad(&mut self, cx: &mut Cx) {
         unsafe {
             if let Some(mi) = &mut self.many {
-                if let Area::Instance(ia) = &mut self.area{
-                    ia.instance_count = 1;
-                    ia.instance_offset=  mi.instances.len();
+                
+                let new_area = if let Area::Instance(ia) = &mut self.area{
+                    // we need to update the area pointer
+                    if mi.instance_area.redraw_id != ia.redraw_id{
+                        Some(Area::Instance(InstanceArea {
+                            instance_count: 1,
+                            instance_offset: mi.instances.len(),
+                            ..mi.instance_area.clone()
+                        }))
+                    }
+                    else{ // just patch up the area without notifying Cx
+                        ia.instance_count = 1;
+                        ia.instance_offset=  mi.instances.len();
+                        None
+                    }
                 }
+                else{
+                    None
+                };
                 mi.instances.extend_from_slice(std::slice::from_raw_parts(&self.rect_pos as *const _ as *const f32, self.slots));
+                
+                if let Some(new_area) = new_area{
+                    self.area = cx.update_area_refs(self.area, new_area);
+                }
                 return
             }
         }
@@ -193,7 +216,7 @@ impl DrawQuad {
     }
 
     pub fn set_area(&mut self, area:Area) {
-        self.area = area
+        self.area = area;
     }
 
     pub fn set_shader(&mut self, shader: Shader){
@@ -203,6 +226,7 @@ impl DrawQuad {
     pub fn begin_many(&mut self, cx: &mut Cx) {
         let mi = cx.begin_many_aligned_instances(self.shader, self.slots);
         self.many_old_area = self.area;
+        //self.many_set_area = false;
         self.area = Area::Instance(InstanceArea {
             instance_count: 0,
             instance_offset: mi.instances.len(),
