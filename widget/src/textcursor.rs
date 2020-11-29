@@ -1366,6 +1366,7 @@ impl DrawCursors {
                 return mark_spaces
             }
         }
+        //println!("{}", self.start);
         // in current cursor range, update values
         if offset >= self.start && offset <= self.end {
             self.process_cursor(last_cursor, offset, x, y, h, z);
@@ -1382,4 +1383,6 @@ impl DrawCursors {
         }
         return mark_spaces
     }
+
+
 }

@@ -210,7 +210,7 @@ impl WorldView {
         }
         
         self.view.end_view(cx,);
-        self.next_frame = cx.new_next_frame();
+        //self.next_frame = cx.new_next_frame();
         self.update_uniforms(cx);
     }
     
