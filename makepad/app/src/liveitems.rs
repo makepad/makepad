@@ -44,7 +44,7 @@ impl LiveItemsView {
     
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            scroll_view: ScrollView::new(cx),
+            scroll_view: ScrollView::new_standard_hv(cx),
             undo_id: 0,
             value_text: DrawText::new(cx, default_shader!())
                 .with_draw_depth(1.0),

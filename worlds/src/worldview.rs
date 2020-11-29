@@ -61,7 +61,7 @@ impl WorldView {
         Self {
             view: View::new(),
             bg: DrawColor::new(cx, default_shader!()),
-            select_view: ScrollView::new(cx),
+            select_view: ScrollView::new_standard_hv(cx),
             viewport_3d: Viewport3D::new(cx),
             buttons: Elements::new(NormalButton::new(cx)),
             time: 0.0,
