@@ -276,6 +276,9 @@ impl Area{
                     if prop.ty != ty{
                         panic!("get_read_ref wrong instance type, expected {:?} got: {:?}!", prop.ty, ty);
                     }
+                    if inst.instance_count == 0{
+                        return None
+                    }
                     return Some(
                         DrawReadRef{
                             repeat: inst.instance_count,
@@ -325,7 +328,9 @@ impl Area{
 
                     cx.passes[cxview.pass_id].paint_dirty = true;
                     draw_call.instance_dirty = true;
-
+                    if inst.instance_count == 0{
+                        return None
+                    }
                     return Some(
                         DrawWriteRef{
                             repeat:inst.instance_count,

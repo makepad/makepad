@@ -14,6 +14,7 @@ pub struct DrawText {
     pub shader: Shader,
     pub area: Area,
     pub many: Option<ManyInstances>,
+    pub many_old_area: Area,
     pub slots: usize,
     pub buf: Vec<char>,
     pub text_style: TextStyle,
@@ -41,6 +42,7 @@ impl Clone for DrawText {
             shader: unsafe {self.shader.clone()},
             area: Area ::Empty,
             many: None,
+            many_old_area: Area::Empty,
             slots: self.slots,
             buf: Vec::new(),
             
@@ -78,6 +80,7 @@ impl DrawText {
             shader: shader,
             area: Area::Empty,
             many: None,
+            many_old_area: Area::Empty,
             slots: slots + 18,
             buf: Vec::new(),
             
@@ -184,6 +187,7 @@ impl DrawText {
                     // basic hardcoded mipmapping so it stops 'swimming' in VR
                     // mipmaps are stored in red/green/blue channel
                     let s = 1.0;
+                    
                     if dx > 7.0 {
                         s = 0.7;
                     }
@@ -270,13 +274,25 @@ impl DrawText {
     }
     
     pub fn begin_many(&mut self, cx: &mut Cx) {
-        let mi = cx.begin_many_aligned_instances(self.shader, self.slots, self.area);
+        self.many_old_area = self.area;
+        let mi = cx.begin_many_aligned_instances(self.shader, self.slots);
         self.area = Area::Instance(InstanceArea {
             instance_count: 0,
             instance_offset: mi.instances.len(),
             ..mi.instance_area.clone()
         });
         self.many = Some(mi);
+    }
+
+        
+    pub fn end_many(&mut self, cx: &mut Cx) {
+        unsafe {
+            if let Some(mi) = self.many.take() {
+                let new_area = cx.end_many_instances(mi);
+                self.area = cx.update_area_refs(self.many_old_area, new_area);
+                self.write_uniforms(cx);
+            }
+        }
     }
     
     pub fn write_uniforms(&mut self, cx: &mut Cx) {
@@ -298,16 +314,7 @@ impl DrawText {
     pub fn set_shader(&mut self, shader: Shader){
         self.shader = shader;
     }
-        
-    pub fn end_many(&mut self, cx: &mut Cx) {
-        unsafe {
-            if let Some(mi) = self.many.take() {
-                let new_area = cx.end_many_instances(mi);
-                self.area = cx.update_area_refs(self.area, new_area);
-                self.write_uniforms(cx);
-            }
-        }
-    }
+
     
     pub fn buf_truncate(&mut self, len:usize){
         unsafe {
@@ -584,10 +591,10 @@ impl DrawText {
         let scroll_pos = area.get_scroll_pos(cx);
         let spos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
         
-        let base = area.get_read_ref(cx, live_item_id!(self::shader::base), Ty::Vec2).unwrap();
-        let rect_size = area.get_read_ref(cx, live_item_id!(self::shader::rect_size), Ty::Vec2).unwrap();
-        let font_size = area.get_read_ref(cx, live_item_id!(self::shader::font_size), Ty::Float).unwrap();
-        let char_offset = area.get_read_ref(cx, live_item_id!(self::shader::font_size), Ty::Float).unwrap();
+        let base = area.get_read_ref(cx, live_item_id!(self::DrawText::base), Ty::Vec2).unwrap();
+        let rect_size = area.get_read_ref(cx, live_item_id!(self::DrawText::rect_size), Ty::Vec2).unwrap();
+        let font_size = area.get_read_ref(cx, live_item_id!(self::DrawText::font_size), Ty::Float).unwrap();
+        let char_offset = area.get_read_ref(cx, live_item_id!(self::DrawText::char_offset), Ty::Float).unwrap();
         
         let text_style = unsafe {&self.text_style};
         let line_spacing = text_style.line_spacing;

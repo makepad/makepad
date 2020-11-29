@@ -5,6 +5,7 @@ pub struct DrawQuad {
     pub shader: Shader,
     pub area: Area,
     pub many: Option<ManyInstances>,
+    pub many_old_area: Area,
     pub slots: usize,
     pub rect_pos: Vec2,
     pub rect_size: Vec2,
@@ -17,6 +18,7 @@ impl Clone for DrawQuad {
             shader: unsafe {self.shader.clone()},
             area: Area ::Empty,
             many: None,
+            many_old_area: Area::Empty,
             slots: self.slots,
             rect_pos: Vec2::default(),
             rect_size: Vec2::default(),
@@ -36,6 +38,7 @@ impl DrawQuad {
             slots: slots + 5,
             area: Area::Empty,
             many: None,
+            many_old_area: Area::Empty,
             rect_pos: Vec2::default(),
             rect_size: Vec2::default(),
             draw_depth: 0.0
@@ -198,7 +201,8 @@ impl DrawQuad {
     }
 
     pub fn begin_many(&mut self, cx: &mut Cx) {
-        let mi = cx.begin_many_aligned_instances(self.shader, self.slots, self.area);
+        let mi = cx.begin_many_aligned_instances(self.shader, self.slots);
+        self.many_old_area = self.area;
         self.area = Area::Instance(InstanceArea {
             instance_count: 0,
             instance_offset: mi.instances.len(),
@@ -209,11 +213,10 @@ impl DrawQuad {
     
     pub fn end_many(&mut self, cx: &mut Cx) {
         unsafe {
-            if let Some(li) = self.many.take() {
+            if let Some(mi) = self.many.take() {
                 // update area pointer
-                let old_area = li.old_area;
-                let new_area = cx.end_many_instances(li);
-                self.area = cx.update_area_refs(old_area, new_area);
+                let new_area = cx.end_many_instances(mi);
+                self.area = cx.update_area_refs(self.many_old_area, new_area);
             }
         }
     }

@@ -141,7 +141,7 @@ impl TreeWorld {
         
         self.sky_box.draw_sky_box(cx);
         
-        let mut many = cx.begin_many_instances(live_shader!(cx, self::shader), 2, Area::Empty);
+        let mut many = cx.begin_many_instances(live_shader!(cx, self::shader), 2);
         
         let max_depth = match cx.gpu_info.performance{
             GpuPerformance::Tier1=>10.0,
@@ -157,11 +157,11 @@ impl TreeWorld {
             if depth > max_depth {return}
             recur(many, path, depth + 1.0, max_depth);
             recur(many, path + (2.0f32).powf(depth), depth + 1.0, max_depth);
-        } 
+        }  
         recur(&mut many, 0., 0., max_depth);
 
         let area = cx.end_many_instances(many);
         // write the uniform on the area
-        max_depth.write_draw_input(cx, area, live_item_id!(self::shader::max_depth), "");
+        write_draw_input!(cx, area, self::shader::max_depth, max_depth);
     }
 }
