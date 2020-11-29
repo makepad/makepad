@@ -37,7 +37,7 @@ impl KeyType {
 impl Keyboard {
     pub fn new(cx: &mut Cx) -> Self {
         Self { 
-            view: ScrollView::new(cx),
+            view: ScrollView::new_standard_hv(cx),
             buttons: Elements::new(NormalButton {
                 ..NormalButton::new(cx)
             }),

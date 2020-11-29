@@ -10,7 +10,7 @@ pub struct ScrollView{
 
 impl ScrollView{
 
-    pub fn new(cx: &mut Cx) -> Self {
+    pub fn new() -> Self {
         Self {
             view: View::new(),
             scroll_h: None,
@@ -176,12 +176,12 @@ impl ScrollView{
         }
         
         if let Some(scroll_h) = &mut self.scroll_h {
-            let scroll_pos = scroll_h.draw_scroll_bar(cx, Axis::Horizontal, rect_now, view_total);
+            let scroll_pos = scroll_h.draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
             cx.set_view_scroll_x(view_id, scroll_pos);
         }
         if let Some(scroll_v) = &mut self.scroll_v {
             //println!("SET SCROLLBAR {} {}", rect_now.h, view_total.y);
-            let scroll_pos = scroll_v.draw_scroll_bar(cx, Axis::Vertical, rect_now, view_total);
+            let scroll_pos = scroll_v.draw_scroll_bar(cx, Axis::Vertical, view_area, rect_now, view_total);
             cx.set_view_scroll_y(view_id, scroll_pos);
         }
         

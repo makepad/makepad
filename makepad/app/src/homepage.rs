@@ -27,7 +27,7 @@ pub enum EmailState {
 impl HomePage {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            view: ScrollView::new(cx),
+            view: ScrollView::new_standard_hv(cx),
             bg: DrawColor::new(cx, default_shader!()),
             text: DrawText::new(cx, default_shader!()),
             shadow: ScrollShadow::new(cx),

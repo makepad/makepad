@@ -36,7 +36,7 @@ impl TabControl {
     
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            tabs_view: ScrollView::new(cx)
+            tabs_view: ScrollView::new()
                 .with_scroll_h(ScrollBar::new(cx)
                     .with_bar_size(8.0)
                     .with_smoothing(0.15)

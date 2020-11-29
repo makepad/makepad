@@ -47,7 +47,10 @@ impl Animator {
     pub fn init(&mut self, cx: &mut Cx, def_anim:Anim){
         self.live_update_id = cx.live_update_id;
         // lets stop all animations if we had any
-        if let Some(anim_area) = cx.playing_animator_ids.get_mut(&self.animator_id) {
+        if !self.animator_id.is_valid() {
+            self.animator_id = cx.new_animator_id();
+        }
+        else if let Some(anim_area) = cx.playing_animator_ids.get_mut(&self.animator_id) {
             anim_area.total_time = 0.;
         }
         self.set_anim_as_last_values(&def_anim);
@@ -127,10 +130,8 @@ impl Animator {
 
         if !self.animator_id.is_valid() {
             self.animator_id = cx.new_animator_id();
-            self.set_anim_as_last_values(&anim);
-            self.current = Some(anim);
-            return
         }
+
         // alright first we find area, it already exists
         if let Some(anim_info) = cx.playing_animator_ids.get_mut(&self.animator_id){
 
