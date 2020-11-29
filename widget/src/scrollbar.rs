@@ -52,7 +52,8 @@ impl ScrollBar {
             next_frame: NextFrame::default(),
             axis: Axis::Horizontal,
             animator: Animator::default(),
-            bg: DrawScrollBar::new(cx, live_shader!(cx, self::shader_bg)).with_draw_depth(2.5),
+            bg: DrawScrollBar::new(cx, default_shader!())
+                .with_draw_depth(2.5),
             use_vertical_finger_scroll: false,
             _visible: false,
             
@@ -74,8 +75,6 @@ impl ScrollBar {
         self::DrawScrollBar::register_draw_input(cx);
         
         live_body!(cx, r#"
-            self::bar_size: 1.000;
-            
             self::color_base: #5;
             self::color_over: #7;
             self::color_down: #9;
@@ -83,21 +82,21 @@ impl ScrollBar {
             self::anim_default: Anim {
                 play: Cut {duration: 0.5}
                 tracks: [
-                    Vec4 {keys: {1.0: self::color_base}, bind_to: makepad_render::quad::shader::color}
+                    Vec4 {keys: {1.0: self::color_base}, bind_to: makepad_render::drawcolor::DrawColor::color}
                 ]
             }
             
             self::anim_over: Anim {
                 play: Cut {duration: 0.05}
                 tracks: [
-                    Vec4 {keys: {1.0: self::color_over}, bind_to: makepad_render::quad::shader::color}
+                    Vec4 {keys: {1.0: self::color_over}, bind_to: makepad_render::drawcolor::DrawColor::color}
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.05}
                 tracks: [
-                    Vec4 {keys: {1.0: self::color_down}, bind_to: makepad_render::quad::shader::color}
+                    Vec4 {keys: {1.0: self::color_down}, bind_to: makepad_render::drawcolor::DrawColor::color}
                 ]
             }
             
@@ -393,15 +392,14 @@ impl ScrollBar {
         ScrollBarEvent::None
     }
     
-    pub fn draw_scroll_bar(&mut self, cx: &mut Cx, axis: Axis, view_rect: Rect, view_total: Vec2) -> f32 {
+    pub fn draw_scroll_bar(&mut self, cx: &mut Cx, axis: Axis, view_area: Area, view_rect: Rect, view_total: Vec2) -> f32 {
 
         if self.animator.need_init(cx) {
             self.animator.init(cx, live_anim!(cx, self::anim_default));
             self.bg.last_animate(&self.animator);
         }
-
+        self._view_area = view_area;
         self.axis = axis;
-        self.bar_size = live_float!(cx, self::bar_size);
         
         match self.axis {
             Axis::Horizontal => {
