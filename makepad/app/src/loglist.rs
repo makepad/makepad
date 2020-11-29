@@ -30,7 +30,7 @@ impl LogList {
             item_draw: LogItemDraw::new(cx),
             list: ListLogic::default()
                 .with_multi_select(true),
-            view: ScrollView::new(cx),
+            view: ScrollView::new_standard_hv(cx),
         }
     }
     

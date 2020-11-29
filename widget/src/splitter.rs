@@ -70,21 +70,21 @@ impl Splitter {
             self::anim_default: Anim {
                 play: Cut {duration: 0.5}
                 tracks: [
-                    Vec4 {keys: {1.0: self::color_bg} bind_to: makepad_render::quad::shader::color}
+                    Vec4 {keys: {1.0: self::color_bg} bind_to: makepad_render::drawcolor::DrawColor::color}
                 ]
             }
             
             self::anim_over: Anim {
                 play: Cut {duration: 0.05}
                 tracks: [
-                    Vec4 {keys: {1.0: self::color_over}, bind_to: makepad_render::quad::shader::color}
+                    Vec4 {keys: {1.0: self::color_over}, bind_to: makepad_render::drawcolor::DrawColor::color}
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.2}
                 tracks: [
-                    Vec4 {keys: {0.0: self::color_peak, 1.0: self::color_drag}, bind_to: makepad_render::quad::shader::color}
+                    Vec4 {keys: {0.0: self::color_peak, 1.0: self::color_drag}, bind_to: makepad_render::drawcolor::DrawColor::color}
                 ]
             }
             

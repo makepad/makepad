@@ -581,11 +581,11 @@ impl DrawText {
     }
     
     // looks up text with the behavior of a text selection mouse cursor
-    pub fn closest_text_offset(&self, cx: &Cx, pos: Vec2) -> usize {
+    pub fn closest_text_offset(&self, cx: &Cx, pos: Vec2) -> Option<usize> {
         let area = unsafe {&self.area};
         
         if !area.is_valid(cx) {
-            return 0
+            return None
         }
         
         let scroll_pos = area.get_scroll_pos(cx);
@@ -618,16 +618,16 @@ impl DrawText {
                         let prev_x = base.buffer[prev_index + 0];
                         let prev_w = rect_size.buffer[prev_index + 0];
                         if i < base.repeat - 1 && prev_x > spos.x + prev_w { // fix newline jump-back
-                            return char_offset.buffer[index] as usize;
+                            return Some(char_offset.buffer[index] as usize);
                         }
-                        return char_offset.buffer[prev_index] as usize;
+                        return Some(char_offset.buffer[prev_index] as usize);
                     }
                     i += 1;
                 }
             }
             i += 1;
         }
-        return char_offset.buffer[(base.repeat - 1) * base.stride] as usize;
+        return Some(char_offset.buffer[(base.repeat - 1) * base.stride] as usize);
     }
     
     pub fn get_monospace_base(&self, cx: &Cx) -> Vec2 {
