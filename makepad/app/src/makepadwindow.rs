@@ -67,11 +67,9 @@ impl MakepadWindow {
     pub fn new(cx: &mut Cx) -> Self {
         
         Self {
-            desktop_window: DesktopWindow {
-                caption: "Makepad".to_string(),
-                window: Window::new(cx),
-                ..DesktopWindow::new(cx)
-            },
+            desktop_window: DesktopWindow::new(cx)
+                .with_caption("Makepad"),
+
             file_editors: FileEditors {
                 rust_editor: RustEditor::new(cx),
                 js_editor: JSEditor::new(cx),

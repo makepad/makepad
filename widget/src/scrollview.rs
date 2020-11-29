@@ -22,10 +22,8 @@ impl ScrollView{
         Self {
             view: View::new(),
             scroll_h: Some(ScrollBar::new(cx)),
-            scroll_v: Some(ScrollBar {
-                smoothing: Some(0.15),
-                ..ScrollBar::new(cx)
-            }),
+            scroll_v: Some(ScrollBar::new(cx)
+                .with_smoothing(0.15)),
         }
     }
    

@@ -84,7 +84,7 @@ impl Tab {
             
             self::shader_bg: Shader {
                 use makepad_render::drawquad::shader::*;
-                
+                 
                 draw_input: self::DrawTab;
                 
                 const border_width: float = 1.0;

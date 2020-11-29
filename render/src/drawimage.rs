@@ -52,7 +52,7 @@ impl DrawImage {
                 }
                 
                 fn pixel() -> vec4 {
-                    return vec4(sample2d(texture, tc.xy).rgb, alpha);
+                    return vec4(sample2d(texture, tc.xy).rgb * alpha, alpha);
                 }
             }
         "#);
