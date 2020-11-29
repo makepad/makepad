@@ -8,14 +8,14 @@ pub struct SkyBox {
 impl SkyBox {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            cube: DrawCube::new(cx, default_shader!())
+            cube: DrawCube::new(cx, live_shader!(cx, self::shader_sky_box))
         }
     }
     
     pub fn style(cx: &mut Cx) {
         live_body!(cx, r#"
-            self::sky_color: #0;
-            self::edge_color: #1;
+            self::sky_color: #000000;
+            self::edge_color: #111111;
             self::floor_color: #8;
             
             self::size: vec3(200.0, 100.0, 200.0);
@@ -77,7 +77,6 @@ impl SkyBox {
     }
     
     pub fn draw_sky_box(&mut self, cx: &mut Cx) {
-        self.cube.shader = live_shader!(cx, self::shader_sky_box);
         self.cube.cube_size = live_vec3!(cx, self::size);
         self.cube.cube_pos = live_vec3!(cx, self::pos);
         self.cube.draw_cube(cx);
