@@ -1184,9 +1184,11 @@ impl TextEditor {
         self.token_highlight.begin_many(cx);
         self.cursor_row.begin_many(cx);
         self.selection.begin_many(cx);
+        
         self.message_marker.begin_many(cx);
         self.search_marker.begin_many(cx);
         self.paren_pair.begin_many(cx);
+        
         self.text.begin_many(cx);
         self.indent_lines.begin_many(cx);
         self.cursor.begin_many(cx);
@@ -1207,12 +1209,18 @@ impl TextEditor {
         self.token_highlight.end_many(cx);
         self.cursor_row.end_many(cx);
         self.selection.end_many(cx);
+        
         self.message_marker.end_many(cx);
         self.search_marker.end_many(cx);
         self.paren_pair.end_many(cx);
+        
         self.text.end_many(cx);
         self.indent_lines.end_many(cx);
         self.cursor.end_many(cx);
+
+        if self.draw_line_numbers {
+            self.line_number_text.end_many(cx);
+        }
     }
     
     pub fn init_draw_state(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {

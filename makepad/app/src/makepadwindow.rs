@@ -502,6 +502,15 @@ impl MakepadWindow {
             self.world_view.draw_world_view_3d(cx);
             self.xr_control.draw_xr_control(cx);
         }
+        
+        /*
+        let mut di = DrawImage::new(cx, default_shader!()).with_draw_depth(100.);
+        di.texture = Texture2D(Some(cx.fonts_atlas.texture_id));
+        di.alpha = 1.0;
+        di.pt1 = vec2(0.,0.);
+        di.pt2 = vec2(1.,0.2);
+        di.draw_quad_abs(cx, Rect{pos:vec2(100.,100.), size:cx.get_turtle_rect().size*0.5});
+        */
         self.desktop_window.end_desktop_window(cx);
     }
     

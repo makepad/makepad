@@ -422,7 +422,6 @@ impl SearchResultDraw {
             list_item.animator.init(cx, Self::get_default_anim(cx, selected));
         }
 
-        self.item_bg.set_area(list_item.area);
         self.item_bg.last_animate(&list_item.animator);
        
         self.item_bg.begin_quad(cx, if selected {
@@ -430,6 +429,9 @@ impl SearchResultDraw {
         }else {
             live_layout!(cx, self::layout_item_closed)
         }); //&self.get_line_layout());
+
+        list_item.area = self.item_bg.area();
+
         
         let window_up = if selected {2} else {1};
         let window_down = if selected {3} else {1};

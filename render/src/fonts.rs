@@ -31,26 +31,17 @@ const TRAPEZOID_TEXT_SLOTS: usize = 7;
 
 impl TrapezoidText {
     
-    pub fn register_draw_input(cx: &mut Cx) {
-        let mut def = LiveDrawInput::default();
-        let mp = module_path!();
-        def.add_instance(mp, "TrapezoidText", "a_xs", Vec2::ty_expr());
-        def.add_instance(mp, "TrapezoidText", "a_ys", Vec4::ty_expr());
-        def.add_instance(mp, "TrapezoidText", "chan", f32::ty_expr());
-        cx.live_styles.register_draw_input(live_item_id!(self::TrapezoidText), def)
-    }
-    
-    pub fn style(cx: &mut Cx){
-        
-        Self::register_draw_input(cx);
+    pub fn style(cx: &mut Cx) {
         
         live_body!(cx, r#"
-            self::trapezoid_shader: Shader{
+            self::trapezoid_shader: Shader {
                 use crate::shader_std::prelude::*;
                 default_geometry: crate::shader_std::quad_2d;
                 geometry geom: vec2;
                 
-                draw_input: self::TrapezoidText;
+                instance a_xs: vec2;
+                instance a_ys: vec4;
+                instance chan: float;
                 
                 varying v_p0: vec2;
                 varying v_p1: vec2;
@@ -146,7 +137,7 @@ impl TrapezoidText {
     // test api for directly drawing a glyph
     pub fn draw_char(&mut self, cx: &mut Cx, c: char, font_id: usize, font_size: f32) {
         // now lets make a draw_character function
-        let mut many = cx.begin_many_instances(live_shader!(cx, self::trapezoid_shader), TRAPEZOID_TEXT_SLOTS, Area::Empty);
+        let mut many = cx.begin_many_instances(live_shader!(cx, self::trapezoid_shader), TRAPEZOID_TEXT_SLOTS);
         
         let trapezoids = {
             let cxfont = &cx.fonts[font_id];
@@ -201,14 +192,12 @@ impl TrapezoidText {
             ];
             many.instances.extend_from_slice(&data);
         }
-
+        
         cx.end_many_instances(many);
     }
     
     // atlas drawing function used by CxAfterDraw
-    pub fn draw_todo(&mut self, cx: &mut Cx, todo: CxFontsAtlasTodo) {
-        let mut many = cx.begin_many_instances(live_shader!(cx, self::trapezoid_shader), TRAPEZOID_TEXT_SLOTS, Area::Empty);
-        
+    pub fn draw_todo(&mut self, cx: &mut Cx, todo: CxFontsAtlasTodo, many: &mut ManyInstances) {
         let mut size = 1.0;
         for i in 0..3 {
             if i == 1 {
@@ -252,7 +241,7 @@ impl TrapezoidText {
                         }
                     }).linearize(0.5),
                 );
-                if let Some(trapezoidate) = trapezoidate{
+                if let Some(trapezoidate) = trapezoidate {
                     trapezoids.extend_from_internal_iter(
                         trapezoidate
                     );
@@ -272,8 +261,6 @@ impl TrapezoidText {
                 many.instances.extend_from_slice(&data);
             }
         }
-
-        cx.end_many_instances(many);
     }
 }
 
@@ -282,16 +269,18 @@ pub struct CxAfterDraw {
     pub atlas_pass: Pass,
     pub atlas_view: View,
     pub atlas_texture: Texture,
+    pub counter: usize
 }
 
 impl CxAfterDraw {
     pub fn new(cx: &mut Cx) -> Self {
         cx.fonts_atlas.texture_size = Vec2 {x: 2048.0, y: 2048.0};
         let atlas_texture = Texture::new(cx);
-
+        
         cx.fonts_atlas.texture_id = atlas_texture.texture_id;
         
         Self {
+            counter: 0,
             trapezoid_text: TrapezoidText::default(),
             atlas_pass: Pass::default(),
             atlas_view: View::new()
@@ -315,15 +304,19 @@ impl CxAfterDraw {
                 ClearColor::InitWith(Vec4::default())
             };
             self.atlas_pass.add_color_texture(cx, self.atlas_texture, clear);
-
             let _ = self.atlas_view.begin_view(cx, Layout::default());
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut cx.fonts_atlas.atlas_todo, &mut atlas_todo);
+            
+            let mut many = cx.begin_many_instances(live_shader!(cx, self::trapezoid_shader), TRAPEZOID_TEXT_SLOTS);
+
             for todo in atlas_todo {
-                self.trapezoid_text.draw_todo(cx, todo);
-                // ok we have to draw a font_id
-                //break;
+                self.trapezoid_text.draw_todo(cx, todo, &mut many);
             }
+            
+            cx.end_many_instances(many);
+            
+            self.counter += 1;
             self.atlas_view.end_view(cx);
             self.atlas_pass.end_pass(cx);
         }
@@ -355,7 +348,7 @@ pub struct CxFontAtlasGlyph {
     pub ty2: f32,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct CxFontsAtlasTodo {
     pub subpixel_x_fract: f32,
     pub subpixel_y_fract: f32,

@@ -131,10 +131,10 @@ impl WorldView {
             }
         }; 
         for area in areas{ // lets find some uniforms
-            self.time.write_draw_input(cx, area, live_item_id!(self::uniforms::time), "");
+            write_draw_input!(cx, area, self::uniforms::time, self.time);
             if let Some(xu) = &self.last_xr_update_event{
-                xu.left_input.ray.position.write_draw_input(cx, area, live_item_id!(self::uniforms::left_input_pos), "");
-                xu.right_input.ray.position.write_draw_input(cx, area, live_item_id!(self::uniforms::right_input_pos), "");
+                write_draw_input!(cx, area, self::uniforms::left_input_pos, xu.left_input.ray.position);
+                write_draw_input!(cx, area, self::uniforms::right_input_pos, xu.right_input.ray.position);
             }  
         }  
     }

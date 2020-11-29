@@ -5,6 +5,7 @@ use crate::drawquad::DrawQuad;
 #[repr(C)]
 pub struct DrawImage {
     #[default_shader(self::shader)]
+    #[custom_new()]
     pub texture: Texture2D,
     pub base: DrawQuad,
     pub pt1: Vec2,
@@ -13,6 +14,15 @@ pub struct DrawImage {
 }
 
 impl DrawImage {
+    
+    pub fn new(cx: &mut Cx, shader:Shader)->Self{
+        Self{
+            pt1: vec2(0.,0.),
+            pt2: vec2(1.,1.),
+            alpha: 1.0,
+            ..Self::custom_new(cx, shader)
+        }
+    }
     
     pub fn style(cx: &mut Cx) {
         Self::register_draw_input(cx);
@@ -38,7 +48,7 @@ impl DrawImage {
                     tc = mix(pt1, pt2, pos);
                     v_pixel = clipped;
                     // only pass the clipped position forward
-                    return camera_projection * vec4(clipped.x, clipped.y, 0., 1.);
+                    return camera_projection * vec4(clipped.x, clipped.y, draw_depth, 1.);
                 }
                 
                 fn pixel() -> vec4 {
