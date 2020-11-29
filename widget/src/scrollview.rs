@@ -13,6 +13,14 @@ impl ScrollView{
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             view: View::new(),
+            scroll_h: None,
+            scroll_v: None
+        }
+    }
+
+    pub fn new_standard_hv(cx: &mut Cx) -> Self {
+        Self {
+            view: View::new(),
             scroll_h: Some(ScrollBar::new(cx)),
             scroll_v: Some(ScrollBar {
                 smoothing: Some(0.15),

@@ -195,7 +195,7 @@ impl TextEditor {
             indent_lines: DrawIndentLines::new(cx, default_shader!())
                 .with_draw_depth(0.001),
             
-            view: ScrollView::new(cx),
+            view: ScrollView::new_standard_hv(cx),
             
             bg: DrawColor::new(cx, live_shader!(cx, self::shader_bg)),
             
@@ -577,7 +577,12 @@ impl TextEditor {
             self._is_row_select = true;
         }
         else {
-            offset = self.text.closest_text_offset(cx, fe.abs);
+            offset = if let Some(o) = self.text.closest_text_offset(cx, fe.abs) {
+                o
+            }
+            else {
+                return
+            };
             match fe.tap_count {
                 1 => {
                 },
@@ -652,9 +657,14 @@ impl TextEditor {
             self.cursors.set_last_cursor_head(offset, text_buffer)
         }
         else {
-            let offset = self.text.closest_text_offset(cx, fe.abs);
-            self.cursors.set_last_cursor_head(offset, text_buffer)
+            if let Some(offset) = self.text.closest_text_offset(cx, fe.abs) {
+                self.cursors.set_last_cursor_head(offset, text_buffer)
+            }
+            else {
+                false
+            }
         };
+        
         self._last_finger_move = Some(fe.abs);
         // determine selection drag scroll dynamics
         let repaint_scroll = self.check_select_scroll_dynamics(&fe);
@@ -978,6 +988,8 @@ impl TextEditor {
     }
     
     pub fn handle_text_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
+        let at_start = self.cursors.set[0].head;
+        
         if self.view.handle_scroll_view(cx, event) {
             if let Some(last_finger_move) = self._last_finger_move {
                 if let Some(grid_select_corner) = self._grid_select_corner {
@@ -985,8 +997,9 @@ impl TextEditor {
                     self.cursors.grid_select(grid_select_corner, pos, text_buffer);
                 }
                 else {
-                    let offset = self.text.closest_text_offset(cx, last_finger_move);
-                    self.cursors.set_last_cursor_head(offset, text_buffer);
+                    if let Some(offset) = self.text.closest_text_offset(cx, last_finger_move){
+                        self.cursors.set_last_cursor_head(offset, text_buffer);
+                    }
                 }
             }
             // the editor actually redraws on scroll, its because we don't actually
@@ -1151,6 +1164,9 @@ impl TextEditor {
             },
             _ => ()
         };
+        
+        ///println!("{:?} {:?}", event, self.cursors.set[0]);
+        
         // i need to know if selection changed, ifso
         //
         if last_mutation_id != text_buffer.mutation_id {
@@ -1217,7 +1233,7 @@ impl TextEditor {
         self.text.end_many(cx);
         self.indent_lines.end_many(cx);
         self.cursor.end_many(cx);
-
+        
         if self.draw_line_numbers {
             self.line_number_text.end_many(cx);
         }
@@ -1252,6 +1268,8 @@ impl TextEditor {
         self.view.begin_view(cx, live_layout!(cx, self::layout_bg)) ?;
         
         self.apply_style(cx);
+        
+        //println!("{:?}", self.cursors.set[0]);
         
         if !text_buffer.is_loaded {
             self.bg.draw_quad_rel(cx, cx.get_turtle_rect());
@@ -1835,14 +1853,16 @@ impl TextEditor {
         if !cx.is_height_computed() {
             cx.walk_turtle(Walk::wh(Width::Fix(0.0), Height::Fix(self._final_fill_height)));
         }
-        // last bits
-        self.do_selection_scrolling(cx, text_buffer);
-        self.place_ime_and_draw_cursor_row(cx);
-        self.set_indent_line_highlight_id(cx);
         self.draw_shadows(cx);
-        //self.bg.end_quad_fill(cx, self._bg_inst.take().unwrap());
+        
+        self.place_ime_and_draw_cursor_row(cx);
         
         self.end_draw_objects(cx);
+        
+        // last bits
+        self.do_selection_scrolling(cx, text_buffer);
+        self.set_indent_line_highlight_id(cx);
+        //self.bg.end_quad_fill(cx, self._bg_inst.take().unwrap());
         
         self.view.end_view(cx);
         
@@ -1995,8 +2015,9 @@ impl TextEditor {
                 self.cursors.grid_select(grid_select_corner, pos, text_buffer);
             }
             else {
-                let offset = self.text.closest_text_offset(cx, select_scroll.abs);
-                self.cursors.set_last_cursor_head(offset, text_buffer);
+                if let Some(offset) = self.text.closest_text_offset(cx, select_scroll.abs){
+                    self.cursors.set_last_cursor_head(offset, text_buffer);
+                }
             }
             if select_scroll.at_end {
                 self._select_scroll = None;
