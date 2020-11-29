@@ -93,7 +93,7 @@ impl HomePage {
                     else if *status == Cx::status_http_send_fail() {
                         self.email_state = EmailState::ErrorSending;
                     }
-                    self.view.redraw_view_area(cx);
+                    self.view.redraw_view(cx);
                 }
             }
         }
@@ -109,7 +109,7 @@ impl HomePage {
             else {
                 self.email_state = EmailState::Empty
             }
-            self.view.redraw_view_area(cx);
+            self.view.redraw_view(cx);
         }
         
         if let ButtonEvent::Clicked = self.send_mail_button.handle_normal_button(cx, event) {
@@ -118,7 +118,7 @@ impl HomePage {
                     self.email_state = EmailState::Sending;
                     let email = self.email_input.get_value();
                     cx.http_send("POST", "/subscribe", "http", "makepad.nl", 80, "text/plain", email.as_bytes(), self.email_signal);
-                    self.view.redraw_view_area(cx);
+                    self.view.redraw_view(cx);
                 },
                 _ => ()
             }

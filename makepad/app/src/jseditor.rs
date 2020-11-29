@@ -25,7 +25,7 @@ impl JSEditor {
             TextEditorEvent::AutoFormat => {
                 let formatted = JSTokenizer::auto_format(&mut mtb.text_buffer).out_lines;
                 self.text_editor.cursors.replace_lines_formatted(formatted, &mut mtb.text_buffer);
-                self.text_editor.view.redraw_view_area(cx);
+                self.text_editor.view.redraw_view(cx);
             },
             _ => ()
         }

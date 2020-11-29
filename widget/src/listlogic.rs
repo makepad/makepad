@@ -59,6 +59,10 @@ impl ListSelect {
 }
 
 impl ListLogic {
+    pub fn with_multi_select(self, multi_select:bool)->Self{
+        Self{multi_select,..self}
+    }
+    
     pub fn set_list_len(&mut self, len: usize)
     {
         if self.list_items.len() != len{
@@ -217,13 +221,11 @@ impl ListLogic {
                 break;
             }
             let item = &mut self.list_items[counter];
+            if let Some(ae) = event.is_animate(cx, &item.animator) {
+                cb(cx, ListLogicEvent::Animate(ae), item, counter)
+            }
+            
             match event.hits(cx, item.area, HitOpt::default()) {
-                Event::Animate(ae) => {
-                    cb(cx, ListLogicEvent::Animate(ae), item, counter)
-                },
-                Event::AnimEnded(_) => {
-                    cb(cx, ListLogicEvent::AnimEnded, item, counter)
-                },
                 Event::FingerDown(fe) => {
                     cx.set_down_mouse_cursor(MouseCursor::Hand);
                     if self.multi_select && (fe.modifiers.logo || fe.modifiers.control) {

@@ -1,5 +1,15 @@
 use makepad_render::*;
 
+#[derive(Clone, DrawQuad)]
+#[repr(C)]
+pub struct DrawFloatSlider {
+    #[default_shader(self::shader_slider)]
+    base: DrawQuad,
+    norm_value: f32,
+    hover: f32,
+    down: f32
+}
+
 pub enum FloatSliderEvent {
     Change {scaled_value: f32},
     DoneChanging,
@@ -15,7 +25,7 @@ pub struct FloatSlider {
     pub max: Option<f32>,
     pub step: Option<f32>,
     pub _size: f32,
-    pub slider: Quad,
+    pub slider: DrawFloatSlider,
     pub dragging: bool
 }
 
@@ -30,57 +40,56 @@ impl FloatSlider {
             max: None,
             step: None,
             _size: 0.0,
-            slider: Quad::new(cx),
+            slider: DrawFloatSlider::new(cx, default_shader!()),
             dragging: false
         }
     }
     
     pub fn style(cx: &mut Cx) {
+        self::DrawFloatSlider::register_draw_input(cx);
         live_body!(cx, r#"
             self::anim_default: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {bind_to: self::shader_slider::hover, keys: {1.0: 0.0}},
-                    Float {bind_to: self::shader_slider::down, keys: {1.0: 0.0}}
+                    Float {bind_to: self::DrawFloatSlider::hover, keys: {1.0: 0.0}},
+                    Float {bind_to: self::DrawFloatSlider::down, keys: {1.0: 0.0}}
                 ]
             }
             
             self::anim_hover: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {bind_to: self::shader_slider::hover, keys: {0.0: 1.0}},
-                    Float {bind_to: self::shader_slider::down, keys: {1.0: 0.0}}
+                    Float {bind_to: self::DrawFloatSlider::hover, keys: {0.0: 1.0}},
+                    Float {bind_to: self::DrawFloatSlider::down, keys: {1.0: 0.0}}
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
-                    Float {bind_to: self::shader_slider::hover, keys: {1.0: 1.0}},
-                    Float {bind_to: self::shader_slider::down, keys: {0.0: 0.0, 1.0: 1.0}}
+                    Float {bind_to: self::DrawFloatSlider::hover, keys: {1.0: 1.0}},
+                    Float {bind_to: self::DrawFloatSlider::down, keys: {0.0: 0.0, 1.0: 1.0}}
                 ]
             }
             
             self::shader_slider: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawquad::shader::*;
                 
-                instance norm_value: float;
-                instance hover: float;
-                instance down: float;
+                draw_input: self::DrawFloatSlider;
                 
                 fn pixel() -> vec4 {
-                    let df = Df::viewport(pos * vec2(w, h));
+                    let df = Df::viewport(pos * rect_size);
                     
-                    let cy = h * 0.5;
+                    let cy = rect_size.y * 0.5;
                     let height = 2.;
-                    df.box(1., cy - 0.5 * height, w - 1., height, 1.);
+                    df.box(1., cy - 0.5 * height, rect_size.x - 1., height, 1.);
                      
                     df.fill(#4);
                     
                     let bheight = 15.;
                     let bwidth = 7.;
                     
-                    df.box((w - bwidth) * norm_value, cy - 0.5 * bheight, bwidth, bheight, 1.);
+                    df.box((rect_size.x - bwidth) * norm_value, cy - 0.5 * bheight, bwidth, bheight, 1.);
                     ////
                     let color = mix(mix(#7, #B, hover), #F, down);
                     df.fill(color);
@@ -101,7 +110,7 @@ impl FloatSlider {
         if scaled_value != self.scaled_value {
             self.scaled_value = scaled_value;
             self.norm_value = norm_value;
-            self.animator.area.write_float(cx, live_item_id!(self::shader_slider::norm_value), self.norm_value);
+            self.slider.set_norm_value(cx, self.norm_value);
             changed = true;
         }
         if changed {
@@ -113,11 +122,11 @@ impl FloatSlider {
     }
     
     pub fn handle_float_slider(&mut self, cx: &mut Cx, event: &mut Event) -> FloatSliderEvent {
-        match event.hits(cx, self.animator.area, HitOpt::default()) {
-            Event::Animate(ae) => {
-                self.animator.calc_area(cx, self.animator.area, ae.time);
-            },
-            Event::AnimEnded(_) => self.animator.end(),
+        if let Some(ae) = event.is_animate(cx, &self.animator) {
+            self.slider.animate(cx, &mut self.animator, ae.time);
+        }
+
+        match event.hits(cx, self.slider.area(), HitOpt::default()) {
             Event::FingerHover(fe) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Arrow);
                 match fe.hover_state {
@@ -160,7 +169,7 @@ impl FloatSlider {
                 self.norm_value += fs.scroll.x / 1000.0;
                 self.norm_value = self.norm_value.min(1.0).max(0.0);
                 self.scaled_value = self.norm_value * (self.max.unwrap_or(1.0) - self.min.unwrap_or(0.0)) + self.min.unwrap_or(0.0);
-                self.animator.area.write_float(cx, live_item_id!(self::shader_slider::norm_value), self.norm_value);
+                self.slider.set_norm_value(cx, self.norm_value);
                 return FloatSliderEvent::Change {scaled_value: self.scaled_value};
             },
             _ => ()
@@ -177,7 +186,11 @@ impl FloatSlider {
         step: Option<f32>,
         height_scale: f32
     ) {
-        self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
+         if self.animator.need_init(cx) {
+            self.animator.init(cx, live_anim!(cx, self::anim_default));
+            self.slider.last_animate(&self.animator);
+        }
+
         if !self.dragging {
             self.scaled_value = scaled_value;
             self.min = min;
@@ -186,22 +199,15 @@ impl FloatSlider {
             self.norm_value = (scaled_value - min.unwrap_or(0.0)) / (max.unwrap_or(1.0) - min.unwrap_or(0.0));
         }
         
-        self.slider.shader = live_shader!(cx, self::shader_slider);
-        // i wanna draw a wheel with 'width' set but height a fixed height.
-        
         let pad = 10.;
         
-        self._size = cx.get_turtle_rect().w - 2. * pad;
-        let k = self.slider.draw_quad(cx, Walk {
+        self._size = cx.get_turtle_rect().size.x - 2. * pad;
+        self.slider.norm_value = self.norm_value;
+        self.slider.draw_quad_walk(cx, Walk {
             margin: Margin::left(pad),
             width: Width::FillPad(pad),
             height: Height::Fix(35.0 * height_scale)
         });
-        // lets put a hsv int here
-        k.push_float(cx, self.norm_value);
-        k.push_last_float(cx, &self.animator, live_item_id!(self::shader_slider::hover));
-        k.push_last_float(cx, &self.animator, live_item_id!(self::shader_slider::down));
-        self.animator.set_area(cx, k.into());
     }
     
 }
