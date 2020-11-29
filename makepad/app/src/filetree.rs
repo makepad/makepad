@@ -56,7 +56,7 @@ impl FileTree {
             drag_bg: DrawColor::new(cx, live_shader!(cx, self::shader_drag_bg)),
 
             view: ScrollView::new(cx)
-                .with_scroll_v(ScrollBar::new(cx).with_smoothing(0.25)),
+                .with_scroll_v(ScrollBar::new(cx).with_smoothing(0.15)),
 
             drag_view: View::new()
                 .with_is_overlay(true),
@@ -190,7 +190,7 @@ impl FileTree {
             play: Play::Chain {duration: 0.01},
             tracks: vec![
                 Track::Vec4 {
-                    bind_to: live_item_id!(makepad_render::quad::shader::color),
+                    bind_to: live_item_id!(makepad_render::drawcolor::DrawColor::color),
                     ease: Ease::Lin,
                     keys: vec![(1.0, default_color)],
                     cut_init: None
@@ -211,7 +211,7 @@ impl FileTree {
             play: Play::Cut {duration: 0.02},
             tracks: vec![
                 Track::Vec4 {
-                    bind_to: live_item_id!(makepad_render::quad::shader::color),
+                    bind_to: live_item_id!(makepad_render::drawcolor::DrawColor::color),
                     ease: Ease::Lin,
                     keys: vec![(0., over_color), (1., over_color)],
                     cut_init: None

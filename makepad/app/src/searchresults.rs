@@ -43,12 +43,9 @@ impl SearchResults {
             first_tbid: MakepadTextBufferId(0),
             search_input: TextInput::new(cx, TextInputOptions {multiline: false, read_only: false, empty_message: "search".to_string()}),
             result_draw: SearchResultDraw::new(cx),
-            list: ListLogic {
-                multi_select: false,
-                ..ListLogic::default()
-            },
+            list: ListLogic::default(),
             do_select_first: false,
-            view: ScrollView::new(cx),
+            view: ScrollView::new_standard_hv(cx),
             results: Vec::new(),
         }
     }
