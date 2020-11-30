@@ -17,7 +17,7 @@ impl SkyBox {
             self::sky_color: #000000;
             self::edge_color: #111111;
             self::floor_color: #8;
-            
+             
             self::size: vec3(200.0, 100.0, 200.0);
             self::pos: vec3(0.0, 50.0, 0.);
             

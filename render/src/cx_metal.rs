@@ -590,8 +590,8 @@ impl MetalWindow {
         }
     }
     
-    pub fn set_vsync_enable(&mut self, enable: bool) {
-        let () = unsafe {msg_send![self.ca_layer, setDisplaySyncEnabled: enable]};
+    pub fn set_vsync_enable(&mut self, _enable: bool) {
+        let () = unsafe {msg_send![self.ca_layer, setDisplaySyncEnabled: true]};
     }
     
     pub fn set_buffer_count(&mut self, _count: u64) {
