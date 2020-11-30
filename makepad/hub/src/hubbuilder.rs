@@ -707,7 +707,8 @@ impl HubBuilder {
                 let mut parsed: Result<RustcCompilerMessage, DeJsonErr> = DeJson::deserialize_json(&line);
                 match &mut parsed {
                     Err(_e) => {
-                        eprintln!("ERROR PARSING {} {:?}", line, _e);
+                        println!("{}", line);
+                        //eprintln!("ERROR PARSING {} {:?}", line, _e);
                     },
                     Ok(parsed) => {
                         if let Some(message) = &mut parsed.message { //.spans;

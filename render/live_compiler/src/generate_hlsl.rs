@@ -5,9 +5,9 @@ use {
         span::Span,
         analyse::ShaderCompileOptions,
         generate::{BackendWriter, BlockGenerator, ExprGenerator},
-        ident::{Ident,IdentPath},
+        ident::{Ident, IdentPath},
         livestyles::LiveStyles,
-        ty::{Ty,TyLit}
+        ty::{Ty, TyLit}
     },
     std::{
         cell::{Cell},
@@ -20,7 +20,7 @@ pub fn index_to_char(index: usize) -> char {
     std::char::from_u32(index as u32 + 65).unwrap()
 }
 
-pub fn generate_shader(shader: &ShaderAst, live_styles: &LiveStyles, options:ShaderCompileOptions) -> String {
+pub fn generate_shader(shader: &ShaderAst, live_styles: &LiveStyles, options: ShaderCompileOptions) -> String {
     let mut string = String::new();
     let env = Env::new(live_styles);
     ShaderGenerator {
@@ -157,15 +157,15 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
         }
         writeln!(self.string, "}}").unwrap();
         
-        if self.create_const_table{
-            if let Some(const_table) = self.shader.const_table.borrow_mut().as_mut(){
+        if self.create_const_table {
+            if let Some(const_table) = self.shader.const_table.borrow_mut().as_mut() {
                 // lets use a float4 table.
                 let size = const_table.len();
-                let align_gap = 4 - (size - ((size>>2) << 2));
-                for _ in 0..align_gap{
+                let align_gap = 4 - (size - ((size >> 2) << 2));
+                for _ in 0..align_gap {
                     const_table.push(0.0);
                 }
-                writeln!(self.string, "cbuffer mspc_const_Table : register(b5){{float4 mpsc_const_table[{}];}};",const_table.len()>>2).unwrap();
+                writeln!(self.string, "cbuffer mspc_const_Table : register(b5){{float4 mpsc_const_table[{}];}};", const_table.len() >> 2).unwrap();
             };
         }
     }
@@ -177,13 +177,9 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
             match decl {
                 Decl::Texture(decl) => {
                     assert_eq!(*decl.ty_expr.ty.borrow().as_ref().unwrap(), Ty::Texture2D);
-                    writeln!(
-                        self.string,
-                        "Texture2D {}: register(t{});",
-                        decl.ident,
-                        index
-                    )
-                        .unwrap();
+                    write!(self.string, "Texture2D ").unwrap();
+                    self.backend_writer.write_ident(self.string, decl.ident);
+                    writeln!(self.string, ": register(t{});", index);
                     index += 1;
                 }
                 _ => {}
@@ -220,8 +216,8 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
         for decl in &self.shader.decls {
             match decl {
                 Decl::Instance(decl) => {
-                    match decl.ty_expr.ty.borrow().as_ref().unwrap(){
-                        Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 =>{
+                    match decl.ty_expr.ty.borrow().as_ref().unwrap() {
+                        Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {
                             write!(self.string, "    ").unwrap();
                             self.write_var_decl(
                                 false,
@@ -232,32 +228,32 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
                             writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
                             index += 1;
                         },
-                        Ty::Mat4 =>{
-                            for i in 0..4{
+                        Ty::Mat4 => {
+                            for i in 0..4 {
                                 write!(self.string, "    ").unwrap();
                                 self.write_ty_lit(TyLit::Vec4);
                                 write!(self.string, " {}{}", decl.ident, i).unwrap();
                                 writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
-                                index += 1;                                
+                                index += 1;
                             }
                         },
-                        Ty::Mat3=>{
-                            for i in 0..3{
+                        Ty::Mat3 => {
+                            for i in 0..3 {
                                 write!(self.string, "    ").unwrap();
                                 self.write_ty_lit(TyLit::Vec3);
                                 write!(self.string, " {}{}", decl.ident, i).unwrap();
                                 writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
-                                index += 1;                                
+                                index += 1;
                             }
                         },
-                        Ty::Mat2 =>{
+                        Ty::Mat2 => {
                             write!(self.string, "    ").unwrap();
                             self.write_ty_lit(TyLit::Vec4);
                             write!(self.string, " {}", decl.ident).unwrap();
                             writeln!(self.string, ": INST{};", index_to_char(index)).unwrap();
-                            index += 1;                                
+                            index += 1;
                         },
-                        _=>panic!("unsupported type in generate_instance_struct")
+                        _ => panic!("unsupported type in generate_instance_struct")
                     }
                 }
                 _ => {}
@@ -361,8 +357,8 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
         for param_ty in param_tys {
             write!(cons_name, "_{}", param_ty).unwrap();
         }
-        if !self.backend_writer.use_cons_fn(&cons_name){
-            return 
+        if !self.backend_writer.use_cons_fn(&cons_name) {
+            return
         }
         
         self.write_ty_lit(ty_lit);
@@ -692,7 +688,7 @@ impl<'a> FnDeclGenerator<'a> {
     }
 }
 
-struct HlslBackendWriter<'a, 'b>{
+struct HlslBackendWriter<'a, 'b> {
     pub env: &'a Env<'b>
 }
 
@@ -726,76 +722,76 @@ impl<'a, 'b> BackendWriter for HlslBackendWriter<'a, 'b> {
     }
     
     
-    fn generate_var_expr(&self, string: &mut String, span:Span, ident_path: IdentPath, kind: &Cell<Option<VarKind>>, _shader: &ShaderAst, decl: &FnDecl, ty:&Option<Ty>) {
+    fn generate_var_expr(&self, string: &mut String, span: Span, ident_path: IdentPath, kind: &Cell<Option<VarKind >>, _shader: &ShaderAst, decl: &FnDecl, ty: &Option<Ty>) {
         
         let is_used_in_vertex_shader = decl.is_used_in_vertex_shader.get().unwrap();
         let is_used_in_fragment_shader = decl.is_used_in_fragment_shader.get().unwrap();
         if is_used_in_vertex_shader {
             match kind.get().unwrap() {
                 VarKind::Geometry => write!(string, "mpsc_geometries.").unwrap(),
-                VarKind::Instance =>{
-                    match ty{
-                        Some(Ty::Mat4)=>{
+                VarKind::Instance => {
+                    match ty {
+                        Some(Ty::Mat4) => {
                             write!(string, "float4x4(").unwrap();
                             let ident = ident_path.get_single().expect("unexpected");
-                            for i in 0..4{
-                                for j in 0..4{
-                                    if i != 0 || j != 0{
+                            for i in 0..4 {
+                                for j in 0..4 {
+                                    if i != 0 || j != 0 {
                                         write!(string, ",").unwrap();
                                     }
                                     write!(string, "mpsc_instances.").unwrap();
                                     write!(string, "{}{}", ident, j).unwrap();
-                                    match i{
-                                        0=>write!(string,".x").unwrap(),
-                                        1=>write!(string,".y").unwrap(),
-                                        2=>write!(string,".z").unwrap(),
-                                        _=>write!(string,".w").unwrap()
+                                    match i {
+                                        0 => write!(string, ".x").unwrap(),
+                                        1 => write!(string, ".y").unwrap(),
+                                        2 => write!(string, ".z").unwrap(),
+                                        _ => write!(string, ".w").unwrap()
                                     }
                                 }
                             }
                             write!(string, ")").unwrap();
                             return
                         },
-                        Some(Ty::Mat3)=>{
+                        Some(Ty::Mat3) => {
                             write!(string, "float3x3(").unwrap();
                             let ident = ident_path.get_single().expect("unexpected");
-                            for i in 0..3{
-                                for j in 0..3{
-                                    if i != 0 || j != 0{
+                            for i in 0..3 {
+                                for j in 0..3 {
+                                    if i != 0 || j != 0 {
                                         write!(string, ",").unwrap();
                                     }
                                     write!(string, "mpsc_instances.").unwrap();
                                     write!(string, "{}{}", ident, j).unwrap();
-                                    match i{
-                                        0=>write!(string,".x").unwrap(),
-                                        1=>write!(string,".y").unwrap(),
-                                        _=>write!(string,".z").unwrap(),
+                                    match i {
+                                        0 => write!(string, ".x").unwrap(),
+                                        1 => write!(string, ".y").unwrap(),
+                                        _ => write!(string, ".z").unwrap(),
                                     }
                                 }
                                 write!(string, ")").unwrap();
                             }
                             return
                         },
-                        Some(Ty::Mat2)=>{
+                        Some(Ty::Mat2) => {
                             write!(string, "float2x2(").unwrap();
                             let ident = ident_path.get_single().expect("unexpected");
-                            for i in 0..2{
-                                for j in 0..2{
-                                    if i != 0 || j != 0{
+                            for i in 0..2 {
+                                for j in 0..2 {
+                                    if i != 0 || j != 0 {
                                         write!(string, ",").unwrap();
                                     }
                                     write!(string, "mpsc_instances.").unwrap();
                                     write!(string, "{}{}", ident, j).unwrap();
-                                    match i{
-                                        0=>write!(string,".x").unwrap(),
-                                        _=>write!(string,".y").unwrap(),
+                                    match i {
+                                        0 => write!(string, ".x").unwrap(),
+                                        _ => write!(string, ".y").unwrap(),
                                     }
                                 }
                                 write!(string, ")").unwrap();
                             }
                             return
                         },
-                        _=>{
+                        _ => {
                             write!(string, "mpsc_instances.").unwrap();
                         }
                     }
@@ -812,7 +808,7 @@ impl<'a, 'b> BackendWriter for HlslBackendWriter<'a, 'b> {
                 _ => {}
             }
         }
-        match kind.get().unwrap(){
+        match kind.get().unwrap() {
             VarKind::LiveStyle => {
                 let qualified = self.env.qualify_ident_path(span.live_body_id, ident_path);
                 write!(string, "mpsc_live_").unwrap();
@@ -828,25 +824,25 @@ impl<'a, 'b> BackendWriter for HlslBackendWriter<'a, 'b> {
     fn needs_mul_fn_for_matrix_multiplication(&self) -> bool {
         true
     }
-
-    fn needs_unpack_for_matrix_multiplication(&self)->bool{
+    
+    fn needs_unpack_for_matrix_multiplication(&self) -> bool {
         false
     }
-
-    fn  const_table_is_vec4(&self) -> bool{
+    
+    fn const_table_is_vec4(&self) -> bool {
         true
     }
-
-    fn use_cons_fn(&self, what:&str)->bool{
-        match what{
-            "mpsc_vec4_float_float_float_float"=>false,
-            "mpsc_vec3_float_float_float"=>false,
-            "mpsc_vec2_float_float"=>false,
-            _=>true
+    
+    fn use_cons_fn(&self, what: &str) -> bool {
+        match what {
+            "mpsc_vec4_float_float_float_float" => false,
+            "mpsc_vec3_float_float_float" => false,
+            "mpsc_vec2_float_float" => false,
+            _ => true
         }
     }
-     
-    fn write_var_decl( 
+    
+    fn write_var_decl(
         &self,
         string: &mut String,
         is_inout: bool,
@@ -1015,8 +1011,8 @@ impl<'a, 'b> BackendWriter for HlslBackendWriter<'a, 'b> {
                 string,
                 "{}",
                 match ident_string.as_ref() {
-                    "line"=>"mpsc_line",
-                    "frac"=>"mpsc_frac",
+                    "line" => "mpsc_line",
+                    "frac" => "mpsc_frac",
                     "thread" => "mpsc_thread",
                     "device" => "mpsc_device",
                     "ddx" => "mpsc_ddx",
