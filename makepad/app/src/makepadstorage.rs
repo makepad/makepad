@@ -467,7 +467,7 @@ impl MakepadStorage {
                     file_read: cx.file_read(
                         &Self::file_path_to_live_path(path)
                     ),
-                    live_items_list: LiveItemsList::new(cx),
+                    live_items_list: LiveItemsList::new(cx, self.settings.live_on_self),
                     read_msg: None,
                     full_path: path.to_string(),
                     text_buffer_id: tb_id,
@@ -503,7 +503,7 @@ impl MakepadStorage {
                 self.text_buffer_id_to_path.insert(tb_id, path.to_string());
                 self.text_buffers.push(MakepadTextBuffer {
                     file_read: FileRead::default(),
-                    live_items_list: LiveItemsList::new(cx),
+                    live_items_list: LiveItemsList::new(cx, self.settings.live_on_self),
                     read_msg: Some(msg),
                     full_path: path.to_string(),
                     text_buffer_id: tb_id,

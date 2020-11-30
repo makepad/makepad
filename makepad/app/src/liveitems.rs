@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 #[derive(Clone, Default)]
 pub struct LiveItemsList {
+    pub live_on_self: bool,
     pub visible_editors: bool,
     pub changed: Signal,
     pub items: Vec<LiveItemId>,
@@ -17,8 +18,9 @@ pub struct LiveItemsList {
 }
 
 impl LiveItemsList {
-    pub fn new(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx, live_on_self:bool) -> Self {
         LiveItemsList {
+            live_on_self,
             visible_editors: false,
             changed: cx.new_signal(),
             live_bodies: HashMap::new(),
@@ -280,6 +282,9 @@ impl fmt::Display for PrettyPrintedFloat3Decimals {
 
 impl MakepadTextBuffer {
     pub fn update_live_items(&mut self, cx: &mut Cx) {
+        if !self.live_items_list.live_on_self{
+            return 
+        }
         self.live_items_list.items = cx.live_styles.get_live_items_for_file(&MakepadStorage::file_path_to_live_path(&self.full_path));
         self.live_items_list.visible_editors = false;
         for live_item_id in &self.live_items_list.items{
@@ -297,6 +302,9 @@ impl MakepadTextBuffer {
     }
     
     pub fn parse_live_bodies(&mut self, cx: &mut Cx) {
+        if !self.live_items_list.live_on_self{
+            return 
+        }
         let mut tp = TokenParser::new(&self.text_buffer.flat_text, &self.text_buffer.token_chunks);
         // lets reset the data
         while tp.advance() {
