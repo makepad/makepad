@@ -359,7 +359,6 @@ impl LogItemDraw {
                 cx.turtle_align_y();
                 self.draw_log_path(cx, &loc_msg.path, loc_msg.line);
                 self.draw_log_body(cx, &loc_msg.body);
-                
             },
             HubLogItem::LocError(loc_msg) => {
                 self.code_icon.draw_icon(cx, CodeIconType::Error);

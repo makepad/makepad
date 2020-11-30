@@ -145,7 +145,14 @@ impl DrawQuad {
         }
     }
     
+    pub fn new_draw_call(&mut self, cx:&mut Cx){
+        cx.new_draw_call(self.shader);
+    }
+    
     pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) {
+        if unsafe{self.many.is_some()}{
+            panic!("Cannot use begin_quad inside a many block");
+        }
         let new_area = cx.add_aligned_instance(self.shader, self.as_slice());
         self.area = cx.update_area_refs(self.area, new_area);
         cx.begin_turtle(layout, self.area);
@@ -218,6 +225,11 @@ impl DrawQuad {
     pub fn set_area(&mut self, area:Area) {
         self.area = area;
     }
+
+    pub fn shader(&self) -> Shader{
+        self.shader
+    }
+
 
     pub fn set_shader(&mut self, shader: Shader){
         self.shader = shader;
