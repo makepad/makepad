@@ -289,9 +289,9 @@ impl SearchResults {
         
         if self.list.begin_list(cx, &mut self.view, false, row_height).is_err() {return}
         
-        self.result_draw.item_bg.begin_many(cx);
-        
         live_style_begin!(cx, self::style_text_editor);
+
+        cx.new_draw_call(self.result_draw.item_bg.shader());
 
         self.result_draw.text_editor.apply_style(cx);
         self.result_draw.text_editor.begin_draw_objects(cx, false);
@@ -328,8 +328,6 @@ impl SearchResults {
         self.result_draw.shadow.draw_shadow_top(cx);
         
         self.result_draw.text_editor.end_draw_objects(cx);
-        
-        self.result_draw.item_bg.end_many(cx);
 
         self.list.end_list(cx, &mut self.view);
     }
@@ -369,7 +367,7 @@ impl SearchResultDraw {
             play: Play::Chain {duration: 0.01},
             tracks: vec![
                 Track::Vec4 {
-                    bind_to: live_item_id!(makepad_render::quad::shader::color),
+                    bind_to: live_item_id!(makepad_render::drawcolor::DrawColor::color),
                     ease: Ease::Lin,
                     keys: vec![(1.0, default_color)],
                     cut_init: None
@@ -395,7 +393,7 @@ impl SearchResultDraw {
             play: Play::Chain {duration: 0.02},
             tracks: vec![
                 Track::Vec4 {
-                    bind_to: live_item_id!(makepad_render::quad::shader::color),
+                    bind_to: live_item_id!(makepad_render::drawcolor::DrawColor::color),
                     ease: Ease::Lin,
                     keys: vec![(0.0, over_color)],
                     cut_init: None
@@ -420,7 +418,6 @@ impl SearchResultDraw {
         }
         
         self.item_bg.set_area(list_item.area);
-        
         self.item_bg.last_animate(&list_item.animator);
        
         self.item_bg.begin_quad(cx, if selected {
