@@ -21,7 +21,7 @@ where TItem: Clone
     pub _drag_end: Option<DockDragEnd<TItem >>,
     pub _close_tab: Option<DockTabIdent>,
     pub _tab_select: Option<(usize, usize)>,
-    pub _tweening_quad: Option<(usize, Rect, f32)>
+    //pub _tweening_quad: Option<(usize, Rect, f32)>
 }
 
 #[derive(Clone, Debug)]
@@ -415,7 +415,7 @@ where TItem: Clone
             _drag_move: None,
             _drag_end: None,
             _tab_select: None,
-            _tweening_quad: None
+            //_tweening_quad: None
         }
     }
     
@@ -730,8 +730,8 @@ where TItem: Clone
             if let Err(()) = self.drop_quad_view.begin_view(cx, Layout::abs_origin_zero()) {
                 return
             }
-            let mut found_drop_zone = false;
-            for (id, tab_control) in self.tab_controls.enumerate() {
+            //let mut found_drop_zone = false;
+            for (_id, tab_control) in self.tab_controls.enumerate() {
                 
                 let cdr = tab_control.get_content_drop_rect(cx);
                 let tvr = tab_control.get_tabs_view_rect(cx);
@@ -739,46 +739,15 @@ where TItem: Clone
                     let tab_rects = tab_control.get_tab_rects(cx);
                     let (_kind, rect) = Self::get_drop_kind(fe.abs, self.drop_size, tvr, cdr, tab_rects);
                     
-                    if !self._tweening_quad.is_none() && self._tweening_quad.unwrap().0 != *id {
-                        // restarts the animation by removing drop_quad
-                        self._tweening_quad = None;
-                    }
-                    
-                    // yay, i can finally do these kinds of animations!
-                    let (dr, alpha) = if self._tweening_quad.is_none() {
-                        self._tweening_quad = Some((*id, rect, 0.));
-                        (rect, 0.)
-                    }
-                    else {
-                        let (id, old_rc, old_alpha) = self._tweening_quad.unwrap();
-                        let move_speed = 0.0;
-                        let alpha_speed = 0.0;
-                        let alpha = old_alpha * alpha_speed + (1. - alpha_speed);
-                        let rc = Rect::from_lerp(old_rc, rect, move_speed);
-
-                        let dist = (rc.pos.x - rect.pos.x)
-                            .abs()
-                            .max((rc.pos.y - rect.pos.y).abs())
-                            .max((rc.size.x - rect.size.x).abs())
-                            .max((rc.size.y - rect.size.y).abs())
-                            .max(100. - alpha * 100.);
-
-                        if dist>0.5 { // keep redrawing until we are close
-                            // cx.redraw_previous_areas();
-                            //self.drop_quad_view.redraw_view_area(cx);
-                        }
-                        self._tweening_quad = Some((id, rc, alpha));
-                        (rc, alpha)
-                    };
                     self.drop_quad.color = live_vec4!(cx, crate::widgetstyle::color_drop_quad);
-                    self.drop_quad.color.w = alpha * 0.8;
-                    found_drop_zone = true;
-                    self.drop_quad.draw_quad_rel(cx, dr);
+                    self.drop_quad.color.w = 0.8;
+                    //found_drop_zone = true;
+                    self.drop_quad.draw_quad_rel(cx, rect);
                 }
             }
-            if !found_drop_zone {
-                self._tweening_quad = None;
-            }
+            //if !found_drop_zone {
+            //    self._tweening_quad = None;
+            //  }
             self.drop_quad_view.end_view(cx);
         }
     }
