@@ -9,6 +9,8 @@ pub struct TreeWorld {
     pub sky_box: SkyBox
 }
 
+
+
 /*
 Low    quest1
 Medium quest2
@@ -18,13 +20,14 @@ Ultra  pchigh
 impl TreeWorld {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            view: View::new(cx),
+            view: View::new(),
             area: Area::Empty,
             sky_box: SkyBox::new(cx),
         }  
     }  
       
     pub fn style(cx: &mut Cx) {
+        
         live_body!(cx, r#"
             
             self::color: #E27D3A;
@@ -40,7 +43,9 @@ impl TreeWorld {
                 use makepad_worlds::worldview::uniforms::*;
                 
                 uniform max_depth: float;
+
                 default_geometry: makepad_render::shader_std::quad_2d;
+
                 geometry geom: vec2;
                 
                 instance in_path: float;
@@ -136,8 +141,7 @@ impl TreeWorld {
         
         self.sky_box.draw_sky_box(cx);
         
-        let shader = live_shader!(cx, self::shader);
-        let inst = cx.new_instance(shader, None, 0);
+        let mut many = cx.begin_many_instances(live_shader!(cx, self::shader), 2);
         
         let max_depth = match cx.gpu_info.performance{
             GpuPerformance::Tier1=>10.0,
@@ -147,19 +151,17 @@ impl TreeWorld {
             GpuPerformance::Tier5=>18.0,
         };  
 
-        inst.write_uniform_float(cx, live_item_id!(self::shader::max_depth), max_depth);
-        
-        self.area = inst.into();   
-        
-        fn recur(shader: Shader, pself: &mut TreeWorld, cx: &mut Cx, path: f32, depth: f32, max_depth: f32) {
-            let inst = cx.new_instance(shader, None, 1);
+        fn recur(many: &mut ManyInstances, path: f32, depth: f32, max_depth: f32) {
             let data = [path, depth];
-            inst.push_slice(cx, &data);
+            many.instances.extend_from_slice(&data);
             if depth > max_depth {return}
-            recur(shader, pself, cx, path, depth + 1.0, max_depth);
-            recur(shader, pself, cx, path + (2.0f32).powf(depth), depth + 1.0, max_depth);
-        } 
-        recur(shader, self, cx, 0., 0., max_depth);
+            recur(many, path, depth + 1.0, max_depth);
+            recur(many, path + (2.0f32).powf(depth), depth + 1.0, max_depth);
+        }  
+        recur(&mut many, 0., 0., max_depth);
 
+        self.area = cx.end_many_instances(many);
+        // write the uniform on the area
+        write_draw_input!(cx, self.area, self::shader::max_depth, max_depth);
     }
 }

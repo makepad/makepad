@@ -18,19 +18,19 @@ pub struct ItemDisplay {
     pub view: View,
     pub text_disp: TextEditor,
     pub text_buffer: TextBuffer,
-    pub text: Text,
+    pub text: DrawText,
     pub last_text_buffer_id: usize,
     pub prev_button: NormalButton,
     pub next_button: NormalButton,
     pub open_button: NormalButton,
-    pub item_title: Text
+    pub item_title: DrawText
 }
 
 impl ItemDisplay {
     pub fn new(cx: &mut Cx) -> Self {
         let editor = Self {
-            text: Text::new(cx),
-            view: View::new(cx),
+            text: DrawText::new(cx, default_shader!()),
+            view: View::new(),
             update_display: false,
             text_disp: TextEditor {
                 read_only: true,
@@ -47,7 +47,7 @@ impl ItemDisplay {
             prev_button: NormalButton::new(cx), 
             next_button: NormalButton::new(cx),
             open_button: NormalButton::new(cx),
-            item_title: Text::new(cx),
+            item_title: DrawText::new(cx, default_shader!()),
             display: ItemDisplayType::Empty,
         };
         editor
@@ -76,13 +76,13 @@ impl ItemDisplay {
     pub fn display_message(&mut self, cx: &mut Cx, loc_message: &LocMessage) {
         self.display = ItemDisplayType::Message {message: loc_message.clone()};
         self.update_display = true;
-        self.view.redraw_view_parent_area(cx);
+        self.view.redraw_view_parent(cx);
     }
     
     pub fn display_plain_text(&mut self, cx: &mut Cx, val: &str) {
         self.display = ItemDisplayType::PlainText {text: val.to_string()};
         self.update_display = true;
-        self.view.redraw_view_parent_area(cx);
+        self.view.redraw_view_parent(cx);
     }
     
     pub fn update_plain_text_buffer(text_buffer: &mut TextBuffer, text: &str) {

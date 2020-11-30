@@ -54,14 +54,14 @@ impl Cx {
                 let cxview = &mut self.views[view_id];
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
-                let sh = &self.shaders[draw_call.shader_id];
+                let sh = &self.shaders[draw_call.shader.shader_id];
                 let shp = sh.platform.as_ref().unwrap();
                 
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
-                    self.platform.bytes_written += draw_call.instance.len() * 4;
-                    draw_call.platform.inst_vbuf.update_with_f32_data(metal_cx, &draw_call.instance);
+                    self.platform.bytes_written += draw_call.instances.len() * 4;
+                    draw_call.platform.inst_vbuf.update_with_f32_data(metal_cx, &draw_call.instances);
                 }
                 
                 // update the zbias uniform if we have it.
@@ -75,14 +75,24 @@ impl Cx {
                 }
                 
                 // lets verify our instance_offset is not disaligned
-                let instances = (draw_call.instance.len() / sh.mapping.instance_props.total_slots) as u64;
+                let instances = (draw_call.instances.len() / sh.mapping.instance_props.total_slots) as u64;
                 if instances == 0 {
                     continue;
                 }
                 let pipeline_state = shp.pipeline_state;
                 unsafe {let () = msg_send![encoder, setRenderPipelineState: pipeline_state];}
                 
-                let geometry = &mut self.geometries[draw_call.geometry_id];
+                let geometry_id = if let Some(geometry) = draw_call.geometry{
+                    geometry.geometry_id
+                }
+                else if let Some(geometry) = sh.default_geometry{
+                    geometry.geometry_id
+                }
+                else{
+                    continue
+                };
+                
+                let geometry = &mut self.geometries[geometry_id];
                 
                 if geometry.dirty {
                     geometry.platform.geom_ibuf.update_with_u32_data(metal_cx, &geometry.indices);
@@ -204,7 +214,7 @@ impl Cx {
                 is_initial = true;
             }
             else {
-                let cxtexture = &mut self.textures[color_texture.texture_id];
+                let cxtexture = &mut self.textures[color_texture.texture_id as usize];
                 is_initial = metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, false);
                 
                 if let Some(mtl_texture) = cxtexture.platform.mtl_texture {
@@ -226,10 +236,10 @@ impl Cx {
                         unsafe {
                             let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
                             let () = msg_send![color_attachment, setClearColor: MTLClearColor {
-                                red: color.r as f64,
-                                green: color.g as f64,
-                                blue: color.b as f64,
-                                alpha: color.a as f64
+                                red: color.x as f64,
+                                green: color.y as f64,
+                                blue: color.z as f64,
+                                alpha: color.w as f64
                             }];
                         }
                     }
@@ -241,10 +251,10 @@ impl Cx {
                     unsafe {
                         let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
                         let () = msg_send![color_attachment, setClearColor: MTLClearColor {
-                            red: color.r as f64,
-                            green: color.g as f64,
-                            blue: color.b as f64,
-                            alpha: color.a as f64
+                            red: color.x as f64,
+                            green: color.y as f64,
+                            blue: color.z as f64,
+                            alpha: color.w as f64
                         }];
                     }
                 }
@@ -252,7 +262,7 @@ impl Cx {
         }
         // attach depth texture
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
-            let cxtexture = &mut self.textures[depth_texture_id];
+            let cxtexture = &mut self.textures[depth_texture_id as usize];
             let is_initial = metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, true);
             
             let depth_attachment: id = unsafe {msg_send![render_pass_descriptor, depthAttachment]};
@@ -769,8 +779,8 @@ impl Cx {
             no_const_collapse: false
         };
         
-        for (live_id, shader) in &self.live_styles.shader_alloc {
-            match self.live_styles.collect_and_analyse_shader(*live_id, options) {
+        for (live_item_id, shader) in &self.live_styles.shader_alloc {
+            match self.live_styles.collect_and_analyse_shader(*live_item_id, options) {
                 Err(err) => {
                     eprintln!("{}", err);
                     panic!()
@@ -779,6 +789,7 @@ impl Cx {
                     let shader_id = shader.shader_id;
                     Self::mtl_compile_shader(
                         shader_id,
+                        self.live_styles.live_item_id_to_string(*live_item_id).unwrap(),
                         &mut self.shaders[shader_id],
                         shader_ast,
                         default_geometry,
@@ -802,17 +813,18 @@ impl Cx {
             no_const_collapse: false
         };
         
-        for (live_id, change) in &self.live_styles.changed_shaders {
+        for (live_item_id, change) in &self.live_styles.changed_shaders {
             match change {
                 LiveChangeType::Recompile => {
-                    match self.live_styles.collect_and_analyse_shader(*live_id, options) {
+                    match self.live_styles.collect_and_analyse_shader(*live_item_id, options) {
                         Err(err) => {
                             errors.push(err);
                         },
                         Ok((shader_ast, default_geometry)) => {
-                            let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                            let shader_id = self.live_styles.shader_alloc.get(&live_item_id).unwrap().shader_id;
                             Self::mtl_compile_shader(
                                 shader_id,
+                                self.live_styles.live_item_id_to_string(*live_item_id).unwrap(),
                                 &mut self.shaders[shader_id],
                                 shader_ast,
                                 default_geometry,
@@ -824,7 +836,7 @@ impl Cx {
                     }
                 }
                 LiveChangeType::UpdateValue => {
-                    let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                    let shader_id = self.live_styles.shader_alloc.get(&live_item_id).unwrap().shader_id;
                     self.shaders[shader_id].mapping.update_live_uniforms(&self.live_styles);
                 }
             }
@@ -834,6 +846,7 @@ impl Cx {
     
     pub fn mtl_compile_shader(
         shader_id: usize,
+        name: String,
         sh: &mut CxShader,
         shader_ast: ShaderAst,
         default_geometry: Option<Geometry>,
@@ -881,6 +894,7 @@ impl Cx {
         
         //let err_str: id = unsafe {msg_send![err, localizedDescription]};
         //println!("{}", nsstring_to_string(err_str));
+        sh.name = name;
         sh.default_geometry = default_geometry;
         sh.mapping = mapping;
         sh.platform = Some(CxPlatformShader {

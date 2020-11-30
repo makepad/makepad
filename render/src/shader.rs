@@ -19,33 +19,25 @@ pub struct PropDef {
 
 #[derive(Debug, Default, Clone)]
 pub struct RectInstanceProps {
-    pub x: Option<usize>,
-    pub y: Option<usize>,
-    pub w: Option<usize>,
-    pub h: Option<usize>,
+    pub rect_pos: Option<usize>,
+    pub rect_size: Option<usize>,
 }
 impl RectInstanceProps {
     pub fn construct(instances: &Vec<PropDef>) -> RectInstanceProps {
-        let mut x = None;
-        let mut y = None;
-        let mut w = None;
-        let mut h = None;
+        let mut rect_pos = None;
+        let mut rect_size = None;
         let mut slot = 0;
         for inst in instances {
             match inst.name.as_ref() {
-                "x" => x = Some(slot),
-                "y" => y = Some(slot),
-                "w" => w = Some(slot),
-                "h" => h = Some(slot),
+                "rect_pos" => rect_pos = Some(slot),
+                "rect_size" => rect_size = Some(slot),
                 _ => ()
             }
             slot += inst.ty.size(); //sg.get_type_slots(&inst.ty);
         };
         RectInstanceProps {
-            x: x,
-            y: y,
-            w: w,
-            h: h
+            rect_pos,
+            rect_size
         }
     }
 }
@@ -316,12 +308,12 @@ impl CxShaderMapping {
         for prop in &self.live_uniform_props.props {
             match prop.ty {
                 Ty::Vec4 => { // color or anim
-                    let color = live_styles.get_color(prop.live_item_id, &prop.name);
+                    let color = live_styles.get_vec4(prop.live_item_id, &prop.name);
                     let o = prop.offset;
-                    self.live_uniforms_buf[o + 0] = color.r;
-                    self.live_uniforms_buf[o + 1] = color.g;
-                    self.live_uniforms_buf[o + 2] = color.b;
-                    self.live_uniforms_buf[o + 3] = color.a;
+                    self.live_uniforms_buf[o + 0] = color.x;
+                    self.live_uniforms_buf[o + 1] = color.y;
+                    self.live_uniforms_buf[o + 2] = color.z;
+                    self.live_uniforms_buf[o + 3] = color.w;
                 },
                 Ty::Float => { // float or anim
                     let float = live_styles.get_float(prop.live_item_id, &prop.name);

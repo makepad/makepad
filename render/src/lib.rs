@@ -38,6 +38,8 @@ mod cx_wasm32;
 #[cfg(all(not(feature="ipc"),any(target_os = "linux", target_os="macos", target_os="windows")))]
 mod cx_desktop;
 
+mod cx_style;
+
 mod turtle;
 mod fonts;
 mod cursor;
@@ -49,20 +51,39 @@ mod animator;
 mod elements;
 mod area;
 mod geometrygen;
-mod quad;
-mod blit;
-mod text;
+
+mod drawquad;
+mod drawtext;
+mod drawcolor;
+mod drawcube;
+mod drawimage;
 mod events;
 mod menu; 
 mod geometry;
 mod shader;
-mod cube;
 mod shader_std;
 mod gpuinfo;
 
 pub use crate::cx::*;
-pub use crate::quad::*;
-pub use crate::cube::*;
-pub use crate::blit::*;
-pub use crate::text::*;
+pub use crate::drawquad::*;
+pub use crate::drawtext::*;
+pub use crate::drawcolor::*;
+pub use crate::drawcube::*;
+pub use crate::drawimage::*;
+
 pub use crate::elements::*;
+
+use std::time::{Instant};
+
+impl Cx{
+    pub fn profile_start(&mut self, id:u64){
+        self.profiles.insert(id, Instant::now());
+    }
+    
+    pub fn profile_end(&self, id:u64){
+        if let Some(inst) = self.profiles.get(&id){
+            log!("Profile {} time {}", id, inst.elapsed().as_millis());
+        }
+        
+    }
+}

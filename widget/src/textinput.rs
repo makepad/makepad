@@ -52,10 +52,10 @@ impl TextInput {
                 padding: all(7.),
             }
             self::shader_bg: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawcolor::shader::*;
                 fn pixel() -> vec4 {
-                    let cx = Df::viewport(pos * vec2(w, h));
-                    cx.box(0., 0., w, h, 2.5);
+                    let cx = Df::viewport(pos * rect_size);
+                    cx.box(0., 0., rect_size.x, rect_size.y, 2.5);
                     return cx.fill(color);
                 }
             }
@@ -78,7 +78,7 @@ impl TextInput {
     pub fn set_value(&mut self, cx: &mut Cx, text: &str) {
         let text_buffer = &mut self.text_buffer;
         text_buffer.load_from_utf8(text);
-        self.text_editor.view.redraw_view_area(cx);
+        self.text_editor.view.redraw_view(cx);
     }
     
     pub fn get_value(&self) -> String {
@@ -87,7 +87,7 @@ impl TextInput {
     
     pub fn select_all(&mut self, cx: &mut Cx) {
         self.text_editor.cursors.select_all(&mut self.text_buffer);
-        self.text_editor.view.redraw_view_area(cx);
+        self.text_editor.view.redraw_view(cx);
     }
     
     pub fn draw_text_input_static(&mut self, cx: &mut Cx, text: &str) {
@@ -121,8 +121,8 @@ impl TextInput {
         
         if text_buffer.is_empty() {
             let pos = cx.get_turtle_pos();
-            self.text_editor.text.color = live_color!(cx, self::color_empty_message);
-            self.text_editor.text.draw_text(cx, &self.empty_message);
+            self.text_editor.text.color = live_vec4!(cx, self::color_empty_message);
+            self.text_editor.text.draw_text_walk(cx, &self.empty_message);
             cx.set_turtle_pos(pos);
         }
         

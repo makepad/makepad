@@ -12,7 +12,11 @@ impl WidgetExampleApp {
     pub fn new(cx: &mut Cx) -> Self {
         
         Self { 
-            desktop_window: DesktopWindow::new(cx),
+            desktop_window: DesktopWindow::new(cx)
+            .with_inner_layout(Layout{
+                line_wrap: LineWrap::NewLine,
+                ..Layout::default()
+            }),
             button: NormalButton::new(cx),
             buttons:ElementsCounted::new(NormalButton::new(cx)),
             menu:Menu::main(vec![
@@ -32,11 +36,11 @@ impl WidgetExampleApp {
         self.desktop_window.handle_desktop_window(cx, event);
 
         if let ButtonEvent::Clicked = self.button.handle_normal_button(cx,event){
-            log!("CLICKED Hello");  
+            log!("CLICKED Hello");
         }
         for (index,button) in self.buttons.iter().enumerate(){
             if let ButtonEvent::Clicked = button.handle_normal_button(cx, event){
-                log!("CLICKED {}", index);  
+                log!("CLICKED {}", index);
             }
         }
     }

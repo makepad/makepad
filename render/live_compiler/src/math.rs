@@ -1,7 +1,8 @@
 use crate::util::PrettyPrintedFloat;
 use makepad_microserde::*;
 use std::fmt;
-
+use crate::colors::{color_name_to_vec4, hex_bytes_to_vec4};
+use std::ops;
 
 #[derive(Clone, Copy, Default, SerBin, DeBin, PartialEq, Debug)]
 pub struct Mat4 {
@@ -38,15 +39,15 @@ impl Transform {
         ]}
     }
     
-    pub fn from_lerp(a:Transform, b:Transform, f:f32)->Self{
-        Transform{
+    pub fn from_lerp(a: Transform, b: Transform, f: f32) -> Self {
+        Transform {
             orientation: Quat::from_slerp(a.orientation, b.orientation, f),
             position: Vec3::from_lerp(a.position, b.position, f)
         }
     }
     
-    pub fn from_slerp_orientation(a:Transform, b:Transform, f:f32)->Self{
-        Transform{
+    pub fn from_slerp_orientation(a: Transform, b: Transform, f: f32) -> Self {
+        Transform {
             orientation: Quat::from_slerp(a.orientation, b.orientation, f),
             position: b.position
         }
@@ -59,6 +60,7 @@ pub struct Vec2 {
     pub y: f32,
 }
 
+
 impl Vec2 {
     pub fn all(x: f32) -> Vec2 {
         Vec2 {x: x, y: x}
@@ -69,7 +71,15 @@ impl Vec2 {
         let dy = self.y - other.y;
         (dx * dx + dy * dy).sqrt()
     }
+
+    pub fn to_vec3(&self) -> Vec3 {
+        Vec3 {x: self.x, y: self.y, z: 0.0}
+    }
 }
+
+pub fn vec2(x: f32, y: f32) -> Vec2 {Vec2 {x, y}}
+pub fn vec3(x: f32, y: f32, z: f32) -> Vec3 {Vec3 {x, y, z}}
+pub fn vec4(x: f32, y: f32, z: f32, w: f32) -> Vec4 {Vec4 {x, y, z, w}}
 
 const TORAD: f32 = 0.017453292519943295;
 const TODEG: f32 = 57.295779513082321;
@@ -88,8 +98,8 @@ pub struct Vec3 {
 
 impl Vec3 {
     
-    pub fn from_lerp(a:Vec3, b:Vec3, f:f32)->Vec3{
-        Vec3{
+    pub fn from_lerp(a: Vec3, b: Vec3, f: f32) -> Vec3 {
+        Vec3 {
             x: (b.x - a.x) * f + a.x,
             y: (b.y - a.y) * f + a.y,
             z: (b.z - a.z) * f + a.z
@@ -106,18 +116,6 @@ impl Vec3 {
     
     pub fn scale(&self, f: f32) -> Vec3 {
         Vec3 {x: self.x * f, y: self.y * f, z: self.z * f}
-    }
-    
-    pub fn add(a: Vec3, b: Vec3) -> Vec3 {
-        Vec3 {x: a.x + b.x, y: a.y + b.y, z: a.z + b.z}
-    }
-    
-    pub fn sub(a: Vec3, b: Vec3) -> Vec3 {
-        Vec3 {x: a.x - b.x, y: a.y - b.y, z: a.z - b.z}
-    }
-    
-    pub fn neg(&self) -> Vec3 {
-        Vec3 {x: -self.x, y: -self.y, z: -self.z}
     }
     
     pub fn cross(a: Vec3, b: Vec3) -> Vec3 {
@@ -173,18 +171,18 @@ impl Plane {
     }
     
     pub fn from_points(p1: Vec3, p2: Vec3, p3: Vec3) -> Self {
-        let normal = Vec3::cross(Vec3::sub(p2, p1), Vec3::sub(p3, p1));
+        let normal = Vec3::cross(p2 - p1, p3 - p1);
         return Self::from_point_normal(p1, normal);
     }
     
     pub fn intersect_line(&self, v1: Vec3, v2: Vec3) -> Vec3 {
-        let diff = Vec3::sub(v1, v2);
+        let diff = v1 - v2;
         let denom = self.a * diff.x + self.b * diff.y + self.c * diff.z;
         if denom == 0.0 {
-            return Vec3::add(v1, v2).scale(0.5)
+            return (v1 * v2) * 0.5
         }
         let u = (self.a * v1.x + self.b * v1.y + self.c * v1.z + self.d) / denom;
-        return Vec3::add(v1, Vec3::sub(v2, v1).scale(u))
+        return v1 + (v2 - v1) * u
     }
 }
 
@@ -215,11 +213,129 @@ impl Vec4 {
     pub fn all(v: f32) -> Self {
         Self {x: v, y: v, z: v, w: v}
     }
+    
     pub fn to_vec3(&self) -> Vec3 {
         Vec3 {x: self.x, y: self.y, z: self.z}
     }
+    
     pub fn dot(&self, other: Vec4) -> f32 {
         self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w
+    }
+    
+    pub fn mix(a: Vec4, b: Vec4, f: f32) -> Vec4 {
+        let nf = 1.0 - f;
+        return Vec4 {
+            x: nf * a.x + f * b.x,
+            y: nf * a.y + f * b.y,
+            z: nf * a.z + f * b.z,
+            w: nf * a.w + f * b.w,
+        };
+    }
+    
+    
+    pub fn is_equal_enough(&self, other: &Vec4) -> bool {
+        (self.x - other.x).abs() < 0.0001
+            && (self.y - other.y).abs() < 0.0001
+            && (self.z - other.z).abs() < 0.0001
+            && (self.w - other.w).abs() < 0.0001
+    }
+    
+    
+    pub fn from_hsva(hsv: Vec4) -> Vec4 {
+        fn mix(x: f32, y: f32, t: f32) -> f32 {x + (y - x) * t}
+        fn clamp(x: f32, mi: f32, ma: f32) -> f32 {if x < mi {mi} else if x > ma {ma} else {x}}
+        fn fract(x: f32) -> f32 {x.fract()}
+        fn abs(x: f32) -> f32 {x.abs()}
+        Vec4 {
+            x: hsv.z * mix(1.0, clamp(abs(fract(hsv.x + 1.0) * 6.0 - 3.0) - 1.0, 0.0, 1.0), hsv.y),
+            y: hsv.z * mix(1.0, clamp(abs(fract(hsv.x + 2.0 / 3.0) * 6.0 - 3.0) - 1.0, 0.0, 1.0), hsv.y),
+            z: hsv.z * mix(1.0, clamp(abs(fract(hsv.x + 1.0 / 3.0) * 6.0 - 3.0) - 1.0, 0.0, 1.0), hsv.y),
+            w: 1.0
+        }
+    }
+    
+    pub fn to_hsva(&self) -> Vec4 {
+        let pc = self.y < self.z; //step(c[2],c[1])
+        let p0 = if pc {self.z} else {self.y}; //mix(c[2],c[1],pc)
+        let p1 = if pc {self.y} else {self.z}; //mix(c[1],c[2],pc)
+        let p2 = if pc {-1.0} else {0.0}; //mix(-1,0,pc)
+        let p3 = if pc {2.0 / 3.0} else {-1.0 / 3.0}; //mix(2/3,-1/3,pc)
+        
+        let qc = self.x < p0; //step(p0, c[0])
+        let q0 = if qc {p0} else {self.x}; //mix(p0, c[0], qc)
+        let q1 = p1;
+        let q2 = if qc {p3} else {p2}; //mix(p3, p2, qc)
+        let q3 = if qc {self.x} else {p0}; //mix(c[0], p0, qc)
+        
+        let d = q0 - q3.min(q1);
+        let e = 1.0e-10;
+        return Vec4 {
+            x: (q2 + (q3 - q1) / (6.0 * d + e)).abs(),
+            y: d / (q0 + e),
+            z: q0,
+            w: self.w
+        }
+    }
+    
+    
+    pub fn from_u32(val: u32) -> Vec4 {
+        Vec4 {
+            x: ((val >> 24) & 0xff) as f32 / 255.0,
+            y: ((val >> 16) & 0xff) as f32 / 255.0,
+            z: ((val >> 8) & 0xff) as f32 / 255.0,
+            w: ((val >> 0) & 0xff) as f32 / 255.0,
+        }
+    }
+    
+    pub fn to_hex_string(&self) -> String {
+        fn int_to_hex(d: u8) -> char {
+            if d >= 10 {
+                return (d + 55) as char;
+            }
+            return (d + 48) as char;
+        }
+        
+        let r = (self.x * 255.0) as u8;
+        let g = (self.y * 255.0) as u8;
+        let b = (self.z * 255.0) as u8;
+        let mut out = String::new();
+        out.push(int_to_hex((r >> 4) & 0xf));
+        out.push(int_to_hex((r) & 0xf));
+        out.push(int_to_hex((g >> 4) & 0xf));
+        out.push(int_to_hex((g) & 0xf));
+        out.push(int_to_hex((b >> 4) & 0xf));
+        out.push(int_to_hex((b) & 0xf));
+        return out
+    }
+    
+    pub fn color(value: &str) -> Vec4 {
+        if let Ok(val) = Self::from_color_name(value) {
+            val
+        }
+        else if let Ok(val) = Self::from_hex_str(value) {
+            val
+        }
+        else {
+            Vec4 {x: 1.0, y: 0.0, z: 1.0, w: 1.0}
+        }
+    }
+    
+    pub fn from_color_name(name: &str) -> Result<Vec4, ()> {
+        color_name_to_vec4(name)
+    }
+    
+    pub fn from_hex_str(hex: &str) -> Result<Vec4, ()> {
+        let bytes = hex.as_bytes();
+        if bytes[0] == '#' as u8 {
+            hex_bytes_to_vec4(&bytes[1..])
+        }
+        else {
+            hex_bytes_to_vec4(bytes)
+        }
+    }
+    
+    pub fn from_hex_bytes(hex: &[u8]) -> Result<Vec4, ()> {
+        hex_bytes_to_vec4(hex)
     }
 }
 
@@ -246,7 +362,7 @@ impl Quat {
         (2.0 * dot * dot - 1.0).acos() * TODEG
     }
     
-    pub fn from_slerp(n: Quat, mut m: Quat, t:f32) -> Quat {
+    pub fn from_slerp(n: Quat, mut m: Quat, t: f32) -> Quat {
         // calc cosine
         let mut cosom = n.dot(m);
         // adjust signs (if necessary)
@@ -259,30 +375,30 @@ impl Quat {
             // standard case (slerp)
             let omega = cosom.acos();
             let sinom = omega.sin();
-            ( ((1.0 - t) * omega).sin() / sinom, (t * omega).sin() / sinom )
+            (((1.0 - t) * omega).sin() / sinom, (t * omega).sin() / sinom)
         } else {
             (1.0 - t, t)
         };
         // calculate final values
-        (Quat{
-            a:scale0 * n.a + scale1 * m.a,
-            b:scale0 * n.b + scale1 * m.b,
-            c:scale0 * n.c + scale1 * m.c,
-            d:scale0 * m.d + scale1 * m.d
+        (Quat {
+            a: scale0 * n.a + scale1 * m.a,
+            b: scale0 * n.b + scale1 * m.b,
+            c: scale0 * n.c + scale1 * m.c,
+            d: scale0 * m.d + scale1 * m.d
         }).normalized()
     }
     
-    pub fn length(self)->f32{
+    pub fn length(self) -> f32 {
         return self.dot(self).sqrt()
     }
     
-    pub fn normalized(&mut self)->Quat{
+    pub fn normalized(&mut self) -> Quat {
         let len = self.length();
-        Quat{
-            a:self.a / len,
-            b:self.b / len,
-            c:self.c / len,
-            d:self.d / len,
+        Quat {
+            a: self.a / len,
+            b: self.b / len,
+            c: self.c / len,
+            d: self.d / len,
         }
     }
     
@@ -651,3 +767,479 @@ impl Mat4 {
         }
     }
 }
+
+
+//------ Vec2 operators
+
+impl ops::Add<Vec2> for Vec2 {
+    type Output = Vec2;
+    fn add(self, rhs: Vec2) -> Vec2 {
+        Vec2 {x: self.x + rhs.x, y: self.y + rhs.y}
+    }
+}
+
+impl ops::Sub<Vec2> for Vec2 {
+    type Output = Vec2;
+    fn sub(self, rhs: Vec2) -> Vec2 {
+        Vec2 {x: self.x - rhs.x, y: self.y - rhs.y}
+    }
+}
+
+impl ops::Mul<Vec2> for Vec2 {
+    type Output = Vec2;
+    fn mul(self, rhs: Vec2) -> Vec2 {
+        Vec2 {x: self.x * rhs.x, y: self.y * rhs.y}
+    }
+}
+
+impl ops::Div<Vec2> for Vec2 {
+    type Output = Vec2;
+    fn div(self, rhs: Vec2) -> Vec2 {
+        Vec2 {x: self.x / rhs.x, y: self.y / rhs.y}
+    }
+}
+
+
+impl ops::Add<Vec2> for f32 {
+    type Output = Vec2;
+    fn add(self, rhs: Vec2) -> Vec2 {
+        Vec2 {x: self + rhs.x, y: self + rhs.y}
+    }
+}
+
+impl ops::Sub<Vec2> for f32 {
+    type Output = Vec2;
+    fn sub(self, rhs: Vec2) -> Vec2 {
+        Vec2 {x: self -rhs.x, y: self -rhs.y}
+    }
+}
+
+impl ops::Mul<Vec2> for f32 {
+    type Output = Vec2;
+    fn mul(self, rhs: Vec2) -> Vec2 {
+        Vec2 {x: self *rhs.x, y: self *rhs.y}
+    }
+}
+
+impl ops::Div<Vec2> for f32 {
+    type Output = Vec2;
+    fn div(self, rhs: Vec2) -> Vec2 {
+        Vec2 {x: self / rhs.x, y: self / rhs.y}
+    }
+}
+
+
+impl ops::Add<f32> for Vec2 {
+    type Output = Vec2;
+    fn add(self, rhs: f32) -> Vec2 {
+        Vec2 {x: self.x + rhs, y: self.y + rhs}
+    }
+}
+
+impl ops::Sub<f32> for Vec2 {
+    type Output = Vec2;
+    fn sub(self, rhs: f32) -> Vec2 {
+        Vec2 {x: self.x - rhs, y: self.y - rhs}
+    }
+}
+
+impl ops::Mul<f32> for Vec2 {
+    type Output = Vec2;
+    fn mul(self, rhs: f32) -> Vec2 {
+        Vec2 {x: self.x * rhs, y: self.y * rhs}
+    }
+}
+
+impl ops::Div<f32> for Vec2 {
+    type Output = Vec2;
+    fn div(self, rhs: f32) -> Vec2 {
+        Vec2 {x: self.x / rhs, y: self.y / rhs}
+    }
+}
+
+impl ops::AddAssign<Vec2> for Vec2 {
+    fn add_assign(&mut self, rhs: Vec2) {
+        self.x = self.x + rhs.x;
+        self.y = self.y + rhs.y;
+    }
+}
+
+impl ops::SubAssign<Vec2> for Vec2 {
+    fn sub_assign(&mut self, rhs: Vec2) {
+        self.x = self.x - rhs.x;
+        self.y = self.y - rhs.y;
+    }
+}
+
+impl ops::MulAssign<Vec2> for Vec2 {
+    fn mul_assign(&mut self, rhs: Vec2) {
+        self.x = self.x * rhs.x;
+        self.y = self.y * rhs.y;
+    }
+}
+
+impl ops::DivAssign<Vec2> for Vec2 {
+    fn div_assign(&mut self, rhs: Vec2) {
+        self.x = self.x / rhs.x;
+        self.y = self.y / rhs.y;
+    }
+}
+
+
+impl ops::AddAssign<f32> for Vec2 {
+    fn add_assign(&mut self, rhs: f32) {
+        self.x = self.x + rhs;
+        self.y = self.y + rhs;
+    }
+}
+
+impl ops::SubAssign<f32> for Vec2 {
+    fn sub_assign(&mut self, rhs: f32) {
+        self.x = self.x - rhs;
+        self.y = self.y - rhs;
+    }
+}
+
+impl ops::MulAssign<f32> for Vec2 {
+    fn mul_assign(&mut self, rhs: f32) {
+        self.x = self.x * rhs;
+        self.y = self.y * rhs;
+    }
+}
+
+impl ops::DivAssign<f32> for Vec2 {
+    fn div_assign(&mut self, rhs: f32) {
+        self.x = self.x / rhs;
+        self.y = self.y / rhs;
+    }
+}
+
+impl ops::Neg for Vec2 {
+    type Output = Vec2;
+    fn neg(self) -> Self { Vec2{x:-self.x, y:-self.y}}
+}
+
+impl ops::Neg for Vec3{
+    type Output = Vec3;
+    fn neg(self) -> Self { Vec3{x:-self.x, y:-self.y, z:-self.z}}
+}
+
+impl ops::Neg for Vec4 {
+    type Output = Vec4;
+    fn neg(self) -> Self { Vec4{x:-self.x, y:-self.y, z:-self.z, w:-self.w}}
+}
+
+
+//------ Vec3 operators
+
+impl ops::Add<Vec3> for Vec3 {
+    type Output = Vec3;
+    fn add(self, rhs: Vec3) -> Vec3 {
+        Vec3 {x: self.x + rhs.x, y: self.y + rhs.y, z: self.z + rhs.z}
+    }
+}
+
+impl ops::Sub<Vec3> for Vec3 {
+    type Output = Vec3;
+    fn sub(self, rhs: Vec3) -> Vec3 {
+        Vec3 {x: self.x - rhs.x, y: self.y - rhs.y, z: self.z - rhs.z}
+    }
+}
+
+impl ops::Mul<Vec3> for Vec3 {
+    type Output = Vec3;
+    fn mul(self, rhs: Vec3) -> Vec3 {
+        Vec3 {x: self.x * rhs.x, y: self.y * rhs.y, z: self.z * rhs.z}
+    }
+}
+
+impl ops::Div<Vec3> for Vec3 {
+    type Output = Vec3;
+    fn div(self, rhs: Vec3) -> Vec3 {
+        Vec3 {x: self.x / rhs.x, y: self.y / rhs.y, z: self.z / rhs.z}
+    }
+}
+
+impl ops::Add<Vec3> for f32 {
+    type Output = Vec3;
+    fn add(self, rhs: Vec3) -> Vec3 {
+        Vec3 {x: self + rhs.x, y: self + rhs.y, z: self + rhs.z}
+    }
+}
+
+impl ops::Sub<Vec3> for f32 {
+    type Output = Vec3;
+    fn sub(self, rhs: Vec3) -> Vec3 {
+        Vec3 {x: self -rhs.x, y: self -rhs.y, z: self -rhs.z}
+    }
+}
+
+impl ops::Mul<Vec3> for f32 {
+    type Output = Vec3;
+    fn mul(self, rhs: Vec3) -> Vec3 {
+        Vec3 {x: self *rhs.x, y: self *rhs.y, z: self *rhs.z}
+    }
+}
+
+impl ops::Div<Vec3> for f32 {
+    type Output = Vec3;
+    fn div(self, rhs: Vec3) -> Vec3 {
+        Vec3 {x: self / rhs.x, y: self / rhs.y, z: self / rhs.z}
+    }
+}
+
+
+impl ops::Add<f32> for Vec3 {
+    type Output = Vec3;
+    fn add(self, rhs: f32) -> Vec3 {
+        Vec3 {x: self.x + rhs, y: self.y + rhs, z: self.z + rhs}
+    }
+}
+
+impl ops::Sub<f32> for Vec3 {
+    type Output = Vec3;
+    fn sub(self, rhs: f32) -> Vec3 {
+        Vec3 {x: self.x - rhs, y: self.y - rhs, z: self.z - rhs}
+    }
+}
+
+impl ops::Mul<f32> for Vec3 {
+    type Output = Vec3;
+    fn mul(self, rhs: f32) -> Vec3 {
+        Vec3 {x: self.x * rhs, y: self.y * rhs, z: self.z * rhs}
+    }
+}
+
+impl ops::Div<f32> for Vec3 {
+    type Output = Vec3;
+    fn div(self, rhs: f32) -> Vec3 {
+        Vec3 {x: self.x / rhs, y: self.y / rhs, z: self.z / rhs}
+    }
+}
+
+
+impl ops::AddAssign<Vec3> for Vec3 {
+    fn add_assign(&mut self, rhs: Vec3) {
+        self.x = self.x + rhs.x;
+        self.y = self.y + rhs.y;
+        self.z = self.z + rhs.z;
+    }
+}
+
+impl ops::SubAssign<Vec3> for Vec3 {
+    fn sub_assign(&mut self, rhs: Vec3) {
+        self.x = self.x - rhs.x;
+        self.y = self.y - rhs.y;
+        self.z = self.z - rhs.z;
+    }
+}
+
+impl ops::MulAssign<Vec3> for Vec3 {
+    fn mul_assign(&mut self, rhs: Vec3) {
+        self.x = self.x * rhs.x;
+        self.y = self.y * rhs.y;
+        self.z = self.z * rhs.z;
+    }
+}
+
+impl ops::DivAssign<Vec3> for Vec3 {
+    fn div_assign(&mut self, rhs: Vec3) {
+        self.x = self.x / rhs.x;
+        self.y = self.y / rhs.y;
+        self.z = self.z / rhs.z;
+    }
+}
+
+
+impl ops::AddAssign<f32> for Vec3 {
+    fn add_assign(&mut self, rhs: f32) {
+        self.x = self.x + rhs;
+        self.y = self.y + rhs;
+        self.z = self.z + rhs;
+    }
+}
+
+impl ops::SubAssign<f32> for Vec3 {
+    fn sub_assign(&mut self, rhs: f32) {
+        self.x = self.x - rhs;
+        self.y = self.y - rhs;
+        self.z = self.z - rhs;
+    }
+}
+
+impl ops::MulAssign<f32> for Vec3 {
+    fn mul_assign(&mut self, rhs: f32) {
+        self.x = self.x * rhs;
+        self.y = self.y * rhs;
+        self.z = self.z * rhs;
+    }
+}
+
+impl ops::DivAssign<f32> for Vec3 {
+    fn div_assign(&mut self, rhs: f32) {
+        self.x = self.x / rhs;
+        self.y = self.y / rhs;
+        self.z = self.z / rhs;
+    }
+}
+
+//------ Vec4 operators
+
+impl ops::Add<Vec4> for Vec4 {
+    type Output = Vec4;
+    fn add(self, rhs: Vec4) -> Vec4 {
+        Vec4 {x: self.x + rhs.x, y: self.y + rhs.y, z: self.z + rhs.z, w: self.w + rhs.w}
+    }
+}
+
+impl ops::Sub<Vec4> for Vec4 {
+    type Output = Vec4;
+    fn sub(self, rhs: Vec4) -> Vec4 {
+        Vec4 {x: self.x - rhs.x, y: self.y - rhs.y, z: self.z - rhs.z, w: self.w - rhs.w}
+    }
+}
+
+impl ops::Mul<Vec4> for Vec4 {
+    type Output = Vec4;
+    fn mul(self, rhs: Vec4) -> Vec4 {
+        Vec4 {x: self.x * rhs.x, y: self.y * rhs.y, z: self.z * rhs.z, w: self.w * rhs.w}
+    }
+}
+
+impl ops::Div<Vec4> for Vec4 {
+    type Output = Vec4;
+    fn div(self, rhs: Vec4) -> Vec4 {
+        Vec4 {x: self.x / rhs.x, y: self.y / rhs.y, z: self.z / rhs.z, w: self.w / rhs.w}
+    }
+}
+
+impl ops::Add<Vec4> for f32 {
+    type Output = Vec4;
+    fn add(self, rhs: Vec4) -> Vec4 {
+        Vec4 {x: self + rhs.x, y: self + rhs.y, z: self + rhs.z, w: self + rhs.z}
+    }
+}
+
+impl ops::Sub<Vec4> for f32 {
+    type Output = Vec4;
+    fn sub(self, rhs: Vec4) -> Vec4 {
+        Vec4 {x: self -rhs.x, y: self -rhs.y, z: self -rhs.z, w: self -rhs.z}
+    }
+}
+
+impl ops::Mul<Vec4> for f32 {
+    type Output = Vec4;
+    fn mul(self, rhs: Vec4) -> Vec4 {
+        Vec4 {x: self *rhs.x, y: self *rhs.y, z: self *rhs.z, w: self *rhs.z}
+    }
+}
+
+impl ops::Div<Vec4> for f32 {
+    type Output = Vec4;
+    fn div(self, rhs: Vec4) -> Vec4 {
+        Vec4 {x: self / rhs.x, y: self / rhs.y, z: self / rhs.z, w: self / rhs.z}
+    }
+}
+
+
+impl ops::Add<f32> for Vec4 {
+    type Output = Vec4;
+    fn add(self, rhs: f32) -> Vec4 {
+        Vec4 {x: self.x + rhs, y: self.y + rhs, z: self.z + rhs, w: self.w + rhs}
+    }
+}
+
+impl ops::Sub<f32> for Vec4 {
+    type Output = Vec4;
+    fn sub(self, rhs: f32) -> Vec4 {
+        Vec4 {x: self.x - rhs, y: self.y - rhs, z: self.z - rhs, w: self.w - rhs}
+    }
+}
+
+impl ops::Mul<f32> for Vec4 {
+    type Output = Vec4;
+    fn mul(self, rhs: f32) -> Vec4 {
+        Vec4 {x: self.x * rhs, y: self.y * rhs, z: self.z * rhs, w: self.w * rhs}
+    }
+}
+
+impl ops::Div<f32> for Vec4 {
+    type Output = Vec4;
+    fn div(self, rhs: f32) -> Vec4 {
+        Vec4 {x: self.x / rhs, y: self.y / rhs, z: self.z / rhs, w: self.w / rhs}
+    }
+}
+
+impl ops::AddAssign<Vec4> for Vec4 {
+    fn add_assign(&mut self, rhs: Vec4) {
+        self.x = self.x + rhs.x;
+        self.y = self.y + rhs.y;
+        self.z = self.z + rhs.z;
+        self.w = self.w + rhs.w;
+    }
+}
+
+impl ops::SubAssign<Vec4> for Vec4 {
+    fn sub_assign(&mut self, rhs: Vec4) {
+        self.x = self.x - rhs.x;
+        self.y = self.y - rhs.y;
+        self.z = self.z - rhs.z;
+        self.w = self.w - rhs.w;
+    }
+}
+
+impl ops::MulAssign<Vec4> for Vec4 {
+    fn mul_assign(&mut self, rhs: Vec4) {
+        self.x = self.x * rhs.x;
+        self.y = self.y * rhs.y;
+        self.z = self.z * rhs.z;
+        self.w = self.w * rhs.w;
+    }
+}
+
+impl ops::DivAssign<Vec4> for Vec4 {
+    fn div_assign(&mut self, rhs: Vec4) {
+        self.x = self.x / rhs.x;
+        self.y = self.y / rhs.y;
+        self.z = self.z / rhs.z;
+        self.w = self.w / rhs.w;
+    }
+}
+
+
+impl ops::AddAssign<f32> for Vec4 {
+    fn add_assign(&mut self, rhs: f32) {
+        self.x = self.x + rhs;
+        self.y = self.y + rhs;
+        self.z = self.z + rhs;
+        self.w = self.w + rhs;
+    }
+}
+
+impl ops::SubAssign<f32> for Vec4 {
+    fn sub_assign(&mut self, rhs: f32) {
+        self.x = self.x - rhs;
+        self.y = self.y - rhs;
+        self.z = self.z - rhs;
+        self.w = self.w - rhs;
+    }
+}
+
+impl ops::MulAssign<f32> for Vec4 {
+    fn mul_assign(&mut self, rhs: f32) {
+        self.x = self.x * rhs;
+        self.y = self.y * rhs;
+        self.z = self.z * rhs;
+        self.w = self.w * rhs;
+    }
+}
+
+impl ops::DivAssign<f32> for Vec4 {
+    fn div_assign(&mut self, rhs: f32) {
+        self.x = self.x / rhs;
+        self.y = self.y / rhs;
+        self.z = self.z / rhs;
+        self.w = self.w / rhs;
+    }
+}
+

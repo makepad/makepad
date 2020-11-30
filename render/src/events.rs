@@ -143,7 +143,7 @@ pub struct AnimateEvent {
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
-pub struct FrameEvent {
+pub struct NextFrameEvent {
     pub frame: u64,
     pub time: f64
 }
@@ -291,7 +291,7 @@ pub enum Event {
     AppFocusLost,
     AnimEnded(AnimateEvent),
     Animate(AnimateEvent),
-    Frame(FrameEvent),
+    NextFrame(NextFrameEvent),
     XRUpdate(XRUpdateEvent),
     WindowSetHoverCursor(MouseCursor),
     WindowDragQuery(WindowDragQueryEvent),
@@ -340,13 +340,23 @@ pub struct HitOpt {
 
 impl Event {
     
-    pub fn is_frame_event(&self, cx:&mut Cx, area: Area)->Option<FrameEvent>{
+    pub fn is_next_frame(&self, cx:&mut Cx, next_frame: NextFrame)->Option<NextFrameEvent>{
          match self {
-            Event::Frame(fe) => {
-                for frame_area in &cx._frame_callbacks {
-                    if *frame_area == area {
-                        return Some(fe.clone())
-                    }  
+            Event::NextFrame(fe) => {
+                if cx._next_frames.contains(&next_frame){
+                   return Some(fe.clone()) 
+                }
+            }
+            _=>()
+        }
+        None
+    }
+
+    pub fn is_animate(&self, cx:&mut Cx, animator: &Animator)->Option<AnimateEvent>{
+         match self {
+            Event::Animate(ae) => {
+                if cx.playing_animator_ids.get(&animator.animator_id).is_some(){
+                    return Some(ae.clone())
                 }
             }
             _=>()
@@ -391,27 +401,12 @@ impl Event {
                     return Event::Trigger(TriggerEvent{triggers})
                 }
             }
-            Event::Animate(_) => {
-                if let Some(_) = cx.playing_anim_areas.get(&area){
-                    return self.clone()
-                }
-            },
-            Event::Frame(_) => {
-                if cx._frame_callbacks.contains(&area){
-                    return self.clone()
-                }
-            },
-            Event::AnimEnded(_) => {
-                if let Some(_) = cx.ended_anim_areas.get(&area){
-                    return self.clone()
-                }
-            },
             Event::FingerScroll(fe) => {
                 let rect = area.get_rect(&cx);
-                if rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
+                if rect.contains_with_margin(fe.abs, &opt.margin) {
                     //fe.handled = true;
                     return Event::FingerScroll(FingerScrollEvent {
-                        rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
+                        rel: fe.abs - rect.pos,
                         rect: rect,
                         ..fe.clone()
                     })
@@ -428,7 +423,7 @@ impl Event {
                             break;
                         }
                     }
-                    if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
+                    if !fe.handled && rect.contains_with_margin(fe.abs, &opt.margin) {
                         fe.handled = true;
                         if let HoverState::Out = fe.hover_state {
                             //    cx.finger_over_last_area = Area::Empty;
@@ -455,7 +450,7 @@ impl Event {
                     }
                 }
                 else {
-                    if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
+                    if !fe.handled && rect.contains_with_margin(fe.abs, &opt.margin) {
                         let mut any_down = false;
                         for finger in &cx.fingers {
                             if finger.captured == area {
@@ -487,7 +482,7 @@ impl Event {
                         rel: area.abs_to_rel(cx, fe.abs),
                         rel_start: rel_start,
                         rect: rect,
-                        is_over: rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin),
+                        is_over: rect.contains_with_margin(fe.abs, &opt.margin),
                         ..fe.clone()
                     })
                 }
@@ -495,7 +490,7 @@ impl Event {
             Event::FingerDown(fe) => {
                 if !fe.handled {
                     let rect = area.get_rect(&cx);
-                    if rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
+                    if rect.contains_with_margin(fe.abs, &opt.margin) {
                         // scan if any of the fingers already captured this area
                         if !opt.use_multi_touch {
                             for finger in &cx.fingers {
@@ -524,7 +519,7 @@ impl Event {
                     let rel_start = cx.fingers[fe.digit].down_rel_start;
                     let rect = area.get_rect(&cx);
                     return Event::FingerUp(FingerUpEvent {
-                        is_over: rect.contains(fe.abs.x, fe.abs.y),
+                        is_over: rect.contains(fe.abs),
                         abs_start: abs_start,
                         rel_start: rel_start,
                         rel: area.abs_to_rel(cx, fe.abs),

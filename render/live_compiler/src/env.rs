@@ -25,7 +25,7 @@ impl<'a> Env<'a> {
         // lets look up ident_path in our live_styles
         // we support color and float lookups, and soon animation lookups too.
         let live_item_id = ident_path.qualify(&self.live_styles.live_bodies[span.live_body_id.0].module_path).to_live_item_id();
-        if let Some(_) = self.live_styles.colors.get(&live_item_id){
+        if let Some(_) = self.live_styles.vec4s.get(&live_item_id){
             return Some(Sym::Var{
                 is_mut: false,
                 ty: Ty::Vec4,

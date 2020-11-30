@@ -28,6 +28,10 @@ impl TokenBuilder {
         }
     }
     
+    pub fn is_empty(&self) -> bool{
+        self.groups.len() == 1 && self.groups[0].1.is_empty()
+    }
+    
     pub fn end(mut self) -> TokenStream {
         if self.groups.len() != 1 {
             panic!("Groups not empty, you missed a pop_group")
@@ -67,7 +71,7 @@ impl TokenBuilder {
                 "]" => self.pop_group(Delimiter::Bracket),
                 "?" | ";" | "&" | "^" | ":" | "::" | "," | "!" | "." | "<<" | ">>" |
                 "->" | "=>" | "<" | ">" | "<=" | ">=" | "=" | "==" | "!=" |
-                "+" | "+=" | "-" | "-=" | "*" | "*=" | "/" | "/=" => self.punct(part),
+                "+" | "+=" | "-" | "-=" | "*" | "*=" | "/" | "/=" | ".." => self.punct(part),
                 _ => {
                     if part.len() == 0{
                         continue
@@ -96,6 +100,12 @@ impl TokenBuilder {
         for (last, c) in s.chars().identify_last() {
             self.extend(TokenTree::from(Punct::new(c, if last {Spacing::Alone} else {Spacing::Joint})));
         }
+        self
+    }
+    
+    pub fn sep(&mut self) -> &mut Self {
+        self.extend(TokenTree::from(Punct::new(':', Spacing::Joint)));
+        self.extend(TokenTree::from(Punct::new(':', Spacing::Alone)));
         self
     }
     
@@ -153,6 +163,18 @@ pub struct Iter<It> where It: Iterator {
     buffer: Option<It::Item>,
 }
 
+
+pub struct Attribute{
+    pub name: String,
+    pub args: TokenStream
+}
+ 
+pub struct StructField{
+    pub name:String,
+    pub ty: TokenStream,
+    pub attrs: Vec<Attribute>
+}
+
 impl<It> Iterator for Iter<It> where It: Iterator {
     type Item = (bool, It::Item);
     
@@ -174,7 +196,7 @@ impl<It> Iterator for Iter<It> where It: Iterator {
 
 pub struct TokenParser {
     iter_stack: Vec<IntoIter>,
-    current: Option<TokenTree>
+    pub current: Option<TokenTree>
 }
 
 // this parser is optimized for parsing type definitions, not general Rust code
@@ -266,6 +288,15 @@ impl TokenParser {
         return false
     }
     
+    pub fn eat_level(&mut self)->TokenStream{
+        let mut tb = TokenBuilder::new();
+        while !self.eat_eot(){
+            tb.extend(self.current.clone().unwrap());
+            self.advance();
+        }
+        tb.end()
+    }
+    
     pub fn eat_ident(&mut self, what: &str) -> bool {
         // check if our current thing is an ident, ifso eat it.
         if let Some(TokenTree::Ident(ident)) = &self.current {
@@ -288,7 +319,9 @@ impl TokenParser {
     pub fn eat_literal(&mut self) -> Option<Literal> {
         // check if our current thing is an ident, ifso eat it.
         if let Some(TokenTree::Literal(lit)) = &self.current {
-            return Some(lit.clone())
+            let ret = Some(lit.clone());
+            self.advance();
+            return ret
         }
         return None
     }
@@ -309,6 +342,22 @@ impl TokenParser {
         }
     }
     
+    pub fn eat_sep(&mut self) -> bool {
+        // check if our punct is multichar.
+        if let Some(TokenTree::Punct(current)) = &self.current {
+            if current.as_char() == ':' && current.spacing() == Spacing::Joint{
+                self.advance();
+                if let Some(TokenTree::Punct(current)) = &self.current {
+                    if current.as_char() == ':' && current.spacing() == Spacing::Alone{
+                        self.advance();
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+    
     pub fn eat_punct(&mut self, what: char) -> bool {
         if self.is_punct(what) {
             self.advance();
@@ -322,6 +371,27 @@ impl TokenParser {
             let ret = Some(ident.to_string());
             self.advance();
             return ret
+        }
+        return None
+    }
+    
+    pub fn eat_ident_path(&mut self) -> Option<TokenStream> {
+        let mut tb = TokenBuilder::new();
+        loop{
+            if let Some(ident) = self.eat_any_ident(){
+                tb.ident(&ident);
+                if !self.eat_sep(){
+                    break
+                }
+                tb.sep();
+            }
+            else{
+                break
+            }
+        }
+        let ts = tb.end();
+        if !ts.is_empty(){
+            return Some(ts)
         }
         return None
     }
@@ -379,26 +449,51 @@ impl TokenParser {
         return None
     }
     
-    pub fn eat_struct_field(&mut self) -> Option<(String, TokenStream)> {
+    pub fn eat_struct_field(&mut self) -> Option<StructField> {
         // letsparse an ident
+        let attrs = self.eat_attributes();
+        
         self.eat_ident("pub");
         if let Some(field) = self.eat_any_ident() {
             if self.eat_punct(':') {
                 if let Some(ty) = self.eat_type() {
-                    return Some((field, ty))
+                    return Some(StructField{name:field, ty:ty, attrs:attrs})
                 }
             }
         }
         return None
     }
     
-    pub fn eat_all_struct_fields(&mut self, )->Option<Vec<(String, TokenStream)>>{
+
+    pub fn eat_attributes(&mut self) -> Vec<Attribute> {
+        let mut results = Vec::new();
+        while self.eat_punct('#') { // parse our attribute
+            if !self.open_bracket() {
+                break;
+            }
+            while let Some(ident) = self.eat_any_ident(){
+                if !self.open_paren() {
+                    break;
+                }
+                // lets take the whole ts
+                results.push(Attribute{name:ident, args:self.eat_level()});
+                self.eat_punct(',');
+            }
+            if !self.eat_eot(){
+                break
+            }
+        }
+        return results;
+    }
+    
+    pub fn eat_all_struct_fields(&mut self, )->Option<Vec<StructField>>{
         
         if self.open_brace(){
             let mut fields = Vec::new();
             while !self.eat_eot(){
-                if let Some((field, ty)) = self.eat_struct_field(){
-                    fields.push((field, ty));
+                // lets eat an attrib
+                if let Some(sf) = self.eat_struct_field(){
+                    fields.push(sf);
                     self.eat_punct(',');
                 }
                 else{

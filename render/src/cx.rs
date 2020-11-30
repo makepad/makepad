@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
 use std::fmt::Write;
+use std::time::{Instant};
 
+pub use makepad_draw_derive::*;
 pub use makepad_live_compiler::livetypes::*;
 pub use makepad_live_compiler::livestyles::*;
 pub use makepad_live_compiler::span::LiveBodyId;
 pub use makepad_live_compiler::math::*;
 pub use makepad_live_compiler::colors::*;
-pub use makepad_live_compiler::ty::Ty;
+pub use makepad_live_compiler::ty::{Ty, TyLit, TyExpr};
 
 pub use crate::fonts::*;
 pub use crate::turtle::*;
@@ -16,7 +18,6 @@ pub use crate::view::*;
 pub use crate::pass::*;
 pub use crate::geometry::*;
 pub use crate::texture::*;
-pub use crate::text::*;
 pub use crate::livemacros::*;
 pub use crate::events::*;
 pub use crate::animator::*;
@@ -106,7 +107,7 @@ pub struct Cx {
     
     pub shaders: Vec<CxShader>,
     
-    pub is_in_redraw_cycle: bool,
+    pub in_redraw_cycle: bool,
     pub default_dpi_factor: f32,
     pub current_dpi_factor: f32,
     pub window_stack: Vec<usize>,
@@ -124,6 +125,8 @@ pub struct Cx {
     pub repaint_id: u64,
     pub event_id: u64,
     pub timer_id: u64,
+    pub animator_id: u64,
+    pub next_frame_id: u64,
     pub signal_id: usize,
     pub live_update_id: u64,
     pub anim_time: f64,
@@ -139,14 +142,15 @@ pub struct Cx {
     pub hover_mouse_cursor: Option<MouseCursor>,
     pub fingers: Vec<CxPerFinger>,
     
-    pub playing_anim_areas: BTreeMap<Area, AnimInfo>,
-    pub ended_anim_areas: BTreeMap<Area ,AnimInfo>,
+    pub playing_animator_ids: BTreeMap<AnimatorId, AnimInfo>,
     
-    pub frame_callbacks: HashSet<Area>,
-    pub _frame_callbacks: HashSet<Area>,
+    pub next_frames: HashSet<NextFrame>,
+    pub _next_frames: HashSet<NextFrame>,
     
     pub triggers: HashMap<Area, BTreeSet<TriggerId>>,
     pub signals: HashMap<Signal, BTreeSet<StatusId >>,
+
+    pub profiles: HashMap<u64, Instant>,
     
     pub live_styles: LiveStyles,
     
@@ -159,6 +163,9 @@ pub struct Cx {
     // this cuts the compiletime of an end-user application in half
     pub event_handler: Option<*mut dyn FnMut(&mut Cx, &mut Event)>,
 }
+
+#[derive(Clone, Default, Eq, PartialEq, Copy, Hash)]
+pub struct NextFrame(u64);
 
 #[derive(Clone, Copy, Default)]
 pub struct CxCommandSetting {
@@ -220,7 +227,7 @@ impl Default for Cx {
             
             default_dpi_factor: 1.0,
             current_dpi_factor: 1.0,
-            is_in_redraw_cycle: false,
+            in_redraw_cycle: false,
             window_stack: Vec::new(),
             pass_stack: Vec::new(),
             view_stack: Vec::new(),
@@ -238,6 +245,8 @@ impl Default for Cx {
             timer_id: 1,
             signal_id: 1,
             live_update_id: 1,
+            animator_id: 1,
+            next_frame_id: 1,
             anim_time: 0.0,
             
             next_key_focus: Area::Empty,
@@ -249,19 +258,19 @@ impl Default for Cx {
             
             down_mouse_cursor: None,
             hover_mouse_cursor: None,
-            fingers: fingers,
+            fingers: fingers, 
             
             live_styles: LiveStyles::new(),
             
             command_settings: HashMap::new(),
             
-            playing_anim_areas: BTreeMap::new(),
-            ended_anim_areas: BTreeMap::new(),
+            playing_animator_ids: BTreeMap::new(),
             
-            frame_callbacks: HashSet::new(),
-            _frame_callbacks: HashSet::new(),
+            next_frames: HashSet::new(),
+            _next_frames: HashSet::new(),
+            profiles: HashMap::new(),
             
-            signals: HashMap::new(),
+            signals: HashMap::new(), 
             
             triggers: HashMap::new(),
             
@@ -495,7 +504,7 @@ impl Cx {
     }
     
     pub fn is_xr_presenting(&mut self) -> bool {
-        if !self.is_in_redraw_cycle {
+        if !self.in_redraw_cycle {
             panic!("Cannot call is_xr_presenting outside of redraw flow");
         }
         if self.window_stack.len() == 0 {
@@ -586,15 +595,16 @@ impl Cx {
         false
     }
     
-    pub fn check_ended_anim_areas(&mut self, time: f64) {
-        self.ended_anim_areas.clear();
-        for (area, anim_info) in &self.playing_anim_areas{
+    pub fn check_ended_animator_ids(&mut self, time: f64) {
+        let mut ended_animator_ids = BTreeSet::new();
+        //self.ended_animator_ids.clear();
+        for (anim_id, anim_info) in &self.playing_animator_ids{
             if anim_info.start_time.is_nan() || time - anim_info.start_time >= anim_info.total_time {
-                self.ended_anim_areas.insert(*area, anim_info.clone());
+                ended_animator_ids.insert(*anim_id);
             }
         }
-        for (area, _) in &self.ended_anim_areas{
-            self.playing_anim_areas.remove(area);
+        for anim_id in &ended_animator_ids{
+            self.playing_animator_ids.remove(anim_id);
         }
     }
     
@@ -602,11 +612,6 @@ impl Cx {
         if old_area == Area::Empty || old_area == Area::All {
             return new_area
         }
-        
-        if let Some(anim_info) = self.playing_anim_areas.get(&old_area).cloned() {
-            self.playing_anim_areas.insert(new_area, anim_info);
-        }
-        self.playing_anim_areas.remove(&old_area);
         
         for finger in &mut self.fingers {
             if finger.captured == old_area {
@@ -629,12 +634,6 @@ impl Cx {
             self.next_key_focus = new_area.clone()
         }
         
-        //
-        if self.frame_callbacks.contains(&old_area){
-            self.frame_callbacks.insert(new_area);
-            self.frame_callbacks.remove(&old_area);
-        }
-
         new_area
     }
     
@@ -698,7 +697,7 @@ impl Cx {
     pub fn call_draw_event(&mut self)
     {
         // self.profile();
-        self.is_in_redraw_cycle = true;
+        self.in_redraw_cycle = true;
         self.redraw_id += 1;
         self.counter = 0;
         std::mem::swap(&mut self._redraw_child_areas, &mut self.redraw_child_areas);
@@ -707,7 +706,7 @@ impl Cx {
         self.redraw_child_areas.truncate(0);
         self.redraw_parent_areas.truncate(0);
         self.call_event_handler(&mut Event::Draw);
-        self.is_in_redraw_cycle = false;
+        self.in_redraw_cycle = false;
         if self.live_styles.style_stack.len()>0 {
             panic!("Style stack disaligned, forgot a cx.end_style()");
         }
@@ -726,27 +725,24 @@ impl Cx {
         //self.profile();
     }
     
-    pub fn call_animation_event(&mut self, time: f64)
+    pub fn call_animate_event(&mut self, time: f64)
     {
         self.call_event_handler(&mut Event::Animate(AnimateEvent {time: time, frame: self.repaint_id}));
-        self.check_ended_anim_areas(time);
-        if self.ended_anim_areas.len() > 0 {
-            self.call_event_handler(&mut Event::AnimEnded(AnimateEvent {time: time, frame: self.repaint_id}));
-        }
+        self.check_ended_animator_ids(time);
     }
     
-    pub fn call_frame_event(&mut self, time: f64)
+    pub fn call_next_frame_event(&mut self, time: f64)
     {
-        std::mem::swap(&mut self._frame_callbacks, &mut self.frame_callbacks);
-        self.frame_callbacks.clear();
-        self.call_event_handler(&mut Event::Frame(FrameEvent {time: time, frame: self.repaint_id}));
+        std::mem::swap(&mut self._next_frames, &mut self.next_frames);
+        self.next_frames.clear();
+        self.call_event_handler(&mut Event::NextFrame(NextFrameEvent {time: time, frame: self.repaint_id}));
     }
     
-    pub fn next_frame(&mut self, area: Area) {
-        if let Some(_) = self.frame_callbacks.iter().position( | a | *a == area) {
-            return;
-        }
-        self.frame_callbacks.insert(area);
+    pub fn new_next_frame(&mut self) -> NextFrame {
+        let res = NextFrame(self.next_frame_id);
+        self.next_frame_id += 1;
+        self.next_frames.insert(res);
+        res
     }
     
     pub fn new_signal(&mut self) -> Signal {
@@ -830,7 +826,6 @@ impl Cx {
     pub fn status_http_send_ok() -> StatusId {uid!()}
     pub fn status_http_send_fail() -> StatusId {uid!()}
     
-    
     pub fn debug_draw_tree_recur(&mut self, dump_instances: bool, s: &mut String, view_id: usize, depth: usize) {
         if view_id >= self.views.len() {
             writeln!(s, "---------- Drawlist still empty ---------").unwrap();
@@ -854,10 +849,10 @@ impl Cx {
             else {
                 let cxview = &mut self.views[view_id];
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
-                let sh = &self.shaders[draw_call.shader_id];
+                let sh = &self.shaders[draw_call.shader.shader_id];
                 let slots = sh.mapping.instance_props.total_slots;
-                let instances = draw_call.instance.len() / slots;
-                writeln!(s, "{}call {}: {}({}) *:{} scroll:{}", indent, draw_call_id, sh.name, draw_call.shader_id, instances, draw_call.get_local_scroll()).unwrap();
+                let instances = draw_call.instances.len() / slots;
+                writeln!(s, "{}call {}: {}({}) *:{} scroll:{}", indent, draw_call_id, sh.name, draw_call.shader.shader_id, instances, draw_call.get_local_scroll()).unwrap();
                 // lets dump the instance geometry
                 if dump_instances {
                     for inst in 0..instances.min(1) {
@@ -865,10 +860,10 @@ impl Cx {
                         let mut off = 0;
                         for prop in &sh.mapping.instance_props.props {
                             match prop.slots {
-                                1 => out.push_str(&format!("{}:{} ", prop.name, draw_call.instance[inst * slots + off])),
-                                2 => out.push_str(&format!("{}:v2({},{}) ", prop.name, draw_call.instance[inst * slots + off], draw_call.instance[inst * slots + 1 + off])),
-                                3 => out.push_str(&format!("{}:v3({},{},{}) ", prop.name, draw_call.instance[inst * slots + off], draw_call.instance[inst * slots + 1 + off], draw_call.instance[inst * slots + 1 + off])),
-                                4 => out.push_str(&format!("{}:v4({},{},{},{}) ", prop.name, draw_call.instance[inst * slots + off], draw_call.instance[inst * slots + 1 + off], draw_call.instance[inst * slots + 2 + off], draw_call.instance[inst * slots + 3 + off])),
+                                1 => out.push_str(&format!("{}:{} ", prop.name, draw_call.instances[inst * slots + off])),
+                                2 => out.push_str(&format!("{}:v2({},{}) ", prop.name, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off])),
+                                3 => out.push_str(&format!("{}:v3({},{},{}) ", prop.name, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off], draw_call.instances[inst * slots + 1 + off])),
+                                4 => out.push_str(&format!("{}:v4({},{},{},{}) ", prop.name, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off], draw_call.instances[inst * slots + 2 + off], draw_call.instances[inst * slots + 3 + off])),
                                 _ => {}
                             }
                             off += prop.slots;
@@ -884,15 +879,6 @@ impl Cx {
     }
 }
 
-// palette types
-
-
-#[derive(Clone)]
-pub enum StyleValue {
-    Color(Color),
-    Font(String),
-    Size(f64)
-}
 
 #[macro_export]
 macro_rules!main_app {

@@ -1277,10 +1277,8 @@ impl DrawCursors {
                 self.selections.push(DrawSel {
                     index: self.next_index - 1,
                     rc: Rect {
-                        x: self.left_top.x,
-                        y: self.left_top.y,
-                        w: (self.right_bottom.x - self.left_top.x),
-                        h: self.right_bottom.y - self.left_top.y
+                        pos: self.left_top,
+                        size: self.right_bottom - self.left_top
                     }
                 })
             }
@@ -1294,10 +1292,8 @@ impl DrawCursors {
             self.selections.push(DrawSel {
                 index: self.next_index - 1,
                 rc: Rect {
-                    x: self.left_top.x,
-                    y: self.left_top.y,
-                    w: (self.right_bottom.x - self.left_top.x) + self.last_w,
-                    h: self.right_bottom.y - self.left_top.y
+                    pos:self.left_top,
+                    size: (self.right_bottom - self.left_top) + vec2(self.last_w, 0.0)
                 }
             });
             self.right_bottom.y = 0.;
@@ -1370,6 +1366,7 @@ impl DrawCursors {
                 return mark_spaces
             }
         }
+        //println!("{}", self.start);
         // in current cursor range, update values
         if offset >= self.start && offset <= self.end {
             self.process_cursor(last_cursor, offset, x, y, h, z);
@@ -1386,4 +1383,6 @@ impl DrawCursors {
         }
         return mark_spaces
     }
+
+
 }

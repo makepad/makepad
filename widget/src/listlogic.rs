@@ -17,6 +17,7 @@ pub struct ListLogic {
 
 #[derive(Clone)]
 pub struct ListItem {
+    pub area: Area,
     pub animator: Animator,
     pub is_selected: bool
 }
@@ -58,6 +59,10 @@ impl ListSelect {
 }
 
 impl ListLogic {
+    pub fn with_multi_select(self, multi_select:bool)->Self{
+        Self{multi_select,..self}
+    }
+    
     pub fn set_list_len(&mut self, len: usize)
     {
         if self.list_items.len() != len{
@@ -66,6 +71,7 @@ impl ListLogic {
         if self.list_items.len() < len {
             for _ in self.list_items.len()..len {
                 self.list_items.push(ListItem {
+                    area: Area::Empty,
                     animator: Animator::default(),
                     is_selected: false
                 })
@@ -79,7 +85,7 @@ impl ListLogic {
     pub fn handle_list_scroll_bars(&mut self, cx: &mut Cx, event: &mut Event, view: &mut ScrollView)
         -> bool {
         if view.handle_scroll_view(cx, event) {
-            view.redraw_view_area(cx);
+            view.redraw_view(cx);
             match &event {
                 Event::FingerScroll {..} => {
                     return true;
@@ -123,7 +129,7 @@ impl ListLogic {
         let view_rect = cx.get_turtle_rect();
         
         // the maximum scroll position given the amount of log items
-        let max_scroll_y = ((self.list_items.len() + 1) as f32 * row_height - view_rect.h).max(0.);
+        let max_scroll_y = ((self.list_items.len() + 1) as f32 * row_height - view_rect.size.y).max(0.);
         
         // tail the log
         let (scroll_pos, set_scroll_pos) = if tail_list {
@@ -136,7 +142,7 @@ impl ListLogic {
             if let Some(scroll_item_in_view) = self.scroll_item_in_view {
                 self.scroll_item_in_view = None;
                 let item_y = scroll_item_in_view as f32 * row_height;
-                let dy = (item_y + row_height) - (sp.y + view_rect.h);
+                let dy = (item_y + row_height) - (sp.y + view_rect.size.y);
                 if item_y < sp.y {
                     (Vec2 {x: 0., y: item_y}, true)
                 }
@@ -159,7 +165,7 @@ impl ListLogic {
         };
         
         let start_item = (scroll_pos.y / row_height).floor() as usize;
-        let end_item = ((scroll_pos.y + view_rect.h + row_height) / row_height).ceil() as usize;
+        let end_item = ((scroll_pos.y + view_rect.size.y + row_height) / row_height).ceil() as usize;
         
         self.start_item = start_item.min(self.list_items.len());
         self.end_fill = end_item;
@@ -215,13 +221,11 @@ impl ListLogic {
                 break;
             }
             let item = &mut self.list_items[counter];
-            match event.hits(cx, item.animator.area, HitOpt::default()) {
-                Event::Animate(ae) => {
-                    cb(cx, ListLogicEvent::Animate(ae), item, counter)
-                },
-                Event::AnimEnded(_) => {
-                    cb(cx, ListLogicEvent::AnimEnded, item, counter)
-                },
+            if let Some(ae) = event.is_animate(cx, &item.animator) {
+                cb(cx, ListLogicEvent::Animate(ae), item, counter)
+            }
+            
+            match event.hits(cx, item.area, HitOpt::default()) {
                 Event::FingerDown(fe) => {
                     cx.set_down_mouse_cursor(MouseCursor::Hand);
                     if self.multi_select && (fe.modifiers.logo || fe.modifiers.control) {

@@ -7,7 +7,7 @@ use crate::env::{Env, Sym, VarKind};
 use crate::error::LiveError;
 use crate::ident::{Ident,IdentPath};
 use crate::span::Span;
-use crate::ty::Ty;
+use crate::ty::{Ty,TyExpr};
 use crate::ty_check::TyChecker;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, BTreeSet};

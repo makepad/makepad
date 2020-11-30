@@ -82,40 +82,46 @@ impl FoldOpenState{
     }
 }
 
+#[derive(Clone, DrawQuad)]
+#[repr(C)]
+pub struct DrawFoldCaption  {
+    #[default_shader(self::shader_bg)]
+    base: DrawQuad,
+    hover: f32,
+    down: f32,
+    open: f32
+}
+
+
 #[derive(Clone)]
 pub struct FoldCaption {
     pub button: ButtonLogic,
-    pub bg: Quad,
-    pub text: Text,
+    pub bg: DrawFoldCaption,
+    pub text: DrawText,
     pub animator: Animator,
     pub open_state: FoldOpenState,
-    pub _bg_area: Area,
-    pub _text_area: Area,
-    pub _bg_inst: Option<InstanceArea>
 }
 
 impl FoldCaption {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             button: ButtonLogic::default(),
-            bg: Quad{
-                z: 0.5,
-                ..Quad::new(cx)
-             },
-            text: Text{
-                z: 1.0,
-                shader: live_shader!(cx, makepad_render::text::shader),
-                ..Text::new(cx)
-            },
+            
+            bg: DrawFoldCaption::new(cx, default_shader!())
+                .with_draw_depth(0.5),
+
+            text: DrawText::new(cx, default_shader!())
+                .with_draw_depth(1.0),
+                
             open_state: FoldOpenState::Open,
             animator: Animator::default(),
-            _bg_area: Area::Empty,
-            _bg_inst: None,
-            _text_area: Area::Empty,
         }
     }
     
     pub fn style(cx: &mut Cx) {
+        
+        DrawFoldCaption::register_draw_input(cx);
+        
         live_body!(cx, r#"
             self::layout_bg: Layout {
                 align: {fx:1.0,fy:0.5},
@@ -134,45 +140,43 @@ impl FoldCaption {
             self::anim_default: Anim {
                 play: Cut {duration: 0.1}
                 tracks:[
-                    Float {keys:{1.0: 0.0}, bind_to: self::shader_bg::hover}
-                    Float {keys:{1.0: 0.0}, bind_to: self::shader_bg::down}
-                    Color {keys:{1.0: #9}, bind_to: makepad_render::text::shader::color}
+                    Float {keys:{1.0: 0.0}, bind_to: self::DrawFoldCaption::hover}
+                    Float {keys:{1.0: 0.0}, bind_to: self::DrawFoldCaption::down}
+                    Vec4 {keys:{1.0: #9}, bind_to: makepad_render::drawtext::DrawText::color}
                 ]
             }
             
             self::anim_over: Anim {
                 play: Cut {duration: 0.1},
                 tracks:[
-                    Float {keys:{0.0: 1.0, 1.0: 1.0}, bind_to: self::shader_bg::hover},
-                    Float {keys:{1.0: 0.0}, bind_to: self::shader_bg::down},
-                    Color {keys:{0.0: #f}, bind_to: makepad_render::text::shader::color}
+                    Float {keys:{0.0: 1.0, 1.0: 1.0}, bind_to: self::DrawFoldCaption::hover},
+                    Float {keys:{1.0: 0.0}, bind_to: self::DrawFoldCaption::down},
+                    Vec4 {keys:{0.0: #f}, bind_to: makepad_render::drawtext::DrawText::color}
                 ]
             }
             
             self::anim_down: Anim {
                 play: Cut {duration: 0.2},
                 tracks:[
-                    Float {keys:{0.0: 1.0, 1.0: 1.0}, bind_to: self::shader_bg::down},
-                    Float {keys:{1.0: 1.0}, bind_to: self::shader_bg::hover},
-                    Color {keys:{0.0: #c}, bind_to: makepad_render::text::shader::color},
+                    Float {keys:{0.0: 1.0, 1.0: 1.0}, bind_to: self::DrawFoldCaption::down},
+                    Float {keys:{1.0: 1.0}, bind_to: self::DrawFoldCaption::hover},
+                    Vec4 {keys:{0.0: #c}, bind_to: makepad_render::drawtext::DrawText::color},
                 ]
             }
             
             self::shader_bg: Shader {
                 
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawquad::shader::*;
                 
-                instance hover: float;
-                instance down: float;
-                instance open: float;
+                draw_input: self::DrawFoldCaption;
                 
                 const shadow: float = 3.0;
                 const border_radius: float = 2.5;
                 
                 fn pixel() -> vec4 {
                     let sz = 3.;
-                    let c = vec2(5.0,0.5*h);
-                    let df = Df::viewport(pos * vec2(w, h));
+                    let c = vec2(5.0,0.5*rect_size.y);
+                    let df = Df::viewport(pos * rect_size);
                     df.clear(#2);
                     // we have 3 points, and need to rotate around its center
                     df.rotate(open*0.5*PI+0.5*PI, c.x, c.y);
@@ -191,19 +195,18 @@ impl FoldCaption {
     pub fn handle_fold_caption(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
         //let mut ret_event = ButtonEvent::None;
         let animator = &mut self.animator;
-        let text_area = self._text_area;
         let open_state = &mut self.open_state;
-        let bg_area = self._bg_area;
-        self.button.handle_button_logic(cx, event, self._bg_area, | cx, logic_event, area | match logic_event {
-            ButtonLogicEvent::Animate(ae) => {
-                animator.calc_area(cx, area, ae.time);
-                animator.calc_area(cx, text_area, ae.time);
-            },
-            ButtonLogicEvent::AnimEnded(_) => animator.end(),
+
+        if let Some(ae) = event.is_animate(cx, animator) {
+            self.bg.animate(cx, animator, ae.time);
+            self.text.animate(cx, animator, ae.time);
+        }
+
+        self.button.handle_button_logic(cx, event, self.bg.area(), | cx, logic_event, area | match logic_event {
             ButtonLogicEvent::Down => {
                 // lets toggle our anim state
                 open_state.toggle();
-                cx.redraw_child_area(bg_area);
+                cx.redraw_child_area(area);
                 animator.play_anim(cx, live_anim!(cx, self::anim_down));
             }
             ButtonLogicEvent::Default => animator.play_anim(cx, live_anim!(cx, self::anim_default)),
@@ -212,20 +215,19 @@ impl FoldCaption {
     }
     
     pub fn begin_fold_caption(&mut self, cx: &mut Cx)->f32{
-        self.bg.shader = live_shader!(cx, self::shader_bg);
+
+        if self.animator.need_init(cx){
+            self.animator.init(cx, live_anim!(cx, self::anim_default));
+            self.bg.last_animate(&self.animator);
+            self.text.last_animate(&self.animator);
+        }
         
-        self.animator.init(cx, | cx | live_anim!(cx, self::anim_default));
-        
-        let bg_inst = self.bg.begin_quad(cx, live_layout!(cx, self::layout_bg));
-        
-        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::hover));
-        bg_inst.push_last_float(cx, &self.animator, live_item_id!(self::shader_bg::down));
         let open_value = self.open_state.get_value();
-        bg_inst.push_float(cx, self.open_state.get_value());
+        self.bg.open = open_value;
+        self.bg.begin_quad(cx, live_layout!(cx, self::layout_bg));
         
-        self._bg_inst = Some(bg_inst);
         if self.open_state.do_time_step(0.6){
-            cx.redraw_child_area(self._bg_area);
+            cx.redraw_child_area(self.bg.area());
         }
         
         open_value
@@ -238,11 +240,9 @@ impl FoldCaption {
         self.text.text_style = live_text_style!(cx, self::text_style_label);
         let wleft = cx.get_width_left();
         self.text.wrapping = Wrapping::Ellipsis(wleft - 10.0);
-        self.text.color = self.animator.last_color(cx, live_item_id!(makepad_render::text::shader::color));
-        self._text_area = self.text.draw_text(cx, label);
+        self.text.draw_text_walk(cx, label);
 
-        self._bg_area = self.bg.end_quad(cx, self._bg_inst.take().unwrap());
-        self.animator.set_area(cx, self._bg_area);
+        self.bg.end_quad(cx);
     }
 }
 

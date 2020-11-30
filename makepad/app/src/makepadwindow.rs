@@ -67,11 +67,9 @@ impl MakepadWindow {
     pub fn new(cx: &mut Cx) -> Self {
         
         Self {
-            desktop_window: DesktopWindow {
-                caption: "Makepad".to_string(),
-                window: Window::new(cx),
-                ..DesktopWindow::new(cx)
-            },
+            desktop_window: DesktopWindow::new(cx)
+                .with_caption("Makepad"),
+
             file_editors: FileEditors {
                 rust_editor: RustEditor::new(cx),
                 js_editor: JSEditor::new(cx),
@@ -502,6 +500,15 @@ impl MakepadWindow {
             self.world_view.draw_world_view_3d(cx);
             self.xr_control.draw_xr_control(cx);
         }
+        
+        /*
+        let mut di = DrawImage::new(cx, default_shader!()).with_draw_depth(100.);
+        di.texture = Texture2D(Some(cx.fonts_atlas.texture_id));
+        di.alpha = 1.0;
+        di.pt1 = vec2(0.,0.);
+        di.pt2 = vec2(1.,0.2);
+        di.draw_quad_abs(cx, Rect{pos:vec2(100.,100.), size:cx.get_turtle_rect().size*0.5});
+        */
         self.desktop_window.end_desktop_window(cx);
     }
     

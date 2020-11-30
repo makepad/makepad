@@ -1,8 +1,16 @@
 use makepad_render::*;
 
+#[derive(Clone, DrawQuad)]
+#[repr(C)]
+pub struct DrawCodeIcon {
+    #[default_shader(self::shader_code_icon)]
+    base: DrawQuad,
+    icon_type: f32,
+}
+
 #[derive(Clone)]
 pub struct CodeIcon {
-    pub quad: Quad,
+    pub code_icon: DrawCodeIcon,
 }
 
 pub enum CodeIconType {
@@ -28,14 +36,12 @@ impl CodeIconType {
 impl CodeIcon {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            quad: Quad {
-                shader: live_shader!(cx, self::shader_code_icon),
-                ..Quad::new(cx)
-            }
+            code_icon: DrawCodeIcon::new(cx, default_shader!())
         }
     }
     
     pub fn style(cx: &mut Cx) {
+        self::DrawCodeIcon::register_draw_input(cx);
         live_body!(cx, r#"
             self::walk: Walk {
                 width: Fix(14.0),
@@ -43,13 +49,12 @@ impl CodeIcon {
                 margin: {l: 0., t: 0.5, r: 4., b: 0.},
             }
             self::shader_code_icon: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawquad::shader::*;
                 
-                instance icon_id: float;
+                draw_input: self::DrawCodeIcon;
                 
                 fn pixel() -> vec4 {
-                    let col = color;
-                    if abs(icon_id - 5.) < 0.1 { //Wait
+                    if abs(icon_type - 5.) < 0.1 { //Wait
                         let df = Df::viewport(pos * vec2(10., 10.)); // * vec2(w, h));
                         df.circle(5., 5., 4.);
                         df.fill_keep(#ffa500);
@@ -63,7 +68,7 @@ impl CodeIcon {
                         df.stroke(#0, 0.8);
                         return df.result;
                     }
-                    if abs(icon_id - 4.) < 0.1 { //OK
+                    if abs(icon_type - 4.) < 0.1 { //OK
                         let df = Df::viewport(pos * vec2(10., 10.)); // * vec2(w, h));
                         df.circle(5., 5., 4.);
                         df.fill_keep(#5);
@@ -74,7 +79,7 @@ impl CodeIcon {
                         df.stroke(#a, 0.8);
                         return df.result;
                     }
-                    else if abs(icon_id - 3.) < 0.1 { // Error
+                    else if abs(icon_type - 3.) < 0.1 { // Error
                         let df = Df::viewport(pos * vec2(10., 10.)); // * vec2(w, h));
                         df.circle(5., 5., 4.);
                         df.fill_keep(#c00);
@@ -87,7 +92,7 @@ impl CodeIcon {
                         df.stroke(#0, 0.8);
                         return df.result;
                     }
-                    else if abs(icon_id - 2.) < 0.1 { // Warning
+                    else if abs(icon_type - 2.) < 0.1 { // Warning
                         let df = Df::viewport(pos * vec2(10., 10.)); // * vec2(w, h));
                         df.move_to(5., 1.);
                         df.line_to(9., 9.);
@@ -126,11 +131,9 @@ impl CodeIcon {
         "#)
     }
     
-    pub fn draw_icon(&mut self, cx: &mut Cx, icon_type: CodeIconType) -> InstanceArea {
-        
-        let inst = self.quad.draw_quad(cx, live_walk!(cx, self::walk));
-        inst.push_float(cx, icon_type.shader_float());
-        inst
+    pub fn draw_icon(&mut self, cx: &mut Cx, icon_type: CodeIconType) {
+        self.code_icon.icon_type = icon_type.shader_float();
+        self.code_icon.draw_quad_walk(cx, live_walk!(cx, self::walk));
     }
     
 }

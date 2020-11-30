@@ -184,7 +184,7 @@ impl MakepadApp {
                                     item: Panel::FileEditor {path: "main/makepad/worlds/src/skybox.rs".to_string(), scroll_pos: Vec2::default(), editor_id: 3}
                                 },
                             ],
-                        }), 
+                        }),
                         
                         last: Box::new(DockItem::Splitter {
                             axis: Axis::Vertical,
@@ -354,7 +354,7 @@ impl MakepadApp {
                                         }
                                     }
                                 }
-                                window.file_panel.file_tree.view.redraw_view_area(cx);
+                                window.file_panel.file_tree.view.redraw_view(cx);
                             }
                         }
                     }
@@ -383,11 +383,12 @@ impl MakepadApp {
                                     create_pos = Some(last_pos);
                                 }
                                 self.makepad_windows.push(MakepadWindow {
-                                    desktop_window: DesktopWindow {window: Window {
+                                    desktop_window: self.makepad_window_template.desktop_window.clone()
+                                        .with_window(Window {
                                         create_inner_size: Some(size),
                                         create_position: create_pos,
                                         ..Window::new(cx)
-                                    }, ..self.makepad_window_template.desktop_window.clone()},
+                                    }),
                                     ..self.makepad_window_template.clone()
                                 })
                             }

@@ -1,7 +1,7 @@
 
 use crate::cx::*;
 
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub enum Wrapping {
     Char,
     Word,
@@ -215,10 +215,10 @@ impl Text {
         
         let atlas_page = &mut cxfont.atlas_pages[atlas_page_id];
         
-        let instance = {
+        let instances = {
             let cxview = &mut cx.views[aligned.inst.view_id];
             let draw_call = &mut cxview.draw_calls[aligned.inst.draw_call_id];
-            &mut draw_call.instance
+            &mut draw_call.instances
         };
         
         for wc in chunk {
@@ -305,7 +305,7 @@ impl Text {
                 char_offset as f32, // char_offset
                 marker, // marker
             ];
-            instance.extend_from_slice(&data);
+            instances.extend_from_slice(&data);
             // !TODO make sure a derived shader adds 'empty' values here.
             
             geom_x += advance;
@@ -419,22 +419,22 @@ impl Text {
         let mut index = 0;
         if let Some(read) = read {
             while index < read.count {
-                let y = read.buffer[read.offset + y_o + index * read.slots];
-                let font_size = read.buffer[read.offset + font_size_o + index * read.slots];
+                let y = read.instances[read.offset + y_o + index * read.slots];
+                let font_size = read.instances[read.offset + font_size_o + index * read.slots];
                 if y + font_size * line_spacing > spos.y { // alright lets find our next x
                     while index < read.count {
-                        let x = read.buffer[read.offset + x_o + index * read.slots];
-                        let y = read.buffer[read.offset + y_o + index * read.slots];
+                        let x = read.instances[read.offset + x_o + index * read.slots];
+                        let y = read.instances[read.offset + y_o + index * read.slots];
                         //let font_size = read.buffer[read.offset + font_size_o + index* read.slots];
-                        let w = read.buffer[read.offset + w_o + index * read.slots];
+                        let w = read.instances[read.offset + w_o + index * read.slots];
                         if x > spos.x + w * 0.5 || y > spos.y {
                             let prev_index = if index == 0 {0}else {index - 1};
-                            let prev_x = read.buffer[read.offset + x_o + prev_index * read.slots];
-                            let prev_w = read.buffer[read.offset + w_o + prev_index * read.slots];
+                            let prev_x = read.instances[read.offset + x_o + prev_index * read.slots];
+                            let prev_w = read.instances[read.offset + w_o + prev_index * read.slots];
                             if index < read.count - 1 && prev_x > spos.x + prev_w { // fix newline jump-back
-                                return read.buffer[read.offset + char_offset_o + index * read.slots] as usize;
+                                return read.instances[read.offset + char_offset_o + index * read.slots] as usize;
                             } 
-                            return read.buffer[read.offset + char_offset_o + prev_index * read.slots] as usize;
+                            return read.instances[read.offset + char_offset_o + prev_index * read.slots] as usize;
                         }
                         index += 1;
                     }
@@ -444,7 +444,7 @@ impl Text {
             if read.count == 0 {
                 return 0
             }
-            return read.buffer[read.offset + char_offset_o + (read.count - 1) * read.slots] as usize;
+            return read.instances[read.offset + char_offset_o + (read.count - 1) * read.slots] as usize;
         }
         return 0
     }

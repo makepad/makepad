@@ -16,7 +16,7 @@ pub struct RustEditor {
 impl RustEditor {
     pub fn new(cx: &mut Cx) -> Self {
         let editor = Self {
-            view: View::new(cx),
+            view: View::new(),
             live_items_view: LiveItemsView::new(cx),
             splitter: Splitter {
                 pos: 125.0,
@@ -42,7 +42,7 @@ impl RustEditor {
         if mtb.live_items_list.visible_editors{
             match self.splitter.handle_splitter(cx, event) {
                 SplitterEvent::Moving {..} => {
-                    self.view.redraw_view_parent_area(cx);
+                    self.view.redraw_view_parent(cx);
                 },
                 _ => ()
             }
@@ -56,7 +56,7 @@ impl RustEditor {
             TextEditorEvent::AutoFormat => {
                 let formatted = MprsTokenizer::auto_format(&mtb.text_buffer.flat_text, &mtb.text_buffer.token_chunks, false).out_lines;
                 self.text_editor.cursors.replace_lines_formatted(formatted, &mut mtb.text_buffer);
-                self.text_editor.view.redraw_view_area(cx);
+                self.text_editor.view.redraw_view(cx);
             },
             _ => ()
         }

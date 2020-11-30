@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 #[derive(Clone, Default)]
 pub struct LiveItemsList {
+    pub live_on_self: bool,
     pub visible_editors: bool,
     pub changed: Signal,
     pub items: Vec<LiveItemId>,
@@ -17,23 +18,24 @@ pub struct LiveItemsList {
 }
 
 impl LiveItemsList {
-    pub fn new(cx: &mut Cx) -> Self {
+    pub fn new(cx: &mut Cx, live_on_self:bool) -> Self {
         LiveItemsList {
+            live_on_self,
             visible_editors: false,
             changed: cx.new_signal(),
             live_bodies: HashMap::new(),
             items: Vec::new(),
         }
     }
-}
+} 
 
 #[derive(Clone)]
 pub struct LiveItemsView {
-    pub view_bg: Quad,
+    pub view_bg: DrawColor,
     pub scroll_view: ScrollView,
     pub undo_id: u64,
-    pub color_swatch: Quad,
-    pub value_text: Text,
+    pub color_swatch: DrawColor,
+    pub value_text: DrawText,
     pub fold_captions: Elements<usize, FoldCaption, FoldCaption>,
     pub color_pickers: Elements<usize, ColorPicker, ColorPicker>,
     pub float_sliders: Elements<usize, FloatSlider, FloatSlider>
@@ -44,21 +46,16 @@ impl LiveItemsView {
     
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            scroll_view: ScrollView::new(cx),
+            scroll_view: ScrollView::new_standard_hv(cx),
             undo_id: 0,
-            value_text: Text {
-                z:1.0,
-                shader: live_shader!(cx, makepad_render::text::shader),
-                ..Text::new(cx)
-            },
-            color_swatch: Quad{
-                z: 1.0,
-               ..Quad::new(cx)
-            },
+            value_text: DrawText::new(cx, default_shader!())
+                .with_draw_depth(1.0),
+            color_swatch: DrawColor::new(cx, live_shader!(cx, self::shader_color_swatch))
+                .with_draw_depth(1.0),
             fold_captions: Elements::new(FoldCaption::new(cx)),
             color_pickers: Elements::new(ColorPicker::new(cx)),
             float_sliders: Elements::new(FloatSlider::new(cx)),
-            view_bg: Quad::new(cx),
+            view_bg: DrawColor::new(cx, default_shader!()),
         }
     }
     
@@ -71,11 +68,11 @@ impl LiveItemsView {
             }
             
             self::shader_color_swatch: Shader {
-                use makepad_render::quad::shader::*;
+                use makepad_render::drawcolor::shader::*;
                 
                 fn pixel() -> vec4 {
-                    let df = Df::viewport(pos * vec2(w, h));
-                    df.box(0., 0., w, h, 1.);
+                    let df = Df::viewport(pos * rect_size);
+                    df.box(0., 0., rect_size.x, rect_size.y, 1.);
                     df.fill(color);
                     return df.result;
                 }
@@ -99,7 +96,7 @@ impl LiveItemsView {
             Event::Signal(se) => {
                 // process network messages for hub_ui
                 if let Some(_) = se.signals.get(&mtb.live_items_list.changed) {
-                    self.scroll_view.redraw_view_area(cx);
+                    self.scroll_view.redraw_view(cx);
                 }
                 if let Some(ids) = se.signals.get(&mtb.text_buffer.signal){
                     if ids.contains(&TextBuffer::token_chunks_changed()){
@@ -150,7 +147,7 @@ impl LiveItemsView {
                             }
                         }
                     },
-                    LiveTokensType::Color => {
+                    LiveTokensType::Vec4 => {
                         if let Some(f) = self.color_pickers.get_mut(index) {
                             match f.handle_color_picker(cx, event) {
                                 ColorPickerEvent::Change {rgba} => {
@@ -211,13 +208,12 @@ impl LiveItemsView {
             direction: Direction::Down,
             ..Layout::default()
         }).is_ok() {
-            self.view_bg.color = live_color!(cx, self::color_bg);
-            let bg_inst = self.view_bg.begin_quad_fill(cx);
-            bg_inst.set_do_scroll(cx, false, false);
+            self.view_bg.color = live_vec4!(cx, self::color_bg);
+            self.view_bg.draw_quad_abs(cx, cx.get_turtle_rect());//self.view_bg.begin_quad_fill(cx);
+            self.view_bg.area().set_do_scroll(cx, false, false);
             
             //let layout_caption_bg = live_layout!(cx, self::layout_caption_bg);
             self.value_text.text_style = live_text_style!(cx, self::text_style_value);
-            self.color_swatch.shader = live_shader!(cx, self::shader_color_swatch);
             
             for (index, live_id) in mtb.live_items_list.items.iter().enumerate() {
                 // get tokens
@@ -236,7 +232,7 @@ impl LiveItemsView {
                                 // draw our float value
                                 //cx.change_turtle_align_x_ab(1.0);
                                 //cx.move_turtle(5., 0.);
-                                self.value_text.draw_text(cx, &format!("{}", PrettyPrintedFloat3Decimals(f.value)));
+                                self.value_text.draw_text_walk(cx, &format!("{}", PrettyPrintedFloat3Decimals(f.value)));
                                 // draw our value right aligned
                                 ip.segs[1].with( | s | {
                                     fold_caption.end_fold_caption(cx, s);
@@ -245,13 +241,13 @@ impl LiveItemsView {
                                     .draw_float_slider(cx, f.value, f.min, f.max, f.step, height_scale);
                             }
                         },
-                        LiveTokensType::Color => {
-                            if let Some(c) = cx.live_styles.colors.get(live_id).cloned() {
+                        LiveTokensType::Vec4 => {
+                            if let Some(c) = cx.live_styles.vec4s.get(live_id).cloned() {
                                 let fold_caption = self.fold_captions.get_draw(cx, index, | _, t | t.clone());
                                 let height_scale = fold_caption.begin_fold_caption(cx);
                                 // we need to draw a little color swatch.
                                 self.color_swatch.color = c;
-                                self.color_swatch.draw_quad(cx, live_walk!(cx, self::walk_color_swatch));
+                                self.color_swatch.draw_quad_walk(cx, live_walk!(cx, self::walk_color_swatch));
                                 
                                 ip.segs[1].with( | s | {
                                     fold_caption.end_fold_caption(cx, s);
@@ -264,7 +260,7 @@ impl LiveItemsView {
                 }
             }
             
-            self.view_bg.end_quad_fill(cx, bg_inst);
+            //self.view_bg.end_quad_fill(cx, bg_inst);
             
             self.scroll_view.end_view(cx);
         }
@@ -286,12 +282,15 @@ impl fmt::Display for PrettyPrintedFloat3Decimals {
 
 impl MakepadTextBuffer {
     pub fn update_live_items(&mut self, cx: &mut Cx) {
+        if !self.live_items_list.live_on_self{
+            return 
+        }
         self.live_items_list.items = cx.live_styles.get_live_items_for_file(&MakepadStorage::file_path_to_live_path(&self.full_path));
         self.live_items_list.visible_editors = false;
         for live_item_id in &self.live_items_list.items{
             if let Some(tok) = cx.live_styles.tokens.get(live_item_id){
                 match tok.live_tokens_type{
-                    LiveTokensType::Color | LiveTokensType::Float=>{
+                    LiveTokensType::Vec4 | LiveTokensType::Float=>{
                         self.live_items_list.visible_editors = true;
                     },
                     _=>()
@@ -303,6 +302,9 @@ impl MakepadTextBuffer {
     }
     
     pub fn parse_live_bodies(&mut self, cx: &mut Cx) {
+        if !self.live_items_list.live_on_self{
+            return 
+        }
         let mut tp = TokenParser::new(&self.text_buffer.flat_text, &self.text_buffer.token_chunks);
         // lets reset the data
         while tp.advance() {

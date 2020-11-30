@@ -4,7 +4,7 @@ use makepad_render::*;
 #[derive(Clone)]
 pub struct Viewport3D {
     pub pass: Pass,
-    pub clear_color: Color,
+    pub clear_color: Vec4,
     pub color_texture: Texture,
     pub depth_texture: Texture,
     pub view_2d: View,
@@ -14,7 +14,7 @@ pub struct Viewport3D {
     pub camera_pos: Vec3,
     pub camera_rot: Vec3,
     pub camera_start: Option<(Vec3, Vec3)>,
-    pub blit: Blit
+    pub image: DrawImage
 }
 
 impl Viewport3D {
@@ -25,13 +25,13 @@ impl Viewport3D {
             camera_pos: Vec3 {x: 0.0, y: -0.5, z: -1.1},
             camera_rot: Vec3 {x: 0.0, y: 0.0, z: 0.0},
             camera_start: None,
-            clear_color: Color::parse_hex_str("040").unwrap(),
+            clear_color: Vec4::color("fff"),
             color_texture: Texture::new(cx),
             depth_texture: Texture::new(cx),
-            view_3d: View::new(cx),
-            view_2d: View::new(cx),
+            view_3d: View::new(),
+            view_2d: View::new(),
             measured_size: Vec2::all(1.0),
-            blit: Blit::new(cx)
+            image: DrawImage::new(cx, default_shader!())
         }
     }
     
@@ -40,10 +40,9 @@ impl Viewport3D {
             self::pos: vec3(0., 0.0, -1.1);
         "#);
     }
-    
      
     pub fn handle_viewport_2d(&mut self, cx: &mut Cx, event: &mut Event) {
-        match event.hits(cx, self.view_2d.get_view_area(cx), HitOpt::default()) {
+        match event.hits(cx, self.view_2d.area(), HitOpt::default()) {
             Event::FingerHover(_fe) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Move);
             },
@@ -81,15 +80,11 @@ impl Viewport3D {
             near: 0.1,
             far: 1000.0,
             cam: Mat4::txyz_s_ry_rx_txyz(
-                Vec3 {
-                    x: self.camera_pos.x + self.camera_center.x,
-                    y: self.camera_pos.y + self.camera_center.y,
-                    z: self.camera_pos.z + self.camera_center.z
-                },
+                self.camera_pos + self.camera_center,
                 1.0,
                 self.camera_rot.y,
                 self.camera_rot.x,
-                self.camera_center.neg(),
+                -self.camera_center,
             )
         });
     }
@@ -120,11 +115,11 @@ impl Viewport3D {
         if self.view_2d.begin_view(cx, Layout::default()).is_err() {
             return
         };
-        self.view_3d.redraw_view_area(cx);
+        self.view_3d.redraw_view(cx);
         // blit the texture to a view rect
-        let inst = self.blit.begin_blit_fill(cx, self.color_texture);
-        self.blit.end_blit_fill(cx, inst);
-        self.measured_size = Vec2 {x: cx.get_width_total(), y: cx.get_height_total()};
+        self.measured_size = vec2(cx.get_width_total(), cx.get_height_total());
+        self.image.texture = self.color_texture.into();
+        self.image.draw_quad_rel(cx, Rect{pos:vec2(0.,0.), size:self.measured_size });
         
         self.view_2d.end_view(cx);
     }

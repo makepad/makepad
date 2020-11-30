@@ -118,7 +118,7 @@ pub enum MakepadChannelMessage {
     Connect,
     XRChannelUpdate {self_user: XRChannelUser},
     ChangeAll {path: String, code: String, cursors: TextCursorSet},
-    ChangeColor {live_item_id: LiveItemId, rgba: Color},
+    ChangeColor {live_item_id: LiveItemId, rgba: Vec4},
     ChangeFloat {live_item_id: LiveItemId, float: Float},
 }
 
@@ -263,7 +263,7 @@ impl MakepadStorage {
     pub fn handle_changed_color(
         cx: &mut Cx,
         live_item_id: LiveItemId,
-        rgba: Color,
+        rgba: Vec4,
         live_bodies: &HashMap<LiveBodyId, usize>,
         text_buffer: &mut TextBuffer,
     ) {
@@ -273,7 +273,7 @@ impl MakepadStorage {
             let end = tok.tokens[0].span.end;
             if let Some(live_body_id) = cx.live_styles.item_in_live_body.get(&live_item_id) {
                 if let Some(offset) = live_bodies.get(&live_body_id) {
-                    let new_string = format!("#{}", rgba.to_hex());
+                    let new_string = format!("#{}", rgba.to_hex_string());
                     if let Some(tok) = cx.live_styles.tokens.get_mut(&live_item_id) {
                         tok.tokens[0].span.end = start + new_string.len();
                     }
@@ -467,7 +467,7 @@ impl MakepadStorage {
                     file_read: cx.file_read(
                         &Self::file_path_to_live_path(path)
                     ),
-                    live_items_list: LiveItemsList::new(cx),
+                    live_items_list: LiveItemsList::new(cx, self.settings.live_on_self),
                     read_msg: None,
                     full_path: path.to_string(),
                     text_buffer_id: tb_id,
@@ -503,7 +503,7 @@ impl MakepadStorage {
                 self.text_buffer_id_to_path.insert(tb_id, path.to_string());
                 self.text_buffers.push(MakepadTextBuffer {
                     file_read: FileRead::default(),
-                    live_items_list: LiveItemsList::new(cx),
+                    live_items_list: LiveItemsList::new(cx, self.settings.live_on_self),
                     read_msg: Some(msg),
                     full_path: path.to_string(),
                     text_buffer_id: tb_id,
@@ -672,7 +672,7 @@ impl MakepadStorage {
                             }
                         )).collect()
                     };
-                    window.file_panel.file_tree.view.redraw_view_area(cx);
+                    window.file_panel.file_tree.view.redraw_view(cx);
                 }
                 // lets resend the file load we haven't gotten
                 for atb in &mut self.text_buffers {

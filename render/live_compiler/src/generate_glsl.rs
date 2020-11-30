@@ -7,9 +7,8 @@ use {
         generate::{BackendWriter, BlockGenerator, ExprGenerator},
         ident::{Ident, IdentPath},
         livestyles::LiveStyles,
-        lit::TyLit,
         swizzle::Swizzle,
-        ty::Ty,
+        ty::{Ty,TyLit}
     },
     std::collections::HashSet,
     std::fmt::Write,
@@ -1006,19 +1005,16 @@ impl<'a, 'b> BackendWriter for GlslBackendWriter<'a, 'b> {
     
     fn write_ident(&self, string: &mut String, ident: Ident) {
         ident.with( | ident_string | {
-            if ident_string.contains("::") {
-                write!(string, "mpsc_{}", ident_string.replace("::", "_")).unwrap()
-            } else {
-                write!(
-                    string,
-                    "{}",
-                    match ident_string.as_ref() {
-                        "union" => "mpsc_union",
-                        _ => ident_string,
-                    }
-                )
-                    .unwrap()
-            }
+            write!(
+                string,
+                "{}",
+                match ident_string.as_ref() {
+                    "union" => "mpsc_union",
+                    "texture" => "mpsc_texture",
+                    _ => ident_string,
+                }
+            )
+                .unwrap()
         })
     }
 }

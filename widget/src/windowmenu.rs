@@ -9,18 +9,16 @@ pub struct WindowMenu {
 
 #[derive(Clone)]
 pub struct MenuItemDraw {
-    pub text: Text,
-    pub item_bg: Quad,
+    pub text: DrawText,
+    pub item_bg: DrawQuad,
 }
 
 impl MenuItemDraw {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            text: Text {
-                wrapping: Wrapping::Word,
-                ..Text::new(cx)
-            },
-            item_bg: Quad::new(cx),
+            text: DrawText::new(cx, default_shader!())
+                .with_wrapping(Wrapping::Word),
+            item_bg: DrawQuad::new(cx, default_shader!()),
         }
     }
 }
@@ -36,7 +34,7 @@ impl WindowMenu {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             item_draw: MenuItemDraw::new(cx),
-            view: View::new(cx),
+            view: View::new(),
         }
     }
     

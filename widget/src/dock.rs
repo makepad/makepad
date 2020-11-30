@@ -14,14 +14,14 @@ where TItem: Clone
     pub tab_controls: Elements<usize, TabControl, TabControl>,
     
     pub drop_size: Vec2,
-    pub drop_quad: Quad,
+    pub drop_quad: DrawColor,
     pub drop_quad_view: View,
     //pub drop_quad_color: ColorId,
     pub _drag_move: Option<FingerMoveEvent>,
     pub _drag_end: Option<DockDragEnd<TItem >>,
     pub _close_tab: Option<DockTabIdent>,
     pub _tab_select: Option<(usize, usize)>,
-    pub _tweening_quad: Option<(usize, Rect, f32)>
+    //pub _tweening_quad: Option<(usize, Rect, f32)>
 }
 
 #[derive(Clone, Debug)]
@@ -211,7 +211,7 @@ where TItem: Clone
                                 TabControlEvent::TabDragMove {fe, ..} => {
                                     *self._drag_move = Some(fe);
                                     *self._drag_end = None;
-                                    self.drop_quad_view.redraw_view_area(cx);
+                                    self.drop_quad_view.redraw_view(cx);
                                 },
                                 TabControlEvent::TabDragEnd {fe, tab_id} => {
                                     *self._drag_move = None;
@@ -224,7 +224,7 @@ where TItem: Clone
                                             tab_id: tab_id
                                         }
                                     });
-                                    self.drop_quad_view.redraw_view_area(cx);
+                                    self.drop_quad_view.redraw_view(cx);
                                 },
                                 TabControlEvent::TabClose {tab_id} => {
                                     *self._close_tab = Some(DockTabIdent {
@@ -263,12 +263,12 @@ where TItem: Clone
                             match split.handle_splitter(cx, event) {
                                 SplitterEvent::Moving {new_pos} => {
                                     *pos = new_pos;
-                                    cx.redraw_pass_of(split._split_area);
+                                    cx.redraw_pass_of(split.bg.area());
                                 },
                                 SplitterEvent::MovingEnd {new_align, new_pos} => {
                                     *align = new_align;
                                     *pos = new_pos;
-                                    cx.redraw_pass_of(split._split_area);
+                                    cx.redraw_pass_of(split.bg.area());
                                 },
                                 _ => ()
                             };
@@ -404,10 +404,10 @@ where TItem: Clone
             // dock_items:None,
             drop_size: Vec2 {x: 100., y: 70.},
             //drop_quad_color: Color_drop_quad::id(),
-            drop_quad: Quad {
-                z: 3.,
-                ..Quad::new(cx)
-            },
+            
+            drop_quad: DrawColor::new(cx, default_shader!())
+                .with_draw_depth(3.),
+                
             splitters: Elements::new(Splitter::new(cx)),
             tab_controls: Elements::new(TabControl::new(cx)),
             drop_quad_view: View::proto_overlay(cx),
@@ -415,7 +415,7 @@ where TItem: Clone
             _drag_move: None,
             _drag_end: None,
             _tab_select: None,
-            _tweening_quad: None
+            //_tweening_quad: None
         }
     }
     
@@ -592,44 +592,36 @@ where TItem: Clone
         //    |      |    Bottom      |       |
         //    ---------------------------------
         
-        if tvr.contains(pos.x, pos.y) {
+        if tvr.contains(pos) {
             for (id, tr) in tab_rects.iter().enumerate() {
-                if tr.contains(pos.x, pos.y) {
+                if tr.contains(pos) {
                     return (DockDropKind::Tab(id), *tr)
                 }
             }
             return (DockDropKind::TabsView, tvr)
         }
-        if pos.y < cdr.y + drop_size.y {
+        if pos.y < cdr.pos.y + drop_size.y {
             return (DockDropKind::Top, Rect {
-                x: cdr.x,
-                y: cdr.y,
-                w: cdr.w,
-                h: 0.5 * cdr.h
+                pos: vec2(cdr.pos.x, cdr.pos.y),
+                size: vec2(cdr.size.x, 0.5*cdr.size.y)
             })
         }
-        if pos.y > cdr.y + cdr.h - drop_size.y {
+        if pos.y > cdr.pos.y + cdr.size.y - drop_size.y {
             return (DockDropKind::Bottom, Rect {
-                x: cdr.x,
-                y: cdr.y + 0.5 * cdr.h,
-                w: cdr.w,
-                h: 0.5 * cdr.h
+                pos: vec2(cdr.pos.x, cdr.pos.y + 0.5 * cdr.size.y),
+                size: vec2(cdr.size.x, 0.5*cdr.size.y)
             })
         }
-        if pos.x < cdr.x + drop_size.x {
+        if pos.x < cdr.pos.x + drop_size.x {
             return (DockDropKind::Left, Rect {
-                x: cdr.x,
-                y: cdr.y,
-                w: 0.5 * cdr.w,
-                h: cdr.h
+                pos: vec2(cdr.pos.x, cdr.pos.y),
+                size: vec2(0.5*cdr.size.x, cdr.size.y)
             })
         }
-        if pos.x > cdr.x + cdr.w - drop_size.x {
+        if pos.x > cdr.pos.x + cdr.size.x - drop_size.x {
             return (DockDropKind::Right, Rect {
-                x: cdr.x + 0.5 * cdr.w,
-                y: cdr.y,
-                w: 0.5 * cdr.w,
-                h: cdr.h
+                pos: vec2(cdr.pos.x + 0.5 * cdr.size.x, cdr.pos.y),
+                size: vec2(0.5*cdr.size.x, cdr.size.y)
             })
         }
         (DockDropKind::Center, cdr.clone())
@@ -637,17 +629,17 @@ where TItem: Clone
     
     pub fn dock_drag_out(&mut self, cx: &mut Cx) {
         self._drag_move = None;
-        self.drop_quad_view.redraw_view_area(cx);
+        self.drop_quad_view.redraw_view(cx);
     }
     
     pub fn dock_drag_move(&mut self, cx: &mut Cx, fe: FingerMoveEvent) {
         self._drag_move = Some(fe);
-        self.drop_quad_view.redraw_view_area(cx);
+        self.drop_quad_view.redraw_view(cx);
     }
     
     pub fn dock_drag_cancel(&mut self, cx: &mut Cx) {
         self._drag_move = None;
-        self.drop_quad_view.redraw_view_area(cx);
+        self.drop_quad_view.redraw_view(cx);
     }
     
     pub fn dock_drag_end(&mut self, _cx: &mut Cx, fe: FingerUpEvent, new_items: Vec<DockTab<TItem >>) {
@@ -674,7 +666,7 @@ where TItem: Clone
                 
                 let cdr = tab_control.get_content_drop_rect(cx);
                 let tvr = tab_control.get_tabs_view_rect(cx);
-                if tvr.contains(fe.abs.x, fe.abs.y) || cdr.contains(fe.abs.x, fe.abs.y) { // we might got dropped elsewhere
+                if tvr.contains(fe.abs) || cdr.contains(fe.abs) { // we might got dropped elsewhere
                     // ok now, we ask the tab_controls rect
                     let tab_rects = tab_control.get_tab_rects(cx);
                     let (kind, _rect) = Self::get_drop_kind(fe.abs, self.drop_size, tvr, cdr, tab_rects);
@@ -738,58 +730,24 @@ where TItem: Clone
             if let Err(()) = self.drop_quad_view.begin_view(cx, Layout::abs_origin_zero()) {
                 return
             }
-            let mut found_drop_zone = false;
-            for (id, tab_control) in self.tab_controls.enumerate() {
+            //let mut found_drop_zone = false;
+            for (_id, tab_control) in self.tab_controls.enumerate() {
                 
                 let cdr = tab_control.get_content_drop_rect(cx);
                 let tvr = tab_control.get_tabs_view_rect(cx);
-                if tvr.contains(fe.abs.x, fe.abs.y) || cdr.contains(fe.abs.x, fe.abs.y) {
+                if tvr.contains(fe.abs) || cdr.contains(fe.abs) {
                     let tab_rects = tab_control.get_tab_rects(cx);
                     let (_kind, rect) = Self::get_drop_kind(fe.abs, self.drop_size, tvr, cdr, tab_rects);
                     
-                    if !self._tweening_quad.is_none() && self._tweening_quad.unwrap().0 != *id {
-                        // restarts the animation by removing drop_quad
-                        self._tweening_quad = None;
-                    }
-                    
-                    // yay, i can finally do these kinds of animations!
-                    let (dr, alpha) = if self._tweening_quad.is_none() {
-                        self._tweening_quad = Some((*id, rect, 0.));
-                        (rect, 0.)
-                    }
-                    else {
-                        let (id, old_rc, old_alpha) = self._tweening_quad.unwrap();
-                        let move_speed = 0.0;
-                        let alpha_speed = 0.0;
-                        let alpha = old_alpha * alpha_speed + (1. - alpha_speed);
-                        let rc = Rect {
-                            x: old_rc.x * move_speed + rect.x * (1. - move_speed),
-                            y: old_rc.y * move_speed + rect.y * (1. - move_speed),
-                            w: old_rc.w * move_speed + rect.w * (1. - move_speed),
-                            h: old_rc.h * move_speed + rect.h * (1. - move_speed)
-                        };
-                        let dist = (rc.x - rect.x)
-                            .abs()
-                            .max((rc.y - rect.y).abs())
-                            .max((rc.w - rect.w).abs())
-                            .max((rc.h - rect.h).abs())
-                            .max(100. - alpha * 100.);
-                        if dist>0.5 { // keep redrawing until we are close
-                            // cx.redraw_previous_areas();
-                            //self.drop_quad_view.redraw_view_area(cx);
-                        }
-                        self._tweening_quad = Some((id, rc, alpha));
-                        (rc, alpha)
-                    };
-                    self.drop_quad.color = live_color!(cx, crate::widgetstyle::color_drop_quad);
-                    self.drop_quad.color.a = alpha * 0.8;
-                    found_drop_zone = true;
-                    self.drop_quad.draw_quad_rel(cx, dr);
+                    self.drop_quad.color = live_vec4!(cx, crate::widgetstyle::color_drop_quad);
+                    self.drop_quad.color.w = 0.8;
+                    //found_drop_zone = true;
+                    self.drop_quad.draw_quad_rel(cx, rect);
                 }
             }
-            if !found_drop_zone {
-                self._tweening_quad = None;
-            }
+            //if !found_drop_zone {
+            //    self._tweening_quad = None;
+            //  }
             self.drop_quad_view.end_view(cx);
         }
     }

@@ -12,7 +12,7 @@ pub struct FieldWorld {
 impl FieldWorld {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
-            view: View::new(cx),
+            view: View::new(),
             area: Area::Empty,
             sky_box: SkyBox::new(cx),
         }
@@ -113,19 +113,5 @@ impl FieldWorld {
     
     pub fn draw_field_world(&mut self, cx: &mut Cx) {
         self.sky_box.draw_sky_box(cx);
-        
-        let shader = live_shader!(cx, self::shader);
-        
-        self.area = cx.new_instance(shader, None, 0).into();
-        
-        // lets draw a grid of x times y quads.
-        
-        for y in 0..500{
-            for x in 0..500{
-                let inst = cx.new_instance(shader, None, 1);
-                let data = [x as f32, y as f32];
-                inst.push_slice(cx, &data);
-            }
-        }
     }
 }

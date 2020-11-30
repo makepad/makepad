@@ -1,4 +1,3 @@
-use crate::colors::Color;
 use makepad_microserde::*;
 use makepad_detok_derive::*;
 use crate::math::*;
@@ -16,7 +15,7 @@ pub struct Float {
     pub step: Option<f32>,
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, Default, PartialEq, Debug)]
 pub struct Shader {
     pub shader_id: usize,
     pub location_hash: u64
@@ -29,7 +28,16 @@ pub struct Geometry {
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct Texture {
-    pub texture_id: usize,
+    pub texture_id: u32,
+}
+
+#[derive(Copy, Clone, Default, PartialEq, Debug)]
+pub struct Texture2D(pub Option<u32>);
+
+impl Into<Texture2D> for Texture {
+    fn into(self) -> Texture2D {
+        Texture2D(Some(self.texture_id as u32))
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -75,7 +83,7 @@ impl Default for TextureDesc {
 
 
 #[derive(PartialEq, Copy, Clone, Hash, Eq, Debug, PartialOrd, Ord, SerBin, DeBin)]
-pub struct LiveItemId(pub u64); 
+pub struct LiveItemId(pub u64);
 
 impl LiveItemId {
     fn as_index(&self) -> u64 {self.0}
@@ -333,47 +341,60 @@ impl Height {
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, SerRon, DeRon, DeTokSplat, DeTok)]
 pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32
+    pub pos: Vec2,
+    pub size: Vec2,
 }
 
 impl Rect {
     
-    pub fn contains(&self, x: f32, y: f32) -> bool {
-        return x >= self.x && x <= self.x + self.w &&
-        y >= self.y && y <= self.y + self.h;
+    pub fn translate(self, pos: Vec2) -> Rect {
+        Rect {pos: self.pos + pos, size: self.size}
+    }
+    
+    pub fn contains(&self, pos: Vec2) -> bool {
+        return pos.x >= self.pos.x && pos.x <= self.pos.x + self.size.x &&
+        pos.y >= self.pos.y && pos.y <= self.pos.y + self.size.y;
     }
     pub fn intersects(&self, r: Rect) -> bool {
         !(
-            r.x > self.x + self.w ||
-            r.x + r.w < self.x ||
-            r.y > self.y + self.h ||
-            r.y + r.h < self.y
+            r.pos.x > self.pos.x + self.size.x ||
+            r.pos.x + r.size.x < self.pos.x ||
+            r.pos.y > self.pos.y + self.size.y ||
+            r.pos.y + r.size.y < self.pos.y
         )
     }
     
-    pub fn contains_with_margin(&self, x: f32, y: f32, margin: &Option<Margin>) -> bool {
+    pub fn contains_with_margin(&self, pos: Vec2, margin: &Option<Margin>) -> bool {
         if let Some(margin) = margin {
-            return x >= self.x - margin.l && x <= self.x + self.w + margin.r &&
-            y >= self.y - margin.t && y <= self.y + self.h + margin.b;
+            return
+            pos.x >= self.pos.x - margin.l
+                && pos.x <= self.pos.x + self.size.x + margin.r
+                && pos.y >= self.pos.y - margin.t
+                && pos.y <= self.pos.y + self.size.y + margin.b;
         }
         else {
-            return self.contains(x, y);
+            return self.contains(pos);
+        }
+    }
+    
+    pub fn from_lerp(a: Rect, b: Rect, f: f32) -> Rect {
+        Rect {
+            pos: ( b.pos - a.pos ) * f + a.pos,
+            size: ( b.size - a.size ) * f + a.size
         }
     }
 }
 
-#[derive(Clone,  Debug, PartialEq)]
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Anim {
     pub play: Play,
     pub tracks: Vec<Track>
 }
 
-impl Default for Anim{
-    fn default()->Anim{
-        Anim{play:Play::Cut{duration:0.0}, tracks:Vec::new()}
+impl Default for Anim {
+    fn default() -> Anim {
+        Anim {play: Play::Cut {duration: 0.0}, tracks: Vec::new()}
     }
 }
 
@@ -786,12 +807,6 @@ pub enum Track {
         cut_init: Option<Vec4>,
         keys: Vec<(f64, Vec4)>
     },
-    Color {
-        bind_to: LiveItemId,
-        ease: Ease,
-        cut_init: Option<Color>,
-        keys: Vec<(f64, Color)>
-    },
 }
 
 impl Track {
@@ -907,34 +922,6 @@ impl Track {
         return lerp(*val1, val2.1, f)
     }
     
-    pub fn compute_track_color(time: f64, track: &Vec<(f64, Color)>, cut_init: &mut Option<Color>, init: Color, ease: &Ease) -> Color {
-        if track.is_empty() {return init}
-        fn lerp(a: Color, b: Color, f: f32) -> Color {
-            let nf = 1.0 - f;
-            return Color {r: a.r * nf + b.r * f, g: a.g * nf + b.g * f, b: a.b * nf + b.b * f, a: a.a * nf + b.a * f}
-        }
-        // find the 2 keys we want
-        for i in 0..track.len() {
-            if time >= track[i].0 { // we found the left key
-                let val1 = &track[i];
-                if i == track.len() - 1 { // last key
-                    return val1.1.clone()
-                }
-                let val2 = &track[i + 1];
-                // lerp it
-                let f = ease.map((time - val1.0) / (val2.0 - val1.0)) as f32;
-                return lerp(val1.1, val2.1, f);
-            }
-        }
-        if cut_init.is_none() {
-            *cut_init = Some(init);
-        }
-        let val2 = &track[0];
-        let val1 = cut_init.as_mut().unwrap();
-        let f = ease.map(time / val2.0) as f32;
-        return lerp(*val1, val2.1, f)
-    }
-    
     pub fn bind_id(&self) -> LiveItemId {
         match self {
             Track::Float {bind_to, ..} => {
@@ -949,17 +936,11 @@ impl Track {
             Track::Vec4 {bind_to, ..} => {
                 *bind_to
             }
-            Track::Color {bind_to, ..} => {
-                *bind_to
-            }
         }
     }
     
     pub fn reset_cut_init(&mut self) {
         match self {
-            Track::Color {cut_init, ..} => {
-                *cut_init = None;
-            },
             Track::Vec4 {cut_init, ..} => {
                 *cut_init = None;
             },
@@ -989,9 +970,6 @@ impl Track {
             Track::Vec4 {ease, ..} => {
                 ease
             }
-            Track::Color {ease, ..} => {
-                ease
-            }
         }
     }
     
@@ -1010,9 +988,6 @@ impl Track {
             Track::Vec4 {ease, ..} => {
                 *ease = new_ease
             },
-            Track::Color {ease, ..} => {
-                *ease = new_ease
-            },
         }
     }
     
@@ -1028,9 +1003,6 @@ impl Track {
                 *bind_to = new_bind_id
             },
             Track::Vec4 {bind_to, ..} => {
-                *bind_to = new_bind_id
-            },
-            Track::Color {bind_to, ..} => {
                 *bind_to = new_bind_id
             },
         }

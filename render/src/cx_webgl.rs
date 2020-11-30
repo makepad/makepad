@@ -35,7 +35,7 @@ impl Cx {
             else {
                 let cxview = &mut self.views[view_id];
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
-                let sh = &self.shaders[draw_call.shader_id];
+                let sh = &self.shaders[draw_call.shader.shader_id];
 
                 if draw_call.instance_dirty || draw_call.platform.inst_vb_id.is_none() {
                     draw_call.instance_dirty = false;
@@ -45,8 +45,8 @@ impl Cx {
                     }
                     self.platform.from_wasm.alloc_array_buffer(
                         draw_call.platform.inst_vb_id.unwrap(),
-                        draw_call.instance.len(),
-                        draw_call.instance.as_ptr() as *const f32
+                        draw_call.instances.len(),
+                        draw_call.instances.as_ptr() as *const f32
                     );
                     draw_call.instance_dirty = false;
                 }
@@ -67,8 +67,18 @@ impl Cx {
                     }
                 }
                 
+                let geometry_id = if let Some(geometry) = draw_call.geometry{
+                    geometry.geometry_id
+                }
+                else if let Some(geometry) = sh.default_geometry{
+                    geometry.geometry_id
+                }
+                else{
+                    continue
+                };
+                
                 // update geometry?
-                let geometry = &mut self.geometries[draw_call.geometry_id];
+                let geometry = &mut self.geometries[geometry_id];
                 
                 if geometry.dirty || geometry.platform.vb_id.is_none() || geometry.platform.ib_id.is_none() {
                     if geometry.platform.vb_id.is_none() {
@@ -109,9 +119,9 @@ impl Cx {
                 if vao.inst_vb_id != draw_call.platform.inst_vb_id
                     || vao.geom_vb_id != geometry.platform.vb_id
                     || vao.geom_ib_id != geometry.platform.ib_id
-                    || vao.shader_id != Some(draw_call.shader_id) {
+                    || vao.shader_id != Some(draw_call.shader.shader_id) {
                         
-                    vao.shader_id = Some(draw_call.shader_id);
+                    vao.shader_id = Some(draw_call.shader.shader_id);
                     vao.inst_vb_id = draw_call.platform.inst_vb_id;
                     vao.geom_vb_id = geometry.platform.vb_id;
                     vao.geom_ib_id = geometry.platform.ib_id;
@@ -126,7 +136,7 @@ impl Cx {
                 }
                 
                 self.platform.from_wasm.draw_call(
-                    draw_call.shader_id,
+                    draw_call.shader.shader_id,
                     draw_call.platform.vao.as_ref().unwrap().vao_id,
                     self.passes[pass_id].pass_uniforms.as_slice(),
                     cxview.view_uniforms.as_slice(),
@@ -166,7 +176,7 @@ impl Cx {
         
         // get the color and depth
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
-            Color::default()
+            Vec4::default()
         }
         else {
             match self.passes[pass_id].color_textures[0].clear_color {
@@ -208,10 +218,10 @@ impl Cx {
         for color_texture in &self.passes[pass_id].color_textures {
             match color_texture.clear_color {
                 ClearColor::InitWith(color) => {
-                    self.platform.from_wasm.add_color_target(color_texture.texture_id, true, color);
+                    self.platform.from_wasm.add_color_target(color_texture.texture_id as usize, true, color);
                 },
                 ClearColor::ClearWith(color) => {
-                    self.platform.from_wasm.add_color_target(color_texture.texture_id, false, color);
+                    self.platform.from_wasm.add_color_target(color_texture.texture_id as usize, false, color);
                 }
             }
         }
@@ -220,10 +230,10 @@ impl Cx {
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
             match self.passes[pass_id].clear_depth {
                 ClearDepth::InitWith(depth_clear) => {
-                    self.platform.from_wasm.set_depth_target(depth_texture_id, true, depth_clear as f32);
+                    self.platform.from_wasm.set_depth_target(depth_texture_id as usize, true, depth_clear as f32);
                 },
                 ClearDepth::ClearWith(depth_clear) => {
-                    self.platform.from_wasm.set_depth_target(depth_texture_id, false, depth_clear as f32);
+                    self.platform.from_wasm.set_depth_target(depth_texture_id as usize, false, depth_clear as f32);
                 }
             }
         }
@@ -253,15 +263,16 @@ impl Cx {
             no_const_collapse: false
         };
         
-        for (live_id,_shader) in &self.live_styles.shader_alloc{
-            match self.live_styles.collect_and_analyse_shader(*live_id, options) {
+        for (live_item_id,_shader) in &self.live_styles.shader_alloc{
+            match self.live_styles.collect_and_analyse_shader(*live_item_id, options) {
                 Err(err) => {
                     self.platform.from_wasm.log(&format!("{}", err))
                 },
                 Ok((shader_ast, default_geometry)) => {
-                    let shader_id = self.live_styles.shader_alloc.get(live_id).unwrap().shader_id;
+                    let shader_id = self.live_styles.shader_alloc.get(live_item_id).unwrap().shader_id;
                     Self::webgl_compile_shader(
                         shader_id,
+                        self.live_styles.live_item_id_to_string(*live_item_id).unwrap(),
                         &mut self.shaders[shader_id],
                         shader_ast,
                         default_geometry,
@@ -282,17 +293,18 @@ impl Cx {
             no_const_collapse: false
         };
         
-        for (live_id, change) in &self.live_styles.changed_shaders {
+        for (live_item_id, change) in &self.live_styles.changed_shaders {
             match change {
                 LiveChangeType::Recompile => {
-                    match self.live_styles.collect_and_analyse_shader(*live_id, options) {
+                    match self.live_styles.collect_and_analyse_shader(*live_item_id, options) {
                         Err(err) => {
                             errors.push(err);
                         },
                         Ok((shader_ast, default_geometry)) => {
-                            let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                            let shader_id = self.live_styles.shader_alloc.get(&live_item_id).unwrap().shader_id;
                             Self::webgl_compile_shader(
                                 shader_id,
+                                self.live_styles.live_item_id_to_string(*live_item_id).unwrap(),
                                 &mut self.shaders[shader_id],
                                 shader_ast,
                                 default_geometry,
@@ -304,7 +316,7 @@ impl Cx {
                     }
                 }
                 LiveChangeType::UpdateValue => {
-                    let shader_id = self.live_styles.shader_alloc.get(&live_id).unwrap().shader_id;
+                    let shader_id = self.live_styles.shader_alloc.get(&live_item_id).unwrap().shader_id;
                     self.shaders[shader_id].mapping.update_live_uniforms(&self.live_styles);
                 }
             }
@@ -314,6 +326,7 @@ impl Cx {
     
     pub fn webgl_compile_shader(
         shader_id: usize,
+        name: String,
         sh: &mut CxShader,
         shader_ast: ShaderAst,
         default_geometry: Option<Geometry>,
@@ -364,6 +377,7 @@ impl Cx {
         }
         //let shader_id = self.compiled_shaders.len();
         platform.from_wasm.compile_webgl_shader(shader_id, &vertex, &fragment, &mapping);
+        sh.name = name;
         sh.default_geometry = default_geometry;
         sh.mapping = mapping;
         sh.platform = Some(CxPlatformShader {
