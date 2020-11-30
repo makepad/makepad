@@ -53,21 +53,26 @@ impl ScrollView{
         if let Some(scroll_v) = &mut self.scroll_v {
             ret_v = scroll_v.handle_scroll_bar(cx, event);
         }
-        match ret_h {
-            ScrollBarEvent::None => (),
-            ScrollBarEvent::Scroll {scroll_pos, ..} => {
-                cx.set_view_scroll_x(self.view.view_id.unwrap(), scroll_pos);
-            },
-            _ => ()
-        };
-        match ret_v {
-            ScrollBarEvent::None => (),
-            ScrollBarEvent::Scroll {scroll_pos, ..} => {
-                cx.set_view_scroll_y(self.view.view_id.unwrap(), scroll_pos);
-            },
-            _ => ()
-        };
-        ret_h != ScrollBarEvent::None || ret_v != ScrollBarEvent::None
+        if let Some(view_id) = self.view.view_id{
+            match ret_h {
+                ScrollBarEvent::None => (),
+                ScrollBarEvent::Scroll {scroll_pos, ..} => {
+                    cx.set_view_scroll_x(view_id, scroll_pos);
+                },
+                _ => ()
+            };
+            match ret_v {
+                ScrollBarEvent::None => (),
+                ScrollBarEvent::Scroll {scroll_pos, ..} => {
+                    cx.set_view_scroll_y(view_id, scroll_pos);
+                },
+                _ => ()
+            };
+            ret_h != ScrollBarEvent::None || ret_v != ScrollBarEvent::None
+        }
+        else{
+            false
+        }
     }
     
     pub fn get_scroll_pos(&self, cx: &Cx) -> Vec2 {
