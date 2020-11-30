@@ -176,7 +176,7 @@ impl Cx {
         
         // get the color and depth
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
-            Color::default()
+            Vec4::default()
         }
         else {
             match self.passes[pass_id].color_textures[0].clear_color {
@@ -218,10 +218,10 @@ impl Cx {
         for color_texture in &self.passes[pass_id].color_textures {
             match color_texture.clear_color {
                 ClearColor::InitWith(color) => {
-                    self.platform.from_wasm.add_color_target(color_texture.texture_id, true, color);
+                    self.platform.from_wasm.add_color_target(color_texture.texture_id as usize, true, color);
                 },
                 ClearColor::ClearWith(color) => {
-                    self.platform.from_wasm.add_color_target(color_texture.texture_id, false, color);
+                    self.platform.from_wasm.add_color_target(color_texture.texture_id as usize, false, color);
                 }
             }
         }
@@ -230,10 +230,10 @@ impl Cx {
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
             match self.passes[pass_id].clear_depth {
                 ClearDepth::InitWith(depth_clear) => {
-                    self.platform.from_wasm.set_depth_target(depth_texture_id, true, depth_clear as f32);
+                    self.platform.from_wasm.set_depth_target(depth_texture_id as usize, true, depth_clear as f32);
                 },
                 ClearDepth::ClearWith(depth_clear) => {
-                    self.platform.from_wasm.set_depth_target(depth_texture_id, false, depth_clear as f32);
+                    self.platform.from_wasm.set_depth_target(depth_texture_id as usize, false, depth_clear as f32);
                 }
             }
         }
@@ -272,7 +272,7 @@ impl Cx {
                     let shader_id = self.live_styles.shader_alloc.get(live_item_id).unwrap().shader_id;
                     Self::webgl_compile_shader(
                         shader_id,
-                        self.live_styles.live_item_id_to_string(live_item_id).unwrap(),
+                        self.live_styles.live_item_id_to_string(*live_item_id).unwrap(),
                         &mut self.shaders[shader_id],
                         shader_ast,
                         default_geometry,
@@ -304,7 +304,7 @@ impl Cx {
                             let shader_id = self.live_styles.shader_alloc.get(&live_item_id).unwrap().shader_id;
                             Self::webgl_compile_shader(
                                 shader_id,
-                                self.live_styles.live_item_id_to_string(live_item_id).unwrap(),
+                                self.live_styles.live_item_id_to_string(*live_item_id).unwrap(),
                                 &mut self.shaders[shader_id],
                                 shader_ast,
                                 default_geometry,
