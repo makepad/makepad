@@ -3,35 +3,35 @@ use crate::cx_cocoa::*;
 use crate::cx::*;
 
 impl Cx {
-
+    
     pub fn event_loop<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event),
     {
         self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &mut Event) as *mut dyn FnMut(&mut Cx, &mut Event));
         self.event_loop_core();
-        self.event_handler = None;  
+        self.event_handler = None;
     }
-
-    pub fn event_loop_core(&mut self){
+    
+    pub fn event_loop_core(&mut self) {
         self.platform_type = PlatformType::OSX;
-
+        
         let mut cocoa_app = CocoaApp::new();
         
-        cocoa_app.init();  
+        cocoa_app.init();
         
         let mut metal_cx = MetalCx::new();
         
         let mut metal_windows: Vec<MetalWindow> = Vec::new();
         
         self.mtl_compile_all_shaders(&metal_cx);
-
+        
         self.load_all_fonts();
         
         self.call_event_handler(&mut Event::Construct);
         
         self.redraw_child_area(Area::All);
-         
-        let mut passes_todo = Vec::new(); 
+        
+        let mut passes_todo = Vec::new();
         
         cocoa_app.event_loop( | cocoa_app, events | {
             //let mut paint_dirty = false;
@@ -46,7 +46,7 @@ impl Cx {
                                 metal_window.window_geom = re.new_geom.clone();
                                 self.windows[re.window_id].window_geom = re.new_geom.clone();
                                 // redraw just this windows root draw list
-                                if re.old_geom.inner_size != re.new_geom.inner_size{
+                                if re.old_geom.inner_size != re.new_geom.inner_size {
                                     if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
                                         self.redraw_pass_and_sub_passes(main_pass_id);
                                     }
@@ -57,7 +57,7 @@ impl Cx {
                         // ok lets not redraw all, just this window
                         self.call_event_handler(&mut event);
                     },
-                    Event::WindowClosed(wc) => { 
+                    Event::WindowClosed(wc) => {
                         // lets remove the window from the set
                         self.windows[wc.window_id].window_state = CxWindowState::Closed;
                         self.windows_free.push(wc.window_id);
@@ -162,9 +162,9 @@ impl Cx {
                             cocoa_app.stop_timer(timer_id);
                         }
                         
-                        if self.platform.set_menu{
+                        if self.platform.set_menu {
                             self.platform.set_menu = false;
-                            if let Some(menu) = &self.platform.last_menu{
+                            if let Some(menu) = &self.platform.last_menu {
                                 cocoa_app.update_app_menu(menu, &self.command_settings)
                             }
                         }
@@ -197,12 +197,12 @@ impl Cx {
                                                 &mut metal_cx,
                                             );
                                             // call redraw if we guessed the dpi wrong on startup
-                                            if metal_window.first_draw{
+                                            if metal_window.first_draw {
                                                 metal_window.first_draw = false;
-                                                if dpi_factor != self.default_dpi_factor{
+                                                if dpi_factor != self.default_dpi_factor {
                                                     self.redraw_pass_and_sub_passes(*pass_id);
                                                 }
-
+                                                
                                             }
                                         }}
                                     }
@@ -227,7 +227,7 @@ impl Cx {
                     },
                     Event::None => {
                     },
-                    Event::Signal{..}=>{
+                    Event::Signal {..} => {
                         self.call_event_handler(&mut event);
                         self.call_signals_and_triggers();
                     },
@@ -240,7 +240,7 @@ impl Cx {
                 }
             }
             
-            if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0{
+            if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0 {
                 let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
                 let mut errors = self.process_live_styles_changes();
                 self.mtl_update_all_shaders(&metal_cx, &mut errors);
@@ -248,15 +248,14 @@ impl Cx {
             }
             
             self.process_live_style_errors();
-            if self.next_frames.len() != 0{
-                //println!("HERE");
-                return false;
-            }
-            //println!("{}", self.next_frames.len());
-            if self.playing_animator_ids.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.next_frames.len() == 0 {
-                true
-            } else {
+            
+            if self.playing_animator_ids.len() != 0
+                || self.redraw_parent_areas.len() != 0
+                || self.redraw_child_areas.len() != 0
+                || self.next_frames.len() != 0 {
                 false
+            } else {
+                true
             }
         })
     }
@@ -290,15 +289,15 @@ impl Cx {
     }
     
     pub fn post_signal(signal: Signal, status: StatusId) {
-        if signal.signal_id != 0{
+        if signal.signal_id != 0 {
             CocoaApp::post_signal(signal.signal_id, status);
         }
     }
     
-    pub fn update_menu(&mut self, menu:&Menu){
+    pub fn update_menu(&mut self, menu: &Menu) {
         // lets walk the menu and do the cocoa equivalents
         let platform = &mut self.platform;
-        if platform.last_menu.is_none() || platform.last_menu.as_ref().unwrap() != menu{
+        if platform.last_menu.is_none() || platform.last_menu.as_ref().unwrap() != menu {
             platform.last_menu = Some(menu.clone());
             platform.set_menu = true;
         }
