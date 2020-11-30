@@ -60,16 +60,16 @@ impl Cx {
                 let cxview = &mut self.views[view_id];
                 
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
-                let sh = &self.shaders[draw_call.shader_id];
+                let sh = &self.shaders[draw_call.shader.shader_id];
                 let shp = sh.platform.as_ref().unwrap();
                 
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
-                    if draw_call.instance.len() == 0 {
+                    if draw_call.instances.len() == 0 {
                         continue;
                     }
                     // update the instance buffer data
-                    draw_call.platform.inst_vbuf.update_with_f32_vertex_data(d3d11_cx, &draw_call.instance);
+                    draw_call.platform.inst_vbuf.update_with_f32_vertex_data(d3d11_cx, &draw_call.instances);
                 }
                 
                 // update the zbias uniform if we have it.
@@ -87,13 +87,23 @@ impl Cx {
                     }
                 }
                 
-                let instances = (draw_call.instance.len() / sh.mapping.instance_props.total_slots) as usize;
+                let instances = (draw_call.instances.len() / sh.mapping.instance_props.total_slots) as usize;
                 
                 if instances == 0 {
                     continue;
                 }
                 
-                let geometry = &mut self.geometries[draw_call.geometry_id];
+                let geometry_id = if let Some(geometry) = draw_call.geometry{
+                    geometry.geometry_id
+                }
+                else if let Some(geometry) = sh.default_geometry{
+                    geometry.geometry_id
+                }
+                else{
+                    continue
+                };
+                
+                let geometry = &mut self.geometries[geometry_id];
                 
                 if geometry.dirty {
                     geometry.platform.geom_ibuf.update_with_u32_index_data(d3d11_cx, &geometry.indices);
@@ -187,7 +197,7 @@ impl Cx {
                 is_initial = true;
             }
             else {
-                let cxtexture = &mut self.textures[color_texture.texture_id];
+                let cxtexture = &mut self.textures[color_texture.texture_id as usize];
                 is_initial = d3d11_cx.update_render_target(cxtexture, dpi_factor, pass_size);
                 render_target = cxtexture.platform.render_target_view.as_ref().unwrap();
             }
@@ -207,7 +217,7 @@ impl Cx {
         
         // attach/clear depth buffers, if any
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
-            let cxtexture = &mut self.textures[depth_texture_id];
+            let cxtexture = &mut self.textures[depth_texture_id as usize];
             let is_initial = d3d11_cx.update_depth_stencil(cxtexture, dpi_factor, pass_size);
             match self.passes[pass_id].clear_depth {
                 ClearDepth::InitWith(depth_clear) => {
@@ -719,8 +729,8 @@ impl D3d11Cx {
         )}
     }*/
     
-    pub fn clear_render_target_view(&self, render_target_view: &ComPtr<d3d11::ID3D11RenderTargetView>, color: Color) {
-        let color = [color.r, color.g, color.b, color.a];
+    pub fn clear_render_target_view(&self, render_target_view: &ComPtr<d3d11::ID3D11RenderTargetView>, color: Vec4) {
+        let color = [color.x, color.y, color.z, color.w];
         unsafe {self.context.ClearRenderTargetView(render_target_view.as_raw() as *mut _, &color)}
     }
     
@@ -733,7 +743,7 @@ impl D3d11Cx {
         )}
     }
     
-    //fn clear_depth_stencil_view(&self, d3d11_window: &D3d11Window) {
+    //fn clear_depth_stencil_view(&self, d3d11_window: &D3d11Window) { 
     //    unsafe {self.context.ClearDepthStencilView(d3d11_window.depth_stencil_view.as_ref().unwrap().as_raw() as *mut _, d3d11::D3D11_CLEAR_DEPTH, 1.0, 0)}
     //}
     

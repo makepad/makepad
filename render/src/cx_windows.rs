@@ -267,15 +267,18 @@ impl Cx {
             self.process_live_style_errors();
 
             
-            if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
-                true
-            } else {
+            if self.playing_animator_ids.len() != 0
+                || self.redraw_parent_areas.len() != 0
+                || self.redraw_child_areas.len() != 0
+                || self.next_frames.len() != 0 {
                 false
+            } else {
+                true
             }
         })
     }
     
-    pub fn show_text_ime(&mut self, x: f32, y: f32) {
+    pub fn show_text_ime(&mut self, x: f32, y: f32) { 
         self.platform.set_ime_position = Some(Vec2 {x: x, y: y});
     }
     
