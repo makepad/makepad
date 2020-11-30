@@ -53,15 +53,25 @@ impl Cx {
                 let cxview = &mut self.views[view_id];
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
-                let sh = &self.shaders[draw_call.shader_id];
+                let sh = &self.shaders[draw_call.shader.shader_id];
                 let shp = sh.platform.as_ref().unwrap();
                 
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
-                    draw_call.platform.inst_vb.update_with_f32_data(opengl_cx, &draw_call.instance);
+                    draw_call.platform.inst_vb.update_with_f32_data(opengl_cx, &draw_call.instances);
                 }
                 
-                let geometry = &mut self.geometries[draw_call.geometry_id];
+                 let geometry_id = if let Some(geometry) = draw_call.geometry{
+                    geometry.geometry_id
+                }
+                else if let Some(geometry) = sh.default_geometry{
+                    geometry.geometry_id
+                }
+                else{
+                    continue
+                };
+                
+                let geometry = &mut self.geometries[geometry_id];
                 let indices = geometry.indices.len();
                 
                 draw_call.set_zbias(*zbias);
@@ -74,7 +84,7 @@ impl Cx {
                 }
                 
                 // update geometry?
-                let geometry = &mut self.geometries[draw_call.geometry_id];
+                let geometry = &mut self.geometries[geometry_id];
                 if geometry.dirty || geometry.platform.vb.gl_buffer.is_none() || geometry.platform.ib.gl_buffer.is_none() {
                     geometry.platform.vb.update_with_f32_data(opengl_cx, &geometry.vertices);
                     geometry.platform.ib.update_with_u32_data(opengl_cx, &geometry.indices);
@@ -100,8 +110,8 @@ impl Cx {
                 if vao.inst_vb != draw_call.platform.inst_vb.gl_buffer
                     || vao.geom_vb != geometry.platform.vb.gl_buffer
                     || vao.geom_ib != geometry.platform.ib.gl_buffer
-                    || vao.shader_id != Some(draw_call.shader_id) {
-                    vao.shader_id = Some(draw_call.shader_id);
+                    || vao.shader_id != Some(draw_call.shader.shader_id) {
+                    vao.shader_id = Some(draw_call.shader.shader_id);
                     vao.inst_vb = draw_call.platform.inst_vb.gl_buffer;
                     vao.geom_vb = geometry.platform.vb.gl_buffer;
                     vao.geom_ib = geometry.platform.ib.gl_buffer;
@@ -133,7 +143,7 @@ impl Cx {
                 unsafe {
                     gl::UseProgram(shp.program);
                     gl::BindVertexArray(draw_call.platform.vao.as_ref().unwrap().vao);
-                    let instances = draw_call.instance.len() / sh.mapping.instance_props.total_slots;
+                    let instances = draw_call.instances.len() / sh.mapping.instance_props.total_slots;
                     
                     let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
                     let view_uniforms = cxview.view_uniforms.as_slice();
@@ -254,7 +264,7 @@ impl Cx {
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         // set up the
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
-            Color::default()
+            Vec4::default()
         }
         else {
             match self.passes[pass_id].color_textures[0].clear_color {
@@ -270,7 +280,7 @@ impl Cx {
         unsafe {
             gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
             gl::ClearDepth(clear_depth);
-            gl::ClearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
+            gl::ClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
             gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
         }
         Self::set_default_depth_and_blend_mode();
@@ -315,7 +325,7 @@ impl Cx {
         };
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         
-        let mut clear_color = Color::default();
+        let mut clear_color = Vec4::default();
         let mut clear_depth = 1.0;
         let mut clear_flags = 0;
         
@@ -339,18 +349,18 @@ impl Cx {
             // ok lets do ugly shit here.
             match self.passes[pass_id].clear_depth {
                 ClearDepth::InitWith(depth_clear) => {
-                    if opengl_cx.update_platform_render_target(&mut self.textures[depth_texture_id], dpi_factor, pass_size, true) {
+                    if opengl_cx.update_platform_render_target(&mut self.textures[depth_texture_id as usize], dpi_factor, pass_size, true) {
                         clear_depth = depth_clear;
                         clear_flags |= gl::DEPTH_BUFFER_BIT;
                     }
                 },
                 ClearDepth::ClearWith(depth_clear) => {
-                    opengl_cx.update_platform_render_target(&mut self.textures[depth_texture_id], dpi_factor, pass_size, true);
+                    opengl_cx.update_platform_render_target(&mut self.textures[depth_texture_id as usize], dpi_factor, pass_size, true);
                     clear_depth = depth_clear;
                     clear_flags |= gl::DEPTH_BUFFER_BIT;
                 }
             }
-            if let Some(gl_renderbuffer) = self.textures[depth_texture_id].platform.gl_renderbuffer {
+            if let Some(gl_renderbuffer) = self.textures[depth_texture_id as usize].platform.gl_renderbuffer {
                 unsafe {
                     gl::FramebufferRenderbuffer( gl::FRAMEBUFFER, gl::DEPTH_ATTACHMENT, gl::RENDERBUFFER, gl_renderbuffer );
                 }
@@ -381,18 +391,18 @@ impl Cx {
         for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
             match color_texture.clear_color {
                 ClearColor::InitWith(color) => {
-                    if opengl_cx.update_platform_render_target(&mut self.textures[color_texture.texture_id], dpi_factor, pass_size, false) {
+                    if opengl_cx.update_platform_render_target(&mut self.textures[color_texture.texture_id as usize], dpi_factor, pass_size, false) {
                         clear_color = color;
                         clear_flags |= gl::COLOR_BUFFER_BIT;
                     }
                 },
                 ClearColor::ClearWith(color) => {
-                    opengl_cx.update_platform_render_target(&mut self.textures[color_texture.texture_id], dpi_factor, pass_size, false);
+                    opengl_cx.update_platform_render_target(&mut self.textures[color_texture.texture_id as usize], dpi_factor, pass_size, false);
                     clear_color = color;
                     clear_flags |= gl::COLOR_BUFFER_BIT;
                 }
             }
-            if let Some(gl_texture) = self.textures[color_texture.texture_id].platform.gl_texture {
+            if let Some(gl_texture) = self.textures[color_texture.texture_id as usize].platform.gl_texture {
                 unsafe {
                     gl::FramebufferTexture2D(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0 + index as u32, gl::TEXTURE_2D, gl_texture, 0);
                 }
@@ -405,7 +415,7 @@ impl Cx {
         if clear_flags != 0 {
             unsafe {
                 gl::ClearDepth(clear_depth);
-                gl::ClearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
+                gl::ClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
                 gl::Clear(clear_flags);
             }
         }
@@ -798,17 +808,17 @@ impl ViewBounds {
     }
     
     fn add_rect(&mut self, rect: &Rect) {
-        if rect.x < self.min_x {
-            self.min_x = rect.x;
+        if rect.pos.x < self.min_x {
+            self.min_x = rect.pos.x;
         }
-        if rect.x + rect.w > self.max_x {
-            self.max_x = rect.x + rect.w;
+        if rect.pos.x + rect.size.x > self.max_x {
+            self.max_x = rect.pos.x + rect.size.x;
         }
-        if rect.y < self.min_y {
-            self.min_y = rect.y;
+        if rect.pos.y < self.min_y {
+            self.min_y = rect.pos.y;
         }
-        if rect.y + rect.h > self.max_y {
-            self.max_y = rect.y + rect.h;
+        if rect.pos.y + rect.size.y > self.max_y {
+            self.max_y = rect.pos.y + rect.size.y;
         }
     }
 }
