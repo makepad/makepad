@@ -230,7 +230,6 @@ impl DrawQuad {
         self.shader
     }
 
-
     pub fn set_shader(&mut self, shader: Shader){
         self.shader = shader;
     }
