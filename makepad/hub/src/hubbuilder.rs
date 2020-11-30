@@ -1231,6 +1231,7 @@ pub struct RustcCompilerMessage {
     target: Option<RustcTarget>,
     message: Option<RustcMessage>,
     profile: Option<RustcProfile>,
+    out_dir: Option<String>,
     features: Option<Vec<String >>,
     filenames: Option<Vec<String >>,
     executable: Option<String>,
