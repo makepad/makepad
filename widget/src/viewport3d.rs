@@ -118,6 +118,7 @@ impl Viewport3D {
         self.view_3d.redraw_view(cx);
         // blit the texture to a view rect
         self.measured_size = vec2(cx.get_width_total(), cx.get_height_total());
+        self.image.texture = self.color_texture.into();
         self.image.draw_quad_rel(cx, Rect{pos:vec2(0.,0.), size:self.measured_size });
         
         self.view_2d.end_view(cx);
