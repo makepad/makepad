@@ -160,8 +160,8 @@ impl TreeWorld {
         }  
         recur(&mut many, 0., 0., max_depth);
 
-        let area = cx.end_many_instances(many);
+        self.area = cx.end_many_instances(many);
         // write the uniform on the area
-        write_draw_input!(cx, area, self::shader::max_depth, max_depth);
+        write_draw_input!(cx, self.area, self::shader::max_depth, max_depth);
     }
 }
