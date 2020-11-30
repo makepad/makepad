@@ -250,10 +250,14 @@ impl Cx {
             
             self.process_live_style_errors();
 
-            if !paint_dirty && self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
-                true
-            } else {
+            if paint_dirty 
+                || self.playing_animator_ids.len() != 0
+                || self.redraw_parent_areas.len() != 0
+                || self.redraw_child_areas.len() != 0
+                || self.next_frames.len() != 0 {
                 false
+            } else {
+                true
             }
         })
     }
