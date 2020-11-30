@@ -73,7 +73,6 @@ impl NormalButton {
             }
             
             self::shader_bg: Shader {
-                
                 use makepad_render::drawquad::shader::*;
                 
                 draw_input: self::DrawNormalButton;
