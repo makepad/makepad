@@ -161,6 +161,14 @@ impl Area{
                     return Rect::default();
                 }
                 let draw_call = &cxview.draw_calls[inst.draw_call_id];
+                if draw_call.in_many_instances{
+                    panic!("get_rect called whilst in many instances");
+                    //return Rect::default();
+                }
+                if draw_call.instances.len() == 0{
+                    println!("No instances but everything else valid?");
+                    return Rect::default()
+                }
                 let sh = &cx.shaders[draw_call.shader.shader_id];
                 // ok now we have to patch x/y/w/h into it
                 if let Some(rect_pos) = sh.mapping.rect_instance_props.rect_pos{
