@@ -63,11 +63,11 @@ impl ScrollShadow {
     }
     
     pub fn draw_shadow_top_at(&mut self, cx: &mut Cx, rect: Rect) {
-        let height = live_float!(cx, self::shadow_size);
+        let size = live_float!(cx, self::shadow_size);
         self.bg.shadow_top = 1.0;
         self.bg.draw_quad_rel(cx, Rect {
             pos: rect.pos,
-            size: vec2(rect.size.x, height)
+            size: vec2(rect.size.x, size)
         });
         self.bg.area().set_do_scroll(cx, false, false);
     }
@@ -80,11 +80,11 @@ impl ScrollShadow {
     }
     
     pub fn draw_shadow_left_at(&mut self, cx: &mut Cx, rect: Rect) {
-        let height = live_float!(cx, self::shadow_size);
+        let size = live_float!(cx, self::shadow_size);
         self.bg.shadow_top = 0.0;
         self.bg.draw_quad_rel(cx, Rect {
             pos: rect.pos,
-            size: vec2(rect.size.x, height)
+            size: vec2(size, rect.size.y)
         });
         self.bg.area().set_do_scroll(cx, false, false);
     }

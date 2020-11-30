@@ -309,7 +309,7 @@ impl TextEditor {
             self::gutter_width: 45.0;
             self::padding_top: 27.0;
             
-            self::color_bg: #1e;
+            self::color_bg: #1E1E1E;
             self::color_gutter_bg: #1e;
             self::color_indent_line_unknown: #5;
             self::color_indent_line_fn: #dcdcae;
@@ -1215,6 +1215,7 @@ impl TextEditor {
                 self.gutter_bg.area().set_do_scroll(cx, false, false);
             }
             self.line_number_text.begin_many(cx);
+            self.line_number_text.area().set_do_scroll(cx, false, true);
         }
     }
     
