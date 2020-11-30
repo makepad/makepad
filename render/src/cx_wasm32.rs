@@ -15,7 +15,7 @@ impl Cx {
     {
         self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &mut Event) as *mut dyn FnMut(&mut Cx, &mut Event));
         let ret = self.event_loop_core(msg);
-        self.event_handler = None;  
+        self.event_handler = None;
         ret
     }
     
@@ -149,11 +149,11 @@ impl Cx {
                     let time = to_wasm.mf64();
                     self.anim_time = time;
                     //log!(self, "{} o clock",time);
-                    if self.playing_anim_areas.len() != 0 {
-                        self.call_animation_event(time);
+                    if self.playing_animator_ids.len() != 0 {
+                        self.call_animate_event(time);
                     }
-                    if self.frame_callbacks.len() != 0 {
-                        self.call_frame_event(time);
+                    if self.next_frames.len() != 0 {
+                        self.call_next_frame_event(time);
                     }
                 },
                 6 => { // finger down
@@ -540,7 +540,12 @@ impl Cx {
         
         // request animation frame if still need to redraw, or repaint
         // we use request animation frame for that.
-        if !(passes_todo.len() == 0 && self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0) {
+        if passes_todo.len() != 0
+            || self.playing_animator_ids.len() != 0
+            || self.redraw_parent_areas.len() != 0
+            || self.redraw_child_areas.len() != 0
+            || self.next_frames.len() != 0
+        {
             self.platform.from_wasm.request_animation_frame();
         }
         
@@ -1170,15 +1175,15 @@ impl FromWasm {
         self.mu32(height as u32);
     }
     
-    pub fn add_color_target(&mut self, texture_id: usize, init_only: bool, color: Color) {
+    pub fn add_color_target(&mut self, texture_id: usize, init_only: bool, color: Vec4) {
         self.fit(7);
         self.mu32(22);
         self.mu32(texture_id as u32);
         self.mu32(if init_only {1} else {0});
-        self.mf32(color.r);
-        self.mf32(color.g);
-        self.mf32(color.b);
-        self.mf32(color.a);
+        self.mf32(color.x);
+        self.mf32(color.y);
+        self.mf32(color.z);
+        self.mf32(color.w);
     }
     
     pub fn set_depth_target(&mut self, texture_id: usize, init_only: bool, depth: f32) {
@@ -1199,13 +1204,13 @@ impl FromWasm {
         self.mu32(25);
     }
     
-    pub fn begin_main_canvas(&mut self, color: Color, depth: f32) {
+    pub fn begin_main_canvas(&mut self, color: Vec4, depth: f32) {
         self.fit(6);
         self.mu32(26);
-        self.mf32(color.r);
-        self.mf32(color.g);
-        self.mf32(color.b);
-        self.mf32(color.a);
+        self.mf32(color.x);
+        self.mf32(color.y);
+        self.mf32(color.z);
+        self.mf32(color.w);
         self.mf32(depth);
     }
     
