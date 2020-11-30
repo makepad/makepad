@@ -310,11 +310,14 @@ impl DrawText {
     pub fn set_area(&mut self, area: Area) {
         self.area = area
     }
+    
+    pub fn shader(&self) -> Shader{
+        self.shader
+    }
 
     pub fn set_shader(&mut self, shader: Shader){
         self.shader = shader;
     }
-
     
     pub fn buf_truncate(&mut self, len:usize){
         unsafe {
