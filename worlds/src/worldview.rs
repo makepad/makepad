@@ -181,7 +181,7 @@ impl WorldView {
             //let inst = self.bg.begin_quad_fill(cx);
             //self.bg.end_quad_fill(cx, inst);
             return
-        } 
+        }
         
         if self.viewport_3d.begin_viewport_3d(cx).is_ok() {
             self.draw_world_view_3d(cx);
@@ -199,7 +199,7 @@ impl WorldView {
         };
         
         self.view.lock_view_transform(cx, &Mat4::identity());
-        /*
+        
         match &self.world_type {
             WorldType::TreeWorld => {
                 self.tree_world.draw_tree_world(cx);
@@ -208,7 +208,7 @@ impl WorldView {
                 self.field_world.draw_field_world(cx);
             }
         }
-        */
+        
         self.view.end_view(cx,);
         self.next_frame = cx.new_next_frame();
         self.update_uniforms(cx);
