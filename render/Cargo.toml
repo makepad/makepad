@@ -23,9 +23,6 @@ makepad-draw-derive = { path = "./draw_derive", version = "0.1" }
 [target.aarch64-apple-darwin.dependencies]
 makepad-objc-sys = { path = "./bind/objc-sys", version = "0.2" }
 
-[target.aarch64-apple-darwin.dependencies]
-makepad-objc-sys = { path = "./bind/objc-sys", version = "0.2" }
-
 [target.x86_64-apple-darwin.dependencies]
 makepad-objc-sys = { path = "./bind/objc-sys", version = "0.2" }
 
