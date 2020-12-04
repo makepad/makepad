@@ -179,7 +179,7 @@ impl<'a, 'b> ShaderGenerator<'a, 'b> {
                     assert_eq!(*decl.ty_expr.ty.borrow().as_ref().unwrap(), Ty::Texture2D);
                     write!(self.string, "Texture2D ").unwrap();
                     self.backend_writer.write_ident(self.string, decl.ident);
-                    writeln!(self.string, ": register(t{});", index);
+                    writeln!(self.string, ": register(t{});", index).unwrap();
                     index += 1;
                 }
                 _ => {}
