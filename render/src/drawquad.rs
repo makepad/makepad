@@ -101,17 +101,17 @@ impl DrawQuad {
     
     pub fn set_draw_depth(&mut self, cx:&mut Cx, v: f32) {
         self.draw_depth = v;
-        write_draw_input!(cx, self.area(), Self::DrawQuad::draw_depth, v);
+        write_draw_input!(cx, self.area(), self::DrawQuad::draw_depth, v);
     }
 
     pub fn set_rect_pos(&mut self, cx:&mut Cx, v: Vec2) {
         self.rect_pos = v;
-        write_draw_input!(cx, self.area(), Self::DrawQuad::rect_pos, v);
+        write_draw_input!(cx, self.area(), self::DrawQuad::rect_pos, v);
     }
 
     pub fn set_rect_size(&mut self, cx:&mut Cx, v: Vec2) {
         self.rect_size = v;
-        write_draw_input!(cx, self.area(), Self::DrawQuad::rect_size, v);
+        write_draw_input!(cx, self.area(), self::DrawQuad::rect_size, v);
     }
     
     pub fn register_draw_input(cx: &mut Cx) {
