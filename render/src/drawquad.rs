@@ -22,8 +22,8 @@ impl Clone for DrawQuad {
            // many_set_area: false,
             many_old_area: Area::Empty,
             slots: self.slots,
-            rect_pos: Vec2::default(),
-            rect_size: Vec2::default(),
+            rect_pos: self.rect_pos,
+            rect_size: self.rect_size,
             draw_depth: self.draw_depth
         }
     }
@@ -95,9 +95,10 @@ impl DrawQuad {
         "#);
     }
     
-    pub fn with_draw_depth(self, draw_depth: f32) -> Self {Self {draw_depth, ..self}}
-    pub fn with_rect_pos(self, rect_pos: Vec2) -> Self {Self {rect_pos, ..self}}
-    pub fn with_rect_size(self, rect_size: Vec2) -> Self {Self {rect_size, ..self}}
+    pub fn with_draw_depth(mut self, draw_depth: f32) -> Self {self.draw_depth = draw_depth;self}
+    pub fn with_rect_pos(mut self, rect_pos: Vec2) -> Self {self.rect_pos = rect_pos;self}
+    pub fn with_rect_size(mut self, rect_size: Vec2) -> Self {self.rect_size = rect_size;self}
+    //    Self {rect_size, ..self}}
     
     pub fn set_draw_depth(&mut self, cx:&mut Cx, v: f32) {
         self.draw_depth = v;

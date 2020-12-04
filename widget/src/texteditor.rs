@@ -1292,8 +1292,8 @@ impl TextEditor {
                 self.set_key_focus(cx);
             }
             
-            self.bg.draw_quad_rel(cx, cx.get_turtle_rect());
-            
+            self.bg.draw_quad_abs(cx, cx.get_turtle_rect());
+            self.bg.area().set_do_scroll(cx, false,false);
             self.begin_draw_objects(cx, true);
             
             if let Some(select_scroll) = &mut self._select_scroll {
