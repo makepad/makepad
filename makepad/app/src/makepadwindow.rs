@@ -98,7 +98,7 @@ impl MakepadWindow {
         makepad_storage: &mut MakepadStorage,
         build_manager: &mut BuildManager
     ) {
-        
+       
         match self.desktop_window.handle_desktop_window(cx, event) {
             DesktopWindowEvent::EventForOtherWindow => {
                 return
@@ -500,7 +500,6 @@ impl MakepadWindow {
             self.world_view.draw_world_view_3d(cx);
             self.xr_control.draw_xr_control(cx);
         }
-        
         /*
         let mut di = DrawImage::new(cx, default_shader!()).with_draw_depth(100.);
         di.texture = Texture2D(Some(cx.fonts_atlas.texture_id));
