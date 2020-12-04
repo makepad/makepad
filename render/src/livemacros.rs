@@ -165,7 +165,7 @@ impl DrawInputType for Mat4 {
     
     // find uniform, then find instance prop
     fn write_draw_input(self, cx: &mut Cx, area: Area, live_item_id: LiveItemId, name: &str) {
-        if let Some(wr) = area.get_write_ref(cx, live_item_id, Ty::Vec4, name) {
+        if let Some(wr) = area.get_write_ref(cx, live_item_id, Ty::Mat4, name) {
             for i in 0..wr.repeat {
                 for j in 0..16 {
                     wr.buffer[i * wr.stride + j] = self.v[j];
