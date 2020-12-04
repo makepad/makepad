@@ -177,7 +177,7 @@ impl WorldView {
         if self.xr_is_presenting {
             // just do some gray rect
             self.bg.color = live_vec4!(cx, self::color_bg);
-            self.bg.draw_quad_rel(cx, cx.get_turtle_rect());
+            self.bg.draw_quad_abs(cx, cx.get_turtle_rect());
             //let inst = self.bg.begin_quad_fill(cx);
             //self.bg.end_quad_fill(cx, inst);
             return
