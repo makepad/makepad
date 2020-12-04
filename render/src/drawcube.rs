@@ -114,7 +114,7 @@ impl DrawCube {
     
     pub fn set_cube_pos(&mut self, cx: &mut Cx, cube_pos: Vec3) {
         self.cube_pos = cube_pos;
-        write_draw_input!(cx, self.area(), self::drawcube::DrawCube::cube_pos, cube_pos);
+        write_draw_input!(cx, self.area(), self::DrawCube::cube_pos, cube_pos);
     }
     
     pub fn set_cube_size(&mut self, cx: &mut Cx, cube_size: Vec3) {
