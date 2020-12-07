@@ -690,7 +690,7 @@ impl HubBuilder {
         let mut build_result = BuildResult::NoOutput;
         while let Ok(line) = rx_line.recv() {
             if let Some((is_stderr, line)) = line {
-                if is_stderr && line != "\n"
+                 if is_stderr && line != "\n"
                     && !line.contains("Finished")
                     && !line.contains("Blocking")
                     && !line.contains("Compiling")
@@ -702,21 +702,37 @@ impl HubBuilder {
                             item: HubLogItem::Error(line.clone())
                         }
                     });
+                    continue
                 }
                 
                 let mut parsed: Result<RustcCompilerMessage, DeJsonErr> = DeJson::deserialize_json(&line);
                 match &mut parsed {
                     Err(_e) => {
-                        println!("{}", line);
+                        if line != "\n" && line != "\r\n" && !line.contains("--verbose"){
+                            route_send.send(ToHubMsg {
+                                to: HubMsgTo::UI,
+                                msg: HubMsg::LogItem {
+                                    uid: uid,
+                                    item: HubLogItem::Message(line.clone())
+                                }
+                            });
+                        }
                         //eprintln!("ERROR PARSING {} {:?}", line, _e);
                     },
                     Ok(parsed) => {
+                        
                         if let Some(message) = &mut parsed.message { //.spans;
                             let spans = &message.spans;
+                            //println!("{:#?}", spans);
                             for i in 0..spans.len() {
-                                let span = spans[i].clone();
+                                let mut span = spans[i].clone();
                                 if !span.is_primary {
                                     continue
+                                }
+                                if let Some(exp) = span.expansion{
+                                    if let Some(ispan) = exp.span{
+                                        span = ispan
+                                    }
                                 }
                                 
                                 let mut msg = message.message.clone();
@@ -727,9 +743,13 @@ impl HubBuilder {
                                 }
                                 msg = msg.replace("\n", "");
                                 // lets try to pull path out of rendered, this fixes some rust bugs
-                                let mut path = span.file_name;
+
+                                //println!("{:#?}", span);
+
+                                let path = span.file_name;
+
                                 let line = span.line_start as usize;
-                                let column = span.column_start as usize;
+                                let column = span.column_start as usize;/*
                                 if let Some(rendered) = &message.rendered {
                                     let lines: Vec<&str> = rendered.split('\n').collect();
                                     if lines.len() > 1 {
@@ -741,9 +761,9 @@ impl HubBuilder {
                                             }
                                         }
                                     }
-                                }
+                                }*/
                                 let loc_message = LocMessage {
-                                    path: format!("{}/{}/{}", builder, workspace, de_relativize_path(&path)).replace("\\", "/"),
+                                    path: format!("{}/{}/{}", builder, workspace, project_rel_path(&abs_root_path, &path)).replace("\\", "/"),
                                     line: line,
                                     column: column,
                                     range: Some((span.byte_start as usize, span.byte_end as usize)),
@@ -751,6 +771,7 @@ impl HubBuilder {
                                     rendered: message.rendered.clone(),
                                     explanation: if let Some(code) = &message.code {code.explanation.clone()}else {None},
                                 };
+                                //println!("{:?}", loc_message);
                                 let item = match message.level.as_ref() {
                                     "error" => {
                                         errors.push(loc_message.clone());
@@ -769,11 +790,14 @@ impl HubBuilder {
                             }
                         }
                         else {
+                            if parsed.package_id.is_none(){
+                                continue;
+                            }
                             route_send.send(ToHubMsg {
                                 to: HubMsgTo::UI,
                                 msg: HubMsg::CargoArtifact {
                                     uid: uid,
-                                    package_id: parsed.package_id.clone(),
+                                    package_id: parsed.package_id.clone().unwrap(),
                                     fresh: if let Some(fresh) = parsed.fresh {fresh}else {false}
                                 }
                             });
@@ -1111,10 +1135,20 @@ fn rel_to_abs_path(abs_root: &str, path: &str) -> String {
     de_relativize_path(&format!("{}/{}", abs_root, path))
 }
 
-fn de_relativize_path(path: &str) -> String {
+fn project_rel_path(abs_root:&str, path: &str) -> String {
+    if path.len() > abs_root.len() + 1{
+        if abs_root == &path[0..abs_root.len()]{
+            return path[abs_root.len()+1..].to_string()
+        }
+    }
+    path.to_string()
+}
+
+
+fn de_relativize_path( path: &str) -> String {
     let splits: Vec<&str> = path.split("/").collect();
     let mut out = Vec::new();
-    for split in splits {
+    for split in splits { 
         if split == ".." && out.len()>0 {
             out.pop();
         }
@@ -1127,26 +1161,26 @@ fn de_relativize_path(path: &str) -> String {
 
 
 // rust compiler output json structs
-#[derive(Clone, DeJson, Default)]
+#[derive(Clone, DeJson, Debug, Default)]
 pub struct RustcTarget {
     kind: Vec<String>,
     crate_types: Vec<String>,
     name: String,
     src_path: String,
     edition: String,
-    doc:Option<bool>,
+    doc: Option<bool>,
     doctest: bool,
-    test:bool
+    test: bool
 }
 
-#[derive(Clone, DeJson, Default)]
+#[derive(Clone, DeJson, Debug, Default)]
 pub struct RustcText {
     text: String,
     highlight_start: u32,
     highlight_end: u32
 }
 
-#[derive(Clone, DeJson, Default)]
+#[derive(Clone, DeJson, Debug,  Default)]
 pub struct RustcSpan {
     file_name: String,
     byte_start: u32,
@@ -1189,20 +1223,20 @@ pub struct RustcSpan {
     "fresh": false
 }
 */
-#[derive(Clone, DeJson, Default)]
+#[derive(Clone, DeJson, Debug, Default)]
 pub struct RustcExpansion {
     span: Option<RustcSpan>,
     macro_decl_name: String,
     def_site_span: Option<RustcSpan>
 }
 
-#[derive(Clone, DeJson, Default)]
+#[derive(Clone, DeJson, Debug, Default)]
 pub struct RustcCode {
     code: String,
     explanation: Option<String>
 }
 
-#[derive(Clone, DeJson, Default)]
+#[derive(Clone, DeJson, Debug,  Default)]
 pub struct RustcMessage {
     message: String,
     code: Option<RustcCode>,
@@ -1212,7 +1246,7 @@ pub struct RustcMessage {
     rendered: Option<String>
 }
 
-#[derive(Clone, DeJson, Default)]
+#[derive(Clone, DeJson, Debug,  Default)]
 pub struct RustcProfile {
     opt_level: String,
     debuginfo: Option<u32>,
@@ -1221,10 +1255,11 @@ pub struct RustcProfile {
     test: bool
 }
 
-#[derive(Clone, DeJson, Default)]
+#[derive(Clone, DeJson, Debug,  Default)]
 pub struct RustcCompilerMessage {
     reason: String,
-    package_id: String,
+    success: Option<bool>, 
+    package_id: Option<String>,
     linked_libs: Option<Vec<String >>,
     linked_paths: Option<Vec<String >>,
     cfgs: Option<Vec<String >>,
