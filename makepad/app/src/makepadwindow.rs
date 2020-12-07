@@ -279,7 +279,7 @@ impl MakepadWindow {
                                 // lets post a new file to our local thing
                                 temporary_change_hook = true;
                                 // and send over the cursor change
-                                do_search = Some((None, MakepadTextBufferId(0), false, false));
+                                //do_search = Some((None, MakepadTextBufferId(0), false, false));
                             }
                             TextEditorEvent::LagChange => {
                                 makepad_storage.text_buffer_file_write(cx, path);
