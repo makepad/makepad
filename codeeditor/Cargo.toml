@@ -1,0 +1,18 @@
+[package]
+name = "makepad-code-editor"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad code editor"
+license = "MIT"
+
+[dependencies]
+
+[dependencies.makepad-render]
+path = "../render"
+version = "0.2"
+
+[dependencies.makepad-widget]
+path = "../widget"
+version = "0.1"
+
