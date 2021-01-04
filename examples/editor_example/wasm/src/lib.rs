@@ -1,4 +1,4 @@
-use widget_example_app::*;
+use editor_example_app::*;
 use makepad_render::*;
 
-wasm_app!(WidgetExampleApp);
+wasm_app!(EditorExampleApp);
