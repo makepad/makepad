@@ -186,7 +186,7 @@ impl ColorPicker {
 
     pub fn style(cx: &mut Cx) {
         self::DrawColorPicker::register_draw_input(cx);
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::anim_default: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
@@ -277,7 +277,7 @@ impl ColorPicker {
                 }
                 
             }
-        "#)
+        })
     }
 }
 

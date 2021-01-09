@@ -34,7 +34,6 @@ impl EditorExampleApp {
        
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         self.desktop_window.handle_desktop_window(cx, event);
-
         self.code_editor.handle_code_editor(cx,event);
     }
     
@@ -44,7 +43,6 @@ impl EditorExampleApp {
         };
         
         self.code_editor.draw_code_editor(cx);
-
         self.desktop_window.end_desktop_window(cx);
     }
 }

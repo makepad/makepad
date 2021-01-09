@@ -11,7 +11,7 @@ pub fn define_shader_stdlib(cx: &mut Cx) {
     
     //Text::style(cx);
     
-    live_body!(cx, r#"
+    live_body!(cx, {
         
         self::geometry_3d: ShaderLib {
             geometry geom_pos: vec3;
@@ -310,6 +310,6 @@ pub fn define_shader_stdlib(cx: &mut Cx) {
                     self.line_to(self.start_pos.x, self.start_pos.y);
                 }
             }
-        }"#
-    );
+        }
+    });
 }

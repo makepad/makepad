@@ -51,7 +51,7 @@ impl DesktopButton {
     
     pub fn style(cx: &mut Cx) {
         self::DrawDesktopButton::register_draw_input(cx);
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::anim_default: Anim {
                 play: Cut {duration: 0.1}
                 tracks: [
@@ -160,7 +160,7 @@ impl DesktopButton {
                     return #f00;
                 }
             }
-        "#);
+        });
         
     }
     

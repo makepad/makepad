@@ -52,7 +52,7 @@ impl DrawQuad {
         
         Self::register_draw_input(cx);
         
-        live_body!(cx, r#"
+        live_body!(cx, {
             
             self::shader: Shader {
                 
@@ -92,7 +92,7 @@ impl DrawQuad {
                     return #0f0;
                 }
             }
-        "#);
+        });
     }
     
     pub fn with_draw_depth(mut self, draw_depth: f32) -> Self {self.draw_depth = draw_depth;self}

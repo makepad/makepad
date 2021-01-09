@@ -84,12 +84,12 @@ impl DesktopWindow {
     }
     
     pub fn style(cx: &mut Cx) {
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::color_bg_selected_over: #3d;
             self::text_style_window_caption: TextStyle {
                 ..crate::widgetstyle::text_style_unscaled
             }
-        "#);
+        });
     }
     
     pub fn handle_desktop_window(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
