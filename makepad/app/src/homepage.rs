@@ -51,7 +51,7 @@ impl HomePage {
     
     pub fn style(cx: &mut Cx) {
         
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::color_bg: #2;
             
             self::text_style_heading: TextStyle {
@@ -80,7 +80,7 @@ impl HomePage {
                 new_line_padding: 15.,
                 line_wrap: MaxSize(550.),
             }
-        "#)
+        })
     }
     
     pub fn handle_home_page(&mut self, cx: &mut Cx, event: &mut Event) {

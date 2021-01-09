@@ -47,7 +47,7 @@ impl FloatSlider {
     
     pub fn style(cx: &mut Cx) {
         self::DrawFloatSlider::register_draw_input(cx);
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::anim_default: Anim {
                 play: Cut {duration: 0.2},
                 tracks: [
@@ -97,7 +97,7 @@ impl FloatSlider {
                     return df.result;
                 }
             }
-        "#)
+        })
     }
     
     pub fn handle_finger(&mut self, cx: &mut Cx, rel: Vec2) -> FloatSliderEvent {

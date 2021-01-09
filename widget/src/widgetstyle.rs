@@ -2,7 +2,7 @@ use makepad_render::*;
 
 pub fn set_widget_style(cx: &mut Cx) {
     
-    live_body!(cx, r#"
+    live_body!(cx, {
         self::text_style_unscaled: TextStyle{
             font: "resources/Ubuntu-R.ttf",
             font_size: 8.0,
@@ -29,7 +29,7 @@ pub fn set_widget_style(cx: &mut Cx) {
         
         self::color_drop_quad: #a;
         
-    "#);
+    });
     crate::foldcaption::FoldCaption::style(cx);
     crate::tabclose::TabClose::style(cx);
     crate::desktopwindow::DesktopWindow::style(cx);

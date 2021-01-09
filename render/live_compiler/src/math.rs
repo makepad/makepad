@@ -326,8 +326,13 @@ impl Vec4 {
     
     pub fn from_hex_str(hex: &str) -> Result<Vec4, ()> {
         let bytes = hex.as_bytes();
-        if bytes[0] == '#' as u8 {
-            hex_bytes_to_vec4(&bytes[1..])
+        if bytes.len()>2 && bytes[0] == '#' as u8 {
+            if bytes[1] == 'x' as u8 {
+                hex_bytes_to_vec4(&bytes[2..])
+            }
+            else{
+                hex_bytes_to_vec4(&bytes[1..])
+            }
         }
         else {
             hex_bytes_to_vec4(bytes)

@@ -36,9 +36,9 @@ impl Viewport3D {
     }
     
     pub fn style(cx: &mut Cx) {
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::pos: vec3(0., 0.0, -1.1);
-        "#);
+        });
     }
      
     pub fn handle_viewport_2d(&mut self, cx: &mut Cx, event: &mut Event) {

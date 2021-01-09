@@ -301,7 +301,7 @@ impl Cx {
                 None
             }
             else {
-                Some(Rect {pos:vec2(x,y),size:vec2(w,h)})
+                Some(Rect {pos: vec2(x, y), size: vec2(w, h)})
             }
         }
         else {

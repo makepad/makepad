@@ -122,7 +122,7 @@ impl FoldCaption {
         
         DrawFoldCaption::register_draw_input(cx);
         
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::layout_bg: Layout {
                 align: {fx:1.0,fy:0.5},
                 walk: Walk {
@@ -189,7 +189,7 @@ impl FoldCaption {
                     return df.result;
                 }
             }
-        "#);
+        });
     }
     
     pub fn handle_fold_caption(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {

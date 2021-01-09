@@ -42,7 +42,7 @@ impl CodeIcon {
     
     pub fn style(cx: &mut Cx) {
         self::DrawCodeIcon::register_draw_input(cx);
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::walk: Walk {
                 width: Fix(14.0),
                 height: Fix(14.0),
@@ -128,7 +128,7 @@ impl CodeIcon {
                 }
             }
             
-        "#)
+        })
     }
     
     pub fn draw_icon(&mut self, cx: &mut Cx, icon_type: CodeIconType) {

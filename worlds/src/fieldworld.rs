@@ -19,7 +19,7 @@ impl FieldWorld {
     }
     
     pub fn style(cx: &mut Cx) {
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::color: #E27D3A;
             self::leaf_1: #C1FF00;
             self::leaf_2: #009713;
@@ -103,7 +103,7 @@ impl FieldWorld {
                     return vec4(color.xyz * self::alpha, self::alpha); 
                 }
             }
-        "#)
+        });
     }
     
     pub fn handle_field_world(&mut self, _cx: &mut Cx, _event: &mut Event) {

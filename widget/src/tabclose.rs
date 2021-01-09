@@ -29,7 +29,7 @@ impl TabClose {
 
         self::DrawTabClose::register_draw_input(cx);
         
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::color_selected_focus: #f;
             self::color_deselected_focus: #9d;
             
@@ -88,7 +88,7 @@ impl TabClose {
                     //return df_fill(color);
                 }
             }
-        "#);
+        });
     }
     
     pub fn handle_tab_close(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {

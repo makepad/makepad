@@ -33,7 +33,7 @@ impl TrapezoidText {
     
     pub fn style(cx: &mut Cx) {
         
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::trapezoid_shader: Shader {
                 use crate::shader_std::prelude::*;
                 default_geometry: crate::shader_std::quad_2d;
@@ -130,7 +130,7 @@ impl TrapezoidText {
                     return camera_projection * vec4(pos, 0.0, 1.0);
                 }
             }
-        "#);
+        });
         
     }
     
