@@ -54,7 +54,7 @@ impl ItemDisplay {
     }
     
     pub fn style(cx: &mut Cx) {
-        live_body!(cx, r#"
+        live_body!(cx, {
             
             self::text_style_title: TextStyle {
                 ..makepad_widget::widgetstyle::text_style_normal
@@ -70,7 +70,7 @@ impl ItemDisplay {
                 makepad_widget::texteditor::padding_top: self::padding_top;
                 makepad_widget::texteditor::color_bg: self::color_bg;
             }
-        "#)
+        })
     }
     
     pub fn display_message(&mut self, cx: &mut Cx, loc_message: &LocMessage) {

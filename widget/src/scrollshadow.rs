@@ -27,7 +27,7 @@ impl ScrollShadow {
     
     pub fn style(cx: &mut Cx) {
         DrawScrollShadow::register_draw_input(cx);
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::shadow_size: 4.0;
             self::shader_bg: Shader {
                 use makepad_render::drawquad::shader::*;
@@ -52,7 +52,7 @@ impl ScrollShadow {
                     return mix(vec4(0., 0., 0., is_viz), vec4(0., 0., 0., 0.), pow(geom.x, 0.5));
                 }
             }
-        "#);
+        });
     }
     
     pub fn draw_shadow_top(&mut self, cx: &mut Cx) {

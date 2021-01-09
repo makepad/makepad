@@ -255,6 +255,16 @@ impl TokenParser {
         false
     }
     
+    pub fn open_group(&mut self) -> Option<Delimiter> {
+        if let Some(TokenTree::Group(group)) = &self.current {
+            let delim = group.delimiter();
+            self.iter_stack.push(group.stream().into_iter());
+            self.advance();
+            return Some(delim)
+        }
+        None
+    }
+    
     pub fn open_brace(&mut self) -> bool {
         self.open_delim(Delimiter::Brace)
     }
@@ -325,7 +335,15 @@ impl TokenParser {
         }
         return None
     }
-
+    
+    pub fn span(&self)->Option<Span>{
+        if let Some(current) = &self.current{
+            Some(current.span())
+        }
+        else{
+            None
+        }
+    }
     
     pub fn is_punct(&mut self, what: char) -> bool {
         // check if our punct is multichar.

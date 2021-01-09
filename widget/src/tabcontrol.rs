@@ -70,14 +70,14 @@ impl TabControl {
     }
     
     pub fn style(cx: &mut Cx) {
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::color_bg_normal: #34;
             self::bar_size: 8.0;
             self::tab_control_style: Style {
                 crate::scrollbar::bar_size: self::bar_size;
             }
             
-        "#)
+        })
     }
     
     pub fn handle_tab_control(&mut self, cx: &mut Cx, event: &mut Event) -> TabControlEvent {

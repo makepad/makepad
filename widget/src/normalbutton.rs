@@ -30,7 +30,7 @@ impl NormalButton {
     pub fn style(cx: &mut Cx) {
         self::DrawNormalButton::register_draw_input(cx);
         
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::layout_bg: Layout {
                 align: all(0.5),
                 walk: Walk {
@@ -90,7 +90,7 @@ impl NormalButton {
                     return cx.fill(mix(mix(#3, #4, hover), #2a, down));
                 }
             }
-        "#);
+        });
     }
     
     pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {

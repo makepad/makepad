@@ -26,7 +26,7 @@ impl DrawImage {
     
     pub fn style(cx: &mut Cx) {
         Self::register_draw_input(cx);
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::shader: Shader {
                 use crate::drawquad::shader::*;
 
@@ -55,7 +55,7 @@ impl DrawImage {
                     return vec4(sample2d(texture, tc.xy).rgb * alpha, alpha);
                 }
             }
-        "#);
+        });
     }
 }
 
