@@ -922,11 +922,6 @@ impl FromWasm {
         }
     }
     
-    // end the block and return ownership of the pointer
-    pub fn end(&mut self) {
-        self.fit(1);
-        self.mu32(0);
-    }
     
     pub fn take_wasm_ptr(&mut self) -> u32 {
         let mu32 = self.mu32;
@@ -937,6 +932,12 @@ impl FromWasm {
         self.used = 0;
         self.offset = 0;
         mu32 as u32
+    }
+
+    // end the block and return ownership of the pointer
+    pub fn end(&mut self) {
+        self.fit(1);
+        self.mu32(0);
     }
     
     fn add_propdefvec(&mut self, prop_defs: &Vec<PropDef>) {

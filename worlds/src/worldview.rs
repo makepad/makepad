@@ -75,14 +75,14 @@ impl WorldView {
     }
     
     pub fn style(cx: &mut Cx) {
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::color_bg: #222222;
             self::uniforms: ShaderLib {
                 uniform time:float;
                 uniform left_input_pos: vec3;
                 uniform right_input_pos: vec3;
             }
-        "#);
+        });
     }
     
     pub fn handle_world_select(&mut self, cx: &mut Cx, event: &mut Event) -> WorldSelectEvent {
