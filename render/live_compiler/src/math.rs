@@ -62,6 +62,10 @@ pub struct Vec2 {
 
 
 impl Vec2 {
+    pub fn new() -> Vec2 {
+        Vec2::default()
+    }
+    
     pub fn all(x: f32) -> Vec2 {
         Vec2 {x: x, y: x}
     }
