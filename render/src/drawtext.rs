@@ -1,6 +1,6 @@
 use crate::cx::*;
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub enum Wrapping {
     Char,
     Word,
@@ -9,6 +9,7 @@ pub enum Wrapping {
     Ellipsis(f32)
 }
 
+#[derive(Debug)]
 #[repr(C, packed)]
 pub struct DrawText {
     pub shader: Shader,

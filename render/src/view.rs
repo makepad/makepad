@@ -476,6 +476,7 @@ impl Cx {
     }
 }
 
+#[derive(Debug)]
 pub struct ManyInstances {
     pub instance_area: InstanceArea,
     pub aligned: Option<usize>,
