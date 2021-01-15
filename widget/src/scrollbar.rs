@@ -76,7 +76,7 @@ impl ScrollBar {
     pub fn style(cx: &mut Cx) {
         self::DrawScrollBar::register_draw_input(cx);
         
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::color_base: #5;
             self::color_over: #7;
             self::color_down: #9;
@@ -120,7 +120,7 @@ impl ScrollBar {
                     return df.fill_keep(color);
                 }
             }
-        "#);
+        });
     }
     
     pub fn with_bar_size(self, bar_size: f32) -> Self {Self {bar_size, ..self}}

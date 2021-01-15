@@ -303,14 +303,14 @@ impl TextEditor {
         DrawCursor::register_draw_input(cx);
         DrawSelection::register_draw_input(cx);
         
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::layout_bg: Layout {}
             self::shadow_size: 6.0;
             self::gutter_width: 45.0;
             self::padding_top: 27.0;
             
             self::color_bg: #1E1E1E;
-            self::color_gutter_bg: #1e;
+            self::color_gutter_bg: #1E1E1E;
             self::color_indent_line_unknown: #5;
             self::color_indent_line_fn: #dcdcae;
             self::color_indent_line_typedef: #5b9bd3;
@@ -334,7 +334,7 @@ impl TextEditor {
             self::color_line_number_normal: #88;
             self::color_line_number_highlight: #d4;
             
-            self::color_whitespace: #6e;
+            self::color_whitespace: #6E6E6E;
             
             self::color_keyword: #5b9bd3;
             self::color_flow: #c485be;
@@ -483,7 +483,7 @@ impl TextEditor {
                     return vec4(color.rgb * color.a, color.a);
                 }
             }
-        "#);
+        });
     }
     
     pub fn apply_style(&mut self, cx: &mut Cx) {

@@ -21,14 +21,13 @@ impl CodeEditor {
         }
     }
     pub fn style(cx: &mut Cx) {
-
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::layout_bg: Layout {}
             
             self::text_style_label: TextStyle {
                 ..makepad_widget::widgetstyle::text_style_fixed
             }
-        "#);
+        });
     }
     
     pub fn handle_code_editor(&mut self, cx: &mut Cx, event: &mut Event) -> CodeEditorEvent {

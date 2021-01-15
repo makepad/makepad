@@ -60,7 +60,7 @@ impl LiveItemsView {
     }
     
     pub fn style(cx: &mut Cx) {
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::color_bg: #28;
             
             self::text_style_value: TextStyle {
@@ -85,7 +85,7 @@ impl LiveItemsView {
             }
             
             
-        "#)
+        })
     }
     
     pub fn handle_live_items(&mut self, cx: &mut Cx, event: &mut Event, mtb: &mut MakepadTextBuffer) {

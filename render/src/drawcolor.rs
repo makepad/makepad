@@ -13,7 +13,7 @@ impl DrawColor{
     
     pub fn style(cx:&mut Cx){
         Self::register_draw_input(cx);
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::shader: Shader {
                 use crate::drawquad::shader::*;
                 draw_input: self::DrawColor;
@@ -21,6 +21,6 @@ impl DrawColor{
                     return vec4(color.rgb*color.a, color.a);
                 }
             }
-        "#);
+        });
     }
 }
