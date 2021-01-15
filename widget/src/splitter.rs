@@ -60,7 +60,7 @@ impl Splitter {
     
     pub fn style(cx: &mut Cx) {
         
-        live_body!(cx, r#"
+        live_body!(cx, {
             
             self::color_bg: #19;
             self::color_over: #5;
@@ -98,7 +98,7 @@ impl Splitter {
                 }
             }
             
-        "#);
+        });
     }
     
     pub fn handle_splitter(&mut self, cx: &mut Cx, event: &mut Event) -> SplitterEvent {

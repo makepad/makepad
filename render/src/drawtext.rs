@@ -132,7 +132,7 @@ impl DrawText {
         
         Self::register_draw_input(cx);
         
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::text_style_unscaled: TextStyle {
                 font: "resources/Ubuntu-R.ttf",
                 font_size: 8.0,
@@ -253,7 +253,7 @@ impl DrawText {
                     )));
                 }
             }
-        "#);
+        });
     }
     
     pub fn set_color(&mut self, cx: &mut Cx, v: Vec4) {

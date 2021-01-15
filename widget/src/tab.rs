@@ -62,7 +62,7 @@ impl Tab {
     
     pub fn style(cx: &mut Cx) {
         self::DrawTab::register_draw_input(cx);
-        live_body!(cx, r#"
+        live_body!(cx, {
             
             self::color_bg_selected: #28;
             self::color_bg_normal: #34;
@@ -101,7 +101,7 @@ impl Tab {
                 }
             }
             
-        "#)
+        })
     }
     
     pub fn get_bg_color(&self, cx: &Cx) -> Vec4 {

@@ -28,7 +28,7 @@ impl TreeWorld {
       
     pub fn style(cx: &mut Cx) {
         
-        live_body!(cx, r#"
+        live_body!(cx, {
             
             self::color: #E27D3A;
             self::leaf_1: #C1FF00;
@@ -129,7 +129,7 @@ impl TreeWorld {
                     blend_multiply(a,b);
                 }*/
             }
-        "#)
+        })
     }
     
     pub fn handle_tree_world(&mut self, _cx: &mut Cx, _event: &mut Event) {
