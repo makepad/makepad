@@ -88,6 +88,9 @@ where
             ('#', _) => {
                 self.skip_char();
                 let mut hex = Vec::new();
+                if self.ch_0 == 'x'{
+                    self.skip_char();
+                }
                 while let Some(ch) = self.read_char_if(|ch| ch.is_ascii_hexdigit()) {
                     hex.push(ch as u8)
                 }

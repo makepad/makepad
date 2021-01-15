@@ -85,18 +85,18 @@ impl FileTree {
     
     pub fn style(cx: &mut Cx) {
         DrawFileTreeFiller::register_draw_input(cx);
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::shadow_size: 6.0;
             self::color_tree_folder: #f;
             self::color_tree_file: #9D9D9D;
             self::color_filler: #7f;
-            self::color_bg_marked: #11466e;
-            self::color_bg_selected: #28;
+            self::color_bg_marked: #x11466e;
+            self::color_bg_selected: #x28;
             self::color_bg_odd: #25;
-            self::color_bg_marked_over: #11466e;
+            self::color_bg_marked_over: #x11466e;
             self::color_bg_selected_over: #3d;
             self::color_bg_odd_over: #38;
-            self::color_drag_bg: #11466e;
+            self::color_drag_bg: #x11466e;
             
             self::layout_drag_bg: Layout {
                 padding: {l: 5., t: 5., r: 5., b: 5.},
@@ -164,7 +164,7 @@ impl FileTree {
             }
             
             
-        "#)
+        })
     }
     
     pub fn apply_style(&mut self, cx: &mut Cx) {

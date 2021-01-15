@@ -13,7 +13,7 @@ impl SkyBox {
     }
     
     pub fn style(cx: &mut Cx) {
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::sky_color: #000000;
             self::edge_color: #111111;
             self::floor_color: #8;
@@ -72,7 +72,7 @@ impl SkyBox {
                     return sky;
                 }
             }
-        "#)
+        })
     }
     
     pub fn draw_sky_box(&mut self, cx: &mut Cx) {

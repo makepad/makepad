@@ -36,7 +36,7 @@ impl LogList {
     
     pub fn style(cx: &mut Cx) {
         
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::layout_item: Layout {
                 walk: Walk {width: Fill, height: Fix(20.)},
                 align: {fx: 0.0, fy: 0.5},
@@ -50,10 +50,10 @@ impl LogList {
             
             self::color_path: #9;
             self::color_message: #b;
-            self::color_bg_marked: #11466e;
+            self::color_bg_marked: #x11466E;
             self::color_bg_selected: #28;
             self::color_bg_odd: #25;
-            self::color_bg_marked_over: #11466e;
+            self::color_bg_marked_over: #11466F;
             self::color_bg_selected_over: #3d;
             self::color_bg_odd_over: #38;
             
@@ -70,7 +70,7 @@ impl LogList {
                 makepad_widget::texteditor::layout_bg: self::layout_bg;
             }
             
-        "#)
+        })
     }
     
     
