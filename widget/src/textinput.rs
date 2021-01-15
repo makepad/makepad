@@ -38,7 +38,7 @@ impl TextInput {
     
     pub fn style(cx: &mut Cx) {
         
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::color_empty_message: #666;
             
             self::gutter_width: 0.0;
@@ -66,7 +66,7 @@ impl TextInput {
                 crate::texteditor::layout_bg: self::layout_bg;
                 crate::texteditor::shader_bg: self::shader_bg;
             }
-        "#)
+        })
     }
     
     pub fn handle_text_input(&mut self, cx: &mut Cx, event: &mut Event) -> TextEditorEvent {

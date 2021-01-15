@@ -248,7 +248,7 @@ impl XRControl {
     
     pub fn style(cx: &mut Cx) {
         // lets define the shader
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::shader_hand: Shader {
                 use makepad_render::drawcube::shader::*;
             }
@@ -261,7 +261,7 @@ impl XRControl {
                     return df.fill(#f);
                 }
             }
-        "#)
+        })
     }
     
     pub fn process_avatar_state(&mut self, cx: &mut Cx, xr_channel: &XRChannel, ui_rect: Rect) {

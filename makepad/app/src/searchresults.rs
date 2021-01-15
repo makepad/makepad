@@ -51,15 +51,15 @@ impl SearchResults {
     }
     
     pub fn style(cx: &mut Cx) {
-        live_body!(cx, r#"
-            self::color_path: #9;
-            self::color_message: #A67A32;
-            self::color_bg: #1e;
-            self::color_bg_marked: #11466e;
-            self::color_bg_odd: #25;
-            self::color_bg_odd_over: #3;
-            self::color_bg_marked_over: #11466e;
-            self::color_bg_selected: #28;
+        live_body!(cx, {
+            self::color_path: #x9;
+            self::color_message: #xA67A32;
+            self::color_bg: #x1e;
+            self::color_bg_marked: #x11466e;
+            self::color_bg_odd: #x25;
+            self::color_bg_odd_over: #x3;
+            self::color_bg_marked_over: #x11466e;
+            self::color_bg_selected: #x28;
             
             self::text_input_layout_bg: Layout {
                 walk: Walk {
@@ -101,7 +101,7 @@ impl SearchResults {
                 makepad_widget::texteditor::padding_top: self::texteditor_padding_top;
             }
             
-        "#)
+        })
     }
     
     pub fn set_search_input_value(

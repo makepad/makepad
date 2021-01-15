@@ -9,6 +9,7 @@ pub use makepad_live_compiler::span::LiveBodyId;
 pub use makepad_live_compiler::math::*;
 pub use makepad_live_compiler::colors::*;
 pub use makepad_live_compiler::ty::{Ty, TyLit, TyExpr};
+pub use makepad_live_body::*;
 
 pub use crate::fonts::*;
 pub use crate::turtle::*;

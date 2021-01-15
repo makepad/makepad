@@ -71,7 +71,7 @@ impl DrawCube {
         
         Self::register_draw_input(cx);
         
-        live_body!(cx, r#"
+        live_body!(cx, {
             self::shader: Shader {
                 use crate::shader_std::prelude::*;
                 use crate::shader_std::geometry_3d::*;
@@ -99,7 +99,7 @@ impl DrawCube {
                     return lit_col;
                 }
             }
-        "#)
+        })
         
     }
     
