@@ -165,7 +165,7 @@ pub struct Cx {
     pub event_handler: Option<*mut dyn FnMut(&mut Cx, &mut Event)>,
 }
 
-#[derive(Clone, Default, Eq, PartialEq, Copy, Hash)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Copy, Hash)]
 pub struct NextFrame(u64);
 
 #[derive(Clone, Copy, Default)]
