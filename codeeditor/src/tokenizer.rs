@@ -104,14 +104,14 @@ impl<'a> Tokenize<'a> {
             match (self.peek(0), self.peek(1)) {
                 ('\'', _) => {
                     self.skip(1);
+                    self.suffix();
                     break;
                 }
                 ('\0', _) => return TokenKind::Unknown,
-                ('\\', '\'') => self.skip(2),
+                ('\\', '\'') | ('\\', '\\')=> self.skip(2),
                 _ => self.skip(1),
             }
         }
-        self.suffix();
         TokenKind::String
     }
 
@@ -126,6 +126,7 @@ impl<'a> Tokenize<'a> {
             match (self.peek(0), self.peek(1)) {
                 ('"', _) => {
                     self.skip(1);
+                    self.suffix();
                     *self.state = State::Initial;
                     break;
                 }
@@ -137,7 +138,6 @@ impl<'a> Tokenize<'a> {
                 _ => self.skip(1),
             }
         }
-        self.suffix();
         TokenKind::String
     }
 
@@ -159,6 +159,7 @@ impl<'a> Tokenize<'a> {
                         end_hash_count += 1;
                     }
                     if end_hash_count == start_hash_count {
+                        self.suffix();
                         *self.state = State::Initial;
                         break;
                     }
@@ -760,6 +761,7 @@ impl<'a> Iterator for Tokenize<'a> {
                 self.raw_double_quoted_string_tail(start_hash_count)
             }
         };
+        assert!(start != self.index);
         Some(Token {
             len: self.index - start,
             kind,
