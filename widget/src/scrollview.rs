@@ -1,7 +1,7 @@
 use makepad_render::*;
 use crate::scrollbar::*;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ScrollView{
     pub view:View,
     pub scroll_h:Option<ScrollBar>,
