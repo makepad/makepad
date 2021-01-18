@@ -9,7 +9,7 @@ pub struct ViewTexture {
 
 pub type ViewRedraw = Result<(), ()>;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct View { // draw info per UI element
     pub view_id: Option<usize>,
     pub redraw_id: u64,
