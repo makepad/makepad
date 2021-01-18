@@ -11,6 +11,12 @@ pub struct CodeEditor {
     text: DrawText,
 }
 
+pub enum CodeEditorEvent{
+    KeyFocus,
+    KeyFocusLost,
+    None
+}
+
 impl CodeEditor {
     pub fn style(cx: &mut Cx) {
         live_body!(cx, {
@@ -39,10 +45,43 @@ impl CodeEditor {
         }
     }
 
-    pub fn handle_code_editor(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_code_editor(&mut self, cx: &mut Cx, event: &mut Event)->CodeEditorEvent {
         if self.view.handle_scroll_view(cx, event) {
             self.view.redraw_view(cx);
         }
+        match event.hits(cx, self.view.area(), HitOpt::default()) {
+            Event::KeyFocus(_kf) => {
+                return CodeEditorEvent::KeyFocus
+            },
+            Event::KeyFocusLost(_kf) => {
+                self.view.redraw_view(cx);
+                return CodeEditorEvent::KeyFocusLost
+            },
+            Event::FingerDown(_fe) => {
+            },
+            Event::FingerHover(_fe) => {
+            },
+            Event::FingerUp(_fe) => {
+            },
+            Event::FingerMove(_fe) => {
+            },
+            Event::KeyDown(ke) => {
+                println!("Got keydown {:?}", ke.key_code);
+            },
+            Event::KeyUp(_ke) => {
+            },
+            Event::TextInput(te) => {
+                println!("Got input {}", te.input);
+            },
+            Event::TextCopy(_) => match event { // access the original event
+                Event::TextCopy(req) => {
+                    req.response = Some(String::new());
+                },
+                _ => ()
+            },
+            _ => ()
+        }
+        CodeEditorEvent::None
     }
 
     pub fn draw_code_editor(&mut self, cx: &mut Cx, lines: &[Vec<char>]) {
@@ -57,7 +96,7 @@ impl CodeEditor {
             whitespace: Vec4,
             unknown: Vec4,
         }
-
+        
         if self
             .view
             .begin_view(cx, live_layout!(cx, self::layout))
@@ -65,6 +104,9 @@ impl CodeEditor {
         {
             return;
         }
+        // should do this elsewhere, but ok
+        cx.set_key_focus(self.view.area());
+        
         self.bg.draw_quad_abs(cx, cx.get_turtle_rect());
 
         // Get the position and size of the viewport.
