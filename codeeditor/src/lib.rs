@@ -1,3 +1,3 @@
-mod codeeditor;
-pub use crate::codeeditor::*; 
-
+pub mod code_editor;
+pub mod text;
+pub mod tokenizer;
