@@ -1,7 +1,7 @@
 use crate::cx::*;
 use crate::drawquad::DrawQuad;
 
-#[derive(Clone, DrawQuad)]
+#[derive(Clone, Debug, DrawQuad)]
 #[repr(C)]
 pub struct DrawColor {
     #[default_shader(self::shader)]

@@ -1,6 +1,6 @@
 use crate::cx::*;
 
-#[derive(Clone, Default, Ord, PartialOrd, PartialEq, Eq, Copy)]
+#[derive(Clone, Debug, Default, Ord, PartialOrd, PartialEq, Eq, Copy)]
 pub struct AnimatorId(u64);
 
 impl AnimatorId{
@@ -13,7 +13,7 @@ pub struct AnimInfo {
     pub total_time: f64
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum AnimLastValue {
     Float(f32), 
     Vec2(Vec2), 
@@ -21,7 +21,7 @@ pub enum AnimLastValue {
     Vec4(Vec4),
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct Animator {
     current: Option<Anim>,
     next: Option<Anim>,

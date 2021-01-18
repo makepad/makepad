@@ -1,6 +1,6 @@
 use makepad_render::*;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ScrollBar {
     
     pub bg: DrawScrollBar,
@@ -26,7 +26,7 @@ pub struct ScrollBar {
     drag_point: Option<f32>, // the point in pixels where we are dragging
 }
 
-#[derive(Clone, DrawQuad)]
+#[derive(Clone, Debug, DrawQuad)]
 #[repr(C)]
 pub struct DrawScrollBar {
     #[default_shader(self::shader_bg)]

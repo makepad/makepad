@@ -266,7 +266,7 @@ impl Default for Direction {
     }
 }
 
-#[derive(Copy, Clone, SerRon, DeRon, DeTok)]
+#[derive(Copy, Clone, Debug, SerRon, DeRon, DeTok)]
 pub enum Axis {
     Horizontal,
     Vertical

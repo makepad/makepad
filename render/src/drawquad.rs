@@ -1,5 +1,6 @@
 use crate::cx::*;
 
+#[derive(Debug)]
 #[repr(C, packed)]
 pub struct DrawQuad {
     pub shader: Shader,
