@@ -175,7 +175,7 @@ impl<'a> Tokenize<'a> {
 
     fn raw_identifier(&mut self) -> TokenKind {
         debug_assert!(
-            self.peek(0) == 'r' && self.peek(1) == '#' && self.peek(2).is_identifier_start()
+            self.peek(0) == 'r' && self.peek(1).is_identifier_start()
         );
         self.skip(3);
         self.identifier_tail()
@@ -777,8 +777,8 @@ pub struct Token {
 pub enum TokenKind {
     Comment,
     Identifier,
-    Keyword,
     Punctuator,
+    Keyword,
     Number,
     String,
     Whitespace,

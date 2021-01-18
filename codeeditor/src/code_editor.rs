@@ -20,12 +20,12 @@ impl CodeEditor {
                 ..makepad_widget::widgetstyle::text_style_fixed
             }
 
-            self::comment: #808080;
-            self::identifier: #808080;
-            self::keyword: #808080;
-            self::punctuator: #808080;
-            self::number: #808080;
-            self::string: #808080;
+            self::comment: #638d54;
+            self::identifier: #d4d4d4;
+            self::keyword: #5b9bd3;
+            self::punctuator: #d4d4d4;
+            self::number: #b6ceaa;
+            self::string: #cc917b;
             self::whitespace: #808080;
             self::unknown: #808080;
         })
@@ -40,7 +40,9 @@ impl CodeEditor {
     }
 
     pub fn handle_code_editor(&mut self, cx: &mut Cx, event: &mut Event) {
-        self.view.handle_scroll_view(cx, event);
+        if self.view.handle_scroll_view(cx, event) {
+            self.view.redraw_view(cx);
+        }
     }
 
     pub fn draw_code_editor(&mut self, cx: &mut Cx, lines: &[Vec<char>]) {
@@ -67,23 +69,19 @@ impl CodeEditor {
 
         // Get the position and size of the viewport.
         let Rect {
-            pos:
-                Vec2 {
-                    x: viewport_left,
-                    y: viewport_top,
-                },
-            size: Vec2 {
-                x: _,
-                y: viewport_height,
-            },
+            pos: layout_viewport_start,
+            size: viewport_size,
         } = cx.get_turtle_rect();
-        let viewport_bottom = viewport_top + viewport_height;
+        let visual_viewport_start = layout_viewport_start + self.view.get_scroll_pos(cx);
+        let visual_viewport_end = visual_viewport_start + viewport_size;
+        
+        self.text.text_style = live_text_style!(cx, self::text_style);
 
         // Get the size of a character.
         let Vec2 {
             x: char_width,
             y: char_height,
-        } = self.text.font_size * self.text.get_monospace_base(cx);
+        } = self.text.text_style.font_size * self.text.get_monospace_base(cx);
 
         // Initialize the color table.
         let colors = Colors {
@@ -97,26 +95,24 @@ impl CodeEditor {
             unknown: live_vec4!(cx, self::unknown),
         };
 
-        self.text.text_style = live_text_style!(cx, self::text_style);
-
         let mut max_line_width = 0.0;
-        let mut line_top = viewport_top;
+        let mut line_start_y = layout_viewport_start.y;
         let mut state = State::Initial;
 
         // Iterate over all lines in the text.
         for line in lines {
             let line_width = line.len() as f32 * char_width;
             let line_height = char_height;
-            let line_bottom = line_top + line_height;
+            let line_end_y = line_start_y + line_height;
 
             // If the current line intersects the viewport, draw it.
-            if line_top < viewport_bottom && line_bottom > viewport_top {
-                let mut char_left = viewport_left;
+            if line_start_y < visual_viewport_end.y && line_end_y > visual_viewport_start.y {
+                let mut char_start_x = layout_viewport_start.x;
                 let mut start = 0;
-
+                
                 // Iterate over all tokens in the current line.
                 for token in tokenizer::tokenize(&mut state, line) {
-                    let char_right = char_left + char_width;
+                    let char_end_x = char_start_x + token.len as f32 * char_width;
                     let end = start + token.len;
 
                     // Set the text color for the current token.
@@ -135,26 +131,26 @@ impl CodeEditor {
                     self.text.draw_text_chunk(
                         cx,
                         Vec2 {
-                            x: char_left,
-                            y: line_top,
+                            x: char_start_x,
+                            y: line_start_y,
                         },
                         0,
                         &line[start..end],
                         |_, _, _, _| 0.0,
                     );
 
-                    char_left = char_right;
+                    char_start_x = char_end_x;
                     start = end;
                 }
             }
 
             max_line_width = line_width.max(max_line_width);
-            line_top = line_bottom;
+            line_start_y = line_end_y;
         }
 
         cx.set_turtle_bounds(Vec2 {
             x: max_line_width,
-            y: line_top,
+            y: line_start_y,
         });
 
         self.view.end_view(cx);
