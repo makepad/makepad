@@ -108,7 +108,7 @@ impl<'a> Tokenize<'a> {
                     break;
                 }
                 ('\0', _) => return TokenKind::Unknown,
-                ('\\', '\'') | ('\\', '\\')=> self.skip(2),
+                ('\\', '\'') | ('\\', '\\') => self.skip(2),
                 _ => self.skip(1),
             }
         }
@@ -175,9 +175,7 @@ impl<'a> Tokenize<'a> {
     }
 
     fn raw_identifier(&mut self) -> TokenKind {
-        debug_assert!(
-            self.peek(0) == 'r' && self.peek(1).is_identifier_start()
-        );
+        debug_assert!(self.peek(0) == 'r' && self.peek(1).is_identifier_start());
         self.skip(3);
         self.identifier_tail()
     }
