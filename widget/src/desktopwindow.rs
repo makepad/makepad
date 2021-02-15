@@ -175,10 +175,10 @@ impl DesktopWindow {
    
     pub fn draw_desktop_window<F>(&mut self, cx: &mut Cx, menu: Option<&Menu>, f: F)
     where
-        F: FnOnce(&mut Cx, &mut DesktopWindow)
+        F: FnOnce(&mut Cx)
     {
         if self.begin_desktop_window(cx, menu).is_ok() {
-            f(cx, self);
+            f(cx);
             self.end_desktop_window(cx);
         }
     }

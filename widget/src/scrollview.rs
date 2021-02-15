@@ -37,10 +37,10 @@ impl ScrollView{
    
     pub fn draw_scroll_view<F>(&mut self, cx: &mut Cx, layout: Layout, f: F)
     where
-        F: FnOnce(&mut Cx, &mut ScrollView)
+        F: FnOnce(&mut Cx)
     {
         if self.begin_view(cx, layout).is_ok() {
-            f(cx, self);
+            f(cx);
             self.end_view(cx);
         }
     }
