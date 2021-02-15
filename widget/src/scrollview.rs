@@ -35,7 +35,7 @@ impl ScrollView{
         Self{scroll_v:Some(s), ..self}
     }
    
-    pub fn draw_view<F>(&mut self, cx: &mut Cx, layout: Layout, f: F)
+    pub fn draw_scroll_view<F>(&mut self, cx: &mut Cx, layout: Layout, f: F)
     where
         F: FnOnce(&mut Cx)
     {
