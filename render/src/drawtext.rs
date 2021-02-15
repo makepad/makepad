@@ -273,7 +273,16 @@ impl DrawText {
             self.set_color(cx, v);
         }
     }
-    
+   
+    pub fn draw_many<F>(&mut self, cx: &mut Cx, f: F)
+    where
+        F: FnOnce(&mut Cx, &mut DrawText)
+    {
+        self.begin_many(cx);
+        f(cx, self);
+        self.end_many(cx);
+    }
+
     pub fn begin_many(&mut self, cx: &mut Cx) {
         self.many_old_area = self.area;
         let mi = cx.begin_many_aligned_instances(self.shader, self.slots);
