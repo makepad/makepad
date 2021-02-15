@@ -34,7 +34,16 @@ impl ScrollView{
     pub fn with_scroll_v(self, s:ScrollBar)->Self{
         Self{scroll_v:Some(s), ..self}
     }
-    
+   
+    pub fn draw_view<F>(&mut self, cx: &mut Cx, layout: Layout, f: F)
+    where
+        F: FnOnce(&mut Cx)
+    {
+        self.begin_view(cx, layout);
+        f(cx);
+        self.end_view(cx);
+    }
+
     pub fn begin_view(&mut self, cx: &mut Cx, layout: Layout) -> ViewRedraw {
         self.view.begin_view(cx, layout)
     }
