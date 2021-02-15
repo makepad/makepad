@@ -39,9 +39,10 @@ impl ScrollView{
     where
         F: FnOnce(&mut Cx)
     {
-        self.begin_view(cx, layout);
-        f(cx);
-        self.end_view(cx);
+        if self.begin_view(cx, layout).is_ok() {
+            f(cx);
+            self.end_view(cx);
+        }
     }
 
     pub fn begin_view(&mut self, cx: &mut Cx, layout: Layout) -> ViewRedraw {
