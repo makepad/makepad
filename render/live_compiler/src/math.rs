@@ -65,6 +65,10 @@ impl Vec2 {
     pub fn new(x: f32, y: f32) -> Vec2 {
         Vec2 { x, y }
     }
+
+    pub fn zero() -> Vec2 {
+        Vec2 { x: 0.0, y: 0.0 }
+    }
     
     pub fn all(x: f32) -> Vec2 {
         Vec2 {x: x, y: x}
@@ -78,6 +82,13 @@ impl Vec2 {
 
     pub fn to_vec3(&self) -> Vec3 {
         Vec3 {x: self.x, y: self.y, z: 0.0}
+    }
+
+    pub fn max(self, other: Vec2) -> Vec2 {
+        Vec2 {
+            x: self.x.max(other.x),
+            y: self.y.max(other.y),
+        }
     }
 }
 
