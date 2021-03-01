@@ -1,18 +1,9 @@
 [package]
 name = "makepad-code-editor"
 version = "0.1.0"
-authors = ["Makepad <info@makepad.nl>"]
+authors = ["Eddy Bruel <ejpbruel@gmail.com>"]
 edition = "2018"
-description = "Makepad code editor"
-license = "MIT"
 
 [dependencies]
-
-[dependencies.makepad-render]
-path = "../render"
-version = "0.2"
-
-[dependencies.makepad-widget]
-path = "../widget"
-version = "0.1"
-
+makepad-render = { git = "https://github.com/makepad/makepad.git", branch = "dev" }
+makepad-widget = { git = "https://github.com/makepad/makepad.git", branch = "dev" }
