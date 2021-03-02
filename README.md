@@ -1,15 +1,14 @@
 # Introducing Makepad
 
-Makepad is a new VR, web and native collaborative shader programming environment. 
-It will support many different shader modes including many vertex-shaders 
-besides the well known shader toy SDF programs. This makes shader coding possible
-for more compute constrained environments like VR goggles or mobiles.
-Try makepad now on a Quest in the quest browser, click the goggles top right of the UI. Try touching the leaves of the tree with your hands! Magic!
+Makepad is a new VR, web and native-rendering UI framework for Rust.
+It utilises shaders as its styling primitives, and we are currently developing a live UI design and animation environment for it.
+
+For the first build of our editor / UI you can look at the following URL in your browser,
+or try makepad now on a Quest in the quest browser, click the goggles top right of the UI. Try touching the leaves of the tree with your hands! Magic!
 
 https://makepad.dev
 
-The Makepad development platform and library ecosystem are MIT licensed,
-for the Quest and in the future iOS we will provide paid, native version
+The Makepad Framework and UI component system is MIT licensed, our UI designer will be cloud based and commercial.
 
 # How to install the native version
 
