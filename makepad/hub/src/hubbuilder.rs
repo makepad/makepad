@@ -666,6 +666,7 @@ impl HubBuilder {
         
         let mut extargs = args.to_vec();
         extargs.push("--message-format=json");
+        extargs.push("--target-dir=target"); // In case someone has overridden the CARGO_TARGET_DIR env var.
         let mut process = Process::start("cargo", &extargs, &abs_root_path, env).expect("Cannot start process");
         
         let route_send = self.route_send.clone();
