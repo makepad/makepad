@@ -172,7 +172,17 @@ impl DesktopWindow {
             DesktopWindowEvent::None
         }
     }
-    
+   
+    pub fn draw_desktop_window<F>(&mut self, cx: &mut Cx, menu: Option<&Menu>, f: F)
+    where
+        F: FnOnce(&mut Cx)
+    {
+        if self.begin_desktop_window(cx, menu).is_ok() {
+            f(cx);
+            self.end_desktop_window(cx);
+        }
+    }
+
     pub fn begin_desktop_window(&mut self, cx: &mut Cx, menu: Option<&Menu>) -> ViewRedraw {
         
         if !self.main_view.view_will_redraw(cx) {
