@@ -11,7 +11,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cx: &mut Cx) -> App {
+    pub fn new(cx: &mut Cx) -> App { 
         App {
             window: DesktopWindow::new(cx),
             editor: CodeEditor::new(cx),

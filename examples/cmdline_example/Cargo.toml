@@ -2,3 +2,7 @@
 name = "cmdline_example"
 version = "0.1.0"
 edition = "2018"
+
+[dependencies.makepad-live-parser]
+path="../../render/live_parser"
+version="0.1"

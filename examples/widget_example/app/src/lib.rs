@@ -10,8 +10,7 @@ pub struct WidgetExampleApp {
 
 impl WidgetExampleApp {
     pub fn new(cx: &mut Cx) -> Self {
-        
-        Self { 
+        Self {
             desktop_window: DesktopWindow::new(cx)
             .with_inner_layout(Layout{
                 line_wrap: LineWrap::NewLine,

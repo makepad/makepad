@@ -70,7 +70,6 @@ pub use crate::drawtext::*;
 pub use crate::drawcolor::*;
 pub use crate::drawcube::*;
 pub use crate::drawimage::*;
-
 pub use crate::elements::*;
 
 use std::time::{Instant};

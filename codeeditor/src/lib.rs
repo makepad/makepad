@@ -138,7 +138,7 @@ impl CodeEditor {
             let line_end_x = origin.x + line.chars.len() as f32 * char_size.x;
             max_line_end_x = max_line_end_x.max(line_end_x);
             let line_end_y = line_start_y + char_size.y;
-            if line_start_y >= viewport_end.y && line_end_y <= viewport_start.y {
+            if line_start_y >= viewport_end.y || line_end_y <= viewport_start.y {
                 line_start_y = line_end_y;
                 continue;
             }
@@ -152,12 +152,14 @@ impl CodeEditor {
                     0
                 } as f32
                     * char_size.x;
+                    
                 let selection_end_x = if selection.end.line == line_index {
                     selection.end.column
                 } else {
                     line.chars.len()
                 } as f32
                     * char_size.x;
+                    
                 if selection_start_x >= viewport_end.x || selection_end_x <= viewport_start.x {
                     continue;
                 }
@@ -184,7 +186,7 @@ impl CodeEditor {
                 let token_end = token_start + token.len;
                 let token_start_x = token_start as f32 * char_size.x;
                 let token_end_x = token_end as f32 * char_size.x;
-                if token_start_x >= viewport_end.x && token_end_x <= viewport_start.x {
+                if token_start_x >= viewport_end.x || token_end_x <= viewport_start.x {
                     continue;
                 }
                 self.text.color = match token.kind {

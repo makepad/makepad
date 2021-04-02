@@ -88,7 +88,7 @@ impl BareExampleApp {
             self.quad.counter = 0.;
             self.quad.some = 0.;
             
-            for i in 0..1000 {
+            for i in 0..1000 {  
                 let v = 0.5 * (i as f32);
                 self.quad.counter += 0.01; //= (i as f32).sin();
                 let x = 400. + (v + self.count).sin() * 400.;
