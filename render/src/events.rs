@@ -287,6 +287,7 @@ pub enum Event {
     Destruct,
     Draw,
     Paint,
+    Redraw,
     AppFocus,
     AppFocusLost,
     AnimEnded(AnimateEvent),
