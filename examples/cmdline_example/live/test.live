@@ -1,0 +1,61 @@
+use makepad_render::{Component, Frame, DrawQuad};
+
+DrawNormalButton: DrawQuad {
+    const shadow: float = 3.0;
+    const border_radius: float = 2.5;
+    
+    fn pixel() -> vec4 {
+        let cx = Df::viewport(pos * rect_size);
+        cx.box(shadow, shadow, rect_size.x - shadow * (1. + down), rect_size.y - shadow * (1. + down), border_radius);
+        cx.blur = 6.0;
+        cx.fill(mix(#0007, #0, hover));
+        cx.blur = 0.001;
+        cx.box(shadow, shadow, rect_size.x - shadow * 2., rect_size.y - shadow * 2., border_radius);
+        return cx.fill(mix(mix(#3, #4, hover), #2a, down));
+    }
+}
+
+NormalButton: Component {
+    layout_bg: Layout {
+        align: Align::Center, 
+        walk: Walk {
+            width: Width::Compute,
+            height: Height::Compute,
+            margin: Margin{l:1.0, t:1.0, r:1.0, b:1.0},
+        },
+        padding: Padding{l: 16.0, t: 12.0, r: 16.0, b: 12.0},
+    }
+    
+    shader: DrawNormalButton {
+    }
+    
+    text_style: DefaultTextStyle {
+    }
+    
+    Default: Self {
+        shader.down: 0.0
+        layout_bg.padding.l: Animation {
+            play: Play::Cut {duration: 0.1}
+            keys: {1.0: 10.0}
+        }
+        frame.prop: 1.0
+    }
+    
+    Pressed: Self{}
+}
+
+MyFrame: Frame { // something that layouts / clips
+    pos: Vec3{x: 1.0, y: 1.0, z: 1.0}
+    size: Vec2{x: 100.0, y: 100.0}
+    layout: Layout::Auto {}
+    children: [button1, user1, button2]
+
+    // loop this thing somehow
+    button1: NormalButton {
+        label: "testword"
+        subobj.prop: 1.0
+    }
+    button1: MyNormalButton{}
+    button2: MyNormalButton{}
+    user1: UserDraw{}
+}

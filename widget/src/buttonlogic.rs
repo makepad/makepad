@@ -34,7 +34,7 @@ impl ButtonLogic {
                 match fe.hover_state {
                     HoverState::In => if fe.any_down {
                         cb(cx, ButtonLogicEvent::Down, area);
-                    }
+                    } 
                     else {
                         cb(cx, ButtonLogicEvent::Over, area);
                     },
