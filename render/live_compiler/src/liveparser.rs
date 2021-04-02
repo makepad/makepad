@@ -179,7 +179,6 @@ impl<'a> DeTokParserImpl<'a> {
             let live_item_id = qualified_ident_path.to_live_item_id();
             
             new_body_contains.insert(live_item_id);
-            
             self.live_styles.item_in_live_body.insert(live_item_id, live_body_id);
             
             body_items.push(live_item_id);

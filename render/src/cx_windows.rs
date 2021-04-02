@@ -11,7 +11,6 @@ impl Cx {
         self.event_loop_core();
         self.event_handler = None;  
     }
-
     
     pub fn event_loop_core(&mut self){
         self.platform_type = PlatformType::Windows;
