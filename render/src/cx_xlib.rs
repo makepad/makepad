@@ -7,9 +7,9 @@ use std::ffi::CString;
 use std::ffi::CStr;
 use std::slice;
 use std::sync::Mutex;
-//use std::fs::File;
-//use std::io::Write;
-//use std::os::unix::io::FromRawFd;
+use std::fs::File;
+use std::io::Write;
+use std::os::unix::io::FromRawFd;
 use std::mem;
 use std::os::raw::{c_char, c_uchar, c_int, c_uint, c_ulong, c_long, c_void};
 use std::ptr;
@@ -28,7 +28,7 @@ pub struct XlibApp {
     pub xim: X11_sys::XIM,
     pub clipboard: String,
     pub display_fd: c_int,
-    pub signal_fd: c_int,
+    pub signal_fds: [c_int; 2],
     pub window_map: HashMap<c_ulong, *mut XlibWindow>,
     pub time_start: u64,
     pub last_scroll_time: f64,
@@ -111,7 +111,8 @@ impl XlibApp {
             let display = X11_sys::XOpenDisplay(ptr::null());
             let display_fd = X11_sys::XConnectionNumber(display);
             let xim = X11_sys::XOpenIM(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
-            let signal_fd = 0i32; //libc::pipe();
+            let mut signal_fds = [0, 0];
+            libc::pipe(signal_fds.as_mut_ptr());
             XlibApp {
                 atom_clipboard: X11_sys::XInternAtom(display, CString::new("CLIPBOARD").unwrap().as_ptr(), 0),
                 atom_net_wm_moveresize: X11_sys::XInternAtom(display, CString::new("_NET_WM_MOVERESIZE").unwrap().as_ptr(), 0),
@@ -130,7 +131,7 @@ impl XlibApp {
                 xim,
                 display,
                 display_fd,
-                signal_fd,
+                signal_fds,
                 clipboard: String::new(),
                 last_scroll_time: 0.0,
                 last_click_time: 0.0,
@@ -180,6 +181,7 @@ impl XlibApp {
                     let mut fds = mem::MaybeUninit::uninit();
                     libc::FD_ZERO(fds.as_mut_ptr());
                     libc::FD_SET(self.display_fd, fds.as_mut_ptr());
+                    libc::FD_SET(self.signal_fds[0], fds.as_mut_ptr());
                     // If there are any timers, we set the timeout for select to the `delta_timeout`
                     // of the first timer that should be fired. Otherwise, we set the timeout to
                     // None, so that select will block indefinitely.
@@ -197,7 +199,7 @@ impl XlibApp {
                         None
                     };
                     let _nfds = libc::select(
-                        self.display_fd + 1,
+                        self.display_fd.max(self.signal_fds[0]) + 1,
                         fds.as_mut_ptr(),
                         ptr::null_mut(),
                         ptr::null_mut(),
@@ -801,9 +803,8 @@ impl XlibApp {
                 set.insert(status);
                 signals.insert(signal, set);
                 signals_locked.push(Event::Signal(SignalEvent {signals}));
-                //let mut f = unsafe { File::from_raw_fd((*GLOBAL_XLIB_APP).display_fd) };
-                //let _ = write!(&mut f, "\0");
-                // !TODO unblock the select!
+                let mut f = unsafe { File::from_raw_fd((*GLOBAL_XLIB_APP).signal_fds[1]) };
+                let _ = write!(&mut f, "\0");
             }
         }
     }
