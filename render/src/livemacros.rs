@@ -216,7 +216,7 @@ macro_rules!write_draw_input {
 #[macro_export]
 macro_rules!uid {
     () => {{
-        struct Unique {};
+        struct Unique {}
         std::any::TypeId::of::<Unique>().into()
     }};
 }

@@ -1,0 +1,13 @@
+[package]
+name = "threed_example_app"
+version = "0.1.0"
+authors = ["makepaddev"]
+edition = "2018"
+
+[dependencies]
+
+[dependencies.makepad-render]
+path="../../../render"
+
+[dependencies.makepad-widget]
+path="../../../widget"

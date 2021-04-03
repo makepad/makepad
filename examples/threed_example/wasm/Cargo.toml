@@ -1,0 +1,17 @@
+[package]
+name = "threed_example_wasm"
+version = "0.1.0"
+authors = ["makepaddev"]
+edition = "2018"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+
+[dependencies.makepad-render]
+path="../../../render"
+
+[dependencies.threed_example_app]
+path="../app"
+

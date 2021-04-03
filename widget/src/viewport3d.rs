@@ -25,7 +25,7 @@ impl Viewport3D {
             camera_pos: Vec3 {x: 0.0, y: -0.5, z: -1.1},
             camera_rot: Vec3 {x: 0.0, y: 0.0, z: 0.0},
             camera_start: None,
-            clear_color: Vec4::color("fff"),
+            clear_color: Vec4::color("000"),
             color_texture: Texture::new(cx),
             depth_texture: Texture::new(cx),
             view_3d: View::new(),

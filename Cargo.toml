@@ -3,6 +3,7 @@
 members = [
     "makepad",
     "makepad/wasm", 
+    "examples/threed_example", 
     "examples/bare_example", 
     "examples/bare_example/wasm",
     "examples/widget_example",
