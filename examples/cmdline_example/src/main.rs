@@ -45,9 +45,9 @@ fn main() {
     let ld = match parser.parse_live_document(){
         Err(msg)=>panic!("Parse error {}", msg.to_live_file_error("", &source)),
         Ok(ld)=>ld
-    };
+    }; 
     
-    println!("{:?}", lex_result.tokens);
+    println!("{}", ld);
     
 }
 
