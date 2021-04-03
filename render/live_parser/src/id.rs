@@ -67,6 +67,13 @@ impl Id {
         (self.0 & 0x8000_0000_0000_0000) == 0
     }
     
+    pub fn get_multi(&self)->(u32,u32){
+        (
+            ((self.0 & 0x7fff_ffff_ffff_ffff)>>32) as u32,
+            (self.0 & 0xffff_ffff) as u32
+        )
+    }
+    
     pub fn check_collision(&self, val:&str)->Option<String>{
         IdMap::with( | idmap | {
             if self.is_single() {
@@ -115,7 +122,7 @@ impl fmt::Display for Id {
                 write!(f, "{}", id)
             }
             else{
-                write!(f, "{}",self.0)
+                write!(f, "{:x}",self.0)
             }
         })
     }
