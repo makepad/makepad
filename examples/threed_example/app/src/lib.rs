@@ -6,7 +6,6 @@ pub struct ThreeDExampleApp {
     menu: Menu,
     world_view: WorldView,
     button:NormalButton,
-    //buttons:ElementsCounted<NormalButton>
 }
 
 impl ThreeDExampleApp {
@@ -20,7 +19,6 @@ impl ThreeDExampleApp {
             }),
             world_view: WorldView::new(cx),
             button: NormalButton::new(cx),
-            //buttons:ElementsCounted::new(NormalButton::new(cx)),
             menu:Menu::main(vec![
                 Menu::sub("Example", vec![
                     Menu::line(),
@@ -45,11 +43,6 @@ impl ThreeDExampleApp {
         }
 
         self.world_view.handle_world_view(cx, event);
-        /*for (index,button) in self.buttons.iter().enumerate(){
-            if let ButtonEvent::Clicked = button.handle_normal_button(cx, event){
-                log!("CLICKED {}", index);
-            }
-        }*/
         
     }
     
@@ -58,11 +51,11 @@ impl ThreeDExampleApp {
             return
         };
         self.world_view.draw_world_view_2d(cx);
+
         cx.reset_turtle_pos();
+
         self.button.draw_normal_button(cx, "Hello");
-        //for i in 0..1000{  
-        //    self.buttons.get_draw(cx).draw_normal_button(cx, &format!("{}",i));
-        // }
+
         self.desktop_window.end_desktop_window(cx);
     }
 }
