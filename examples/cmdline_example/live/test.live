@@ -9,7 +9,7 @@
 // This system does not use a html renderer. It's all Rust+Wasm/native. Demo of the webGL build: https://makepad.dev
 use makepad_render::{Component, Frame, DrawQuad};
 
-DrawNormalButton: DrawQuad { // compiled to shader on backend (metal, webgl, dx11, etc)
+DrawNormalButton: DrawQuad { // compiled to shader on platform layer (metal, webgl, dx11, etc)
     shadow: 3.0;
     border_radius: 2.5;
     
