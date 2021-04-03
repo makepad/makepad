@@ -228,7 +228,21 @@ impl<'a> LiveParser<'a> {
         }
         return Err(self.error(format!("Eof in object body")))
     }        
-
+    
+    fn expect_arguments(&mut self, level: usize, ld: &mut LiveDocument) -> Result<(u32,u16), LiveError>{
+        let node_start = ld.level_len(level);
+        while self.peek_token() != Token::Eof {
+            if self.peek_token() == Token::CloseParen {
+                self.skip_token();
+                let node_end = ld.level_len(level);
+                return Ok((node_start as u32, (node_end - node_start) as u16))
+            }
+            self.expect_live_value(Id::empty(), level, ld)?;
+            self.accept_token(token_punct!(,));
+        }
+        return Err(self.error(format!("Eof in object body")))
+    }     
+    
     fn expect_live_value(&mut self, prop_id: Id, level: usize, ld: &mut LiveDocument) -> Result<(), LiveError> {
         
         // now we can have an array or a class instance
@@ -290,18 +304,25 @@ impl<'a> LiveParser<'a> {
             },
             Token::Ident(id) => { // we're gonna parse a class.
                 // we also support vec2/vec3 values directly.
-                let class = self.expect_class_id(ld) ?;
+                let target_id = self.expect_class_id(ld) ?;
                 if self.accept_token(Token::OpenBrace) {
                     let (node_start, node_count) = self.expect_live_class(level + 1, ld) ?;
                     ld.push_node(level, LiveNode {
                         id: prop_id,
-                        value: LiveValue::Class {class, node_start, node_count}
+                        value: LiveValue::Class {class:target_id, node_start, node_count}
                     });
                 }
-                else {
+                else if self.accept_token(Token::OpenParen){
+                    let (node_start, node_count) = self.expect_arguments(level + 1, ld) ?;
                     ld.push_node(level, LiveNode {
                         id: prop_id,
-                        value: LiveValue::Id(class)
+                        value: LiveValue::Call {target:target_id, node_start, node_count}
+                    });
+                }
+                else{
+                    ld.push_node(level, LiveNode {
+                        id: prop_id,
+                        value: LiveValue::Id(target_id)
                     });
                 }
             },
@@ -422,7 +443,6 @@ impl<'a> LiveParser<'a> {
         Ok(ld)
     }
 }
-
 
 pub struct SpanTracker {
     pub live_file_id: LiveFileId,
