@@ -6,6 +6,7 @@
 // Execute another Live fragment in a loop in Rust.
 // Events, expressions, and drawing a UserDraw component are all done in Rust. Otherwise we can't make a visual UI designer for this structure.
 // In the visual UI designer subclassing will behave like instancing a component and overriding a few values.
+// This system does not use a html renderer. It's all Rust+Wasm/native. Demo of the webGL build: https://makepad.dev
 use makepad_render::{Component, Frame, DrawQuad};
 
 DrawNormalButton: DrawQuad { // compiled to shader on backend (metal, webgl, dx11, etc)
