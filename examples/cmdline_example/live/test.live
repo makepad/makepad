@@ -1,8 +1,8 @@
 use makepad_render::{Component, Frame, DrawQuad};
 
-DrawNormalButton: DrawQuad {
-    const shadow: float = 3.0;
-    const border_radius: float = 2.5;
+DrawNormalButton: DrawQuad { // compiled to shader on backend (metal, webgl, dx11, etc)
+    shadow: 3.0;
+    border_radius: 2.5;
     
     fn pixel() -> vec4 {
         let cx = Df::viewport(pos * rect_size);
@@ -20,28 +20,31 @@ NormalButton: Component {
         align: Align::Center, 
         walk: Walk {
             width: Width::Compute,
-            height: Height::Compute,
+            height: Height::Fix(100.0),
             margin: Margin{l:1.0, t:1.0, r:1.0, b:1.0},
         },
         padding: Padding{l: 16.0, t: 12.0, r: 16.0, b: 12.0},
     }
     
-    shader: DrawNormalButton {
+    shader: DrawNormalButton { // shaders behave as classes and can be partially overwritten here
+         border_radius: 5.5;
     }
     
     text_style: DefaultTextStyle {
     }
     
-    Default: Self {
+    Default: Self { // shows states as instances of self
         shader.down: 0.0
-        layout_bg.padding.l: Animation {
+        layout_bg.padding.l: Animation { // all properties can have animation
             play: Play::Cut {duration: 0.1}
             keys: {1.0: 10.0}
         }
         frame.prop: 1.0
     }
     
-    Pressed: Self{}
+    Pressed: Self{ // todo: find a way to 'tween' these 2 states
+        shader.down: 1.0
+    }
 }
 
 MyFrame: Frame { // something that layouts / clips
@@ -53,9 +56,11 @@ MyFrame: Frame { // something that layouts / clips
     // loop this thing somehow
     button1: NormalButton {
         label: "testword"
-        subobj.prop: 1.0
+        layout_bg.padding.l: 1.0 // deep propery overwrites
     }
-    button1: MyNormalButton{}
-    button2: MyNormalButton{}
+    button2: NormalButton{
+        label: "testword2"
+        layout_bg.padding.l: 3.0
+    }
     user1: UserDraw{}
 }

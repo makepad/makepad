@@ -3,7 +3,7 @@ use makepad_microserde::*;
 use std::fmt;
 use std::ops;
 use crate::colors::hex_bytes_to_u32;
-use crate::util::PrettyPrintedFloat;
+use crate::util::PrettyPrintedF32;
 
 #[derive(Clone, Copy, Default, SerBin, DeBin, PartialEq, Debug)]
 pub struct Mat4 {
@@ -79,6 +79,21 @@ impl Vec2 {
 
     pub fn to_vec3(&self) -> Vec3 {
         Vec3 {x: self.x, y: self.y, z: 0.0}
+    }
+}
+
+
+impl fmt::Display for Vec2 {
+    // This trait requires `fmt` with this exact signature.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f,"vec2({},{})",self.x, self.y)
+    }
+}
+
+impl fmt::Display for Vec3 {
+    // This trait requires `fmt` with this exact signature.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f,"vec3({},{},{})",self.x, self.y, self.z)
     }
 }
 
@@ -206,10 +221,10 @@ impl fmt::Display for Vec4 {
         write!(
             f,
             "vec4({}, {}, {}, {})",
-            PrettyPrintedFloat(self.x),
-            PrettyPrintedFloat(self.y),
-            PrettyPrintedFloat(self.z),
-            PrettyPrintedFloat(self.w),
+            PrettyPrintedF32(self.x),
+            PrettyPrintedF32(self.y),
+            PrettyPrintedF32(self.z),
+            PrettyPrintedF32(self.w),
         )
     }
 }
