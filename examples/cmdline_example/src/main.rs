@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::prelude::*;
 use makepad_live_parser::span::LiveFileId;
 use makepad_live_parser::lex::lex;
-use makepad_live_parser::token::TokenWithSpan;
+use makepad_live_parser::token::{TokenWithSpan};
 use makepad_live_parser::liveparser::LiveParser;
 
 use makepad_live_parser::livenode::*;
@@ -42,13 +42,16 @@ fn main() {
     
     // OK GREAT! We have tokens. Now
     // lets parse this DOM!
-    let ld = match parser.parse_live_document(){
+    let mut ld = match parser.parse_live_document(){
         Err(msg)=>panic!("Parse error {}", msg.to_live_file_error("", &source)),
         Ok(ld)=>ld
     }; 
+    // move these on there
+
+    ld.source = source;
+    ld.tokens = lex_result.tokens;
     
     println!("{}", ld);
-    
 }
 
 

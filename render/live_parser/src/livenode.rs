@@ -1,8 +1,11 @@
 #![allow(unused_variables)]
 use crate::id::Id;
 use std::fmt;
+use crate::span::Span;
 use crate::math::{Vec2, Vec3};
 use crate::util::PrettyPrintedF64;
+use crate::token::{TokenWithSpan};
+use crate::liveerror::byte_to_row_col;
 
 pub struct LiveDocument {
     root: usize,
@@ -11,6 +14,8 @@ pub struct LiveDocument {
     dirty: Vec<u64>,
     pub multi_ids: Vec<Id>,
     pub strings: Vec<char>,
+    pub tokens: Vec<TokenWithSpan>,
+    pub source: String,
 }
 
 impl LiveDocument {
@@ -22,6 +27,8 @@ impl LiveDocument {
             dirty: Vec::new(),
             multi_ids: Vec::new(),
             strings: Vec::new(),
+            tokens: Vec::new(),
+            source: String::new(),
         }
     }
 }
@@ -42,12 +49,6 @@ impl LiveDocument {
     
     pub fn add_use_import(&mut self, crate_name: Id, crate_import: Id) {
         
-        let multi_index = self.multi_ids.len();
-        self.multi_ids.push(crate_name);
-        self.multi_ids.push(crate_import);
-        let imp_id = Id::multi(multi_index as u32, 2);
-        
-        self.nodes[0].push(LiveNode {id: Id::empty(), value: LiveValue::Use(imp_id)});
     }
 }
 
@@ -107,6 +108,9 @@ impl fmt::Display for LiveDocument {
         
         fn recur(ld: &LiveDocument, level: usize, node_index: usize, f: &mut fmt::Formatter) {
             let node = &ld.nodes[level][node_index];
+            let (row,col) = byte_to_row_col(node.span.start(), &ld.source);
+            
+            //let _ = write!(f, "/*{},{} {}*/", row+1, col, node.span.len());
             match node.value {
                 LiveValue::String {string_index, string_len} => {
                     prefix(node.id, ld, f);
@@ -175,13 +179,13 @@ impl fmt::Display for LiveDocument {
                     }
                     let _ = write!(f, "}}");
                 },
-                LiveValue::Const {live_file_id, token_start, token_count} => {
+                LiveValue::Const {token_start, token_count} => {
                     let _ = write!(f, "const {}", IdFmt::col(&ld.multi_ids, node.id));
                 },
-                LiveValue::Fn {live_file_id, token_start, token_count} => {
+                LiveValue::Fn {token_start, token_count} => {
                     let _ = write!(f, "fn {}(){{}}", IdFmt::col(&ld.multi_ids, node.id));
                 },
-                LiveValue::Use(id) => {
+                LiveValue::Use(id) => { 
                     let _ = write!(f, "use {}", IdFmt::col(&ld.multi_ids, id));
                 }
                 LiveValue::Class {class, node_start, node_count} => {
@@ -227,6 +231,7 @@ impl fmt::Display for LiveDocument {
 }
 
 pub struct LiveNode { // 3x u64
+    pub span: Span,
     pub id: Id,
     pub value: LiveValue,
 }
@@ -272,12 +277,10 @@ pub enum LiveValue {
         node_count: u32
     },
     Const {
-        live_file_id: u32,
         token_start: u32,
         token_count: u32,
     },
     Fn {
-        live_file_id: u32,
         token_start: u32,
         token_count: u32,
     },
