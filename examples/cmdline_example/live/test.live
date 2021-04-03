@@ -2,6 +2,8 @@
 // In Rust you can overwrite properties like let live = Live::instance(NormalButton); set_float!(live, layout_bg.padding.l, 1.0); or something like that.
 // These 'live' instances can get their code rewritten by the visual designer/code editor as the program runs, and are interpreted in Rust
 // However contrary to HTML the Rust flow owns the UI structure, these live instances behave like a normal widget in the UI kit.
+// Events, expressions, and drawing a UserDraw component are all done in Rust. Otherwise we can't make a visual UI designer for this structure.
+// In the visual UI designer subclassing will behave like instancing a component and overriding a few values.
 use makepad_render::{Component, Frame, DrawQuad};
 
 DrawNormalButton: DrawQuad { // compiled to shader on backend (metal, webgl, dx11, etc)
