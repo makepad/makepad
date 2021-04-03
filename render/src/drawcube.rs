@@ -121,6 +121,11 @@ impl DrawCube {
         self.cube_size = cube_size;
         write_draw_input!(cx, self.area(), self::DrawCube::cube_size, cube_size);
     }
+
+    pub fn set_color(&mut self, cx: &mut Cx, color: Vec4) {
+        self.color = color;
+        write_draw_input!(cx, self.area(), self::DrawCube::color, color);
+    }
     
     pub fn get_transform(&mut self)->&Mat4 {
         unsafe{&self.transform}

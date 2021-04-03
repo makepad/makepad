@@ -5,7 +5,7 @@ pub struct ThreeDExampleApp {
     desktop_window: DesktopWindow, 
     menu: Menu,
     world_view: WorldView,
-    //button:NormalButton,
+    button:NormalButton,
     //buttons:ElementsCounted<NormalButton>
 }
 
@@ -19,7 +19,7 @@ impl ThreeDExampleApp {
                 ..Layout::default()
             }),
             world_view: WorldView::new(cx),
-            //button: NormalButton::new(cx),
+            button: NormalButton::new(cx),
             //buttons:ElementsCounted::new(NormalButton::new(cx)),
             menu:Menu::main(vec![
                 Menu::sub("Example", vec![
@@ -39,11 +39,14 @@ impl ThreeDExampleApp {
        
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         self.desktop_window.handle_desktop_window(cx, event);
-        self.world_view.handle_world_view(cx, event);
-        /*if let ButtonEvent::Clicked = self.button.handle_normal_button(cx,event){
+
+        if let ButtonEvent::Clicked = self.button.handle_normal_button(cx,event){
             log!("CLICKED Hello");
+            self.world_view.cube_view.handle_button_click(cx);
         }
-        for (index,button) in self.buttons.iter().enumerate(){
+
+        self.world_view.handle_world_view(cx, event);
+        /*for (index,button) in self.buttons.iter().enumerate(){
             if let ButtonEvent::Clicked = button.handle_normal_button(cx, event){
                 log!("CLICKED {}", index);
             }
@@ -56,7 +59,8 @@ impl ThreeDExampleApp {
             return
         };
         self.world_view.draw_world_view_2d(cx);
-        //self.button.draw_normal_button(cx, "Hello");
+        cx.reset_turtle_pos();
+        self.button.draw_normal_button(cx, "Hello");
         //for i in 0..1000{  
         //    self.buttons.get_draw(cx).draw_normal_button(cx, &format!("{}",i));
         // }
@@ -148,6 +152,10 @@ impl CubeView {
     }  
       
     pub fn style(cx: &mut Cx) {
+    }
+    
+    pub fn handle_button_click(&mut self, cx: &mut Cx){
+        self.cube.set_color(cx, Vec4{x:1.0, y:1.0,z:0.0, w:1.0});
     }
     
     pub fn set_time(&mut self, cx: &mut Cx, time: f64){
