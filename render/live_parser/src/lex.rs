@@ -1,7 +1,7 @@
 use makepad_live_derive::*;
 use crate::id::{IdMap, Id};
 use crate::liveerror::LiveError;
-use crate::span::{Span, LiveFileId};
+use crate::span::{Span,LiveFileId};
 use crate::token::{Token, TokenWithSpan};
 use crate::colors::hex_bytes_to_u32;
 
@@ -495,22 +495,22 @@ struct SpanTracker {
 impl SpanTracker {
     fn token<C>(&self, lex: &Lex<C>, token: Token) -> TokenWithSpan {
         TokenWithSpan {
-            span: Span {
-                live_file_id: self.live_file_id,
-                start: self.start as u32,
-                end: lex.index as u32,
-            },
+            span: Span::new(
+                self.live_file_id,
+                self.start,
+                lex.index,
+            ),
             token,
         }
     }
     
     fn error<C>(&self, lex: &Lex<C>, message: String) -> LiveError {
         LiveError {
-            span: Span {
-                live_file_id: self.live_file_id,
-                start: self.start as u32,
-                end: lex.index as u32,
-            },
+            span: Span::new(
+                self.live_file_id,
+                self.start,
+                 lex.index,
+            ),
             message,
         }
     }
