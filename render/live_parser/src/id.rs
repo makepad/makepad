@@ -43,12 +43,16 @@ impl Id {
         return Id(x & 0x7fff_ffff_ffff_ffff) // leave the first bit 
     }
     
-    pub fn multi(index: u32, len: u32) -> Id {
-        Id((((index as u64) << 32) | len as u64) & 0x7fff_ffff_ffff_ffff | 0x8000_0000_0000_0000)
+    pub fn multi(index: usize, len: usize) -> Id {
+        Id(((((index as u64) << 32) | len as u64) & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
     }
     
     pub fn single(val: u64) -> Id {
         Id(val & 0x7fff_ffff_ffff_ffff)
+    }
+
+    pub fn number(val: u32) -> Id {
+        Id(0xffff_ffff_0000_0000 | val as u64)
     }
     
     pub fn empty() -> Id {
@@ -60,17 +64,21 @@ impl Id {
     }
     
     pub fn is_multi(&self) -> bool {
-        (self.0 & 0x8000_0000_0000_0000) != 0 && (self.0 & 0x7fff_ffff_ffff_ffff) != 0
+        (self.0 & 0x8000_0000_0000_0000) != 0 && (self.0 & 0x7fff_ffff_ffff_ffff) != 0 && (self.0 & 0xffff_ffff_0000_0000) != 0xffff_ffff_0000_0000
+    }
+
+    pub fn is_number(&self) -> bool {
+        (self.0 & 0x8000_0000_0000_0000) != 0 && (self.0 & 0xffff_ffff_0000_0000) == 0xffff_ffff_0000_0000
     }
     
     pub fn is_single(&self) -> bool {
         (self.0 & 0x8000_0000_0000_0000) == 0
     }
     
-    pub fn get_multi(&self)->(u32,u32){
+    pub fn get_multi(&self)->(usize,usize){
         (
-            ((self.0 & 0x7fff_ffff_ffff_ffff)>>32) as u32,
-            (self.0 & 0xffff_ffff) as u32
+            ((self.0 & 0x7fff_ffff_ffff_ffff)>>32) as usize,
+            (self.0 & 0xffff_ffff) as usize
         )
     }
     
@@ -109,7 +117,7 @@ impl fmt::Debug for Id {
                 write!(f, "{}", id)
             }
             else{
-                write!(f, "{}",self.0)
+                write!(f, "{:x}",self.0)
             }
         })
     }
@@ -171,3 +179,42 @@ impl IdMap {
     }
 }
  
+ 
+pub struct IdFmt<'a> {
+    multi_ids: &'a Vec<Id>,
+    is_dot: bool,
+    id: Id
+}
+
+impl <'a> IdFmt<'a> {
+    pub fn dot(multi_ids: &'a Vec<Id>, id: Id) -> Self {
+        Self {multi_ids, is_dot: true, id}
+    }
+    pub fn col(multi_ids: &'a Vec<Id>, id: Id) -> Self {
+        Self {multi_ids, is_dot: false, id}
+    }
+}
+
+impl <'a> fmt::Display for IdFmt<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.id.is_multi() {
+            let (index, len) = self.id.get_multi();
+            for i in 0..len {
+                let _ = write!(f, "{}", self.multi_ids[(i + index) as usize]);
+                if i < len - 1 {
+                    if self.is_dot {
+                        let _ = write!(f, ".");
+                    }
+                    else {
+                        let _ = write!(f, "::");
+                    }
+                }
+            }
+            fmt::Result::Ok(())
+        }
+        else {
+            write!(f, "{}", self.id)
+        }
+    }
+}
+
