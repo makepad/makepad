@@ -1,15 +1,13 @@
-#![allow(unused_variables)]
-#![allow(unused_imports)]
+//#![allow(unused_variables)]
+//#![allow(unused_imports)]
 
 use std::path::Path;
 use std::fs::File;
 use std::io::prelude::*;
 use makepad_live_parser::span::LiveFileId;
 use makepad_live_parser::lex::lex;
-use makepad_live_parser::token::{TokenWithSpan};
 use makepad_live_parser::liveparser::LiveParser;
-
-use makepad_live_parser::livenode::*;
+use makepad_live_parser::liveregistry::LiveRegistry;
 
 fn main() {
     // rust crate directory
@@ -38,7 +36,7 @@ fn main() {
     let mut parser = LiveParser::new(&lex_result);
      
     // lets go parse this thing.
-    println!("Hello {}",std::mem::size_of::<LiveNode>());
+    //println!("Hello {}",std::mem::size_of::<LiveNode>());
     
     // OK GREAT! We have tokens. Now
     // lets parse this DOM!
@@ -47,11 +45,19 @@ fn main() {
         Ok(ld)=>ld
     }; 
     // move these on there
-
-    ld.source = source;
+    ld.strings = lex_result.strings;
     ld.tokens = lex_result.tokens;
+    // okaaay now we can actually start processing this thing.
     
-    println!("{}", ld);
+    let mut lr = LiveRegistry::default();
+    
+    let mut errors = Vec::new();
+    let ld2 = lr.expand_document(&ld, &mut errors);
+    for msg in errors{
+        println!("Expand error {}", msg.to_live_file_error("", &source));
+    }
+    //println!("{}", ld);
+    println!("-----\n{}", ld2);
 }
 
 
