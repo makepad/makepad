@@ -10,7 +10,8 @@ use crate::span::{LiveFileId, Span};
 use crate::liveerror::LiveError;
 use crate::id::Id;
 use crate::lex::LexResult;
-use crate::livenode::{LiveDocument, LiveNode, LiveValue};
+use crate::livedocument::LiveDocument;
+use crate::livenode::{LiveNode, LiveValue};
 
 pub struct LiveParser<'a> {
     //pub token_clone: Vec<TokenWithSpan>,
@@ -156,7 +157,7 @@ impl<'a> LiveParser<'a> {
                     }
                 }
             };
-            let id = Id::multi(multi_index as u32, (ld.multi_ids.len() - multi_index) as u32);
+            let id = Id::multi(multi_index, ld.multi_ids.len() - multi_index);
             Ok(id)
         }
         else {
@@ -185,7 +186,7 @@ impl<'a> LiveParser<'a> {
                     }
                 }
             };
-            let id = Id::multi(multi_index as u32, (ld.multi_ids.len() - multi_index) as u32);
+            let id = Id::multi(multi_index, ld.multi_ids.len() - multi_index);
             Ok(id)
         }
         else {
@@ -194,11 +195,11 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_object(&mut self, level: usize, ld: &mut LiveDocument) -> Result<(u32, u32), LiveError> {
-        let node_start = ld.level_len(level);
+        let node_start = ld.get_level_len(level);
         while self.peek_token() != Token::Eof {
             if self.peek_token() == Token::CloseBrace {
                 self.skip_token();
-                let node_end = ld.level_len(level);
+                let node_end = ld.get_level_len(level);
                 return Ok((node_start as u32, (node_end - node_start) as u32))
             }
             let span = self.begin_span();
@@ -214,11 +215,11 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_array(&mut self, level: usize, ld: &mut LiveDocument) -> Result<(u32, u32), LiveError> {
-        let node_start = ld.level_len(level);
+        let node_start = ld.get_level_len(level);
         while self.peek_token() != Token::Eof {
             if self.peek_token() == Token::CloseBracket {
                 self.skip_token();
-                let node_end = ld.level_len(level);
+                let node_end = ld.get_level_len(level);
                 return Ok((node_start as u32, (node_end - node_start) as u32))
             }
             let span = self.begin_span();
@@ -229,11 +230,11 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_arguments(&mut self, level: usize, ld: &mut LiveDocument) -> Result<(u32, u16), LiveError> {
-        let node_start = ld.level_len(level);
+        let node_start = ld.get_level_len(level);
         while self.peek_token() != Token::Eof {
             if self.peek_token() == Token::CloseParen {
                 self.skip_token();
-                let node_end = ld.level_len(level);
+                let node_end = ld.get_level_len(level);
                 return Ok((node_start as u32, (node_end - node_start) as u16))
             }
             let span = self.begin_span();
@@ -370,7 +371,7 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_live_class(&mut self, level: usize, ld: &mut LiveDocument) -> Result<(u32, u16), LiveError> {
-        let node_start = ld.level_len(level);
+        let node_start = ld.get_level_len(level);
         while self.peek_token() != Token::Eof {
             match self.peek_token() {
                 token_ident!(use) => {
@@ -387,19 +388,7 @@ impl<'a> LiveParser<'a> {
                                     break
                                 }
                                 Token::Ident(crate_import) => {
-                                    let multi_index = ld.multi_ids.len();
-                                    ld.multi_ids.push(crate_name);
-                                    ld.multi_ids.push(crate_import);
-                                    let imp_id = Id::multi(multi_index as u32, 2);
-                                    
-                                    ld.push_node(level, LiveNode {
-                                        span: span.end(self),
-                                        id: Id::empty(),
-                                        value: LiveValue::Use(imp_id)
-                                    });
-                                    
-                                    
-                                    ld.add_use_import(crate_name, crate_import);
+                                    ld.push_use(span.end(self), level, crate_name, crate_import);
                                 }
                                 token_punct!(,) => {
                                 }
@@ -408,21 +397,10 @@ impl<'a> LiveParser<'a> {
                         }
                     }
                     else {
-                        ld.add_use_import(crate_name, self.expect_ident() ?);
+                        let span = self.begin_span();
+                        let crate_import = self.expect_ident()?;
+                        ld.push_use(span.end(self), level, crate_name, crate_import);
                     }
-                },
-                token_ident!(const) => {
-                    let span = self.begin_span();
-                    self.skip_token();
-                    let prop_id = self.expect_ident() ?;
-                    
-                    let (token_start, token_count) = self.scan_to_token(token_punct!(;)) ?;
-                    
-                    ld.push_node(level, LiveNode {
-                        span: span.end(self),
-                        id: prop_id,
-                        value: LiveValue::Const {token_start, token_count}
-                    });
                 },
                 token_ident!(fn) => {
                     let span = self.begin_span();
@@ -438,7 +416,7 @@ impl<'a> LiveParser<'a> {
                 },
                 Token::CloseBrace => {
                     self.skip_token();
-                    let node_end = ld.level_len(level);
+                    let node_end = ld.get_level_len(level);
                     return Ok((node_start as u32, (node_end - node_start) as u16))
                 }
                 Token::Ident(prop) => {
@@ -455,7 +433,7 @@ impl<'a> LiveParser<'a> {
             }
         }
         if level == 0 {
-            let node_end = ld.level_len(level);
+            let node_end = ld.get_level_len(level);
             return Ok((node_start as u32, (node_end - node_start) as u16))
         }
         return Err(self.error(format!("Eof in class body")))

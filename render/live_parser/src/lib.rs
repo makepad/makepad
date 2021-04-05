@@ -9,4 +9,6 @@ pub mod lex;
 pub mod liveerror;
 pub mod liveparser;
 pub mod livenode;
+pub mod livedocument;
+pub mod liveregistry;
 pub mod id;

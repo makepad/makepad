@@ -1,3 +1,28 @@
+Props: Component{
+    x:1
+    y:2
+    z:[1,2,3]
+    w:{x:1,y:2}
+}
+
+Class1: Component{
+    props_a:Props{zz:3}
+}
+
+Class3: Component{
+    blarp:15
+}
+
+Class2: Class1{
+    bliep:[1,2,Class3::blarp{}],
+    props_a.a: bliep{}
+    props_b: props_a{x:props_a::z{},bbb:props_a::w{}}
+}
+
+//Class3:Class2{
+//    props2.p5.p7:10
+//}
+
 // This file is parsed in Rust, and all components can be instanced there.
 // In Rust you can overwrite properties like let live = Live::instance(NormalButton); set_float!(live, layout_bg.padding.l, 1.0); or something like that.
 // These 'live' instances can get their code rewritten by the visual designer/code editor as the program runs, and are interpreted in Rust
@@ -7,7 +32,8 @@
 // Events, expressions, and drawing a UserDraw component are all done in Rust. Otherwise we can't make a visual UI designer for this structure.
 // In the visual UI designer subclassing will behave like instancing a component and overriding a few values.
 // This system does not use a html renderer. It's all Rust+Wasm/native. Demo of the webGL build: https://makepad.dev
-use makepad_render::{Component, Frame, DrawQuad};
+
+/*use makepad_render::{Component, Frame, DrawQuad};
 
 DrawNormalButton: DrawQuad { // compiled to shader on platform layer (metal, webgl, dx11, etc)
     shadow: 3.0;
@@ -72,4 +98,4 @@ MyFrame: Frame { // something that layouts / clips
         layout_bg.padding.l: 3.0
     }
     user1: UserDraw{}
-}
+}*/
