@@ -10,7 +10,9 @@ pub struct DrawCube {
     pub transform: Mat4,
     pub color: Vec4,
     pub cube_size: Vec3,
-    pub cube_pos: Vec3
+    pub cube_pos: Vec3,
+    pub pad1: Vec4,
+    pub pad2: Vec2,
 }
 
 impl Clone for DrawCube {
@@ -23,7 +25,9 @@ impl Clone for DrawCube {
             transform: self.transform,
             color: self.color,
             cube_size: self.cube_size,
-            cube_pos: self.cube_pos
+            cube_pos: self.cube_pos,
+            pad1:Vec4::default(),
+            pad2:Vec2::default()
         }
     }
 }
@@ -37,14 +41,16 @@ impl DrawCube {
     pub fn with_slots(_cx: &mut Cx, shader: Shader, slots: usize) -> Self {
         Self {
             shader: shader,
-            slots: slots + 26,
+            slots: slots + 32,
             area: Area::Empty,
             many: None,
             
             transform: Mat4::identity(),
             color: vec4(1.0, 0.0, 0.0, 1.0),
             cube_size: vec3(0.1, 0.1, 0.1),
-            cube_pos: vec3(0.0, 0.0, 0.0)
+            cube_pos: vec3(0.0, 0.0, 0.0),
+            pad1: Vec4::default(),
+            pad2: Vec2::default(),
         }
     }
     
@@ -60,6 +66,8 @@ impl DrawCube {
         def.add_instance(mp, "DrawCube", "color", Vec4::ty_expr());
         def.add_instance(mp, "DrawCube", "cube_size", Vec3::ty_expr());
         def.add_instance(mp, "DrawCube", "cube_pos", Vec3::ty_expr());
+        def.add_instance(mp, "DrawCube", "pad1", Vec4::ty_expr());
+        def.add_instance(mp, "DrawCube", "pad2", Vec2::ty_expr());
         return def
     }
     
@@ -73,6 +81,7 @@ impl DrawCube {
         
         live_body!(cx, r#"
             self::shader: Shader {
+                debug
                 use crate::shader_std::prelude::*;
                 use crate::shader_std::geometry_3d::*;
                 default_geometry: crate::shader_std::cube_3d;

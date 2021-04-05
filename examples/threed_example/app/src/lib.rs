@@ -64,6 +64,7 @@ impl ThreeDExampleApp {
 #[derive(Clone)]
 pub struct WorldView {
     pub view: View,
+    pub time: f64,
     pub sky_box: SkyBox,
     pub cube: DrawCube,
     pub viewport_3d: Viewport3D,
@@ -74,6 +75,7 @@ impl WorldView {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             view: View::new(),
+            time: 0.0,
             viewport_3d: Viewport3D::new(cx),
             next_frame: NextFrame::default(),
             sky_box: SkyBox::new(cx),
@@ -93,8 +95,10 @@ impl WorldView {
         
         if let Some(ae) = event.is_next_frame(cx, self.next_frame) {
             //self.time = ae.time as f32;
-            self.set_time(cx, ae.time);
-            self.next_frame = cx.new_next_frame();
+            self.time = ae.time;
+            self.view.redraw_view(cx);
+            // self.set_time(cx, ae.time);
+            //self.next_frame = cx.new_next_frame();
         } 
     }
 
@@ -103,13 +107,7 @@ impl WorldView {
     }
     
     pub fn set_time(&mut self, cx: &mut Cx, time: f64){
-        let mat = Mat4::txyz_s_ry_rx_txyz(
-            Vec3{x:0.0,y:0.0,z:0.0},
-            1.0,
-            (time*45.0) as f32,(time*45.0) as f32,
-            Vec3{x:0.0, y:0.5, z:-1.5}
-        );
-        self.cube.set_transform(cx, mat);
+
     }
     
     pub fn draw_world_view_2d(&mut self, cx: &mut Cx) {
@@ -132,9 +130,20 @@ impl WorldView {
         self.view.lock_view_transform(cx, &Mat4::identity());
         
         self.sky_box.draw_sky_box(cx);
-        self.cube.cube_size = Vec3{x:0.5,y:0.5,z:0.5};
-        self.cube.cube_pos = Vec3{x:0.0,y:0.0,z:0.0};
-        self.cube.draw_cube(cx);
+        
+        for i in 0..2000{
+            let ti = (i as f32)/4.0 + (self.time*0.1) as f32;
+            let mat = Mat4::txyz_s_ry_rx_txyz(
+                Vec3{x:0.0,y:0.0,z:0.0},
+                1.0,
+                (self.time*15.0) as f32 + ti*10.,(self.time*15.0) as f32,
+                Vec3{x:0.0, y:0.5, z:-1.5} 
+            );
+            self.cube.transform = mat; 
+            self.cube.cube_size = Vec3{x:0.05,y:0.05,z:0.05};
+            self.cube.cube_pos = Vec3{x:ti.sin()*0.8,y:ti.cos()*0.8,z:(ti*3.0).cos()*0.8};
+            self.cube.draw_cube(cx);
+        }
        
         self.view.end_view(cx,);
         self.next_frame = cx.new_next_frame();
