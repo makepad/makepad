@@ -1,11 +1,11 @@
 #![allow(unused_variables)]
 use crate::id::Id;
-use crate::span::Span;
+use crate::token::TokenId;
 use crate::math::{Vec2, Vec3};
 
 #[derive(Copy, Clone)]
 pub struct LiveNode { // 3x u64
-    pub span: Span,
+    pub token_id: TokenId,
     pub id: Id,
     pub value: LiveValue,
 }
@@ -55,7 +55,9 @@ pub enum LiveValue {
         token_start: u32,
         token_count: u32,
     },
-    Use(Id),
+    Use{
+        crate_module: Id,
+    },
     Class {
         class: Id,
         node_start: u32, // how about

@@ -7,6 +7,13 @@ use std::fmt;
 #[derive(Clone, Eq, Hash, Copy, PartialEq)]
 pub struct Id(pub u64);
 
+pub enum IdType {
+    Empty,
+    Multi {index: usize, count: usize},
+    Single(u64),
+    Number(u32)
+}
+
 impl Id {
     /*
     // ok fine maybe this one was too simple.
@@ -23,8 +30,8 @@ impl Id {
         }
         return Id(ret & 0x7fff_ffff_ffff_ffff)
     }*/
-
-    // from https://nullprogram.com/blog/2018/07/31/ 
+    
+    // from https://nullprogram.com/blog/2018/07/31/
     // i have no idea what im doing with start value and finalisation.
     pub const fn from_str(idstr: &str) -> Id {
         let id = idstr.as_bytes();
@@ -40,7 +47,29 @@ impl Id {
             x ^= x >> 32;
             i += 1;
         }
-        return Id(x & 0x7fff_ffff_ffff_ffff) // leave the first bit 
+        return Id(x & 0x7fff_ffff_ffff_ffff) // leave the first bit
+    }
+    
+    pub fn to_type(&self) -> IdType {
+        if self.0 & 0x8000_0000_0000_0000 != 0 {
+            if self.0 & 0x7fff_ffff_ffff_ffff == 0 {
+                IdType::Empty
+            }
+            else {
+                if (self.0 & 0xffff_ffff_0000_0000) == 0xffff_ffff_0000_0000 {
+                    IdType::Number((self.0 & 0xffff_ffff) as u32)
+                }
+                else {
+                    IdType::Multi {
+                        index: ((self.0 & 0x7fff_ffff_ffff_ffff) >> 32) as usize,
+                        count: (self.0 & 0xffff_ffff) as usize
+                    }
+                }
+            }
+        }
+        else {
+            IdType::Single(self.0 & 0x7fff_ffff_ffff_ffff)
+        }
     }
     
     pub fn multi(index: usize, len: usize) -> Id {
@@ -50,7 +79,7 @@ impl Id {
     pub fn single(val: u64) -> Id {
         Id(val & 0x7fff_ffff_ffff_ffff)
     }
-
+    
     pub fn number(val: u32) -> Id {
         Id(0xffff_ffff_0000_0000 | val as u64)
     }
@@ -66,7 +95,7 @@ impl Id {
     pub fn is_multi(&self) -> bool {
         (self.0 & 0x8000_0000_0000_0000) != 0 && (self.0 & 0x7fff_ffff_ffff_ffff) != 0 && (self.0 & 0xffff_ffff_0000_0000) != 0xffff_ffff_0000_0000
     }
-
+    
     pub fn is_number(&self) -> bool {
         (self.0 & 0x8000_0000_0000_0000) != 0 && (self.0 & 0xffff_ffff_0000_0000) == 0xffff_ffff_0000_0000
     }
@@ -75,22 +104,39 @@ impl Id {
         (self.0 & 0x8000_0000_0000_0000) == 0
     }
     
-    pub fn get_multi(&self)->(usize,usize){
+    pub fn get_multi(&self) -> (usize, usize) {
+        if !self.is_multi() {
+            panic!()
+        }
         (
-            ((self.0 & 0x7fff_ffff_ffff_ffff)>>32) as usize,
+            ((self.0 & 0x7fff_ffff_ffff_ffff) >> 32) as usize,
             (self.0 & 0xffff_ffff) as usize
         )
     }
     
-    pub fn check_collision(&self, val:&str)->Option<String>{
+    pub fn get_single(&self) -> u64 {
+        if !self.is_single() {
+            panic!()
+        }
+        self.0
+    }
+    
+    pub fn panic_collision(self, val:&str)->Id{
+        if let Some(s) = self.check_collision(val){
+            panic!("Collision {} {}", val, s)
+        }
+        self
+    }
+    
+    pub fn check_collision(&self, val: &str) -> Option<String> {
         IdMap::with( | idmap | {
             if self.is_single() {
-                if let Some(stored) = idmap.id_to_string.get(self){
-                    if stored != val{
+                if let Some(stored) = idmap.id_to_string.get(self) {
+                    if stored != val {
                         return Some(stored.clone())
                     }
                 }
-                else{
+                else {
                     idmap.id_to_string.insert(self.clone(), val.to_string());
                 }
             }
@@ -112,41 +158,41 @@ impl Id {
 
 impl fmt::Debug for Id {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.as_string( | string | {
-            if let Some(id) = string{
-                write!(f, "{}", id)
-            }
-            else{
-                write!(f, "{:x}",self.0)
-            }
-        })
+        fmt::Display::fmt(self, f)
     }
 }
 
 impl fmt::Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.as_string( | string | {
-            if let Some(id) = string{
-                write!(f, "{}", id)
+        match self.to_type() {
+            IdType::Multi {index, count} => {
+                write!(f, "MultiId {} {}", index, count)
+            },
+            IdType::Single(_) => {
+                self.as_string( | string | {
+                    if let Some(id) = string {
+                        write!(f, "{}", id)
+                    }
+                    else {
+                        write!(f, "IdNotFound {:x}", self.0)
+                    }
+                })
+            },
+            IdType::Number(value) => {
+                write!(f, "{}", value)
+            },
+            IdType::Empty => {
+                write!(f, "IdEmpty")
             }
-            else{
-                write!(f, "{:x}",self.0)
-            }
-        })
+        }
+        
     }
 }
 
 
 impl fmt::LowerHex for Id {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.as_string( | string | {
-            if let Some(id) = string{
-                write!(f, "{}", id)
-            }
-            else{
-                write!(f, "{:X}",self.0)
-            }
-        })
+        fmt::Display::fmt(self, f)
     }
 }
 
@@ -156,11 +202,11 @@ pub struct IdMap {
 }
 
 impl IdMap {
-    pub fn add(&mut self, val:&str){
+    pub fn add(&mut self, val: &str) {
         self.id_to_string.insert(Id::from_str(val), val.to_string());
     }
     
-    pub fn contains(&mut self, val:&str)->bool{
+    pub fn contains(&mut self, val: &str) -> bool {
         self.id_to_string.contains_key(&Id::from_str(val))
     }
     
@@ -173,13 +219,13 @@ impl IdMap {
         ONCE.call_once( || unsafe {
             IDMAP = Some(IdMap {
                 id_to_string: HashMap::new()
-            }) 
+            })
         });
         f(unsafe {IDMAP.as_mut().unwrap()})
     }
 }
- 
- 
+
+
 pub struct IdFmt<'a> {
     multi_ids: &'a Vec<Id>,
     is_dot: bool,
@@ -197,23 +243,24 @@ impl <'a> IdFmt<'a> {
 
 impl <'a> fmt::Display for IdFmt<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.id.is_multi() {
-            let (index, len) = self.id.get_multi();
-            for i in 0..len {
-                let _ = write!(f, "{}", self.multi_ids[(i + index) as usize]);
-                if i < len - 1 {
-                    if self.is_dot {
-                        let _ = write!(f, ".");
-                    }
-                    else {
-                        let _ = write!(f, "::");
+        match self.id.to_type() {
+            IdType::Multi {index, count} => {
+                for i in 0..count {
+                    let _ = write!(f, "{}", self.multi_ids[(i + index) as usize]);
+                    if i < count - 1 {
+                        if self.is_dot {
+                            let _ = write!(f, ".");
+                        }
+                        else {
+                            let _ = write!(f, "::");
+                        }
                     }
                 }
-            }
-            fmt::Result::Ok(())
-        }
-        else {
-            write!(f, "{}", self.id)
+                fmt::Result::Ok(())
+            },
+            _ => {
+                write!(f, "{}", self.id)
+            },
         }
     }
 }

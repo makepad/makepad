@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialOrd, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialOrd, Hash, PartialEq)]
 pub struct LiveFileId(pub u16);
 
 #[derive(Clone, Copy, Default, Eq, Ord, PartialOrd, PartialEq)]

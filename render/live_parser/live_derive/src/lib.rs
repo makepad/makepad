@@ -14,6 +14,18 @@ pub fn live_derive(input: TokenStream) -> TokenStream {
     live_derive_impl(input)
 }
 
+
+#[proc_macro]
+pub fn id_check(item: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new(); 
+    let item_str = item.to_string();
+    
+    let id = Id::from_str(&item_str);
+    tb.add("Id (").suf_u64(id.0).add(") . panic_collision (").string(&item_str).add(")");
+    tb.end()
+}
+
+
 #[proc_macro]
 pub fn id(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
