@@ -1,41 +1,47 @@
-Props: Component{
-    x:1
-    y:2
-    z:[1,2,3]
-    w:{x:1,y:2}
+use makepad_render::{Component, Frame, DrawQuad};
+
+DrawQuad: Shader{
+    use crate::shader_std::prelude::*;
+        
+    default_geometry: crate::shader_std::quad_2d;
+    geometry geom: vec2;
+    varying pos: vec2;
+    
+    draw_input: self::DrawQuad;
+    
+    //let dpi_dilate: float<Uniform>;
+    fn scroll() -> vec2 {
+        return draw_scroll.xy;
+    }
+    
+    fn vertex() -> vec4 {
+        let scr = scroll();
+        
+        let clipped: vec2 = clamp(
+            geom * rect_size + rect_pos - scr,
+            draw_clip.xy,
+            draw_clip.zw
+        );
+        pos = (clipped + scr - rect_pos) / rect_size;
+        // only pass the clipped position forward
+        return camera_projection * (camera_view * (view_transform * vec4(
+            clipped.x,
+            clipped.y,
+            draw_depth + draw_zbias,
+            1.
+        )));
+    }
+    
+    fn pixel() -> vec4 {
+        return #0f0;
+    }
 }
-
-Class1: Component{
-    props_a:Props{zz:3}
-}
-
-Class3: Component{
-    blarp:15
-}
-
-Class2: Class1{
-    bliep:[1,2,Class3::blarp{}],
-    props_a.a: bliep{}
-    props_b: props_a{x:props_a::z{},bbb:props_a::w{}}
-}
-
-//Class3:Class2{
-//    props2.p5.p7:10
-//}
-
-// This file is parsed in Rust, and all components can be instanced there.
-// In Rust you can overwrite properties like let live = Live::instance(NormalButton); set_float!(live, layout_bg.padding.l, 1.0); or something like that.
-// These 'live' instances can get their code rewritten by the visual designer/code editor as the program runs, and are interpreted in Rust
-// However contrary to HTML the Rust flow owns the UI structure, these live instances behave like a normal widget in the UI kit.
-// Unlike JSX and other 'template' languages you also won't need to generate this DSL structure with duplicating-items since you can just
-// Execute another Live fragment in a loop in Rust.
-// Events, expressions, and drawing a UserDraw component are all done in Rust. Otherwise we can't make a visual UI designer for this structure.
-// In the visual UI designer subclassing will behave like instancing a component and overriding a few values.
-// This system does not use a html renderer. It's all Rust+Wasm/native. Demo of the webGL build: https://makepad.dev
-
-/*use makepad_render::{Component, Frame, DrawQuad};
 
 DrawNormalButton: DrawQuad { // compiled to shader on platform layer (metal, webgl, dx11, etc)
+    // default values for the shader
+    hover: 0.0,
+    down: 0.0,
+
     shadow: 3.0;
     border_radius: 2.5;
     
@@ -50,7 +56,13 @@ DrawNormalButton: DrawQuad { // compiled to shader on platform layer (metal, web
     }
 }
 
-NormalButton: Component {
+Align: Struct{
+    Center: Self{fx:0.5,fy:0.5}
+}
+
+Width : Enum{}
+
+NormalButton: Component{
     layout_bg: Layout {
         align: Align::Center, 
         walk: Walk {
@@ -61,11 +73,12 @@ NormalButton: Component {
         padding: Padding{l: 16.0, t: 12.0, r: 16.0, b: 12.0},
     }
     
-    shader: DrawNormalButton { // shaders behave as classes and can be partially overwritten here
+    bg: DrawNormalButton { // shaders behave as classes and can be partially overwritten here
          border_radius: 5.5;
     }
     
-    text_style: DefaultTextStyle {
+    text: DrawText{
+        text_style:DefaultTextStyle{}
     }
     
     Default: Self { // shows states as instances of self
@@ -98,4 +111,4 @@ MyFrame: Frame { // something that layouts / clips
         layout_bg.padding.l: 3.0
     }
     user1: UserDraw{}
-}*/
+}
