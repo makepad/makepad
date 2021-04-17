@@ -3,7 +3,7 @@ use crate::id::Id;
 use crate::token::TokenId;
 use crate::math::{Vec2, Vec3};
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct LiveNode { // 3x u64
     pub token_id: TokenId,
     pub id: Id,
@@ -25,11 +25,11 @@ impl LiveValue {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum LiveValue {
     String {
-        string_index: u32,
-        string_len: u32
+        string_start: u32,
+        string_count: u32
     },
     Bool(bool),
     Int(i64),
@@ -54,6 +54,8 @@ pub enum LiveValue {
     Fn {
         token_start: u32,
         token_count: u32,
+        scope_start: u32,
+        scope_count: u16
     },
     Use{
         crate_module: Id,

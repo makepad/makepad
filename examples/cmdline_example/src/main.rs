@@ -27,16 +27,25 @@ fn main() {
     
     let file_1 = r#"
         ClassA: Component {
-            prop_a: 1
+            prop_a: 15
+            prop_c: "hioo"
+            fn bla(){
+                let x = 10;
+            }
         }
         prop_crap:13
     "#;
     
     let file_2 = r#"
-        use crate::file1::*;
-        ClassB: ClassA{
+        use crate::file1::ClassA::*;
+        ClassB: Component{
             prop_b: 2,
-            prop_blarp:prop_crap{}
+            prop_blarp:prop_c{}
+            bleirp:bla{}
+            fn blop(){}
+        }
+        ClassC:Component{
+            r:1
         }
     "#;
     
@@ -58,7 +67,7 @@ fn main() {
     for msg in errors{
         println!("Expand error {}", msg.to_live_file_error("", &source));
     }
-    //println!("{}", ld);
+    //println!("{}", std::mem::size_of::<crate::livenode::LiveValue>());
     //println!("-----\n{}", ld2);
 }
 

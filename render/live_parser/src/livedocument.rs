@@ -15,6 +15,32 @@ pub struct LiveDocument {
     pub multi_ids: Vec<Id>,
     pub strings: Vec<char>,
     pub tokens: Vec<TokenWithSpan>,
+    pub scopes: Vec<LiveScopeItem>,
+}
+
+impl fmt::Display for LiveScopeTarget {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self{
+            LiveScopeTarget::Local{..}=>{
+                write!(f, "Local")
+            },
+            LiveScopeTarget::Use{crate_module,..}=>{
+                write!(f, "Use: {}", crate_module)
+            }
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+pub enum LiveScopeTarget {
+    Local {node_ptr: LiveNodePtr},
+    Use {crate_module: CrateModule, node_ptr: LiveNodePtr}
+}
+
+#[derive(Copy, Clone)]
+pub struct LiveScopeItem {
+    pub id: Id,
+    pub target: LiveScopeTarget
 }
 
 impl LiveDocument {
@@ -25,6 +51,7 @@ impl LiveDocument {
             multi_ids: Vec::new(),
             strings: Vec::new(),
             tokens: Vec::new(),
+            scopes: Vec::new(),
         }
     }
     
@@ -263,11 +290,11 @@ impl fmt::Display for LiveDocument {
             //let (row,col) = byte_to_row_col(node.span.start(), &ld.source);
             //let _ = write!(f, "/*{},{} {}*/", row+1, col, node.span.len());
             match node.value {
-                LiveValue::String {string_index, string_len} => {
+                LiveValue::String {string_start, string_count} => {
                     prefix(node.id, ld, f);
                     let _ = write!(f, "\"");
-                    for i in 0..string_len {
-                        let _ = write!(f, "{}", ld.strings[(i + string_index) as usize]);
+                    for i in 0..string_count {
+                        let _ = write!(f, "{}", ld.strings[(i + string_start) as usize]);
                     }
                     let _ = write!(f, "\"");
                 },
@@ -334,8 +361,15 @@ impl fmt::Display for LiveDocument {
                     }
                     let _ = write!(f, "}}");
                 },
-                LiveValue::Fn {token_start, token_count} => {
-                    let _ = write!(f, "fn {}(){{}}", IdFmt::col(&ld.multi_ids, node.id));
+                LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
+                    let _ = write!(f, "fn {}(){{", IdFmt::col(&ld.multi_ids, node.id));
+                    for i in 0..token_count{
+                        let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
+                    }
+                    for i in 0..(scope_count as u32){
+                        let item = & ld.scopes[(i + scope_start) as usize];
+                        let _ = write!(f, "{} = {}",item.id, item.target);
+                    }
                 },
                 LiveValue::Use{crate_module} => {
                     let _ = write!(f, "use {} :: {}", IdFmt::col(&ld.multi_ids, node.id), IdFmt::col(&ld.multi_ids, crate_module));
