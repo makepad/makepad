@@ -464,7 +464,13 @@ impl LiveRegistry {
                 },
                 LiveValue::Use {crate_module} => { // import things on the scope from Use
                     let crate_module = in_doc.fetch_crate_module(crate_module, in_crate);
-                    let other_doc = expanded.get(&crate_module).unwrap();
+                    
+                    let other_doc = if let Some(other_doc) = expanded.get(&crate_module){
+                        other_doc
+                    }
+                    else{
+                        return
+                    };
                     
                     match node.id.to_type() {
                         IdType::Empty => { // its a wildcard
@@ -862,8 +868,6 @@ impl LiveRegistry {
             for i in 0..len {
                 walk_node(&self.expanded, crate_module.0, errors, &mut scope_stack, in_doc, &mut out_doc, 0, 0, i, 0, 0);
             }
-            
-            //println!("{}", out_doc);
             
             self.expanded.insert(*crate_module, out_doc);
         }
