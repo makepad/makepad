@@ -12,3 +12,4 @@ pub mod livenode;
 pub mod livedocument;
 pub mod liveregistry;
 pub mod id;
+pub use makepad_live_derive::*;
