@@ -29,12 +29,14 @@ fn main() {
         ClassA: Component {
             prop_a: 1
         }
+        prop_crap:13
     "#;
     
     let file_2 = r#"
         use crate::file1::*;
         ClassB: ClassA{
-            prop_b: 2
+            prop_b: 2,
+            prop_blarp:prop_crap{}
         }
     "#;
     
