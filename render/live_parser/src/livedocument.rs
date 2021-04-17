@@ -22,10 +22,10 @@ impl fmt::Display for LiveScopeTarget {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self{
             LiveScopeTarget::Local{..}=>{
-                write!(f, "Local")
+                write!(f, "[local]")
             },
             LiveScopeTarget::Use{crate_module,..}=>{
-                write!(f, "Use: {}", crate_module)
+                write!(f, "{}", crate_module)
             }
         }
     }
@@ -80,7 +80,7 @@ impl LiveDocument {
         self.nodes[level].push(node);
     }
     
-    pub fn scan_for_multi(&self, level: usize, node_start: usize, node_count: usize, id_start: usize, id_count: usize, multi_ids: &Vec<Id>, token_id: TokenId) -> Result<LiveNodePtr, LiveError> {
+    pub fn scan_for_multi(&self, level: usize, node_start: usize, node_count: usize, id_start: usize, id_count: usize, multi_ids: &Vec<Id>) -> Result<LiveNodePtr, String> {
         let mut node_start = node_start as usize;
         let mut node_count = node_count as usize;
         let mut level = level;
@@ -104,10 +104,11 @@ impl LiveDocument {
                                 node_start = ns as usize;
                                 node_count = nc as usize;
                             },
-                            _ => return Err(LiveError {
-                                span:self.token_id_to_span(token_id),
-                                message: format!("Cannont find property {} is not an object path", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count)))
-                            })
+                            _ => return Err(format!("Cannont find property {} is not an object path", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count))))
+                            //LiveError {
+                             //   span:self.token_id_to_span(token_id),
+                             //   message: format!("Cannont find property {} is not an object path", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count)))
+                           // })
                         }
                         found = true;
                         break
@@ -115,16 +116,10 @@ impl LiveDocument {
                 }
             }
             if !found {
-                return Err(LiveError {
-                    span:self.token_id_to_span(token_id),
-                    message: format!("Cannot find class {}", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count)))
-                })
+                return Err(format!("Cannot find class {}", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count))))
             }
         }
-        return Err(LiveError {
-            span:self.token_id_to_span(token_id),
-            message: format!("Cannot find class {}", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count)))
-        })
+        return Err(format!("Cannot find class {}", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count))))
     }
     
     pub fn write_or_add_node(
@@ -234,6 +229,12 @@ impl LiveDocument {
                 nodes.push(*in_node);
                 return Ok(Some(index))
             }
+            IdType::Empty=>{
+                let nodes = &mut self.nodes[level];
+                let index = nodes.len();
+                nodes.push(*in_node);
+                return Ok(Some(index))
+            },
             _=>{
                 return Err(LiveError {
                     span: in_doc.token_id_to_span(in_node.token_id),
@@ -362,17 +363,21 @@ impl fmt::Display for LiveDocument {
                     let _ = write!(f, "}}");
                 },
                 LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
-                    let _ = write!(f, "fn {}(){{", IdFmt::col(&ld.multi_ids, node.id));
+                    let _ = write!(f, "fn {}", IdFmt::col(&ld.multi_ids, node.id));
                     for i in 0..token_count{
                         let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
                     }
                     for i in 0..(scope_count as u32){
                         let item = & ld.scopes[(i + scope_start) as usize];
-                        let _ = write!(f, "{} = {}",item.id, item.target);
+                        let _ = write!(f, "{}:{}",item.id, item.target);
+                        if i != (scope_count - 1) as u32{
+                        let _ = write!(f, ", ");
+                            
+                        }
                     }
                 },
                 LiveValue::Use{crate_module} => {
-                    let _ = write!(f, "use {} :: {}", IdFmt::col(&ld.multi_ids, node.id), IdFmt::col(&ld.multi_ids, crate_module));
+                    let _ = write!(f, "use {}::{}", IdFmt::col(&ld.multi_ids, node.id), IdFmt::col(&ld.multi_ids, crate_module));
                 }
                 LiveValue::Class {class, node_start, node_count} => {
                     prefix(node.id, ld, f);
