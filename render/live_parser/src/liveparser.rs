@@ -364,7 +364,7 @@ impl<'a> LiveParser<'a> {
                 ld.push_node(level, LiveNode {
                     token_id,
                     id: prop_id,
-                    value: LiveValue::String {string_index: index, string_len: len}
+                    value: LiveValue::String {string_start: index, string_count: len}
                 });
             },
             token_ident!(vec2) => {
@@ -467,7 +467,7 @@ impl<'a> LiveParser<'a> {
                     ld.push_node(level, LiveNode {
                         token_id,
                         id: prop_id,
-                        value: LiveValue::Fn {token_start, token_count}
+                        value: LiveValue::Fn {token_start, token_count, scope_start:0, scope_count:0}
                     });
                 },
                 Token::CloseBrace => {
