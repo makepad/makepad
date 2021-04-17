@@ -168,6 +168,7 @@ impl LiveRegistry {
             }
         }
         
+        #[derive(Debug)]
         enum CopyRecurResult {
             IsClass {class: Id},
             IsArray,
@@ -503,6 +504,7 @@ impl LiveRegistry {
                     // result values of the below scan
                     let mut copy_result = CopyRecurResult::IsClass {class};
                     let mut value_ptr = None;
+                    let mut other_crate_module = None;
                     
                     if class.is_multi() {
                         let (id_start, id_count) = class.get_multi();
@@ -555,12 +557,14 @@ impl LiveRegistry {
                                 }
                                 Some(ScopeTarget::Use {crate_module, node_ptr}) => {
                                     // pull in a copy from the use import
+                                    other_crate_module = Some(crate_module);
                                     let other_doc = expanded.get(&crate_module).unwrap();
                                     match &other_doc.nodes[node_ptr.level][node_ptr.index].value {
                                         LiveValue::Class {node_start, node_count, ..} => {
                                             match other_doc.scan_for_multi(node_ptr.level + 1, *node_start as usize, *node_count as usize, id_start, id_count, &in_doc.multi_ids, node.token_id) {
                                                 Ok(found_node) => {
                                                     copy_result = copy_recur(scope_stack, Some(other_doc), out_doc, found_node.level, found_node.level, shifted_out_level, found_node.index);
+                                                    //println!("COPYING {:?}", copy_result);
                                                     value_ptr = Some(found_node);
                                                 }
                                                 Err(err) => {
@@ -600,6 +604,7 @@ impl LiveRegistry {
                                 value_ptr = Some(node_ptr);
                             }
                             Some(ScopeTarget::Use {crate_module, node_ptr}) => {
+                                other_crate_module = Some(crate_module);
                                 let other_doc = expanded.get(&crate_module).unwrap();
                                 copy_result = copy_recur(scope_stack, Some(other_doc), out_doc, node_ptr.level, node_ptr.level, shifted_out_level, node_ptr.index);
                                 value_ptr = Some(node_ptr);
@@ -620,13 +625,20 @@ impl LiveRegistry {
                             span: in_doc.token_id_to_span(node.token_id),
                             message: format!("Cannot override items in non-class: {}", IdFmt::col(&in_doc.multi_ids, class))
                         });
+                        return
                     }
                     
                     match copy_result {
                         CopyRecurResult::IsValue => {
                             scope_stack.stack.pop();
                             if let Some(value_ptr) = value_ptr {
-                                let mut new_node = out_doc.nodes[value_ptr.level][value_ptr.index];
+                                let mut new_node = if let Some(crate_module) = other_crate_module {
+                                    let other_doc = expanded.get(&crate_module).unwrap();
+                                    other_doc.nodes[value_ptr.level][value_ptr.index]
+                                }
+                                else {
+                                    out_doc.nodes[value_ptr.level][value_ptr.index]
+                                };
                                 new_node.id = node.id;
                                 write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, &new_node);
                             }
