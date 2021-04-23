@@ -81,7 +81,6 @@ impl DrawCube {
         
         live_body!(cx, r#"
             self::shader: Shader {
-                debug
                 use crate::shader_std::prelude::*;
                 use crate::shader_std::geometry_3d::*;
                 default_geometry: crate::shader_std::cube_3d;

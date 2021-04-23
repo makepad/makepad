@@ -36,7 +36,11 @@ impl ThreeDExampleApp {
        
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         self.desktop_window.handle_desktop_window(cx, event);
-
+        
+        if let Event::Construct = event{
+            
+        }
+        
         if let ButtonEvent::Clicked = self.button.handle_normal_button(cx,event){
             log!("CLICKED Hello");
             self.world_view.handle_button_click(cx);
@@ -131,7 +135,7 @@ impl WorldView {
         
         self.sky_box.draw_sky_box(cx);
         
-        for i in 0..2000{
+        for i in 0..10000{
             let ti = (i as f32)/4.0 + (self.time*0.1) as f32;
             let mat = Mat4::txyz_s_ry_rx_txyz(
                 Vec3{x:0.0,y:0.0,z:0.0},

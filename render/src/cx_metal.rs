@@ -82,13 +82,13 @@ impl Cx {
                 let pipeline_state = shp.pipeline_state;
                 unsafe {let () = msg_send![encoder, setRenderPipelineState: pipeline_state];}
                 
-                let geometry_id = if let Some(geometry) = draw_call.geometry{
+                let geometry_id = if let Some(geometry) = draw_call.geometry {
                     geometry.geometry_id
                 }
-                else if let Some(geometry) = sh.default_geometry{
+                else if let Some(geometry) = sh.default_geometry {
                     geometry.geometry_id
                 }
-                else{
+                else {
                     continue
                 };
                 
@@ -189,7 +189,7 @@ impl Cx {
     
     pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: id, pass_id: usize, inherit_dpi_factor: f32, first_texture: Option<id>, metal_cx: &MetalCx) {
         let pass_size = self.passes[pass_id].pass_size;
-
+        
         self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
         self.passes[pass_id].paint_dirty = false;
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
@@ -509,6 +509,20 @@ impl MetalCx {
                     
                     cxtexture.platform.mtl_texture = Some(tex);
                     
+                },
+                _ => {
+                    println!("update_platform_texture_image2d with unsupported format");
+                    return;
+                }
+            }
+            cxtexture.platform.alloc_desc = cxtexture.desc.clone();
+            cxtexture.platform.width = width as u64;
+            cxtexture.platform.height = height as u64;
+        }
+        
+        if cxtexture.update_image {
+            match cxtexture.desc.format {
+                TextureFormat::Default | TextureFormat::ImageBGRA => {
                     if cxtexture.image_u32.len() != width * height {
                         println!("update_platform_texture_image2d with wrong buffer_u32 size!");
                         cxtexture.platform.mtl_texture = None;
@@ -527,18 +541,14 @@ impl MetalCx {
                             bytesPerRow: (width * std::mem::size_of::<u32>()) as u64
                         ]};
                     }
-                },
+                }
                 _ => {
                     println!("update_platform_texture_image2d with unsupported format");
                     return;
                 }
             }
-            cxtexture.platform.alloc_desc = cxtexture.desc.clone();
-            cxtexture.platform.width = width as u64;
-            cxtexture.platform.height = height as u64;
+            cxtexture.update_image = false;
         }
-        
-        cxtexture.update_image = false;
     }
 }
 
@@ -803,8 +813,8 @@ impl Cx {
         self.live_styles.changed_shaders.clear();
     }
     
-    pub fn mtl_update_all_shaders(&mut self, metal_cx: &MetalCx, errors:&mut Vec<LiveBodyError>)  {
-      
+    pub fn mtl_update_all_shaders(&mut self, metal_cx: &MetalCx, errors: &mut Vec<LiveBodyError>) {
+        
         // recompile shaders, and update values
         
         let options = ShaderCompileOptions {
