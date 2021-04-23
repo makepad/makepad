@@ -1,13 +1,8 @@
 use makepad_live_parser::*;
 use makepad_live_parser::id::Id;
-use makepad_live_parser::id::IdType;
 use makepad_live_parser::liveregistry::LiveRegistry;
 use makepad_live_parser::id::LiveFileId;
-use makepad_live_parser::deserialize::DeLive;
-use makepad_live_parser::deserialize::DeLiveErr;
-use makepad_live_parser::deserialize::DeLiveFactory;
 use std::any::Any;
-use makepad_live_parser::livenode::LiveValue;
 
 #[test]
 fn expand() {
@@ -171,7 +166,7 @@ fn expand() {
     }
     
     // deserializer test
-
+    
     #[derive(Debug, PartialEq, Eq, DeLive)]
     struct MyComponent {
         x: u32,
@@ -200,7 +195,7 @@ fn expand() {
             Ok(Box::new(mv))
         }
     }
-
+    
     let mut lr = LiveRegistry::default();
     let source = r#"
         MyEnum: Enum {
@@ -212,7 +207,7 @@ fn expand() {
         MyComponent: Component {
             e1: MyEnum::Value1
             e2: MyEnum::Value2(2)
-            e3: MyEnum::Value3{value: 1} 
+            e3: MyEnum::Value3 {value: 1}
         }
         MyDerive2: MyComponent {x: 1, y: 2, z: 5}
     "#;
@@ -224,11 +219,11 @@ fn expand() {
     let mut errors = Vec::new();
     lr.expand_all_documents(&mut errors);
     
-    if errors.len() != 0{
-        for msg in errors{
+    if errors.len() != 0 {
+        for msg in errors {
             println!("{}\n", msg.to_live_file_error("", source));
         }
-        assert_eq!(true,false);
+        assert_eq!(true, false);
     }
     
     lr.register_component(id!(main), id!(test), id!(MyComponent), Box::new(MyComponentFactory {}));
@@ -236,13 +231,13 @@ fn expand() {
     
     match val.unwrap().downcast_ref::<MyComponent>() {
         Some(comp) => {
-            let check = MyComponent{
-                x:1,
-                y:2,
-                z:5,
-                e1:MyEnum::Value1,
-                e2:MyEnum::Value2(2),
-                e3:MyEnum::Value3{value:1}
+            let check = MyComponent {
+                x: 1,
+                y: 2,
+                z: 5,
+                e1: MyEnum::Value1,
+                e2: MyEnum::Value2(2),
+                e3: MyEnum::Value3 {value: 1}
             };
             
             assert_eq!(*comp, check);
@@ -252,6 +247,4 @@ fn expand() {
             println!("No Value");
         }
     }
-
-
 }
