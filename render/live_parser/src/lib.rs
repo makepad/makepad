@@ -13,4 +13,17 @@ pub mod livedocument;
 pub mod liveregistry;
 pub mod deserialize;
 pub mod id;
+
 pub use makepad_live_derive::*;
+
+pub use crate::id::Id;
+pub use crate::id::IdType;
+pub use crate::liveregistry::LiveRegistry;
+pub use crate::id::LiveFileId;
+pub use crate::deserialize::DeLive;
+pub use crate::deserialize::DeLiveErr;
+pub use crate::deserialize::DeLiveFactory;
+pub use crate::livenode::LiveValue;
+pub use crate::livenode::LiveNode;
+
+
