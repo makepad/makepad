@@ -1,10 +1,17 @@
 use makepad_live_parser::*;
 use makepad_live_parser::id::Id;
+use makepad_live_parser::id::IdType;
 use makepad_live_parser::liveregistry::LiveRegistry;
+use makepad_live_parser::id::LiveFileId;
+use makepad_live_parser::deserialize::DeLive;
+use makepad_live_parser::deserialize::DeLiveErr;
+use makepad_live_parser::deserialize::DeLiveFactory;
+use std::any::Any;
+use makepad_live_parser::livenode::LiveValue;
 
 #[test]
-fn integrate() {
-   // all in one test
+fn expand() {
+    // all in one test
     let file_1 = r#"
         SA: Struct {p1: 5.0}
         EA: Enum {}
@@ -14,6 +21,7 @@ fn integrate() {
             pc: 2
             pd: #00f
             pe: id1,
+            pf: EA,
             fn f1(a1) {let x = 1}
             r1: [1, 2, 3]
             o1: {x: 1, 1.0: 2}
@@ -29,7 +37,8 @@ fn integrate() {
             pc: 2
             pd: 65535
             pe: id1
-            fn f1(a1) {let x = 1} "SA:[local], EA:[local], pa:[local], pb:[local], pc:[local], pd:[local], pe:[local]"
+            pf: NodePtr {file: 1, level: 0, index: 1}
+            fn f1(a1) {let x = 1} "SA:[local], EA:[local], pa:[local], pb:[local], pc:[local], pd:[local], pe:[local], pf:[local]"
             r1: [1, 2, 3]
             o1: {x: 1, 1.0: 2}
             C2: Component {
@@ -37,11 +46,10 @@ fn integrate() {
                 b1: 5.0
                 c1: Component {
                     x1: 6
-                    x4: Struct {p1: 5.0}
+                    x4: NodePtr {file: 1, level: 0, index: 0} {p1: 5.0}
                 }
             }
         }
-        
     "#;
     
     let file_2 = r#"
@@ -54,25 +62,25 @@ fn integrate() {
     "#;
     
     let file_2_check = r#"
-        CB: Component {
+        CB: NodePtr {file: 1, level: 1, index: 10} {
             a1: [1, 2, 3]
             b1: 6.0
             c1: Component {
                 x1: 7
-                x4: Struct {
+                x4: NodePtr {file: 1, level: 0, index: 0} {
                     p1: {3.0: h1}
                 }
                 x2: "hi"
                 x3: [1, 2, 3]
             }
-            fn tst(a1) {let x = 1} "SA:main::file1, EA:main::file1, pa:main::file1, pb:main::file1, pc:main::file1, pd:main::file1, pe:main::file1"
+            fn tst(a1) {let x = 1} "SA:main::file1, EA:main::file1, pa:main::file1, pb:main::file1, pc:main::file1, pd:main::file1, pe:main::file1, pf:main::file1"
         }
-        CC: Component {
+        CC: NodePtr {file: 2, level: 0, index: 0} {
             a1: [1, 2, 3]
             b1: 6.0
             c1: Component {
                 x1: 7
-                x4: Struct {
+                x4: NodePtr {file: 1, level: 0, index: 0} {
                     p1: "ho"
                 }
                 x2: "hi"
@@ -90,24 +98,27 @@ fn integrate() {
     "#;
     
     let file_3_check = r#"
-        CE: Component {
+        CE: NodePtr {file: 2, level: 0, index: 1} {
             a1: [1, 2, 3]
             b1: 6.0
             c1: Component {
                 x1: 7
-                x4: Struct {
+                x4: NodePtr {file: 1, level: 0, index: 0} {
                     p1: "hi"
                 }
                 x2: "ho"
                 x3: [1, 2, 3]
             }
-            t: Struct {p1: 5.0}
+            t: NodePtr {file: 1, level: 0, index: 0} {p1: 5.0}
         }
+        
     "#;
     
     let error_check = r#"
+        file1: 9 16 - Cannot find item on scope: id1
+        file1: 13 17 - Cannot find item on scope: x
+        file2: 5 98 - Cannot find item on scope: h1
         file2: 6 12 - Cannot find class SA.B
-        file2: 6 12 - Cannot override items in non - class: SA::B
         file3: 5 12 - Cannot find item on scope: ERR
     "#;
     
@@ -133,13 +144,14 @@ fn integrate() {
         return a == b
     }
     
-    for (crate_module, file) in lr.expanded {
-        let out = format!("{}", file);
+    for (index, file) in lr.expanded.iter().enumerate() {
+        let crate_module = lr.find_crate_module_by_file_id(LiveFileId::index(index)).unwrap();
+        let out = format!("{}", file.as_ref().unwrap());
         for (name_id, _, check) in &sources {
             if crate_module.1 == *name_id {
                 if !compare_no_ws(&out, check) {
                     println!("Output Unequal {}\n{}", crate_module, out);
-                    assert_eq!(true,false);
+                    //assert_eq!(true, false);
                 }
             }
         }
@@ -148,14 +160,98 @@ fn integrate() {
     let mut err_cmp = String::new();
     for msg in errors {
         err_cmp.push_str(&format!("{}\n", msg.to_live_file_error(
-            &format!("{}", sources[msg.span.live_file_id().0 as usize].0),
-            sources[msg.span.live_file_id().0 as usize].1
+            &format!("{}", sources[msg.span.live_file_id().to_index()].0),
+            sources[msg.span.live_file_id().to_index()].1
         )));
     }
     
     if !compare_no_ws(&err_cmp, error_check) {
-        println!("Output Unequal\n{}", err_cmp);
+        println!("Errors Unequal\n{}", err_cmp);
+        assert_eq!(true, false);
+    }
+    
+    // deserializer test
+
+    #[derive(Debug, PartialEq, Eq, DeLive)]
+    struct MyComponent {
+        x: u32,
+        y: u32,
+        z: u32,
+        e1: MyEnum,
+        e2: MyEnum,
+        e3: MyEnum,
+    }
+    
+    #[derive(Debug, DeLive)]
+    struct MyVec4(f32);
+    
+    #[derive(Debug, PartialEq, Eq, DeLive)]
+    enum MyEnum {
+        Value1,
+        Value2(u32),
+        Value3 {value: u32}
+    }
+    
+    struct MyComponentFactory {}
+    impl DeLiveFactory for MyComponentFactory {
+        fn de_live_any(&self, lr: &LiveRegistry, f: usize, l: usize, s: usize) -> Result<Box<dyn Any>,
+        DeLiveErr> {
+            let mv = MyComponent::de_live(lr, f, l, s) ?;
+            Ok(Box::new(mv))
+        }
+    }
+
+    let mut lr = LiveRegistry::default();
+    let source = r#"
+        MyEnum: Enum {
+            Value1: Enum
+            Value2: Enum()
+            Value3: Enum {}
+        }
+        
+        MyComponent: Component {
+            e1: MyEnum::Value1
+            e2: MyEnum::Value2(2)
+            e3: MyEnum::Value3{value: 1} 
+        }
+        MyDerive2: MyComponent {x: 1, y: 2, z: 5}
+    "#;
+    match lr.parse_live_file("test.live", id_check!(main), id_check!(test), source.to_string()) {
+        Err(why) => panic!("Couldnt parse file {}", why),
+        _ => ()
+    }
+    
+    let mut errors = Vec::new();
+    lr.expand_all_documents(&mut errors);
+    
+    if errors.len() != 0{
+        for msg in errors{
+            println!("{}\n", msg.to_live_file_error("", source));
+        }
         assert_eq!(true,false);
     }
     
-} 
+    lr.register_component(id!(main), id!(test), id!(MyComponent), Box::new(MyComponentFactory {}));
+    let val = lr.create_component(id!(main), id!(test), &[id!(MyDerive2)]);
+    
+    match val.unwrap().downcast_ref::<MyComponent>() {
+        Some(comp) => {
+            let check = MyComponent{
+                x:1,
+                y:2,
+                z:5,
+                e1:MyEnum::Value1,
+                e2:MyEnum::Value2(2),
+                e3:MyEnum::Value3{value:1}
+            };
+            
+            assert_eq!(*comp, check);
+            println!("{:?}", comp);
+        }
+        None => {
+            println!("No Value");
+        }
+    }
+
+
+}

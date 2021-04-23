@@ -1,5 +1,6 @@
 use crate::id::Id;
-use crate::span::{Span, LiveFileId};
+use crate::id::LiveFileId;
+use crate::span::Span;
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,13 +64,13 @@ pub struct TokenId {
 
 impl fmt::Display for TokenId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "TokenId(token_id:{}, live_file_id:{})", self.token_id, self.live_file_id.0)
+        write!(f, "TokenId(token_id:{}, live_file_id:{})", self.token_id, self.live_file_id.to_index())
     }
 }
 
 impl fmt::Debug for TokenId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "TokenId(token_id:{}, live_file_id:{})", self.token_id, self.live_file_id.0)
+        write!(f, "TokenId(token_id:{}, live_file_id:{})", self.token_id, self.live_file_id.to_index())
     }
 }
 
