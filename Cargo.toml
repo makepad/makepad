@@ -9,7 +9,6 @@ members = [
     "examples/widget_example/wasm",
     "examples/editor_example",
     "examples/editor_example/wasm",
-    "examples/wasmio_example_wasm",
     "examples/cmdline_example",
     "tools/webserver",
     "tools/brotli_test",

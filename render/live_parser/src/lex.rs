@@ -1,7 +1,8 @@
 use makepad_live_derive::*;
 use crate::id::{IdMap, Id};
 use crate::liveerror::LiveError;
-use crate::span::{Span,LiveFileId};
+use crate::id::LiveFileId;
+use crate::span::Span;
 use crate::token::{Token, TokenWithSpan};
 use crate::colors::hex_bytes_to_u32;
 
@@ -26,6 +27,8 @@ pub fn fill_collisions() {
             return
         }
         let collision_seed = [
+            "true",
+            "false",
             "use",
             "!=",
             "!",
@@ -293,11 +296,17 @@ C: Iterator<Item = char>,
                 let ch = self.read_char();
                 self.temp_string.push(ch);
                 self.read_chars_while( | ch | ch.is_ascii_alphanumeric() || ch == '_');
-                let id = Id::from_str(&self.temp_string);
-                if let Some(collide) = id.check_collision(&self.temp_string) {
-                    return Err(span.error(self, format!("Id has collision {} with {}, please rename one of them", self.temp_string, collide).into()));
+                match self.temp_string.as_str() {
+                    "true" => Token::Bool(true),
+                    "false" => Token::Bool(false),
+                    _=>{
+                        let id = Id::from_str(&self.temp_string);
+                        if let Some(collide) = id.check_collision(&self.temp_string) {
+                            return Err(span.error(self, format!("Id has collision {} with {}, please rename one of them", self.temp_string, collide).into()));
+                        }
+                        Token::Ident(id)
+                    }
                 }
-                Token::Ident(id)
             }
             ('(', _) => {
                 self.skip_char();
