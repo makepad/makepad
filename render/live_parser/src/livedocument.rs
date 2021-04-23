@@ -1,6 +1,6 @@
 #![allow(unused_variables)]
 use makepad_live_derive::*;
-use crate::id::{Id,IdType,IdFmt};
+use crate::id::{Id, IdType, IdFmt};
 use std::fmt;
 use crate::span::Span;
 use crate::util::PrettyPrintedF64;
@@ -8,6 +8,7 @@ use crate::token::{TokenWithSpan, TokenId};
 use crate::liveerror::LiveError;
 use crate::livenode::{LiveNode, LiveValue};
 use crate::liveregistry::CrateModule;
+use crate::id::LiveNodePtr;
 
 pub struct LiveDocument {
     pub root: usize,
@@ -20,11 +21,11 @@ pub struct LiveDocument {
 
 impl fmt::Display for LiveScopeTarget {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self{
-            LiveScopeTarget::Local{..}=>{
+        match self {
+            LiveScopeTarget::Local {..} => {
                 write!(f, "[local]")
             },
-            LiveScopeTarget::Use{crate_module,..}=>{
+            LiveScopeTarget::Use {crate_module, ..} => {
                 write!(f, "{}", crate_module)
             }
         }
@@ -43,6 +44,7 @@ pub struct LiveScopeItem {
     pub target: LiveScopeTarget
 }
 
+
 impl LiveDocument {
     pub fn new() -> Self {
         Self {
@@ -55,18 +57,13 @@ impl LiveDocument {
         }
     }
     
-    pub fn token_id_to_span(&self, token_id:TokenId)->Span{
+    //pub fn create_component(&self, id:Id)->Any{
+    
+    //}
+    
+    pub fn token_id_to_span(&self, token_id: TokenId) -> Span {
         self.tokens[token_id.token_id as usize].span
     }
-}
-
-#[derive(Copy, Clone)]
-pub struct LiveNodePtr {
-    pub level: usize,
-    pub index: usize
-}
-
-impl LiveDocument {
     
     pub fn get_level_len(&mut self, level: usize) -> usize {
         let len = self.nodes.len() - 1;
@@ -80,7 +77,50 @@ impl LiveDocument {
         self.nodes[level].push(node);
     }
     
-    pub fn scan_for_multi(&self, level: usize, node_start: usize, node_count: usize, id_start: usize, id_count: usize, multi_ids: &Vec<Id>) -> Result<LiveNodePtr, String> {
+    pub fn scan_for_multi(&self, ids: &[Id]) -> Option<LiveNodePtr> {
+        let mut node_start = 0 as usize;
+        let mut node_count = self.nodes[0].len();
+        let mut level = 0;
+        for i in 0..ids.len() {
+            let id = ids[i];
+            let mut found = false;
+            for j in 0..node_count {
+                let node = &self.nodes[level][j + node_start];
+                if node.id == id {
+                    // we found the node.
+                    if i == ids.len() - 1 { // last item
+                        return Some(LiveNodePtr {
+                            level: level,
+                            index: j + node_start
+                        });
+                    }
+                    else { // we need to be either an object or a class
+                        level += 1;
+                        match node.value {
+                            LiveValue::Class {node_start: ns, node_count: nc, ..} => {
+                                node_start = ns as usize;
+                                node_count = nc as usize;
+                            },
+                            _ => return None
+                            //LiveError {
+                            //   span:self.token_id_to_span(token_id),
+                            //   message: format!("Cannont find property {} is not an object path", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count)))
+                            // })
+                        }
+                        found = true;
+                        break
+                    }
+                }
+            }
+            if !found {
+                return None
+            }
+        }
+        None
+    }
+    
+    
+    pub fn scan_for_multi_for_expand(&self, level: usize, node_start: usize, node_count: usize, id_start: usize, id_count: usize, multi_ids: &Vec<Id>) -> Result<LiveNodePtr, String> {
         let mut node_start = node_start as usize;
         let mut node_count = node_count as usize;
         let mut level = level;
@@ -106,9 +146,9 @@ impl LiveDocument {
                             },
                             _ => return Err(format!("Cannont find property {} is not an object path", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count))))
                             //LiveError {
-                             //   span:self.token_id_to_span(token_id),
-                             //   message: format!("Cannont find property {} is not an object path", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count)))
-                           // })
+                            //   span:self.token_id_to_span(token_id),
+                            //   message: format!("Cannont find property {} is not an object path", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count)))
+                            // })
                         }
                         found = true;
                         break
@@ -131,8 +171,8 @@ impl LiveDocument {
         in_node: &LiveNode
     ) -> Result<Option<usize>, LiveError> {
         // I really need to learn to learn functional programming. This is absurd
-        match in_node.id.to_type(){
-            IdType::Multi{index: id_start, count:id_count}=>{
+        match in_node.id.to_type() {
+            IdType::Multi {index: id_start, count: id_count} => {
                 let mut node_start = node_start;
                 let mut node_count = node_count;
                 let mut level = level;
@@ -217,7 +257,7 @@ impl LiveDocument {
                     message: format!("Unexpected problem 2 in overwrite_or_add_node with {}", IdFmt::dot(&in_doc.multi_ids, in_node.id))
                 })
             }
-            IdType::Single(id)=>{
+            IdType::Single(id) => {
                 let nodes = &mut self.nodes[level];
                 for i in node_start..nodes.len() {
                     if nodes[i].id == in_node.id { // overwrite and exit
@@ -229,13 +269,13 @@ impl LiveDocument {
                 nodes.push(*in_node);
                 return Ok(Some(index))
             }
-            IdType::Empty=>{
+            IdType::Empty => {
                 let nodes = &mut self.nodes[level];
                 let index = nodes.len();
                 nodes.push(*in_node);
                 return Ok(Some(index))
             },
-            _=>{
+            _ => {
                 return Err(LiveError {
                     span: in_doc.token_id_to_span(in_node.token_id),
                     message: format!("Unexpected id type {}", IdFmt::dot(&in_doc.multi_ids, in_node.id))
@@ -244,27 +284,27 @@ impl LiveDocument {
         }
     }
     
-    pub fn create_multi_id(&mut self, ids:&[Id])->Id{
+    pub fn create_multi_id(&mut self, ids: &[Id]) -> Id {
         let multi_index = self.multi_ids.len();
-        for id in ids{
+        for id in ids {
             self.multi_ids.push(*id);
         }
         Id::multi(multi_index, ids.len())
     }
     
-    pub fn fetch_crate_module(&self, id: Id, outer_crate_id:Id)->CrateModule{
-        match id.to_type(){
-            IdType::Multi{index, count} if count == 2=>{
+    pub fn fetch_crate_module(&self, id: Id, outer_crate_id: Id) -> CrateModule {
+        match id.to_type() {
+            IdType::Multi {index, count} if count == 2 => {
                 let crate_id = self.multi_ids[index];
-                let crate_id = if crate_id == id!(crate){
+                let crate_id = if crate_id == id!(crate) {
                     outer_crate_id
-                }else{
+                }else {
                     crate_id
                 };
-                CrateModule(crate_id, self.multi_ids[index+1])
+                CrateModule(crate_id, self.multi_ids[index + 1])
             }
-            _=>{
-                panic!("Unexpected id type")
+            _ => {
+                panic!("Unexpected id type {:?}", id.to_type())
             }
         }
     }
@@ -364,21 +404,21 @@ impl fmt::Display for LiveDocument {
                 },
                 LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
                     let _ = write!(f, "fn {}", IdFmt::col(&ld.multi_ids, node.id));
-                    for i in 0..token_count{
+                    for i in 0..token_count {
                         let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
                     }
                     let _ = write!(f, "\"");
-                    for i in 0..(scope_count as u32){
-                        let item = & ld.scopes[(i + scope_start) as usize];
-                        let _ = write!(f, "{}:{}",item.id, item.target);
-                        if i != (scope_count - 1) as u32{
-                        let _ = write!(f, ", ");
+                    for i in 0..(scope_count as u32) {
+                        let item = &ld.scopes[(i + scope_start) as usize];
+                        let _ = write!(f, "{}:{}", item.id, item.target);
+                        if i != (scope_count - 1) as u32 {
+                            let _ = write!(f, ", ");
                             
                         }
                     }
                     let _ = write!(f, "\"");
                 },
-                LiveValue::Use{crate_module} => {
+                LiveValue::Use {crate_module} => {
                     let _ = write!(f, "use {}::{}", IdFmt::col(&ld.multi_ids, node.id), IdFmt::col(&ld.multi_ids, crate_module));
                 }
                 LiveValue::Class {class, node_start, node_count} => {
@@ -411,7 +451,7 @@ impl fmt::Display for LiveDocument {
                     if !is_simple && node_count > 0 {
                         indent(level, f);
                     }
-                    let _ = write!(f, "}}"); 
+                    let _ = write!(f, "}}");
                 }
             }
         }
@@ -419,7 +459,7 @@ impl fmt::Display for LiveDocument {
         let len = self.nodes[0].len();
         for i in 0..len {
             recur(self, 0, i, f);
-            if i != len - 1{
+            if i != len - 1 {
                 let _ = write!(f, "\n");
             }
         }
