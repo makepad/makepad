@@ -9,7 +9,7 @@ use crate::id::*;
 #[path = "../../src/id.rs"]
 mod id; 
 
-#[proc_macro_derive(DeTok)]
+#[proc_macro_derive(DeLive)] 
 pub fn live_derive(input: TokenStream) -> TokenStream {
     live_derive_impl(input)
 }

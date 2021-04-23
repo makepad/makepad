@@ -4,15 +4,39 @@ use std::collections::HashMap;
 use std::sync::Once;
 use std::fmt;
 
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialOrd, Hash, PartialEq)]
+pub struct LiveFileId(u16);
+
+impl LiveFileId{
+    pub fn index(index:usize)->LiveFileId{LiveFileId(index as u16)}
+    pub fn to_index(&self) -> usize{self.0 as usize}
+}
+
 #[derive(Clone, Eq, Hash, Copy, PartialEq)]
 pub struct Id(pub u64);
 
+#[derive(Clone, Debug, Eq, Hash, Copy, PartialEq)]
+pub struct LiveNodePtr {
+    pub level: usize,
+    pub index: usize
+}
+
+
+#[derive(Debug)]
 pub enum IdType {
     Empty,
     Multi {index: usize, count: usize},
+    NodePtr {file_id: LiveFileId, ptr: LiveNodePtr},
     Single(u64),
-    Number(u32)
+    Number(u64)
 }
+
+// Id uses the high 3 bits to signal type
+// 0?? = Single Id    0x8 == 0
+// 100 = Empty     0x8
+// 101 = NodePtr   0xA
+// 110 = Multi     0xC
+// 111 = Number    0xE
 
 impl Id {
     /*
@@ -52,19 +76,20 @@ impl Id {
     
     pub fn to_type(&self) -> IdType {
         if self.0 & 0x8000_0000_0000_0000 != 0 {
-            if self.0 & 0x7fff_ffff_ffff_ffff == 0 {
-                IdType::Empty
-            }
-            else {
-                if (self.0 & 0xffff_ffff_0000_0000) == 0xffff_ffff_0000_0000 {
-                    IdType::Number((self.0 & 0xffff_ffff) as u32)
-                }
-                else {
-                    IdType::Multi {
-                        index: ((self.0 & 0x7fff_ffff_ffff_ffff) >> 32) as usize,
-                        count: (self.0 & 0xffff_ffff) as usize
+            match self.0 & 0xE000_0000_0000_0000 {
+                0xA000_0000_0000_0000 => IdType::NodePtr {
+                    file_id: LiveFileId(((self.0 >> 32) & 0xffff) as u16),
+                    ptr: LiveNodePtr {
+                        level: ((self.0 >> 48) & 0x1fff) as usize,
+                        index: (self.0 & 0xffff_ffff)as usize
                     }
-                }
+                },
+                0xC000_0000_0000_0000 => IdType::Multi {
+                    index: (self.0 & 0xffff_ffff) as usize,
+                    count: ((self.0 & 0x1fff_ffff_ffff_ffff) >> 32) as usize,
+                },
+                0xE000_0000_0000_0000 => IdType::Number(self.0 & 0x1fff_ffff_ffff_ffff),
+                _ => IdType::Empty
             }
         }
         else {
@@ -73,31 +98,44 @@ impl Id {
     }
     
     pub fn multi(index: usize, len: usize) -> Id {
-        Id(((((index as u64) << 32) | len as u64) & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
+        Id(((((len as u64) << 32) | index as u64) & 0x1fff_ffff_ffff_ffff) | 0xC000_0000_0000_0000)
     }
     
     pub fn single(val: u64) -> Id {
         Id(val & 0x7fff_ffff_ffff_ffff)
     }
     
-    pub fn number(val: u32) -> Id {
-        Id(0xffff_ffff_0000_0000 | val as u64)
+    pub fn number(val: u64) -> Id {
+        Id(0xE000_0000_0000_0000 | (val & 0x1fff_ffff_ffff_ffff))
     }
     
     pub fn empty() -> Id {
         Id(0x8000_0000_0000_0000)
     }
     
-    pub fn is_empty(&self) -> bool {
-        (self.0 & 0x8000_0000_0000_0000) != 0 && (self.0 & 0x7fff_ffff_ffff_ffff) == 0
+    pub fn node_ptr(file_id: LiveFileId, ptr: LiveNodePtr)->Id{
+        Id(
+            0xA000_0000_0000_0000 |
+            (ptr.index as u64) |
+            ((file_id.0 as u64) << 32) |
+            ((ptr.level as u64) << 48) 
+        )
     }
     
+    pub fn is_empty(&self) -> bool {
+        self.0 & 0xE000_0000_0000_0000 == 0x8000_0000_0000_0000
+    }
+    
+    pub fn is_node_ptr(&self) -> bool {
+        self.0 & 0xE000_0000_0000_0000 == 0xA000_0000_0000_0000
+    }
+        
     pub fn is_multi(&self) -> bool {
-        (self.0 & 0x8000_0000_0000_0000) != 0 && (self.0 & 0x7fff_ffff_ffff_ffff) != 0 && (self.0 & 0xffff_ffff_0000_0000) != 0xffff_ffff_0000_0000
+        self.0 & 0xE000_0000_0000_0000 == 0xC000_0000_0000_0000
     }
     
     pub fn is_number(&self) -> bool {
-        (self.0 & 0x8000_0000_0000_0000) != 0 && (self.0 & 0xffff_ffff_0000_0000) == 0xffff_ffff_0000_0000
+        self.0 & 0xE000_0000_0000_0000 == 0xE000_0000_0000_0000
     }
     
     pub fn is_single(&self) -> bool {
@@ -109,8 +147,8 @@ impl Id {
             panic!()
         }
         (
-            ((self.0 & 0x7fff_ffff_ffff_ffff) >> 32) as usize,
-            (self.0 & 0xffff_ffff) as usize
+            (self.0 & 0xffff_ffff) as usize,
+            ((self.0 & 0x1fff_ffff_ffff_ffff) >> 32) as usize,
         )
     }
     
@@ -121,8 +159,8 @@ impl Id {
         self.0
     }
     
-    pub fn panic_collision(self, val:&str)->Id{
-        if let Some(s) = self.check_collision(val){
+    pub fn panic_collision(self, val: &str) -> Id {
+        if let Some(s) = self.check_collision(val) {
             panic!("Collision {} {}", val, s)
         }
         self
@@ -183,6 +221,9 @@ impl fmt::Display for Id {
             },
             IdType::Empty => {
                 write!(f, "IdEmpty")
+            }
+            IdType::NodePtr{file_id, ptr}=>{
+                write!(f, "NodePtr{{file:{}, level:{}, index:{}}}", file_id.0, ptr.level, ptr.index)
             }
         }
         

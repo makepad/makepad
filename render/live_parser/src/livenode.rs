@@ -61,7 +61,7 @@ pub enum LiveValue {
         crate_module: Id,
     },
     Class {
-        class: Id,
+        class: Id, // target class , we can reuse this Id on clone
         node_start: u32, // how about
         node_count: u16 //65535 class items is plenty keeps this structure at 24 bytes
     },
