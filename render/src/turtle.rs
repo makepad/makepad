@@ -563,12 +563,12 @@ impl Cx {
         }
     }
     
-    // used for a<>b layouts horizontally
+    // used for a<>b layouts vertically
     pub fn change_turtle_align_y_ab(&mut self, fx: f32) {
         self.change_turtle_align_y(fx, false);
     }
     
-    // used for a<b>c layouts horizontally
+    // used for a<b>c layouts vertically
     pub fn change_turtle_align_y_cab(&mut self, fx: f32) {
         self.change_turtle_align_y(fx, true);
     }
