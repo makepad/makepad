@@ -42,7 +42,7 @@ pub struct LiveRegistry {
     pub live_files: Vec<LiveFile>,
     pub dep_order: Vec<(CrateModule, TokenId)>,
     pub dep_graph: HashMap<CrateModule, HashSet<CrateModule >>, // this contains all the dependencies a crate has
-    pub expanded: Vec<Option<LiveDocument >>,
+    pub expanded: Vec<LiveDocument >,
     pub factories: HashMap<(CrateModule, Id), Box<dyn DeLiveFactory >>
 }
 
@@ -58,7 +58,7 @@ impl LiveRegistry {
     pub fn find_enum_origin(&self, start:Id, lhs: Id)->Id{
         match start.to_type(){
             IdType::NodePtr{file_id, ptr}=>{
-                let doc = &self.expanded[file_id.to_index()].as_ref().unwrap();
+                let doc = &self.expanded[file_id.to_index()];
                 let node = &doc.nodes[ptr.level][ptr.index];
                 match node.value{
                     LiveValue::Id(id)=>{
@@ -81,60 +81,60 @@ impl LiveRegistry {
     pub fn create_component(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<Box<dyn Any >> {
         let cm = CrateModule(crate_id, module_id);
         if let Some(file_id) = self.crate_module_to_file_id.get(&cm) {
-            if let Some(exp) = &self.expanded[file_id.to_index()] {
-                if let Some(ptr) = exp.scan_for_multi(ids) {
-                    let node = &exp.nodes[ptr.level][ptr.index];
-                    match node.value {
-                        LiveValue::Class {class, ..} => {
-                            // ok so this thing can be 'endpoint'
-                            let mut class_iter = class;
-                            let mut token_id_iter = node.token_id;
-                            while let IdType::NodePtr {file_id, ptr} = class_iter.to_type() {
-                                let other = self.expanded[file_id.to_index()].as_ref().unwrap();
-                                let other_node = &other.nodes[ptr.level][ptr.index];
-                                if let LiveValue::Class {class, ..} = other_node.value {
-                                    class_iter = class;
-                                    token_id_iter = other_node.token_id;
-                                }
-                                else {
-                                    return None
-                                }
+            let exp = &self.expanded[file_id.to_index()];
+            if let Some(ptr) = exp.scan_for_multi(ids) {
+                let node = &exp.nodes[ptr.level][ptr.index];
+                match node.value {
+                    LiveValue::Class {class, ..} => {
+                        // ok so this thing can be 'endpoint'
+                        let mut class_iter = class;
+                        let mut token_id_iter = node.token_id;
+                        while let IdType::NodePtr {file_id, ptr} = class_iter.to_type() {
+                            let other = &self.expanded[file_id.to_index()];
+                            let other_node = &other.nodes[ptr.level][ptr.index];
+                            if let LiveValue::Class {class, ..} = other_node.value {
+                                class_iter = class;
+                                token_id_iter = other_node.token_id;
                             }
-                            // alright we found 'token'
-                            let exp = self.expanded[token_id_iter.live_file_id.to_index()].as_ref().unwrap();
-                            let file = &self.live_files[token_id_iter.live_file_id.to_index()];
-                            // this thing needs to be a Component.
-                            if class_iter != id!(Component) {
-                                return None;
+                            else {
+                                return None
                             }
-                            let token_span = &exp.tokens[token_id_iter.token_id as usize - 2];
-                            // ok now we have a live_file_id we can turn into crate_module and a token
-                            let crate_module = file.crate_module;
-                            if let Token::Ident(id) = token_span.token {
-                                // lets get the factory
-                                if let Some(factory) = self.factories.get(&(crate_module, id)) {
-                                    match factory.de_live_any(self, file_id.to_index(), ptr.level, ptr.index) {
-                                        Ok(result) => {
-                                            return Some(result)
-                                        }
-                                        Err(msg) => {
-                                            println!("Error {:?}", msg)
-                                        }
+                        }
+                        // alright we found 'token'
+                        let exp = &self.expanded[token_id_iter.live_file_id.to_index()];
+                        let file = &self.live_files[token_id_iter.live_file_id.to_index()];
+                        // this thing needs to be a Component.
+                        if class_iter != id!(Component) {
+                            return None;
+                        }
+                        let token_span = &exp.tokens[token_id_iter.token_id as usize - 2];
+                        // ok now we have a live_file_id we can turn into crate_module and a token
+                        let crate_module = file.crate_module;
+                        if let Token::Ident(id) = token_span.token {
+                            // lets get the factory
+                            if let Some(factory) = self.factories.get(&(crate_module, id)) {
+                                match factory.de_live_any(self, file_id.to_index(), ptr.level, ptr.index) {
+                                    Ok(result) => {
+                                        return Some(result)
+                                    }
+                                    Err(msg) => {
+                                        println!("Error {:?}", msg)
                                     }
                                 }
                             }
-                            // now we can look this up in our
                         }
-                        _ => ()
+                        // now we can look this up in our
                     }
+                    _ => ()
                 }
+            }
                 // ok now we need our struct by walking 'struct_id'
                 //let mut node_start = 0 as usize;
                 //let mut node_count = other_doc.nodes[0].len();
                 //for (level, id) in struct_id.iter().enumerate(){
                 //    let id = in_doc.multi_ids[level + index];
                 //}
-            }
+            //}
             // and then we pull out of our tokensets
             // the right token
             // and then we can look up the factory, and deserialize
@@ -194,7 +194,7 @@ impl LiveRegistry {
             // marks dependencies dirty recursively (removes the expanded version)
             fn mark_dirty(cm: CrateModule, registry: &mut LiveRegistry) {
                 if let Some(id) = registry.crate_module_to_file_id.get(&cm) {
-                    registry.expanded[id.to_index()] = None;
+                    registry.expanded[id.to_index()].recompile = true;
                 }
                 //registry.expanded.remove(&cm);
                 
@@ -251,11 +251,11 @@ impl LiveRegistry {
         if is_new_file_id {
             self.live_file_ids.insert(file.to_string(), file_id);
             self.live_files.push(live_file);
-            self.expanded.push(None);
+            self.expanded.push(LiveDocument::new());
         }
         else {
             self.live_files[file_id.to_index()] = live_file;
-            self.expanded[file_id.to_index()] = None;
+            self.expanded[file_id.to_index()].recompile = true;
         }
         
         return Ok(file_id)
@@ -477,7 +477,7 @@ impl LiveRegistry {
         
         fn resolve_id(
             resolve_id: Id,
-            expanded: &Vec<Option<LiveDocument >>,
+            expanded: &Vec<LiveDocument >,
             token_id: TokenId,
             crate_module_to_file_id: &HashMap<CrateModule, LiveFileId>,
             scope_stack: &ScopeStack,
@@ -538,7 +538,7 @@ impl LiveRegistry {
                         }
                         Some(LiveScopeTarget::Use {crate_module, node_ptr}) => {
                             let other_id = crate_module_to_file_id.get(&crate_module).unwrap();
-                            let other_doc = expanded[other_id.to_index()].as_ref().unwrap();
+                            let other_doc = &expanded[other_id.to_index()];
                             match &other_doc.nodes[node_ptr.level][node_ptr.index].value {
                                 LiveValue::Class {node_start, node_count, ..} => {
                                     match other_doc.scan_for_multi_for_expand(node_ptr.level + 1, *node_start as usize, *node_count as usize, id_start, id_count, &in_doc.multi_ids) {
@@ -590,7 +590,7 @@ impl LiveRegistry {
         
         // This should we win me some kind of award. Absolute worst programmer in recent history or something like it.
         fn walk_node(
-            expanded: &Vec<Option<LiveDocument >>,
+            expanded: &Vec<LiveDocument >,
             crate_module_to_file_id: &HashMap<CrateModule, LiveFileId>,
             in_crate: Id,
             in_file_id: LiveFileId,
@@ -722,7 +722,7 @@ impl LiveRegistry {
                                 }
                             }
                             Ok((Some((found_file_id, _)), found_node)) => {
-                                let f_n = &expanded[found_file_id.to_index()].as_ref().unwrap().nodes[found_node.level][found_node.index];
+                                let f_n = &expanded[found_file_id.to_index()].nodes[found_node.level][found_node.index];
                                 if let LiveValue::Call {..} = f_n.value {}
                                 else {
                                     errors.push(LiveError {
@@ -813,12 +813,7 @@ impl LiveRegistry {
                 LiveValue::Use {crate_module} => { // import things on the scope from Use
                     let crate_module = in_doc.fetch_crate_module(crate_module, in_crate);
                     let id = crate_module_to_file_id.get(&crate_module).unwrap();
-                    let other_doc = if let Some(other_doc) = &expanded[id.to_index()] {
-                        other_doc
-                    }
-                    else {
-                        return
-                    };
+                    let other_doc =  &expanded[id.to_index()];
                     
                     match node.id.to_type() {
                         IdType::Empty => { // its a wildcard
@@ -972,7 +967,7 @@ impl LiveRegistry {
                                 value_ptr = Some(found_node);
                             }
                             Ok((Some((found_file_id, found_crate_module)), found_node)) => {
-                                let other_doc = expanded[found_file_id.to_index()].as_ref().unwrap();
+                                let other_doc = &expanded[found_file_id.to_index()];
                                 other_crate_module = Some(found_crate_module);
                                 copy_result = copy_recur(scope_stack, Some((other_doc, found_crate_module)), out_doc, found_node.level, found_node.level, shifted_out_level, found_node.index);
                                 value_ptr = Some(found_node);
@@ -999,7 +994,7 @@ impl LiveRegistry {
                             if let Some(value_ptr) = value_ptr {
                                 let mut new_node = if let Some(crate_module) = other_crate_module {
                                     let id = crate_module_to_file_id.get(&crate_module).unwrap();
-                                    let other_doc = expanded[id.to_index()].as_ref().unwrap();
+                                    let other_doc = &expanded[id.to_index()];
                                     other_doc.nodes[value_ptr.level][value_ptr.index]
                                 }
                                 else {
@@ -1134,16 +1129,16 @@ impl LiveRegistry {
                 continue
             };
             
-            if self.expanded[file_id.to_index()].is_some() {
+            if !self.expanded[file_id.to_index()].recompile {
                 continue;
             }
             let live_file = &self.live_files[file_id.to_index()];
             let in_doc = &live_file.document;
             
             let mut out_doc = LiveDocument::new();
-            out_doc.strings = in_doc.strings.clone();
-            out_doc.tokens = in_doc.tokens.clone();
-            out_doc.multi_ids = in_doc.multi_ids.clone();
+            std::mem::swap(&mut out_doc, &mut self.expanded[file_id.to_index()]);
+            out_doc.restart_from(&in_doc);
+
             let mut scope_stack = ScopeStack {
                 stack: vec![Vec::new()]
             };
@@ -1152,8 +1147,10 @@ impl LiveRegistry {
             for i in 0..len {
                 walk_node(&self.expanded, &self.crate_module_to_file_id, crate_module.0, *file_id, errors, &mut scope_stack, in_doc, &mut out_doc, 0, 0, i, 0, 0);
             }
-            
-            self.expanded[file_id.to_index()] = Some(out_doc);
+
+            out_doc.recompile = false;
+
+            std::mem::swap(&mut out_doc, &mut self.expanded[file_id.to_index()]);
         }
     }
 }

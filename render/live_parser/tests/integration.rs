@@ -141,7 +141,7 @@ fn expand() {
     
     for (index, file) in lr.expanded.iter().enumerate() {
         let crate_module = lr.find_crate_module_by_file_id(LiveFileId::index(index)).unwrap();
-        let out = format!("{}", file.as_ref().unwrap());
+        let out = format!("{}", file);
         for (name_id, _, check) in &sources {
             if crate_module.1 == *name_id {
                 if !compare_no_ws(&out, check) {
@@ -244,6 +244,7 @@ fn expand() {
             println!("{:?}", comp);
         }
         None => {
+            assert_eq!(true, false);
             println!("No Value");
         }
     }
