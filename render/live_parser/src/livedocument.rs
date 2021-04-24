@@ -11,7 +11,7 @@ use crate::liveregistry::CrateModule;
 use crate::id::LiveNodePtr;
 
 pub struct LiveDocument {
-    pub root: usize,
+    pub recompile: bool,
     pub nodes: Vec<Vec<LiveNode >>,
     pub multi_ids: Vec<Id>,
     pub strings: Vec<char>,
@@ -48,7 +48,7 @@ pub struct LiveScopeItem {
 impl LiveDocument {
     pub fn new() -> Self {
         Self {
-            root: 0,
+            recompile: true,
             nodes: vec![Vec::new()],
             multi_ids: Vec::new(),
             strings: Vec::new(),
@@ -57,9 +57,15 @@ impl LiveDocument {
         }
     }
     
-    //pub fn create_component(&self, id:Id)->Any{
-    
-    //}
+    pub fn restart_from(&mut self, other:&LiveDocument){
+        for node in &mut self.nodes{
+            node.truncate(0);
+        }
+        self.multi_ids.clone_from(&other.multi_ids.clone());
+        self.strings.clone_from(&other.strings);
+        self.tokens.clone_from(&other.tokens.clone());
+        self.scopes.truncate(0);
+    }
     
     pub fn token_id_to_span(&self, token_id: TokenId) -> Span {
         self.tokens[token_id.token_id as usize].span
