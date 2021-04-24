@@ -1,13 +1,6 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 use makepad_live_parser::*;
-use makepad_live_parser::id::Id;
-use makepad_live_parser::id::IdType;
-use makepad_live_parser::liveregistry::LiveRegistry;
-use makepad_live_parser::deserialize::DeLive;
-use makepad_live_parser::deserialize::DeLiveErr;
-use makepad_live_parser::deserialize::DeLiveFactory;
-use makepad_live_parser::livenode::LiveValue;
 use std::any::Any;
 
 #[derive(Debug, DeLive)]
@@ -64,7 +57,7 @@ fn main() {
     let mut errors = Vec::new();
     lr.expand_all_documents(&mut errors);
     
-    println!("{}", lr.expanded[0].as_ref().unwrap());
+    println!("{}", lr.expanded[0]);
     
     for msg in errors {
         println!("{}\n", msg.to_live_file_error("", source));
