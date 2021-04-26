@@ -168,6 +168,12 @@ pub struct Cx {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Copy, Hash)]
 pub struct NextFrame(u64);
 
+impl NextFrame {
+    pub fn is_active(&self, cx: &mut Cx) -> bool {
+        cx._next_frames.contains(self)
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct CxCommandSetting {
     pub shift: bool,
