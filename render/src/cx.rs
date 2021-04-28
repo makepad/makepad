@@ -906,6 +906,9 @@ macro_rules!wasm_app {
     ( $ app: ident) => {
         #[export_name = "create_wasm_app"]
         pub extern "C" fn create_wasm_app() -> u32 {
+            std::panic::set_hook(Box::new(|info: &std::panic::PanicInfo| {
+                log!("Panic: {}", info.to_string());
+            }));
             let mut cx = Box::new(Cx::default());
             cx.style();
             $ app::style(&mut cx);
