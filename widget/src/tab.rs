@@ -214,13 +214,16 @@ impl Tab {
                 //return TabEvent::Closing;
                 //}
             },
-            Event::FingerDown(_fe) => {
+            Event::FingerDown(fe) => {
                 cx.set_down_mouse_cursor(MouseCursor::Hand);
                 self._is_down = true;
                 self._is_drag = false;
                 self._is_selected = true;
                 self._is_focussed = true;
                 self.animator.play_anim(cx, self.anim_down(cx));
+                if fe.input_type == FingerInputType::Mouse && fe.digit == MOUSE_MIDDLE_BUTTON_DIGIT {
+                    return TabEvent::Close;
+                }
                 return TabEvent::Select;
             },
             Event::FingerHover(fe) => {
