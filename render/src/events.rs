@@ -18,6 +18,10 @@ pub enum FingerInputType{
     XR
 }
 
+pub const MOUSE_LEFT_BUTTON_DIGIT: usize = 0;
+pub const MOUSE_RIGHT_BUTTON_DIGIT: usize = 1;
+pub const MOUSE_MIDDLE_BUTTON_DIGIT: usize = 2;
+
 impl FingerInputType{
     pub fn is_touch(&self)->bool{*self == FingerInputType::Touch}
     pub fn is_mouse(&self)->bool{*self == FingerInputType::Mouse}
