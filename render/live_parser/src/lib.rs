@@ -22,8 +22,10 @@ pub use crate::liveregistry::LiveRegistry;
 pub use crate::id::LiveFileId;
 pub use crate::deserialize::DeLive;
 pub use crate::deserialize::DeLiveErr;
-pub use crate::deserialize::DeLiveFactory;
 pub use crate::livenode::LiveValue;
 pub use crate::livenode::LiveNode;
-
+pub use crate::token::TokenWithSpan;
+pub use crate::token::Token;
+pub use crate::span::Span;
+pub use crate::liveerror::LiveError;
 

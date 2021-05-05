@@ -192,6 +192,18 @@ impl LiveDocument {
                             // we found the node.
                             if i == id_count - 1 { // last item
                                 // ok now we need to replace this node
+                                
+                                if node.value.get_type_nr() != in_node.value.get_type_nr(){
+                                    if node.value.is_var_def(){ // we can replace a vardef with something else
+                                        continue;
+                                    }
+                                    // we cant replace a VarDef with something else
+                                    return Err(LiveError {
+                                        span: in_doc.token_id_to_span(in_node.token_id),
+                                        message: format!("Cannot inherit with different node type {}", IdFmt::dot(&in_doc.multi_ids, in_node.id))
+                                    })
+                                }
+                                
                                 node.token_id = in_node.token_id;
                                 node.value = in_node.value;
                                 return Ok(None)
@@ -267,6 +279,16 @@ impl LiveDocument {
                 let nodes = &mut self.nodes[level];
                 for i in node_start..nodes.len() {
                     if nodes[i].id == in_node.id { // overwrite and exit
+                        // lets error if the overwrite value type changed.
+                        if nodes[i].value.get_type_nr() != in_node.value.get_type_nr(){
+                            if nodes[i].value.is_var_def(){ // we can replace a vardef with something else
+                                continue;
+                            }
+                            return Err(LiveError {
+                                span: in_doc.token_id_to_span(in_node.token_id),
+                                message: format!("Cannot inherit with different node type {}", IdFmt::dot(&in_doc.multi_ids, in_node.id))
+                            })
+                        }
                         nodes[i] = *in_node;
                         return Ok(None)
                     }
@@ -296,6 +318,21 @@ impl LiveDocument {
             self.multi_ids.push(*id);
         }
         Id::multi(multi_index, ids.len())
+    }
+    
+    pub fn clone_multi_id(&mut self, id:Id , other_ids:&[Id]) -> Id {
+         match id.to_type() {
+            IdType::Multi {index, count}  => {
+                let multi_index = self.multi_ids.len();
+                for i in 0..count {
+                    self.multi_ids.push(other_ids[i + index]);
+                }
+                Id::multi(multi_index, self.multi_ids.len())
+            }
+            _ => {
+                id
+            }
+        }
     }
     
     pub fn fetch_crate_module(&self, id: Id, outer_crate_id: Id) -> CrateModule {
@@ -359,7 +396,7 @@ impl fmt::Display for LiveDocument {
                 },
                 LiveValue::Color(val) => {
                     prefix(node.id, ld, f);
-                    let _ = write!(f, "{}", val);
+                    let _ = write!(f, "{:x}", val);
                 },
                 LiveValue::Vec2(val) => {
                     prefix(node.id, ld, f);
@@ -410,6 +447,21 @@ impl fmt::Display for LiveDocument {
                 },
                 LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
                     let _ = write!(f, "fn {}", IdFmt::col(&ld.multi_ids, node.id));
+                    for i in 0..token_count {
+                        let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
+                    }
+                    let _ = write!(f, "\"");
+                    for i in 0..(scope_count as u32) {
+                        let item = &ld.scopes[(i + scope_start) as usize];
+                        let _ = write!(f, "{}:{}", item.id, item.target);
+                        if i != (scope_count - 1) as u32 {
+                            let _ = write!(f, ", ");
+                            
+                        }
+                    }
+                    let _ = write!(f, "\"");
+                },
+                LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
                     for i in 0..token_count {
                         let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
                     }
