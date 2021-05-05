@@ -9,12 +9,10 @@ use crate::id::LiveFileId;
 use crate::span::Span;
 use crate::liveerror::LiveError;
 use crate::id::Id;
-use crate::lex::LexResult;
 use crate::livedocument::LiveDocument;
 use crate::livenode::{LiveNode, LiveValue};
 
 pub struct LiveParser<'a> {
-    pub lex_result: &'a LexResult,
     pub token_index: usize,
     pub live_file_id: LiveFileId,
     pub tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
@@ -23,13 +21,11 @@ pub struct LiveParser<'a> {
 }
 
 impl<'a> LiveParser<'a> {
-    pub fn new(lex_result: &'a LexResult) -> Self {
-        let mut tokens_with_span = lex_result.tokens.iter().cloned();
+    pub fn new(tokens: &'a [TokenWithSpan]) -> Self {
+        let mut tokens_with_span = tokens.iter().cloned();
         let token_with_span = tokens_with_span.next().unwrap();
         LiveParser {
-            lex_result,
             live_file_id: LiveFileId::default(),
-            //token_clone: Vec::new(),
             tokens_with_span,
             token_with_span,
             token_index: 0,
@@ -39,21 +35,7 @@ impl<'a> LiveParser<'a> {
 }
 
 impl<'a> LiveParser<'a> {
-    
-    /*fn clear_token_clone(&mut self) {
-        self.token_clone.truncate(0);
-    }*/
-    
-    /*fn get_token_clone(&mut self) -> Vec<TokenWithSpan> {
-        let mut new_token_storage = Vec::new();
-        std::mem::swap(&mut new_token_storage, &mut self.token_clone);
-        new_token_storage.push(TokenWithSpan{
-            token:Token::Eof,
-            span:self.token_with_span.span
-        });
-        return new_token_storage;
-    }*/
-    
+
     fn peek_span(&self) -> Span {
         self.token_with_span.span
     }
@@ -433,44 +415,18 @@ impl<'a> LiveParser<'a> {
         return Err(self.error(format!("Could not find ending token {} whilst scanning", scan_token)));
     }
     
+    fn expect_var_def_type(&mut self)->Result<(), LiveError>{
+        self.expect_ident()?;
+        if self.accept_token(Token::Ident(id!(in))){
+            self.expect_ident()?;
+        }
+        Ok(())
+    }
+    
     fn expect_live_class(&mut self, level: usize, ld: &mut LiveDocument) -> Result<(u32, u16), LiveError> {
         let node_start = ld.get_level_len(level);
         while self.peek_token() != Token::Eof {
             match self.peek_token() {
-                token_ident!(use) => {
-                    self.skip_token();
-                    let crate_name = self.expect_ident() ?;
-                    self.expect_token(token_punct!(::)) ?;
-                    let module_name = self.expect_ident() ?;
-                    self.expect_token(token_punct!(::)) ?;
-                    // then we have a chain of idents with a possible *
-                    let token_id = self.get_token_id();
-                    let id = self.expect_class_id_wildcard(ld)?;
-                    
-                    let crate_module = ld.create_multi_id(&[crate_name, module_name]);
-                    // alright we have an id thats either a * or a chain.
-                    ld.push_node(level, LiveNode{
-                        token_id,
-                        id: id,
-                        value: LiveValue::Use{crate_module}
-                    });
-                    if !self.accept_token(token_punct!(,)) {
-                        self.accept_token(token_punct!(;));
-                    }
-                },
-                token_ident!(fn) => {
-                    let span = self.begin_span();
-                    self.skip_token();
-                    let token_id = self.get_token_id();
-                    let prop_id = self.expect_ident() ?;
-                    let (token_start, token_count) = self.scan_to_token(Token::CloseBrace) ?;
-                    
-                    ld.push_node(level, LiveNode {
-                        token_id,
-                        id: prop_id,
-                        value: LiveValue::Fn {token_start, token_count, scope_start:0, scope_count:0}
-                    });
-                },
                 Token::CloseBrace => {
                     self.skip_token();
                     let node_end = ld.get_level_len(level);
@@ -478,12 +434,78 @@ impl<'a> LiveParser<'a> {
                 }
                 Token::Ident(prop) => {
                     let span = self.begin_span();
+                    let token_start = self.token_index as u32;
                     let prop_id = self.expect_prop_id(ld) ?;
-                    self.expect_token(token_punct!(:)) ?;
-                    // ok now we get a value to parse
-                    self.expect_live_value(span, prop_id, level, ld) ?;
-                    if !self.accept_token(token_punct!(,)) {
-                        self.accept_token(token_punct!(;));
+                    
+                    if let Token::Ident(_) = self.peek_token(){
+                        match prop_id{
+                            id!(fn)=>{
+                                let span = self.begin_span();
+                                //self.skip_token();
+                                let token_id = self.get_token_id();
+                                let prop_id = self.expect_ident() ?;
+                                let (token_start, token_count) = self.scan_to_token(Token::CloseBrace) ?;
+                                
+                                ld.push_node(level, LiveNode {
+                                    token_id,
+                                    id: prop_id,
+                                    value: LiveValue::Fn {token_start, token_count, scope_start:0, scope_count:0}
+                                });
+                            }
+                            id!(use)=>{
+                                let crate_name = self.expect_ident() ?;
+                                self.expect_token(token_punct!(::)) ?;
+                                let module_name = self.expect_ident() ?;
+                                self.expect_token(token_punct!(::)) ?;
+                                // then we have a chain of idents with a possible *
+                                let token_id = self.get_token_id();
+                                let id = self.expect_class_id_wildcard(ld)?;
+                                
+                                let crate_module = ld.create_multi_id(&[crate_name, module_name]);
+                                // alright we have an id thats either a * or a chain.
+                                ld.push_node(level, LiveNode{
+                                    token_id,
+                                    id: id,
+                                    value: LiveValue::Use{crate_module}
+                                });
+                                if !self.accept_token(token_punct!(,)) {
+                                    self.accept_token(token_punct!(;));
+                                }
+                            }
+                            _=>{
+                                // ok so we get an ident.
+                                let token_id = self.get_token_id();
+                                let ty = self.expect_class_id(ld)?;
+                                if self.accept_token(token_punct!(:)){ // its a vardef
+                                    self.expect_var_def_type()?;
+                                    let token_count = (self.token_index as u32 - token_start) as u32;
+                                    ld.push_node(level, LiveNode {
+                                        token_id,
+                                        id: ty,
+                                        value: LiveValue::VarDef {token_start, token_count, scope_start:0, scope_count:0}
+                                    });
+                                }
+                                else{ // its a var ref
+                                    let token_count = (self.token_index as u32 - token_start) as u32;
+                                    ld.push_node(level, LiveNode {
+                                        token_id,
+                                        id: prop_id,
+                                        value: LiveValue::VarDef {token_start, token_count, scope_start:0, scope_count:0}
+                                    });
+                                }
+                                if !self.accept_token(token_punct!(,)) {
+                                    self.accept_token(token_punct!(;));
+                                }                                
+                            }
+                        }
+                    }
+                    else{
+                        self.expect_token(token_punct!(:)) ?;
+                        // ok now we get a value to parse
+                        self.expect_live_value(span, prop_id, level, ld) ?;
+                        if !self.accept_token(token_punct!(,)) {
+                            self.accept_token(token_punct!(;));
+                        }
                     }
                 },
                 other => return Err(self.error(format!("Unexpected token {} in class body", other)))

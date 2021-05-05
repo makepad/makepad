@@ -50,7 +50,7 @@ impl fmt::Display for Token {
             Token::Bool(lit) => write!(f, "{}", lit),
             Token::Int(lit) => write!(f, "{}", lit),
             Token::Float(lit) => write!(f, "{}", lit),
-            Token::Color(lit) => write!(f, "{}", lit),
+            Token::Color(lit) => write!(f, "#{:x}", lit),
         }
     }
 }

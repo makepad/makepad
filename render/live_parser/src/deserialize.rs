@@ -3,11 +3,6 @@ use crate::livenode::LiveValue;
 use crate::livenode::LiveNode;
 use crate::id::Id;
 use crate::id::IdType;
-use std::any::Any;
-
-pub trait DeLiveFactory{
-    fn de_live_any(&self, lr: &LiveRegistry, file: usize, level: usize, start: usize) -> Result<Box<dyn Any>,DeLiveErr>;
-}
 
 #[derive(Clone, Debug)]
 pub struct DeLiveErr {
