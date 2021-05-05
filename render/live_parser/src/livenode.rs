@@ -13,16 +13,49 @@ pub struct LiveNode { // 3x u64
 impl LiveValue {
     pub fn is_simple(&self) -> bool {
         match self {
-            LiveValue::Bool(_) => true,
-            LiveValue::Int(_) => true,
-            LiveValue::Float(_) => true,
-            LiveValue::Color(_) => true,
-            LiveValue::Vec2(_) => true,
-            LiveValue::Vec3(_) => true,
-            LiveValue::Id(_) => true,
+            Self::Bool(_) => true,
+            Self::Int(_) => true,
+            Self::Float(_) => true,
+            Self::Color(_) => true,
+            Self::Vec2(_) => true,
+            Self::Vec3(_) => true,
+            Self::Id(_) => true,
             _ => false
         }
     }
+    pub fn get_type_nr(&self)->usize{
+        match self {
+            Self::String {..}=>1,
+            Self::Bool(_)=>2,
+            Self::Int(_)=>3,
+            Self::Float(_)=>4,
+            Self::Color(_)=>5,
+            Self::Vec2(_)=>6,
+            Self::Vec3(_)=>7,
+            Self::Id(_)=>8,
+            Self::Call {..}=>9,
+            Self::Array {..}=>10,
+            Self::Object {..}=>11,
+            Self::Fn {..}=>12,
+            Self::VarDef {..}=>13,
+            Self::Use{..} => 14,
+            Self::Class {..}=>15,
+        }
+    }
+    
+    pub fn is_var_def(&self)->bool{
+        match self{
+            Self::VarDef{..}=>true,
+            _=>false
+        }
+    }
+}
+
+
+#[derive(Clone, Copy, Debug)]
+pub enum ShaderRef {
+    DrawInput,
+    DefaultGeometry
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -52,6 +85,12 @@ pub enum LiveValue {
         node_count: u32
     },
     Fn {
+        token_start: u32,
+        token_count: u32,
+        scope_start: u32,
+        scope_count: u16
+    },
+    VarDef {
         token_start: u32,
         token_count: u32,
         scope_start: u32,

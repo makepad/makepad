@@ -6,3 +6,7 @@ edition = "2018"
 [dependencies.makepad-live-parser]
 path="../../render/live_parser"
 version="0.1"
+
+[dependencies.makepad-shader-compiler]
+path="../../render/shader_compiler"
+version="0.1"
