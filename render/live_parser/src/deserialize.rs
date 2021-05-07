@@ -1,8 +1,8 @@
 use crate::liveregistry::LiveRegistry;
 use crate::livenode::LiveValue;
 use crate::livenode::LiveNode;
-use crate::id::Id;
-use crate::id::IdType;
+use crate::id::IdPack;
+use crate::id::IdUnpack;
 
 #[derive(Clone, Debug)]
 pub struct DeLiveErr {
@@ -18,7 +18,7 @@ pub trait DeLive: Sized {
 }
 
 impl DeLiveErr {
-    pub fn unk_prop(cls: Id, prop: Id, file: usize, level: usize, index: usize) -> DeLiveErr {
+    pub fn unk_prop(cls: IdPack, prop: IdPack, file: usize, level: usize, index: usize) -> DeLiveErr {
         DeLiveErr {
             msg: format!("Unknown property {} for type {}", prop, cls),
             file,
@@ -26,7 +26,7 @@ impl DeLiveErr {
             index
         }
     }
-    pub fn miss_prop(cls: Id, prop: &str, file: usize, level: usize, index: usize) -> DeLiveErr {
+    pub fn miss_prop(cls: IdPack, prop: &str, file: usize, level: usize, index: usize) -> DeLiveErr {
         DeLiveErr {
             msg: format!("Missing property {} for type {}", prop, cls),
             file,
@@ -35,7 +35,7 @@ impl DeLiveErr {
         }
     }
 
-    pub fn enum_notfound(enm: Id, prop: Id, file: usize, level: usize, index: usize) -> DeLiveErr {
+    pub fn enum_notfound(enm: IdPack, prop: IdPack, file: usize, level: usize, index: usize) -> DeLiveErr {
         DeLiveErr {
             msg: format!("Cannot find enum id {} for prop {}", enm, prop),
             file,
@@ -60,7 +60,7 @@ impl DeLiveErr {
         }
     }
 
-    pub fn arg_count(cls: Id, got:usize, req:usize, file: usize, level: usize, index: usize) -> DeLiveErr {
+    pub fn arg_count(cls: IdPack, got:usize, req:usize, file: usize, level: usize, index: usize) -> DeLiveErr {
         DeLiveErr {
             msg: format!("Not enough args {} got {} req {}", cls, got, req),
             file,
@@ -84,9 +84,9 @@ impl DeLive for f32 {
     DeLiveErr> {
         let node = &lr.expanded[file].nodes[level][index];
         match node.value {
-            LiveValue::Id(id)=>{// it should be a pointer
-                if let IdType::NodePtr{file_id, ptr} = id.to_type(){
-                    return DeLive::de_live(lr, file_id.to_index(), ptr.level, ptr.index)
+            LiveValue::IdPack(id)=>{// it should be a pointer
+                if let IdUnpack::FullNodePtr(full_ptr) = id.unpack(){
+                    return DeLive::de_live(lr, full_ptr.file_id.to_index(), full_ptr.local_ptr.level, full_ptr.local_ptr.index)
                 }
             }
             LiveValue::Int(v) => return Ok(v as f32),
@@ -102,9 +102,9 @@ impl DeLive for u32 {
     DeLiveErr> {
         let node = &lr.expanded[file].nodes[level][index];
         match node.value {
-            LiveValue::Id(id)=>{// it should be a pointer
-                if let IdType::NodePtr{file_id, ptr} = id.to_type(){
-                    return DeLive::de_live(lr, file_id.to_index(), ptr.level, ptr.index)
+            LiveValue::IdPack(id)=>{// it should be a pointer
+                if let IdUnpack::FullNodePtr(full_ptr) = id.unpack(){
+                    return DeLive::de_live(lr, full_ptr.file_id.to_index(), full_ptr.local_ptr.level, full_ptr.local_ptr.index)
                 }
             }
             LiveValue::Int(v) => return Ok(v as u32),

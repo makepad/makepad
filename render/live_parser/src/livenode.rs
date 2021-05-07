@@ -1,12 +1,12 @@
 #![allow(unused_variables)]
-use crate::id::Id;
+use crate::id::IdPack;
 use crate::token::TokenId;
 use crate::math::{Vec2, Vec3};
 
 #[derive(Copy, Clone, Debug)]
 pub struct LiveNode { // 3x u64
     pub token_id: TokenId,
-    pub id: Id,
+    pub id_pack: IdPack,
     pub value: LiveValue,
 }
 
@@ -19,7 +19,7 @@ impl LiveValue {
             Self::Color(_) => true,
             Self::Vec2(_) => true,
             Self::Vec3(_) => true,
-            Self::Id(_) => true,
+            Self::IdPack(_) => true,
             _ => false
         }
     }
@@ -32,7 +32,7 @@ impl LiveValue {
             Self::Color(_)=>5,
             Self::Vec2(_)=>6,
             Self::Vec3(_)=>7,
-            Self::Id(_)=>8,
+            Self::IdPack(_)=>8,
             Self::Call {..}=>9,
             Self::Array {..}=>10,
             Self::Object {..}=>11,
@@ -70,9 +70,9 @@ pub enum LiveValue {
     Color(u32),
     Vec2(Vec2),
     Vec3(Vec3),
-    Id(Id),
+    IdPack(IdPack),
     Call {
-        target: Id,
+        target: IdPack,
         node_start: u32,
         node_count: u16
     },
@@ -97,10 +97,10 @@ pub enum LiveValue {
         scope_count: u16
     },
     Use{
-        crate_module: Id,
+        crate_module: IdPack,
     },
     Class {
-        class: Id, // target class , we can reuse this Id on clone
+        class: IdPack, // target class , we can reuse this Id on clone
         node_start: u32, // how about
         node_count: u16 //65535 class items is plenty keeps this structure at 24 bytes
     },

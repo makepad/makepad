@@ -3,61 +3,56 @@
 use std::collections::HashMap;
 use std::sync::Once;
 use std::fmt;
+use std::cmp::Ordering;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialOrd, Hash, PartialEq)]
-pub struct LiveFileId(u16);
+pub struct FileId(u16);
 
-impl LiveFileId{
-    pub fn index(index:usize)->LiveFileId{LiveFileId(index as u16)}
+impl FileId{
+    pub fn index(index:usize)->FileId{FileId(index as u16)}
     pub fn to_index(&self) -> usize{self.0 as usize}
 }
 
 #[derive(Clone, Eq, Hash, Copy, PartialEq)]
-pub struct Id(pub u64);
+pub struct IdPack(pub u64);
 
 #[derive(Clone, Debug, Eq, Hash, Copy, PartialEq)]
-pub struct LiveNodePtr {
+pub struct LocalNodePtr {
     pub level: usize,
     pub index: usize
 }
 
+#[derive(Clone, Debug, Eq, Hash, Copy, PartialEq)]
+pub struct FullNodePtr {
+    pub file_id: FileId,
+    pub local_ptr: LocalNodePtr,
+}
+
 
 #[derive(Debug)]
-pub enum IdType {
+pub enum IdUnpack {
     Empty,
     Multi {index: usize, count: usize},
-    NodePtr {file_id: LiveFileId, ptr: LiveNodePtr},
-    Single(u64),
+    FullNodePtr (FullNodePtr),
+    Single(Id),
     Number(u64)
 }
 
-// Id uses the high 3 bits to signal type
-// 0?? = Single Id    0x8 == 0
-// 100 = Empty     0x8
-// 101 = NodePtr   0xA
-// 110 = Multi     0xC
-// 111 = Number    0xE
+#[derive(Clone, Default, Eq, Hash, Copy, PartialEq)]
+pub struct Id(pub u64);
 
-impl Id {
-    /*
-    // ok fine maybe this one was too simple.
-    pub const fn from_str(idstr: &str) -> Id {
-        let id = idstr.as_bytes();
-        let id_len = id.len();
-        let mut ret = 0u64;
-        let mut o = 0;
-        let mut i = 0;
-        while i < id_len {
-            ret ^= (id[i] as u64) << ((o & 7) << 3);
-            o += 1;
-            i += 1;
-        }
-        return Id(ret & 0x7fff_ffff_ffff_ffff)
-    }*/
+impl Id{
+    pub fn empty()->Self{
+        Self(0)
+    }
+    
+    pub fn is_empty(&self)->bool{
+        self.0 == 0
+    }
     
     // from https://nullprogram.com/blog/2018/07/31/
     // i have no idea what im doing with start value and finalisation.
-    pub const fn from_str(idstr: &str) -> Id {
+    pub const fn from_str(idstr: &str) -> Self {
         let id = idstr.as_bytes();
         let id_len = id.len();
         let mut x = 0xd6e8_feb8_6659_fd9u64;
@@ -71,50 +66,114 @@ impl Id {
             x ^= x >> 32;
             i += 1;
         }
-        return Id(x & 0x7fff_ffff_ffff_ffff) // leave the first bit
+        return Self(x & 0x7fff_ffff_ffff_ffff) // leave the first bit
     }
     
-    pub fn to_type(&self) -> IdType {
+        
+    pub fn panic_collision(self, val: &str) -> Id {
+        if let Some(s) = self.check_collision(val) {
+            panic!("Collision {} {}", val, s)
+        }
+        self
+    }
+    
+    pub fn check_collision(&self, val: &str) -> Option<String> {
+        IdMap::with( | idmap | {
+            if let Some(stored) = idmap.id_to_string.get(self) {
+                if stored != val {
+                    return Some(stored.clone())
+                }
+            }
+            else {
+                idmap.id_to_string.insert(self.clone(), val.to_string());
+            }
+            return None
+        })
+    }
+    
+    fn as_string<F, R>(&self, f: F) -> R
+    where F: FnOnce(Option<&String>) -> R
+    {
+        IdMap::with( | idmap | {
+            return f(idmap.id_to_string.get(self))
+        })
+    }
+}
+
+impl Ord for Id {
+    fn cmp(&self, other: &Id) -> Ordering {
+        IdMap::with( | idmap | {
+            if let Some(id1) = idmap.id_to_string.get(self){
+                if let Some(id2) = idmap.id_to_string.get(other){
+                    return id1.cmp(id2)
+                }
+            }
+            return Ordering::Equal
+        })
+    }
+}
+
+impl PartialOrd for Id {
+    fn partial_cmp(&self, other: &Id) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// IdPack uses the high 3 bits to signal type
+// 0?? = Single Id    0x8 == 0
+// 0 = Empty
+// 101 = NodePtr   0xA
+// 110 = Multi     0xC
+// 111 = Number    0xE
+
+impl IdPack {
+
+    pub fn unpack(&self) -> IdUnpack {
         if self.0 & 0x8000_0000_0000_0000 != 0 {
             match self.0 & 0xE000_0000_0000_0000 {
-                0xA000_0000_0000_0000 => IdType::NodePtr {
-                    file_id: LiveFileId(((self.0 >> 32) & 0xffff) as u16),
-                    ptr: LiveNodePtr {
+                0xA000_0000_0000_0000 => IdUnpack::FullNodePtr(FullNodePtr{
+                    file_id: FileId(((self.0 >> 32) & 0xffff) as u16),
+                    local_ptr: LocalNodePtr {
                         level: ((self.0 >> 48) & 0x1fff) as usize,
                         index: (self.0 & 0xffff_ffff)as usize
                     }
-                },
-                0xC000_0000_0000_0000 => IdType::Multi {
+                }),
+                0xC000_0000_0000_0000 => IdUnpack::Multi {
                     index: (self.0 & 0xffff_ffff) as usize,
                     count: ((self.0 & 0x1fff_ffff_ffff_ffff) >> 32) as usize,
                 },
-                0xE000_0000_0000_0000 => IdType::Number(self.0 & 0x1fff_ffff_ffff_ffff),
-                _ => IdType::Empty
+                0xE000_0000_0000_0000 => IdUnpack::Number(self.0 & 0x1fff_ffff_ffff_ffff),
+                _ => IdUnpack::Empty
             }
         }
         else {
-            IdType::Single(self.0 & 0x7fff_ffff_ffff_ffff)
+            if self.0 == 0{
+                IdUnpack::Empty
+            }
+            else{
+                IdUnpack::Single(Id(self.0 & 0x7fff_ffff_ffff_ffff))
+            }
         }
     }
     
-    pub fn multi(index: usize, len: usize) -> Id {
-        Id(((((len as u64) << 32) | index as u64) & 0x1fff_ffff_ffff_ffff) | 0xC000_0000_0000_0000)
+    pub fn multi(index: usize, len: usize) -> Self {
+        Self(((((len as u64) << 32) | index as u64) & 0x1fff_ffff_ffff_ffff) | 0xC000_0000_0000_0000)
     }
     
-    pub fn single(val: u64) -> Id {
-        Id(val & 0x7fff_ffff_ffff_ffff)
+    pub fn single(id: Id) -> Self {
+        Self(id.0)
     }
     
-    pub fn number(val: u64) -> Id {
-        Id(0xE000_0000_0000_0000 | (val & 0x1fff_ffff_ffff_ffff))
+    pub fn number(val: u64) -> Self {
+        Self(0xE000_0000_0000_0000 | (val & 0x1fff_ffff_ffff_ffff))
     }
     
-    pub fn empty() -> Id {
-        Id(0x8000_0000_0000_0000)
+    pub fn empty() -> Self {
+        Self(0x0)
     }
     
-    pub fn node_ptr(file_id: LiveFileId, ptr: LiveNodePtr)->Id{
-        Id(
+    pub fn node_ptr(file_id: FileId, ptr: LocalNodePtr)->Self{
+        Self(
             0xA000_0000_0000_0000 |
             (ptr.index as u64) |
             ((file_id.0 as u64) << 32) |
@@ -123,7 +182,7 @@ impl Id {
     }
     
     pub fn is_empty(&self) -> bool {
-        self.0 & 0xE000_0000_0000_0000 == 0x8000_0000_0000_0000
+        self.0 == 0
     }
     
     pub fn is_node_ptr(&self) -> bool {
@@ -158,41 +217,9 @@ impl Id {
         }
         self.0
     }
-    
-    pub fn panic_collision(self, val: &str) -> Id {
-        if let Some(s) = self.check_collision(val) {
-            panic!("Collision {} {}", val, s)
-        }
-        self
-    }
-    
-    pub fn check_collision(&self, val: &str) -> Option<String> {
-        IdMap::with( | idmap | {
-            if self.is_single() {
-                if let Some(stored) = idmap.id_to_string.get(self) {
-                    if stored != val {
-                        return Some(stored.clone())
-                    }
-                }
-                else {
-                    idmap.id_to_string.insert(self.clone(), val.to_string());
-                }
-            }
-            return None;
-        })
-    }
-    
-    fn as_string<F, R>(&self, f: F) -> R
-    where F: FnOnce(Option<&String>) -> R
-    {
-        IdMap::with( | idmap | {
-            if self.is_single() {
-                return f(idmap.id_to_string.get(self))
-            }
-            return f(None);
-        })
-    }
+
 }
+
 
 impl fmt::Debug for Id {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -202,12 +229,31 @@ impl fmt::Debug for Id {
 
 impl fmt::Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self.to_type() {
-            IdType::Multi {index, count} => {
+        self.as_string( | string | {
+            if let Some(id) = string {
+                write!(f, "{}", id)
+            }
+            else {
+                write!(f, "IdNotFound {:x}", self.0)
+            }
+        })
+    }
+}
+
+impl fmt::Debug for IdPack {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl fmt::Display for IdPack {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.unpack() {
+            IdUnpack::Multi {index, count} => {
                 write!(f, "MultiId {} {}", index, count)
             },
-            IdType::Single(_) => {
-                self.as_string( | string | {
+            IdUnpack::Single(single) => {
+                single.as_string( | string | {
                     if let Some(id) = string {
                         write!(f, "{}", id)
                     }
@@ -216,14 +262,14 @@ impl fmt::Display for Id {
                     }
                 })
             },
-            IdType::Number(value) => {
+            IdUnpack::Number(value) => {
                 write!(f, "{}", value)
             },
-            IdType::Empty => {
+            IdUnpack::Empty => {
                 write!(f, "IdEmpty")
             }
-            IdType::NodePtr{file_id, ptr}=>{
-                write!(f, "NodePtr{{file:{}, level:{}, index:{}}}", file_id.0, ptr.level, ptr.index)
+            IdUnpack::FullNodePtr(full_ptr)=>{
+                write!(f, "NodePtr{{file:{}, level:{}, index:{}}}", full_ptr.file_id.0, full_ptr.local_ptr.level, full_ptr.local_ptr.index)
             }
         }
         
@@ -270,22 +316,22 @@ impl IdMap {
 pub struct IdFmt<'a> {
     multi_ids: &'a Vec<Id>,
     is_dot: bool,
-    id: Id
+    id_pack: IdPack
 }
 
 impl <'a> IdFmt<'a> {
-    pub fn dot(multi_ids: &'a Vec<Id>, id: Id) -> Self {
-        Self {multi_ids, is_dot: true, id}
+    pub fn dot(multi_ids: &'a Vec<Id>, id_pack: IdPack) -> Self {
+        Self {multi_ids, is_dot: true, id_pack}
     }
-    pub fn col(multi_ids: &'a Vec<Id>, id: Id) -> Self {
-        Self {multi_ids, is_dot: false, id}
+    pub fn col(multi_ids: &'a Vec<Id>, id_pack: IdPack) -> Self {
+        Self {multi_ids, is_dot: false, id_pack}
     }
 }
 
 impl <'a> fmt::Display for IdFmt<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self.id.to_type() {
-            IdType::Multi {index, count} => {
+        match self.id_pack.unpack() {
+            IdUnpack::Multi {index, count} => {
                 for i in 0..count {
                     let _ = write!(f, "{}", self.multi_ids[(i + index) as usize]);
                     if i < count - 1 {
@@ -300,7 +346,7 @@ impl <'a> fmt::Display for IdFmt<'a> {
                 fmt::Result::Ok(())
             },
             _ => {
-                write!(f, "{}", self.id)
+                write!(f, "{}", self.id_pack)
             },
         }
     }

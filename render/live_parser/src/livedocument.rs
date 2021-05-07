@@ -1,6 +1,6 @@
 #![allow(unused_variables)]
 use makepad_live_derive::*;
-use crate::id::{Id, IdType, IdFmt};
+use crate::id::{Id, IdPack, IdUnpack, IdFmt};
 use std::fmt;
 use crate::span::Span;
 use crate::util::PrettyPrintedF64;
@@ -8,8 +8,9 @@ use crate::token::{TokenWithSpan, TokenId};
 use crate::liveerror::LiveError;
 use crate::livenode::{LiveNode, LiveValue};
 use crate::liveregistry::CrateModule;
-use crate::id::LiveNodePtr;
+use crate::id::LocalNodePtr;
 
+#[derive(Debug)]
 pub struct LiveDocument {
     pub recompile: bool,
     pub nodes: Vec<Vec<LiveNode >>,
@@ -32,13 +33,13 @@ impl fmt::Display for LiveScopeTarget {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Debug, Clone)]
 pub enum LiveScopeTarget {
-    Local {node_ptr: LiveNodePtr},
-    Use {crate_module: CrateModule, node_ptr: LiveNodePtr}
+    Local {node_ptr: LocalNodePtr},
+    Use {crate_module: CrateModule, node_ptr: LocalNodePtr}
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Debug, Clone)]
 pub struct LiveScopeItem {
     pub id: Id,
     pub target: LiveScopeTarget
@@ -83,7 +84,7 @@ impl LiveDocument {
         self.nodes[level].push(node);
     }
     
-    pub fn scan_for_multi(&self, ids: &[Id]) -> Option<LiveNodePtr> {
+    pub fn scan_for_multi(&self, ids: &[Id]) -> Option<LocalNodePtr> {
         let mut node_start = 0 as usize;
         let mut node_count = self.nodes[0].len();
         let mut level = 0;
@@ -92,10 +93,10 @@ impl LiveDocument {
             let mut found = false;
             for j in 0..node_count {
                 let node = &self.nodes[level][j + node_start];
-                if node.id == id {
+                if node.id_pack == IdPack::single(id) {
                     // we found the node.
                     if i == ids.len() - 1 { // last item
-                        return Some(LiveNodePtr {
+                        return Some(LocalNodePtr {
                             level: level,
                             index: j + node_start
                         });
@@ -126,7 +127,7 @@ impl LiveDocument {
     }
     
     
-    pub fn scan_for_multi_for_expand(&self, level: usize, node_start: usize, node_count: usize, id_start: usize, id_count: usize, multi_ids: &Vec<Id>) -> Result<LiveNodePtr, String> {
+    pub fn scan_for_multi_for_expand(&self, level: usize, node_start: usize, node_count: usize, id_start: usize, id_count: usize, multi_ids: &Vec<Id>) -> Result<LocalNodePtr, String> {
         let mut node_start = node_start as usize;
         let mut node_count = node_count as usize;
         let mut level = level;
@@ -135,10 +136,10 @@ impl LiveDocument {
             let mut found = false;
             for j in 0..node_count {
                 let node = &self.nodes[level][j + node_start];
-                if node.id == id {
+                if node.id_pack == IdPack::single(id) {
                     // we found the node.
                     if i == id_count - 1 { // last item
-                        return Ok(LiveNodePtr {
+                        return Ok(LocalNodePtr {
                             level: level,
                             index: j + node_start
                         });
@@ -150,7 +151,7 @@ impl LiveDocument {
                                 node_start = ns as usize;
                                 node_count = nc as usize;
                             },
-                            _ => return Err(format!("Cannont find property {} is not an object path", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count))))
+                            _ => return Err(format!("Cannont find property {} is not an object path", IdFmt::dot(&multi_ids, IdPack::multi(id_start, id_count))))
                             //LiveError {
                             //   span:self.token_id_to_span(token_id),
                             //   message: format!("Cannont find property {} is not an object path", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count)))
@@ -162,10 +163,10 @@ impl LiveDocument {
                 }
             }
             if !found {
-                return Err(format!("Cannot find class {}", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count))))
+                return Err(format!("Cannot find class {}", IdFmt::dot(&multi_ids, IdPack::multi(id_start, id_count))))
             }
         }
-        return Err(format!("Cannot find class {}", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count))))
+        return Err(format!("Cannot find class {}", IdFmt::dot(&multi_ids, IdPack::multi(id_start, id_count))))
     }
     
     pub fn write_or_add_node(
@@ -177,8 +178,8 @@ impl LiveDocument {
         in_node: &LiveNode
     ) -> Result<Option<usize>, LiveError> {
         // I really need to learn to learn functional programming. This is absurd
-        match in_node.id.to_type() {
-            IdType::Multi {index: id_start, count: id_count} => {
+        match in_node.id_pack.unpack() {
+            IdUnpack::Multi {index: id_start, count: id_count} => {
                 let mut node_start = node_start;
                 let mut node_count = node_count;
                 let mut level = level;
@@ -188,7 +189,7 @@ impl LiveDocument {
                     let mut found = false;
                     for j in 0..node_count {
                         let node = &mut self.nodes[level][j + node_start];
-                        if node.id == id {
+                        if node.id_pack == IdPack::single(id) {
                             // we found the node.
                             if i == id_count - 1 { // last item
                                 // ok now we need to replace this node
@@ -200,7 +201,7 @@ impl LiveDocument {
                                     // we cant replace a VarDef with something else
                                     return Err(LiveError {
                                         span: in_doc.token_id_to_span(in_node.token_id),
-                                        message: format!("Cannot inherit with different node type {}", IdFmt::dot(&in_doc.multi_ids, in_node.id))
+                                        message: format!("Cannot inherit with different node type {}", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
                                     })
                                 }
                                 
@@ -218,7 +219,7 @@ impl LiveDocument {
                                     },
                                     _ => return Err(LiveError {
                                         span: in_doc.token_id_to_span(in_node.token_id),
-                                        message: format!("Setting property {} is not an object path", IdFmt::dot(&in_doc.multi_ids, in_node.id))
+                                        message: format!("Setting property {} is not an object path", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
                                     })
                                 }
                                 found = true;
@@ -230,7 +231,7 @@ impl LiveDocument {
                         if i != id_count - 1 || last_class.is_none() { // not last item, so object doesnt exist
                             return Err(LiveError {
                                 span: in_doc.token_id_to_span(in_node.token_id),
-                                message: format!("Setting property {} is not an object path", IdFmt::dot(&in_doc.multi_ids, in_node.id))
+                                message: format!("Setting property {} is not an object path", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
                             })
                         }
                         let last_class = last_class.unwrap();
@@ -250,7 +251,7 @@ impl LiveDocument {
                             else {
                                 return Err(LiveError {
                                     span: in_doc.token_id_to_span(in_node.token_id),
-                                    message: format!("Unexpected problem 1 in overwrite_or_add_node with {}", IdFmt::dot(&in_doc.multi_ids, in_node.id))
+                                    message: format!("Unexpected problem 1 in overwrite_or_add_node with {}", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
                                 })
                             };
                             let nodes = &mut self.nodes[level];
@@ -264,7 +265,7 @@ impl LiveDocument {
                         // push the final node
                         self.nodes[level].push(LiveNode {
                             token_id: in_node.token_id,
-                            id: in_doc.multi_ids[id_start + id_count - 1],
+                            id_pack: IdPack::single(in_doc.multi_ids[id_start + id_count - 1]),
                             value: in_node.value
                         });
                         return Ok(None)
@@ -272,13 +273,13 @@ impl LiveDocument {
                 }
                 return Err(LiveError {
                     span: in_doc.token_id_to_span(in_node.token_id),
-                    message: format!("Unexpected problem 2 in overwrite_or_add_node with {}", IdFmt::dot(&in_doc.multi_ids, in_node.id))
+                    message: format!("Unexpected problem 2 in overwrite_or_add_node with {}", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
                 })
             }
-            IdType::Single(id) => {
+            IdUnpack::Single(id) => {
                 let nodes = &mut self.nodes[level];
                 for i in node_start..nodes.len() {
-                    if nodes[i].id == in_node.id { // overwrite and exit
+                    if nodes[i].id_pack == in_node.id_pack { // overwrite and exit
                         // lets error if the overwrite value type changed.
                         if nodes[i].value.get_type_nr() != in_node.value.get_type_nr(){
                             if nodes[i].value.is_var_def(){ // we can replace a vardef with something else
@@ -286,7 +287,7 @@ impl LiveDocument {
                             }
                             return Err(LiveError {
                                 span: in_doc.token_id_to_span(in_node.token_id),
-                                message: format!("Cannot inherit with different node type {}", IdFmt::dot(&in_doc.multi_ids, in_node.id))
+                                message: format!("Cannot inherit with different node type {}", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
                             })
                         }
                         nodes[i] = *in_node;
@@ -297,7 +298,7 @@ impl LiveDocument {
                 nodes.push(*in_node);
                 return Ok(Some(index))
             }
-            IdType::Empty => {
+            IdUnpack::Empty => {
                 let nodes = &mut self.nodes[level];
                 let index = nodes.len();
                 nodes.push(*in_node);
@@ -306,28 +307,28 @@ impl LiveDocument {
             _ => {
                 return Err(LiveError {
                     span: in_doc.token_id_to_span(in_node.token_id),
-                    message: format!("Unexpected id type {}", IdFmt::dot(&in_doc.multi_ids, in_node.id))
+                    message: format!("Unexpected id type {}", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
                 })
             }
         }
     }
     
-    pub fn create_multi_id(&mut self, ids: &[Id]) -> Id {
+    pub fn create_multi_id(&mut self, ids: &[Id]) -> IdPack {
         let multi_index = self.multi_ids.len();
         for id in ids {
             self.multi_ids.push(*id);
         }
-        Id::multi(multi_index, ids.len())
+        IdPack::multi(multi_index, ids.len())
     }
     
-    pub fn clone_multi_id(&mut self, id:Id , other_ids:&[Id]) -> Id {
-         match id.to_type() {
-            IdType::Multi {index, count}  => {
+    pub fn clone_multi_id(&mut self, id:IdPack , other_ids:&[Id]) -> IdPack {
+         match id.unpack() {
+            IdUnpack::Multi {index, count}  => {
                 let multi_index = self.multi_ids.len();
                 for i in 0..count {
                     self.multi_ids.push(other_ids[i + index]);
                 }
-                Id::multi(multi_index, self.multi_ids.len())
+                IdPack::multi(multi_index, self.multi_ids.len())
             }
             _ => {
                 id
@@ -335,9 +336,9 @@ impl LiveDocument {
         }
     }
     
-    pub fn fetch_crate_module(&self, id: Id, outer_crate_id: Id) -> CrateModule {
-        match id.to_type() {
-            IdType::Multi {index, count} if count == 2 => {
+    pub fn fetch_crate_module(&self, id_pack: IdPack, outer_crate_id: Id) -> CrateModule {
+        match id_pack.unpack() {
+            IdUnpack::Multi {index, count} if count == 2 => {
                 let crate_id = self.multi_ids[index];
                 let crate_id = if crate_id == id!(crate) {
                     outer_crate_id
@@ -347,7 +348,7 @@ impl LiveDocument {
                 CrateModule(crate_id, self.multi_ids[index + 1])
             }
             _ => {
-                panic!("Unexpected id type {:?}", id.to_type())
+                panic!("Unexpected id type {:?}", id_pack.unpack())
             }
         }
     }
@@ -363,7 +364,7 @@ impl fmt::Display for LiveDocument {
             }
         }
         
-        fn prefix(prep_id: Id, ld: &LiveDocument, f: &mut fmt::Formatter) {
+        fn prefix(prep_id: IdPack, ld: &LiveDocument, f: &mut fmt::Formatter) {
             if !prep_id.is_empty() {
                 let _ = write!(f, "{}:", IdFmt::dot(&ld.multi_ids, prep_id));
             }
@@ -375,7 +376,7 @@ impl fmt::Display for LiveDocument {
             //let _ = write!(f, "/*{},{} {}*/", row+1, col, node.span.len());
             match node.value {
                 LiveValue::String {string_start, string_count} => {
-                    prefix(node.id, ld, f);
+                    prefix(node.id_pack, ld, f);
                     let _ = write!(f, "\"");
                     for i in 0..string_count {
                         let _ = write!(f, "{}", ld.strings[(i + string_start) as usize]);
@@ -383,35 +384,35 @@ impl fmt::Display for LiveDocument {
                     let _ = write!(f, "\"");
                 },
                 LiveValue::Bool(val) => {
-                    prefix(node.id, ld, f);
+                    prefix(node.id_pack, ld, f);
                     let _ = write!(f, "{}", val);
                 },
                 LiveValue::Int(val) => {
-                    prefix(node.id, ld, f);
+                    prefix(node.id_pack, ld, f);
                     let _ = write!(f, "{}", val);
                 }
                 LiveValue::Float(val) => {
-                    prefix(node.id, ld, f);
+                    prefix(node.id_pack, ld, f);
                     let _ = write!(f, "{}", PrettyPrintedF64(val));
                 },
                 LiveValue::Color(val) => {
-                    prefix(node.id, ld, f);
+                    prefix(node.id_pack, ld, f);
                     let _ = write!(f, "{:x}", val);
                 },
                 LiveValue::Vec2(val) => {
-                    prefix(node.id, ld, f);
+                    prefix(node.id_pack, ld, f);
                     let _ = write!(f, "{}", val);
                 },
                 LiveValue::Vec3(val) => {
-                    prefix(node.id, ld, f);
+                    prefix(node.id_pack, ld, f);
                     let _ = write!(f, "{}", val);
                 },
-                LiveValue::Id(val) => {
-                    prefix(node.id, ld, f);
+                LiveValue::IdPack(val) => {
+                    prefix(node.id_pack, ld, f);
                     let _ = write!(f, "{}", IdFmt::col(&ld.multi_ids, val));
                 },
                 LiveValue::Call {target, node_start, node_count} => {
-                    prefix(node.id, ld, f);
+                    prefix(node.id_pack, ld, f);
                     let _ = write!(f, "{}(", IdFmt::dot(&ld.multi_ids, target));
                     for i in 0..node_count {
                         if i>0 {
@@ -422,7 +423,7 @@ impl fmt::Display for LiveDocument {
                     let _ = write!(f, ")");
                 },
                 LiveValue::Array {node_start, node_count} => {
-                    prefix(node.id, ld, f);
+                    prefix(node.id_pack, ld, f);
                     let _ = write!(f, "[");
                     for i in 0..node_count {
                         if i>0 {
@@ -433,7 +434,7 @@ impl fmt::Display for LiveDocument {
                     let _ = write!(f, "]");
                 },
                 LiveValue::Object {node_start, node_count} => {
-                    prefix(node.id, ld, f);
+                    prefix(node.id_pack, ld, f);
                     let _ = write!(f, "{{");
                     for i in 0..(node_count >> 1) {
                         if i>0 {
@@ -446,7 +447,7 @@ impl fmt::Display for LiveDocument {
                     let _ = write!(f, "}}");
                 },
                 LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
-                    let _ = write!(f, "fn {}", IdFmt::col(&ld.multi_ids, node.id));
+                    let _ = write!(f, "fn {}", IdFmt::col(&ld.multi_ids, node.id_pack));
                     for i in 0..token_count {
                         let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
                     }
@@ -477,10 +478,10 @@ impl fmt::Display for LiveDocument {
                     let _ = write!(f, "\"");
                 },
                 LiveValue::Use {crate_module} => {
-                    let _ = write!(f, "use {}::{}", IdFmt::col(&ld.multi_ids, node.id), IdFmt::col(&ld.multi_ids, crate_module));
+                    let _ = write!(f, "use {}::{}", IdFmt::col(&ld.multi_ids, node.id_pack), IdFmt::col(&ld.multi_ids, crate_module));
                 }
                 LiveValue::Class {class, node_start, node_count} => {
-                    prefix(node.id, ld, f);
+                    prefix(node.id_pack, ld, f);
                     let _ = write!(f, "{} {{", IdFmt::col(&ld.multi_ids, class));
                     // lets do a pass to check if its all simple values
                     let mut is_simple = true;
