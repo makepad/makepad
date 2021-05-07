@@ -3,7 +3,7 @@ use makepad_live_parser::id::Id;
 use makepad_live_parser::liveregistry::LiveRegistry;
 use makepad_live_parser::liveregistry::LiveFactoryTest;
 use makepad_live_parser::liveregistry::LiveFactoriesTest;
-use makepad_live_parser::id::LiveFileId;
+use makepad_live_parser::id::FileId;
 use std::any::Any;
 
 #[test]
@@ -171,7 +171,7 @@ fn expand() {
     }
     
     for (index, file) in lr.expanded.iter().enumerate() {
-        let crate_module = lr.find_crate_module_by_file_id(LiveFileId::index(index)).unwrap();
+        let crate_module = lr.find_crate_module_by_file_id(FileId::index(index)).unwrap();
         let out = format!("{}", file);
         for (name_id, _, check) in &sources {
             if crate_module.1 == *name_id {
@@ -186,8 +186,8 @@ fn expand() {
     let mut err_cmp = String::new();
     for msg in errors {
         err_cmp.push_str(&format!("{}\n", msg.to_live_file_error(
-            &format!("{}", sources[msg.span.live_file_id().to_index()].0),
-            sources[msg.span.live_file_id().to_index()].1
+            &format!("{}", sources[msg.span.file_id().to_index()].0),
+            sources[msg.span.file_id().to_index()].1
         )));
     }
     

@@ -31,7 +31,7 @@ impl LiveFactoryTest for MyShaderFactory {
 }
 
 fn main() {
-    println!("{}", std::mem::size_of::<LiveNode>());
+    //println!("{}", std::mem::size_of::<LiveNode>());
     // ok lets do a deserialize
     let mut lr = LiveFactoriesTest::default();
     let source = r#"
@@ -52,14 +52,18 @@ fn main() {
             instance y: float
             uniform z: float
             varying w: float
-
-            myStruct:Struct{
+            
+            MyStruct:Struct{
                 field x:float,
                 field y:float
                 fn bla(self){}
             }
             
             fn pixel()->vec4{
+                // this can resolve to a LivePtr to find the fn
+                // however it also needs to annotate a type 
+                // 
+                let x = Df::viewport()
                 return #f00
             }
             
@@ -76,7 +80,7 @@ fn main() {
     let mut errors = Vec::new();
     lr.registry.expand_all_documents(&mut errors);
     
-    println!("{}", lr.registry.expanded[0]);
+    //println!("{}", lr.registry.expanded[0]);
     
     for msg in errors {
         println!("{}\n", msg.to_live_file_error("", source));
