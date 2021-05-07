@@ -23,9 +23,9 @@ pub fn live_derive_impl(input: TokenStream) -> TokenStream {
             tb.add("let cn = & doc . nodes [ level ] [ index ] ;");
             
             // forward if just an ID
-            tb.add("if let makepad_live_parser :: LiveValue :: Id ( id ) = cn . value {");
-            tb.add("if let makepad_live_parser :: IdType :: NodePtr { file_id , ptr } = id . to_type ( ) {");
-            tb.add("return makepad_live_parser :: DeLive :: de_live ( lr , file_id . to_index ( ) , ptr . level , ptr . index ) ;");
+            tb.add("if let makepad_live_parser :: LiveValue :: IdPack ( id ) = cn . value {");
+            tb.add("if let makepad_live_parser :: IdUnpack :: FullNodePtr ( p ) = id . unpack ( ) {");
+            tb.add("return makepad_live_parser :: DeLive :: de_live ( lr , p . file_id . to_index ( ) , p . local_ptr . level , p . local_ptr . index ) ;");
             tb.add("}");
             tb.add("}");
             
@@ -33,7 +33,7 @@ pub fn live_derive_impl(input: TokenStream) -> TokenStream {
                 
                 tb.add("if let makepad_live_parser :: LiveValue :: Call { node_start , node_count , .. } = cn . value {");
                 tb.add("if node_count < ").unsuf_usize(types.len()).add("{");
-                tb.add("return Err ( makepad_live_parser :: DeLiveErr :: arg_count ( cn . id , node_count as usize ,");
+                tb.add("return Err ( makepad_live_parser :: DeLiveErr :: arg_count ( cn . id_pack , node_count as usize ,");
                 tb.unsuf_usize(types.len()).add(", file , level , index ) ) ;");
                 tb.add("}");
                 tb.add("let ln = level + 1 ;");
@@ -58,11 +58,11 @@ pub fn live_derive_impl(input: TokenStream) -> TokenStream {
                 tb.add("for i in 0 .. ( node_count as usize ) {");
                 tb.add("let si = i + ( node_start as usize ) ;");
                 tb.add("let n = & doc . nodes [ ln ] [ si ] ;");
-                tb.add("match n . id {");
+                tb.add("match n . id_pack {");
                 for field in &fields {
                     // lets id it
                     let id = Id::from_str(&field.name);
-                    tb.add("Id (").suf_u64(id.0).add(") =>");
+                    tb.add("IdPack (").suf_u64(id.0).add(") =>");
                     tb.ident(&format!("_{}", field.name));
                     tb.add("= Some ( makepad_live_parser :: DeLive :: de_live ( lr , file , ln , si ) ? ) ,");
                 }
@@ -78,7 +78,7 @@ pub fn live_derive_impl(input: TokenStream) -> TokenStream {
                     }
                     else {
                         tb.add("if let Some ( t ) =").ident(&format!("_{}", field.name));
-                        tb.add("{ t } else { return Err ( makepad_live_parser :: DeLiveErr :: miss_prop ( cn . id ,");
+                        tb.add("{ t } else { return Err ( makepad_live_parser :: DeLiveErr :: miss_prop ( cn . id_pack ,");
                         tb.string(&field.name).add(", file , level , index ) ) } ,");
                     }
                 }
@@ -138,15 +138,15 @@ pub fn live_derive_impl(input: TokenStream) -> TokenStream {
             tb.add("match cn . value {");
             
             if bare.len()>0 {
-                tb.add("makepad_live_parser :: LiveValue :: Id ( id ) => {");
+                tb.add("makepad_live_parser :: LiveValue :: IdPack ( id ) => {");
                 tb.add("let orig_id = lr . find_enum_origin ( id , id ) ;");
                 tb.add("match orig_id {");
                 for variant in bare {
                     let id = Id::from_str(&variant);
-                    tb.add("Id (").suf_u64(id.0).add(") =>");
+                    tb.add("IdPack (").suf_u64(id.0).add(") =>");
                     tb.add("return Ok ( Self ::").ident(&variant).add(") ,");
                 }
-                tb.add("_ => return Err ( makepad_live_parser :: DeLiveErr :: enum_notfound ( orig_id , cn . id , file , level , index ) )");
+                tb.add("_ => return Err ( makepad_live_parser :: DeLiveErr :: enum_notfound ( orig_id , cn . id_pack , file , level , index ) )");
                 tb.add("}");
                 tb.add("}");
             }
@@ -157,11 +157,11 @@ pub fn live_derive_impl(input: TokenStream) -> TokenStream {
                 tb.add("match orig_id {");
                 for (variant, types) in unnamed {
                     let id = Id::from_str(&variant);
-                    tb.add("Id (").suf_u64(id.0).add(") => {");
+                    tb.add("IdPack (").suf_u64(id.0).add(") => {");
                     // ok now we need to parse the arguments
                     
                     tb.add("if node_count < ").unsuf_usize(types.len()).add("{");
-                    tb.add("return Err ( makepad_live_parser :: DeLiveErr :: arg_count ( cn . id , node_count as usize ,");
+                    tb.add("return Err ( makepad_live_parser :: DeLiveErr :: arg_count ( cn . id_pack , node_count as usize ,");
                     tb.unsuf_usize(types.len()).add(", file , level , index ) ) ;");
                     tb.add("}");
                     tb.add("let ln = level + 1 ;");
@@ -172,7 +172,7 @@ pub fn live_derive_impl(input: TokenStream) -> TokenStream {
                     }
                     tb.add(") ) } ,");
                 }
-                tb.add("_ => return Err ( makepad_live_parser :: DeLiveErr :: enum_notfound ( orig_id , cn . id , file , level , index ) )");
+                tb.add("_ => return Err ( makepad_live_parser :: DeLiveErr :: enum_notfound ( orig_id , cn . id_pack , file , level , index ) )");
                 tb.add("}");
                 tb.add("}");
             }
@@ -183,7 +183,7 @@ pub fn live_derive_impl(input: TokenStream) -> TokenStream {
                 tb.add("match orig_id {");
                 for (variant, fields) in named {
                     let id = Id::from_str(&variant);
-                    tb.add("Id (").suf_u64(id.0).add(") => {");
+                    tb.add("IdPack (").suf_u64(id.0).add(") => {");
                     
                     tb.add("let ln = level + 1 ;");
                     
@@ -193,11 +193,11 @@ pub fn live_derive_impl(input: TokenStream) -> TokenStream {
                     tb.add("for i in 0 .. ( node_count as usize ) {");
                     tb.add("let si = i + ( node_start as usize ) ;");
                     tb.add("let n = & doc . nodes [ ln ] [ si ] ;");
-                    tb.add("match n . id {");
+                    tb.add("match n . id_pack {");
                     for field in &fields {
                         // lets id it
                         let id = Id::from_str(&field.name);
-                        tb.add("Id (").suf_u64(id.0).add(") =>");
+                        tb.add("IdPack (").suf_u64(id.0).add(") =>");
                         tb.ident(&format!("_{}", field.name));
                         tb.add("= Some ( makepad_live_parser :: DeLive :: de_live ( lr , file , ln , si ) ? ) ,");
                     }
@@ -213,13 +213,13 @@ pub fn live_derive_impl(input: TokenStream) -> TokenStream {
                         }
                         else {
                             tb.add("if let Some ( t ) =").ident(&format!("_{}", field.name));
-                            tb.add("{ t } else { return Err ( makepad_live_parser :: DeLiveErr :: miss_prop ( cn . id ,");
+                            tb.add("{ t } else { return Err ( makepad_live_parser :: DeLiveErr :: miss_prop ( cn . id_pack ,");
                             tb.string(&field.name).add(", file , level , index ) ) } ,");
                         }
                     }
                     tb.add("} ) } ,");
                 }
-                tb.add("_ => return Err ( makepad_live_parser :: DeLiveErr :: enum_notfound ( orig_id , cn . id , file , level , index ) )");
+                tb.add("_ => return Err ( makepad_live_parser :: DeLiveErr :: enum_notfound ( orig_id , cn . id_pack , file , level , index ) )");
                 tb.add("}");
                 tb.add("}");
             }
@@ -227,7 +227,7 @@ pub fn live_derive_impl(input: TokenStream) -> TokenStream {
             tb.add("_ => ( )");
             tb.add("}");
             
-            tb.add("return Err ( makepad_live_parser :: DeLiveErr :: enum_notfound ( Id :: empty ( ) , cn . id , file , level , index ) )");
+            tb.add("return Err ( makepad_live_parser :: DeLiveErr :: enum_notfound ( IdPack :: empty ( ) , cn . id_pack , file , level , index ) )");
             tb.add("} }");
             return tb.end();
         }

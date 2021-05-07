@@ -1,0 +1,8 @@
+[package]
+name = "makepad-shader-compiler"
+version = "0.1.0"
+authors = ["Eddy Bruel <ejpbruel@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+makepad-live-parser = { path = "../live_parser", version = "0.1" }
