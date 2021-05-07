@@ -1,20 +1,19 @@
-#![allow(unused_variables)]
-#![allow(unused_imports)]
 
 use makepad_live_derive::*;
 use crate::token::{Token, TokenWithSpan, TokenId};
 use std::iter::Cloned;
 use std::slice::Iter;
-use crate::id::LiveFileId;
+use crate::id::FileId;
 use crate::span::Span;
 use crate::liveerror::LiveError;
 use crate::id::Id;
+use crate::id::IdPack;
 use crate::livedocument::LiveDocument;
 use crate::livenode::{LiveNode, LiveValue};
 
 pub struct LiveParser<'a> {
     pub token_index: usize,
-    pub live_file_id: LiveFileId,
+    pub file_id: FileId,
     pub tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
     pub token_with_span: TokenWithSpan,
     pub end: usize,
@@ -25,7 +24,7 @@ impl<'a> LiveParser<'a> {
         let mut tokens_with_span = tokens.iter().cloned();
         let token_with_span = tokens_with_span.next().unwrap();
         LiveParser {
-            live_file_id: LiveFileId::default(),
+            file_id: FileId::default(),
             tokens_with_span,
             token_with_span,
             token_index: 0,
@@ -52,7 +51,6 @@ impl<'a> LiveParser<'a> {
     
     fn skip_token(&mut self) {
         self.end = self.token_with_span.span.end() as usize;
-        //self.token_clone.push(self.token_with_span);
         self.token_with_span = self.tokens_with_span.next().unwrap();
         self.token_index += 1;
     }
@@ -63,16 +61,7 @@ impl<'a> LiveParser<'a> {
             message,
         }
     }
-    
-    fn expect_ident(&mut self) -> Result<Id, LiveError> {
-        match self.peek_token() {
-            Token::Ident(ident) => {
-                self.skip_token();
-                Ok(ident)
-            }
-            token => Err(self.error(format!("expected ident, unexpected token `{}`", token))),
-        }
-    }
+
     
     fn end(&self) -> usize {
         self.end
@@ -82,7 +71,7 @@ impl<'a> LiveParser<'a> {
         self.token_with_span.span.end()
     }
     
-    fn accept_ident(&mut self, token: Token) -> Option<Id> {
+    fn accept_ident(&mut self) -> Option<Id> {
         if let Token::Ident(id) = self.peek_token() {
             self.skip_token();
             Some(id)
@@ -99,6 +88,16 @@ impl<'a> LiveParser<'a> {
         self.skip_token();
         true
     }
+        
+    fn expect_ident(&mut self) -> Result<Id, LiveError> {
+        match self.peek_token() {
+            Token::Ident(ident) => {
+                self.skip_token();
+                Ok(ident)
+            }
+            token => Err(self.error(format!("expected ident, unexpected token `{}`", token))),
+        }
+    }
     
     fn expect_token(&mut self, expected: Token) -> Result<(), LiveError> {
         let actual = self.peek_token();
@@ -111,17 +110,17 @@ impl<'a> LiveParser<'a> {
     
     fn begin_span(&self) -> SpanTracker {
         SpanTracker {
-            live_file_id: self.token_with_span.span.live_file_id(),
+            file_id: self.token_with_span.span.file_id(),
             start: self.token_with_span.span.start(),
         }
     }
     
-    fn expect_class_id_wildcard(&mut self, ld: &mut LiveDocument) -> Result<Id, LiveError> {
+    fn expect_class_id_wildcard(&mut self, ld: &mut LiveDocument) -> Result<IdPack, LiveError> {
         
         let base = match self.peek_token() {
             token_punct!(*) =>{
                 self.skip_token();
-                Id::empty()
+                Id(0)
             }
             Token::Ident(id) => {
                 self.skip_token();
@@ -156,15 +155,15 @@ impl<'a> LiveParser<'a> {
                     }
                 }
             };
-            let id = Id::multi(multi_index, ld.multi_ids.len() - multi_index);
+            let id = IdPack::multi(multi_index, ld.multi_ids.len() - multi_index);
             Ok(id)
         }
         else {
-            Ok(base)
+            Ok(IdPack::single(base))
         }
     }
     
-    fn expect_class_id(&mut self, ld: &mut LiveDocument) -> Result<Id, LiveError> {
+    fn expect_class_id(&mut self, ld: &mut LiveDocument) -> Result<IdPack, LiveError> {
         
         let base = self.expect_ident() ?;
         
@@ -187,15 +186,14 @@ impl<'a> LiveParser<'a> {
                     }
                 }
             };
-            let id = Id::multi(multi_index, ld.multi_ids.len() - multi_index);
-            Ok(id)
+            Ok(IdPack::multi(multi_index, ld.multi_ids.len() - multi_index))
         }
         else {
-            Ok(base)
+            Ok(IdPack::single(base))
         }
     }
     
-    fn expect_prop_id(&mut self, ld: &mut LiveDocument) -> Result<Id, LiveError> {
+    fn expect_prop_id(&mut self, ld: &mut LiveDocument) -> Result<IdPack, LiveError> {
         let base = self.expect_ident() ?;
         if self.peek_token() == token_punct!(.) {
             self.skip_token();
@@ -216,11 +214,10 @@ impl<'a> LiveParser<'a> {
                     }
                 }
             };
-            let id = Id::multi(multi_index, ld.multi_ids.len() - multi_index);
-            Ok(id)
+            Ok(IdPack::multi(multi_index, ld.multi_ids.len() - multi_index))
         }
         else {
-            Ok(base)
+            Ok(IdPack::single(base))
         }
     }
     
@@ -232,11 +229,11 @@ impl<'a> LiveParser<'a> {
                 let node_end = ld.get_level_len(level);
                 return Ok((node_start as u32, (node_end - node_start) as u32))
             }
-            let span = self.begin_span();
-            self.expect_live_value(span, Id::empty(), level, ld) ?;
+            //let span = self.begin_span();
+            self.expect_live_value(IdPack::empty(), level, ld) ?;
             self.expect_token(token_punct!(:)) ?;
-            let span = self.begin_span();
-            self.expect_live_value(span, Id::empty(), level, ld) ?;
+            //let span = self.begin_span();
+            self.expect_live_value(IdPack::empty(), level, ld) ?;
             if !self.accept_token(token_punct!(,)) {
                 self.accept_token(token_punct!(;));
             }
@@ -252,8 +249,8 @@ impl<'a> LiveParser<'a> {
                 let node_end = ld.get_level_len(level);
                 return Ok((node_start as u32, (node_end - node_start) as u32))
             }
-            let span = self.begin_span();
-            self.expect_live_value(span, Id::empty(), level, ld) ?;
+            //let span = self.begin_span();
+            self.expect_live_value(IdPack::empty(), level, ld) ?;
             self.accept_token(token_punct!(,));
         }
         return Err(self.error(format!("Eof in object body")))
@@ -267,8 +264,8 @@ impl<'a> LiveParser<'a> {
                 let node_end = ld.get_level_len(level);
                 return Ok((node_start as u32, (node_end - node_start) as u16))
             }
-            let span = self.begin_span();
-            self.expect_live_value(span, Id::empty(), level, ld) ?;
+            //let span = self.begin_span();
+            self.expect_live_value(IdPack::empty(), level, ld) ?;
             self.accept_token(token_punct!(,));
         }
         return Err(self.error(format!("Eof in object body")))
@@ -276,12 +273,12 @@ impl<'a> LiveParser<'a> {
     
     fn get_token_id(&self)->TokenId{
         TokenId{
-            live_file_id:self.live_file_id,
+            file_id:self.file_id,
             token_id: self.token_index as u32
         }
     }
     
-    fn expect_live_value(&mut self, span: SpanTracker, prop_id: Id, level: usize, ld: &mut LiveDocument) -> Result<(), LiveError> {
+    fn expect_live_value(&mut self, prop_id: IdPack, level: usize, ld: &mut LiveDocument) -> Result<(), LiveError> {
         
         // now we can have an array or a class instance
         match self.peek_token() {
@@ -291,7 +288,7 @@ impl<'a> LiveParser<'a> {
                 let (node_start, node_count) = self.expect_object(level + 1, ld) ?;
                 ld.push_node(level, LiveNode {
                     token_id,
-                    id: prop_id,
+                    id_pack: prop_id,
                     value: LiveValue::Object {node_start, node_count}
                 });
             },
@@ -301,7 +298,7 @@ impl<'a> LiveParser<'a> {
                 let (node_start, node_count) = self.expect_array(level + 1, ld) ?;
                 ld.push_node(level, LiveNode {
                     token_id,
-                    id: prop_id,
+                    id_pack: prop_id,
                     value: LiveValue::Array {node_start, node_count}
                 });
             },
@@ -310,7 +307,7 @@ impl<'a> LiveParser<'a> {
                 self.skip_token();
                 ld.push_node(level, LiveNode {
                     token_id,
-                    id: prop_id,
+                    id_pack: prop_id,
                     value: LiveValue::Bool(val)
                 });
             },
@@ -319,7 +316,7 @@ impl<'a> LiveParser<'a> {
                 self.skip_token();
                 ld.push_node(level, LiveNode {
                     token_id,
-                    id: prop_id,
+                    id_pack: prop_id,
                     value: LiveValue::Int(val)
                 });
             },
@@ -328,7 +325,7 @@ impl<'a> LiveParser<'a> {
                 self.skip_token();
                 ld.push_node(level, LiveNode {
                     token_id,
-                    id: prop_id,
+                    id_pack: prop_id,
                     value: LiveValue::Float(val)
                 });
             },
@@ -337,7 +334,7 @@ impl<'a> LiveParser<'a> {
                 self.skip_token();
                 ld.push_node(level, LiveNode {
                     token_id,
-                    id: prop_id,
+                    id_pack: prop_id,
                     value: LiveValue::Color(val)
                 });
             },
@@ -346,7 +343,7 @@ impl<'a> LiveParser<'a> {
                 self.skip_token();
                 ld.push_node(level, LiveNode {
                     token_id,
-                    id: prop_id,
+                    id_pack: prop_id,
                     value: LiveValue::String {string_start: index, string_count: len}
                 });
             },
@@ -354,7 +351,7 @@ impl<'a> LiveParser<'a> {
             },
             token_ident!(vec3) => {
             },
-            Token::Ident(id) => { // we're gonna parse a class.
+            Token::Ident(_) => { // we're gonna parse a class.
                 // we also support vec2/vec3 values directly.
                 let token_id = self.get_token_id();
                 let target_id = self.expect_class_id(ld) ?;
@@ -362,7 +359,7 @@ impl<'a> LiveParser<'a> {
                     let (node_start, node_count) = self.expect_live_class(level + 1, ld) ?;
                     ld.push_node(level, LiveNode {
                         token_id,
-                        id: prop_id,
+                        id_pack: prop_id,
                         value: LiveValue::Class {class: target_id, node_start, node_count}
                     });
                 }
@@ -370,15 +367,15 @@ impl<'a> LiveParser<'a> {
                     let (node_start, node_count) = self.expect_arguments(level + 1, ld) ?;
                     ld.push_node(level, LiveNode {
                         token_id,
-                        id: prop_id,
+                        id_pack: prop_id,
                         value: LiveValue::Call {target: target_id, node_start, node_count}
                     });
                 }
                 else {
                     ld.push_node(level, LiveNode {
                         token_id,
-                        id: prop_id,
-                        value: LiveValue::Id(target_id)
+                        id_pack: prop_id,
+                        value: LiveValue::IdPack(target_id)
                     });
                 }
             },
@@ -432,15 +429,15 @@ impl<'a> LiveParser<'a> {
                     let node_end = ld.get_level_len(level);
                     return Ok((node_start as u32, (node_end - node_start) as u16))
                 }
-                Token::Ident(prop) => {
-                    let span = self.begin_span();
+                Token::Ident(_) => {
+                    //let span = self.begin_span();
                     let token_start = self.token_index as u32;
                     let prop_id = self.expect_prop_id(ld) ?;
                     
                     if let Token::Ident(_) = self.peek_token(){
                         match prop_id{
-                            id!(fn)=>{
-                                let span = self.begin_span();
+                            id_pack!(fn)=>{
+                                //let span = self.begin_span();
                                 //self.skip_token();
                                 let token_id = self.get_token_id();
                                 let prop_id = self.expect_ident() ?;
@@ -448,11 +445,11 @@ impl<'a> LiveParser<'a> {
                                 
                                 ld.push_node(level, LiveNode {
                                     token_id,
-                                    id: prop_id,
+                                    id_pack: IdPack::single(prop_id),
                                     value: LiveValue::Fn {token_start, token_count, scope_start:0, scope_count:0}
                                 });
                             }
-                            id!(use)=>{
+                            id_pack!(use)=>{
                                 let crate_name = self.expect_ident() ?;
                                 self.expect_token(token_punct!(::)) ?;
                                 let module_name = self.expect_ident() ?;
@@ -465,7 +462,7 @@ impl<'a> LiveParser<'a> {
                                 // alright we have an id thats either a * or a chain.
                                 ld.push_node(level, LiveNode{
                                     token_id,
-                                    id: id,
+                                    id_pack: id,
                                     value: LiveValue::Use{crate_module}
                                 });
                                 if !self.accept_token(token_punct!(,)) {
@@ -481,7 +478,7 @@ impl<'a> LiveParser<'a> {
                                     let token_count = (self.token_index as u32 - token_start) as u32;
                                     ld.push_node(level, LiveNode {
                                         token_id,
-                                        id: ty,
+                                        id_pack: ty,
                                         value: LiveValue::VarDef {token_start, token_count, scope_start:0, scope_count:0}
                                     });
                                 }
@@ -489,7 +486,7 @@ impl<'a> LiveParser<'a> {
                                     let token_count = (self.token_index as u32 - token_start) as u32;
                                     ld.push_node(level, LiveNode {
                                         token_id,
-                                        id: prop_id,
+                                        id_pack: prop_id,
                                         value: LiveValue::VarDef {token_start, token_count, scope_start:0, scope_count:0}
                                     });
                                 }
@@ -502,7 +499,7 @@ impl<'a> LiveParser<'a> {
                     else{
                         self.expect_token(token_punct!(:)) ?;
                         // ok now we get a value to parse
-                        self.expect_live_value(span, prop_id, level, ld) ?;
+                        self.expect_live_value(prop_id, level, ld) ?;
                         if !self.accept_token(token_punct!(,)) {
                             self.accept_token(token_punct!(;));
                         }
@@ -527,14 +524,14 @@ impl<'a> LiveParser<'a> {
 }
 
 pub struct SpanTracker {
-    pub live_file_id: LiveFileId,
+    pub file_id: FileId,
     pub start: usize,
 }
 
 impl SpanTracker {
     pub fn end(&self, parser: &mut LiveParser) -> Span {
         Span::new(
-            self.live_file_id,
+            self.file_id,
             self.start,
             parser.end()
         )
@@ -543,7 +540,7 @@ impl SpanTracker {
     pub fn error(&self, parser: &mut LiveParser, message: String) -> LiveError {
         LiveError {
             span: Span::new(
-                self.live_file_id,
+                self.file_id,
                 self.start,
                 parser.token_end(),
             ),

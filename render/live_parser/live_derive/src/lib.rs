@@ -35,6 +35,15 @@ pub fn id(item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
+pub fn id_pack(item: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new(); 
+    let id = Id::from_str(&item.to_string());
+    tb.add("IdPack (").suf_u64(id.0).add(")");
+    tb.end()
+}
+
+
+#[proc_macro]
 pub fn token_ident(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
     let id = Id::from_str(&item.to_string());

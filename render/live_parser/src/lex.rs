@@ -1,7 +1,7 @@
 use makepad_live_derive::*;
 use crate::id::{IdMap, Id};
 use crate::liveerror::LiveError;
-use crate::id::LiveFileId;
+use crate::id::FileId;
 use crate::span::Span;
 use crate::token::{Token, TokenWithSpan};
 use crate::colors::hex_bytes_to_u32;
@@ -9,7 +9,7 @@ use crate::colors::hex_bytes_to_u32;
 #[derive(Clone, Debug)]
 pub struct Lex<C> {
     chars: C,
-    live_file_id: LiveFileId,
+    file_id: FileId,
     temp_string: String,
     temp_hex: Vec<u8>,
     strings: Vec<char>,
@@ -425,7 +425,7 @@ C: Iterator<Item = char>,
     
     fn begin_span(&mut self) -> SpanTracker {
         SpanTracker {
-            live_file_id: self.live_file_id,
+            file_id: self.file_id,
             start: self.index,
         }
     }
@@ -456,7 +456,7 @@ pub struct LexResult{
     pub tokens: Vec<TokenWithSpan>
 }
 
-pub fn lex<C>(chars: C, live_file_id: LiveFileId) -> Result<LexResult, LiveError>
+pub fn lex<C>(chars: C, file_id: FileId) -> Result<LexResult, LiveError>
 where
 C: IntoIterator<Item = char>,
 {
@@ -469,7 +469,7 @@ C: IntoIterator<Item = char>,
         chars,
         ch_0,
         ch_1,
-        live_file_id,
+        file_id,
         index: 0,
         temp_hex: Vec::new(),
         temp_string: String::new(),
@@ -497,7 +497,7 @@ C: IntoIterator<Item = char>,
 }
 
 struct SpanTracker {
-    live_file_id: LiveFileId,
+    file_id: FileId,
     start: usize,
 }
 
@@ -505,7 +505,7 @@ impl SpanTracker {
     fn token<C>(&self, lex: &Lex<C>, token: Token) -> TokenWithSpan {
         TokenWithSpan {
             span: Span::new(
-                self.live_file_id,
+                self.file_id,
                 self.start,
                 lex.index,
             ),
@@ -516,7 +516,7 @@ impl SpanTracker {
     fn error<C>(&self, lex: &Lex<C>, message: String) -> LiveError {
         LiveError {
             span: Span::new(
-                self.live_file_id,
+                self.file_id,
                 self.start,
                  lex.index,
             ),

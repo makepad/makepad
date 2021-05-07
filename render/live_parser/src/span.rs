@@ -1,5 +1,5 @@
 use std::fmt;
-use crate::id::LiveFileId;
+use crate::id::FileId;
 
 #[derive(Clone, Copy, Default, Eq, Ord, PartialOrd, PartialEq)]
 pub struct Span {
@@ -7,10 +7,10 @@ pub struct Span {
 }
 
 impl Span {
-    pub fn new(live_file_id: LiveFileId, start: usize, end: usize)->Self{
+    pub fn new(file_id: FileId, start: usize, end: usize)->Self{
         Span {
             store:
-            (((live_file_id.to_index() as u64) & 0xffff) << 48) |
+            (((file_id.to_index() as u64) & 0xffff) << 48) |
             (((start as u64) & 0xffffff) << 24) |
             (((end as u64) & 0xffffff) << 0)
         }
@@ -25,20 +25,20 @@ impl Span {
         self.end() - self.start()
     }    
     
-    pub fn live_file_id(&self)->LiveFileId{
-        LiveFileId::index(((self.store>>48)&0xffff) as usize)
+    pub fn file_id(&self)->FileId{
+        FileId::index(((self.store>>48)&0xffff) as usize)
     }
 }
 
 impl fmt::Display for Span {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Span(start:{}, end:{}, live_file_id:{})", self.start(), self.end(), self.live_file_id().to_index())
+        write!(f, "Span(start:{}, end:{}, file_id:{})", self.start(), self.end(), self.file_id().to_index())
     }
 }
 
 impl fmt::Debug for Span {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Span(start:{}, end:{}, live_file_id:{})", self.start(), self.end(), self.live_file_id().to_index())
+        write!(f, "Span(start:{}, end:{}, file_id:{})", self.start(), self.end(), self.file_id().to_index())
     }
 }
 
