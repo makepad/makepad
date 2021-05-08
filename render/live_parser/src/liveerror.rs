@@ -31,23 +31,25 @@ impl fmt::Display for LiveFileError {
     }
 }
 
-pub fn byte_to_row_col(byte: usize, source: &str) -> (usize, usize) {
-    let lines = source.split("\n");
-    let mut o = 0;
-    for (index, line) in lines.enumerate() {
-        if byte >= o && byte < o + line.len() {
-            return (index, byte - o);
-        }
-        o += line.len() + 1;
-    }
-    return (0, 0);
-}
+
 
 impl LiveError{
+    pub fn byte_to_row_col(byte: usize, source: &str) -> (usize, usize) {
+        let lines = source.split("\n");
+        let mut o = 0;
+        for (index, line) in lines.enumerate() {
+            if byte >= o && byte < o + line.len() {
+                return (index, byte - o);
+            }
+            o += line.len() + 1;
+        }
+        return (0, 0);
+    }
+    
     pub fn to_live_file_error(&self, file:&str, source:&str)->LiveFileError{
 
         // lets find the span info
-        let start = byte_to_row_col(self.span.start() as usize, &source);
+        let start = Self::byte_to_row_col(self.span.start() as usize, &source);
         LiveFileError {
             file: file.to_string(),
             line: start.0,

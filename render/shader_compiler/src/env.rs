@@ -1,5 +1,5 @@
 use makepad_live_parser::LiveError;
-use makepad_live_parser::LiveRegistry;
+use crate::shaderregistry::ShaderRegistry;
 use makepad_live_parser::Span;
 use crate::ident::IdentPath;
 use crate::ty::Ty;
@@ -11,12 +11,12 @@ type Scope = HashMap<IdentPath, Sym>;
 #[derive(Clone, Debug)]
 pub struct Env<'a> {
     scopes: Vec<Scope>,
-    live_registry: &'a LiveRegistry
+    shader_registry: &'a ShaderRegistry
 }
 
 impl<'a> Env<'a> {
-    pub fn new(live_registry : &'a LiveRegistry) -> Env {
-        Env { scopes: Vec::new(), live_registry }
+    pub fn new(shader_registry : &'a ShaderRegistry) -> Env {
+        Env { scopes: Vec::new(), shader_registry }
     }
 
     pub fn find_sym(&self, _ident_path: IdentPath, _span:Span) -> Option<Sym> {
