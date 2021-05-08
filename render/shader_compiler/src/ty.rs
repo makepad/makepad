@@ -5,6 +5,8 @@ use makepad_live_parser::Span;
 use makepad_live_parser::Id;
 use makepad_live_parser::id;
 use std::cell::{RefCell};
+use crate::shaderast::TyExpr;
+use crate::shaderast::TyExprKind;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum Ty {
@@ -124,29 +126,6 @@ impl fmt::Display for Ty {
             Ty::Struct { ident, .. } => write!(f, "{}", ident),
         }
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct TyExpr {
-    pub ty: RefCell<Option<Ty >>,
-    pub kind: TyExprKind,
-}
-
-#[derive(Clone, Debug)]
-pub enum TyExprKind {
-    Array {
-        span: Span,
-        elem_ty_expr: Box<TyExpr>,
-        len: u32,
-    },
-    Var {
-        span: Span,
-        ident: Ident,
-    },
-    Lit {
-        span: Span,
-        ty_lit: TyLit,
-    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
