@@ -42,24 +42,7 @@ pub struct IdentPathWithSpan{
     pub ident_path:IdentPath,
 }
 
-
 impl QualifiedIdentPath{
-/*
-    pub fn write_underscored_ident(&self, string:&mut String){
-        for i in 0..self.0.len{
-            if i != 0{
-                write!(string, "_").unwrap();
-            }
-            write!(string, "{}", self.0.segs[i]).unwrap();
-        }
-    }
-
-    pub fn with_final_ident(&self, ident:Ident)->Self{
-        let mut new = self.clone();
-        new.0.push(ident);
-        new
-    }*/
-    
 }
 
 impl IdentPath {

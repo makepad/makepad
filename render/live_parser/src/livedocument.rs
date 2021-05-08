@@ -9,6 +9,7 @@ use crate::liveerror::LiveError;
 use crate::livenode::{LiveNode, LiveValue};
 use crate::liveregistry::CrateModule;
 use crate::id::LocalNodePtr;
+use crate::id::FullNodePtr;
 
 #[derive(Debug)]
 pub struct LiveDocument {
@@ -26,8 +27,8 @@ impl fmt::Display for LiveScopeTarget {
             LiveScopeTarget::Local {..} => {
                 write!(f, "[local]")
             },
-            LiveScopeTarget::Use {crate_module, ..} => {
-                write!(f, "{}", crate_module)
+            LiveScopeTarget::Full (ptr) => {
+                write!(f, "[F:{} L:{} I:{}]", ptr.file_id.to_index(), ptr.local_ptr.level, ptr.local_ptr.index)
             }
         }
     }
@@ -35,8 +36,8 @@ impl fmt::Display for LiveScopeTarget {
 
 #[derive(Copy, Debug, Clone)]
 pub enum LiveScopeTarget {
-    Local {node_ptr: LocalNodePtr},
-    Use {crate_module: CrateModule, node_ptr: LocalNodePtr}
+    Local(LocalNodePtr),
+    Full(FullNodePtr)
 }
 
 #[derive(Copy, Debug, Clone)]
@@ -448,7 +449,7 @@ impl fmt::Display for LiveDocument {
                 },
                 LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
                     let _ = write!(f, "fn {}", IdFmt::col(&ld.multi_ids, node.id_pack));
-                    for i in 0..token_count {
+                    for i in 2..(token_count-1) {
                         let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
                     }
                     let _ = write!(f, "\"");

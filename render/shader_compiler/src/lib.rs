@@ -3,6 +3,7 @@
 pub mod shaderparser;
 pub mod ident;
 pub mod shaderast;
+pub mod shaderregistry;
 pub mod env;
 pub mod ty;
 pub mod lit;
