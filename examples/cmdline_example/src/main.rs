@@ -1,10 +1,8 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 use makepad_live_parser::*;
-use makepad_live_parser::liveregistry::LiveFactoryTest;
-use makepad_live_parser::liveregistry::LiveFactoriesTest;
-use std::any::Any;
-
+use makepad_shader_compiler::shaderregistry::ShaderRegistry;
+/*
 #[derive(Clone, Debug)]
 struct DrawQuad{
 }
@@ -29,11 +27,13 @@ impl LiveFactoryTest for MyShaderFactory {
         Ok(Box::new(mv))
     }
 }
-
+*/
 fn main() {
     //println!("{}", std::mem::size_of::<LiveNode>());
     // ok lets do a deserialize
-    let mut lr = LiveFactoriesTest::default();
+    //let mut lr = LiveFactoriesTest::default();
+    let mut sr = ShaderRegistry::default();
+    
     let source = r#"
         ViewShader: Shader{
             uniform camera_projection: mat4 in pass;
@@ -54,31 +54,32 @@ fn main() {
             varying w: float
             
             MyStruct:Struct{
-                field x:float,
+                field x:float
                 field y:float
-                fn bla(self){}
+                fn bla()->Self{}
             }
             
             fn pixel()->vec4{
                 // this can resolve to a LivePtr to find the fn
                 // however it also needs to annotate a type 
                 // 
-                let x = Df::viewport()
-                return #f00
+                let y:MyStruct;
+                let x = MyStruct::bla();
+                return #f00;
             }
             
             fn vertex()->vec4{
-                return vec4(1.0)
+                return vec4(1.0);
             }
         }
     "#;
-    match lr.registry.parse_live_file("test.live", id_check!(main), id_check!(test), source.to_string()) {
+    match sr.live_registry.parse_live_file("test.live", id_check!(main), id_check!(test), source.to_string()) {
         Err(why) => panic!("Couldnt parse file {}", why),
         _ => ()
     }
     
     let mut errors = Vec::new();
-    lr.registry.expand_all_documents(&mut errors);
+    sr.live_registry.expand_all_documents(&mut errors);
     
     //println!("{}", lr.registry.expanded[0]);
     
@@ -86,7 +87,19 @@ fn main() {
         println!("{}\n", msg.to_live_file_error("", source));
     }
     
+    // lets just call the shader compiler on this thing
+    let result = sr.compile_draw_shader(id!(main), id!(test), &[id!(DrawQuad)]);
+    match result{
+        Err(e)=>{
+            println!("Error {}", e);
+        }
+        Ok(_)=>{
+            println!("OK!");
+        }
+    }
+    /*
     lr.register_component(id!(main), id!(test), id!(DrawQuad), Box::new(MyShaderFactory {}));
+    
     let val = lr.create_component(id!(main), id!(test), &[id!(DrawQuad)]);
     
     match val.unwrap().downcast_mut::<DrawQuad>() {
@@ -96,7 +109,7 @@ fn main() {
         None => {
             println!("No Value");
         }
-    }
+    }*/
     
     // ok now we should deserialize MyObj
     // we might wanna plug the shader-compiler in some kind of deserializer as well

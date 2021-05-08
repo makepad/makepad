@@ -1,10 +1,38 @@
 use makepad_live_parser::*;
-use makepad_live_parser::id::Id;
-use makepad_live_parser::liveregistry::LiveRegistry;
-use makepad_live_parser::liveregistry::LiveFactoryTest;
-use makepad_live_parser::liveregistry::LiveFactoriesTest;
-use makepad_live_parser::id::FileId;
 use std::any::Any;
+use std::collections::HashMap;
+
+#[derive(Default)]
+pub struct LiveFactoriesTest {
+    pub registry: LiveRegistry,
+    pub factories: HashMap<(CrateModule, Id), Box<dyn LiveFactoryTest >>,
+}
+
+pub trait LiveFactoryTest {
+    fn de_live_any(&self, lr: &LiveRegistry, file: usize, level: usize, start: usize) -> Result<Box<dyn Any>,
+    DeLiveErr>;
+}
+
+impl LiveFactoriesTest {
+    pub fn register_component(&mut self, crate_id: Id, module_id: Id, struct_id: Id, factory: Box<dyn LiveFactoryTest>) {
+        self.factories.insert((CrateModule(crate_id, module_id), struct_id), factory);
+    }
+    pub fn create_component(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<Box<dyn Any >> {
+        if let Some((crate_module, id, full_ptr)) = self.registry.find_component_origin(crate_id, module_id, ids) {
+            if let Some(factory) = self.factories.get(&(crate_module, id)) {
+                match factory.de_live_any(&self.registry, full_ptr.file_id.to_index(), full_ptr.local_ptr.level, full_ptr.local_ptr.index) {
+                    Ok(result) => {
+                        return Some(result)
+                    }
+                    Err(msg) => {
+                        println!("Error {:?}", msg)
+                    }
+                }
+            }
+        }
+        return None
+    }
+}
 
 #[test]
 fn expand() {
@@ -80,8 +108,8 @@ fn expand() {
     
     let file_2_check = r#"
         CB: NodePtr {file: 1, level: 1, index: 10} {
-            vdef1 bla ::bla ::bla "SA:main::file1, EA:main::file1, pa:main::file1, pb:main::file1, pc:main::file1, pd:main::file1, pe:main::file1, pf:main::file1, f1:main::file1, r1:main::file1, o1:main::file1"
-            vdef2 pa: float "SA:main::file1, EA:main::file1, pa:main::file1, pb:main::file1, pc:main::file1, pd:main::file1, pe:main::file1, pf:main::file1, f1:main::file1, r1:main::file1, o1:main::file1, vdef1:main::file1"
+            vdef1 bla ::bla ::bla "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9]"
+            vdef2 pa: float "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9], vdef1:[F:1 L:2 I:7]"
             pa: 2.0
             a1: [1, 2, 3]
             b1: 6.0
@@ -91,11 +119,11 @@ fn expand() {
                 x2: "hi"
                 x3: [1, 2, 3]
             }
-            fn tst(a1) {let x = 1} "SA:main::file1, EA:main::file1, pa:main::file1, pb:main::file1, pc:main::file1, pd:main::file1, pe:main::file1, pf:main::file1"
+            fn tst(a1) {let x = 1} "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
         }
         CC: NodePtr {file: 2, level: 0, index: 0} {
-            vdef1 bla ::bla ::bla "SA:main::file1, EA:main::file1, pa:main::file1, pb:main::file1, pc:main::file1, pd:main::file1, pe:main::file1, pf:main::file1, f1:main::file1, r1:main::file1, o1:main::file1"
-            vdef2 pa: float "SA:main::file1, EA:main::file1, pa:main::file1, pb:main::file1, pc:main::file1, pd:main::file1, pe:main::file1, pf:main::file1, f1:main::file1, r1:main::file1, o1:main::file1, vdef1:main::file1"
+            vdef1 bla ::bla ::bla "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9]"
+            vdef2 pa: float "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9], vdef1:[F:1 L:2 I:7]"
             pa: 2.0
             a1: [1, 2, 3]
             b1: 6.0
@@ -105,9 +133,8 @@ fn expand() {
                 x2: "hi"
                 x3: [1, 2, 3]
             }
-            fn tst(a1) {let x = 1} "SA:main::file1, EA:main::file1, pa:main::file1, pb:main::file1, pc:main::file1, pd:main::file1, pe:main::file1, pf:main::file1"
+            fn tst(a1) {let x = 1} "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
         }
-        
         
     "#;
     
@@ -120,8 +147,8 @@ fn expand() {
     
     let file_3_check = r#"
         CE: NodePtr {file: 2, level: 0, index: 1} {
-            vdef1 bla ::bla ::bla "SA:main::file1, EA:main::file1, pa:main::file1, pb:main::file1, pc:main::file1, pd:main::file1, pe:main::file1, pf:main::file1, f1:main::file1, r1:main::file1, o1:main::file1"
-            vdef2 pa: float "SA:main::file1, EA:main::file1, pa:main::file1, pb:main::file1, pc:main::file1, pd:main::file1, pe:main::file1, pf:main::file1, f1:main::file1, r1:main::file1, o1:main::file1, vdef1:main::file1"
+            vdef1 bla ::bla ::bla "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9]"
+            vdef2 pa: float "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9], vdef1:[F:1 L:2 I:7]"
             pa: 2.0
             a1: [1, 2, 3]
             b1: 6.0
@@ -131,10 +158,9 @@ fn expand() {
                 x2: "hi"
                 x3: [1, 2, 3]
             }
-            fn tst(a1) {let x = 1} "SA:main::file1, EA:main::file1, pa:main::file1, pb:main::file1, pc:main::file1, pd:main::file1, pe:main::file1, pf:main::file1"
+            fn tst(a1) {let x = 1} "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
             t: NodePtr {file: 1, level: 0, index: 0} {p1: 5.0}
         }
-        
     "#;
     
     let error_check = r#"

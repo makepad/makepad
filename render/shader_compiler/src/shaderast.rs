@@ -2,8 +2,11 @@ use crate::env::VarKind;
 use crate::ident::{Ident, IdentPath, QualifiedIdentPath, IdentPathWithSpan};
 use crate::lit::{Lit};
 use makepad_live_parser::Span;
-use makepad_live_parser::*;
-use crate::ty::{Ty,TyLit,TyExpr};
+use makepad_live_parser::Token;
+use makepad_live_parser::Id;
+use makepad_live_parser::token_punct;
+use makepad_live_parser::FullNodePtr;
+use crate::ty::{Ty,TyLit};
 use crate::val::Val;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
@@ -16,7 +19,6 @@ pub struct ShaderAst {
     pub default_geometry: Option<IdentPathWithSpan>,
     pub draw_input: Option<(Span, QualifiedIdentPath)>,
     pub decls: Vec<Decl>,
-    pub uses: Vec<IdentPathWithSpan>,
     // generated
     pub const_table: RefCell<Option<Vec<f32 >> >,
     pub const_table_spans: RefCell<Option<Vec<(usize, Span) >> >,
@@ -89,6 +91,7 @@ pub struct StructDecl {
     pub span: Span,
     pub ident: Ident,
     pub fields: Vec<Field>,
+    pub methods: Vec<FnDecl>
 }
 
 impl StructDecl {
@@ -250,6 +253,31 @@ pub enum ExprKind {
     Lit {
         span: Span,
         lit: Lit,
+    },
+}
+
+
+#[derive(Clone, Debug)]
+pub struct TyExpr {
+    pub ty: RefCell<Option<Ty >>,
+    pub kind: TyExprKind,
+}
+
+#[derive(Clone, Debug)]
+pub enum TyExprKind {
+    Array {
+        span: Span,
+        elem_ty_expr: Box<TyExpr>,
+        len: u32,
+    },
+    Var {
+        full_ptr: FullNodePtr,
+        span: Span,
+        ident: Ident,
+    },
+    Lit {
+        span: Span,
+        ty_lit: TyLit,
     },
 }
 
