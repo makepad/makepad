@@ -312,20 +312,28 @@ impl LiveRegistry {
                 node.id_pack
             };
             
-            
-            //let out_index = out_doc.get_level_len(out_level);
-            /*
-            if in_level == skip_level + 1 && scope_stack.stack.len() - 1 == out_level { // first level, store on scope
-                match node.id_pack.unpack() {
-                    IdUnpack::Single(id) => {
-                        scope_stack.stack[out_level].push(LiveScopeItem {
-                            id: id,
-                            target: LiveScopeTarget::Local {node_ptr: LocalNodePtr {level: out_level, index: out_index}}
-                        });
+            fn clone_scope(in_doc: &LiveDocument, out_doc: &mut LiveDocument, scope_start:usize, scope_count: usize, in_file_id:FileId){
+                for i in 0..scope_count {
+                    let item = &in_doc.scopes[i + scope_start];
+                    // if item is local, it is now 'remote'.
+                    match item.target {
+                        LiveScopeTarget::Local(local_ptr) => {
+                            out_doc.scopes.push(LiveScopeItem {
+                                id: item.id,
+                                target: LiveScopeTarget::Full(
+                                    FullNodePtr {
+                                        file_id: in_file_id,
+                                        local_ptr
+                                    }
+                                )
+                            });
+                        },
+                        LiveScopeTarget::Full {..} => {
+                            out_doc.scopes.push(*item);
+                        }
                     }
-                    _=>()
-                }
-            }*/
+                }                
+            }
             
             match node.value {
                 LiveValue::Call {target, node_start, node_count} => {
@@ -426,26 +434,7 @@ impl LiveRegistry {
                         for i in 0..(token_count as usize) {
                             out_doc.tokens.push(in_doc.tokens[i + token_start as usize]);
                         }
-                        for i in 0..(scope_count as usize) {
-                            let item = &in_doc.scopes[i + scope_start as usize];
-                            // if item is local, it is now 'remote'.
-                            match item.target {
-                                LiveScopeTarget::Local(local_ptr) => {
-                                    out_doc.scopes.push(LiveScopeItem {
-                                        id: item.id,
-                                        target: LiveScopeTarget::Full(
-                                            FullNodePtr {
-                                                file_id: in_file_id,
-                                                local_ptr
-                                            }
-                                        )
-                                    });
-                                },
-                                LiveScopeTarget::Full {..} => {
-                                    out_doc.scopes.push(*item);
-                                }
-                            }
-                        }
+                        clone_scope(in_doc, out_doc, scope_start as usize, scope_count as usize, in_file_id);
                         (nts as u32, nss as u32)
                     }
                     else {
@@ -470,26 +459,7 @@ impl LiveRegistry {
                         for i in 0..(token_count as usize) {
                             out_doc.tokens.push(in_doc.tokens[i + token_start as usize]);
                         }
-                        for i in 0..(scope_count as usize) {
-                            let item = &in_doc.scopes[i + scope_start as usize];
-                            // if item is local, it is now 'remote'.
-                            match item.target {
-                                LiveScopeTarget::Local(local_ptr) => {
-                                    out_doc.scopes.push(LiveScopeItem {
-                                        id: item.id,
-                                        target: LiveScopeTarget::Full(
-                                            FullNodePtr {
-                                                file_id: in_file_id,
-                                                local_ptr
-                                            }
-                                        )
-                                    });
-                                },
-                                LiveScopeTarget::Full {..} => {
-                                    out_doc.scopes.push(*item);
-                                }
-                            }
-                        }
+                        clone_scope(in_doc, out_doc, scope_start as usize, scope_count as usize, in_file_id);
                         (nts as u32, nss as u32)
                     }
                     else {
@@ -503,6 +473,22 @@ impl LiveRegistry {
                             scope_start: new_scope_start,
                             token_count,
                             scope_count
+                        }
+                    });
+                    return CopyRecurResult::Noop
+                }
+                LiveValue::VarRef {target} => {
+                    let new_target = if let Some((in_doc, in_file_id)) = in_doc { // copy the string if its from another doc
+                        out_doc.clone_multi_id(target, &in_doc.multi_ids)
+                    }
+                    else {
+                        target
+                    };
+                    out_doc.push_node(out_level, LiveNode {
+                        token_id: node.token_id,
+                        id_pack: node_id,
+                        value: LiveValue::VarRef {
+                            target: new_target,
                         }
                     });
                     return CopyRecurResult::Noop
@@ -891,6 +877,17 @@ impl LiveRegistry {
                             token_count,
                             scope_start: new_scope_start as u32,
                             scope_count: (out_doc.scopes.len() - new_scope_start) as u16
+                        }
+                    };
+                    write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, &new_node);
+                },
+                LiveValue::VarRef {target} => {
+                    // we should store the scopestack here so the shader compiler can find symbols.
+                    let new_node = LiveNode {
+                        token_id: node.token_id,
+                        id_pack: node.id_pack,
+                        value: LiveValue::VarRef {
+                            target,
                         }
                     };
                     write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, &new_node);

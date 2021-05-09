@@ -38,8 +38,9 @@ impl LiveValue {
             Self::Object {..}=>11,
             Self::Fn {..}=>12,
             Self::VarDef {..}=>13,
-            Self::Use{..} => 14,
-            Self::Class {..}=>15,
+            Self::VarRef {..}=>14,
+            Self::Use{..} => 15,
+            Self::Class {..}=>16,
         }
     }
     
@@ -89,6 +90,9 @@ pub enum LiveValue {
         token_count: u32,
         scope_start: u32,
         scope_count: u16
+    },
+    VarRef {
+        target: IdPack,
     },
     VarDef {
         token_start: u32,
