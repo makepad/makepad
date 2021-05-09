@@ -449,7 +449,7 @@ impl fmt::Display for LiveDocument {
                 },
                 LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
                     let _ = write!(f, "fn {}", IdFmt::col(&ld.multi_ids, node.id_pack));
-                    for i in 2..(token_count-1) {
+                    for i in 0..token_count {
                         let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
                     }
                     let _ = write!(f, "\"");
@@ -463,6 +463,10 @@ impl fmt::Display for LiveDocument {
                     }
                     let _ = write!(f, "\"");
                 },
+                LiveValue::VarRef {target}=>{
+                    prefix(node.id_pack, ld, f);
+                    let _ = write!(f, "{}", IdFmt::col(&ld.multi_ids, target));
+                }
                 LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
                     for i in 0..token_count {
                         let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);

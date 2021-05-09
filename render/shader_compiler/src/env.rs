@@ -1,8 +1,8 @@
 use makepad_live_parser::LiveError;
 use crate::shaderregistry::ShaderRegistry;
 use makepad_live_parser::Span;
-use crate::ident::IdentPath;
-use crate::ty::Ty;
+use crate::shaderast::IdentPath;
+use crate::shaderast::Ty;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
