@@ -14,9 +14,10 @@ use makepad_live_parser::token_ident;
 use makepad_live_parser::id;
 use makepad_live_parser::FullNodePtr;
 use makepad_live_parser::LiveScopeTarget;
-use crate::ident::Ident;
-use crate::ty::TyLit;
-use crate::ident::IdentPath;
+use crate::shaderast::Lit;
+use crate::shaderast::TyLit;
+use crate::shaderast::Ident;
+use crate::shaderast::IdentPath;
 use crate::shaderast::TyExprKind;
 use crate::shaderast::TyExpr;
 use crate::shaderast::FnDecl;
@@ -27,8 +28,12 @@ use crate::shaderast::Param;
 use crate::shaderast::Stmt;
 use crate::shaderast::BinOp;
 use crate::shaderast::UnOp;
-//use crate::shaderast::Decl;
-use crate::lit::Lit;
+use crate::shaderast::Decl;
+use crate::shaderast::GeometryDecl;
+use crate::shaderast::InstanceDecl;
+use crate::shaderast::UniformDecl;
+use crate::shaderast::VaryingDecl;
+use crate::shaderast::TextureDecl;
 
 pub struct ShaderParser<'a> {
     pub token_index: usize,
@@ -202,14 +207,72 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_fn_decl(&mut self, prefix: Option<(Ident, FullNodePtr)>) -> Result<FnDecl, LiveError> {
+    pub fn expect_other_decl(&mut self, ident: Ident) -> Result<Decl, LiveError> {
         let span = self.begin_span();
-        self.expect_token(token_ident!(fn)) ?;
+        let decl_ty = self.expect_ident() ?;
+        let decl_name = self.expect_ident() ?;
+        self.expect_token(token_punct!(:)) ?;
+        // now we expect a type
+        let ty_expr = self.expect_ty_expr() ?;
+        match decl_ty {
+            Ident(id!(geometry)) => {
+                return span.end(self, | span | Ok(Decl::Geometry(GeometryDecl {
+                    is_used_in_fragment_shader: Cell::new(None),
+                    span,
+                    ident,
+                    ty_expr
+                })))
+            }
+            Ident(id!(instance)) => {
+                return span.end(self, | span | Ok(Decl::Instance(InstanceDecl {
+                    is_used_in_fragment_shader: Cell::new(None),
+                    span,
+                    ident,
+                    ty_expr
+                })))
+            }
+            Ident(id!(uniform)) => {
+                let block_ident = if self.accept_token(token_ident!(in)){
+                    Some(self.expect_ident()?)
+                }
+                else{
+                    None
+                };
+                return span.end(self, | span | Ok(Decl::Uniform(UniformDecl {
+                    block_ident,
+                    span,
+                    ident,
+                    ty_expr
+                })))
+            }            
+            Ident(id!(varying)) => {
+                return span.end(self, | span | Ok(Decl::Varying(VaryingDecl {
+                    span,
+                    ident,
+                    ty_expr
+                })))
+            }
+            Ident(id!(texture)) => {
+                return span.end(self, | span | Ok(Decl::Texture(TextureDecl {
+                    span,
+                    ident,
+                    ty_expr
+                })))
+            }
+            _=>{
+                return Err(span.error(self, format!("unexpected decl type `{}`", decl_ty).into()))
+            }
+        }
+    }
+    
+    // lets parse a function.
+    pub fn expect_fn_decl(&mut self, ident: Ident, prefix: Option<(Ident, FullNodePtr)>) -> Result<FnDecl, LiveError> {
+        let span = self.begin_span();
         
         let ident_path = if let Some((prefix, _)) = prefix {
-            IdentPath::from_two(prefix, self.expect_ident() ?)
+            IdentPath::from_two(prefix, ident)
         } else {
-            IdentPath::from_ident(self.expect_ident() ?)
+            IdentPath::from_ident(ident)
         };
         
         self.expect_token(Token::OpenParen) ?;

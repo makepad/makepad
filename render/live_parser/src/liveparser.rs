@@ -439,6 +439,7 @@ impl<'a> LiveParser<'a> {
                                 //self.skip_token();
                                 let token_id = self.get_token_id();
                                 let prop_id = self.expect_ident() ?;
+                                let token_start = self.token_index;
                                 let token_index = self.scan_to_token(Token::CloseBrace) ?;
                                 
                                 ld.push_node(level, LiveNode {
@@ -446,7 +447,7 @@ impl<'a> LiveParser<'a> {
                                     id_pack: IdPack::single(prop_id),
                                     value: LiveValue::Fn {
                                         token_start: token_start as u32,
-                                        token_count: (token_index - token_start) as u32 + 1,
+                                        token_count: (token_index - token_start) as u32,
                                         scope_start: 0,
                                         scope_count: 0
                                     }
@@ -493,11 +494,8 @@ impl<'a> LiveParser<'a> {
                                     ld.push_node(level, LiveNode {
                                         token_id,
                                         id_pack: prop_id,
-                                        value: LiveValue::VarDef {
-                                            token_start: token_start as u32,
-                                            token_count: (self.token_index - token_start) as u32,
-                                            scope_start: 0,
-                                            scope_count: 0
+                                        value: LiveValue::VarRef {
+                                            target:ty
                                         }
                                     });
                                 }
