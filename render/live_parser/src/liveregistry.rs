@@ -477,8 +477,8 @@ impl LiveRegistry {
                     });
                     return CopyRecurResult::Noop
                 }
-                LiveValue::VarRef {target} => {
-                    let new_target = if let Some((in_doc, in_file_id)) = in_doc { // copy the string if its from another doc
+                LiveValue::ResourceRef {target} => {
+                    let new_target = if let Some((in_doc, _)) = in_doc { // copy the string if its from another doc
                         out_doc.clone_multi_id(target, &in_doc.multi_ids)
                     }
                     else {
@@ -487,7 +487,7 @@ impl LiveRegistry {
                     out_doc.push_node(out_level, LiveNode {
                         token_id: node.token_id,
                         id_pack: node_id,
-                        value: LiveValue::VarRef {
+                        value: LiveValue::ResourceRef {
                             target: new_target,
                         }
                     });
@@ -529,7 +529,6 @@ impl LiveRegistry {
             resolve_id: IdPack,
             expanded: &Vec<LiveDocument >,
             token_id: TokenId,
-            crate_module_to_file_id: &HashMap<CrateModule, FileId>,
             scope_stack: &ScopeStack,
             in_doc: &LiveDocument,
             out_doc: &mut LiveDocument,
@@ -675,7 +674,6 @@ impl LiveRegistry {
                             id_value,
                             expanded,
                             node.token_id,
-                            crate_module_to_file_id,
                             scope_stack,
                             in_doc,
                             out_doc,
@@ -746,7 +744,6 @@ impl LiveRegistry {
                             target,
                             expanded,
                             node.token_id,
-                            crate_module_to_file_id,
                             scope_stack,
                             in_doc,
                             out_doc,
@@ -797,7 +794,7 @@ impl LiveRegistry {
                 },
                 LiveValue::Array {node_start, node_count} => { // normal array
                     let shifted_out_level = if node.id_pack.is_multi() {
-                        let (_start, len) = node.id_pack.get_multi();
+                        let (_start, len) = node.id_pack.unwrap_multi();
                         out_level + (len - 1)
                     }
                     else {
@@ -819,7 +816,7 @@ impl LiveRegistry {
                 },
                 LiveValue::Object {node_start, node_count} => {
                     let shifted_out_level = if node.id_pack.is_multi() {
-                        let (_start, len) = node.id_pack.get_multi();
+                        let (_start, len) = node.id_pack.unwrap_multi();
                         out_level + (len - 1)
                     }
                     else {
@@ -881,12 +878,12 @@ impl LiveRegistry {
                     };
                     write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, &new_node);
                 },
-                LiveValue::VarRef {target} => {
+                LiveValue::ResourceRef {target} => {
                     // we should store the scopestack here so the shader compiler can find symbols.
                     let new_node = LiveNode {
                         token_id: node.token_id,
                         id_pack: node.id_pack,
-                        value: LiveValue::VarRef {
+                        value: LiveValue::ResourceRef {
                             target,
                         }
                     };
@@ -1031,7 +1028,7 @@ impl LiveRegistry {
                     scope_stack.stack.push(Vec::new());
                     // if our id is a multi-id, write the clone at the correct level
                     let shifted_out_level = if node.id_pack.is_multi() {
-                        let (_start, len) = node.id_pack.get_multi();
+                        let (_start, len) = node.id_pack.unwrap_multi();
                         out_level + (len - 1)
                     }
                     else {
@@ -1056,7 +1053,6 @@ impl LiveRegistry {
                             class,
                             expanded,
                             node.token_id,
-                            crate_module_to_file_id,
                             scope_stack,
                             in_doc,
                             out_doc,
