@@ -463,7 +463,7 @@ impl fmt::Display for LiveDocument {
                     }
                     let _ = write!(f, "\"");
                 },
-                LiveValue::VarRef {target}=>{
+                LiveValue::ResourceRef {target}=>{
                     prefix(node.id_pack, ld, f);
                     let _ = write!(f, "{}", IdFmt::col(&ld.multi_ids, target));
                 }
