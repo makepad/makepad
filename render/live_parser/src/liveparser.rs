@@ -494,7 +494,7 @@ impl<'a> LiveParser<'a> {
                                     ld.push_node(level, LiveNode {
                                         token_id,
                                         id_pack: prop_id,
-                                        value: LiveValue::VarRef {
+                                        value: LiveValue::ResourceRef {
                                             target:ty
                                         }
                                     });

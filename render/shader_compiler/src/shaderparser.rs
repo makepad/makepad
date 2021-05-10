@@ -34,6 +34,7 @@ use crate::shaderast::InstanceDecl;
 use crate::shaderast::UniformDecl;
 use crate::shaderast::VaryingDecl;
 use crate::shaderast::TextureDecl;
+use crate::shaderast::Field;
 
 pub struct ShaderParser<'a> {
     pub token_index: usize,
@@ -42,11 +43,18 @@ pub struct ShaderParser<'a> {
     pub live_scope: &'a [LiveScopeItem],
     pub type_deps: &'a mut Vec<FullNodePtr>,
     pub token_with_span: TokenWithSpan,
+    pub struct_prefix: Option<(Ident, FullNodePtr)>,
     pub end: usize,
 }
 
 impl<'a> ShaderParser<'a> {
-    pub fn new(tokens: &'a [TokenWithSpan], live_scope: &'a [LiveScopeItem], type_deps: &'a mut Vec<FullNodePtr>) -> Self {
+    pub fn new(
+        tokens: &'a [TokenWithSpan],
+        live_scope: &'a [LiveScopeItem],
+        type_deps: &'a mut Vec<FullNodePtr>,
+        struct_prefix: Option<(Ident, FullNodePtr)>
+        
+    ) -> Self {
         let mut tokens_with_span = tokens.iter().cloned();
         let token_with_span = tokens_with_span.next().unwrap();
         ShaderParser {
@@ -57,6 +65,7 @@ impl<'a> ShaderParser<'a> {
             token_with_span,
             token_index: 0,
             end: 0,
+            struct_prefix
         }
     }
 }
@@ -211,6 +220,9 @@ impl<'a> ShaderParser<'a> {
         let span = self.begin_span();
         let decl_ty = self.expect_ident() ?;
         let decl_name = self.expect_ident() ?;
+        if decl_name != ident {
+            panic!()
+        }
         self.expect_token(token_punct!(:)) ?;
         // now we expect a type
         let ty_expr = self.expect_ty_expr() ?;
@@ -232,10 +244,10 @@ impl<'a> ShaderParser<'a> {
                 })))
             }
             Ident(id!(uniform)) => {
-                let block_ident = if self.accept_token(token_ident!(in)){
-                    Some(self.expect_ident()?)
+                let block_ident = if self.accept_token(token_ident!(in)) {
+                    Some(self.expect_ident() ?)
                 }
-                else{
+                else {
                     None
                 };
                 return span.end(self, | span | Ok(Decl::Uniform(UniformDecl {
@@ -244,7 +256,7 @@ impl<'a> ShaderParser<'a> {
                     ident,
                     ty_expr
                 })))
-            }            
+            }
             Ident(id!(varying)) => {
                 return span.end(self, | span | Ok(Decl::Varying(VaryingDecl {
                     span,
@@ -259,17 +271,42 @@ impl<'a> ShaderParser<'a> {
                     ty_expr
                 })))
             }
-            _=>{
+            _ => {
                 return Err(span.error(self, format!("unexpected decl type `{}`", decl_ty).into()))
             }
         }
     }
     
     // lets parse a function.
-    pub fn expect_fn_decl(&mut self, ident: Ident, prefix: Option<(Ident, FullNodePtr)>) -> Result<FnDecl, LiveError> {
+    pub fn expect_field(&mut self, ident: Ident) -> Result<Field, LiveError> {
+        let span = self.begin_span();
+        let decl_ty = self.expect_ident() ?;
+        let decl_name = self.expect_ident() ?;
+        if decl_name != ident {
+            panic!()
+        }
+        self.expect_token(token_punct!(:)) ?;
+        // now we expect a type
+        let ty_expr = self.expect_ty_expr() ?;
+        match decl_ty {
+            Ident(id!(field)) => {
+                return span.end(self, | span | Ok(Field {
+                    span,
+                    ident,
+                    ty_expr
+                }))
+            }
+            _ => {
+                return Err(span.error(self, format!("unexpected decl type in struct `{}`", decl_ty).into()))
+            }
+        }
+    }
+    
+    // lets parse a function.
+    pub fn expect_fn_decl(&mut self, ident: Ident) -> Result<FnDecl, LiveError> {
         let span = self.begin_span();
         
-        let ident_path = if let Some((prefix, _)) = prefix {
+        let ident_path = if let Some((prefix, _)) = self.struct_prefix {
             IdentPath::from_two(prefix, ident)
         } else {
             IdentPath::from_ident(ident)
@@ -279,7 +316,7 @@ impl<'a> ShaderParser<'a> {
         let mut params = Vec::new();
         if !self.accept_token(Token::CloseParen) {
             
-            if let Some((prefix, prefix_ptr)) = prefix {
+            if let Some((prefix, prefix_ptr)) = self.struct_prefix  {
                 let span = self.begin_span();
                 let is_inout = self.accept_token(token_ident!(inout));
                 if self.accept_token(token_ident!(self)) {
@@ -379,9 +416,18 @@ impl<'a> ShaderParser<'a> {
                     }))
                 }
                 else {
-                    // this is where we use a custom type
-                    // lets resolve this right now against our scope
-                    // and store a pointer to it.
+                    if let Some((prefix, full_ptr)) = self.struct_prefix{
+                        if id == id!(Self){
+                            return Ok(span.end(self, | span | TyExpr {
+                                ty: RefCell::new(None),
+                                kind: TyExprKind::Var {
+                                    full_ptr,
+                                    span,
+                                    ident: prefix
+                                },
+                            }))
+                        }
+                    }
                     for item in self.live_scope.iter().rev() {
                         if item.id == id {
                             let full_ptr = match item.target {
@@ -402,6 +448,7 @@ impl<'a> ShaderParser<'a> {
                             }))
                         }
                     }
+                    
                     return Err(span.error(self, format!("Cannot find type `{}` on scope", id).into()));
                 }
             }

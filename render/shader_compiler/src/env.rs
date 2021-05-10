@@ -19,12 +19,15 @@ impl<'a> Env<'a> {
         Env { scopes: Vec::new(), shader_registry }
     }
 
-    pub fn find_sym(&self, _ident_path: IdentPath, _span:Span) -> Option<Sym> {
-        /*
+    pub fn find_sym(&self, ident_path: IdentPath, _span:Span) -> Option<Sym> {
+        
         let ret = self.scopes.iter().rev().find_map(|scope| scope.get(&ident_path));
         if ret.is_some(){
             return Some(ret.unwrap().clone())
         }
+        // lets look ident_path up in our shader registry. somehow.
+        
+        /*
         // lets look up ident_path in our live_styles
         // we support color and float lookups, and soon animation lookups too.
         let live_item_id = ident_path.qualify(&self.live_styles.live_bodies[span.live_body_id.0].module_path).to_live_item_id();
@@ -88,6 +91,6 @@ pub enum VarKind {
     Texture,
     Uniform,
     Varying,
-    LiveStyle
+    Live
 }
 
