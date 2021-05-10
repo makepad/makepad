@@ -2,6 +2,10 @@
 #![allow(dead_code)]
 use makepad_live_parser::*;
 use makepad_shader_compiler::shaderregistry::ShaderRegistry;
+use makepad_shader_compiler::shaderregistry::ShaderDrawInput;
+use makepad_shader_compiler::shaderast::TyLit;
+mod test;
+use crate::test::test;
 /*
 #[derive(Clone, Debug)]
 struct DrawQuad{
@@ -33,12 +37,13 @@ fn main() {
     // ok lets do a deserialize
     //let mut lr = LiveFactoriesTest::default();
     let mut sr = ShaderRegistry::default();
-    
+    println!("{}", module_path!());
+    test();
     let source = r#"
         ViewShader: Shader{
             uniform camera_projection: mat4 in pass;
             uniform draw_scroll: vec4 in draw;
-            instance y: float
+            //instance y: float
         }
         
         // what does this thing factory?
@@ -48,21 +53,23 @@ fn main() {
             default_geometry makepad_render::shader_std::quad_2d;
             
             geometry geom: vec2;
-            instance x: float
-            instance y: float
+            //instance x: float
+            //instance y: float
             uniform z: float
             varying w: float
             
             MyStruct:Struct{
                 field x:float
                 field y:float
-                fn bla()->Self{}
+                fn bla()->Self{
+                    let v = Self;
+                    v.x = 1.0;
+                    v.y = 2.0;
+                    return v;
+                }
             }
             
             fn pixel()->vec4{
-                // this can resolve to a LivePtr to find the fn
-                // however it also needs to annotate a type 
-                // 
                 let y:MyStruct;
                 let x = MyStruct::bla();
                 return #f00;
@@ -87,8 +94,12 @@ fn main() {
         println!("{}\n", msg.to_live_file_error("", source));
     }
     
+    let mut di = ShaderDrawInput::default();
+    di.add_uniform("w", TyLit::Float.to_ty_expr());
+    sr.register_draw_input("main::test", "DrawQuad", di);
+    
     // lets just call the shader compiler on this thing
-    let result = sr.compile_draw_shader(id!(main), id!(test), &[id!(DrawQuad)]);
+    let result = sr.analyse_draw_shader(id!(main), id!(test), &[id!(DrawQuad)]);
     match result{
         Err(e)=>{
             println!("Error {}", e);

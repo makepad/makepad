@@ -16,13 +16,13 @@ impl FileId{
 #[derive(Clone, Eq, Hash, Copy, PartialEq)]
 pub struct IdPack(pub u64);
 
-#[derive(Clone, Debug, Eq, Hash, Copy, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialOrd, Copy, PartialEq)]
 pub struct LocalNodePtr {
     pub level: usize,
     pub index: usize
 }
 
-#[derive(Clone, Debug, Eq, Hash, Copy, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Copy, Ord, PartialOrd, PartialEq)]
 pub struct FullNodePtr {
     pub file_id: FileId,
     pub local_ptr: LocalNodePtr,
@@ -91,7 +91,7 @@ impl Id{
         })
     }
     
-    fn as_string<F, R>(&self, f: F) -> R
+    pub fn as_string<F, R>(&self, f: F) -> R
     where F: FnOnce(Option<&String>) -> R
     {
         IdMap::with( | idmap | {
@@ -201,7 +201,7 @@ impl IdPack {
         (self.0 & 0x8000_0000_0000_0000) == 0
     }
     
-    pub fn get_multi(&self) -> (usize, usize) {
+    pub fn unwrap_multi(&self) -> (usize, usize) {
         if !self.is_multi() {
             panic!()
         }
@@ -211,11 +211,11 @@ impl IdPack {
         )
     }
     
-    pub fn get_single(&self) -> u64 {
+    pub fn unwrap_single(&self) -> Id {
         if !self.is_single() {
             panic!()
         }
-        self.0
+        Id(self.0)
     }
 
 }
@@ -314,16 +314,16 @@ impl IdMap {
 
 
 pub struct IdFmt<'a> {
-    multi_ids: &'a Vec<Id>,
+    multi_ids: &'a [Id],
     is_dot: bool,
     id_pack: IdPack
 }
 
 impl <'a> IdFmt<'a> {
-    pub fn dot(multi_ids: &'a Vec<Id>, id_pack: IdPack) -> Self {
+    pub fn dot(multi_ids: &'a [Id], id_pack: IdPack) -> Self {
         Self {multi_ids, is_dot: true, id_pack}
     }
-    pub fn col(multi_ids: &'a Vec<Id>, id_pack: IdPack) -> Self {
+    pub fn col(multi_ids: &'a [Id], id_pack: IdPack) -> Self {
         Self {multi_ids, is_dot: false, id_pack}
     }
 }

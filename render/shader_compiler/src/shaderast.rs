@@ -12,22 +12,21 @@ use std::fmt;
 use std::rc::Rc;
 use makepad_live_parser::PrettyPrintedF32;
 use makepad_live_parser::id;
+use crate::shaderregistry::ShaderResourceId;
 
 #[derive(Clone, Debug, Default)]
 pub struct ShaderAst {
     //pub qualified_ident_path: QualifiedIdentPath,
     pub debug: bool,
-    pub default_geometry: Option<IdentPathWithSpan>,
+    pub default_geometry: Option<ShaderResourceId>,
     //pub draw_input: Option<(Span, QualifiedIdentPath)>,
     pub decls: Vec<Decl>,
     // generated
     pub const_table: RefCell<Option<Vec<f32 >> >,
     pub const_table_spans: RefCell<Option<Vec<(usize, Span) >> >,
-   // pub livestyle_uniform_deps: RefCell<Option<BTreeSet<(Ty, QualifiedIdentPath) >> >,
+    pub live_uniform_deps: RefCell<Option<BTreeSet<(Ty, FullNodePtr) >> >,
 }
 
-impl ShaderAst {
-}
 
 #[derive(Clone, Debug)]
 pub enum Decl {
@@ -131,6 +130,7 @@ pub struct Param {
 
 #[derive(Clone, Debug)]
 pub struct Field {
+    pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
 }
@@ -378,8 +378,78 @@ pub enum Val {
 pub struct Ident(pub Id);
 
 
-
-
+impl ShaderAst {
+    
+    pub fn find_geometry_decl(&self, ident: Ident) -> Option<&GeometryDecl> {
+        self.decls.iter().find_map( | decl | {
+            match decl {
+                Decl::Geometry(decl) => Some(decl),
+                _ => None,
+            }
+            .filter( | decl | decl.ident == ident)
+        })
+    }
+    
+    pub fn find_const_decl(&self, ident: Ident) -> Option<&ConstDecl> {
+        self.decls.iter().find_map( | decl | {
+            match decl {
+                Decl::Const(decl) => Some(decl),
+                _ => None,
+            }
+            .filter( | decl | decl.ident == ident)
+        })
+    }
+    
+    pub fn find_fn_decl(&self, ident_path: IdentPath) -> Option<&FnDecl> {
+        self.decls.iter().rev().find_map( | decl | {
+            match decl {
+                Decl::Fn(decl) => Some(decl),
+                _ => None,
+            }
+            .filter( | decl | decl.ident_path == ident_path)
+        })
+    }
+    
+    pub fn find_instance_decl(&self, ident: Ident) -> Option<&InstanceDecl> {
+        self.decls.iter().find_map( | decl | {
+            match decl {
+                Decl::Instance(decl) => Some(decl),
+                _ => None,
+            }
+            .filter( | decl | decl.ident == ident)
+        })
+    }
+    
+    pub fn find_struct_decl(&self, ident: Ident) -> Option<&StructDecl> {
+        self.decls.iter().find_map( | decl | {
+            match decl {
+                Decl::Struct(decl) => Some(decl),
+                _ => None,
+            }
+            .filter( | decl | decl.ident == ident)
+        })
+    }
+    
+    pub fn find_uniform_decl(&self, ident: Ident) -> Option<&UniformDecl> {
+        self.decls.iter().find_map( | decl | {
+            match decl {
+                Decl::Uniform(decl) => Some(decl),
+                _ => None,
+            }
+            .filter( | decl | decl.ident == ident)
+        })
+    }
+    
+    pub fn find_varying_decl(&self, ident: Ident) -> Option<&VaryingDecl> {
+        self.decls.iter().find_map( | decl | {
+            match decl {
+                Decl::Varying(decl) => Some(decl),
+                _ => None,
+            }
+            .filter( | decl | decl.ident == ident)
+        })
+    }
+}
 
 impl BinOp {
     pub fn from_assign_op(token:Token) -> Option<BinOp> {
@@ -729,6 +799,7 @@ impl fmt::Display for Lit {
 
 
 impl Ident {
+    pub fn to_id(self)->Id{self.0}
     pub fn to_ident_path(self)->IdentPath{
         IdentPath::from_ident(self)
     }
