@@ -1,6 +1,7 @@
 use makepad_live_derive::*;
 use crate::id::{IdMap, Id};
 use crate::liveerror::LiveError;
+use crate::liveerror::LiveErrorOrigin;
 use crate::id::FileId;
 use crate::span::Span;
 use crate::token::{Token, TokenWithSpan};
@@ -515,6 +516,7 @@ impl SpanTracker {
     
     fn error<C>(&self, lex: &Lex<C>, message: String) -> LiveError {
         LiveError {
+            origin: live_error_origin!(),
             span: Span::new(
                 self.file_id,
                 self.start,

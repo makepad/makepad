@@ -6,6 +6,7 @@ use std::slice::Iter;
 use crate::id::FileId;
 use crate::span::Span;
 use crate::liveerror::LiveError;
+use crate::liveerror::LiveErrorOrigin;
 use crate::id::Id;
 use crate::id::IdPack;
 use crate::livedocument::LiveDocument;
@@ -57,6 +58,7 @@ impl<'a> LiveParser<'a> {
     
     fn error(&mut self, message: String) -> LiveError {
         LiveError {
+            origin: live_error_origin!(),
             span: self.token_with_span.span,
             message,
         }
@@ -546,8 +548,9 @@ impl SpanTracker {
         )
     }
     
-    pub fn error(&self, parser: &mut LiveParser, message: String) -> LiveError {
+    pub fn error(&self, parser: &mut LiveParser, origin:LiveErrorOrigin, message: String) -> LiveError {
         LiveError {
+            origin,
             span: Span::new(
                 self.file_id,
                 self.start,

@@ -6,10 +6,12 @@ use crate::span::Span;
 use crate::util::PrettyPrintedF64;
 use crate::token::{TokenWithSpan, TokenId};
 use crate::liveerror::LiveError;
+use crate::liveerror::LiveErrorOrigin;
 use crate::livenode::{LiveNode, LiveValue};
 use crate::liveregistry::CrateModule;
 use crate::id::LocalNodePtr;
 use crate::id::FullNodePtr;
+use crate::id::FileId;
 
 #[derive(Debug)]
 pub struct LiveDocument {
@@ -40,6 +42,19 @@ pub enum LiveScopeTarget {
     Full(FullNodePtr)
 }
 
+impl LiveScopeTarget{
+    pub fn to_full_node_ptr(&self, file_id:FileId)->FullNodePtr{
+        match self{
+            LiveScopeTarget::Local(local)=>{
+                FullNodePtr{file_id:file_id, local_ptr:*local}
+            }
+            LiveScopeTarget::Full(full)=>{
+                *full
+            }
+        }
+    }
+}
+
 #[derive(Copy, Debug, Clone)]
 pub struct LiveScopeItem {
     pub id: Id,
@@ -59,6 +74,19 @@ impl LiveDocument {
         }
     }
     
+    pub fn resolve_ptr(&self, local_ptr:LocalNodePtr)->&LiveNode{
+        &self.nodes[local_ptr.level][local_ptr.index]
+    }
+    
+    pub fn get_tokens(&self, token_start:u32, token_count:u32)->&[TokenWithSpan]{
+        &self.tokens[token_start as usize..(token_start + token_count)as usize]
+    }
+
+    pub fn get_scopes(&self, scope_start:u32, scope_count:u16)->&[LiveScopeItem]{
+        &self.scopes[scope_start as usize..(scope_start + scope_count as u32)as usize]
+    }
+
+
     pub fn restart_from(&mut self, other:&LiveDocument){
         for node in &mut self.nodes{
             node.truncate(0);
@@ -201,6 +229,7 @@ impl LiveDocument {
                                     }
                                     // we cant replace a VarDef with something else
                                     return Err(LiveError {
+                                        origin: live_error_origin!(),
                                         span: in_doc.token_id_to_span(in_node.token_id),
                                         message: format!("Cannot inherit with different node type {}", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
                                     })
@@ -219,6 +248,7 @@ impl LiveDocument {
                                         node_count = nc as usize;
                                     },
                                     _ => return Err(LiveError {
+                                        origin: live_error_origin!(),
                                         span: in_doc.token_id_to_span(in_node.token_id),
                                         message: format!("Setting property {} is not an object path", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
                                     })
@@ -231,6 +261,7 @@ impl LiveDocument {
                     if !found { //
                         if i != id_count - 1 || last_class.is_none() { // not last item, so object doesnt exist
                             return Err(LiveError {
+                                origin: live_error_origin!(),
                                 span: in_doc.token_id_to_span(in_node.token_id),
                                 message: format!("Setting property {} is not an object path", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
                             })
@@ -251,6 +282,7 @@ impl LiveDocument {
                             }
                             else {
                                 return Err(LiveError {
+                                    origin: live_error_origin!(),
                                     span: in_doc.token_id_to_span(in_node.token_id),
                                     message: format!("Unexpected problem 1 in overwrite_or_add_node with {}", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
                                 })
@@ -273,6 +305,7 @@ impl LiveDocument {
                     }
                 }
                 return Err(LiveError {
+                    origin: live_error_origin!(),
                     span: in_doc.token_id_to_span(in_node.token_id),
                     message: format!("Unexpected problem 2 in overwrite_or_add_node with {}", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
                 })
@@ -287,6 +320,7 @@ impl LiveDocument {
                                 continue;
                             }
                             return Err(LiveError {
+                                origin: live_error_origin!(),
                                 span: in_doc.token_id_to_span(in_node.token_id),
                                 message: format!("Cannot inherit with different node type {}", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
                             })
@@ -307,6 +341,7 @@ impl LiveDocument {
             },
             _ => {
                 return Err(LiveError {
+                    origin: live_error_origin!(),
                     span: in_doc.token_id_to_span(in_node.token_id),
                     message: format!("Unexpected id type {}", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
                 })

@@ -1,7 +1,9 @@
+#![allow(unused_variables)]
 use crate::shaderast::*;
-use crate::builtin::Builtin;
-use crate::env::{Env, Sym, VarKind};
+use crate::env::Env;
 use makepad_live_parser::LiveError;
+use makepad_live_parser::LiveErrorOrigin;
+use makepad_live_parser::live_error_origin;
 use crate::shaderast::{Ident, IdentPath};
 use crate::lhs_check::LhsChecker;
 use crate::shaderast::Lit;
@@ -10,14 +12,11 @@ use crate::swizzle::Swizzle;
 use crate::shaderast::{Ty, TyLit, TyExprKind, TyExpr};
 use crate::util::CommaSep;
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::fmt::Write;
 use std::rc::Rc;
 
 #[derive(Clone, Debug)]
 pub struct TyChecker<'a, 'b> {
-    pub builtins: &'a HashMap<Ident, Builtin>,
-    pub shader: &'a ShaderAst,
     pub env: &'a Env<'b>,
 }
 
@@ -29,12 +28,12 @@ impl<'a, 'b> TyChecker<'a, 'b> {
     pub fn ty_check_ty_expr(&mut self, ty_expr: &TyExpr) -> Result<Ty, LiveError> {
         let ty = match ty_expr.kind {
             TyExprKind::Array {
-                span,
                 ref elem_ty_expr,
                 len,
-            } => self.ty_check_array_ty_expr(span, elem_ty_expr, len),
-            TyExprKind::Var {span, ident, full_ptr} => self.ty_check_var_ty_expr(span, ident),
-            TyExprKind::Lit {span, ty_lit} => self.ty_check_lit_ty_expr(span, ty_lit),
+            } => self.ty_check_array_ty_expr(ty_expr.span, elem_ty_expr, len),
+            TyExprKind::Lit {ty_lit} => self.ty_check_lit_ty_expr(ty_expr.span, ty_lit),
+            TyExprKind::Struct(struct_ptr) => Ok(Ty::Struct(struct_ptr)),
+            TyExprKind::Shader(shader_ptr) => Ok(Ty::Shader(shader_ptr)),
         } ?;
         *ty_expr.ty.borrow_mut() = Some(ty.clone());
         Ok(ty)
@@ -51,19 +50,6 @@ impl<'a, 'b> TyChecker<'a, 'b> {
         Ok(Ty::Array {elem_ty, len})
     }
     
-    fn ty_check_var_ty_expr(&mut self, span: Span, ident: Ident) -> Result<Ty, LiveError> {
-        match self.env.find_sym(ident.to_ident_path(), span).ok_or_else( || LiveError {
-            span,
-            message: format!("`{}` is not defined in this scope", ident),
-        }) ? {
-            Sym::TyVar {ty} => Ok(ty.clone()),
-            _ => Err(LiveError {
-                span,
-                message: format!("`{}` is not a type variable", ident),
-            }),
-        }
-    }
-    
     fn ty_check_lit_ty_expr(&mut self, _span: Span, ty_lit: TyLit) -> Result<Ty, LiveError> {
         Ok(ty_lit.to_ty())
     }
@@ -77,6 +63,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
         let actual_ty = self.ty_check_expr(expr) ?;
         if &actual_ty != expected_ty {
             return Err(LiveError {
+                origin: live_error_origin!(),
                 span,
                 message: format!(
                     "can't match expected type `{}` with actual type `{}",
@@ -105,11 +92,27 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                 ..
             } => self.ty_check_bin_expr(span, op, left_expr, right_expr),
             ExprKind::Un {span, op, ref expr} => self.ty_check_un_expr(span, op, expr),
+            ExprKind::PlainCall {
+                span,
+                //ident,
+                fn_node_ptr,
+                ref arg_exprs,
+            } => self.ty_check_plain_call_expr(span,  arg_exprs, fn_node_ptr),
             ExprKind::MethodCall {
                 span,
                 ident,
                 ref arg_exprs,
             } => self.ty_check_method_call_expr(span, ident, arg_exprs),
+            ExprKind::BuiltinCall {
+                span,
+                ident,
+                ref arg_exprs,
+            } => self.ty_check_builtin_call_expr(span, ident, arg_exprs),
+            ExprKind::ConsCall {
+                span,
+                ty_lit,
+                ref arg_exprs,
+            } => self.ty_check_cons_call_expr(span, ty_lit, arg_exprs), 
             ExprKind::Field {
                 span,
                 ref expr,
@@ -120,22 +123,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                 ref expr,
                 ref index_expr,
             } => self.ty_check_index_expr(span, expr, index_expr),
-            ExprKind::Call {
-                span,
-                ident_path,
-                ref arg_exprs,
-            } => self.ty_check_call_expr(span, ident_path, arg_exprs),
-            ExprKind::MacroCall {
-                span,
-                ref analysis,
-                ident,
-                ref arg_exprs,
-            } => self.ty_check_macro_call_expr(span, analysis, ident, arg_exprs),
-            ExprKind::ConsCall {
-                span,
-                ty_lit,
-                ref arg_exprs,
-            } => self.ty_check_cons_call_expr(span, ty_lit, arg_exprs),
+            
             ExprKind::Var {
                 span,
                 ref kind,
@@ -326,6 +314,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
             },
         }
         .ok_or_else( || LiveError {
+            origin: live_error_origin!(),
             span,
             message: format!(
                 "can't apply binary operator `{}` to operands of type `{}` and `{}",
@@ -354,6 +343,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
             },
         }
         .ok_or_else( || LiveError {
+            origin: live_error_origin!(),
             span,
             message: format!(
                 "can't apply unary operator `{}` to operand of type `{}`",
@@ -364,26 +354,155 @@ impl<'a, 'b> TyChecker<'a, 'b> {
         })
     }
     
+    fn ty_check_plain_call_expr(
+        &mut self,
+        span: Span,
+        //ident: Ident,
+        arg_exprs: &[Expr],
+        fn_node_ptr: FnNodePtr,
+    ) -> Result<Ty, LiveError> {
+        
+        for arg_expr in arg_exprs {
+            self.ty_check_expr(arg_expr) ?;
+        }
+        // alright so. 
+        let fn_decl = self.env.plain_fn_decl_from_ptr(fn_node_ptr).expect("fn ptr invalid");
+    
+        self.check_call_args(span, fn_node_ptr, arg_exprs, &fn_decl)?;
+    
+        // lets return the right ty
+        return Ok(fn_decl.return_ty.borrow().clone().unwrap())
+    }
+    
     fn ty_check_method_call_expr(
         &mut self,
         span: Span,
         ident: Ident,
         arg_exprs: &[Expr],
     ) -> Result<Ty, LiveError> {
+        
         let ty = self.ty_check_expr(&arg_exprs[0]) ?;
         match ty {
-            Ty::Struct {
-                ident: struct_ident,
-            } => self.ty_check_call_expr(
-                span,
-                IdentPath::from_two(struct_ident, ident),
-                &arg_exprs,
-            ),
-            _ => Err(LiveError {
-                span,
-                message: format!("method `{}` is not defined on type `{}`", ident, ty),
-            }),
+            Ty::Shader(shader_ptr)=>{ // a shader method call
+                panic!("IMPL");
+            },
+            Ty::Struct(struct_ptr) => {
+                //println!("GOT STRUCT {:?}", struct_ptr);
+                for arg_expr in arg_exprs {
+                    self.ty_check_expr(arg_expr) ?;
+                }
+                // ok lets find 'ident' on struct_ptr
+                if let Some(fn_decl) = self.env.struct_method_from_ptr(struct_ptr, ident){
+                    self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl)?;
+                    
+                    if let Some(return_ty) = fn_decl.return_ty.borrow().clone(){
+                        return Ok(return_ty);
+                    }
+                    return Err(LiveError {
+                        origin: live_error_origin!(),
+                        span,
+                        message: format!("method `{}` is not type checked `{}`", ident, ty),
+                    });
+                }
+            },
+            _=>()
         }
+        Err(LiveError {
+            origin: live_error_origin!(),
+            span,
+            message: format!("method `{}` is not defined on type `{}`", ident, ty),
+        })
+    }
+    
+    fn ty_check_builtin_call_expr(
+        &mut self,
+        span: Span,
+        ident: Ident,
+        arg_exprs: &[Expr],
+    ) -> Result<Ty, LiveError> {
+        for arg_expr in arg_exprs {
+            self.ty_check_expr(arg_expr) ?;
+        }
+        
+        let builtin = self.env.shader_registry.builtins.get(&ident).unwrap();
+        let arg_tys = arg_exprs
+            .iter()
+            .map( | arg_expr | arg_expr.ty.borrow().as_ref().unwrap().clone())
+            .collect::<Vec<_ >> ();
+        Ok(builtin .return_tys .get(&arg_tys) .ok_or({
+            let mut message = String::new();
+            write!(
+                message,
+                "can't apply builtin `{}` to arguments of types ",
+                ident
+            )
+                .unwrap();
+            let mut sep = "";
+            for arg_ty in arg_tys {
+                write!(message, "{}{}", sep, arg_ty).unwrap();
+                sep = ", ";
+            }
+            LiveError {origin: live_error_origin!(), span, message}
+        }) ? .clone())
+    }
+    
+    fn check_call_args(
+        &mut self,
+        span: Span,
+        fn_node_ptr: FnNodePtr,
+        arg_exprs: &[Expr],
+        fn_decl: &FnDecl,
+    ) -> Result<(), LiveError> {
+        if arg_exprs.len() < fn_decl.params.len() {
+            return Err(LiveError {
+                origin: live_error_origin!(),
+                span,
+                message: format!(
+                    "not enough arguments for call to function `{}`: expected {}, got {}",
+                    self.env.fn_ident_from_ptr(fn_node_ptr),
+                    fn_decl.params.len(),
+                    arg_exprs.len(),
+                )
+                    .into(),
+            });
+        }
+        if arg_exprs.len() > fn_decl.params.len() {
+            return Err(LiveError {
+                origin: live_error_origin!(),
+                span,
+                message: format!(
+                    "too many arguments for call to function `{}`: expected {}, got {}",
+                    self.env.fn_ident_from_ptr(fn_node_ptr),
+                    fn_decl.params.len(),
+                    arg_exprs.len()
+                )
+                    .into(),
+            });
+        }
+        for (index, (arg_expr, param)) in arg_exprs.iter().zip(fn_decl.params.iter()).enumerate()
+        {
+            let arg_ty = arg_expr.ty.borrow();
+            let arg_ty = arg_ty.as_ref().unwrap();
+            let param_ty = param.ty_expr.ty.borrow();
+            let param_ty = param_ty.as_ref().unwrap();
+            if arg_ty != param_ty {
+                return Err(LiveError {
+                    origin: live_error_origin!(),
+                    span,
+                    message: format!(
+                        "wrong type for argument {} in call to function `{}`: expected `{}`, got `{}`",
+                        index + 1,
+                        self.env.fn_ident_from_ptr(fn_node_ptr),
+                        param_ty,
+                        arg_ty,
+                    ).into()
+                });
+            }
+            if param.is_inout {
+                self.lhs_checker().lhs_check_expr(arg_expr) ?;
+            }
+        }
+        Ok(())
     }
     
     fn ty_check_field_expr(
@@ -409,6 +528,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                     true
                 })
                     .ok_or_else( || LiveError {
+                    origin: live_error_origin!(),
                     span,
                     message: format!("field `{}` is not defined on type `{}`", field_ident, ty),
                 }) ?;
@@ -437,11 +557,15 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                     _ => panic!(),
                 })
             }
-            Ty::Struct {ident} => Ok(self .shader .find_struct_decl(ident) .unwrap() .find_field(field_ident) .ok_or(LiveError {
-                span,
-                message: format!("field `{}` is not defined on type `{}`", field_ident, ident),
-            }) ? .ty_expr .ty .borrow() .as_ref() .unwrap() .clone()),
+            Ty::Struct(struct_ptr) => {
+                Ok(self .env .struct_decl_from_ptr(struct_ptr) .unwrap() .find_field(field_ident) .ok_or(LiveError {
+                    origin: live_error_origin!(),
+                    span,
+                    message: format!("field `{}` is not defined on type `{:?}`", field_ident, struct_ptr),
+                }) ? .ty_expr .ty .borrow() .as_ref() .unwrap() .clone())
+            },
             _ => Err(LiveError {
+                origin: live_error_origin!(),
                 span,
                 message: format!("can't access field on value of type `{}`", ty).into(),
             }),
@@ -465,6 +589,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
             Ty::Mat4 => Ty::Vec4,
             _ => {
                 return Err(LiveError {
+                    origin: live_error_origin!(),
                     span,
                     message: format!("can't index into value of type `{}`", ty).into(),
                 })
@@ -472,6 +597,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
         };
         if index_ty != Ty::Int {
             return Err(LiveError {
+                origin: live_error_origin!(),
                 span,
                 message: "index is not an integer".into(),
             });
@@ -479,113 +605,6 @@ impl<'a, 'b> TyChecker<'a, 'b> {
         Ok(elem_ty)
     }
     
-    fn ty_check_call_expr(
-        &mut self,
-        span: Span,
-        ident_path: IdentPath,
-        arg_exprs: &[Expr],
-    ) -> Result<Ty, LiveError> {
-        
-        for arg_expr in arg_exprs {
-            self.ty_check_expr(arg_expr) ?;
-        }
-        
-        match self.env.find_sym(ident_path, span).ok_or_else( || LiveError {
-            span,
-            message: format!("`{}` is not defined", ident_path),
-        }) ? {
-            Sym::Builtin => {
-                let builtin = self.builtins.get(&ident_path.get_single().expect("unexpected")).unwrap();
-                let arg_tys = arg_exprs
-                    .iter()
-                    .map( | arg_expr | arg_expr.ty.borrow().as_ref().unwrap().clone())
-                    .collect::<Vec<_ >> ();
-                Ok(builtin .return_tys .get(&arg_tys) .ok_or({
-                    let mut message = String::new();
-                    write!(
-                        message,
-                        "can't apply builtin `{}` to arguments of types ",
-                        ident_path
-                    )
-                        .unwrap();
-                    let mut sep = "";
-                    for arg_ty in arg_tys {
-                        write!(message, "{}{}", sep, arg_ty).unwrap();
-                        sep = ", ";
-                    }
-                    LiveError {span, message}
-                }) ? .clone())
-            }
-            Sym::Fn => {
-                let fn_decl = self.shader.find_fn_decl(ident_path).unwrap();
-                if arg_exprs.len() < fn_decl.params.len() {
-                    return Err(LiveError {
-                        span,
-                        message: format!(
-                            "not enough arguments for call to function `{}`: expected {}, got {}",
-                            ident_path,
-                            fn_decl.params.len(),
-                            arg_exprs.len(),
-                        )
-                            .into(),
-                    });
-                }
-                if arg_exprs.len() > fn_decl.params.len() {
-                    return Err(LiveError {
-                        span,
-                        message: format!(
-                            "too many arguments for call to function `{}`: expected {}, got {}",
-                            ident_path,
-                            fn_decl.params.len(),
-                            arg_exprs.len()
-                        )
-                            .into(),
-                    });
-                }
-                for (index, (arg_expr, param)) in
-                arg_exprs.iter().zip(fn_decl.params.iter()).enumerate()
-                {
-                    let arg_ty = arg_expr.ty.borrow();
-                    let arg_ty = arg_ty.as_ref().unwrap();
-                    let param_ty = param.ty_expr.ty.borrow();
-                    let param_ty = param_ty.as_ref().unwrap();
-                    if arg_ty != param_ty {
-                        return Err(LiveError {
-                            span,
-                            message: format!(
-                                "wrong type for argument {} in call to function `{}`: expected `{}`, got `{}`",
-                                index + 1,
-                                ident_path,
-                                param_ty,
-                                arg_ty,
-                            ).into()
-                        });
-                    }
-                    if param.is_inout {
-                        self.lhs_checker().lhs_check_expr(arg_expr) ?;
-                    }
-                }
-                Ok(fn_decl.return_ty.borrow().as_ref().unwrap().clone())
-            }
-            _ => Err(LiveError {
-                span,
-                message: format!("`{}` is not a function", ident_path).into(),
-            }),
-        }
-    }
-    
-    fn ty_check_macro_call_expr(
-        &mut self,
-        span: Span,
-        _analysis: &Cell<Option<MacroCallAnalysis >>,
-        _ident: Ident,
-        _arg_exprs: &[Expr],
-    ) -> Result<Ty, LiveError> {
-        return Err(LiveError {
-            span,
-            message: "macro not found!".into(),
-        });
-    }
     
     #[allow(clippy::redundant_closure_call)]
     fn ty_check_cons_call_expr(
@@ -623,6 +642,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                 let actual_size = arg_tys.iter().map( | arg_ty | arg_ty.size()).sum::<usize>();
                 if actual_size < expected_size {
                     return Err(LiveError {
+                        origin: live_error_origin!(),
                         span,
                         message: format!(
                             "not enough components for call to constructor `{}`: expected {}, got {}",
@@ -635,6 +655,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                 }
                 if actual_size > expected_size {
                     return Err(LiveError {
+                        origin: live_error_origin!(),
                         span,
                         message: format!(
                             "too many components for call to constructor `{}`: expected {}, got {}",
@@ -648,6 +669,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                 Ok(ty.clone())
             }
             _ => Err(LiveError {
+                origin: live_error_origin!(),
                 span,
                 message: format!(
                     "can't construct value of type `{}` with arguments of types `{}`",
@@ -665,37 +687,51 @@ impl<'a, 'b> TyChecker<'a, 'b> {
         kind: &Cell<Option<VarKind >>,
         ident_path: IdentPath,
     ) -> Result<Ty, LiveError> {
+        // ok so . what do we do.
+        // alright a var expr. great
+        // what if we are a const?
         
-        match self.env.find_sym(ident_path, span).ok_or_else( || LiveError {
-            span,
-            message: format!("`{}` is not defined in this scope", ident_path),
-        }) ? {
-            Sym::Var {
-                ref ty,
-                kind: new_kind,
-                ..
-            } => {
-                // if kind is LiveId
-                if let VarKind::Live = new_kind {
-                    // lets fully qualify it here
-                    /*
-                    let qualified = self.env.qualify_ident_path(span.live_body_id, ident_path);
-                    self.shader
-                        .live_uniform_deps
-                        .borrow_mut()
-                        .as_mut()
-                        .unwrap()
-                        .insert((ty.clone(), qualified));*/
-                }
-                
-                kind.set(Some(new_kind));
-                Ok(ty.clone())
-            }
-            _ => Err(LiveError {
+        // ok ty checking a var expression.
+        panic!("IMPL")
+        /*
+        // ok so what if this is like bla::bla::bla::bla.
+        if ident_path.len() == 1 {
+            match self.env.find_sym_on_scopes(Ident(ident_path.segs[0]), span).ok_or_else( || LiveError {
+                origin: live_error_origin!(),
                 span,
-                message: format!("`{}` is not a variable", ident_path).into(),
-            }),
+                message: format!("`{}` is not defined in this scope", ident_path),
+            }) ? {
+                Sym::Var {
+                    ref ty,
+                    kind: new_kind,
+                    ..
+                } => {
+                    // if kind is LiveId
+                    if let VarKind::Live(full_node_ptr) = new_kind {
+                        // lets fully qualify it here
+                        
+                        //let qualified = self.env.qualify_ident_path(span.live_body_id, ident_path);
+                        self.env
+                            .live_uniform_deps
+                            .borrow_mut()
+                            .as_mut()
+                            .unwrap()
+                            .insert((ty.clone(), full_node_ptr));
+                    }
+                    
+                    kind.set(Some(new_kind));
+                    Ok(ty.clone())
+                }
+                _ => Err(LiveError {
+                    origin: live_error_origin!(),
+                    span,
+                    message: format!("`{}` is not a variable", ident_path).into(),
+                }),
+            }
         }
+        else {
+            panic!("IMPL")
+        }*/
     }
     
     fn ty_check_lit_expr(&mut self, _span: Span, lit: Lit) -> Result<Ty, LiveError> {

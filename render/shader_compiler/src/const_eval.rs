@@ -1,22 +1,24 @@
 use crate::shaderast::*;
-use crate::env::VarKind;
 use makepad_live_parser::LiveError;
+use makepad_live_parser::LiveErrorOrigin;
+use makepad_live_parser::live_error_origin;
 use crate::shaderast::{Ident,IdentPath};
 use crate::shaderast::{Lit};
 use makepad_live_parser::Span;
-use crate::shaderast::{Ty,TyLit};
 use crate::shaderast::Val;
+use crate::env::Env;
 use std::cell::Cell;
 
-#[derive(Clone, Debug)]
-pub struct ConstEvaluator<'a> {
-    pub shader: &'a ShaderAst,
+#[derive(Debug)]
+pub struct ConstEvaluator<'a, 'b> {
+    pub env: &'a Env<'b>,
     pub no_const_collapse: bool
 }
 
-impl<'a> ConstEvaluator<'a> {
+impl<'a,'b> ConstEvaluator<'a,'b> {
     pub fn const_eval_expr(&self, expr: &Expr) -> Result<Val, LiveError> {
         self.try_const_eval_expr(expr).ok_or_else(|| LiveError {
+            origin:live_error_origin!(),
             span: expr.span,
             message: String::from("expression is not const"),
         })
@@ -37,11 +39,6 @@ impl<'a> ConstEvaluator<'a> {
                 ref right_expr,
             } => self.try_const_eval_bin_expr(span, op, left_expr, right_expr),
             ExprKind::Un { span, op, ref expr } => self.try_const_eval_un_expr(span, op, expr),
-            ExprKind::MethodCall {
-                span,
-                ident,
-                ref arg_exprs,
-            } => self.try_const_eval_method_call_expr(span, ident, arg_exprs),
             ExprKind::Field {
                 span,
                 ref expr,
@@ -52,23 +49,22 @@ impl<'a> ConstEvaluator<'a> {
                 ref expr,
                 ref index_expr,
             } => self.try_const_eval_index_expr(span, expr, index_expr),
-            ExprKind::Call {
-                span,
-                ident_path,
-                ref arg_exprs,
-            } => self.try_const_eval_call_expr(span, ident_path, arg_exprs),
-            ExprKind::MacroCall {
-                span,
-                ref analysis,
-                ident,
+            ExprKind::MethodCall {
                 ref arg_exprs,
                 ..
-            } => self.try_const_eval_macro_call_expr(span, analysis, ident, arg_exprs),
-            ExprKind::ConsCall {
-                span,
-                ty_lit,
+            } => self.try_const_eval_all_call_expr(arg_exprs),
+            ExprKind::PlainCall {
                 ref arg_exprs,
-            } => self.try_const_eval_cons_call_expr(span, ty_lit, arg_exprs),
+                ..
+            } => self.try_const_eval_all_call_expr(arg_exprs),
+            ExprKind::BuiltinCall {
+                ref arg_exprs,
+                ..
+            } => self.try_const_eval_all_call_expr(arg_exprs),
+            ExprKind::ConsCall {
+                ref arg_exprs,
+                ..
+            } => self.try_const_eval_all_call_expr(arg_exprs),
             ExprKind::Var {
                 span,
                 ref kind,
@@ -197,24 +193,6 @@ impl<'a> ConstEvaluator<'a> {
         }
     }
 
-    fn try_const_eval_method_call_expr(
-        &self,
-        span: Span,
-        ident: Ident,
-        arg_exprs: &[Expr],
-    ) -> Option<Val> {
-        match arg_exprs[0].ty.borrow().as_ref().unwrap() {
-            Ty::Struct {
-                ident: struct_ident,
-            } => self.try_const_eval_call_expr(
-                span,
-                IdentPath::from_two(*struct_ident, ident),
-                arg_exprs,
-            ),
-            _ => panic!(),
-        }
-    }
-
     fn try_const_eval_field_expr(
         &self,
         _span: Span,
@@ -235,10 +213,10 @@ impl<'a> ConstEvaluator<'a> {
         None
     }
 
-    fn try_const_eval_call_expr(
+    fn try_const_eval_all_call_expr(
         &self,
-        _span: Span,
-        _ident_path: IdentPath,
+        //_span: Span,
+        //_ident: Ident,
         arg_exprs: &[Expr],
     ) -> Option<Val> {
         for arg_expr in arg_exprs {
@@ -246,36 +224,15 @@ impl<'a> ConstEvaluator<'a> {
         }
         None
     }
-
-    fn try_const_eval_macro_call_expr(
-        &self,
-        _span: Span,
-        _analysis: &Cell<Option<MacroCallAnalysis>>,
-        _ident: Ident,
-        _arg_exprs: &[Expr],
-    ) -> Option<Val> {
-        None
-    }
-
-    fn try_const_eval_cons_call_expr(
-        &self,
-        _span: Span,
-        _ty_lit: TyLit,
-        arg_exprs: &[Expr],
-    ) -> Option<Val> {
-        for arg_expr in arg_exprs {
-            self.try_const_eval_expr(arg_expr);
-        }
-        None
-    }
-
 
     fn try_const_eval_var_expr(
         &self,
         _span: Span,
-        kind: &Cell<Option<VarKind>>,
-        ident_path: IdentPath,
+        _kind: &Cell<Option<VarKind>>,
+        _ident_path: IdentPath,
     ) -> Option<Val> {
+        panic!("IMPL")
+        /*
         let ident = if let Some(ident) = ident_path.get_single(){
             ident
         }
@@ -283,10 +240,11 @@ impl<'a> ConstEvaluator<'a> {
             return None
         };
         
+        
         match kind.get().unwrap() {
             VarKind::Const => Some(
-                self.shader
-                    .find_const_decl(ident)
+                self.env
+                    .find_const_decl(ident, self.scope_node_ptr)
                     .unwrap()
                     .expr
                     .const_val
@@ -298,7 +256,7 @@ impl<'a> ConstEvaluator<'a> {
                     .clone(),
             ),
             _ => None,
-        }
+        }*/
     }
 
     fn try_const_eval_lit_expr(&self, _span: Span, lit: Lit) -> Option<Val> {
