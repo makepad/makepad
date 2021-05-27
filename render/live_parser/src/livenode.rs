@@ -52,13 +52,13 @@ impl LiveValue {
     }
 }
 
-
+/*
 #[derive(Clone, Copy, Debug)]
 pub enum ShaderRef {
     DrawInput,
     DefaultGeometry
 }
-
+*/
 #[derive(Clone, Copy, Debug)]
 pub enum LiveValue {
     String {
