@@ -1,31 +1,25 @@
 use crate::shaderast::*;
-use crate::env::VarKind;
 use crate::shaderast::{Ident,IdentPath};
 use crate::shaderast::{Lit};
 use makepad_live_parser::Span;
-use crate::shaderast::{Ty,TyLit};
 use crate::shaderast::Val;
 use std::cell::Cell;
+use crate::env::Env;
 
 #[derive(Clone, Debug)]
-pub struct ConstGatherer<'a> {
-    pub shader: &'a ShaderAst,
+pub struct ConstGatherer<'a,'b> {
+    pub env: &'a Env<'b>,
     pub gather_all: bool,
 }
 
-impl<'a> ConstGatherer<'a> {
+impl<'a,'b> ConstGatherer<'a,'b> {
     pub fn const_gather_expr(&self, expr: &Expr) {
-        let gather_span = match &expr.kind {
-            ExprKind::MacroCall { arg_exprs,..} => {
-                Some(arg_exprs[0].span)
-            },
-            _ => if self.gather_all{Some(expr.span)}else{None}
-        };
+        let gather_span = if self.gather_all{Some(expr.span)}else{None};
         if let Some(expr_span) = gather_span {
             match expr.const_val.borrow().as_ref().unwrap() {
                 Some(Val::Vec4(val)) => {
                     expr.const_index.set(Some(
-                        self.shader.const_table.borrow().as_ref().unwrap().len(),
+                        self.env.const_table.borrow().as_ref().unwrap().len(),
                     ));
                     self.write_span(&expr_span);
                     self.write_f32(val.x);
@@ -36,7 +30,7 @@ impl<'a> ConstGatherer<'a> {
                 }
                 Some(Val::Float(val)) => {
                     expr.const_index.set(Some(
-                        self.shader.const_table.borrow().as_ref().unwrap().len(),
+                        self.env.const_table.borrow().as_ref().unwrap().len(),
                     ));
                     self.write_span(&expr.span);
                     self.write_f32(*val);
@@ -60,10 +54,21 @@ impl<'a> ConstGatherer<'a> {
             } => self.const_gather_bin_expr(span, op, left_expr, right_expr),
             ExprKind::Un { span, op, ref expr } => self.const_gather_un_expr(span, op, expr),
             ExprKind::MethodCall {
-                span,
-                ident,
                 ref arg_exprs,
-            } => self.const_gather_method_call_expr(span, ident, arg_exprs),
+                ..
+            } => self.const_gather_all_call_expr(arg_exprs),
+            ExprKind::PlainCall {
+                ref arg_exprs,
+                ..
+            } => self.const_gather_all_call_expr(arg_exprs),
+            ExprKind::BuiltinCall {
+                ref arg_exprs,
+                ..
+            } => self.const_gather_all_call_expr(arg_exprs),
+            ExprKind::ConsCall {
+                ref arg_exprs,
+                ..
+            } => self.const_gather_all_call_expr(arg_exprs),
             ExprKind::Field {
                 span,
                 ref expr,
@@ -74,23 +79,6 @@ impl<'a> ConstGatherer<'a> {
                 ref expr,
                 ref index_expr,
             } => self.const_gather_index_expr(span, expr, index_expr),
-            ExprKind::Call {
-                span,
-                ident_path,
-                ref arg_exprs,
-            } => self.const_gather_call_expr(span, ident_path, arg_exprs),
-            ExprKind::MacroCall {
-                span,
-                ref analysis,
-                ident,
-                ref arg_exprs,
-                ..
-            } => self.const_gather_macro_call_expr(span, analysis, ident, arg_exprs),
-            ExprKind::ConsCall {
-                span,
-                ty_lit,
-                ref arg_exprs,
-            } => self.const_gather_cons_call_expr(span, ty_lit, arg_exprs),
             ExprKind::Var {
                 span,
                 ref kind,
@@ -122,19 +110,6 @@ impl<'a> ConstGatherer<'a> {
         self.const_gather_expr(expr);
     }
 
-    fn const_gather_method_call_expr(&self, span: Span, ident: Ident, arg_exprs: &[Expr]) {
-        match arg_exprs[0].ty.borrow().as_ref().unwrap() {
-            Ty::Struct {
-                ident: struct_ident,
-            } => self.const_gather_call_expr(
-                span,
-                IdentPath::from_two(*struct_ident, ident),
-                arg_exprs,
-            ),
-            _ => panic!(),
-        }
-    }
-
     fn const_gather_field_expr(&self, _span: Span, expr: &Expr, _field_ident: Ident) {
         self.const_gather_expr(expr);
     }
@@ -143,22 +118,7 @@ impl<'a> ConstGatherer<'a> {
         self.const_gather_expr(expr);
     }
 
-    fn const_gather_call_expr(&self, _span: Span, _ident_path: IdentPath, arg_exprs: &[Expr]) {
-        for arg_expr in arg_exprs {
-            self.const_gather_expr(arg_expr);
-        }
-    }
-
-    fn const_gather_macro_call_expr(
-        &self,
-        _span: Span,
-        _analysis: &Cell<Option<MacroCallAnalysis>>,
-        _ident: Ident,
-        _arg_exprs: &[Expr],
-    ) {
-    }
-
-    fn const_gather_cons_call_expr(&self, _span: Span, _ty_lit: TyLit, arg_exprs: &[Expr]) {
+    fn const_gather_all_call_expr(&self, arg_exprs: &[Expr]) {
         for arg_expr in arg_exprs {
             self.const_gather_expr(arg_expr);
         }
@@ -169,8 +129,8 @@ impl<'a> ConstGatherer<'a> {
     fn const_gather_lit_expr(&self, _span: Span, _lit: Lit) {}
 
     fn write_span(&self, span: &Span) {
-        let index = self.shader.const_table.borrow().as_ref().unwrap().len();
-        self.shader
+        let index = self.env.const_table.borrow().as_ref().unwrap().len();
+        self.env
             .const_table_spans
             .borrow_mut()
             .as_mut()
@@ -179,7 +139,7 @@ impl<'a> ConstGatherer<'a> {
     }
 
     fn write_f32(&self, val: f32) {
-        self.shader
+        self.env
             .const_table
             .borrow_mut()
             .as_mut()

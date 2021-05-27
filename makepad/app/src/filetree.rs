@@ -493,7 +493,7 @@ impl FileTree {
             // of the draw api with the item. 
             self.node_bg.set_area(node_draw.area);
             
-             if node_draw.animator.need_init(cx) {
+            if node_draw.animator.need_init(cx) {
                 node_draw.animator.init(cx, Self::get_default_anim(cx, counter, false));
             }
             // because we don't keep the draw api with the item

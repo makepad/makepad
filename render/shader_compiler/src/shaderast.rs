@@ -1,4 +1,3 @@
-use crate::env::VarKind;
 use makepad_live_parser::Span;
 use makepad_live_parser::Token;
 use makepad_live_parser::Id;
@@ -14,27 +13,49 @@ use makepad_live_parser::PrettyPrintedF32;
 use makepad_live_parser::id;
 use crate::shaderregistry::ShaderResourceId;
 
+// all the Live node pointer newtypes
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub struct FnNodePtr(pub FullNodePtr);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub struct StructNodePtr(pub FullNodePtr);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub struct ShaderNodePtr(pub FullNodePtr);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub struct ConstNodePtr(pub FullNodePtr);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub struct ValueNodePtr(pub FullNodePtr);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub struct VarDefNodePtr(pub FullNodePtr);
+
+//impl FnNodePtr {pub fn to_scope_ptr(self) -> ScopeNodePtr {ScopeNodePtr(self.0)}}
+//impl VarDefNodePtr {pub fn to_scope_ptr(self) -> ScopeNodePtr {ScopeNodePtr(self.0)}}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub enum InputNodePtr {
+    VarDef(FullNodePtr),
+    Class(FullNodePtr)
+}
+
+
 #[derive(Clone, Debug, Default)]
-pub struct ShaderAst {
-    //pub qualified_ident_path: QualifiedIdentPath,
+pub struct DrawShaderDecl {
     pub debug: bool,
     pub default_geometry: Option<ShaderResourceId>,
-    //pub draw_input: Option<(Span, QualifiedIdentPath)>,
     pub decls: Vec<Decl>,
-    // generated
-    pub const_table: RefCell<Option<Vec<f32 >> >,
-    pub const_table_spans: RefCell<Option<Vec<(usize, Span) >> >,
-    pub live_uniform_deps: RefCell<Option<BTreeSet<(Ty, FullNodePtr) >> >,
+    pub methods: Vec<FnDecl>,
 }
 
 
 #[derive(Clone, Debug)]
 pub enum Decl {
     Geometry(GeometryDecl),
-    Const(ConstDecl),
-    Fn(FnDecl),
     Instance(InstanceDecl),
-    Struct(StructDecl),
     Texture(TextureDecl),
     Uniform(UniformDecl),
     Varying(VaryingDecl),
@@ -43,63 +64,80 @@ pub enum Decl {
 #[derive(Clone, Debug)]
 pub struct GeometryDecl {
     pub is_used_in_fragment_shader: Cell<Option<bool >>,
+    pub var_def_node_ptr: VarDefNodePtr,
     pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
 }
-
+/*
 #[derive(Clone, Debug)]
 pub struct ConstDecl {
     pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
     pub expr: Expr,
+}*/
+
+// the unique identification of a fn call
+#[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
+pub enum Callee {
+    PlainFn{fn_node_ptr:FnNodePtr},
+    ShaderMethod{shader_node_ptr:ShaderNodePtr, ident:Ident},
+    StructMethod{struct_node_ptr:StructNodePtr, ident:Ident},
 }
 
 #[derive(Clone, Debug)]
 pub struct FnDecl {
+    pub fn_node_ptr: FnNodePtr,
+    
+    pub ident: Ident,
+
+    pub self_kind: Option<TyExprKind>, 
+    
+    // analysis
+    pub callees: RefCell<Option<BTreeSet<Callee >> >,
+    pub builtin_deps: RefCell<Option<BTreeSet<Ident >> >,
+
+    // which props we reffed on self
+    pub self_refs: RefCell<Option<BTreeSet<Ident >> >,
+
+    pub cons_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>) >> >,
+
+    // base
     pub span: Span,
     pub return_ty: RefCell<Option<Ty >>,
-    pub is_used_in_vertex_shader: Cell<Option<bool >>,
-    pub is_used_in_fragment_shader: Cell<Option<bool >>,
-    pub callees: RefCell<Option<BTreeSet<IdentPath >> >,
-    pub uniform_block_deps: RefCell<Option<BTreeSet<Ident >> >,
-    pub has_texture_deps: Cell<Option<bool >>,
-    pub geometry_deps: RefCell<Option<BTreeSet<Ident >> >,
-    pub instance_deps: RefCell<Option<BTreeSet<Ident >> >,
-    pub has_varying_deps: Cell<Option<bool >>,
-    pub builtin_deps: RefCell<Option<BTreeSet<Ident >> >,
-    pub cons_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>) >> >,
-    pub ident_path: IdentPath,
     pub params: Vec<Param>,
     pub return_ty_expr: Option<TyExpr>,
     pub block: Block,
+    pub first_param_is_self: bool
 }
 
+
+#[derive(Clone, Debug)]
+pub struct StructDecl {
+    pub span: Span,
+    //pub ident: Ident,
+    pub fields: Vec<FieldDecl>,
+    pub methods: Vec<FnDecl>, 
+}
+
+impl StructDecl {
+    pub fn find_field(&self, ident: Ident) -> Option<&FieldDecl> {
+        self.fields.iter().find( | field | field.ident == ident)
+    }
+}
 #[derive(Clone, Debug)]
 pub struct InstanceDecl {
     pub is_used_in_fragment_shader: Cell<Option<bool >>,
+    pub input_node_ptr: InputNodePtr,
     pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
 }
 
 #[derive(Clone, Debug)]
-pub struct StructDecl {
-    pub span: Span,
-    pub ident: Ident,
-    pub fields: Vec<Field>,
-    pub methods: Vec<FnDecl>
-}
-
-impl StructDecl {
-    pub fn find_field(&self, ident: Ident) -> Option<&Field> {
-        self.fields.iter().find( | field | field.ident == ident)
-    }
-}
-
-#[derive(Clone, Debug)]
 pub struct TextureDecl {
+    pub input_node_ptr: InputNodePtr,
     pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
@@ -107,14 +145,16 @@ pub struct TextureDecl {
 
 #[derive(Clone, Debug)]
 pub struct UniformDecl {
+    pub input_node_ptr: InputNodePtr,
     pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
-    pub block_ident: Option<Ident>,
+    pub block_ident: Ident,
 }
 
 #[derive(Clone, Debug)]
 pub struct VaryingDecl {
+    pub var_def_node_ptr: VarDefNodePtr,
     pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
@@ -129,7 +169,8 @@ pub struct Param {
 }
 
 #[derive(Clone, Debug)]
-pub struct Field {
+pub struct FieldDecl {
+    pub var_def_node_ptr: VarDefNodePtr,
     pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
@@ -211,11 +252,6 @@ pub enum ExprKind {
         op: UnOp,
         expr: Box<Expr>,
     },
-    MethodCall {
-        span: Span,
-        ident: Ident,
-        arg_exprs: Vec<Expr>,
-    },
     Field {
         span: Span,
         expr: Box<Expr>,
@@ -226,14 +262,18 @@ pub enum ExprKind {
         expr: Box<Expr>,
         index_expr: Box<Expr>,
     },
-    Call {
+    MethodCall {
         span: Span,
-        ident_path: IdentPath,
+        ident: Ident,
         arg_exprs: Vec<Expr>,
     },
-    MacroCall {
+    PlainCall {
         span: Span,
-        analysis: Cell<Option<MacroCallAnalysis >>,
+        fn_node_ptr: FnNodePtr,
+        arg_exprs: Vec<Expr>,
+    },
+    BuiltinCall{
+        span: Span,
         ident: Ident,
         arg_exprs: Vec<Expr>,
     },
@@ -253,9 +293,17 @@ pub enum ExprKind {
     },
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum VarKind {
+    Local,
+    MutLocal,
+    Const(ConstNodePtr),
+    LiveValue(ValueNodePtr)
+}
 
 #[derive(Clone, Debug)]
 pub struct TyExpr {
+    pub span: Span,
     pub ty: RefCell<Option<Ty >>,
     pub kind: TyExprKind,
 }
@@ -263,17 +311,12 @@ pub struct TyExpr {
 #[derive(Clone, Debug)]
 pub enum TyExprKind {
     Array {
-        span: Span,
         elem_ty_expr: Box<TyExpr>,
         len: u32,
     },
-    Var {
-        full_ptr: FullNodePtr,
-        span: Span,
-        ident: Ident,
-    },
+    Struct(StructNodePtr),
+    Shader(ShaderNodePtr),
     Lit {
-        span: Span,
         ty_lit: TyLit,
     },
 }
@@ -331,8 +374,9 @@ pub enum Ty {
     Mat3,
     Mat4,
     Texture2D,
-    Array { elem_ty: Rc<Ty>, len: usize },
-    Struct { ident: Ident },
+    Array {elem_ty: Rc<Ty>, len: usize},
+    Struct(StructNodePtr),
+    Shader(ShaderNodePtr),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -377,8 +421,40 @@ pub enum Val {
 #[derive(Clone, Copy, Ord, PartialOrd, Default, Eq, Hash, PartialEq)]
 pub struct Ident(pub Id);
 
+/*
+impl ShaderBody {
+    
+    pub fn find_const_decl(&self, _ident: Ident) -> Option<&ConstDecl> {
+        /*
+        self.decls.iter().find_map( | decl | {
+            match decl {
+                Decl::Const(decl) => Some(decl),
+                _ => None,
+            }
+            .filter( | decl | decl.ident == ident)
+        })
+        */
+        return None
+    }
+    
+    pub fn find_fn_decl(&self, ident: Ident) -> Option<&FnDecl> {
+        self.fn_decls.iter().rev().find_map( | decl | {
+            Some(decl)
+                .filter( | decl | decl.ident == ident)
+        })
+    }
+}*/
 
-impl ShaderAst {
+impl FnDecl{
+    pub fn init_analysis(&self){
+        *self.callees.borrow_mut() = Some(BTreeSet::new());
+        *self.builtin_deps.borrow_mut() = Some(BTreeSet::new());
+        *self.cons_fn_deps.borrow_mut() = Some(BTreeSet::new());
+        *self.self_refs.borrow_mut() = Some(BTreeSet::new());
+    }
+}
+
+impl DrawShaderDecl {
     
     pub fn find_geometry_decl(&self, ident: Ident) -> Option<&GeometryDecl> {
         self.decls.iter().find_map( | decl | {
@@ -390,25 +466,14 @@ impl ShaderAst {
         })
     }
     
-    pub fn find_const_decl(&self, ident: Ident) -> Option<&ConstDecl> {
-        self.decls.iter().find_map( | decl | {
-            match decl {
-                Decl::Const(decl) => Some(decl),
-                _ => None,
-            }
-            .filter( | decl | decl.ident == ident)
-        })
-    }
-    
+    /*
     pub fn find_fn_decl(&self, ident_path: IdentPath) -> Option<&FnDecl> {
-        self.decls.iter().rev().find_map( | decl | {
-            match decl {
-                Decl::Fn(decl) => Some(decl),
-                _ => None,
-            }
+        self.shader_body.find_fn_
+        self.fn_decls.iter().rev().find_map( | decl | {
+            Some(decl)
             .filter( | decl | decl.ident_path == ident_path)
         })
-    }
+    }*/
     
     pub fn find_instance_decl(&self, ident: Ident) -> Option<&InstanceDecl> {
         self.decls.iter().find_map( | decl | {
@@ -419,7 +484,7 @@ impl ShaderAst {
             .filter( | decl | decl.ident == ident)
         })
     }
-    
+    /*
     pub fn find_struct_decl(&self, ident: Ident) -> Option<&StructDecl> {
         self.decls.iter().find_map( | decl | {
             match decl {
@@ -428,7 +493,7 @@ impl ShaderAst {
             }
             .filter( | decl | decl.ident == ident)
         })
-    }
+    }*/
     
     pub fn find_uniform_decl(&self, ident: Ident) -> Option<&UniformDecl> {
         self.decls.iter().find_map( | decl | {
@@ -452,61 +517,61 @@ impl ShaderAst {
 }
 
 impl BinOp {
-    pub fn from_assign_op(token:Token) -> Option<BinOp> {
+    pub fn from_assign_op(token: Token) -> Option<BinOp> {
         match token {
-            token_punct!(=) => Some(BinOp::Assign),
-            token_punct!(+=) =>Some(BinOp::AddAssign),
-            token_punct!(-=) => Some(BinOp::SubAssign),
-            token_punct!(*=) => Some(BinOp::MulAssign),
-            token_punct!(/=) => Some(BinOp::DivAssign),
+            token_punct!( =) => Some(BinOp::Assign),
+            token_punct!( +=) => Some(BinOp::AddAssign),
+            token_punct!( -=) => Some(BinOp::SubAssign),
+            token_punct!( *=) => Some(BinOp::MulAssign),
+            token_punct!( /=) => Some(BinOp::DivAssign),
             _ => None,
         }
     }
     
-    pub fn from_or_op(token:Token) -> Option<BinOp> {
+    pub fn from_or_op(token: Token) -> Option<BinOp> {
         match token {
-            token_punct!(||) => Some(BinOp::Or),
+            token_punct!( ||) => Some(BinOp::Or),
             _ => None,
         }
     }
     
-    pub fn from_and_op(token:Token) -> Option<BinOp> {
+    pub fn from_and_op(token: Token) -> Option<BinOp> {
         match token {
-            token_punct!(&&) => Some(BinOp::And),
+            token_punct!( &&) => Some(BinOp::And),
             _ => None,
         }
     }
     
-    pub fn from_eq_op(token:Token) -> Option<BinOp> {
+    pub fn from_eq_op(token: Token) -> Option<BinOp> {
         match token {
-            token_punct!(==) => Some(BinOp::Eq),
-            token_punct!(!=) => Some(BinOp::Ne),
+            token_punct!( ==) => Some(BinOp::Eq),
+            token_punct!( !=) => Some(BinOp::Ne),
             _ => None,
         }
     }
     
-    pub fn from_rel_op(token:Token) -> Option<BinOp> {
+    pub fn from_rel_op(token: Token) -> Option<BinOp> {
         match token {
             token_punct!(<) => Some(BinOp::Lt),
-            token_punct!(<=) => Some(BinOp::Le),
+            token_punct!( <=) => Some(BinOp::Le),
             token_punct!(>) => Some(BinOp::Gt),
-            token_punct!(>=) => Some(BinOp::Ge),
+            token_punct!( >=) => Some(BinOp::Ge),
             _ => None,
         }
     }
     
-    pub fn from_add_op(token:Token) -> Option<BinOp> {
+    pub fn from_add_op(token: Token) -> Option<BinOp> {
         match token {
-            token_punct!(+) => Some(BinOp::Add),
+            token_punct!( +) => Some(BinOp::Add),
             token_punct!(-) => Some(BinOp::Sub),
             _ => None,
         }
     }
     
-    pub fn from_mul_op(token:Token) -> Option<BinOp> {
+    pub fn from_mul_op(token: Token) -> Option<BinOp> {
         match token {
             token_punct!(*) => Some(BinOp::Mul),
-            token_punct!(/) => Some(BinOp::Div),
+            token_punct!( /) => Some(BinOp::Div),
             _ => None,
         }
     }
@@ -541,14 +606,14 @@ impl fmt::Display for BinOp {
     }
 }
 
-impl UnOp{
-    pub fn from_un_op(token:Token) -> Option<UnOp> {
+impl UnOp {
+    pub fn from_un_op(token: Token) -> Option<UnOp> {
         match token {
-            token_punct!(!) =>Some(UnOp::Not),
-            token_punct!(-)=> Some(UnOp::Neg),
+            token_punct!(!) => Some(UnOp::Not),
+            token_punct!(-) => Some(UnOp::Neg),
             _ => None,
         }
-    }    
+    }
 }
 
 impl fmt::Display for UnOp {
@@ -567,11 +632,11 @@ impl fmt::Display for UnOp {
 
 impl Ty {
     
-    pub fn maybe_ty_lit(&self)->Option<TyLit>{
-        match self{
+    pub fn maybe_ty_lit(&self) -> Option<TyLit> {
+        match self {
             Ty::Void => None,
             Ty::Bool => Some(TyLit::Bool),
-            Ty::Int =>  Some(TyLit::Int),
+            Ty::Int => Some(TyLit::Int),
             Ty::Float => Some(TyLit::Float),
             Ty::Bvec2 => Some(TyLit::Bvec2),
             Ty::Bvec3 => Some(TyLit::Bvec3),
@@ -586,8 +651,9 @@ impl Ty {
             Ty::Mat3 => Some(TyLit::Mat3),
             Ty::Mat4 => Some(TyLit::Mat4),
             Ty::Texture2D => Some(TyLit::Bool),
-            Ty::Array { .. } => None,
-            Ty::Struct { .. } => None
+            Ty::Array {..} => None,
+            Ty::Struct(_) => None,
+            Ty::Shader(_) => None
         }
     }
     
@@ -597,29 +663,29 @@ impl Ty {
             _ => false,
         }
     }
-
+    
     pub fn is_vector(&self) -> bool {
         match self {
             Ty::Bvec2
-            | Ty::Bvec3
-            | Ty::Bvec4
-            | Ty::Ivec2
-            | Ty::Ivec3
-            | Ty::Ivec4
-            | Ty::Vec2
-            | Ty::Vec3
-            | Ty::Vec4 => true,
+                | Ty::Bvec3
+                | Ty::Bvec4
+                | Ty::Ivec2
+                | Ty::Ivec3
+                | Ty::Ivec4
+                | Ty::Vec2
+                | Ty::Vec3
+                | Ty::Vec4 => true,
             _ => false,
         }
     }
-
+    
     pub fn is_matrix(&self) -> bool {
         match self {
             Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => true,
             _ => false,
         }
     }
-
+    
     pub fn size(&self) -> usize {
         match self {
             Ty::Void => 0,
@@ -629,9 +695,10 @@ impl Ty {
             Ty::Bvec4 | Ty::Ivec4 | Ty::Vec4 | Ty::Mat2 => 4,
             Ty::Mat3 => 9,
             Ty::Mat4 => 16,
-            Ty::Texture2D { .. } => panic!(),
-            Ty::Array { elem_ty, len } => elem_ty.size() * len,
-            Ty::Struct { .. } => panic!(),
+            Ty::Texture2D {..} => panic!(),
+            Ty::Array {elem_ty, len} => elem_ty.size() * len,
+            Ty::Struct(_) => panic!(),
+            Ty::Shader(_) =>  panic!(),
         }
     }
 }
@@ -656,40 +723,41 @@ impl fmt::Display for Ty {
             Ty::Mat3 => write!(f, "mat3"),
             Ty::Mat4 => write!(f, "mat4"),
             Ty::Texture2D => write!(f, "texture2D"),
-            Ty::Array { elem_ty, len } => write!(f, "{}[{}]", elem_ty, len),
-            Ty::Struct { ident, .. } => write!(f, "{}", ident),
+            Ty::Array {elem_ty, len} => write!(f, "{}[{}]", elem_ty, len),
+            Ty::Struct(struct_ptr)=> write!(f, "Struct:{:?}", struct_ptr),
+            Ty::Shader(shader_ptr) =>  write!(f, "Shader:{:?}", shader_ptr),
         }
     }
 }
 
 impl TyLit {
-    pub fn from_id(id:Id)->Option<TyLit>{
-        match id{
-            id!(vec4)=>Some(TyLit::Vec4),
-            id!(vec3)=>Some(TyLit::Vec3),
-            id!(vec2)=>Some(TyLit::Vec2),
-            id!(mat4)=>Some(TyLit::Mat4),
-            id!(mat3)=>Some(TyLit::Mat3),
-            id!(mat2)=>Some(TyLit::Mat2),
-            id!(float)=>Some(TyLit::Float),
-            id!(bool)=>Some(TyLit::Bool),
-            id!(int)=>Some(TyLit::Int),
-            id!(bvec2)=>Some(TyLit::Bvec2),
-            id!(bvec3)=>Some(TyLit::Bvec3),
-            id!(bvec4)=>Some(TyLit::Bvec4),
-            id!(ivec2)=>Some(TyLit::Ivec4),
-            id!(ivec3)=>Some(TyLit::Ivec4),
-            id!(ivec4)=>Some(TyLit::Ivec4),
-            id!(texture2D)=>Some(TyLit::Texture2D),
-            _=>None
+    pub fn from_id(id: Id) -> Option<TyLit> {
+        match id {
+            id!(vec4) => Some(TyLit::Vec4),
+            id!(vec3) => Some(TyLit::Vec3),
+            id!(vec2) => Some(TyLit::Vec2),
+            id!(mat4) => Some(TyLit::Mat4),
+            id!(mat3) => Some(TyLit::Mat3),
+            id!(mat2) => Some(TyLit::Mat2),
+            id!(float) => Some(TyLit::Float),
+            id!(bool) => Some(TyLit::Bool),
+            id!(int) => Some(TyLit::Int),
+            id!(bvec2) => Some(TyLit::Bvec2),
+            id!(bvec3) => Some(TyLit::Bvec3),
+            id!(bvec4) => Some(TyLit::Bvec4),
+            id!(ivec2) => Some(TyLit::Ivec4),
+            id!(ivec3) => Some(TyLit::Ivec4),
+            id!(ivec4) => Some(TyLit::Ivec4),
+            id!(texture2D) => Some(TyLit::Texture2D),
+            _ => None
         }
     }
     
-    pub fn to_ty_expr(self) ->TyExpr{
+    pub fn to_ty_expr(self) -> TyExpr {
         TyExpr {
             ty: RefCell::new(None),
+            span: Span::default(),
             kind: TyExprKind::Lit {
-                span: Span::default(),
                 ty_lit: self
             }
         }
@@ -799,8 +867,8 @@ impl fmt::Display for Lit {
 
 
 impl Ident {
-    pub fn to_id(self)->Id{self.0}
-    pub fn to_ident_path(self)->IdentPath{
+    pub fn to_id(self) -> Id {self.0}
+    pub fn to_ident_path(self) -> IdentPath {
         IdentPath::from_ident(self)
     }
 }
@@ -819,72 +887,72 @@ impl fmt::Display for Ident {
 
 #[derive(Clone, Default, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct IdentPath {
-    pub segs: [Ident; 6],
+    pub segs: [Id; 6],
     pub len: usize
 }
 
 #[derive(Clone, Copy, Default, Eq, PartialEq, Debug)]
-pub struct IdentPathWithSpan{
-    pub span:Span,
-    pub ident_path:IdentPath,
+pub struct IdentPathWithSpan {
+    pub span: Span,
+    pub ident_path: IdentPath,
 }
 
 
 impl IdentPath {
     
-    pub fn from_ident(ident:Ident)->Self{
+    pub fn from_ident(ident: Ident) -> Self {
         let mut p = IdentPath::default();
-        p.segs[0] = ident;
+        p.segs[0] = ident.0;
         p.len = 1;
         p
     }
     
-    pub fn from_two(ident1:Ident,ident2:Ident)->Self{
+    pub fn from_two(ident1: Ident, ident2: Ident) -> Self {
         let mut p = IdentPath::default();
-        p.segs[0] = ident1;
-        p.segs[1] = ident2;
+        p.segs[0] = ident1.0;
+        p.segs[1] = ident2.0;
         p.len = 2;
         p
     }
-
-    pub fn from_three(ident1:Ident,ident2:Ident, ident3:Ident)->Self{
+    
+    pub fn from_three(ident1: Ident, ident2: Ident, ident3: Ident) -> Self {
         let mut p = IdentPath::default();
-        p.segs[0] = ident1;
-        p.segs[1] = ident2;
-        p.segs[1] = ident3;
+        p.segs[0] = ident1.0;
+        p.segs[1] = ident2.0;
+        p.segs[1] = ident3.0;
         p.len = 3;
         p
     }
-
-    pub fn from_array(idents:&[Ident])->Self{
+    
+    pub fn from_array(idents: &[Ident]) -> Self {
         let mut p = IdentPath::default();
-        for i in 0..idents.len(){
-            p.segs[i] = idents[i];
+        for i in 0..idents.len() {
+            p.segs[i] = idents[i].0;
         }
         p.len = idents.len();
         p
     }
     
-    pub fn to_struct_fn_ident(&self)->Ident{
+    pub fn to_struct_fn_ident(&self) -> Ident {
         let mut s = String::new();
         for i in 0..self.len {
             if i != 0 {
                 let _ = write!(s, "_").unwrap();
             }
-            let _ = write!(s,"{}", self.segs[i]);
+            let _ = write!(s, "{}", self.segs[i]);
         }
         Ident(Id::from_str(&s).panic_collision(&s))
     }
-
-    pub fn from_str(value:&str)->Self{
+    
+    pub fn from_str(value: &str) -> Self {
         let mut p = IdentPath::default();
-        p.segs[0] = Ident(Id::from_str(value));
+        p.segs[0] = Id::from_str(value);
         p.len = 1;
         p
     }
-
+    
     pub fn is_self_scope(&self) -> bool {
-        self.len > 1 && self.segs[0] == Ident(id!(self))
+        self.len > 1 && self.segs[0] == id!(self)
     }
     
     pub fn len(&self) -> usize {
@@ -895,7 +963,7 @@ impl IdentPath {
         if self.len >= self.segs.len() {
             return false
         }
-        self.segs[self.len] = ident;
+        self.segs[self.len] = ident.0;
         self.len += 1;
         return true
     }
@@ -905,7 +973,7 @@ impl IdentPath {
         if self.len != 1 {
             return None
         }
-        return Some(self.segs[0])
+        return Some(Ident(self.segs[0]))
     }
 }
 
@@ -940,7 +1008,7 @@ impl Val {
             _ => None,
         }
     }
-
+    
     pub fn to_int(&self) -> Option<i32> {
         match *self {
             Val::Int(val) => Some(val),

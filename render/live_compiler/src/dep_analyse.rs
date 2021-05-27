@@ -126,7 +126,7 @@ impl<'a,'b> DepAnalyser<'a,'b> {
 
     fn dep_analyse_call_expr(&mut self, span: Span, ident_path: IdentPath, arg_exprs: &[Expr]) {
         //let ident = ident_path.get_single().expect("IMPL");
-        for arg_expr in arg_exprs {
+        for arg_expr in arg_exprs { 
             self.dep_analyse_expr(arg_expr);
         }
         match self.env.find_sym(ident_path, span).unwrap() {

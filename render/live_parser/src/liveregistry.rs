@@ -1,5 +1,5 @@
 use crate::id::{Id, IdPack, IdUnpack, IdFmt};
-use crate::liveerror::{LiveError, LiveFileError};
+use crate::liveerror::{LiveError, LiveFileError, LiveErrorOrigin};
 use makepad_live_derive::*;
 use crate::livedocument::LiveDocument;
 use crate::livedocument::LiveScopeTarget;
@@ -47,18 +47,15 @@ pub struct LiveRegistry {
 
 
 impl LiveRegistry {
+
+     pub fn resolve_ptr(&self, full_ptr:FullNodePtr)->(&LiveDocument,&LiveNode){
+        let doc = &self.expanded[full_ptr.file_id.to_index()];
+        (doc,&doc.resolve_ptr(full_ptr.local_ptr))
+    }
+    
     pub fn live_error_to_live_file_error(&self, live_error:LiveError)->LiveFileError{
         let live_file = &self.live_files[live_error.span.file_id().to_index()];
-        
-        // lets find the span info
-        let start = LiveError::byte_to_row_col(live_error.span.start() as usize, &live_file.source);
-        LiveFileError {
-            file: live_file.file.to_string(),
-            line: start.0,
-            column: start.1,
-            len: (live_error.span.len()) as usize,
-            message: live_error.message.to_string(),
-        }
+        live_error.to_live_file_error(&live_file.file, &live_file.source)
     }
     
     pub fn is_baseclass(id: IdPack) -> bool {
@@ -88,7 +85,7 @@ impl LiveRegistry {
         lhs
     }
     
-    pub fn find_full_node_ptr(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<FullNodePtr> {
+    pub fn find_full_node_ptr_from_ids(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<FullNodePtr> {
         let cm = CrateModule(crate_id, module_id);
         if let Some(file_id) = self.crate_module_to_file_id.get(&cm) {
             let exp = &self.expanded[file_id.to_index()];
@@ -105,6 +102,20 @@ impl LiveRegistry {
         None
     }
     
+    pub fn find_base_class_id(&self, class: IdPack)->Option<IdPack>{
+        let mut class_iter = class;
+        while let IdUnpack::FullNodePtr(full_ptr) = class_iter.unpack() {
+            let (_, other_node) = self.resolve_ptr(full_ptr);
+            if let LiveValue::Class {class, ..} = other_node.value {
+                class_iter = class;
+            }
+            else {
+                return None
+            }
+        }
+        Some(class_iter)        
+    }
+    
     pub fn find_component_origin(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<(CrateModule, Id, FullNodePtr)> {
         let cm = CrateModule(crate_id, module_id);
         if let Some(file_id) = self.crate_module_to_file_id.get(&cm) {
@@ -117,8 +128,9 @@ impl LiveRegistry {
                         let mut class_iter = class;
                         let mut token_id_iter = node.token_id;
                         while let IdUnpack::FullNodePtr(full_ptr) = class_iter.unpack() {
-                            let other = &self.expanded[full_ptr.file_id.to_index()];
-                            let other_node = &other.nodes[full_ptr.local_ptr.level][full_ptr.local_ptr.index];
+                            let (_,other_node) = self.resolve_ptr(full_ptr);
+                            //let other = &self.expanded[full_ptr.file_id.to_index()];
+                            //let other_node = &other.nodes[full_ptr.local_ptr.level][full_ptr.local_ptr.index];
                             if let LiveValue::Class {class, ..} = other_node.value {
                                 class_iter = class;
                                 token_id_iter = other_node.token_id;
@@ -548,6 +560,7 @@ impl LiveRegistry {
                             }
                             Err(message) => {
                                 return Err(LiveError {
+                                    origin: live_error_origin!(),
                                     span: out_doc.token_id_to_span(token_id),
                                     message
                                 });
@@ -556,6 +569,7 @@ impl LiveRegistry {
                     }
                     else if LiveRegistry::is_baseclass(IdPack::single(base)) {
                         return Err(LiveError {
+                            origin: live_error_origin!(),
                             span: in_doc.token_id_to_span(token_id),
                             message: format!("Cannot use baseclass {}", base)
                         });
@@ -571,6 +585,7 @@ impl LiveRegistry {
                                             }
                                             Err(message) => {
                                                 return Err(LiveError {
+                                                    origin: live_error_origin!(),
                                                     span: out_doc.token_id_to_span(token_id),
                                                     message
                                                 });
@@ -579,6 +594,7 @@ impl LiveRegistry {
                                     }
                                     _ => {
                                         return Err(LiveError {
+                                            origin: live_error_origin!(),
                                             span: in_doc.token_id_to_span(token_id),
                                             message: format!("Property is not a class {} of {}", base, IdFmt::col(&in_doc.multi_ids, resolve_id))
                                         });
@@ -595,6 +611,7 @@ impl LiveRegistry {
                                             }
                                             Err(message) => {
                                                 return Err(LiveError {
+                                                    origin: live_error_origin!(),
                                                     span: out_doc.token_id_to_span(token_id),
                                                     message
                                                 });
@@ -603,6 +620,7 @@ impl LiveRegistry {
                                     }
                                     _ => {
                                         return Err(LiveError {
+                                            origin: live_error_origin!(),
                                             span: in_doc.token_id_to_span(token_id),
                                             message: format!("Property is not a class {} of {}", base, IdFmt::col(&in_doc.multi_ids, resolve_id))
                                         });
@@ -611,6 +629,7 @@ impl LiveRegistry {
                             }
                             None => { // scope item not found, error
                                 return Err(LiveError {
+                                    origin: live_error_origin!(),
                                     span: in_doc.token_id_to_span(token_id),
                                     message: format!("Cannot find item on scope: {} of {}", base, IdFmt::col(&in_doc.multi_ids, resolve_id))
                                 });
@@ -632,6 +651,7 @@ impl LiveRegistry {
                 _ => ()
             }
             return Err(LiveError {
+                origin: live_error_origin!(),
                 span: in_doc.token_id_to_span(token_id),
                 message: format!("Cannot find item on scope: {}", resolve_id)
             });
@@ -682,15 +702,6 @@ impl LiveRegistry {
                         );
                         match result {
                             Ok((None, found_node)) => {
-                                //let f_n = &out_doc.nodes[found_node.level][found_node.index];
-                                /*if let LiveValue::Id(..) = f_n.value {}
-                                else {
-                                    errors.push(LiveError {
-                                        span: in_doc.token_id_to_span(node.token_id),
-                                        message: format!("Target not an id {}", IdFmt::col(&in_doc.multi_ids, node.id))
-                                    });
-                                    return
-                                }*/
                                 let new_id = IdPack::node_ptr(in_file_id, found_node);
                                 let written_node = &mut out_doc.nodes[out_level][out_index];
                                 if let LiveValue::IdPack(id) = &mut written_node.value {
@@ -698,22 +709,11 @@ impl LiveRegistry {
                                 }
                             }
                             Ok((Some(found_file_id), found_node)) => {
-                                //let f_n = &expanded[found_file_id.to_index()].as_ref().unwrap().nodes[found_node.level][found_node.index];
-                                /*if let LiveValue::Id(..) = f_n.value {}
-                                else {
-                                    errors.push(LiveError {
-                                        span: in_doc.token_id_to_span(node.token_id),
-                                        message: format!("Target not an id {}", IdFmt::col(&in_doc.multi_ids, node.id))
-                                    });
-                                    return
-                                }*/
-                                
                                 let new_id = IdPack::node_ptr(found_file_id, found_node);
                                 let written_node = &mut out_doc.nodes[out_level][out_index];
                                 if let LiveValue::IdPack(id) = &mut written_node.value {
                                     *id = new_id;
                                 }
-                                // store pointer
                             }
                             Err(err) => {
                                 errors.push(err);
@@ -757,6 +757,7 @@ impl LiveRegistry {
                                 if let LiveValue::Call {..} = f_n.value {}
                                 else {
                                     errors.push(LiveError {
+                                        origin: live_error_origin!(),
                                         span: in_doc.token_id_to_span(node.token_id),
                                         message: format!("Target not a call {}", IdFmt::col(&in_doc.multi_ids, node.id_pack))
                                     });
@@ -773,6 +774,7 @@ impl LiveRegistry {
                                 if let LiveValue::Call {..} = f_n.value {}
                                 else {
                                     errors.push(LiveError {
+                                        origin: live_error_origin!(),
                                         span: in_doc.token_id_to_span(node.token_id),
                                         message: format!("Target not a call {}", IdFmt::col(&in_doc.multi_ids, node.id_pack))
                                     });
@@ -940,6 +942,7 @@ impl LiveRegistry {
                             }
                             if !found {
                                 errors.push(LiveError {
+                                    origin: live_error_origin!(),
                                     span: in_doc.token_id_to_span(node.token_id),
                                     message: format!("Cannot find import {}", IdFmt::col(&in_doc.multi_ids, node.id_pack))
                                 });
@@ -1008,6 +1011,7 @@ impl LiveRegistry {
                                     }
                                     if !found {
                                         errors.push(LiveError {
+                                            origin: live_error_origin!(),
                                             span: in_doc.token_id_to_span(node.token_id),
                                             message: format!("Use path not found {}", IdFmt::col(&in_doc.multi_ids, node.id_pack))
                                         });
@@ -1017,6 +1021,7 @@ impl LiveRegistry {
                         }
                         _ => {
                             errors.push(LiveError {
+                                origin: live_error_origin!(),
                                 span: in_doc.token_id_to_span(node.token_id),
                                 message: format!("Node type invalid {}", IdFmt::col(&in_doc.multi_ids, node.id_pack))
                             });
@@ -1080,6 +1085,7 @@ impl LiveRegistry {
                     if let CopyRecurResult::IsClass {..} = copy_result {}
                     else if node_count >0 {
                         errors.push(LiveError {
+                            origin: live_error_origin!(),
                             span: in_doc.token_id_to_span(node.token_id),
                             message: format!("Cannot override items in non-class: {}", IdFmt::col(&in_doc.multi_ids, class))
                         });
@@ -1139,6 +1145,7 @@ impl LiveRegistry {
             else {
                 // ok so we have a token_id. now what.
                 errors.push(LiveError {
+                    origin: live_error_origin!(),
                     span: self.token_id_to_span(*token_id),
                     message: format!("Cannot find dependency: {}::{}", crate_module.0, crate_module.1)
                 });

@@ -2,14 +2,22 @@ use crate::span::Span;
 //use std::error;
 use std::fmt;
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LiveErrorOrigin {
+    pub filename: String,
+    pub line:usize
+}
+
 #[derive(Clone, Debug)]
 pub struct LiveError {
+    pub origin: LiveErrorOrigin,
     pub span: Span,
     pub message: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LiveFileError {
+    pub origin: LiveErrorOrigin,
     pub file: String,
     pub line: usize,
     pub column: usize,
@@ -51,6 +59,7 @@ impl LiveError{
         // lets find the span info
         let start = Self::byte_to_row_col(self.span.start() as usize, &source);
         LiveFileError {
+            origin: self.origin.clone(),
             file: file.to_string(),
             line: start.0,
             column: start.1,
@@ -62,6 +71,6 @@ impl LiveError{
 
 impl fmt::Display for LiveError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.message)
+        write!(f, "{} - origin: {}:{} ", self.message, self.origin.filename, self.origin.line)
     }
 }
