@@ -1,11 +1,55 @@
-#![allow(unused_variables)]
-#![allow(dead_code)]
+const SOURCE:&'static str = r#"
+        ViewShader: Shader{
+            uniform camera_projection: mat4 in pass;
+            uniform draw_scroll: vec4 in draw;
+            //instance y: float
+        }
+        
+        // what does this thing factory?
+        DrawQuad: ViewShader{
+            // these point to things in Rust
+            draw_input self::DrawQuad;
+            default_geometry makepad_render::shader_std::quad_2d;
+            
+            geometry geom: vec2;
+            //instance x: float
+            //instance y: float
+            uniform z: float
+            varying w: float
+            BlaComp:Component{
+                fn blup(){}
+            }
+                
+            MyStruct:Struct{
+                field x:float
+                field y:float
+                fn blop(self){}
+                fn bla()->Self{
+                    let t = BlaComp::blup();
+                    let v: Self;
+                    v.x = 1.0;
+                    v.y = 2.0;
+                    v.blop();
+                    return v;
+                }
+            }
+            
+            fn pixel(self)->vec4{
+                let y:MyStruct;
+                let x = MyStruct::bla();
+                //let w = self.z;
+                return #f00;
+            }
+            
+            fn vertex(self)->vec4{
+                return vec4(1.0);
+            }
+        }
+    "#;
 use makepad_live_parser::*;
 use makepad_shader_compiler::shaderregistry::ShaderRegistry;
 use makepad_shader_compiler::shaderregistry::ShaderDrawInput;
 use makepad_shader_compiler::shaderast::TyLit;
-mod test;
-use crate::test::test;
 /*
 #[derive(Clone, Debug)]
 struct DrawQuad{
@@ -37,50 +81,8 @@ fn main() {
     // ok lets do a deserialize
     //let mut lr = LiveFactoriesTest::default();
     let mut sr = ShaderRegistry::default();
-    println!("{}", module_path!());
-    test();
-    let source = r#"
-        ViewShader: Shader{
-            uniform camera_projection: mat4 in pass;
-            uniform draw_scroll: vec4 in draw;
-            //instance y: float
-        }
-        
-        // what does this thing factory?
-        DrawQuad: ViewShader{
-            // these point to things in Rust
-            draw_input self::DrawQuad;
-            default_geometry makepad_render::shader_std::quad_2d;
-            
-            geometry geom: vec2;
-            //instance x: float
-            //instance y: float
-            uniform z: float
-            varying w: float
-            
-            MyStruct:Struct{
-                field x:float
-                field y:float
-                fn bla()->Self{
-                    let v = Self;
-                    v.x = 1.0;
-                    v.y = 2.0;
-                    return v;
-                }
-            }
-            
-            fn pixel()->vec4{
-                let y:MyStruct;
-                let x = MyStruct::bla();
-                return #f00;
-            }
-            
-            fn vertex()->vec4{
-                return vec4(1.0);
-            }
-        }
-    "#;
-    match sr.live_registry.parse_live_file("test.live", id_check!(main), id_check!(test), source.to_string()) {
+    
+    match sr.live_registry.parse_live_file("test.live", id_check!(main), id_check!(test), SOURCE.to_string()) {
         Err(why) => panic!("Couldnt parse file {}", why),
         _ => ()
     }
@@ -91,7 +93,7 @@ fn main() {
     //println!("{}", lr.registry.expanded[0]);
     
     for msg in errors {
-        println!("{}\n", msg.to_live_file_error("", source));
+        println!("{}\n", msg.to_live_file_error("", SOURCE));
     }
     
     let mut di = ShaderDrawInput::default();
@@ -102,7 +104,7 @@ fn main() {
     let result = sr.analyse_draw_shader(id!(main), id!(test), &[id!(DrawQuad)]);
     match result{
         Err(e)=>{
-            println!("Error {}", e);
+            println!("Error {}", e.to_live_file_error("", SOURCE));
         }
         Ok(_)=>{
             println!("OK!");

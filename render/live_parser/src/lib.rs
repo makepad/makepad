@@ -30,6 +30,7 @@ pub use crate::token::TokenWithSpan;
 pub use crate::token::Token;
 pub use crate::span::Span;
 pub use crate::liveerror::LiveError;
+pub use crate::liveerror::LiveErrorOrigin;
 pub use crate::liveerror::LiveFileError;
 pub use crate::id::FullNodePtr;
 pub use crate::math::*;
@@ -38,5 +39,5 @@ pub use crate::livedocument::LiveScopeItem;
 pub use crate::livedocument::LiveScopeTarget;
 pub use crate::token::TokenId;
 pub use crate::id::IdFmt;
-
+pub use crate::id::LocalNodePtr;
 

@@ -1,8 +1,8 @@
 
 use crate::env::Env;
-use crate::env::Sym;
-use crate::env::VarKind;
 use makepad_live_parser::LiveError;
+use makepad_live_parser::LiveErrorOrigin;
+use makepad_live_parser::live_error_origin;
 use makepad_live_parser::Span;
 use crate::shaderast::Ident;
 use crate::shaderast::ExprKind;
@@ -11,15 +11,14 @@ use crate::shaderast::UnOp;
 use crate::shaderast::Expr;
 use crate::shaderast::IdentPath;
 use crate::shaderast::Lit;
-use crate::shaderast::TyLit;
-use crate::shaderast::MacroCallAnalysis;
+use crate::shaderast::VarKind;
 use std::cell::Cell;
 
-pub struct LhsChecker<'a,'b> {
+pub struct LhsChecker<'a, 'b> {
     pub env: &'a Env<'b>,
 }
 
-impl<'a,'b> LhsChecker<'a,'b> {
+impl<'a, 'b> LhsChecker<'a, 'b> {
     pub fn lhs_check_expr(&mut self, expr: &Expr) -> Result<(), LiveError> {
         match expr.kind {
             ExprKind::Cond {
@@ -36,12 +35,7 @@ impl<'a,'b> LhsChecker<'a,'b> {
                 ref right_expr,
                 ..
             } => self.lhs_check_bin_expr(span, op, left_expr, right_expr),
-            ExprKind::Un { span, op, ref expr } => self.lhs_check_un_expr(span, op, expr),
-            ExprKind::MethodCall {
-                span,
-                ident,
-                ref arg_exprs,
-            } => self.lhs_check_method_call_expr(span, ident, arg_exprs),
+            ExprKind::Un {span, op, ref expr} => self.lhs_check_un_expr(span, op, expr),
             ExprKind::Field {
                 span,
                 ref expr,
@@ -52,31 +46,31 @@ impl<'a,'b> LhsChecker<'a,'b> {
                 ref expr,
                 ref index_expr,
             } => self.lhs_check_index_expr(span, expr, index_expr),
-            ExprKind::Call {
+            ExprKind::MethodCall {
                 span,
-                ident_path,
-                ref arg_exprs,
-            } => self.lhs_check_call_expr(span, ident_path, arg_exprs),
-            ExprKind::MacroCall {
+                ..
+            } => self.lhs_check_all_call_expr(span),
+            ExprKind::PlainCall {
                 span,
-                ref analysis,
-                ident,
-                ref arg_exprs,
-            } => self.lhs_check_macro_call_expr(span, analysis, ident, arg_exprs),
+                ..
+            } => self.lhs_check_all_call_expr(span),
+            ExprKind::BuiltinCall {
+                span,
+                ..
+            } => self.lhs_check_all_call_expr(span),
             ExprKind::ConsCall {
                 span,
-                ty_lit,
-                ref arg_exprs,
-            } => self.lhs_check_cons_call_expr(span, ty_lit, arg_exprs),
+                ..
+            } => self.lhs_check_all_call_expr(span),
             ExprKind::Var {
                 span,
                 ref kind,
                 ident_path,
             } => self.lhs_check_var_expr(span, kind, ident_path),
-            ExprKind::Lit { span, lit } => self.lhs_check_lit_expr(span, lit),
+            ExprKind::Lit {span, lit} => self.lhs_check_lit_expr(span, lit),
         }
     }
-
+    
     fn lhs_check_cond_expr(
         &mut self,
         span: Span,
@@ -85,11 +79,12 @@ impl<'a,'b> LhsChecker<'a,'b> {
         _expr_if_false: &Expr,
     ) -> Result<(), LiveError> {
         return Err(LiveError {
+            origin: live_error_origin!(),
             span,
             message: String::from("expression is not a valid left hand side"),
         });
     }
-
+    
     fn lhs_check_bin_expr(
         &mut self,
         span: Span,
@@ -98,30 +93,31 @@ impl<'a,'b> LhsChecker<'a,'b> {
         _right_expr: &Expr,
     ) -> Result<(), LiveError> {
         return Err(LiveError {
+            origin:live_error_origin!(),
             span,
             message: String::from("expression is not a valid left hand side"),
         });
     }
-
+    
     fn lhs_check_un_expr(&mut self, span: Span, _op: UnOp, _expr: &Expr) -> Result<(), LiveError> {
         return Err(LiveError {
+            origin:live_error_origin!(),
             span,
             message: String::from("expression is not a valid left hand side"),
         });
     }
-
-    fn lhs_check_method_call_expr(
+    
+    fn lhs_check_all_call_expr(
         &mut self,
         span: Span,
-        _ident: Ident,
-        _arg_exprs: &[Expr],
     ) -> Result<(), LiveError> {
         return Err(LiveError {
+            origin:live_error_origin!(),
             span,
             message: String::from("expression is not a valid left hand side"),
         });
     }
-
+    
     fn lhs_check_field_expr(
         &mut self,
         _span: Span,
@@ -130,7 +126,7 @@ impl<'a,'b> LhsChecker<'a,'b> {
     ) -> Result<(), LiveError> {
         self.lhs_check_expr(expr)
     }
-
+    
     fn lhs_check_index_expr(
         &mut self,
         _span: Span,
@@ -139,7 +135,7 @@ impl<'a,'b> LhsChecker<'a,'b> {
     ) -> Result<(), LiveError> {
         self.lhs_check_expr(expr)
     }
-
+    
     fn lhs_check_call_expr(
         &mut self,
         span: Span,
@@ -147,54 +143,27 @@ impl<'a,'b> LhsChecker<'a,'b> {
         _arg_exprs: &[Expr],
     ) -> Result<(), LiveError> {
         return Err(LiveError {
+            origin:live_error_origin!(),
             span,
             message: String::from("expression is not a valid left hand side"),
         });
     }
-
-    fn lhs_check_macro_call_expr(
-        &mut self,
-        span: Span,
-        _analysis: &Cell<Option<MacroCallAnalysis>>,
-        _ident: Ident,
-        _arg_exprs: &[Expr],
-    ) -> Result<(), LiveError> {
-        return Err(LiveError {
-            span,
-            message: String::from("expression is not a valid left hand side"),
-        });
-    }
-
-    fn lhs_check_cons_call_expr(
-        &mut self,
-        span: Span,
-        _ty_lit: TyLit,
-        _arg_exprs: &[Expr],
-    ) -> Result<(), LiveError> {
-        return Err(LiveError {
-            span,
-            message: String::from("expression is not a valid left hand side"),
-        });
-    }
-
+    
     fn lhs_check_var_expr(
         &mut self,
         span: Span,
-        _kind: &Cell<Option<VarKind>>,
-        ident_path: IdentPath,
+        kind: &Cell<Option<VarKind >>,
+        _ident_path: IdentPath,
     ) -> Result<(), LiveError> {
-
-        match self.env.find_sym(ident_path, span).unwrap() {
-            Sym::Var { is_mut, .. } => {
-                if !is_mut {
-                    return Err(LiveError {
-                        span,
-                        message: String::from("expression is not a valid left hand side"),
-                    });
-                }
-                Ok(())
-            }
-            _ => panic!(),
+        if let VarKind::MutLocal = kind.get().unwrap(){
+            Ok(())
+        }
+        else{
+            Err(LiveError {
+                origin:live_error_origin!(),
+                span,
+                message: String::from("expression is not a valid left hand side"),
+            })
         }
     }
     /*
@@ -210,7 +179,7 @@ impl<'a,'b> LhsChecker<'a,'b> {
             message: String::from("liveid is not a valid left hand side"),
         });
     }*/
-
+    
     fn lhs_check_lit_expr(&mut self, _span: Span, _lit: Lit) -> Result<(), LiveError> {
         Ok(())
     }

@@ -44,6 +44,14 @@ pub fn id_pack(item: TokenStream) -> TokenStream {
 
 
 #[proc_macro]
+pub fn live_error_origin(_item: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new(); 
+    tb.add("LiveErrorOrigin { filename : file ! ( ) . to_string ( ) , line : line ! ( ) as usize }");
+    tb.end()
+}
+
+
+#[proc_macro]
 pub fn token_ident(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
     let id = Id::from_str(&item.to_string());
