@@ -367,6 +367,7 @@ impl Cx {
                     if let Some(other) = other {
                         if !self.passes[other].paint_dirty {
                             self.passes[other].paint_dirty = true;
+                            self.passes[other].paint_flush_counter = 0;
                             altered = true;
                         }
                     }
