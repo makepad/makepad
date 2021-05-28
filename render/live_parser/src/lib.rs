@@ -36,6 +36,7 @@ pub use crate::id::FullNodePtr;
 pub use crate::math::*;
 pub use crate::util::PrettyPrintedF32;
 pub use crate::livedocument::LiveScopeItem;
+pub use crate::livedocument::LiveDocument;
 pub use crate::livedocument::LiveScopeTarget;
 pub use crate::token::TokenId;
 pub use crate::id::IdFmt;

@@ -12,6 +12,8 @@ use crate::shaderast::StructDecl;
 use crate::shaderast::FnNodePtr;
 use crate::shaderast::FnDecl;
 use crate::shaderast::StructNodePtr;
+use crate::shaderast::ConstNodePtr;
+use crate::shaderast::ConstDecl;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::cell::RefCell;
@@ -95,6 +97,10 @@ impl<'a> Env<'a> {
     
     pub fn struct_decl_from_ptr(&self, struct_node_ptr:StructNodePtr) -> Option<&StructDecl> {
         self.shader_registry.structs.get(&struct_node_ptr)
+    }
+    
+    pub fn const_decl_from_ptr(&self, const_node_ptr:ConstNodePtr) -> Option<&ConstDecl> {
+        self.shader_registry.consts.get(&const_node_ptr)
     }
     
     pub fn struct_method_from_ptr(&self, struct_node_ptr:StructNodePtr, ident:Ident) -> Option<&FnDecl>{

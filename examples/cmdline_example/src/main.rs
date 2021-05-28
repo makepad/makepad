@@ -17,9 +17,11 @@ const SOURCE:&'static str = r#"
             uniform z: float
             varying w: float
             BlaComp:Component{
-                fn blup(){}
+                fn blup()->int{return 0;}
             }
-                
+            
+            const CV:float = 1.0;
+             
             MyStruct:Struct{
                 field x:float
                 field y:float
@@ -27,7 +29,7 @@ const SOURCE:&'static str = r#"
                 fn bla()->Self{
                     let t = BlaComp::blup();
                     let v: Self;
-                    v.x = 1.0;
+                    v.x = CV;
                     v.y = 2.0;
                     v.blop();
                     return v;
@@ -46,6 +48,7 @@ const SOURCE:&'static str = r#"
             }
         }
     "#;
+    
 use makepad_live_parser::*;
 use makepad_shader_compiler::shaderregistry::ShaderRegistry;
 use makepad_shader_compiler::shaderregistry::ShaderDrawInput;
@@ -80,7 +83,7 @@ fn main() {
     //println!("{}", std::mem::size_of::<LiveNode>());
     // ok lets do a deserialize
     //let mut lr = LiveFactoriesTest::default();
-    let mut sr = ShaderRegistry::default();
+    let mut sr = ShaderRegistry::new();
     
     match sr.live_registry.parse_live_file("test.live", id_check!(main), id_check!(test), SOURCE.to_string()) {
         Err(why) => panic!("Couldnt parse file {}", why),

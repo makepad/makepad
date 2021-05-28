@@ -65,6 +65,7 @@ impl<'a, 'b> DepAnalyser<'a, 'b> {
                 span,
                 ref kind,
                 ident_path,
+                ..
             } => self.dep_analyse_var_expr(span, kind, ident_path),
             ExprKind::Lit {span, lit} => self.dep_analyse_lit_expr(span, lit),
         }
@@ -238,7 +239,12 @@ impl<'a, 'b> DepAnalyser<'a, 'b> {
     }
     
     fn dep_analyse_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind >>, ident_path: IdentPath) {
-        panic!("IMPL!");
+        // alright so. a var expr..
+        match kind.get().unwrap() {
+            VarKind::Const(_const_node_ptr) => todo!(),
+            VarKind::LiveValue(value_ptr)=>todo!(),
+            _ => ()
+        };
         /*
         match kind.get().unwrap() {
             VarKind::Geometry => {
