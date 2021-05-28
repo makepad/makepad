@@ -7,8 +7,8 @@ pub struct Tree {
     nodes_by_node_id: HashMap<NodeId, Node>,
     node_ids_by_area: HashMap<Area, NodeId>,
     animating_node_ids: HashSet<NodeId>,
-    next_frame: NextFrame,
     needs_redraw: bool,
+    next_frame: NextFrame,
 }
 
 impl Tree {
