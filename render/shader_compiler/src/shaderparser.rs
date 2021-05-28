@@ -43,11 +43,16 @@ use crate::shaderast::FnNodePtr;
 use crate::shaderast::VarDefNodePtr;
 use crate::shaderast::InputNodePtr;
 use crate::shaderast::StructNodePtr;
+use crate::shaderast::ConstNodePtr;
+use crate::shaderast::FnSelfKind;
+use crate::shaderast::LiveScopeValue;
+use crate::shaderast::ConstDecl;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum ShaderParserDep{
+    Const(ConstNodePtr),
     Struct(StructNodePtr),
-    Function(FnNodePtr)
+    Function(Option<StructNodePtr>, FnNodePtr)
 }
 
 pub struct ShaderParser<'a> {
@@ -58,7 +63,7 @@ pub struct ShaderParser<'a> {
     pub shader_registry: &'a ShaderRegistry,
     pub type_deps: &'a mut Vec<ShaderParserDep>,
     pub token_with_span: TokenWithSpan,
-    pub self_kind: Option<TyExprKind>,
+    pub self_kind: Option<FnSelfKind>,
     pub end: usize,
 }
 
@@ -68,7 +73,7 @@ impl<'a> ShaderParser<'a> {
         tokens: &'a [TokenWithSpan],
         live_scope: &'a [LiveScopeItem],
         type_deps: &'a mut Vec<ShaderParserDep>,
-        self_kind: Option<TyExprKind>
+        self_kind: Option<FnSelfKind>
         
     ) -> Self {
         let mut tokens_with_span = tokens.iter().cloned();
@@ -234,7 +239,7 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_other_decl(&mut self, ident: Ident, decl_node_ptr: FullNodePtr) -> Result<Decl, LiveError> {
+    pub fn expect_other_decl(&mut self, ident: Ident, decl_node_ptr: FullNodePtr) -> Result<Option<Decl>, LiveError> {
         let span = self.begin_span();
         let decl_ty = self.expect_ident() ?;
         let decl_name = self.expect_ident() ?;
@@ -246,22 +251,22 @@ impl<'a> ShaderParser<'a> {
         let ty_expr = self.expect_ty_expr() ?;
         match decl_ty {
             Ident(id!(geometry)) => {
-                return span.end(self, | span | Ok(Decl::Geometry(GeometryDecl {
+                return span.end(self, | span | Ok(Some(Decl::Geometry(GeometryDecl {
                     is_used_in_fragment_shader: Cell::new(None),
                     var_def_node_ptr: VarDefNodePtr(decl_node_ptr),
                     span,
                     ident,
                     ty_expr
-                })))
+                }))))
             }
             Ident(id!(instance)) => {
-                return span.end(self, | span | Ok(Decl::Instance(InstanceDecl {
+                return span.end(self, | span | Ok(Some(Decl::Instance(InstanceDecl {
                     is_used_in_fragment_shader: Cell::new(None),
                     input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
                     span,
                     ident,
                     ty_expr
-                })))
+                }))))
             }
             Ident(id!(uniform)) => {
                 let block_ident = if self.accept_token(token_ident!(in)) {
@@ -270,34 +275,65 @@ impl<'a> ShaderParser<'a> {
                 else {
                     Ident(id!(default))
                 };
-                return span.end(self, | span | Ok(Decl::Uniform(UniformDecl {
+                return span.end(self, | span | Ok(Some(Decl::Uniform(UniformDecl {
                     input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
                     block_ident,
                     span,
                     ident,
                     ty_expr
-                })))
+                }))))
             }
             Ident(id!(varying)) => {
-                return span.end(self, | span | Ok(Decl::Varying(VaryingDecl {
+                return span.end(self, | span | Ok(Some(Decl::Varying(VaryingDecl {
                     var_def_node_ptr: VarDefNodePtr(decl_node_ptr),
                     span,
                     ident,
                     ty_expr
-                })))
+                }))))
             }
             Ident(id!(texture)) => {
-                return span.end(self, | span | Ok(Decl::Texture(TextureDecl {
+                return span.end(self, | span | Ok(Some(Decl::Texture(TextureDecl {
                     input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
                     span,
                     ident,
                     ty_expr
-                })))
+                }))))
+            }
+            Ident(id!(const)) => {
+                return Ok(None)
             }
             _ => {
                 return Err(span.error(self, live_error_origin!(), format!("unexpected decl type `{}`", decl_ty).into()))
             }
         }
+    }
+    
+        // lets parse a function.
+    pub fn expect_const_decl(&mut self, ident: Ident) -> Result<ConstDecl, LiveError> {
+        let span = self.begin_span();
+        let decl_ty = self.expect_ident() ?;
+        let decl_name = self.expect_ident() ?;
+        if decl_name != ident {
+            panic!()
+        }
+        self.expect_token(token_punct!(:)) ?;
+        // now we expect a type
+        let ty_expr = self.expect_ty_expr() ?;
+        self.expect_token(token_punct!(=)) ?;
+        
+        let expr = self.expect_expr()?;
+        
+        if decl_ty != Ident(id!(const)){
+            panic!()
+        }
+        
+        // ok lets parse the value
+        return span.end(self, | span | Ok(ConstDecl {
+            span,
+            ident,
+            ty_expr,
+            expr
+        }))
     }
     
     // lets parse a function.
@@ -327,50 +363,70 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_fn_decl(&mut self, fn_node_ptr:FnNodePtr, ident:Ident) -> Result<FnDecl, LiveError> {
+    pub fn expect_method_decl(&mut self, fn_node_ptr:FnNodePtr, ident:Ident) -> Result<Option<FnDecl>, LiveError> {
         let span = self.begin_span();
-        let mut first_param_is_self = false;
+
         self.expect_token(Token::OpenParen) ?;
         let mut params = Vec::new();
         if !self.accept_token(Token::CloseParen) {
             
             let span = self.begin_span();
             let is_inout = self.accept_token(token_ident!(inout));
-            if self.accept_token(token_ident!(self)) {
-                let self_expr_kind = match self.self_kind{
-                    Some(TyExprKind::Shader(shader_ptr))=>{
-                        TyExprKind::Shader(shader_ptr)
-                    },
-                    Some(TyExprKind::Struct(struct_ptr))=>{
-                        TyExprKind::Struct(struct_ptr)
-                    },
-                    _=>{
-                        return Err(span.error(self, live_error_origin!(), format!("self used but no known struct/shader").into()))
-                    }
-                };
-                //let struct_ptr = self.struct_ptr;
-                first_param_is_self = true;
-                params.push(span.end(self, | span | Param {
+            self.expect_token(token_ident!(self))?;
+        
+            let kind = self.self_kind.unwrap().to_ty_expr_kind();
+            params.push(span.end(self, | span | Param {
+                span,
+                is_inout,
+                ident: Ident(id!(self)),
+                ty_expr: TyExpr {
                     span,
-                    is_inout,
-                    ident: Ident(id!(self)),
-                    ty_expr: TyExpr {
-                        span,
-                        ty: RefCell::new(None),
-                        kind: self_expr_kind,
-                    },
-                }))
-            } else {
-                let ident = self.expect_ident() ?;
-                self.expect_token(token_punct!(:)) ?;
-                let ty_expr = self.expect_ty_expr() ?;
-                params.push(span.end(self, | span | Param {
-                    span,
-                    is_inout,
-                    ident,
-                    ty_expr,
-                }));
+                    ty: RefCell::new(None),
+                    kind
+                },
+            }));
+
+            while self.accept_token(token_punct!(,)) {
+                params.push(self.expect_param() ?);
             }
+            self.expect_token(Token::CloseParen) ?;
+        }
+        let return_ty_expr = if self.accept_token(token_punct!( ->)) {
+            Some(self.expect_ty_expr() ?)
+        } else {
+            None
+        };
+        let block = self.expect_block() ?;
+        let self_kind = self.self_kind.clone();
+        Ok(Some(span.end(self, | span | FnDecl {
+            fn_node_ptr,
+            span,
+            ident,
+            self_kind,
+            self_refs: RefCell::new(None),
+            return_ty: RefCell::new(None),
+            callees: RefCell::new(None),
+            builtin_deps: RefCell::new(None),
+            cons_fn_deps: RefCell::new(None),
+            params,
+            return_ty_expr,
+            block,
+        })))
+    }
+    
+    // lets parse a function.
+    pub fn expect_plain_fn_decl(&mut self, fn_node_ptr:FnNodePtr, ident:Ident) -> Result<FnDecl, LiveError> {
+        let span = self.begin_span();
+
+        self.expect_token(Token::OpenParen) ?;
+        let mut params = Vec::new();
+        if !self.accept_token(Token::CloseParen) {
+            let param =self.expect_param() ?; 
+            if param.ident == Ident(id!(self)){
+                return Err(span.error(self, live_error_origin!(), format!("use of self not allowed in plain function").into()))
+            }
+            
+            params.push(param);
             while self.accept_token(token_punct!(,)) {
                 params.push(self.expect_param() ?);
             }
@@ -387,7 +443,6 @@ impl<'a> ShaderParser<'a> {
             fn_node_ptr,
             span,
             ident,
-            first_param_is_self,
             self_kind,
             self_refs: RefCell::new(None),
             return_ty: RefCell::new(None),
@@ -471,7 +526,7 @@ impl<'a> ShaderParser<'a> {
                 else {
                     if id == id!(Self) {
                         self.skip_token();
-                        if let Some(TyExprKind::Struct(shader)) = self.self_kind{
+                        if let Some(FnSelfKind::Struct(shader)) = self.self_kind{
                             
                             return Ok(span.end(self, | span | TyExpr {
                                 span,
@@ -491,6 +546,7 @@ impl<'a> ShaderParser<'a> {
                                 return Err(span.error(self, live_error_origin!(), format!("Struct not found `{}`", ident_path).into()))
                             }
                             LiveNodeFindResult::Function(_) 
+                            |  LiveNodeFindResult::Const(_)
                             |  LiveNodeFindResult::Component(_)
                             |  LiveNodeFindResult::LiveValue(_,_)
                             | LiveNodeFindResult::PossibleStatic(_,_) => {
@@ -995,17 +1051,14 @@ impl<'a> ShaderParser<'a> {
                                     LiveNodeFindResult::NotFound => {
                                         Err(span.error(self, live_error_origin!(), format!("Function not found `{}`", ident_path).into()))
                                     }
-                                    LiveNodeFindResult::Component(_) => {
-                                        Err(span.error(self, live_error_origin!(), format!("Cannot call a component `{}`", ident_path).into()))
-                                    }
-                                    LiveNodeFindResult::Struct(_) => {
-                                        Err(span.error(self, live_error_origin!(), format!("Cannot call a struct `{}`", ident_path).into()))
-                                    }
-                                    LiveNodeFindResult::LiveValue(_,_)=>{
-                                        Err(span.error(self, live_error_origin!(), format!("Cannot call a value `{}`", ident_path).into()))
+                                    LiveNodeFindResult::Component(_) 
+                                    | LiveNodeFindResult::Struct(_) 
+                                    | LiveNodeFindResult::Const(_)
+                                    | LiveNodeFindResult::LiveValue(_,_) => {
+                                        Err(span.error(self, live_error_origin!(), format!("Not a function `{}`", ident_path).into()))
                                     }
                                     LiveNodeFindResult::Function(fn_node_ptr) => {
-                                        self.type_deps.push(ShaderParserDep::Function(fn_node_ptr));
+                                        self.type_deps.push(ShaderParserDep::Function(None,fn_node_ptr));
                                         Ok(span.end(self, | span | Expr {
                                             span,
                                             ty: RefCell::new(None),
@@ -1023,6 +1076,7 @@ impl<'a> ShaderParser<'a> {
                                     LiveNodeFindResult::PossibleStatic(struct_node_ptr, fn_node_ptr) => {
                                         // we need to register struct_node_ptr as a dep to compile
                                         self.type_deps.push(ShaderParserDep::Struct(struct_node_ptr));
+                                        self.type_deps.push(ShaderParserDep::Function(Some(struct_node_ptr), fn_node_ptr));
                                         Ok(span.end(self, | span | Expr {
                                             span,
                                             ty: RefCell::new(None),
@@ -1044,7 +1098,19 @@ impl<'a> ShaderParser<'a> {
                             }
                         }
                         _ => {
-                            // ok its a var. thats enough.
+                            let mut live_scope_value = LiveScopeValue::NotFound;
+                            if let Some(ptr) = self.scan_scope_for_live_ptr(ident_path.segs[0]) {
+                                match self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]) {
+                                    LiveNodeFindResult::LiveValue(value_ptr,ty)=>{
+                                        live_scope_value = LiveScopeValue::LiveValue(value_ptr, ty);
+                                    }
+                                    LiveNodeFindResult::Const(const_ptr)=>{
+                                        self.type_deps.push(ShaderParserDep::Const(const_ptr));
+                                        live_scope_value = LiveScopeValue::Const(const_ptr);
+                                    }
+                                    _=>()
+                                }
+                            }
                             Ok(span.end(self, | span | Expr {
                                 span,
                                 ty: RefCell::new(None),
@@ -1052,6 +1118,7 @@ impl<'a> ShaderParser<'a> {
                                 const_index: Cell::new(None),
                                 kind: ExprKind::Var {
                                     span,
+                                    live_scope_value,
                                     kind: Cell::new(None),
                                     ident_path,
                                 },
