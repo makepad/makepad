@@ -128,7 +128,8 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                 span,
                 ref kind,
                 ident_path,
-            } => self.ty_check_var_expr(span, kind, ident_path),
+                live_scope_value,
+            } => self.ty_check_var_expr(span, kind, ident_path, live_scope_value),
             ExprKind::Lit {span, lit} => self.ty_check_lit_expr(span, lit),
         } ?;
         *expr.ty.borrow_mut() = Some(ty.clone());
@@ -686,52 +687,42 @@ impl<'a, 'b> TyChecker<'a, 'b> {
         span: Span,
         kind: &Cell<Option<VarKind >>,
         ident_path: IdentPath,
+        live_scope_value: LiveScopeValue
     ) -> Result<Ty, LiveError> {
-        // ok so . what do we do.
-        // alright a var expr. great
-        // what if we are a const?
         
-        // ok ty checking a var expression.
-        panic!("IMPL")
-        /*
-        // ok so what if this is like bla::bla::bla::bla.
         if ident_path.len() == 1 {
-            match self.env.find_sym_on_scopes(Ident(ident_path.segs[0]), span).ok_or_else( || LiveError {
-                origin: live_error_origin!(),
-                span,
-                message: format!("`{}` is not defined in this scope", ident_path),
-            }) ? {
-                Sym::Var {
-                    ref ty,
-                    kind: new_kind,
-                    ..
-                } => {
-                    // if kind is LiveId
-                    if let VarKind::Live(full_node_ptr) = new_kind {
-                        // lets fully qualify it here
-                        
-                        //let qualified = self.env.qualify_ident_path(span.live_body_id, ident_path);
-                        self.env
-                            .live_uniform_deps
-                            .borrow_mut()
-                            .as_mut()
-                            .unwrap()
-                            .insert((ty.clone(), full_node_ptr));
-                    }
-                    
-                    kind.set(Some(new_kind));
-                    Ok(ty.clone())
+            match self.env.find_sym_on_scopes(Ident(ident_path.segs[0]), span){
+                Some(sym)=>{
+                    // ok its either a local var or something.
+                    kind.set(Some(if sym.is_mut{VarKind::MutLocal}else{VarKind::Local}));
+                    return Ok(sym.ty)
                 }
-                _ => Err(LiveError {
-                    origin: live_error_origin!(),
-                    span,
-                    message: format!("`{}` is not a variable", ident_path).into(),
-                }),
+                _=>()
             }
         }
-        else {
-            panic!("IMPL")
-        }*/
+        // use the suggestion
+        match live_scope_value{
+            LiveScopeValue::Const(const_node_ptr)=>{
+                // ok we have a const, and we can fetch it,
+                // and it has a type
+                let const_decl = self.env.const_decl_from_ptr(const_node_ptr).unwrap();
+                kind.set(Some(VarKind::Const(const_node_ptr)));
+                return Ok(const_decl.ty_expr.ty.borrow().clone().unwrap());
+                //kind.set(Some(VarKind::Const(value_ptr)));
+                //return Ok(ty_lit.to_ty());
+            },
+            LiveScopeValue::LiveValue(value_ptr, ty_lit)=>{
+                kind.set(Some(VarKind::LiveValue(value_ptr)));
+                return Ok(ty_lit.to_ty());
+            }
+            LiveScopeValue::NotFound=>{
+                return Err(LiveError {
+                    origin: live_error_origin!(),
+                    span,
+                    message: format!("`{}` is not defined in this scope", ident_path),
+                })
+            }
+        }
     }
     
     fn ty_check_lit_expr(&mut self, _span: Span, lit: Lit) -> Result<Ty, LiveError> {

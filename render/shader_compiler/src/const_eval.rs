@@ -69,6 +69,7 @@ impl<'a,'b> ConstEvaluator<'a,'b> {
                 span,
                 ref kind,
                 ident_path,
+                ..
             } => self.try_const_eval_var_expr(span, kind, ident_path),
             ExprKind::Lit { span, lit } => self.try_const_eval_lit_expr(span, lit),
         };
@@ -228,35 +229,16 @@ impl<'a,'b> ConstEvaluator<'a,'b> {
     fn try_const_eval_var_expr(
         &self,
         _span: Span,
-        _kind: &Cell<Option<VarKind>>,
+        kind: &Cell<Option<VarKind>>,
         _ident_path: IdentPath,
     ) -> Option<Val> {
-        panic!("IMPL")
-        /*
-        let ident = if let Some(ident) = ident_path.get_single(){
-            ident
-        }
-        else{
-            return None
-        };
-        
-        
         match kind.get().unwrap() {
-            VarKind::Const => Some(
-                self.env
-                    .find_const_decl(ident, self.scope_node_ptr)
-                    .unwrap()
-                    .expr
-                    .const_val
-                    .borrow()
-                    .as_ref()
-                    .unwrap()
-                    .as_ref()
-                    .unwrap()
-                    .clone(),
-            ),
+            VarKind::Const(_const_node_ptr) =>{
+                
+                todo!()
+            }
             _ => None,
-        }*/
+        }
     }
 
     fn try_const_eval_lit_expr(&self, _span: Span, lit: Lit) -> Option<Val> {

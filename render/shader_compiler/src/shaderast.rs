@@ -35,7 +35,7 @@ pub struct VarDefNodePtr(pub FullNodePtr);
 
 //impl FnNodePtr {pub fn to_scope_ptr(self) -> ScopeNodePtr {ScopeNodePtr(self.0)}}
 //impl VarDefNodePtr {pub fn to_scope_ptr(self) -> ScopeNodePtr {ScopeNodePtr(self.0)}}
-
+ 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum InputNodePtr {
     VarDef(FullNodePtr),
@@ -49,6 +49,15 @@ pub struct DrawShaderDecl {
     pub default_geometry: Option<ShaderResourceId>,
     pub decls: Vec<Decl>,
     pub methods: Vec<FnDecl>,
+}
+
+
+#[derive(Clone, Debug)]
+pub struct ConstDecl {
+    pub span: Span,
+    pub ident: Ident,
+    pub ty_expr: TyExpr,
+    pub expr: Expr,
 }
 
 
@@ -86,13 +95,32 @@ pub enum Callee {
     StructMethod{struct_node_ptr:StructNodePtr, ident:Ident},
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub enum FnSelfKind{
+    Struct(StructNodePtr),
+    Shader(ShaderNodePtr)
+}
+
+impl FnSelfKind{
+    pub fn to_ty_expr_kind(self)->TyExprKind{
+        match self{
+            FnSelfKind::Shader(shader_ptr)=>{
+                TyExprKind::Shader(shader_ptr)
+            },
+            FnSelfKind::Struct(struct_ptr)=>{
+                TyExprKind::Struct(struct_ptr)
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FnDecl {
     pub fn_node_ptr: FnNodePtr,
     
     pub ident: Ident,
 
-    pub self_kind: Option<TyExprKind>, 
+    pub self_kind: Option<FnSelfKind>, 
     
     // analysis
     pub callees: RefCell<Option<BTreeSet<Callee >> >,
@@ -109,7 +137,6 @@ pub struct FnDecl {
     pub params: Vec<Param>,
     pub return_ty_expr: Option<TyExpr>,
     pub block: Block,
-    pub first_param_is_self: bool
 }
 
 
@@ -250,7 +277,7 @@ pub enum ExprKind {
     Un {
         span: Span,
         op: UnOp,
-        expr: Box<Expr>,
+        expr: Box<Expr>,   
     },
     Field {
         span: Span,
@@ -285,12 +312,20 @@ pub enum ExprKind {
     Var {
         span: Span,
         kind: Cell<Option<VarKind >>,
+        live_scope_value: LiveScopeValue,
         ident_path: IdentPath,
     },
     Lit {
         span: Span,
         lit: Lit,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum LiveScopeValue {
+    NotFound,
+    Const(ConstNodePtr),
+    LiveValue(ValueNodePtr, TyLit)
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -83,6 +83,7 @@ impl<'a,'b> ConstGatherer<'a,'b> {
                 span,
                 ref kind,
                 ident_path,
+                ..
             } => self.const_gather_var_expr(span, kind, ident_path),
             ExprKind::Lit { span, lit } => self.const_gather_lit_expr(span, lit),
         }
