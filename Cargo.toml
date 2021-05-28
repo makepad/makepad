@@ -1,6 +1,7 @@
 [workspace]
 
 members = [
+    "mace",
     "makepad",
     "makepad/wasm", 
     "examples/bare_example", 
