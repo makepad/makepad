@@ -169,6 +169,7 @@ impl Cx {
                         ]};
                     }
                 }
+                //println!("shader {} instances {}", draw_call.shader.shader_id, instances);
                 self.platform.draw_calls_done += 1;
                 if let Some(buf) = geometry.platform.geom_ibuf.multi_buffer_read().buffer {
                     
@@ -349,6 +350,7 @@ impl Cx {
             let () = unsafe {msg_send![encoder, endEncoding]};
             let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
             let () = unsafe {msg_send![command_buffer, commit]};
+            //println!("DRAWING FRAME NOW");
             //let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
             //command_buffer.wait_until_scheduled();
         }
@@ -566,7 +568,7 @@ impl MetalWindow {
             let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
             let () = msg_send![ca_layer, setPresentsWithTransaction: NO];
             let () = msg_send![ca_layer, setMaximumDrawableCount: 3];
-            let () = msg_send![ca_layer, setDisplaySyncEnabled: NO];
+            let () = msg_send![ca_layer, setDisplaySyncEnabled: YES];
             let () = msg_send![ca_layer, setNeedsDisplayOnBoundsChange: YES];
             let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
             let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
@@ -589,14 +591,14 @@ impl MetalWindow {
             cocoa_window
         }
     }
-    
+    /*
     pub fn set_vsync_enable(&mut self, _enable: bool) {
         let () = unsafe {msg_send![self.ca_layer, setDisplaySyncEnabled: true]};
     }
     
     pub fn set_buffer_count(&mut self, _count: u64) {
         let () = unsafe {msg_send![self.ca_layer, setMaximumDrawableCount: 3]};
-    }
+    }*/
     
     pub fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
         let cal_size = Vec2 {

@@ -34,7 +34,7 @@ impl Cx {
         let mut passes_todo = Vec::new();
         
         cocoa_app.event_loop( | cocoa_app, events | {
-            //let mut paint_dirty = false;
+            let mut paint_dirty = false;
             for mut event in events {
                 
                 self.process_desktop_pre_event(&mut event);
@@ -181,10 +181,10 @@ impl Cx {
                                         // its a render window
                                         windows_need_repaint -= 1;
                                         for metal_window in &mut metal_windows {if metal_window.window_id == window_id {
-                                            metal_window.set_vsync_enable(windows_need_repaint == 0 && vsync);
+                                            /* metal_window.set_vsync_enable(windows_need_repaint == 0 && vsync);
                                             metal_window.set_buffer_count(
                                                 if metal_window.window_geom.is_fullscreen {3}else {2}
-                                            );
+                                            );*/
                                             
                                             let dpi_factor = metal_window.window_geom.dpi_factor;
                                             
@@ -196,15 +196,23 @@ impl Cx {
                                                 metal_window.ca_layer,
                                                 &mut metal_cx,
                                             );
+                                            
+                                            let pass = &mut self.passes[*pass_id];
+                                            if pass.paint_flush_counter < 30{
+                                                pass.paint_flush_counter += 1;
+                                                pass.paint_dirty  = true;
+                                                paint_dirty = true;
+                                            }
+                                            
                                             // call redraw if we guessed the dpi wrong on startup
                                             if metal_window.first_draw {
                                                 metal_window.first_draw = false;
                                                 if dpi_factor != self.default_dpi_factor {
                                                     self.redraw_pass_and_sub_passes(*pass_id);
                                                 }
-                                                
                                             }
                                         }}
+                                        
                                     }
                                     CxPassDepOf::Pass(parent_pass_id) => {
                                         let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
@@ -249,7 +257,8 @@ impl Cx {
             
             self.process_live_style_errors();
             
-            if self.playing_animator_ids.len() != 0
+            if paint_dirty
+                || self.playing_animator_ids.len() != 0
                 || self.redraw_parent_areas.len() != 0
                 || self.redraw_child_areas.len() != 0
                 || self.next_frames.len() != 0 {

@@ -318,6 +318,7 @@ impl Area{
                     }
 
                     cx.passes[cxview.pass_id].paint_dirty = true;
+                    cx.passes[cxview.pass_id].paint_flush_counter = 0;
                     draw_call.uniforms_dirty = true;
 
                     return Some(
@@ -335,6 +336,7 @@ impl Area{
                     }
 
                     cx.passes[cxview.pass_id].paint_dirty = true;
+                    cx.passes[cxview.pass_id].paint_flush_counter = 0;
                     draw_call.instance_dirty = true;
                     if inst.instance_count == 0{
                         return None
