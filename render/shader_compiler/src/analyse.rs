@@ -287,26 +287,9 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
             },
         )
     */
-    /*
-    fn analyse_const_decl(&mut self, decl: &ConstDecl) -> Result<(), LiveError> {
-        let expected_ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
-        let actual_ty = self.ty_checker().ty_check_expr_with_expected_ty(
-            decl.span,
-            &decl.expr,
-            &expected_ty,
-        ) ?;
-        self.const_evaluator().const_eval_expr(&decl.expr) ?;
-        self.env.insert_sym(
-            decl.span,
-            decl.ident.to_ident_path(),
-            Sym::Var {
-                is_mut: false,
-                ty: actual_ty,
-                kind: VarKind::Const,
-            },
-        )
-    }*/
     
+
+    /*
     fn analyse_fn_decl(&mut self, decl: &FnDecl) -> Result<(), LiveError> {
         for param in &decl.params {
             self.ty_checker().ty_check_ty_expr(&param.ty_expr) ?;
@@ -359,7 +342,7 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
         *decl.return_ty.borrow_mut() = Some(return_ty);
         //self.env.insert_sym(decl.span, decl.ident, Sym::Fn).ok();
         Ok(())
-    }
+    }*/
     /*
     fn analyse_instance_decl(&mut self, decl: &InstanceDecl) -> Result<(), LiveError> {
         let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
@@ -579,17 +562,58 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
     }*/
 }
 
-#[derive(Debug)]
-pub struct AnalyseContext {
-}
+
 
 #[derive(Debug)]
-struct FnDefAnalyser<'a, 'b> {
-    decl: &'a FnDecl,
-    env: &'a mut Env<'b>,
-    options: ShaderCompileOptions,
-    is_inside_loop: bool,
+pub struct ConstAnalyser<'a, 'b> {
+    pub decl: &'a ConstDecl,
+    pub env: &'a mut Env<'b>,
+    pub options: ShaderCompileOptions,
 }
+
+impl<'a, 'b> ConstAnalyser<'a, 'b> {
+    fn ty_checker(&self) -> TyChecker {
+        TyChecker {
+            env: self.env,
+        }
+    }
+    
+    fn const_evaluator(&self) -> ConstEvaluator {
+        ConstEvaluator {
+            env: self.env,
+            no_const_collapse: self.options.no_const_collapse
+        }
+    }
+
+    pub fn analyse_const_decl(&mut self) -> Result<(), LiveError> {
+        let expected_ty = self.ty_checker().ty_check_ty_expr(&self.decl.ty_expr) ?;
+        let actual_ty = self.ty_checker().ty_check_expr_with_expected_ty(
+            self.decl.span,
+            &self.decl.expr,
+            &expected_ty,
+        ) ?;
+        if expected_ty != actual_ty{
+            return Err(LiveError {
+                origin:live_error_origin!(),
+                span: self.decl.span,
+                message: String::from("Declared type and inferred type not the same"),
+            } .into());
+        }
+        self.const_evaluator().const_eval_expr(&self.decl.expr) ?;
+        Ok(())
+    }
+}
+
+
+#[derive(Debug)]
+pub struct FnDefAnalyser<'a, 'b> {
+    pub decl: &'a FnDecl,
+    pub env: &'a mut Env<'b>,
+    pub options: ShaderCompileOptions,
+    pub is_inside_loop: bool,
+}
+
+
 
 impl<'a, 'b> FnDefAnalyser<'a, 'b> {
     fn ty_checker(&self) -> TyChecker {
@@ -618,8 +642,23 @@ impl<'a, 'b> FnDefAnalyser<'a, 'b> {
             env: &self.env,
         }
     }
+
     
-    fn analyse_fn_def(&mut self) -> Result<(), LiveError> {
+    pub fn analyse_fn_decl(&mut self) -> Result<(), LiveError> {
+        for param in &self.decl.params {
+            self.ty_checker().ty_check_ty_expr(&param.ty_expr) ?;
+        }
+        let return_ty = self.decl
+            .return_ty_expr
+            .as_ref()
+            .map( | return_ty_expr | self.ty_checker().ty_check_ty_expr(return_ty_expr))
+            .transpose() ?
+        .unwrap_or(Ty::Void);
+        *self.decl.return_ty.borrow_mut() = Some(return_ty);
+        Ok(())
+    }
+
+    pub fn analyse_fn_def(&mut self) -> Result<(), LiveError> {
         self.env.push_scope();
         for param in &self.decl.params {
             self.env.insert_sym(

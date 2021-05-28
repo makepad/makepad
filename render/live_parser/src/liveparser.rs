@@ -349,9 +349,9 @@ impl<'a> LiveParser<'a> {
                     value: LiveValue::String {string_start: index, string_count: len}
                 });
             },
-            token_ident!(vec2) => {
+            token_ident!(vec2) => { todo!()
             },
-            token_ident!(vec3) => {
+            token_ident!(vec3) => { todo!()
             },
             Token::Ident(_) => { // we're gonna parse a class.
                 // we also support vec2/vec3 values directly.
@@ -420,6 +420,22 @@ impl<'a> LiveParser<'a> {
         Ok(())
     }
     
+    fn expect_value_literal(&mut self) -> Result<(), LiveError> {
+        match self.peek_token(){
+            Token::Bool(_) 
+            | Token::Int(_)
+            | Token::Float(_)
+            | Token::Color(_)=>{
+                self.skip_token();
+                return Ok(())
+            }
+            token_ident!(vec2)=>{todo!()}
+            token_ident!(vec3)=>{todo!()}
+            _=>()
+        }
+        Err(self.error(format!("Expected value literal")))
+    }
+    
     fn expect_live_class(&mut self, level: usize, ld: &mut LiveDocument) -> Result<(u32, u16), LiveError> {
         let node_start = ld.get_level_len(level);
         while self.peek_token() != Token::Eof {
@@ -481,6 +497,11 @@ impl<'a> LiveParser<'a> {
                                 let ty = self.expect_class_id(ld) ?;
                                 if self.accept_token(token_punct!(:)) { // its a vardef
                                     self.expect_var_def_type() ?;
+                                    // now an assignment might follow.
+                                    if self.accept_token(token_punct!(=)){
+                                        self.expect_value_literal()?;
+                                    }
+                                    
                                     ld.push_node(level, LiveNode {
                                         token_id,
                                         id_pack: ty,

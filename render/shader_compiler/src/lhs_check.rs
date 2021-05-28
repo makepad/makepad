@@ -66,6 +66,7 @@ impl<'a, 'b> LhsChecker<'a, 'b> {
                 span,
                 ref kind,
                 ident_path,
+                ..
             } => self.lhs_check_var_expr(span, kind, ident_path),
             ExprKind::Lit {span, lit} => self.lhs_check_lit_expr(span, lit),
         }
