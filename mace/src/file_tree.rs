@@ -8,10 +8,10 @@ pub struct FileTree {
     view: ScrollView,
     tree: Tree,
     node: DrawColor,
-    node_layout: Layout,
+    node_height: f32,
     indent_width: f32,
     node_name: DrawText,
-    stack: Vec<()>,
+    stack: Vec<f32>,
 }
 
 impl FileTree {
@@ -31,7 +31,7 @@ impl FileTree {
             view: ScrollView::new_standard_hv(cx),
             tree: Tree::new(),
             node: DrawColor::new(cx, default_shader!()),
-            node_layout: Layout::default(),
+            node_height: 0.0,
             indent_width: 0.0,
             node_name: DrawText::new(cx, default_shader!()),
             stack: Vec::new(),
@@ -55,39 +55,27 @@ impl FileTree {
     }
 
     fn apply_style(&mut self, cx: &mut Cx) {
-        self.node_layout = Layout {
-            walk: Walk {
-                width: Width::Fill,
-                height: Height::Fix(live_float!(cx, self::node_height)),
-                ..Walk::default()
-            },
-            align: Align { fx: 0.0, fy: 0.5 },
-            padding: Padding {
-                l: 5.0,
-                t: 0.0,
-                r: 0.0,
-                b: 1.0,
-            },
-            ..Layout::default()
-        };
+        self.node_height = live_float!(cx, self::node_height);
         self.indent_width = live_float!(cx, self::indent_width);
     }
 
     pub fn begin_folder(&mut self, cx: &mut Cx, node_id: NodeId, name: &str) -> Result<(), ()> {
         let info = self.tree.begin_node(node_id);
         println!("BEGIN FOLDER {:?} ({:?})", name, info.is_expanded_fraction);
-        self.node.begin_quad(cx, self.node_layout);
-        self.indent(cx, self.stack.len());
+        let scale = self.stack.last().cloned().unwrap_or(1.0);
+        self.node.begin_quad(cx, self.node_layout(scale));
+        cx.walk_turtle(self.indent_walk(self.stack.len()));
+        self.node_name.font_scale = self.stack.last().cloned().unwrap_or(1.0);
         self.node_name.draw_text_walk(cx, name);
         self.node.end_quad(cx);
         self.tree.set_node_area(node_id, self.node.area());
         cx.turtle_new_line();
+        self.stack.push(info.is_expanded_fraction);
         if info.is_fully_collapsed() {
             println!("!!! FULLY COLLAPSED !!!");
             self.end_folder();
             return Err(());
         }
-        self.stack.push(());
         Ok(())
     }
 
@@ -99,9 +87,11 @@ impl FileTree {
 
     pub fn file(&mut self, cx: &mut Cx, node_id: NodeId, name: &str) {
         println!("FILE {:?}", name);
+        let scale = self.stack.last().cloned().unwrap_or(1.0);
         self.tree.begin_node(node_id);
-        self.node.begin_quad(cx, self.node_layout);
-        self.indent(cx, self.stack.len());
+        self.node.begin_quad(cx, self.node_layout(scale));
+        cx.walk_turtle(self.indent_walk(self.stack.len()));
+        self.node_name.font_scale = scale;
         self.node_name.draw_text_walk(cx, name);
         self.node.end_quad(cx);
         self.tree.set_node_area(node_id, self.node.area());
@@ -109,12 +99,30 @@ impl FileTree {
         self.tree.end_node();
     }
 
-    fn indent(&self, cx: &mut Cx, depth: usize) {
-        cx.walk_turtle(Walk {
+    fn node_layout(&self, scale: f32) -> Layout {
+        Layout {
+            walk: Walk {
+                width: Width::Fill,
+                height: Height::Fix(scale * self.node_height),
+                ..Walk::default()
+            },
+            align: Align { fx: 0.0, fy: 0.5 },
+            padding: Padding {
+                l: 5.0,
+                t: 0.0,
+                r: 0.0,
+                b: 1.0,
+            },
+            ..Layout::default()
+        }
+    }
+
+    fn indent_walk(&self, depth: usize) -> Walk {
+        Walk {
             width: Width::Fix(depth as f32 * self.indent_width),
             height: Height::Fill,
             margin: Margin { l: 1.0, t: 0.0, r: 4.0, b: 0.0 },
-        });
+        }
     }
 
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
