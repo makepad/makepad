@@ -22,7 +22,7 @@ pub struct FnNodePtr(pub FullNodePtr);
 pub struct StructNodePtr(pub FullNodePtr);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub struct ShaderNodePtr(pub FullNodePtr);
+pub struct DrawShaderNodePtr(pub FullNodePtr);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct ConstNodePtr(pub FullNodePtr);
@@ -35,23 +35,21 @@ pub struct VarDefNodePtr(pub FullNodePtr);
 
 //impl FnNodePtr {pub fn to_scope_ptr(self) -> ScopeNodePtr {ScopeNodePtr(self.0)}}
 //impl VarDefNodePtr {pub fn to_scope_ptr(self) -> ScopeNodePtr {ScopeNodePtr(self.0)}}
- 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum InputNodePtr {
     VarDef(FullNodePtr),
-    Class(FullNodePtr)
+    ShaderResourceId(ShaderResourceId)
 }
-
 
 #[derive(Clone, Debug, Default)]
 pub struct DrawShaderDecl {
     pub debug: bool,
     pub default_geometry: Option<ShaderResourceId>,
-    pub decls: Vec<Decl>,
+    pub fields: Vec<DrawShaderFieldDecl>,
     pub methods: Vec<FnDecl>,
 }
 
-
 #[derive(Clone, Debug)]
 pub struct ConstDecl {
     pub span: Span,
@@ -59,55 +57,28 @@ pub struct ConstDecl {
     pub ty_expr: TyExpr,
     pub expr: Expr,
 }
-
-
-#[derive(Clone, Debug)]
-pub enum Decl {
-    Geometry(GeometryDecl),
-    Instance(InstanceDecl),
-    Texture(TextureDecl),
-    Uniform(UniformDecl),
-    Varying(VaryingDecl),
-}
-
-#[derive(Clone, Debug)]
-pub struct GeometryDecl {
-    pub is_used_in_fragment_shader: Cell<Option<bool >>,
-    pub var_def_node_ptr: VarDefNodePtr,
-    pub span: Span,
-    pub ident: Ident,
-    pub ty_expr: TyExpr,
-}
-/*
-#[derive(Clone, Debug)]
-pub struct ConstDecl {
-    pub span: Span,
-    pub ident: Ident,
-    pub ty_expr: TyExpr,
-    pub expr: Expr,
-}*/
 
 // the unique identification of a fn call
 #[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
 pub enum Callee {
-    PlainFn{fn_node_ptr:FnNodePtr},
-    ShaderMethod{shader_node_ptr:ShaderNodePtr, ident:Ident},
-    StructMethod{struct_node_ptr:StructNodePtr, ident:Ident},
+    PlainFn {fn_node_ptr: FnNodePtr},
+    DrawShaderMethod {shader_node_ptr: DrawShaderNodePtr, ident: Ident},
+    StructMethod {struct_node_ptr: StructNodePtr, ident: Ident},
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub enum FnSelfKind{
+pub enum FnSelfKind {
     Struct(StructNodePtr),
-    Shader(ShaderNodePtr)
+    DrawShader(DrawShaderNodePtr)
 }
 
-impl FnSelfKind{
-    pub fn to_ty_expr_kind(self)->TyExprKind{
-        match self{
-            FnSelfKind::Shader(shader_ptr)=>{
-                TyExprKind::Shader(shader_ptr)
+impl FnSelfKind {
+    pub fn to_ty_expr_kind(self) -> TyExprKind {
+        match self {
+            FnSelfKind::DrawShader(shader_ptr) => {
+                TyExprKind::DrawShader(shader_ptr)
             },
-            FnSelfKind::Struct(struct_ptr)=>{
+            FnSelfKind::Struct(struct_ptr) => {
                 TyExprKind::Struct(struct_ptr)
             },
         }
@@ -119,18 +90,20 @@ pub struct FnDecl {
     pub fn_node_ptr: FnNodePtr,
     
     pub ident: Ident,
-
-    pub self_kind: Option<FnSelfKind>, 
+    
+    pub self_kind: Option<FnSelfKind>,
     
     // analysis
     pub callees: RefCell<Option<BTreeSet<Callee >> >,
     pub builtin_deps: RefCell<Option<BTreeSet<Ident >> >,
-
+    
     // which props we reffed on self
-    pub self_refs: RefCell<Option<BTreeSet<Ident >> >,
-
+    pub draw_shader_refs: RefCell<Option<BTreeSet<Ident >> >,
+    pub const_refs: RefCell<Option<BTreeSet<ConstNodePtr >> >,
+    pub live_refs: RefCell<Option<BTreeSet<ValueNodePtr >> >,
+    
     pub cons_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>) >> >,
-
+    
     // base
     pub span: Span,
     pub return_ty: RefCell<Option<Ty >>,
@@ -145,7 +118,7 @@ pub struct StructDecl {
     pub span: Span,
     //pub ident: Ident,
     pub fields: Vec<FieldDecl>,
-    pub methods: Vec<FnDecl>, 
+    pub methods: Vec<FnDecl>,
 }
 
 impl StructDecl {
@@ -153,39 +126,37 @@ impl StructDecl {
         self.fields.iter().find( | field | field.ident == ident)
     }
 }
+
 #[derive(Clone, Debug)]
-pub struct InstanceDecl {
-    pub is_used_in_fragment_shader: Cell<Option<bool >>,
-    pub input_node_ptr: InputNodePtr,
+pub struct DrawShaderFieldDecl {
     pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
+    pub kind: DrawShaderFieldKind
 }
 
 #[derive(Clone, Debug)]
-pub struct TextureDecl {
-    pub input_node_ptr: InputNodePtr,
-    pub span: Span,
-    pub ident: Ident,
-    pub ty_expr: TyExpr,
+pub enum DrawShaderFieldKind {
+    Geometry {
+        is_used_in_fragment_shader: Cell<Option<bool >>,
+        var_def_node_ptr: VarDefNodePtr,
+    },
+    Instance {
+        is_used_in_fragment_shader: Cell<Option<bool >>,
+        input_node_ptr: InputNodePtr,
+    },
+    Texture {
+        input_node_ptr: InputNodePtr,
+    },
+    Uniform {
+        input_node_ptr: InputNodePtr,
+        block_ident: Ident,
+    },
+    Varying {
+        var_def_node_ptr: VarDefNodePtr,
+    }
 }
 
-#[derive(Clone, Debug)]
-pub struct UniformDecl {
-    pub input_node_ptr: InputNodePtr,
-    pub span: Span,
-    pub ident: Ident,
-    pub ty_expr: TyExpr,
-    pub block_ident: Ident,
-}
-
-#[derive(Clone, Debug)]
-pub struct VaryingDecl {
-    pub var_def_node_ptr: VarDefNodePtr,
-    pub span: Span,
-    pub ident: Ident,
-    pub ty_expr: TyExpr,
-}
 
 #[derive(Clone, Debug)]
 pub struct Param {
@@ -277,7 +248,7 @@ pub enum ExprKind {
     Un {
         span: Span,
         op: UnOp,
-        expr: Box<Expr>,   
+        expr: Box<Expr>,
     },
     Field {
         span: Span,
@@ -299,7 +270,7 @@ pub enum ExprKind {
         fn_node_ptr: FnNodePtr,
         arg_exprs: Vec<Expr>,
     },
-    BuiltinCall{
+    BuiltinCall {
         span: Span,
         ident: Ident,
         arg_exprs: Vec<Expr>,
@@ -350,7 +321,7 @@ pub enum TyExprKind {
         len: u32,
     },
     Struct(StructNodePtr),
-    Shader(ShaderNodePtr),
+    DrawShader(DrawShaderNodePtr),
     Lit {
         ty_lit: TyLit,
     },
@@ -411,7 +382,7 @@ pub enum Ty {
     Texture2D,
     Array {elem_ty: Rc<Ty>, len: usize},
     Struct(StructNodePtr),
-    Shader(ShaderNodePtr),
+    DrawShader(DrawShaderNodePtr),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -480,73 +451,22 @@ impl ShaderBody {
     }
 }*/
 
-impl FnDecl{
-    pub fn init_analysis(&self){
+impl FnDecl {
+    pub fn init_analysis(&self) {
         *self.callees.borrow_mut() = Some(BTreeSet::new());
         *self.builtin_deps.borrow_mut() = Some(BTreeSet::new());
         *self.cons_fn_deps.borrow_mut() = Some(BTreeSet::new());
-        *self.self_refs.borrow_mut() = Some(BTreeSet::new());
+        *self.draw_shader_refs.borrow_mut() = Some(BTreeSet::new());
+        *self.const_refs.borrow_mut() = Some(BTreeSet::new());
+        *self.live_refs.borrow_mut() = Some(BTreeSet::new());
     }
 }
 
 impl DrawShaderDecl {
     
-    pub fn find_geometry_decl(&self, ident: Ident) -> Option<&GeometryDecl> {
-        self.decls.iter().find_map( | decl | {
-            match decl {
-                Decl::Geometry(decl) => Some(decl),
-                _ => None,
-            }
-            .filter( | decl | decl.ident == ident)
-        })
-    }
-    
-    /*
-    pub fn find_fn_decl(&self, ident_path: IdentPath) -> Option<&FnDecl> {
-        self.shader_body.find_fn_
-        self.fn_decls.iter().rev().find_map( | decl | {
-            Some(decl)
-            .filter( | decl | decl.ident_path == ident_path)
-        })
-    }*/
-    
-    pub fn find_instance_decl(&self, ident: Ident) -> Option<&InstanceDecl> {
-        self.decls.iter().find_map( | decl | {
-            match decl {
-                Decl::Instance(decl) => Some(decl),
-                _ => None,
-            }
-            .filter( | decl | decl.ident == ident)
-        })
-    }
-    /*
-    pub fn find_struct_decl(&self, ident: Ident) -> Option<&StructDecl> {
-        self.decls.iter().find_map( | decl | {
-            match decl {
-                Decl::Struct(decl) => Some(decl),
-                _ => None,
-            }
-            .filter( | decl | decl.ident == ident)
-        })
-    }*/
-    
-    pub fn find_uniform_decl(&self, ident: Ident) -> Option<&UniformDecl> {
-        self.decls.iter().find_map( | decl | {
-            match decl {
-                Decl::Uniform(decl) => Some(decl),
-                _ => None,
-            }
-            .filter( | decl | decl.ident == ident)
-        })
-    }
-    
-    pub fn find_varying_decl(&self, ident: Ident) -> Option<&VaryingDecl> {
-        self.decls.iter().find_map( | decl | {
-            match decl {
-                Decl::Varying(decl) => Some(decl),
-                _ => None,
-            }
-            .filter( | decl | decl.ident == ident)
+    pub fn find_field(&self, ident: Ident) -> Option<&DrawShaderFieldDecl> {
+        self.fields.iter().find( | decl | {
+            decl.ident == ident
         })
     }
 }
@@ -688,7 +608,7 @@ impl Ty {
             Ty::Texture2D => Some(TyLit::Bool),
             Ty::Array {..} => None,
             Ty::Struct(_) => None,
-            Ty::Shader(_) => None
+            Ty::DrawShader(_) => None
         }
     }
     
@@ -733,7 +653,7 @@ impl Ty {
             Ty::Texture2D {..} => panic!(),
             Ty::Array {elem_ty, len} => elem_ty.size() * len,
             Ty::Struct(_) => panic!(),
-            Ty::Shader(_) =>  panic!(),
+            Ty::DrawShader(_) => panic!(),
         }
     }
 }
@@ -759,8 +679,8 @@ impl fmt::Display for Ty {
             Ty::Mat4 => write!(f, "mat4"),
             Ty::Texture2D => write!(f, "texture2D"),
             Ty::Array {elem_ty, len} => write!(f, "{}[{}]", elem_ty, len),
-            Ty::Struct(struct_ptr)=> write!(f, "Struct:{:?}", struct_ptr),
-            Ty::Shader(shader_ptr) =>  write!(f, "Shader:{:?}", shader_ptr),
+            Ty::Struct(struct_ptr) => write!(f, "Struct:{:?}", struct_ptr),
+            Ty::DrawShader(shader_ptr) => write!(f, "DrawShader:{:?}", shader_ptr),
         }
     }
 }

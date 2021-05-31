@@ -234,8 +234,9 @@ impl<'a,'b> ConstEvaluator<'a,'b> {
     ) -> Option<Val> {
         match kind.get().unwrap() {
             VarKind::Const(_const_node_ptr) =>{
-                
-                todo!()
+                // we should walk into the const for const-eval
+                None
+                //todo!()
             }
             _ => None,
         }

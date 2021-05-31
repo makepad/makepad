@@ -18,11 +18,9 @@ use makepad_live_parser::LiveDocument;
 use makepad_live_parser::Token;
 use crate::shaderast::DrawShaderDecl;
 use crate::shaderast::StructDecl;
-use crate::shaderast::Decl;
+use crate::shaderast::DrawShaderFieldDecl;
+use crate::shaderast::DrawShaderFieldKind;
 use crate::shaderast::FnDecl;
-use crate::shaderast::TextureDecl;
-use crate::shaderast::InstanceDecl;
-use crate::shaderast::UniformDecl;
 use crate::shaderast::TyExpr;
 use crate::shaderast::TyExprKind;
 use crate::shaderast::TyLit;
@@ -33,7 +31,7 @@ use crate::shaderparser::ShaderParser;
 use crate::shaderparser::ShaderParserDep;
 use crate::shaderast::InputNodePtr;
 use crate::shaderast::StructNodePtr;
-use crate::shaderast::ShaderNodePtr;
+use crate::shaderast::DrawShaderNodePtr;
 use crate::shaderast::ValueNodePtr;
 use crate::shaderast::ConstNodePtr;
 use crate::shaderast::FnSelfKind;
@@ -46,10 +44,11 @@ use crate::builtin::generate_builtins;
 use crate::analyse::StructAnalyser;
 use crate::analyse::FnDefAnalyser;
 use crate::analyse::ConstAnalyser;
+use crate::analyse::DrawShaderAnalyser;
 use crate::analyse::ShaderCompileOptions;
 use crate::env::Env;
 
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+#[derive(Clone, Debug, Copy, Hash, Eq, PartialEq)]
 pub struct ShaderResourceId(CrateModule, Id);
 
 impl fmt::Display for ShaderResourceId {
@@ -64,17 +63,17 @@ pub struct ShaderRegistry {
     pub shader_compile_options: ShaderCompileOptions,
     pub consts: HashMap<ConstNodePtr, ConstDecl>,
     pub plain_fns: HashMap<FnNodePtr, FnDecl>,
-    pub draw_shaders: HashMap<ShaderNodePtr, DrawShaderDecl>,
+    pub draw_shaders: HashMap<DrawShaderNodePtr, DrawShaderDecl>,
     pub structs: HashMap<StructNodePtr, StructDecl>,
     
-    pub draw_inputs: HashMap<ShaderResourceId, ShaderDrawInput>,
+    pub draw_inputs: HashMap<ShaderResourceId, DrawShaderInput>,
     pub builtins: HashMap<Ident, Builtin>,
 }
 
 impl ShaderRegistry {
     pub fn new() -> Self {
         Self {
-            shader_compile_options: ShaderCompileOptions{
+            shader_compile_options: ShaderCompileOptions {
                 gather_all: false,
                 create_const_table: false,
                 no_const_collapse: false
@@ -91,31 +90,31 @@ impl ShaderRegistry {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct ShaderDrawInput {
-    pub uniforms: Vec<ShaderDrawInputDef>,
-    pub instances: Vec<ShaderDrawInputDef>,
-    pub textures: Vec<ShaderDrawInputDef>,
+pub struct DrawShaderInput {
+    pub uniforms: Vec<DrawShaderInputItem>,
+    pub instances: Vec<DrawShaderInputItem>,
+    pub textures: Vec<DrawShaderInputItem>,
 }
 
 #[derive(Clone, Debug)]
-pub struct ShaderDrawInputDef {
+pub struct DrawShaderInputItem {
     pub ident: Ident,
     pub ty_expr: TyExpr
 }
 
-impl ShaderDrawInput {
+impl DrawShaderInput {
     pub fn add_uniform(&mut self, name: &str, ty_expr: TyExpr) {
         if let TyExprKind::Lit {ty_lit, ..} = ty_expr.kind {
             if ty_lit == TyLit::Texture2D {
-                self.textures.push(ShaderDrawInputDef {ident: Ident(Id::from_str(name)), ty_expr});
+                self.textures.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr});
                 return
             }
         }
-        self.uniforms.push(ShaderDrawInputDef {ident: Ident(Id::from_str(name)), ty_expr});
+        self.uniforms.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr});
     }
     
     pub fn add_instance(&mut self, modpath: &str, cls: &str, name: &str, ty_expr: TyExpr) {
-        self.instances.push(ShaderDrawInputDef {ident: Ident(Id::from_str(name)), ty_expr});
+        self.instances.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr});
     }
 }
 
@@ -131,6 +130,47 @@ pub enum LiveNodeFindResult {
 
 impl ShaderRegistry {
     
+    
+    pub fn plain_fn_decl_from_ptr(&self, fn_ptr: FnNodePtr) -> Option<&FnDecl> {
+        self.plain_fns.get(&fn_ptr)
+    }
+    
+    pub fn struct_decl_from_ptr(&self, struct_ptr: StructNodePtr) -> Option<&StructDecl> {
+        self.structs.get(&struct_ptr)
+    }
+    
+    
+    pub fn draw_shader_decl_from_ptr(&self, shader_ptr: DrawShaderNodePtr) -> Option<&DrawShaderDecl> {
+        self.draw_shaders.get(&shader_ptr)
+    }
+    
+    pub fn const_decl_from_ptr(&self, const_ptr: ConstNodePtr) -> Option<&ConstDecl> {
+        self.consts.get(&const_ptr)
+    }
+    
+    pub fn struct_method_from_ptr(&self, struct_node_ptr: StructNodePtr, ident: Ident) -> Option<&FnDecl> {
+        if let Some(s) = self.structs.get(&struct_node_ptr) {
+            if let Some(node) = s.methods.iter().find( | fn_decl | fn_decl.ident == ident) {
+                return Some(node)
+            }
+        }
+        None
+    }
+    
+    pub fn draw_shader_method_from_ptr(&self, shader_ptr: DrawShaderNodePtr, ident: Ident) -> Option<&FnDecl> {
+        if let Some(s) = self.draw_shaders.get(&shader_ptr) {
+            if let Some(node) = s.methods.iter().find( | fn_decl | fn_decl.ident == ident) {
+                return Some(node)
+            }
+        }
+        None
+    }
+    
+    pub fn fn_ident_from_ptr(&self, fn_node_ptr: FnNodePtr) -> Ident {
+        let (_, node) = self.live_registry.resolve_ptr(fn_node_ptr.0);
+        Ident(node.id_pack.unwrap_single())
+    }
+    
     pub fn find_live_node_by_path(&self, base_ptr: FullNodePtr, ids: &[Id]) -> LiveNodeFindResult {
         // what are the types of things we can find.
         
@@ -138,12 +178,12 @@ impl ShaderRegistry {
             if ids.len() == 0 {result} else {LiveNodeFindResult::NotFound}
         }
         
-        fn var_def_is_const(doc:&LiveDocument, token_start:u32, base_ptr: FullNodePtr)->LiveNodeFindResult{
-            if Token::Ident(id!(const)) == doc.tokens[token_start as usize].token{
-                LiveNodeFindResult::Const(ConstNodePtr(base_ptr))            
+        fn var_def_is_const(doc: &LiveDocument, token_start: u32, base_ptr: FullNodePtr) -> LiveNodeFindResult {
+            if Token::Ident(id!(const)) == doc.tokens[token_start as usize].token {
+                LiveNodeFindResult::Const(ConstNodePtr(base_ptr))
             }
-            else{
-                LiveNodeFindResult::NotFound      
+            else {
+                LiveNodeFindResult::NotFound
             }
         }
         
@@ -156,7 +196,7 @@ impl ShaderRegistry {
             LiveValue::Vec2(_) => return no_ids(ids, LiveNodeFindResult::LiveValue(ValueNodePtr(base_ptr), TyLit::Vec2)),
             LiveValue::Vec3(_) => return no_ids(ids, LiveNodeFindResult::LiveValue(ValueNodePtr(base_ptr), TyLit::Vec3)),
             LiveValue::Fn {..} => return no_ids(ids, LiveNodeFindResult::Function(FnNodePtr(base_ptr))),
-            LiveValue::VarDef {token_start, ..} =>  return no_ids(ids, var_def_is_const(doc, token_start, base_ptr)),
+            LiveValue::VarDef {token_start, ..} => return no_ids(ids, var_def_is_const(doc, token_start, base_ptr)),
             LiveValue::Class {class, node_start: ns, node_count: nc, ..} => {
                 if ids.len() == 0 { // check if we are struct or component
                     match self.live_registry.find_base_class_id(class) {
@@ -210,7 +250,7 @@ impl ShaderRegistry {
                                     LiveValue::Color(_) => return LiveNodeFindResult::LiveValue(ValueNodePtr(full_node_ptr), TyLit::Vec4),
                                     LiveValue::Vec2(_) => return LiveNodeFindResult::LiveValue(ValueNodePtr(full_node_ptr), TyLit::Vec2),
                                     LiveValue::Vec3(_) => return LiveNodeFindResult::LiveValue(ValueNodePtr(full_node_ptr), TyLit::Vec3),
-                                    LiveValue::VarDef {token_start, ..} =>  return var_def_is_const(doc, token_start, full_node_ptr),
+                                    LiveValue::VarDef {token_start, ..} => return var_def_is_const(doc, token_start, full_node_ptr),
                                     _ => return LiveNodeFindResult::NotFound
                                 }
                             }
@@ -239,7 +279,7 @@ impl ShaderRegistry {
         LiveNodeFindResult::NotFound
     }
     
-    pub fn register_draw_input(&mut self, mod_path: &str, name: &str, draw_input: ShaderDrawInput) {
+    pub fn register_draw_input(&mut self, mod_path: &str, name: &str, draw_input: DrawShaderInput) {
         let parts = mod_path.split("::").collect::<Vec<_ >> ();
         if parts.len()>2 {
             panic!("submodules not supported");
@@ -284,25 +324,25 @@ impl ShaderRegistry {
         });
     }
     
-    pub fn analyse_deps(&mut self, deps: &[ShaderParserDep])-> Result<(), LiveError>{
+    pub fn analyse_deps(&mut self, deps: &[ShaderParserDep]) -> Result<(), LiveError> {
         // recur on used types
         for dep in deps {
-            match dep{
-                ShaderParserDep::Const(dep)=>{
+            match dep {
+                ShaderParserDep::Const(dep) => {
                     self.analyse_const(*dep) ?;
                 },
-                ShaderParserDep::Struct(dep)=>{
+                ShaderParserDep::Struct(dep) => {
                     self.analyse_struct(*dep) ?;
                 },
-                ShaderParserDep::Function(struct_ptr, fn_ptr)=>{
-                    self.analyse_plain_fn(*struct_ptr, *fn_ptr)?
+                ShaderParserDep::Function(struct_ptr, fn_ptr) => {
+                    self.analyse_plain_fn(*struct_ptr, *fn_ptr) ?
                 }
             }
         }
         Ok(())
     }
     
-       // lets compile the thing
+    // lets compile the thing
     pub fn analyse_const(&mut self, const_ptr: ConstNodePtr) -> Result<(), LiveError> {
         if self.consts.get(&const_ptr).is_some() {
             return Ok(());
@@ -324,7 +364,7 @@ impl ShaderRegistry {
                 let const_decl = parser.expect_const_decl(Ident(id)) ?;
                 self.consts.insert(const_ptr, const_decl);
                 
-                self.analyse_deps(&parser_deps)?;
+                self.analyse_deps(&parser_deps) ?;
                 
                 let mut env = Env::new(self);
                 let mut ca = ConstAnalyser {
@@ -334,12 +374,12 @@ impl ShaderRegistry {
                 };
                 ca.analyse_const_decl() ?;
             }
-            _=>panic!()
+            _ => panic!()
         }
         return Ok(())
     }
     
-     // lets compile the thing
+    // lets compile the thing
     pub fn analyse_plain_fn(&mut self, struct_ptr: Option<StructNodePtr>, fn_ptr: FnNodePtr) -> Result<(), LiveError> {
         
         if self.plain_fns.get(&fn_ptr).is_some() {
@@ -357,7 +397,7 @@ impl ShaderRegistry {
                     doc.get_tokens(token_start, token_count + 1),
                     doc.get_scopes(scope_start, scope_count),
                     &mut parser_deps,
-                    if let Some(struct_ptr) = struct_ptr{Some(FnSelfKind::Struct(struct_ptr))}else{None},
+                    if let Some(struct_ptr) = struct_ptr {Some(FnSelfKind::Struct(struct_ptr))}else {None},
                     //Some(struct_full_ptr)
                 );
                 
@@ -367,7 +407,7 @@ impl ShaderRegistry {
                 ) ?;
                 self.plain_fns.insert(fn_ptr, fn_decl);
                 
-                self.analyse_deps(&parser_deps)?;
+                self.analyse_deps(&parser_deps) ?;
                 
                 // ok analyse the struct methods now.
                 let mut env = Env::new(self);
@@ -386,10 +426,10 @@ impl ShaderRegistry {
                 
                 Ok(())
             }
-            _=>panic!()
+            _ => panic!()
         }
     }
-        
+    
     
     // lets compile the thing
     pub fn analyse_struct(&mut self, struct_ptr: StructNodePtr) -> Result<(), LiveError> {
@@ -453,7 +493,7 @@ impl ShaderRegistry {
                             // if we get false, this was not a method but could be static.
                             // statics need a pointer to their struct to resolve Self
                             // so we can't treat them purely as loose methods
-                            if let Some(fn_decl) = fn_decl{
+                            if let Some(fn_decl) = fn_decl {
                                 struct_decl.methods.push(fn_decl)
                             }
                         }
@@ -469,8 +509,8 @@ impl ShaderRegistry {
                 // we should store the structs
                 self.structs.insert(struct_ptr, struct_decl);
                 
-                self.analyse_deps(&parser_deps)?;
-
+                self.analyse_deps(&parser_deps) ?;
+                
                 // ok analyse the struct methods now.
                 let mut env = Env::new(self);
                 let mut sa = StructAnalyser {
@@ -493,21 +533,22 @@ impl ShaderRegistry {
     }
     
     // lets compile the thing
-    pub fn analyse_draw_shader(&mut self, crate_id: Id, module_id: Id, ids: &[Id]) -> Result<DrawShaderDecl, LiveError> {
+    pub fn analyse_draw_shader(&mut self, crate_id: Id, module_id: Id, ids: &[Id]) -> Result<(), LiveError> {
         // lets find the FullPointer
         
-        if let Some(class_full_ptr) = self.live_registry.find_full_node_ptr_from_ids(crate_id, module_id, ids) {
+        if let Some(shader_ptr) = self.live_registry.find_full_node_ptr_from_ids(crate_id, module_id, ids) {
+            let shader_ptr = DrawShaderNodePtr(shader_ptr);
             let mut draw_shader_decl = DrawShaderDecl::default();
             // we have a pointer to the thing to instance.
-            let (doc, class_node) = self.live_registry.resolve_ptr(class_full_ptr);
+            let (doc, class_node) = self.live_registry.resolve_ptr(shader_ptr.0);
             
             match class_node.value {
                 LiveValue::Class {node_start, node_count, ..} => {
                     let mut parser_deps = Vec::new();
                     let mut draw_input_srid = None;
                     for i in 0..node_count as usize {
-                        let prop_ptr = FullNodePtr {file_id: class_full_ptr.file_id, local_ptr: LocalNodePtr {
-                            level: class_full_ptr.local_ptr.level + 1,
+                        let prop_ptr = FullNodePtr {file_id: shader_ptr.0.file_id, local_ptr: LocalNodePtr {
+                            level: shader_ptr.0.local_ptr.level + 1,
                             index: i + node_start as usize
                         }};
                         let prop = doc.resolve_ptr(prop_ptr.local_ptr);
@@ -552,12 +593,12 @@ impl ShaderRegistry {
                                         doc.get_tokens(token_start, token_count + 1),
                                         doc.get_scopes(scope_start, scope_count),
                                         &mut parser_deps,
-                                        Some(FnSelfKind::Shader(ShaderNodePtr(class_full_ptr)))
+                                        Some(FnSelfKind::DrawShader(shader_ptr))
                                         //None
                                     );
-                                    let decl = parser.expect_other_decl(Ident(id), prop_ptr) ?;
-                                    if let Some(decl) = decl{
-                                        draw_shader_decl.decls.push(decl);
+                                    let decl = parser.expect_self_decl(Ident(id), prop_ptr) ?;
+                                    if let Some(decl) = decl {
+                                        draw_shader_decl.fields.push(decl);
                                     }
                                     //else{ // it was a const
                                     //}
@@ -571,7 +612,7 @@ impl ShaderRegistry {
                                         doc.get_tokens(token_start, token_count + 1),
                                         doc.get_scopes(scope_start, scope_count),
                                         &mut parser_deps,
-                                        Some(FnSelfKind::Shader(ShaderNodePtr(class_full_ptr)))
+                                        Some(FnSelfKind::DrawShader(shader_ptr))
                                         //None
                                     );
                                     
@@ -579,7 +620,7 @@ impl ShaderRegistry {
                                         FnNodePtr(prop_ptr),
                                         Ident(id),
                                     ) ?;
-                                    if let Some(fn_decl) = fn_decl{
+                                    if let Some(fn_decl) = fn_decl {
                                         draw_shader_decl.methods.push(fn_decl)
                                     }
                                 }
@@ -590,8 +631,8 @@ impl ShaderRegistry {
                     // if we have a draw_input process it.
                     if let Some((draw_input_srid, span)) = draw_input_srid {
                         if let Some(draw_input) = self.draw_inputs.get(&draw_input_srid) {
-                            for decl in &draw_shader_decl.decls {
-                                if let Decl::Instance(_) = decl {
+                            for decl in &draw_shader_decl.fields {
+                                if let DrawShaderFieldKind::Instance {..} = decl.kind {
                                     return Err(LiveError {
                                         origin: live_error_origin!(),
                                         span,
@@ -600,37 +641,43 @@ impl ShaderRegistry {
                                 }
                             }
                             for instance in &draw_input.instances {
-                                draw_shader_decl.decls.push(
-                                    Decl::Instance(InstanceDecl {
-                                        is_used_in_fragment_shader: Cell::new(None),
-                                        input_node_ptr: InputNodePtr::Class(class_full_ptr),
+                                draw_shader_decl.fields.push(
+                                    DrawShaderFieldDecl {
+                                        kind: DrawShaderFieldKind::Instance {
+                                            is_used_in_fragment_shader: Cell::new(None),
+                                            input_node_ptr: InputNodePtr::ShaderResourceId(draw_input_srid),
+                                        },
                                         span,
                                         ident: instance.ident,
                                         ty_expr: instance.ty_expr.clone(),
-                                    })
+                                    }
                                 )
                             }
                             
                             for uniform in &draw_input.uniforms {
-                                draw_shader_decl.decls.push(
-                                    Decl::Uniform(UniformDecl {
-                                        block_ident: Ident(id!(default)),
-                                        input_node_ptr: InputNodePtr::Class(class_full_ptr),
+                                draw_shader_decl.fields.push(
+                                    DrawShaderFieldDecl {
+                                        kind: DrawShaderFieldKind::Uniform {
+                                            block_ident: Ident(id!(default)),
+                                            input_node_ptr: InputNodePtr::ShaderResourceId(draw_input_srid),
+                                        },
                                         span,
                                         ident: uniform.ident,
                                         ty_expr: uniform.ty_expr.clone(),
-                                    })
+                                    }
                                 )
                             }
                             
                             for texture in &draw_input.textures {
-                                draw_shader_decl.decls.push(
-                                    Decl::Texture(TextureDecl {
+                                draw_shader_decl.fields.push(
+                                    DrawShaderFieldDecl {
+                                        kind: DrawShaderFieldKind::Texture {
+                                            input_node_ptr: InputNodePtr::ShaderResourceId(draw_input_srid),
+                                        },
                                         span,
-                                        input_node_ptr: InputNodePtr::Class(class_full_ptr),
                                         ident: texture.ident,
                                         ty_expr: texture.ty_expr.clone(),
-                                    })
+                                    }
                                 )
                             }
                         }
@@ -644,11 +691,24 @@ impl ShaderRegistry {
                         
                         
                     }
+                    self.draw_shaders.insert(shader_ptr, draw_shader_decl);
                     
-                    self.analyse_deps(&parser_deps)?;
+                    self.analyse_deps(&parser_deps) ?;
+                    
+                    let mut env = Env::new(self);
+                    let mut sa = DrawShaderAnalyser {
+                        draw_shader_decl: self.draw_shaders.get(&shader_ptr).unwrap(),
+                        env: &mut env,
+                        options: ShaderCompileOptions {
+                            gather_all: false,
+                            create_const_table: false,
+                            no_const_collapse: false
+                        }
+                    };
+                    sa.analyse_shader() ?;
                     
                     // ok we have all structs
-                    return Ok(draw_shader_decl)
+                    return Ok(())
                 }
                 _ => ()
             }

@@ -8,12 +8,6 @@ use makepad_live_parser::live_error_origin;
 //use crate::shaderast::IdentPath;
 use crate::shaderast::Ty;
 use crate::shaderast::Ident;
-use crate::shaderast::StructDecl;
-use crate::shaderast::FnNodePtr;
-use crate::shaderast::FnDecl;
-use crate::shaderast::StructNodePtr;
-use crate::shaderast::ConstNodePtr;
-use crate::shaderast::ConstDecl;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::cell::RefCell;
@@ -90,32 +84,6 @@ impl<'a> Env<'a> {
         //return None
     }
     */
-    
-    pub fn plain_fn_decl_from_ptr(&self, fn_node_ptr:FnNodePtr) -> Option<&FnDecl> {
-        self.shader_registry.plain_fns.get(&fn_node_ptr)
-    }
-    
-    pub fn struct_decl_from_ptr(&self, struct_node_ptr:StructNodePtr) -> Option<&StructDecl> {
-        self.shader_registry.structs.get(&struct_node_ptr)
-    }
-    
-    pub fn const_decl_from_ptr(&self, const_node_ptr:ConstNodePtr) -> Option<&ConstDecl> {
-        self.shader_registry.consts.get(&const_node_ptr)
-    }
-    
-    pub fn struct_method_from_ptr(&self, struct_node_ptr:StructNodePtr, ident:Ident) -> Option<&FnDecl>{
-        if let Some(s) = self.shader_registry.structs.get(&struct_node_ptr){
-            if let Some(node) = s.methods.iter().find(|fn_decl| fn_decl.ident == ident){
-                return Some(node)
-            }
-        }
-        None
-    }
-    
-    pub fn fn_ident_from_ptr(&self, fn_node_ptr:FnNodePtr) -> Ident {
-        let (_,node) = self.shader_registry.live_registry.resolve_ptr(fn_node_ptr.0);
-        Ident(node.id_pack.unwrap_single())
-    }
     
     pub fn find_sym_on_scopes(&self, ident: Ident, _span: Span,) -> Option<LocalSym> {
         
