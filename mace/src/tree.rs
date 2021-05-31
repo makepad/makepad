@@ -5,6 +5,7 @@ use {
 
 pub struct Tree {
     nodes_by_node_id: HashMap<NodeId, Node>,
+    animators_by_node_id: HashMap<NodeId, Animator>,
     animating_node_ids: HashSet<NodeId>,
     selected_node_ids: HashSet<NodeId>,
     node_ids_by_area: HashMap<Area, NodeId>,
@@ -17,6 +18,7 @@ impl Tree {
     pub fn new() -> Tree {
         Tree {
             nodes_by_node_id: HashMap::new(),
+            animators_by_node_id: HashMap::new(),
             animating_node_ids: HashSet::new(),
             selected_node_ids: HashSet::new(),
             node_ids_by_area: HashMap::new(),
@@ -60,6 +62,10 @@ impl Tree {
         self.animating_node_ids.remove(&node_id);
     }
 
+    pub fn node_animator(&mut self, node_id: NodeId) -> &mut Animator {
+        self.animators_by_node_id.entry(node_id).or_default()
+    }
+
     pub fn set_node_area(&mut self, node_id: NodeId, area: Area) {
         let node = self.nodes_by_node_id.entry(node_id).or_default();
         if !node.area.is_empty() {
@@ -97,10 +103,6 @@ impl Tree {
     pub fn toggle_node_is_expanded(&mut self, cx: &mut Cx, node_id: NodeId, should_animate: bool) {
         let is_expanded = self.node_is_expanded(node_id);
         self.set_node_is_expanded(cx, node_id, !is_expanded, should_animate);
-    }
-
-    pub fn node_is_selected(&mut self, node_id: NodeId) -> bool {
-        self.selected_node_ids.contains(&node_id)
     }
 
     fn update_animating_node_ids(&mut self, cx: &mut Cx, node_id: NodeId, is_animating: bool) {
