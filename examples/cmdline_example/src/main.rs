@@ -36,9 +36,15 @@ const SOURCE:&'static str = r#"
                 }
             }
             
+            
+            fn other(self){
+            }
+            
             fn pixel(self)->vec4{
                 let y:MyStruct;
                 let x = MyStruct::bla();
+                self.w = 1.0;
+                self.other();
                 //let w = self.z;
                 return #f00;
             }
@@ -51,7 +57,7 @@ const SOURCE:&'static str = r#"
     
 use makepad_live_parser::*;
 use makepad_shader_compiler::shaderregistry::ShaderRegistry;
-use makepad_shader_compiler::shaderregistry::ShaderDrawInput;
+use makepad_shader_compiler::shaderregistry::DrawShaderInput;
 use makepad_shader_compiler::shaderast::TyLit;
 /*
 #[derive(Clone, Debug)]
@@ -99,7 +105,7 @@ fn main() {
         println!("{}\n", msg.to_live_file_error("", SOURCE));
     }
     
-    let mut di = ShaderDrawInput::default();
+    let mut di = DrawShaderInput::default();
     di.add_uniform("w", TyLit::Float.to_ty_expr());
     sr.register_draw_input("main::test", "DrawQuad", di);
     

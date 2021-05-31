@@ -11,8 +11,8 @@ use crate::ty_check::TyChecker;
 use makepad_live_parser::LiveError;
 use makepad_live_parser::LiveErrorOrigin;
 use makepad_live_parser::live_error_origin;
-//use makepad_live_parser::id;
-//use makepad_live_parser::Id;
+use makepad_live_parser::id;
+use makepad_live_parser::Id;
 use makepad_live_parser::Span;
 
 use std::cell::RefCell;
@@ -118,7 +118,7 @@ impl<'a, 'b> StructAnalyser<'a, 'b> {
             },
         )
     }*/
-
+    
     fn analyse_field_decl(&mut self, decl: &FieldDecl) -> Result<(), LiveError> {
         self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
         Ok(())
@@ -145,7 +145,7 @@ impl<'a, 'b> StructAnalyser<'a, 'b> {
 #[derive(Debug)]
 pub struct DrawShaderAnalyser<'a, 'b> {
     //pub body: &'a ShaderBody,
-    pub draw_shader: &'a DrawShaderDecl,
+    pub draw_shader_decl: &'a DrawShaderDecl,
     pub env: &'a mut Env<'b>,
     pub options: ShaderCompileOptions,
 }
@@ -172,51 +172,29 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
     }
     
     pub fn analyse_shader(&mut self) -> Result<(), LiveError> {
-        //*self.shader.live_uniform_deps.borrow_mut() = Some(BTreeSet::new());
         self.env.push_scope();
-        //for &ident in self.builtins.keys() {
-        //    let _ = self.env.insert_sym(Span::default(), ident.to_ident_path(), Sym::Builtin);
-        // }
-        //for decl in &self.shader.decls {
-            //self.analyse_decl(decl) ?;
-        //}
+
+        for decl in &self.draw_shader_decl.fields {
+            self.analyse_field_decl(decl) ?;
+        }
+        // first analyse decls
+        for decl in &self.draw_shader_decl.methods {
+            self.analyse_method_decl(decl) ?;
+        }
         
-        // lets analyse the methods
-        
-        /*
-        for decl in &self.shader.decls {
-            match decl {
-                Decl::Fn(decl) => {
-                    FnDefAnalyser {
-                        //builtins: &self.builtins,
-                        //context: self.context,
-                        decl,
-                        env: &mut self.env,
-                        options: self.options,
-                        is_inside_loop: false,
-                    }
-                    .analyse_fn_def() ?;
-                }
-                _ => {}
+        // now analyse the functions
+        for decl in &self.draw_shader_decl.methods {
+            FnDefAnalyser {
+                decl,
+                env: &mut self.env,
+                options: self.options,
+                is_inside_loop: false,
             }
-        }*/
+            .analyse_fn_def() ?;
+        }
+
         self.env.pop_scope();
-        /*
-        for decl in &self.shader.decls {
-            match decl {
-                Decl::Geometry(decl) => {
-                    decl.is_used_in_fragment_shader.set(Some(false));
-                }
-                Decl::Instance(decl) => {
-                    decl.is_used_in_fragment_shader.set(Some(false));
-                }
-                Decl::Fn(decl) => {
-                    decl.is_used_in_vertex_shader.set(Some(false));
-                    decl.is_used_in_fragment_shader.set(Some(false));
-                }
-                _ => {}
-            }
-        }*/
+
         /*
         self.analyse_call_tree(
             ShaderKind::Vertex,
@@ -249,48 +227,79 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
         }*/
         Ok(())
     }
-    /*
-    fn analyse_decl(&mut self, decl: &Decl) -> Result<(), LiveError> {
-        match decl {
-            Decl::Geometry(decl) => self.analyse_geometry_decl(decl),
-            //Decl::Const(decl) => self.analyse_const_decl(decl),
-            //Decl::Fn(decl) => self.analyse_fn_decl(decl),
-            Decl::Instance(decl) => self.analyse_instance_decl(decl),
-            //Decl::Struct(decl) => self.analyse_struct_decl(decl),
-            Decl::Texture(decl) => self.analyse_texture_decl(decl),
-            Decl::Uniform(decl) => self.analyse_uniform_decl(decl),
-            Decl::Varying(decl) => self.analyse_varying_decl(decl),
-        }
-    }*/
-    /*
-    fn analyse_geometry_decl(&mut self, decl: &GeometryDecl) -> Result<(), LiveError> {
-        let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
-        match ty {
-            Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 | Ty::Mat4 => {}
-            _ => {
-                return Err(LiveError {
-                    origin: live_error_origin!(),
-                    span: decl.span,
-                    message: String::from(
-                        "attribute must be either a floating-point scalar or vector or mat4",
-                    ),
-                })
+    
+    fn analyse_field_decl(&mut self, decl: &DrawShaderFieldDecl) -> Result<(), LiveError> {
+        match decl.kind {
+            DrawShaderFieldKind::Geometry {..} => {
+                let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
+                match ty {
+                    Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 | Ty::Mat4 => {}
+                    _ => {
+                        return Err(LiveError {
+                            origin: live_error_origin!(),
+                            span: decl.span,
+                            message: String::from(
+                                "attribute must be either a floating-point scalar or vector or mat4",
+                            ),
+                        })
+                    }
+                }
+                Ok(())
+            }
+            DrawShaderFieldKind::Instance {..} => {
+                let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
+                match ty {
+                    Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 | Ty::Mat4 => {}
+                    _ => {
+                        return Err(LiveError {
+                            origin: live_error_origin!(),
+                            span: decl.span,
+                            message: String::from(
+                                "attribute must be either a floating-point scalar or vector or mat4",
+                            ),
+                        })
+                    }
+                }
+                Ok(())
+            }
+            DrawShaderFieldKind::Texture {..} => {
+                let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
+                match ty {
+                    Ty::Texture2D => {}
+                    _ => {
+                        return Err(LiveError {
+                            origin: live_error_origin!(),
+                            span: decl.span,
+                            message: String::from("texture must be a texture2D"),
+                        })
+                    }
+                }
+                Ok(())
+            }
+            DrawShaderFieldKind::Uniform {..} => {
+                let _ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
+                Ok(())
+            },
+            DrawShaderFieldKind::Varying {..} => {
+                let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
+                match ty {
+                    Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {}
+                    _ => {
+                        return Err(LiveError {
+                            origin: live_error_origin!(),
+                            span: decl.span,
+                            message: String::from(
+                                "varying must be either a floating-point scalar or vector",
+                            ),
+                        })
+                    }
+                }
+                Ok(())
             }
         }
-        self.env.insert_sym(
-            decl.span,
-            decl.ident,
-            Sym::Var {
-                is_mut: false,
-                ty,
-                kind: VarKind::Geometry,
-            },
-        )
-    */
+    }
     
-
-    /*
-    fn analyse_fn_decl(&mut self, decl: &FnDecl) -> Result<(), LiveError> {
+    fn analyse_method_decl(&mut self, decl: &FnDecl) -> Result<(), LiveError> {
         for param in &decl.params {
             self.ty_checker().ty_check_ty_expr(&param.ty_expr) ?;
         }
@@ -300,13 +309,13 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
             .map( | return_ty_expr | self.ty_checker().ty_check_ty_expr(return_ty_expr))
             .transpose() ?
         .unwrap_or(Ty::Void);
-        /*
+        
         if decl.ident == Ident(id!("vertex")) {
             match return_ty {
                 Ty::Vec4 => {}
                 _ => {
                     return Err(LiveError {
-                        origin:live_error_origin!(),
+                        origin: live_error_origin!(),
                         span: decl.span,
                         message: String::from(
                             "function `vertex` must return a value of type `vec4`",
@@ -319,7 +328,7 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
                 Ty::Vec4 => {}
                 _ => {
                     return Err(LiveError {
-                        origin:live_error_origin!(),
+                        origin: live_error_origin!(),
                         span: decl.span,
                         message: String::from(
                             "function `fragment` must return a value of type `vec4`",
@@ -331,44 +340,19 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
             match return_ty {
                 Ty::Array {..} => {
                     return Err(LiveError {
-                        origin:live_error_origin!(),
+                        origin: live_error_origin!(),
                         span: decl.span,
                         message: String::from("functions can't return arrays"),
                     })
                 }
                 _ => {}
             }
-        }*/
+        }
         *decl.return_ty.borrow_mut() = Some(return_ty);
         //self.env.insert_sym(decl.span, decl.ident, Sym::Fn).ok();
         Ok(())
-    }*/
-    /*
-    fn analyse_instance_decl(&mut self, decl: &InstanceDecl) -> Result<(), LiveError> {
-        let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
-        
-        match ty {
-            Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 | Ty::Mat4 => {}
-            _ => {
-                return Err(LiveError {
-                    origin:live_error_origin!(),
-                    span: decl.span,
-                    message: String::from(
-                        "attribute must be either a floating-point scalar or vector or mat4",
-                    ),
-                })
-            }
-        }
-        self.env.insert_sym(
-            decl.span,
-            decl.ident,
-            Sym::Var {
-                is_mut: false,
-                ty,
-                kind: VarKind::Instance,
-            },
-        )
-    }*/
+    }
+    
     /*
     fn analyse_struct_decl(&mut self, decl: &StructDecl) -> Result<(), LiveError> {
         for field in &decl.fields {
@@ -382,67 +366,7 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
             },
         )
     }*/
-    /*
-    fn analyse_texture_decl(&mut self, decl: &TextureDecl) -> Result<(), LiveError> {
-        let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
-        match ty {
-            Ty::Texture2D => {}
-            _ => {
-                return Err(LiveError {
-                    origin:live_error_origin!(),
-                    span: decl.span,
-                    message: String::from("texture must be a texture2D"),
-                })
-            }
-        }
-        self.env.insert_sym(
-            decl.span,
-            decl.ident,
-            Sym::Var {
-                is_mut: false,
-                ty,
-                kind: VarKind::Texture,
-            },
-        )
-    }*/
-    /*
-    fn analyse_uniform_decl(&mut self, decl: &UniformDecl) -> Result<(), LiveError> {
-        let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
-        self.env.insert_sym(
-            decl.span,
-            decl.ident,
-            Sym::Var {
-                is_mut: false,
-                ty,
-                kind: VarKind::Uniform(decl.block_ident),
-            },
-        )
-    }*/
-    /*
-    fn analyse_varying_decl(&mut self, decl: &VaryingDecl) -> Result<(), LiveError> {
-        let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
-        match ty {
-            Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {}
-            _ => {
-                return Err(LiveError {
-                    origin:live_error_origin!(),
-                    span: decl.span,
-                    message: String::from(
-                        "varying must be either a floating-point scalar or vector",
-                    ),
-                })
-            }
-        }
-        self.env.insert_sym(
-            decl.span,
-            decl.ident,
-            Sym::Var {
-                is_mut: true,
-                ty,
-                kind: VarKind::Varying,
-            },
-        )
-    }*/
+    
     /*
     fn analyse_call_tree_for_kind(
         &mut self,
@@ -584,7 +508,7 @@ impl<'a, 'b> ConstAnalyser<'a, 'b> {
             no_const_collapse: self.options.no_const_collapse
         }
     }
-
+    
     pub fn analyse_const_decl(&mut self) -> Result<(), LiveError> {
         let expected_ty = self.ty_checker().ty_check_ty_expr(&self.decl.ty_expr) ?;
         let actual_ty = self.ty_checker().ty_check_expr_with_expected_ty(
@@ -592,9 +516,9 @@ impl<'a, 'b> ConstAnalyser<'a, 'b> {
             &self.decl.expr,
             &expected_ty,
         ) ?;
-        if expected_ty != actual_ty{
+        if expected_ty != actual_ty {
             return Err(LiveError {
-                origin:live_error_origin!(),
+                origin: live_error_origin!(),
                 span: self.decl.span,
                 message: String::from("Declared type and inferred type not the same"),
             } .into());
@@ -642,7 +566,7 @@ impl<'a, 'b> FnDefAnalyser<'a, 'b> {
             env: &self.env,
         }
     }
-
+    
     
     pub fn analyse_fn_decl(&mut self) -> Result<(), LiveError> {
         for param in &self.decl.params {
@@ -657,7 +581,7 @@ impl<'a, 'b> FnDefAnalyser<'a, 'b> {
         *self.decl.return_ty.borrow_mut() = Some(return_ty);
         Ok(())
     }
-
+    
     pub fn analyse_fn_def(&mut self) -> Result<(), LiveError> {
         self.env.push_scope();
         for param in &self.decl.params {
@@ -724,7 +648,7 @@ impl<'a, 'b> FnDefAnalyser<'a, 'b> {
     fn analyse_break_stmt(&self, span: Span) -> Result<(), LiveError> {
         if !self.is_inside_loop {
             return Err(LiveError {
-                origin:live_error_origin!(),
+                origin: live_error_origin!(),
                 span,
                 message: String::from("break outside loop"),
             } .into());
@@ -735,7 +659,7 @@ impl<'a, 'b> FnDefAnalyser<'a, 'b> {
     fn analyse_continue_stmt(&self, span: Span) -> Result<(), LiveError> {
         if !self.is_inside_loop {
             return Err(LiveError {
-                origin:live_error_origin!(),
+                origin: live_error_origin!(),
                 span,
                 message: String::from("continue outside loop"),
             } .into());
@@ -778,21 +702,21 @@ impl<'a, 'b> FnDefAnalyser<'a, 'b> {
                 .unwrap();
             if step == 0 {
                 return Err(LiveError {
-                    origin:live_error_origin!(),
+                    origin: live_error_origin!(),
                     span,
                     message: String::from("step must not be zero"),
                 } .into());
             }
             if from < to && step < 0 {
                 return Err(LiveError {
-                    origin:live_error_origin!(),
+                    origin: live_error_origin!(),
                     span,
                     message: String::from("step must not be positive"),
                 } .into());
             }
             if from > to && step > 0 {
                 return Err(LiveError {
-                    origin:live_error_origin!(),
+                    origin: live_error_origin!(),
                     span,
                     message: String::from("step must not be negative"),
                 } .into());
@@ -862,7 +786,7 @@ impl<'a, 'b> FnDefAnalyser<'a, 'b> {
             let ty = self.ty_checker().ty_check_expr(expr) ?;
             if ty == Ty::Void {
                 return Err(LiveError {
-                    origin:live_error_origin!(),
+                    origin: live_error_origin!(),
                     span,
                     message: String::from("init expression cannot be void")
                 });
@@ -873,7 +797,7 @@ impl<'a, 'b> FnDefAnalyser<'a, 'b> {
             ty
         } else {
             return Err(LiveError {
-                origin:live_error_origin!(),
+                origin: live_error_origin!(),
                 span,
                 message: format!("can't infer type of variable `{}`", ident),
             });
@@ -903,7 +827,7 @@ impl<'a, 'b> FnDefAnalyser<'a, 'b> {
             self.dep_analyser().dep_analyse_expr(expr);
         } else if self.decl.return_ty.borrow().as_ref().unwrap() != &Ty::Void {
             return Err(LiveError {
-                origin:live_error_origin!(),
+                origin: live_error_origin!(),
                 span,
                 message: String::from("missing return expression"),
             } .into());

@@ -33,7 +33,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
             } => self.ty_check_array_ty_expr(ty_expr.span, elem_ty_expr, len),
             TyExprKind::Lit {ty_lit} => self.ty_check_lit_ty_expr(ty_expr.span, ty_lit),
             TyExprKind::Struct(struct_ptr) => Ok(Ty::Struct(struct_ptr)),
-            TyExprKind::Shader(shader_ptr) => Ok(Ty::Shader(shader_ptr)),
+            TyExprKind::DrawShader(shader_ptr) => Ok(Ty::DrawShader(shader_ptr)),
         } ?;
         *ty_expr.ty.borrow_mut() = Some(ty.clone());
         Ok(ty)
@@ -367,7 +367,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
             self.ty_check_expr(arg_expr) ?;
         }
         // alright so. 
-        let fn_decl = self.env.plain_fn_decl_from_ptr(fn_node_ptr).expect("fn ptr invalid");
+        let fn_decl = self.env.shader_registry.plain_fn_decl_from_ptr(fn_node_ptr).expect("fn ptr invalid");
     
         self.check_call_args(span, fn_node_ptr, arg_exprs, &fn_decl)?;
     
@@ -384,16 +384,12 @@ impl<'a, 'b> TyChecker<'a, 'b> {
         
         let ty = self.ty_check_expr(&arg_exprs[0]) ?;
         match ty {
-            Ty::Shader(shader_ptr)=>{ // a shader method call
-                panic!("IMPL");
-            },
-            Ty::Struct(struct_ptr) => {
-                //println!("GOT STRUCT {:?}", struct_ptr);
+            Ty::DrawShader(shader_ptr)=>{ // a shader method call
                 for arg_expr in arg_exprs {
                     self.ty_check_expr(arg_expr) ?;
                 }
-                // ok lets find 'ident' on struct_ptr
-                if let Some(fn_decl) = self.env.struct_method_from_ptr(struct_ptr, ident){
+                
+                if let Some(fn_decl) = self.env.shader_registry.draw_shader_method_from_ptr(shader_ptr, ident){
                     self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl)?;
                     
                     if let Some(return_ty) = fn_decl.return_ty.borrow().clone(){
@@ -402,7 +398,26 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                     return Err(LiveError {
                         origin: live_error_origin!(),
                         span,
-                        message: format!("method `{}` is not type checked `{}`", ident, ty),
+                        message: format!("shader method `{}` is not type checked `{}`", ident, ty),
+                    });
+                }
+            },
+            Ty::Struct(struct_ptr) => {
+                //println!("GOT STRUCT {:?}", struct_ptr);
+                for arg_expr in arg_exprs {
+                    self.ty_check_expr(arg_expr) ?;
+                }
+                // ok lets find 'ident' on struct_ptr
+                if let Some(fn_decl) = self.env.shader_registry.struct_method_from_ptr(struct_ptr, ident){
+                    self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl)?;
+                    
+                    if let Some(return_ty) = fn_decl.return_ty.borrow().clone(){
+                        return Ok(return_ty);
+                    }
+                    return Err(LiveError {
+                        origin: live_error_origin!(),
+                        span,
+                        message: format!("struct method `{}` is not type checked `{}`", ident, ty),
                     });
                 }
             },
@@ -460,7 +475,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                 span,
                 message: format!(
                     "not enough arguments for call to function `{}`: expected {}, got {}",
-                    self.env.fn_ident_from_ptr(fn_node_ptr),
+                    self.env.shader_registry.fn_ident_from_ptr(fn_node_ptr),
                     fn_decl.params.len(),
                     arg_exprs.len(),
                 )
@@ -473,7 +488,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                 span,
                 message: format!(
                     "too many arguments for call to function `{}`: expected {}, got {}",
-                    self.env.fn_ident_from_ptr(fn_node_ptr),
+                    self.env.shader_registry.fn_ident_from_ptr(fn_node_ptr),
                     fn_decl.params.len(),
                     arg_exprs.len()
                 )
@@ -493,7 +508,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                     message: format!(
                         "wrong type for argument {} in call to function `{}`: expected `{}`, got `{}`",
                         index + 1,
-                        self.env.fn_ident_from_ptr(fn_node_ptr),
+                        self.env.shader_registry.fn_ident_from_ptr(fn_node_ptr),
                         param_ty,
                         arg_ty,
                     ).into()
@@ -559,12 +574,19 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                 })
             }
             Ty::Struct(struct_ptr) => {
-                Ok(self .env .struct_decl_from_ptr(struct_ptr) .unwrap() .find_field(field_ident) .ok_or(LiveError {
+                Ok(self .env .shader_registry.struct_decl_from_ptr(struct_ptr) .unwrap() .find_field(field_ident) .ok_or(LiveError {
                     origin: live_error_origin!(),
                     span,
                     message: format!("field `{}` is not defined on type `{:?}`", field_ident, struct_ptr),
                 }) ? .ty_expr .ty .borrow() .as_ref() .unwrap() .clone())
             },
+            Ty::DrawShader(shader_ptr)=>{
+                Ok(self.env.shader_registry.draw_shader_decl_from_ptr(shader_ptr).unwrap().find_field(field_ident) .ok_or(LiveError {
+                    origin: live_error_origin!(),
+                    span,
+                    message: format!("field `{}` is not defined on shader `{:?}`", field_ident, shader_ptr),
+                }) ? .ty_expr .ty .borrow() .as_ref() .unwrap() .clone())
+            }
             _ => Err(LiveError {
                 origin: live_error_origin!(),
                 span,
@@ -705,7 +727,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
             LiveScopeValue::Const(const_node_ptr)=>{
                 // ok we have a const, and we can fetch it,
                 // and it has a type
-                let const_decl = self.env.const_decl_from_ptr(const_node_ptr).unwrap();
+                let const_decl = self.env.shader_registry.const_decl_from_ptr(const_node_ptr).unwrap();
                 kind.set(Some(VarKind::Const(const_node_ptr)));
                 return Ok(const_decl.ty_expr.ty.borrow().clone().unwrap());
                 //kind.set(Some(VarKind::Const(value_ptr)));

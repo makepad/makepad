@@ -32,12 +32,8 @@ use crate::shaderast::Param;
 use crate::shaderast::Stmt;
 use crate::shaderast::BinOp;
 use crate::shaderast::UnOp;
-use crate::shaderast::Decl;
-use crate::shaderast::GeometryDecl;
-use crate::shaderast::InstanceDecl;
-use crate::shaderast::UniformDecl;
-use crate::shaderast::VaryingDecl;
-use crate::shaderast::TextureDecl;
+use crate::shaderast::DrawShaderFieldDecl;
+use crate::shaderast::DrawShaderFieldKind;
 use crate::shaderast::FieldDecl;
 use crate::shaderast::FnNodePtr;
 use crate::shaderast::VarDefNodePtr;
@@ -239,7 +235,7 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_other_decl(&mut self, ident: Ident, decl_node_ptr: FullNodePtr) -> Result<Option<Decl>, LiveError> {
+    pub fn expect_self_decl(&mut self, ident: Ident, decl_node_ptr: FullNodePtr) -> Result<Option<DrawShaderFieldDecl>, LiveError> {
         let span = self.begin_span();
         let decl_ty = self.expect_ident() ?;
         let decl_name = self.expect_ident() ?;
@@ -251,22 +247,26 @@ impl<'a> ShaderParser<'a> {
         let ty_expr = self.expect_ty_expr() ?;
         match decl_ty {
             Ident(id!(geometry)) => {
-                return span.end(self, | span | Ok(Some(Decl::Geometry(GeometryDecl {
-                    is_used_in_fragment_shader: Cell::new(None),
-                    var_def_node_ptr: VarDefNodePtr(decl_node_ptr),
+                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl{
+                    kind:DrawShaderFieldKind::Geometry{
+                        is_used_in_fragment_shader: Cell::new(None),
+                        var_def_node_ptr: VarDefNodePtr(decl_node_ptr),
+                    },
                     span,
                     ident,
                     ty_expr
-                }))))
+                })))
             }
             Ident(id!(instance)) => {
-                return span.end(self, | span | Ok(Some(Decl::Instance(InstanceDecl {
-                    is_used_in_fragment_shader: Cell::new(None),
-                    input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
+                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl{
+                    kind: DrawShaderFieldKind::Instance{
+                        is_used_in_fragment_shader: Cell::new(None),
+                        input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
+                    },
                     span,
                     ident,
                     ty_expr
-                }))))
+                })))
             }
             Ident(id!(uniform)) => {
                 let block_ident = if self.accept_token(token_ident!(in)) {
@@ -275,29 +275,35 @@ impl<'a> ShaderParser<'a> {
                 else {
                     Ident(id!(default))
                 };
-                return span.end(self, | span | Ok(Some(Decl::Uniform(UniformDecl {
-                    input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
-                    block_ident,
+                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl{
+                    kind: DrawShaderFieldKind::Uniform{
+                        input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
+                        block_ident,
+                    },
                     span,
                     ident,
                     ty_expr
-                }))))
+                })))
             }
             Ident(id!(varying)) => {
-                return span.end(self, | span | Ok(Some(Decl::Varying(VaryingDecl {
-                    var_def_node_ptr: VarDefNodePtr(decl_node_ptr),
+                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl{
+                    kind: DrawShaderFieldKind::Varying{
+                        var_def_node_ptr: VarDefNodePtr(decl_node_ptr),
+                    },
                     span,
                     ident,
                     ty_expr
-                }))))
+                })))
             }
             Ident(id!(texture)) => {
-                return span.end(self, | span | Ok(Some(Decl::Texture(TextureDecl {
-                    input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
+                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl{
+                    kind: DrawShaderFieldKind::Texture{
+                        input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
+                    },
                     span,
                     ident,
                     ty_expr
-                }))))
+                })))
             }
             Ident(id!(const)) => {
                 return Ok(None)
@@ -403,8 +409,10 @@ impl<'a> ShaderParser<'a> {
             span,
             ident,
             self_kind,
-            self_refs: RefCell::new(None),
+            draw_shader_refs: RefCell::new(None),
             return_ty: RefCell::new(None),
+            const_refs: RefCell::new(None),
+            live_refs: RefCell::new(None),
             callees: RefCell::new(None),
             builtin_deps: RefCell::new(None),
             cons_fn_deps: RefCell::new(None),
@@ -444,7 +452,9 @@ impl<'a> ShaderParser<'a> {
             span,
             ident,
             self_kind,
-            self_refs: RefCell::new(None),
+            const_refs: RefCell::new(None),
+            live_refs: RefCell::new(None),
+            draw_shader_refs: RefCell::new(None),
             return_ty: RefCell::new(None),
             callees: RefCell::new(None),
             builtin_deps: RefCell::new(None),
