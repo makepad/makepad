@@ -8,6 +8,7 @@ pub struct Tree {
     animating_node_ids: HashSet<NodeId>,
     selected_node_ids: HashSet<NodeId>,
     node_ids_by_area: HashMap<Area, NodeId>,
+    count: usize,
     needs_redraw: bool,
     next_frame: NextFrame,
 }
@@ -19,20 +20,25 @@ impl Tree {
             animating_node_ids: HashSet::new(),
             selected_node_ids: HashSet::new(),
             node_ids_by_area: HashMap::new(),
+            count: 0,
             needs_redraw: false,
             next_frame: NextFrame::default(),
         }
     }
 
     pub fn begin(&mut self) {
+        self.count = 0;
         self.needs_redraw = false;
     }
 
     pub fn end(&mut self) {}
 
     pub fn begin_node(&mut self, node_id: NodeId) -> NodeInfo {
+        let count = self.count;
+        self.count += 1;
         let node = self.nodes_by_node_id.entry(node_id).or_default();
         NodeInfo {
+            count,
             is_expanded_fraction: node.is_expanded.fraction,
             is_selected: self.selected_node_ids.contains(&node_id)
         }
@@ -168,6 +174,7 @@ pub struct NodeId(pub usize);
 
 #[derive(Clone, Copy, Debug)]
 pub struct NodeInfo {
+    pub count: usize,
     pub is_expanded_fraction: f32,
     pub is_selected: bool,
 }
