@@ -12,6 +12,8 @@ use crate::shaderast::Expr;
 use crate::shaderast::IdentPath;
 use crate::shaderast::Lit;
 use crate::shaderast::VarKind;
+use crate::shaderast::Ty;
+use crate::shaderast::DrawShaderFieldKind;
 use std::cell::Cell;
 
 pub struct LhsChecker<'a, 'b> {
@@ -121,11 +123,31 @@ impl<'a, 'b> LhsChecker<'a, 'b> {
     
     fn lhs_check_field_expr(
         &mut self,
-        _span: Span,
+        span: Span,
         expr: &Expr,
-        _field_ident: Ident,
+        field_ident: Ident,
     ) -> Result<(), LiveError> {
-        self.lhs_check_expr(expr)
+        // lets grab the ty from expr
+        match expr.ty.borrow().as_ref().unwrap(){
+            Ty::DrawShader(shader_ptr)=>{
+                let field_decl = self.env.shader_registry.draw_shader_decl_from_ptr(*shader_ptr).unwrap().find_field(field_ident) .unwrap();
+                match &field_decl.kind{
+                    DrawShaderFieldKind::Varying{..}=>{
+                        Ok(())
+                    }
+                    _=>{
+                        Err(LiveError {
+                            origin:live_error_origin!(),
+                            span,
+                            message: String::from("Can only assign to varying values for shader self"),
+                        })
+                    }
+                }
+            }
+            _=>{
+                 self.lhs_check_expr(expr)
+            }
+        }
     }
     
     fn lhs_check_index_expr(
