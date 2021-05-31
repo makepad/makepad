@@ -117,13 +117,13 @@ impl<'a, 'b> DepAnalyser<'a, 'b> {
                 });
                 //panic!("IMPL")
             }
-            Ty::Shader(shader_ptr)=>{
+            Ty::DrawShader(shader_ptr)=>{
                 // ok we have a struct ptr
                 for arg_expr in arg_exprs {
                     self.dep_analyse_expr(arg_expr);
                 }
                 let mut set = self.decl.callees.borrow_mut();
-                set.as_mut().unwrap().insert(Callee::ShaderMethod {
+                set.as_mut().unwrap().insert(Callee::DrawShaderMethod {
                     shader_node_ptr: *shader_ptr,
                     ident: method_ident
                 });
@@ -207,17 +207,22 @@ impl<'a, 'b> DepAnalyser<'a, 'b> {
         }*/
     }
     
-    
-    
-    fn dep_analyse_field_expr(&mut self, _span: Span, expr: &Expr, _field_ident: Ident) {
-        self.dep_analyse_expr(expr);
+    fn dep_analyse_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident) {
+        // so we have to store which 'shader props' we use
+        match expr.ty.borrow().as_ref().unwrap(){
+            Ty::DrawShader(shader_ptr)=>{
+                self.decl.draw_shader_refs.borrow_mut().as_mut().unwrap().insert(field_ident);
+            }
+            _=>{
+                  self.dep_analyse_expr(expr)
+            }
+        }
+       
     }
     
     fn dep_analyse_index_expr(&mut self, _span: Span, expr: &Expr, index_expr: &Expr) {
         self.dep_analyse_expr(expr);
         self.dep_analyse_expr(index_expr);
-        // TODO here goes the self.prop analysis
-        
     }
     
     fn dep_analyse_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {
@@ -241,8 +246,12 @@ impl<'a, 'b> DepAnalyser<'a, 'b> {
     fn dep_analyse_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind >>, ident_path: IdentPath) {
         // alright so. a var expr..
         match kind.get().unwrap() {
-            VarKind::Const(_const_node_ptr) => todo!(),
-            VarKind::LiveValue(value_ptr)=>todo!(),
+            VarKind::Const(const_ptr) =>{
+                self.decl.const_refs.borrow_mut().as_mut().unwrap().insert(const_ptr);
+            }
+            VarKind::LiveValue(value_ptr)=>{
+                self.decl.live_refs.borrow_mut().as_mut().unwrap().insert(value_ptr);
+            }
             _ => ()
         };
         /*
