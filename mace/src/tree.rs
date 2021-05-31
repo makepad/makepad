@@ -5,8 +5,9 @@ use {
 
 pub struct Tree {
     nodes_by_node_id: HashMap<NodeId, Node>,
-    node_ids_by_area: HashMap<Area, NodeId>,
     animating_node_ids: HashSet<NodeId>,
+    selected_node_ids: HashSet<NodeId>,
+    node_ids_by_area: HashMap<Area, NodeId>,
     needs_redraw: bool,
     next_frame: NextFrame,
 }
@@ -15,8 +16,9 @@ impl Tree {
     pub fn new() -> Tree {
         Tree {
             nodes_by_node_id: HashMap::new(),
-            node_ids_by_area: HashMap::new(),
             animating_node_ids: HashSet::new(),
+            selected_node_ids: HashSet::new(),
+            node_ids_by_area: HashMap::new(),
             needs_redraw: false,
             next_frame: NextFrame::default(),
         }
@@ -32,7 +34,7 @@ impl Tree {
         let node = self.nodes_by_node_id.entry(node_id).or_default();
         NodeInfo {
             is_expanded_fraction: node.is_expanded.fraction,
-            is_selected: node.is_selected,
+            is_selected: self.selected_node_ids.contains(&node_id)
         }
     }
 
@@ -92,22 +94,7 @@ impl Tree {
     }
 
     pub fn node_is_selected(&mut self, node_id: NodeId) -> bool {
-        let node = self.nodes_by_node_id.entry(node_id).or_default();
-        node.is_expanded.value
-    }
-
-    pub fn set_node_is_selected(&mut self, node_id: NodeId, is_selected: bool) {
-        let node = self.nodes_by_node_id.entry(node_id).or_default();
-        if node.is_selected == is_selected {
-            return;
-        }
-        node.is_selected = is_selected;
-        self.needs_redraw = true;
-    }
-
-    pub fn toggle_node_is_selected(&mut self, node_id: NodeId) {
-        let is_selected = self.node_is_selected(node_id);
-        self.set_node_is_selected(node_id, !is_selected);
+        self.selected_node_ids.contains(&node_id)
     }
 
     fn update_animating_node_ids(&mut self, cx: &mut Cx, node_id: NodeId, is_animating: bool) {
@@ -124,6 +111,18 @@ impl Tree {
             self.next_frame = NextFrame::default();
         } else {
             self.next_frame = cx.new_next_frame();
+        }
+    }
+
+    pub fn set_node_is_selected(&mut self, node_id: NodeId, is_selected: bool) {
+        if is_selected {
+            if self.selected_node_ids.insert(node_id) {
+                self.needs_redraw = true;
+            }
+        } else {
+            if self.selected_node_ids.remove(&node_id) {
+                self.needs_redraw = true;
+            }
         }
     }
 
@@ -187,7 +186,6 @@ impl NodeInfo {
 struct Node {
     area: Area,
     is_expanded: AnimatedBool,
-    is_selected: bool,
 }
 
 impl Node {
@@ -205,7 +203,6 @@ impl Default for Node {
         Self {
             area: Area::Empty,
             is_expanded: AnimatedBool::new(true),
-            is_selected: false,
         }
     }
 }
@@ -237,12 +234,12 @@ impl AnimatedBool {
 
     fn update_fraction(&mut self) {
         if self.value {
-            self.fraction = 1.0 - 0.5 * (1.0 - self.fraction);
+            self.fraction = 1.0 - 0.6 * (1.0 - self.fraction);
             if 1.0 - self.fraction < 1.0E-3 {
                 self.fraction = 1.0;
             }
         } else {
-            self.fraction = 0.5 * self.fraction;
+            self.fraction = 0.6 * self.fraction;
             if self.fraction < 1.0E-3 {
                 self.fraction = 0.0;
             }
