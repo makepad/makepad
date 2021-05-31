@@ -13,6 +13,8 @@ pub struct FileTree {
     node_height: f32,
     indent_width: f32,
     node_name: DrawText,
+    node_name_color_folder: Vec4,
+    node_name_color_file: Vec4,
     stack: Vec<f32>,
 }
 
@@ -27,6 +29,8 @@ impl FileTree {
                 top_drop: 1.3,
                 ..makepad_widget::widgetstyle::text_style_normal
             }
+            self::node_name_color_folder: #FF;
+            self::node_name_color_file: #9D;
         })
     }
 
@@ -40,6 +44,8 @@ impl FileTree {
             node_height: 0.0,
             indent_width: 0.0,
             node_name: DrawText::new(cx, default_shader!()),
+            node_name_color_folder: Vec4::default(),
+            node_name_color_file: Vec4::default(),
             stack: Vec::new(),
         }
     }
@@ -65,6 +71,8 @@ impl FileTree {
         self.node_color_odd = live_vec4!(cx, self::node_color_odd);
         self.node_height = live_float!(cx, self::node_height);
         self.indent_width = live_float!(cx, self::indent_width);
+        self.node_name_color_folder = live_vec4!(cx, self::node_name_color_folder);
+        self.node_name_color_file = live_vec4!(cx, self::node_name_color_file);
     }
 
     pub fn begin_folder(&mut self, cx: &mut Cx, node_id: NodeId, name: &str) -> Result<(), ()> {
@@ -74,6 +82,7 @@ impl FileTree {
         self.node.color = self.node_color(info.count);
         self.node.begin_quad(cx, self.node_layout(scale));
         cx.walk_turtle(self.indent_walk(self.stack.len()));
+        self.node_name.color = self.node_name_color_folder;
         self.node_name.font_scale = self.stack.last().cloned().unwrap_or(1.0);
         self.node_name.draw_text_walk(cx, name);
         self.node.end_quad(cx);
@@ -101,6 +110,7 @@ impl FileTree {
         self.node.color = self.node_color(info.count);
         self.node.begin_quad(cx, self.node_layout(scale));
         cx.walk_turtle(self.indent_walk(self.stack.len()));
+        self.node_name.color = self.node_name_color_file;
         self.node_name.font_scale = scale;
         self.node_name.draw_text_walk(cx, name);
         self.node.end_quad(cx);
