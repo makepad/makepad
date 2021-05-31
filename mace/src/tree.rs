@@ -29,6 +29,7 @@ impl Tree {
     }
 
     pub fn begin(&mut self) {
+        self.node_ids_by_area.clear();
         self.count = 0;
         self.needs_redraw = false;
     }
@@ -50,15 +51,11 @@ impl Tree {
 
     pub fn forget_tree(&mut self) {
         self.nodes_by_node_id.clear();
-        self.node_ids_by_area.clear();
         self.animating_node_ids.clear();
     }
 
     pub fn forget_node(&mut self, node_id: NodeId) {
-        let node = self.nodes_by_node_id.remove(&node_id).unwrap();
-        if !node.area.is_empty() {
-            self.node_ids_by_area.remove(&node.area);
-        }
+        self.nodes_by_node_id.remove(&node_id).unwrap();
         self.animating_node_ids.remove(&node_id);
     }
 
@@ -67,12 +64,7 @@ impl Tree {
     }
 
     pub fn set_node_area(&mut self, node_id: NodeId, area: Area) {
-        let node = self.nodes_by_node_id.entry(node_id).or_default();
-        if !node.area.is_empty() {
-            self.node_ids_by_area.remove(&node.area);
-        }
         self.node_ids_by_area.insert(area, node_id);
-        node.area = area;
     }
 
     pub fn node_is_expanded(&mut self, node_id: NodeId) -> bool {
@@ -193,7 +185,6 @@ impl NodeInfo {
 
 #[derive(Clone, Debug)]
 struct Node {
-    area: Area,
     is_expanded: AnimatedBool,
 }
 
@@ -210,7 +201,6 @@ impl Node {
 impl Default for Node {
     fn default() -> Self {
         Self {
-            area: Area::Empty,
             is_expanded: AnimatedBool::new(true),
         }
     }
