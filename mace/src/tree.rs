@@ -136,7 +136,7 @@ impl Tree {
         self.needs_redraw
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(Action)) {
         match event {
             Event::NextFrame(_) if self.next_frame.is_active(cx) => {
                 let mut new_animating_node_ids = HashSet::new();
@@ -162,7 +162,7 @@ impl Tree {
                     }
                 }
                 for node_id in clicked_node_ids {
-                    self.toggle_node_is_expanded(cx, node_id, true);
+                    dispatch_action(Action::ToggleNodeIsExpanded(node_id, true))
                 }
             }
         }
@@ -252,4 +252,8 @@ impl AnimatedBool {
             }
         }
     }
+}
+
+pub enum Action {
+    ToggleNodeIsExpanded(NodeId, bool)
 }
