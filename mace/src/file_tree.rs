@@ -199,11 +199,19 @@ impl FileTree {
     }
 
     pub fn set_node_is_expanded(&mut self, cx: &mut Cx, node_id: NodeId, is_open: bool, should_animate: bool) {
-        self.tree.set_node_is_expanded(cx, node_id, is_open, should_animate)
+        if self.tree.set_node_is_expanded(cx, node_id, is_open, should_animate) {
+            self.view.redraw_view(cx);
+        }
     }
 
     pub fn toggle_node_is_expanded(&mut self, cx: &mut Cx, node_id: NodeId, should_animate: bool) {
-        self.tree.toggle_node_is_expanded(cx, node_id, should_animate)
+        if self.tree.toggle_node_is_expanded(cx, node_id, should_animate) {
+            self.view.redraw_view(cx);
+        }
+    }
+
+    pub fn redraw(&self, cx: &mut Cx) {
+        self.view.redraw_view(cx);
     }
 
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
@@ -217,10 +225,10 @@ impl FileTree {
                 tree::Action::ToggleNodeIsExpanded(node_id, should_animate) => {
                     self.toggle_node_is_expanded(cx, node_id, should_animate)
                 }
+                tree::Action::Redraw => {
+                    self.redraw(cx);
+                }
             }
-        }
-        if self.tree.needs_redraw() {
-            self.view.redraw_view(cx);
         }
     }
 }
