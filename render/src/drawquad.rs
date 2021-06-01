@@ -17,7 +17,7 @@ pub struct DrawQuad {
 impl Clone for DrawQuad {
     fn clone(&self) -> Self {
         Self {
-            shader: unsafe {self.shader.clone()},
+            shader: self.shader.clone(),
             area: Area ::Empty,
             many: None,
            // many_set_area: false,
@@ -152,7 +152,7 @@ impl DrawQuad {
     }
     
     pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) {
-        if unsafe{self.many.is_some()}{
+        if self.many.is_some() {
             panic!("Cannot use begin_quad inside a many block");
         }
         let new_area = cx.add_aligned_instance(self.shader, self.as_slice());
@@ -163,7 +163,7 @@ impl DrawQuad {
     pub fn end_quad(&mut self, cx: &mut Cx) {
         let rect = cx.end_turtle(self.area);
         //println!("GOT RECT {:?}", rect);
-        unsafe {self.area.set_rect(cx, &rect)};
+        self.area.set_rect(cx, &rect);
     }
     
     pub fn draw_quad_walk(&mut self, cx: &mut Cx, walk: Walk) {
@@ -249,13 +249,11 @@ impl DrawQuad {
     }
     
     pub fn end_many(&mut self, cx: &mut Cx) {
-        unsafe {
-            if let Some(mi) = self.many.take() {
-                // update area pointer
-                let new_area = cx.end_many_instances(mi);
-                self.area = cx.update_area_refs(self.many_old_area, new_area);
-            }
-        }
+	if let Some(mi) = self.many.take() {
+	    // update area pointer
+	    let new_area = cx.end_many_instances(mi);
+	    self.area = cx.update_area_refs(self.many_old_area, new_area);
+	}
     }
     
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
