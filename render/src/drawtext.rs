@@ -40,7 +40,7 @@ pub struct DrawText {
 impl Clone for DrawText {
     fn clone(&self) -> Self {
         Self {
-            shader: unsafe {self.shader.clone()},
+            shader: self.shader.clone(),
             area: Area ::Empty,
             many: None,
             many_old_area: Area::Empty,
@@ -296,13 +296,11 @@ impl DrawText {
 
         
     pub fn end_many(&mut self, cx: &mut Cx) {
-        unsafe {
-            if let Some(mi) = self.many.take() {
-                let new_area = cx.end_many_instances(mi);
-                self.area = cx.update_area_refs(self.many_old_area, new_area);
-                self.write_uniforms(cx);
-            }
-        }
+	if let Some(mi) = self.many.take() {
+	    let new_area = cx.end_many_instances(mi);
+	    self.area = cx.update_area_refs(self.many_old_area, new_area);
+	    self.write_uniforms(cx);
+	}
     }
     
     pub fn write_uniforms(&mut self, cx: &mut Cx) {
@@ -330,30 +328,24 @@ impl DrawText {
     }
     
     pub fn buf_truncate(&mut self, len:usize){
-        unsafe {
-            self.buf.truncate(len);
-        }
+        self.buf.truncate(len);
     }
     
     pub fn buf_push_char(&mut self, c:char){
-        unsafe{
-            self.buf.push(c);
-        }
+        self.buf.push(c);
     }
     
     pub fn buf_push_str(&mut self, val:&str){
-        unsafe {
-            for c in val.chars() {
-                self.buf.push(c)
-            }
+        for c in val.chars() {
+            self.buf.push(c)
         }
     }
     
     pub fn draw_text(&mut self, cx: &mut Cx, pos: Vec2) {
         let mut buf = Vec::new();
-        std::mem::swap(&mut buf, unsafe {&mut self.buf});
+        std::mem::swap(&mut buf, &mut self.buf);
         self.draw_text_chunk(cx, pos, 0, &buf, | _, _, _, _ | {0.0});
-        std::mem::swap(&mut buf, unsafe {&mut self.buf});
+        std::mem::swap(&mut buf, &mut self.buf);
     }
 
     pub fn draw_text_rel(&mut self, cx: &mut Cx, pos: Vec2, val:&str) {
@@ -375,13 +367,13 @@ impl DrawText {
             return
         }
         
-        let in_many = unsafe{self.many.is_some()};
+        let in_many = self.many.is_some();
         
         if !in_many{ 
             self.begin_many(cx);
         }
                 
-        let text_style = unsafe {&self.text_style};
+        let text_style = &self.text_style;
         
         let mut walk_x = pos.x;
         let mut char_offset = char_offset;
@@ -402,7 +394,7 @@ impl DrawText {
         let atlas_page = &mut cxfont.atlas_pages[atlas_page_id];
 
         
-        let li = unsafe {if let Some(mi) = &mut self.many {mi} else {return}};
+        let li = if let Some(mi) = &mut self.many {mi} else {return};
         
         for wc in chunk {
             
@@ -497,20 +489,20 @@ impl DrawText {
     }
     
     pub fn draw_text_walk(&mut self, cx: &mut Cx, text: &str) {
-        let in_many = unsafe{self.many.is_some()};
+        let in_many = self.many.is_some();
         
         if !in_many{ 
             self.begin_many(cx);
         }
         
         let mut buf = Vec::new();
-        std::mem::swap(&mut buf, unsafe {&mut self.buf});
+        std::mem::swap(&mut buf, &mut self.buf);
         buf.truncate(0);
         
         let mut width = 0.0;
         let mut elipct = 0;
         
-        let text_style = unsafe {&self.text_style};
+        let text_style = &self.text_style;
         let font_size = text_style.font_size;
         let line_spacing = text_style.line_spacing;
         let height_factor = text_style.height_factor;
@@ -587,7 +579,7 @@ impl DrawText {
                 }
             }
         }
-        std::mem::swap(&mut buf, unsafe {&mut self.buf});
+        std::mem::swap(&mut buf, &mut self.buf);
         if !in_many{
             self.end_many(cx)
         }
@@ -595,7 +587,7 @@ impl DrawText {
     
     // looks up text with the behavior of a text selection mouse cursor
     pub fn closest_text_offset(&self, cx: &Cx, pos: Vec2) -> Option<usize> {
-        let area = unsafe {&self.area};
+        let area = &self.area;
         
         if !area.is_valid(cx) {
             return None
@@ -609,7 +601,7 @@ impl DrawText {
         let font_size = area.get_read_ref(cx, live_item_id!(self::DrawText::font_size), Ty::Float).unwrap();
         let char_offset = area.get_read_ref(cx, live_item_id!(self::DrawText::char_offset), Ty::Float).unwrap();
         
-        let text_style = unsafe {&self.text_style};
+        let text_style = &self.text_style;
         let line_spacing = text_style.line_spacing;
         
         let mut i = 0;
