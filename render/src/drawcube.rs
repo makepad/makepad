@@ -16,7 +16,7 @@ pub struct DrawCube {
 impl Clone for DrawCube {
     fn clone(&self) -> Self {
         Self {
-            shader: unsafe {self.shader.clone()},
+            shader: self.shader.clone(),
             area: Area ::Empty,
             many: None,
             slots: self.slots,
@@ -123,7 +123,7 @@ impl DrawCube {
     }
     
     pub fn get_transform(&mut self)->&Mat4 {
-        unsafe{&self.transform}
+        &self.transform
     }
     
     
@@ -147,16 +147,14 @@ impl DrawCube {
     }
     
     pub fn end_many(&mut self, cx: &mut Cx) {
-        unsafe {
-            if let Some(li) = self.many.take() {
-                self.area = cx.end_many_instances(li);
-            }
+        if let Some(li) = self.many.take() {
+            self.area = cx.end_many_instances(li);
         }
     }
     
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
-        unsafe {
-            std::slice::from_raw_parts(&self.transform as *const _ as *const f32, self.slots)
+	unsafe {        
+	    std::slice::from_raw_parts(&self.transform as *const _ as *const f32, self.slots)
         }
     }
 }
