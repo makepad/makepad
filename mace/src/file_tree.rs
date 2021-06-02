@@ -11,12 +11,17 @@ pub struct FileTree {
     node_height: f32,
     node_color_even: Vec4,
     node_color_odd: Vec4,
+    node_color_selected: Vec4,
+    node_color_hovered_even: Vec4,
+    node_color_hovered_odd: Vec4,
+    node_color_hovered_selected: Vec4,
     indent_width: f32,
     folder_icon: DrawColor,
     folder_icon_walk: Walk,
     node_name: DrawText,
     node_name_color_folder: Vec4,
     node_name_color_file: Vec4,
+    count: usize,
     stack: Vec<f32>,
 }
 
@@ -42,6 +47,10 @@ impl FileTree {
             self::node_height: 20.0;
             self::node_color_even: #25;
             self::node_color_odd: #28;
+            self::node_color_selected: #x11466E;
+            self::node_color_hovered_even: #3D;
+            self::node_color_hovered_odd: #38;
+            self::node_color_hovered_selected: #x11466E;
             self::indent_width: 10.0;
             self::folder_icon_width: 10.0;
             self::folder_icon_color: #80;
@@ -62,21 +71,26 @@ impl FileTree {
             node_height: 0.0,
             node_color_even: Vec4::default(),
             node_color_odd: Vec4::default(),
+            node_color_selected: Vec4::default(),
+            node_color_hovered_even: Vec4::default(),
+            node_color_hovered_odd: Vec4::default(),
+            node_color_hovered_selected: Vec4::default(),
             indent_width: 0.0,
             folder_icon: DrawColor::new(cx, live_shader!(cx, self::folder_icon_shader)),
             folder_icon_walk: Walk::default(),
             node_name: DrawText::new(cx, default_shader!()),
             node_name_color_folder: Vec4::default(),
             node_name_color_file: Vec4::default(),
+            count: 0,
             stack: Vec::new(),
         }
     }
 
     pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
         println!("BEGIN FILE TREE");
-        self.apply_style(cx);
-        self.node_name.text_style = live_text_style!(cx, self::node_name_text_style);
         self.view.begin_view(cx, Layout::default())?;
+        self.apply_style(cx);
+        self.count = 0;
         self.tree.begin();
         Ok(())
     }
@@ -92,6 +106,10 @@ impl FileTree {
         self.node_height = live_float!(cx, self::node_height);
         self.node_color_even = live_vec4!(cx, self::node_color_even);
         self.node_color_odd = live_vec4!(cx, self::node_color_odd);
+        self.node_color_selected = live_vec4!(cx, self::node_color_selected);
+        self.node_color_hovered_even = live_vec4!(cx, self::node_color_hovered_even);
+        self.node_color_hovered_odd = live_vec4!(cx, self::node_color_hovered_odd);
+        self.node_color_hovered_selected = live_vec4!(cx, self::node_color_hovered_selected);
         self.indent_width = live_float!(cx, self::indent_width);
         self.folder_icon_walk = Walk {
             width: Width::Fix(live_float!(cx, self::folder_icon_width)),
@@ -104,6 +122,7 @@ impl FileTree {
             },
         };
         self.folder_icon.color = live_vec4!(cx, self::folder_icon_color);
+        self.node_name.text_style = live_text_style!(cx, self::node_name_text_style);
         self.node_name_color_folder = live_vec4!(cx, self::node_name_color_folder);
         self.node_name_color_file = live_vec4!(cx, self::node_name_color_file);
     }
@@ -112,7 +131,9 @@ impl FileTree {
         let info = self.tree.begin_node(node_id);
         println!("BEGIN FOLDER {:?} ({:?})", name, info.is_expanded_fraction);
         let scale = self.stack.last().cloned().unwrap_or(1.0);
-        self.node.color = self.node_color(info.count);
+        let count = self.count;
+        self.count += 1;
+        self.node.color = self.node_color(count, info.is_hovered, info.is_selected);
         self.node.begin_quad(cx, self.node_layout(scale));
         cx.walk_turtle(self.indent_walk(self.stack.len()));
         self.folder_icon.draw_quad_walk(cx, self.folder_icon_walk);
@@ -142,7 +163,9 @@ impl FileTree {
         println!("FILE {:?}", name);
         let info = self.tree.begin_node(node_id);
         let scale = self.stack.last().cloned().unwrap_or(1.0);
-        self.node.color = self.node_color(info.count);
+        let count = self.count;
+        self.count += 1;
+        self.node.color = self.node_color(count, info.is_hovered, info.is_selected);
         self.node.begin_quad(cx, self.node_layout(scale));
         cx.walk_turtle(self.indent_walk(self.stack.len()));
         cx.turtle_align_y();
@@ -155,11 +178,23 @@ impl FileTree {
         self.tree.end_node();
     }
 
-    fn node_color(&self, count: usize) -> Vec4 {
-        if count % 2 == 0 {
-            self.node_color_even
+    fn node_color(&self, count: usize, is_hovered: bool, is_selected: bool) -> Vec4 {
+        if is_hovered {
+            if is_selected {
+                self.node_color_hovered_selected
+            } else if count % 2 == 0 {
+                self.node_color_hovered_even
+            } else {
+                self.node_color_hovered_odd
+            }
         } else {
-            self.node_color_odd
+            if is_selected {
+                self.node_color_selected
+            } else if count % 2 == 0 {
+                self.node_color_even
+            } else {
+                self.node_color_odd
+            }
         }
     }
 
@@ -210,8 +245,16 @@ impl FileTree {
         }
     }
 
-    pub fn redraw(&self, cx: &mut Cx) {
-        self.view.redraw_view(cx);
+    pub fn set_hovered_node_id(&mut self, cx: &mut Cx, node_id: Option<NodeId>) {
+        if self.tree.set_hovered_node_id(node_id) {
+            self.view.redraw_view(cx);
+        }
+    }
+
+    pub fn set_selected_node_id(&mut self, cx: &mut Cx, node_id: NodeId) {
+        if self.tree.set_selected_node_id(node_id) {
+            self.view.redraw_view(cx);
+        }
     }
 
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
@@ -225,8 +268,14 @@ impl FileTree {
                 tree::Action::ToggleNodeIsExpanded(node_id, should_animate) => {
                     self.toggle_node_is_expanded(cx, node_id, should_animate)
                 }
+                tree::Action::SetHoveredNodeId(node_id) => {
+                    self.set_hovered_node_id(cx, node_id);
+                }
+                tree::Action::SetSelectedNodeId(node_id) => {
+                    self.set_selected_node_id(cx, node_id);
+                }
                 tree::Action::Redraw => {
-                    self.redraw(cx);
+                    self.view.redraw_view(cx);
                 }
             }
         }
