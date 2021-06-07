@@ -3,7 +3,7 @@ use {
     std::collections::{HashMap, HashSet},
 };
 
-pub struct Tree {
+pub struct TreeLogic {
     nodes_by_node_id: HashMap<NodeId, Node>,
     nodes_by_area: HashMap<Area, NodeId>,
     animating_node_ids: HashSet<NodeId>,
@@ -12,9 +12,9 @@ pub struct Tree {
     next_frame: NextFrame,
 }
 
-impl Tree {
-    pub fn new() -> Tree {
-        Tree {
+impl TreeLogic {
+    pub fn new() -> TreeLogic {
+        TreeLogic {
             nodes_by_node_id: HashMap::new(),
             nodes_by_area: HashMap::new(),
             animating_node_ids: HashSet::new(),
