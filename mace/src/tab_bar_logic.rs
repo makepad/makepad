@@ -7,7 +7,9 @@ impl TabBarLogic {
 
     pub fn end(&mut self) {}
 
-    pub fn begin_tab(&mut self, _tab_id: TabId) {}
+    pub fn begin_tab(&mut self, _tab_id: TabId) -> TabInfo {
+        unimplemented!()
+    }
 
     pub fn end_tab(&mut self) {}
 
