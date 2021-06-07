@@ -4,7 +4,7 @@ use {
     makepad_widget::*,
 };
 
-pub struct FileTree {
+pub struct Tree {
     view: ScrollView,
     logic: TreeLogic,
     node: DrawColor,
@@ -25,7 +25,7 @@ pub struct FileTree {
     stack: Vec<f32>,
 }
 
-impl FileTree {
+impl Tree {
     pub fn style(cx: &mut Cx) {
         live_body!(cx, {
             self::folder_icon_shader: Shader {
@@ -63,8 +63,8 @@ impl FileTree {
         })
     }
 
-    pub fn new(cx: &mut Cx) -> FileTree {
-        FileTree {
+    pub fn new(cx: &mut Cx) -> Tree {
+        Tree {
             view: ScrollView::new_standard_hv(cx),
             logic: TreeLogic::new(),
             node: DrawColor::new(cx, default_shader!()),
@@ -127,9 +127,8 @@ impl FileTree {
         self.node_name_color_file = live_vec4!(cx, self::node_name_color_file);
     }
 
-    pub fn begin_folder(&mut self, cx: &mut Cx, node_id: NodeId, name: &str) -> Result<(), ()> {
+    pub fn begin_branch(&mut self, cx: &mut Cx, node_id: NodeId, name: &str) -> Result<(), ()> {
         let info = self.logic.begin_node(node_id);
-        println!("BEGIN FOLDER {:?} ({:?})", name, info.is_expanded_fraction);
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let count = self.count;
         self.count += 1;
@@ -146,21 +145,18 @@ impl FileTree {
         cx.turtle_new_line();
         self.stack.push(scale * info.is_expanded_fraction);
         if info.is_fully_collapsed() {
-            println!("!!! FULLY COLLAPSED !!!");
-            self.end_folder();
+            self.end_branch();
             return Err(());
         }
         Ok(())
     }
 
-    pub fn end_folder(&mut self) {
-        println!("END FOLDER");
+    pub fn end_branch(&mut self) {
         self.stack.pop();
         self.logic.end_node();
     }
 
-    pub fn file(&mut self, cx: &mut Cx, node_id: NodeId, name: &str) {
-        println!("FILE {:?}", name);
+    pub fn leaf(&mut self, cx: &mut Cx, node_id: NodeId, name: &str) {
         let info = self.logic.begin_node(node_id);
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let count = self.count;
