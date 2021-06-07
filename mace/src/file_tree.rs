@@ -1,12 +1,12 @@
 use {
-    crate::tree::{self, NodeId, Tree},
+    crate::tree_logic::{self, NodeId, TreeLogic},
     makepad_render::*,
     makepad_widget::*,
 };
 
 pub struct FileTree {
     view: ScrollView,
-    tree: Tree,
+    logic: TreeLogic,
     node: DrawColor,
     node_height: f32,
     node_color_even: Vec4,
@@ -66,7 +66,7 @@ impl FileTree {
     pub fn new(cx: &mut Cx) -> FileTree {
         FileTree {
             view: ScrollView::new_standard_hv(cx),
-            tree: Tree::new(),
+            logic: TreeLogic::new(),
             node: DrawColor::new(cx, default_shader!()),
             node_height: 0.0,
             node_color_even: Vec4::default(),
@@ -91,14 +91,14 @@ impl FileTree {
         self.view.begin_view(cx, Layout::default())?;
         self.apply_style(cx);
         self.count = 0;
-        self.tree.begin();
+        self.logic.begin();
         Ok(())
     }
 
     pub fn end(&mut self, cx: &mut Cx) {
         println!("END FILE TREE");
         println!();
-        self.tree.end();
+        self.logic.end();
         self.view.end_view(cx);
     }
 
@@ -128,7 +128,7 @@ impl FileTree {
     }
 
     pub fn begin_folder(&mut self, cx: &mut Cx, node_id: NodeId, name: &str) -> Result<(), ()> {
-        let info = self.tree.begin_node(node_id);
+        let info = self.logic.begin_node(node_id);
         println!("BEGIN FOLDER {:?} ({:?})", name, info.is_expanded_fraction);
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let count = self.count;
@@ -142,7 +142,7 @@ impl FileTree {
         self.node_name.font_scale = self.stack.last().cloned().unwrap_or(1.0);
         self.node_name.draw_text_walk(cx, name);
         self.node.end_quad(cx);
-        self.tree.set_node_area(node_id, self.node.area());
+        self.logic.set_node_area(node_id, self.node.area());
         cx.turtle_new_line();
         self.stack.push(scale * info.is_expanded_fraction);
         if info.is_fully_collapsed() {
@@ -156,12 +156,12 @@ impl FileTree {
     pub fn end_folder(&mut self) {
         println!("END FOLDER");
         self.stack.pop();
-        self.tree.end_node();
+        self.logic.end_node();
     }
 
     pub fn file(&mut self, cx: &mut Cx, node_id: NodeId, name: &str) {
         println!("FILE {:?}", name);
-        let info = self.tree.begin_node(node_id);
+        let info = self.logic.begin_node(node_id);
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let count = self.count;
         self.count += 1;
@@ -173,9 +173,9 @@ impl FileTree {
         self.node_name.font_scale = scale;
         self.node_name.draw_text_walk(cx, name);
         self.node.end_quad(cx);
-        self.tree.set_node_area(node_id, self.node.area());
+        self.logic.set_node_area(node_id, self.node.area());
         cx.turtle_new_line();
-        self.tree.end_node();
+        self.logic.end_node();
     }
 
     fn node_color(&self, count: usize, is_hovered: bool, is_selected: bool) -> Vec4 {
@@ -230,29 +230,29 @@ impl FileTree {
     }
 
     pub fn node_is_expanded(&mut self, node_id: NodeId) -> bool {
-        self.tree.node_is_expanded(node_id)
+        self.logic.node_is_expanded(node_id)
     }
 
     pub fn set_node_is_expanded(&mut self, cx: &mut Cx, node_id: NodeId, is_open: bool, should_animate: bool) {
-        if self.tree.set_node_is_expanded(cx, node_id, is_open, should_animate) {
+        if self.logic.set_node_is_expanded(cx, node_id, is_open, should_animate) {
             self.view.redraw_view(cx);
         }
     }
 
     pub fn toggle_node_is_expanded(&mut self, cx: &mut Cx, node_id: NodeId, should_animate: bool) {
-        if self.tree.toggle_node_is_expanded(cx, node_id, should_animate) {
+        if self.logic.toggle_node_is_expanded(cx, node_id, should_animate) {
             self.view.redraw_view(cx);
         }
     }
 
     pub fn set_hovered_node_id(&mut self, cx: &mut Cx, node_id: Option<NodeId>) {
-        if self.tree.set_hovered_node_id(node_id) {
+        if self.logic.set_hovered_node_id(node_id) {
             self.view.redraw_view(cx);
         }
     }
 
     pub fn set_selected_node_id(&mut self, cx: &mut Cx, node_id: NodeId) {
-        if self.tree.set_selected_node_id(node_id) {
+        if self.logic.set_selected_node_id(node_id) {
             self.view.redraw_view(cx);
         }
     }
@@ -262,19 +262,19 @@ impl FileTree {
             self.view.redraw_view(cx);
         }
         let mut actions = Vec::new();
-        self.tree.handle_event(cx, event, &mut |action| actions.push(action));
+        self.logic.handle_event(cx, event, &mut |action| actions.push(action));
         for action in actions {
             match action {
-                tree::Action::ToggleNodeIsExpanded(node_id, should_animate) => {
+                tree_logic::Action::ToggleNodeIsExpanded(node_id, should_animate) => {
                     self.toggle_node_is_expanded(cx, node_id, should_animate)
                 }
-                tree::Action::SetHoveredNodeId(node_id) => {
+                tree_logic::Action::SetHoveredNodeId(node_id) => {
                     self.set_hovered_node_id(cx, node_id);
                 }
-                tree::Action::SetSelectedNodeId(node_id) => {
+                tree_logic::Action::SetSelectedNodeId(node_id) => {
                     self.set_selected_node_id(cx, node_id);
                 }
-                tree::Action::Redraw => {
+                tree_logic::Action::Redraw => {
                     self.view.redraw_view(cx);
                 }
             }

@@ -1,5 +1,5 @@
 use {
-    crate::{file_tree::FileTree, tree::NodeId},
+    crate::{file_tree::FileTree, tree_logic::NodeId},
     makepad_render::*,
     makepad_widget::*,
 };
