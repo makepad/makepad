@@ -1,5 +1,5 @@
 use {
-    crate::{tree::Tree, tree_logic::NodeId},
+    crate::{tab_bar::TabBar, tree::Tree, tree_logic::NodeId},
     makepad_render::*,
     makepad_widget::*,
 };
@@ -12,6 +12,7 @@ pub struct App {
 impl App {
     pub fn style(cx: &mut Cx) {
         makepad_widget::set_widget_style(cx);
+        TabBar::style(cx);
         Tree::style(cx)
     }
 
