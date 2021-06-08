@@ -1,12 +1,13 @@
 use {
-    crate::{tab_bar::TabBar, tree::Tree, tree_logic::NodeId},
+    crate::{tab_bar::TabBar, tab_bar_logic::TabId, tree::Tree, tree_logic::NodeId},
     makepad_render::*,
     makepad_widget::*,
 };
 
 pub struct App {
     window: DesktopWindow,
-    tree: Tree
+    tab_bar: TabBar,
+    tree: Tree,
 }
 
 impl App {
@@ -19,6 +20,7 @@ impl App {
     pub fn new(cx: &mut Cx) -> Self {
         Self {
             window: DesktopWindow::new(cx),
+            tab_bar: TabBar::new(cx),
             tree: Tree::new(cx),
         }
     }
@@ -30,6 +32,13 @@ impl App {
 
     pub fn draw_app(&mut self, cx: &mut Cx) {
         if self.window.begin_desktop_window(cx, None).is_ok() {
+            if self.tab_bar.begin(cx).is_ok() {
+                self.tab_bar.tab(cx, TabId(0), "AAA");
+                self.tab_bar.tab(cx, TabId(0), "BBB");
+                self.tab_bar.tab(cx, TabId(0), "CCC");
+                self.tab_bar.end(cx);
+            }
+            /*
             if self.tree.begin(cx).is_ok() {
                 if self.tree.begin_branch(cx, NodeId(0), "A").is_ok() {
                     if self.tree.begin_branch(cx, NodeId(1), "B").is_ok() {
@@ -46,6 +55,7 @@ impl App {
                 }
                 self.tree.end(cx);
             }
+            */
             self.window.end_desktop_window(cx);
         }
     }
