@@ -1,6 +1,8 @@
-use {makepad_render::*, makepad_widget::*};
-
-use crate::tab_bar_logic::{TabBarLogic, TabId};
+use {
+    crate::tab_bar_logic::{self, TabBarLogic, TabId},
+    makepad_render::*,
+    makepad_widget::*,
+};
 
 pub struct TabBar {
     view: ScrollView,
@@ -17,7 +19,7 @@ pub struct TabBar {
 impl TabBar {
     pub fn style(cx: &mut Cx) {
         DrawTab::register_draw_input(cx);
-        
+
         live_body!(cx, {
             self::draw_tab_shader: Shader {
                 use makepad_render::drawquad::shader::*;
@@ -51,7 +53,7 @@ impl TabBar {
     pub fn new(cx: &mut Cx) -> TabBar {
         TabBar {
             view: ScrollView::new_standard_hv(cx),
-            logic: TabBarLogic,
+            logic: TabBarLogic::new(),
             tab: DrawTab::new(cx, default_shader!()),
             tab_height: 0.0,
             tab_color: Vec4::default(),
@@ -93,6 +95,7 @@ impl TabBar {
         self.tab_name.draw_text_walk(cx, name);
         cx.turtle_align_y();
         self.tab.end_quad(cx);
+        self.logic.set_tab_area(tab_id, self.tab.area());
         self.logic.end_tab();
     }
 
@@ -130,11 +133,26 @@ impl TabBar {
         }
     }
 
+    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, tab_id: TabId) {
+        if self.logic.set_selected_tab_id(tab_id) {
+            self.view.redraw_view(cx);
+        }
+    }
+
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         if self.view.handle_scroll_view(cx, event) {
             self.view.redraw_view(cx);
         }
-        self.logic.handle_event(cx, event);
+        let mut actions = Vec::new();
+        self.logic
+            .handle_event(cx, event, &mut |action| actions.push(action));
+        for action in actions {
+            match action {
+                tab_bar_logic::Action::SetSelectedTabId(tab_id) => {
+                    self.set_selected_tab_id(cx, tab_id);
+                }
+            }
+        }
     }
 }
 
