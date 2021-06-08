@@ -34,14 +34,16 @@ impl TreeLogic {
         let node = self.nodes_by_node_id.entry(node_id).or_default();
         NodeInfo {
             is_expanded_fraction: node.is_expanded.fraction,
-            is_hovered: self.hovered_node_id.map_or(false, |hovered_node_id| hovered_node_id == node_id),
+            is_hovered: self
+                .hovered_node_id
+                .map_or(false, |hovered_node_id| hovered_node_id == node_id),
             is_selected: self.selected_node_ids.contains(&node_id),
         }
     }
 
     pub fn end_node(&mut self) {}
 
-    pub fn forget_tree(&mut self) {
+    pub fn forget(&mut self) {
         self.nodes_by_node_id.clear();
         self.animating_node_ids.clear();
     }
@@ -81,7 +83,12 @@ impl TreeLogic {
         }
     }
 
-    pub fn toggle_node_is_expanded(&mut self, cx: &mut Cx, node_id: NodeId, should_animate: bool) -> bool {
+    pub fn toggle_node_is_expanded(
+        &mut self,
+        cx: &mut Cx,
+        node_id: NodeId,
+        should_animate: bool,
+    ) -> bool {
         let is_expanded = self.node_is_expanded(node_id);
         self.set_node_is_expanded(cx, node_id, !is_expanded, should_animate)
     }
@@ -120,7 +127,12 @@ impl TreeLogic {
         true
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(Action)) {
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        dispatch_action: &mut dyn FnMut(Action),
+    ) {
         match event {
             Event::NextFrame(_) if self.next_frame.is_active(cx) => {
                 let mut new_animating_node_ids = HashSet::new();
@@ -143,10 +155,10 @@ impl TreeLogic {
                             match fe.hover_state {
                                 HoverState::In => {
                                     dispatch_action(Action::SetHoveredNodeId(Some(*node_id)));
-                                },
+                                }
                                 HoverState::Out => {
                                     dispatch_action(Action::SetHoveredNodeId(None));
-                                },
+                                }
                                 _ => {}
                             }
                         }

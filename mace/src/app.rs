@@ -1,5 +1,5 @@
 use {
-    crate::{tab_bar::TabBar, tab_bar_logic::TabId, tree::Tree, tree_logic::NodeId},
+    crate::{tab_bar::TabBar, tab_bar_logic::TabId, tree::Tree},
     makepad_render::*,
     makepad_widget::*,
 };
@@ -27,15 +27,16 @@ impl App {
 
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         self.window.handle_desktop_window(cx, event);
-        self.tree.handle_event(cx, event);
+        self.tab_bar.handle_event(cx, event);
+        // self.tree.handle_event(cx, event);
     }
 
     pub fn draw_app(&mut self, cx: &mut Cx) {
         if self.window.begin_desktop_window(cx, None).is_ok() {
             if self.tab_bar.begin(cx).is_ok() {
                 self.tab_bar.tab(cx, TabId(0), "AAA");
-                self.tab_bar.tab(cx, TabId(0), "BBB");
-                self.tab_bar.tab(cx, TabId(0), "CCC");
+                self.tab_bar.tab(cx, TabId(1), "BBB");
+                self.tab_bar.tab(cx, TabId(2), "CCC");
                 self.tab_bar.end(cx);
             }
             /*
