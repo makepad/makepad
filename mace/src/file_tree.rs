@@ -4,7 +4,7 @@ use {
     makepad_widget::*,
 };
 
-pub struct Tree {
+pub struct FileTree {
     view: ScrollView,
     logic: TreeLogic,
     node: DrawColor,
@@ -25,7 +25,7 @@ pub struct Tree {
     stack: Vec<f32>,
 }
 
-impl Tree {
+impl FileTree {
     pub fn style(cx: &mut Cx) {
         live_body!(cx, {
             self::folder_icon_shader: Shader {
@@ -63,8 +63,8 @@ impl Tree {
         })
     }
 
-    pub fn new(cx: &mut Cx) -> Tree {
-        Tree {
+    pub fn new(cx: &mut Cx) -> FileTree {
+        FileTree {
             view: ScrollView::new_standard_hv(cx),
             logic: TreeLogic::new(),
             node: DrawColor::new(cx, default_shader!()),
@@ -127,7 +127,7 @@ impl Tree {
         self.node_name_color_file = live_vec4!(cx, self::node_name_color_file);
     }
 
-    pub fn begin_branch(&mut self, cx: &mut Cx, node_id: NodeId, name: &str) -> Result<(), ()> {
+    pub fn begin_folder(&mut self, cx: &mut Cx, node_id: NodeId, name: &str) -> Result<(), ()> {
         let info = self.logic.begin_node(node_id);
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let count = self.count;
@@ -145,18 +145,18 @@ impl Tree {
         cx.turtle_new_line();
         self.stack.push(scale * info.is_expanded_fraction);
         if info.is_fully_collapsed() {
-            self.end_branch();
+            self.end_folder();
             return Err(());
         }
         Ok(())
     }
 
-    pub fn end_branch(&mut self) {
+    pub fn end_folder(&mut self) {
         self.stack.pop();
         self.logic.end_node();
     }
 
-    pub fn leaf(&mut self, cx: &mut Cx, node_id: NodeId, name: &str) {
+    pub fn file(&mut self, cx: &mut Cx, node_id: NodeId, name: &str) {
         let info = self.logic.begin_node(node_id);
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let count = self.count;
