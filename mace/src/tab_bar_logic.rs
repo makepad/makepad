@@ -1,28 +1,25 @@
 use {makepad_render::*, std::collections::HashMap};
 
 pub struct TabBarLogic {
-    tabs_by_area: HashMap<Area, TabId>,
+    tab_ids_by_area: HashMap<Area, TabId>,
     selected_tab_id: Option<TabId>,
 }
 
 impl TabBarLogic {
     pub fn new() -> TabBarLogic {
         TabBarLogic {
-            tabs_by_area: HashMap::new(),
+            tab_ids_by_area: HashMap::new(),
             selected_tab_id: None,
         }
     }
 
     pub fn begin(&mut self) {
-        self.tabs_by_area.clear();
+        self.tab_ids_by_area.clear();
     }
 
     pub fn end(&mut self) {}
 
     pub fn begin_tab(&mut self, tab_id: TabId) -> TabInfo {
-        if self.selected_tab_id.is_none() {
-            self.selected_tab_id = Some(tab_id);
-        }
         TabInfo {
             is_selected: self
                 .selected_tab_id
@@ -33,7 +30,7 @@ impl TabBarLogic {
     pub fn end_tab(&mut self) {}
 
     pub fn set_tab_area(&mut self, tab_id: TabId, area: Area) {
-        self.tabs_by_area.insert(area, tab_id);
+        self.tab_ids_by_area.insert(area, tab_id);
     }
 
     pub fn set_selected_tab_id(&mut self, tab_id: TabId) -> bool {
@@ -50,7 +47,7 @@ impl TabBarLogic {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(Action),
     ) {
-        for (area, tab_id) in &self.tabs_by_area {
+        for (area, tab_id) in &self.tab_ids_by_area {
             match event.hits(cx, *area, HitOpt::default()) {
                 Event::FingerDown(_) => {
                     dispatch_action(Action::SetSelectedTabId(*tab_id));
