@@ -87,7 +87,6 @@ impl FileTree {
     }
 
     pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
-        println!("BEGIN FILE TREE");
         self.view.begin_view(cx, Layout::default())?;
         self.apply_style(cx);
         self.count = 0;
@@ -96,7 +95,6 @@ impl FileTree {
     }
 
     pub fn end(&mut self, cx: &mut Cx) {
-        println!("END FILE TREE");
         println!();
         self.logic.end();
         self.view.end_view(cx);
