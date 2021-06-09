@@ -4,8 +4,8 @@ use {
 };
 
 pub struct TreeLogic {
-    nodes_by_node_id: HashMap<NodeId, Node>,
-    nodes_by_area: HashMap<Area, NodeId>,
+    node_ids_by_node_id: HashMap<NodeId, Node>,
+    node_ids_by_area: HashMap<Area, NodeId>,
     animating_node_ids: HashSet<NodeId>,
     hovered_node_id: Option<NodeId>,
     selected_node_ids: HashSet<NodeId>,
@@ -15,8 +15,8 @@ pub struct TreeLogic {
 impl TreeLogic {
     pub fn new() -> TreeLogic {
         TreeLogic {
-            nodes_by_node_id: HashMap::new(),
-            nodes_by_area: HashMap::new(),
+            node_ids_by_node_id: HashMap::new(),
+            node_ids_by_area: HashMap::new(),
             animating_node_ids: HashSet::new(),
             hovered_node_id: None,
             selected_node_ids: HashSet::new(),
@@ -25,13 +25,13 @@ impl TreeLogic {
     }
 
     pub fn begin(&mut self) {
-        self.nodes_by_area.clear();
+        self.node_ids_by_area.clear();
     }
 
     pub fn end(&mut self) {}
 
     pub fn begin_node(&mut self, node_id: NodeId) -> NodeInfo {
-        let node = self.nodes_by_node_id.entry(node_id).or_default();
+        let node = self.node_ids_by_node_id.entry(node_id).or_default();
         NodeInfo {
             is_expanded_fraction: node.is_expanded.fraction,
             is_hovered: self
@@ -44,21 +44,21 @@ impl TreeLogic {
     pub fn end_node(&mut self) {}
 
     pub fn forget(&mut self) {
-        self.nodes_by_node_id.clear();
+        self.node_ids_by_node_id.clear();
         self.animating_node_ids.clear();
     }
 
     pub fn forget_node(&mut self, node_id: NodeId) {
-        self.nodes_by_node_id.remove(&node_id).unwrap();
+        self.node_ids_by_node_id.remove(&node_id).unwrap();
         self.animating_node_ids.remove(&node_id);
     }
 
     pub fn set_node_area(&mut self, node_id: NodeId, area: Area) {
-        self.nodes_by_area.insert(area, node_id);
+        self.node_ids_by_area.insert(area, node_id);
     }
 
     pub fn node_is_expanded(&mut self, node_id: NodeId) -> bool {
-        let node = self.nodes_by_node_id.entry(node_id).or_default();
+        let node = self.node_ids_by_node_id.entry(node_id).or_default();
         node.is_expanded.value
     }
 
@@ -69,7 +69,7 @@ impl TreeLogic {
         is_expanded: bool,
         should_animate: bool,
     ) -> bool {
-        let node = self.nodes_by_node_id.entry(node_id).or_default();
+        let node = self.node_ids_by_node_id.entry(node_id).or_default();
         if node.is_expanded.value == is_expanded {
             return false;
         }
@@ -137,7 +137,7 @@ impl TreeLogic {
             Event::NextFrame(_) if self.next_frame.is_active(cx) => {
                 let mut new_animating_node_ids = HashSet::new();
                 for node_id in &self.animating_node_ids {
-                    let node = self.nodes_by_node_id.get_mut(node_id).unwrap();
+                    let node = self.node_ids_by_node_id.get_mut(node_id).unwrap();
                     node.update();
                     if node.is_animating() {
                         new_animating_node_ids.insert(*node_id);
@@ -148,7 +148,7 @@ impl TreeLogic {
                 self.update_next_frame(cx);
             }
             event => {
-                for (area, node_id) in &self.nodes_by_area {
+                for (area, node_id) in &self.node_ids_by_area {
                     match event.hits(cx, *area, HitOpt::default()) {
                         Event::FingerHover(fe) => {
                             cx.set_hover_mouse_cursor(MouseCursor::Hand);
