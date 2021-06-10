@@ -76,17 +76,6 @@ impl TabBar {
         self.view.end_view(cx);
     }
 
-    fn apply_style(&mut self, cx: &mut Cx) {
-        self.tab_height = live_float!(cx, self::tab_height);
-        self.tab_color = live_vec4!(cx, self::tab_color);
-        self.tab_color_selected = live_vec4!(cx, self::tab_color_selected);
-        self.tab.border_width = live_float!(cx, self::tab_border_width);
-        self.tab.border_color = live_vec4!(cx, self::tab_border_color);
-        self.tab_name.text_style = live_text_style!(cx, self::tab_name_text_style);
-        self.tab_name_color = live_vec4!(cx, self::tab_name_color);
-        self.tab_name_color_selected = live_vec4!(cx, self::tab_name_color_selected);
-    }
-
     pub fn tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
         let info = self.logic.begin_tab(tab_id);
         self.tab.base.color = self.tab_color(info.is_selected);
@@ -97,6 +86,17 @@ impl TabBar {
         self.tab.end_quad(cx);
         self.logic.set_tab_area(tab_id, self.tab.area());
         self.logic.end_tab();
+    }
+
+    fn apply_style(&mut self, cx: &mut Cx) {
+        self.tab_height = live_float!(cx, self::tab_height);
+        self.tab_color = live_vec4!(cx, self::tab_color);
+        self.tab_color_selected = live_vec4!(cx, self::tab_color_selected);
+        self.tab.border_width = live_float!(cx, self::tab_border_width);
+        self.tab.border_color = live_vec4!(cx, self::tab_border_color);
+        self.tab_name.text_style = live_text_style!(cx, self::tab_name_text_style);
+        self.tab_name_color = live_vec4!(cx, self::tab_name_color);
+        self.tab_name_color_selected = live_vec4!(cx, self::tab_name_color_selected);
     }
 
     fn tab_layout(&self) -> Layout {
@@ -133,7 +133,7 @@ impl TabBar {
         }
     }
 
-    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, tab_id: TabId) {
+    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, tab_id: Option<TabId>) {
         if self.logic.set_selected_tab_id(tab_id) {
             self.view.redraw_view(cx);
         }
