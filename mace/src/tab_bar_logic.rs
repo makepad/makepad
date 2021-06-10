@@ -33,11 +33,11 @@ impl TabBarLogic {
         self.tab_ids_by_area.insert(area, tab_id);
     }
 
-    pub fn set_selected_tab_id(&mut self, tab_id: TabId) -> bool {
-        if self.selected_tab_id == Some(tab_id) {
+    pub fn set_selected_tab_id(&mut self, tab_id: Option<TabId>) -> bool {
+        if self.selected_tab_id == tab_id {
             return false;
         }
-        self.selected_tab_id = Some(tab_id);
+        self.selected_tab_id = tab_id;
         true
     }
 
@@ -50,7 +50,7 @@ impl TabBarLogic {
         for (area, tab_id) in &self.tab_ids_by_area {
             match event.hits(cx, *area, HitOpt::default()) {
                 Event::FingerDown(_) => {
-                    dispatch_action(Action::SetSelectedTabId(*tab_id));
+                    dispatch_action(Action::SetSelectedTabId(Some(*tab_id)));
                 }
                 _ => {}
             }
@@ -67,5 +67,5 @@ pub struct TabInfo {
 }
 
 pub enum Action {
-    SetSelectedTabId(TabId),
+    SetSelectedTabId(Option<TabId>),
 }

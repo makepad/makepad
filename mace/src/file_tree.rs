@@ -100,31 +100,6 @@ impl FileTree {
         self.view.end_view(cx);
     }
 
-    fn apply_style(&mut self, cx: &mut Cx) {
-        self.node_height = live_float!(cx, self::node_height);
-        self.node_color_even = live_vec4!(cx, self::node_color_even);
-        self.node_color_odd = live_vec4!(cx, self::node_color_odd);
-        self.node_color_selected = live_vec4!(cx, self::node_color_selected);
-        self.node_color_hovered_even = live_vec4!(cx, self::node_color_hovered_even);
-        self.node_color_hovered_odd = live_vec4!(cx, self::node_color_hovered_odd);
-        self.node_color_hovered_selected = live_vec4!(cx, self::node_color_hovered_selected);
-        self.indent_width = live_float!(cx, self::indent_width);
-        self.folder_icon_walk = Walk {
-            width: Width::Fix(live_float!(cx, self::folder_icon_width)),
-            height: Height::Fill,
-            margin: Margin {
-                l: 1.0,
-                t: 0.0,
-                r: 4.0,
-                b: 0.0,
-            },
-        };
-        self.folder_icon.color = live_vec4!(cx, self::folder_icon_color);
-        self.node_name.text_style = live_text_style!(cx, self::node_name_text_style);
-        self.node_name_color_folder = live_vec4!(cx, self::node_name_color_folder);
-        self.node_name_color_file = live_vec4!(cx, self::node_name_color_file);
-    }
-
     pub fn begin_folder(&mut self, cx: &mut Cx, node_id: NodeId, name: &str) -> Result<(), ()> {
         let info = self.logic.begin_node(node_id);
         let scale = self.stack.last().cloned().unwrap_or(1.0);
@@ -170,6 +145,31 @@ impl FileTree {
         self.logic.set_node_area(node_id, self.node.area());
         cx.turtle_new_line();
         self.logic.end_node();
+    }
+
+    fn apply_style(&mut self, cx: &mut Cx) {
+        self.node_height = live_float!(cx, self::node_height);
+        self.node_color_even = live_vec4!(cx, self::node_color_even);
+        self.node_color_odd = live_vec4!(cx, self::node_color_odd);
+        self.node_color_selected = live_vec4!(cx, self::node_color_selected);
+        self.node_color_hovered_even = live_vec4!(cx, self::node_color_hovered_even);
+        self.node_color_hovered_odd = live_vec4!(cx, self::node_color_hovered_odd);
+        self.node_color_hovered_selected = live_vec4!(cx, self::node_color_hovered_selected);
+        self.indent_width = live_float!(cx, self::indent_width);
+        self.folder_icon_walk = Walk {
+            width: Width::Fix(live_float!(cx, self::folder_icon_width)),
+            height: Height::Fill,
+            margin: Margin {
+                l: 1.0,
+                t: 0.0,
+                r: 4.0,
+                b: 0.0,
+            },
+        };
+        self.folder_icon.color = live_vec4!(cx, self::folder_icon_color);
+        self.node_name.text_style = live_text_style!(cx, self::node_name_text_style);
+        self.node_name_color_folder = live_vec4!(cx, self::node_name_color_folder);
+        self.node_name_color_file = live_vec4!(cx, self::node_name_color_file);
     }
 
     fn node_color(&self, count: usize, is_hovered: bool, is_selected: bool) -> Vec4 {
@@ -227,14 +227,26 @@ impl FileTree {
         self.logic.node_is_expanded(node_id)
     }
 
-    pub fn set_node_is_expanded(&mut self, cx: &mut Cx, node_id: NodeId, is_open: bool, should_animate: bool) {
-        if self.logic.set_node_is_expanded(cx, node_id, is_open, should_animate) {
+    pub fn set_node_is_expanded(
+        &mut self,
+        cx: &mut Cx,
+        node_id: NodeId,
+        is_open: bool,
+        should_animate: bool,
+    ) {
+        if self
+            .logic
+            .set_node_is_expanded(cx, node_id, is_open, should_animate)
+        {
             self.view.redraw_view(cx);
         }
     }
 
     pub fn toggle_node_is_expanded(&mut self, cx: &mut Cx, node_id: NodeId, should_animate: bool) {
-        if self.logic.toggle_node_is_expanded(cx, node_id, should_animate) {
+        if self
+            .logic
+            .toggle_node_is_expanded(cx, node_id, should_animate)
+        {
             self.view.redraw_view(cx);
         }
     }
@@ -256,7 +268,8 @@ impl FileTree {
             self.view.redraw_view(cx);
         }
         let mut actions = Vec::new();
-        self.logic.handle_event(cx, event, &mut |action| actions.push(action));
+        self.logic
+            .handle_event(cx, event, &mut |action| actions.push(action));
         for action in actions {
             match action {
                 tree_logic::Action::ToggleNodeIsExpanded(node_id, should_animate) => {
