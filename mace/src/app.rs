@@ -30,6 +30,7 @@ impl App {
 
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         self.window.handle_desktop_window(cx, event);
+        self.splitter.handle_event(cx, event);
         self.file_tree.handle_event(cx, event);
         self.tab_bar.handle_event(cx, event);
     }
