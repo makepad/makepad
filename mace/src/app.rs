@@ -1,5 +1,5 @@
 use {
-    crate::{splitter::Splitter, tab_bar::TabBar, tab_bar_logic::TabId, file_tree::FileTree, tree_logic::NodeId},
+    crate::{splitter::Splitter, tab_bar::TabBar, list_logic::ItemId, file_tree::FileTree, tree_logic::NodeId},
     makepad_render::*,
     makepad_widget::*,
 };
@@ -55,9 +55,9 @@ impl App {
             }
             self.splitter.middle(cx);
             if self.tab_bar.begin(cx).is_ok() {
-                self.tab_bar.tab(cx, TabId(0), "AAA");
-                self.tab_bar.tab(cx, TabId(1), "BBB");
-                self.tab_bar.tab(cx, TabId(2), "CCC");
+                self.tab_bar.tab(cx, ItemId(0), "AAA");
+                self.tab_bar.tab(cx, ItemId(1), "BBB");
+                self.tab_bar.tab(cx, ItemId(2), "CCC");
                 self.tab_bar.end(cx);
             }
             self.splitter.end(cx);
