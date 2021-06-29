@@ -263,6 +263,10 @@ impl FileTree {
         }
     }
 
+    pub fn redraw(&mut self, cx: &mut Cx) {
+        self.view.redraw_view(cx);
+    }
+
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         if self.view.handle_scroll_view(cx, event) {
             self.view.redraw_view(cx);
@@ -282,7 +286,7 @@ impl FileTree {
                     self.set_selected_node_id(cx, node_id);
                 }
                 tree_logic::Action::Redraw => {
-                    self.view.redraw_view(cx);
+                    self.redraw(cx);
                 }
             }
         }
