@@ -1,5 +1,5 @@
 use {
-    crate::{splitter::Splitter, tab_bar::TabBar, list_logic::ItemId, file_tree::FileTree, tree_logic::NodeId},
+    crate::{splitter::{self, Splitter}, tab_bar::TabBar, list_logic::ItemId, file_tree::FileTree, tree_logic::NodeId},
     makepad_render::*,
     makepad_widget::*,
 };
@@ -30,7 +30,16 @@ impl App {
 
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         self.window.handle_desktop_window(cx, event);
-        self.splitter.handle_event(cx, event);
+        let mut actions = Vec::new();
+        self.splitter.handle_event(cx, event, &mut |action| actions.push(action));
+        for action in actions {
+            match action {
+                splitter::Action::Redraw => {
+                    self.file_tree.redraw(cx);
+                    self.tab_bar.redraw(cx);
+                }
+            }
+        }
         self.file_tree.handle_event(cx, event);
         self.tab_bar.handle_event(cx, event);
     }

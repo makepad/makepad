@@ -89,7 +89,12 @@ impl Splitter {
         }
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        dispatch_action: &mut dyn FnMut(Action),
+    ) {
         match event.hits(
             cx,
             self.split_bar.area(),
@@ -141,6 +146,7 @@ impl Splitter {
                     }
                 };
                 cx.redraw_child_area(self.split_bar.area());
+                dispatch_action(Action::Redraw);
             }
             _ => {}
         }
@@ -186,4 +192,8 @@ impl AlignPosition {
             },
         }
     }
+}
+
+pub enum Action {
+    Redraw,
 }
