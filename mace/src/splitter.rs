@@ -20,7 +20,7 @@ impl Splitter {
 
     pub fn new(cx: &mut Cx) -> Splitter {
         Splitter {
-            axis: Axis::Vertical,
+            axis: Axis::Horizontal,
             align_position: AlignPosition::Weighted(0.5),
             rect: Rect::default(),
             position: 0.0,
@@ -44,19 +44,6 @@ impl Splitter {
                 self.split_bar.draw_quad_abs(
                     cx,
                     Rect {
-                        pos: vec2(self.rect.pos.x, self.rect.pos.y + self.position),
-                        size: vec2(self.rect.size.x, self.split_bar_size),
-                    },
-                );
-                cx.set_turtle_pos(Vec2 {
-                    x: self.rect.pos.x,
-                    y: self.rect.pos.y + self.position + self.split_bar_size,
-                });
-            }
-            Axis::Vertical => {
-                self.split_bar.draw_quad_abs(
-                    cx,
-                    Rect {
                         pos: vec2(self.rect.pos.x + self.position, self.rect.pos.y),
                         size: vec2(self.split_bar_size, self.rect.size.y),
                     },
@@ -64,6 +51,19 @@ impl Splitter {
                 cx.set_turtle_pos(Vec2 {
                     x: self.rect.pos.x + self.position + self.split_bar_size,
                     y: self.rect.pos.y,
+                });
+            }
+            Axis::Vertical => {
+                self.split_bar.draw_quad_abs(
+                    cx,
+                    Rect {
+                        pos: vec2(self.rect.pos.x, self.rect.pos.y + self.position),
+                        size: vec2(self.rect.size.x, self.split_bar_size),
+                    },
+                );
+                cx.set_turtle_pos(Vec2 {
+                    x: self.rect.pos.x,
+                    y: self.rect.pos.y + self.position + self.split_bar_size,
                 });
             }
         }
@@ -82,8 +82,8 @@ impl Splitter {
     fn layout(&self) -> Layout {
         Layout {
             walk: match self.axis {
-                Axis::Horizontal => Walk::wh(Width::Fill, Height::Fix(self.position)),
-                Axis::Vertical => Walk::wh(Width::Fix(self.position), Height::Fill),
+                Axis::Horizontal => Walk::wh(Width::Fix(self.position), Height::Fill),
+                Axis::Vertical => Walk::wh(Width::Fill, Height::Fix(self.position)),
             },
             ..Layout::default()
         }
@@ -104,8 +104,8 @@ impl Splitter {
             },
         ) {
             Event::FingerHover(_) => match self.axis {
-                Axis::Horizontal => cx.set_hover_mouse_cursor(MouseCursor::RowResize),
-                Axis::Vertical => cx.set_hover_mouse_cursor(MouseCursor::ColResize),
+                Axis::Horizontal => cx.set_hover_mouse_cursor(MouseCursor::ColResize),
+                Axis::Vertical => cx.set_hover_mouse_cursor(MouseCursor::RowResize),
             },
             Event::FingerDown(_) => {
                 self.drag_start_align_position = Some(self.align_position);
@@ -115,8 +115,8 @@ impl Splitter {
             }
             Event::FingerMove(event) => {
                 let delta = match self.axis {
-                    Axis::Horizontal => event.abs.y - event.abs_start.y,
-                    Axis::Vertical => event.abs.x - event.abs_start.x,
+                    Axis::Horizontal => event.abs.x - event.abs_start.x,
+                    Axis::Vertical => event.abs.y - event.abs_start.y,
                 };
                 let new_position = self
                     .drag_start_align_position
@@ -125,16 +125,6 @@ impl Splitter {
                     + delta;
                 self.align_position = match self.axis {
                     Axis::Horizontal => {
-                        let center = self.rect.size.y / 2.0;
-                        if new_position < center - 30.0 {
-                            AlignPosition::FromStart(new_position)
-                        } else if new_position > center + 30.0 {
-                            AlignPosition::FromEnd(self.rect.size.y - new_position)
-                        } else {
-                            AlignPosition::Weighted(new_position / self.rect.size.y)
-                        }
-                    }
-                    Axis::Vertical => {
                         let center = self.rect.size.x / 2.0;
                         if new_position < center - 30.0 {
                             AlignPosition::FromStart(new_position)
@@ -142,6 +132,16 @@ impl Splitter {
                             AlignPosition::FromEnd(self.rect.size.x - new_position)
                         } else {
                             AlignPosition::Weighted(new_position / self.rect.size.x)
+                        }
+                    }
+                    Axis::Vertical => {
+                        let center = self.rect.size.y / 2.0;
+                        if new_position < center - 30.0 {
+                            AlignPosition::FromStart(new_position)
+                        } else if new_position > center + 30.0 {
+                            AlignPosition::FromEnd(self.rect.size.y - new_position)
+                        } else {
+                            AlignPosition::Weighted(new_position / self.rect.size.y)
                         }
                     }
                 };
@@ -155,16 +155,16 @@ impl Splitter {
     fn margin(&self) -> Margin {
         match self.axis {
             Axis::Horizontal => Margin {
-                l: 0.0,
-                t: 3.0,
-                r: 0.0,
-                b: 7.0,
-            },
-            Axis::Vertical => Margin {
                 l: 3.0,
                 t: 0.0,
                 r: 7.0,
                 b: 0.0,
+            },
+            Axis::Vertical => Margin {
+                l: 0.0,
+                t: 3.0,
+                r: 0.0,
+                b: 7.0,
             },
         }
     }
@@ -182,13 +182,13 @@ impl AlignPosition {
         match axis {
             Axis::Horizontal => match self {
                 AlignPosition::FromStart(position) => position,
-                AlignPosition::FromEnd(position) => rect.size.y - position,
-                AlignPosition::Weighted(weight) => weight * rect.size.y,
+                AlignPosition::FromEnd(position) => rect.size.x - position,
+                AlignPosition::Weighted(weight) => weight * rect.size.x,
             },
             Axis::Vertical => match self {
                 AlignPosition::FromStart(position) => position,
-                AlignPosition::FromEnd(position) => rect.size.x - position,
-                AlignPosition::Weighted(weight) => weight * rect.size.x,
+                AlignPosition::FromEnd(position) => rect.size.y - position,
+                AlignPosition::Weighted(weight) => weight * rect.size.y,
             },
         }
     }
