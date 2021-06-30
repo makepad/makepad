@@ -33,6 +33,10 @@ impl ListLogic {
         self.item_ids_by_area.insert(area, item_id);
     }
 
+    pub fn selected_item_id(&self) -> Option<ItemId> {
+        self.selected_item_id
+    }
+
     pub fn set_selected_item_id(&mut self, item_id: Option<ItemId>) -> bool {
         if self.selected_item_id == item_id {
             return false;
