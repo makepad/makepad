@@ -64,11 +64,21 @@ impl App {
                     self.file_tree.end(cx);
                 }
                 self.dock.middle_splitter(cx);
-                if self.dock.begin_tab_bar(cx, ContainerId(2)).is_ok() {
-                    self.dock.tab(cx, ItemId(1), "AAA");
-                    self.dock.tab(cx, ItemId(2), "BBB");
-                    self.dock.tab(cx, ItemId(3), "CCC");
-                    self.dock.end_tab_bar(cx);
+                if self.dock.begin_splitter(cx, ContainerId(2)).is_ok() {
+                    if self.dock.begin_tab_bar(cx, ContainerId(3)).is_ok() {
+                        self.dock.tab(cx, ItemId(1), "AAA");
+                        self.dock.tab(cx, ItemId(2), "BBB");
+                        self.dock.tab(cx, ItemId(3), "CCC");
+                        self.dock.end_tab_bar(cx);
+                    }
+                    self.dock.middle_splitter(cx);
+                    if self.dock.begin_tab_bar(cx, ContainerId(4)).is_ok() {
+                        self.dock.tab(cx, ItemId(1), "XXX");
+                        self.dock.tab(cx, ItemId(2), "YYY");
+                        self.dock.tab(cx, ItemId(3), "ZZZ");
+                        self.dock.end_tab_bar(cx);
+                    }
+                    self.dock.end_splitter(cx);
                 }
                 self.dock.end_splitter(cx);
             }
