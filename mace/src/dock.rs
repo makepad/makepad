@@ -17,14 +17,15 @@ impl Dock {
         }
     }
 
-    pub fn begin_splitter(&mut self, cx: &mut Cx, container_id: ContainerId) {
+    pub fn begin_splitter(&mut self, cx: &mut Cx, container_id: ContainerId) -> Result<(), ()> {
         let splitter = self
             .containers_by_container_id
             .entry(container_id)
             .or_insert_with(|| Container::Splitter(Splitter::new(cx)))
             .as_splitter_mut();
-        splitter.begin(cx);
+        splitter.begin(cx)?;
         self.container_id_stack.push(container_id);
+        Ok(())
     }
 
     pub fn middle_splitter(&mut self, cx: &mut Cx) {
@@ -53,13 +54,9 @@ impl Dock {
             .entry(container_id)
             .or_insert_with(|| Container::TabBar(TabBar::new(cx)))
             .as_tab_bar_mut();
-        match tab_bar.begin(cx) {
-            Ok(()) => {
-                self.container_id_stack.push(container_id);
-                Ok(())
-            }
-            Err(()) => Err(()),
-        }
+        tab_bar.begin(cx)?;
+        self.container_id_stack.push(container_id);
+        Ok(())
     }
 
     pub fn end_tab_bar(&mut self, cx: &mut Cx) {
@@ -82,13 +79,8 @@ impl Dock {
         tab_bar.tab(cx, tab_id, name);
     }
 
-    pub fn handle_event(
-        &mut self,
-        cx: &mut Cx,
-        event: &mut Event,
-        dispatch_action: &mut dyn FnMut(Action)
-    ) {
-        for (container_id, container) in &mut self.containers_by_container_id {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+        for (_, container) in &mut self.containers_by_container_id {
             match container {
                 Container::Splitter(splitter) => {
                     let mut actions = Vec::new();
@@ -96,7 +88,7 @@ impl Dock {
                     for action in actions {
                         match action {
                             splitter::Action::Redraw => {
-                                dispatch_action(Action::RedrawSplitter(*container_id));
+                                cx.redraw_child_area(Area::All);
                             }
                         }
                     }
@@ -131,8 +123,4 @@ impl Container {
             _ => panic!(),
         }
     }
-}
-
-pub enum Action {
-    RedrawSplitter(ContainerId),
 }
