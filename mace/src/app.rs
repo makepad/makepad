@@ -1,5 +1,12 @@
 use {
-    crate::{dock::{Dock, PanelId}, tab_bar::TabBar, list_logic::ItemId, file_tree::FileTree, splitter::Splitter},
+    crate::{
+        dock::{Dock, ContainerId},
+        file_tree::FileTree,
+        list_logic::ItemId,
+        splitter::Splitter,
+        tab_bar::TabBar,
+        tree_logic::NodeId,
+    },
     makepad_render::*,
     makepad_widget::*,
 };
@@ -33,17 +40,12 @@ impl App {
 
     pub fn draw_app(&mut self, cx: &mut Cx) {
         if self.window.begin_desktop_window(cx, None).is_ok() {
-            self.dock.begin_split_container(cx, PanelId(0));
-            self.dock.middle_split_container(cx);
-            if self.dock.begin_tab_container(cx, PanelId(1)).is_ok() {
-                self.dock.tab(cx, ItemId(0), "AAA");
-                self.dock.tab(cx, ItemId(1), "BBB");
-                self.dock.tab(cx, ItemId(2), "CCC");
-                self.dock.end_tab_container(cx);
+            self.dock.begin_splitter(cx, ContainerId(0));
+            if self.dock.begin_tab_bar(cx, ContainerId(1)).is_ok() {
+                self.dock.tab(cx, ItemId(0), "File tree");
+                self.dock.end_tab_bar(cx);
             }
-            self.dock.end_split_container(cx);
-            self.window.end_desktop_window(cx);
-            /*
+            cx.turtle_new_line();
             if self.file_tree.begin(cx).is_ok() {
                 if self.file_tree.begin_folder(cx, NodeId(0), "A").is_ok() {
                     if self.file_tree.begin_folder(cx, NodeId(1), "B").is_ok() {
@@ -60,7 +62,15 @@ impl App {
                 }
                 self.file_tree.end(cx);
             }
-            */
+            self.dock.middle_splitter(cx);
+            if self.dock.begin_tab_bar(cx, ContainerId(2)).is_ok() {
+                self.dock.tab(cx, ItemId(1), "AAA");
+                self.dock.tab(cx, ItemId(2), "BBB");
+                self.dock.tab(cx, ItemId(3), "CCC");
+                self.dock.end_tab_bar(cx);
+            }
+            self.dock.end_splitter(cx);
+            self.window.end_desktop_window(cx);
         }
     }
 }
