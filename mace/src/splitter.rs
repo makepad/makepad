@@ -1,6 +1,7 @@
 use makepad_render::*;
 
 pub struct Splitter {
+    view: View,
     axis: Axis,
     align_position: AlignPosition,
     rect: Rect,
@@ -20,6 +21,7 @@ impl Splitter {
 
     pub fn new(cx: &mut Cx) -> Splitter {
         Splitter {
+            view: View::new(),
             axis: Axis::Horizontal,
             align_position: AlignPosition::Weighted(0.5),
             rect: Rect::default(),
@@ -30,11 +32,13 @@ impl Splitter {
         }
     }
 
-    pub fn begin(&mut self, cx: &mut Cx) {
+    pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
+        self.view.begin_view(cx, Layout::default())?;
         self.apply_style(cx);
         self.rect = cx.get_turtle_rect();
         self.position = self.align_position.to_position(self.axis, self.rect);
         cx.begin_turtle(self.layout(), Area::Empty);
+        Ok(())
     }
 
     pub fn middle(&mut self, cx: &mut Cx) {
@@ -72,6 +76,7 @@ impl Splitter {
 
     pub fn end(&mut self, cx: &mut Cx) {
         cx.end_turtle(Area::Empty);
+        self.view.end_view(cx);
     }
 
     fn apply_style(&mut self, cx: &mut Cx) {
