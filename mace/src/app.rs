@@ -1,5 +1,5 @@
 use {
-    crate::{dock::{Dock, PanelId}, tab_bar::TabBar, list_logic::ItemId, file_tree::FileTree, splitter::Splitter, tree_logic::NodeId},
+    crate::{dock::{Dock, PanelId}, tab_bar::TabBar, list_logic::ItemId, file_tree::FileTree, splitter::Splitter},
     makepad_render::*,
     makepad_widget::*,
 };
@@ -33,15 +33,15 @@ impl App {
 
     pub fn draw_app(&mut self, cx: &mut Cx) {
         if self.window.begin_desktop_window(cx, None).is_ok() {
-            self.dock.begin_split_panel(cx, PanelId(0));
-            self.dock.middle_split_panel(cx);
-            if self.dock.begin_tab_panel(cx, PanelId(1)).is_ok() {
+            self.dock.begin_split_container(cx, PanelId(0));
+            self.dock.middle_split_container(cx);
+            if self.dock.begin_tab_container(cx, PanelId(1)).is_ok() {
                 self.dock.tab(cx, ItemId(0), "AAA");
                 self.dock.tab(cx, ItemId(1), "BBB");
                 self.dock.tab(cx, ItemId(2), "CCC");
-                self.dock.end_tab_panel(cx);
+                self.dock.end_tab_container(cx);
             }
-            self.dock.end_split_panel(cx);
+            self.dock.end_split_container(cx);
             self.window.end_desktop_window(cx);
             /*
             if self.file_tree.begin(cx).is_ok() {
