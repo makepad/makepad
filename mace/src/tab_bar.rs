@@ -65,7 +65,7 @@ impl TabBar {
     }
 
     pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
-        self.view.begin_view(cx, Layout::default())?;
+        self.view.begin_view(cx, self.layout())?;
         self.apply_style(cx);
         self.logic.begin();
         Ok(())
@@ -97,6 +97,17 @@ impl TabBar {
         self.tab_name.text_style = live_text_style!(cx, self::tab_name_text_style);
         self.tab_name_color = live_vec4!(cx, self::tab_name_color);
         self.tab_name_color_selected = live_vec4!(cx, self::tab_name_color_selected);
+    }
+
+    fn layout(&self) -> Layout {
+        Layout {
+            walk: Walk {
+                width: Width::Compute,
+                height: Height::Fix(self.tab_height),
+                ..Walk::default()
+            },
+            ..Layout::default()
+        }
     }
 
     fn tab_layout(&self) -> Layout {
