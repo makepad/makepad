@@ -1,6 +1,6 @@
 use {
     crate::{
-        dock::{Dock, ContainerId},
+        dock::{self, Dock, ContainerId},
         file_tree::FileTree,
         list_logic::ItemId,
         splitter::Splitter,
@@ -35,6 +35,15 @@ impl App {
 
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         self.window.handle_desktop_window(cx, event);
+        let mut actions = Vec::new();
+        self.dock.handle_event(cx, event, &mut |action| actions.push(action));
+        for action in actions {
+            match action {
+                dock::Action::RedrawSplitter(_) => {
+                    self.file_tree.redraw(cx);
+                }
+            }
+        }
         self.file_tree.handle_event(cx, event);
     }
 

@@ -1,5 +1,5 @@
 use {
-    crate::{list_logic::ItemId, splitter::Splitter, tab_bar::TabBar},
+    crate::{list_logic::ItemId, splitter::{self, Splitter}, tab_bar::TabBar},
     makepad_render::*,
     std::collections::HashMap,
 };
@@ -81,12 +81,38 @@ impl Dock {
             .as_tab_bar_mut();
         tab_bar.tab(cx, tab_id, name);
     }
+
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        dispatch_action: &mut dyn FnMut(Action)
+    ) {
+        for (container_id, container) in &mut self.containers_by_container_id {
+            match container {
+                Container::Splitter(splitter) => {
+                    let mut actions = Vec::new();
+                    splitter.handle_event(cx, event, &mut |action| actions.push(action));
+                    for action in actions {
+                        match action {
+                            splitter::Action::Redraw => {
+                                dispatch_action(Action::RedrawSplitter(*container_id));
+                            }
+                        }
+                    }
+                }
+                Container::TabBar(tab_bar) => {
+                    tab_bar.handle_event(cx, event);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ContainerId(pub usize);
 
-pub enum Container {
+enum Container {
     Splitter(Splitter),
     TabBar(TabBar),
 }
@@ -105,4 +131,8 @@ impl Container {
             _ => panic!(),
         }
     }
+}
+
+pub enum Action {
+    RedrawSplitter(ContainerId),
 }
