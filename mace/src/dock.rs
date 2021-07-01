@@ -5,98 +5,103 @@ use {
 };
 
 pub struct Dock {
-    container_id_stack: Vec<PanelId>,
-    containers_by_container_id: HashMap<PanelId, Panel>,
+    containers_by_container_id: HashMap<ContainerId, Container>,
+    container_id_stack: Vec<ContainerId>,
 }
 
 impl Dock {
     pub fn new(_cx: &mut Cx) -> Dock {
         Dock {
-            container_id_stack: Vec::new(),
             containers_by_container_id: HashMap::new(),
+            container_id_stack: Vec::new(),
         }
     }
 
-    pub fn begin_split_container(&mut self, cx: &mut Cx, container_id: PanelId) {
-        self.container_id_stack.push(container_id);
-        let container = self
+    pub fn begin_splitter(&mut self, cx: &mut Cx, container_id: ContainerId) {
+        let splitter = self
             .containers_by_container_id
             .entry(container_id)
-            .or_insert_with(|| Panel::Split(Splitter::new(cx)))
-            .as_split_container_mut();
-        container.begin(cx);
+            .or_insert_with(|| Container::Splitter(Splitter::new(cx)))
+            .as_splitter_mut();
+        splitter.begin(cx);
+        self.container_id_stack.push(container_id);
     }
 
-    pub fn middle_split_container(&mut self, cx: &mut Cx) {
+    pub fn middle_splitter(&mut self, cx: &mut Cx) {
         let container_id = self.container_id_stack.last().unwrap();
-        let container = self
+        let splitter = self
             .containers_by_container_id
             .get_mut(&container_id)
             .unwrap()
-            .as_split_container_mut();
-        container.middle(cx);
+            .as_splitter_mut();
+        splitter.middle(cx);
     }
 
-    pub fn end_split_container(&mut self, cx: &mut Cx) {
+    pub fn end_splitter(&mut self, cx: &mut Cx) {
         let container_id = self.container_id_stack.pop().unwrap();
-        let container = self
+        let splitter = self
             .containers_by_container_id
             .get_mut(&container_id)
             .unwrap()
-            .as_split_container_mut();
-        container.end(cx);
+            .as_splitter_mut();
+        splitter.end(cx);
     }
 
-    pub fn begin_tab_container(&mut self, cx: &mut Cx, container_id: PanelId) -> Result<(), ()> {
-        self.container_id_stack.push(container_id);
-        let container = self
+    pub fn begin_tab_bar(&mut self, cx: &mut Cx, container_id: ContainerId) -> Result<(), ()> {
+        let tab_bar = self
             .containers_by_container_id
             .entry(container_id)
-            .or_insert_with(|| Panel::Tab(TabBar::new(cx)))
-            .as_tab_container_mut();
-        container.begin(cx)
+            .or_insert_with(|| Container::TabBar(TabBar::new(cx)))
+            .as_tab_bar_mut();
+        match tab_bar.begin(cx) {
+            Ok(()) => {
+                self.container_id_stack.push(container_id);
+                Ok(())
+            }
+            Err(()) => Err(()),
+        }
     }
 
-    pub fn end_tab_container(&mut self, cx: &mut Cx) {
+    pub fn end_tab_bar(&mut self, cx: &mut Cx) {
         let container_id = self.container_id_stack.pop().unwrap();
-        let container = self
+        let tab_bar = self
             .containers_by_container_id
             .get_mut(&container_id)
             .unwrap()
-            .as_tab_container_mut();
-        container.end(cx);
+            .as_tab_bar_mut();
+        tab_bar.end(cx);
     }
 
     pub fn tab(&mut self, cx: &mut Cx, tab_id: ItemId, name: &str) {
         let container_id = self.container_id_stack.last().unwrap();
-        let container = self
+        let tab_bar = self
             .containers_by_container_id
             .get_mut(&container_id)
             .unwrap()
-            .as_tab_container_mut();
-        container.tab(cx, tab_id, name);
+            .as_tab_bar_mut();
+        tab_bar.tab(cx, tab_id, name);
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct PanelId(pub usize);
+pub struct ContainerId(pub usize);
 
-enum Panel {
-    Split(Splitter),
-    Tab(TabBar),
+pub enum Container {
+    Splitter(Splitter),
+    TabBar(TabBar),
 }
 
-impl Panel {
-    fn as_split_container_mut(&mut self) -> &mut Splitter {
+impl Container {
+    fn as_splitter_mut(&mut self) -> &mut Splitter {
         match self {
-            Panel::Split(container) => container,
+            Container::Splitter(splitter) => splitter,
             _ => panic!(),
         }
     }
 
-    fn as_tab_container_mut(&mut self) -> &mut TabBar {
+    fn as_tab_bar_mut(&mut self) -> &mut TabBar {
         match self {
-            Panel::Tab(container) => container,
+            Container::TabBar(tab_bar) => tab_bar,
             _ => panic!(),
         }
     }
