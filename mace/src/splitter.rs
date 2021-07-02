@@ -94,6 +94,22 @@ impl Splitter {
         }
     }
 
+    pub fn axis(&self) -> Axis {
+        self.axis
+    }
+    
+    pub fn set_axis(&mut self, axis: Axis) {
+        self.axis = axis;
+    }
+
+    pub fn align_position(&self) -> AlignPosition {
+        self.align_position
+    }
+
+    pub fn set_align_position(&mut self, align_position: AlignPosition) {
+        self.align_position = align_position;
+    }
+
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,

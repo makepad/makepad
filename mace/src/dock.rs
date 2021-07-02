@@ -79,6 +79,20 @@ impl Dock {
         tab_bar.tab(cx, tab_id, name);
     }
 
+    pub fn splitter_mut(&mut self, cx: &mut Cx, container_id: ContainerId) -> &mut Splitter {
+        self.containers_by_container_id
+            .entry(container_id)
+            .or_insert_with(|| Container::Splitter(Splitter::new(cx)))
+            .as_splitter_mut()
+    }
+
+    pub fn tab_bar_mut(&mut self, cx: &mut Cx, container_id: ContainerId) -> &mut TabBar {
+        self.containers_by_container_id
+            .entry(container_id)
+            .or_insert_with(|| Container::Splitter(Splitter::new(cx)))
+            .as_tab_bar_mut()
+    }
+
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         for (_, container) in &mut self.containers_by_container_id {
             match container {
