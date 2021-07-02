@@ -1,5 +1,6 @@
 use {
     crate::{
+        code_editor::CodeEditor,
         dock::{Dock, ContainerId},
         file_tree::FileTree,
         list_logic::ItemId,
@@ -15,11 +16,13 @@ pub struct App {
     window: DesktopWindow,
     dock: Dock,
     file_tree: FileTree,
+    code_editor: CodeEditor,
 }
 
 impl App {
     pub fn style(cx: &mut Cx) {
         makepad_widget::set_widget_style(cx);
+        CodeEditor::style(cx);
         FileTree::style(cx);
         Splitter::style(cx);
         TabBar::style(cx);
@@ -30,6 +33,7 @@ impl App {
             window: DesktopWindow::new(cx),
             dock: Dock::new(cx),
             file_tree: FileTree::new(cx),
+            code_editor: CodeEditor::new(cx),
         }
     }
 
@@ -65,22 +69,13 @@ impl App {
                     self.file_tree.end(cx);
                 }
                 self.dock.middle_splitter(cx);
-                if self.dock.begin_splitter(cx, ContainerId(2)).is_ok() {
-                    if self.dock.begin_tab_bar(cx, ContainerId(3)).is_ok() {
-                        self.dock.tab(cx, ItemId(1), "AAA");
-                        self.dock.tab(cx, ItemId(2), "BBB");
-                        self.dock.tab(cx, ItemId(3), "CCC");
-                        self.dock.end_tab_bar(cx);
-                    }
-                    self.dock.middle_splitter(cx);
-                    if self.dock.begin_tab_bar(cx, ContainerId(4)).is_ok() {
-                        self.dock.tab(cx, ItemId(1), "XXX");
-                        self.dock.tab(cx, ItemId(2), "YYY");
-                        self.dock.tab(cx, ItemId(3), "ZZZ");
-                        self.dock.end_tab_bar(cx);
-                    }
-                    self.dock.end_splitter(cx);
+                if self.dock.begin_tab_bar(cx, ContainerId(3)).is_ok() {
+                    self.dock.tab(cx, ItemId(1), "AAA");
+                    self.dock.tab(cx, ItemId(2), "BBB");
+                    self.dock.tab(cx, ItemId(3), "CCC");
+                    self.dock.end_tab_bar(cx);
                 }
+                self.code_editor.draw(cx);
                 self.dock.end_splitter(cx);
             }
             self.window.end_desktop_window(cx);
