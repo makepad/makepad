@@ -102,7 +102,7 @@ impl TabBar {
     fn layout(&self) -> Layout {
         Layout {
             walk: Walk {
-                width: Width::Compute,
+                width: Width::Fill,
                 height: Height::Fix(self.tab_height),
                 ..Walk::default()
             },
