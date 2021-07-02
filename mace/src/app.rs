@@ -40,6 +40,7 @@ impl App {
     }
 
     pub fn draw_app(&mut self, cx: &mut Cx) {
+        self.dock.splitter_mut(cx, ContainerId(2)).set_axis(Axis::Vertical);
         if self.window.begin_desktop_window(cx, None).is_ok() {
             if self.dock.begin_splitter(cx, ContainerId(0)).is_ok() {
                 if self.dock.begin_tab_bar(cx, ContainerId(1)).is_ok() {
