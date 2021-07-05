@@ -135,39 +135,37 @@ impl Splitter {
                 self.drag_start_align_position = None;
             }
             Event::FingerMove(event) => {
-                let delta = match self.axis {
-                    Axis::Horizontal => event.abs.x - event.abs_start.x,
-                    Axis::Vertical => event.abs.y - event.abs_start.y,
-                };
-                let new_position = self
-                    .drag_start_align_position
-                    .unwrap()
-                    .to_position(self.axis, self.rect)
-                    + delta;
-                self.align_position = match self.axis {
-                    Axis::Horizontal => {
-                        let center = self.rect.size.x / 2.0;
-                        if new_position < center - 30.0 {
-                            AlignPosition::FromStart(new_position)
-                        } else if new_position > center + 30.0 {
-                            AlignPosition::FromEnd(self.rect.size.x - new_position)
-                        } else {
-                            AlignPosition::Weighted(new_position / self.rect.size.x)
+                if let Some(drag_start_align_position) = self.drag_start_align_position {
+                    let delta = match self.axis {
+                        Axis::Horizontal => event.abs.x - event.abs_start.x,
+                        Axis::Vertical => event.abs.y - event.abs_start.y,
+                    };
+                    let new_position = drag_start_align_position.to_position(self.axis, self.rect) + delta;
+                    self.align_position = match self.axis {
+                        Axis::Horizontal => {
+                            let center = self.rect.size.x / 2.0;
+                            if new_position < center - 30.0 {
+                                AlignPosition::FromStart(new_position)
+                            } else if new_position > center + 30.0 {
+                                AlignPosition::FromEnd(self.rect.size.x - new_position)
+                            } else {
+                                AlignPosition::Weighted(new_position / self.rect.size.x)
+                            }
                         }
-                    }
-                    Axis::Vertical => {
-                        let center = self.rect.size.y / 2.0;
-                        if new_position < center - 30.0 {
-                            AlignPosition::FromStart(new_position)
-                        } else if new_position > center + 30.0 {
-                            AlignPosition::FromEnd(self.rect.size.y - new_position)
-                        } else {
-                            AlignPosition::Weighted(new_position / self.rect.size.y)
+                        Axis::Vertical => {
+                            let center = self.rect.size.y / 2.0;
+                            if new_position < center - 30.0 {
+                                AlignPosition::FromStart(new_position)
+                            } else if new_position > center + 30.0 {
+                                AlignPosition::FromEnd(self.rect.size.y - new_position)
+                            } else {
+                                AlignPosition::Weighted(new_position / self.rect.size.y)
+                            }
                         }
-                    }
-                };
-                cx.redraw_child_area(self.split_bar.area());
-                dispatch_action(Action::Redraw);
+                    };
+                    cx.redraw_child_area(self.split_bar.area());
+                    dispatch_action(Action::Redraw);
+                }
             }
             _ => {}
         }
