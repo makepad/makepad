@@ -1,6 +1,6 @@
 use {
     crate::{
-        code_editor::CodeEditor,
+        code_editor::{CodeEditor, Document},
         dock::{Dock, ContainerId},
         file_tree::FileTree,
         list_logic::ItemId,
@@ -17,6 +17,7 @@ pub struct App {
     dock: Dock,
     file_tree: FileTree,
     code_editor: CodeEditor,
+    document: Document,
 }
 
 impl App {
@@ -34,6 +35,9 @@ impl App {
             dock: Dock::new(cx),
             file_tree: FileTree::new(cx),
             code_editor: CodeEditor::new(cx),
+            document: Document {
+                lines: include_str!("app.rs").lines().map(|line| line.chars().collect::<Vec<_>>()).collect::<Vec<_>>(),
+            }
         }
     }
 
@@ -75,7 +79,8 @@ impl App {
                     self.dock.tab(cx, ItemId(3), "CCC");
                     self.dock.end_tab_bar(cx);
                 }
-                self.code_editor.draw(cx);
+                cx.turtle_new_line();
+                self.code_editor.draw(cx, &self.document);
                 self.dock.end_splitter(cx);
             }
             self.window.end_desktop_window(cx);
