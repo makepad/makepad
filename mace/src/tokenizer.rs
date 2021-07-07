@@ -40,10 +40,69 @@ pub struct InitialState;
 impl InitialState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
         match (cursor.peek(0), cursor.peek(1), cursor.peek(2)) {
-            ('/', '*', _) => self.block_comment(cursor),
-            ('"', _, _) => self.string(cursor),
             ('r', '#', '"') | ('r', '#', '#') => self.raw_string(cursor),
+            ('.', '.', '.') | ('.', '.', '=') | ('<', '<', '=') | ('>', '>', '=') => {
+                cursor.skip(3);
+                (State::Initial(InitialState), TokenKind::Punctuator)
+            }
+            ('/', '*', _) => self.block_comment(cursor),
+            ('/', '/', _) => self.line_comment(cursor),
+            ('!', '=', _)
+            | ('%', '=', _)
+            | ('&', '&', _)
+            | ('&', '=', _)
+            | ('*', '=', _)
+            | ('+', '=', _)
+            | ('-', '=', _)
+            | ('-', '>', _)
+            | ('.', '.', _)
+            | ('/', '=', _)
+            | (':', ':', _)
+            | ('<', '<', _)
+            | ('<', '=', _)
+            | ('=', '=', _)
+            | ('=', '>', _)
+            | ('>', '=', _)
+            | ('>', '>', _)
+            | ('^', '=', _)
+            | ('|', '=', _)
+            | ('|', '|', _) => {
+                cursor.skip(2);
+                (State::Initial(InitialState), TokenKind::Punctuator)
+            }
+            ('"', _, _) => self.string(cursor),
+            ('!', _, _)
+            | ('#', _, _)
+            | ('$', _, _)
+            | ('%', _, _)
+            | ('&', _, _)
+            | ('(', _, _)
+            | (')', _, _)
+            | ('*', _, _)
+            | ('+', _, _)
+            | (',', _, _)
+            | ('-', _, _)
+            | ('.', _, _)
+            | ('/', _, _)
+            | (':', _, _)
+            | (';', _, _)
+            | ('<', _, _)
+            | ('=', _, _)
+            | ('>', _, _)
+            | ('?', _, _)
+            | ('@', _, _)
+            | ('[', _, _)
+            | (']', _, _)
+            | ('^', _, _)
+            | ('_', _, _)
+            | ('{', _, _)
+            | ('|', _, _)
+            | ('}', _, _) => {
+                cursor.skip(1);
+                (State::Initial(InitialState), TokenKind::Punctuator)
+            }
             (ch, _, _) if ch.is_identifier_start() => self.identifier_or_keyword(cursor),
+            (ch, _, _) if ch.is_digit(10) => self.number(cursor),
             _ => {
                 cursor.skip(1);
                 (State::Initial(InitialState), TokenKind::Unknown)
@@ -55,6 +114,13 @@ impl InitialState {
         debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '*');
         cursor.skip(2);
         BlockCommentTailState { depth: 0 }.next(cursor)
+    }
+
+    fn line_comment(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '/');
+        cursor.skip(2);
+        while cursor.skip_if(|ch| ch != '\0') {}
+        (State::Initial(InitialState), TokenKind::Comment)
     }
 
     fn identifier_or_keyword(self, cursor: &mut Cursor) -> (State, TokenKind) {
@@ -441,6 +507,52 @@ impl InitialState {
         (State::Initial(InitialState), TokenKind::Identifier)
     }
 
+    fn number(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0).is_digit(10));
+        match (cursor.peek(0), cursor.peek(1)) {
+            ('0', 'b') => {
+                cursor.skip(2);
+                if !cursor.skip_digits(2) {
+                    return (State::Initial(InitialState), TokenKind::Unknown);
+                }
+            }
+            ('0', 'o') => {
+                cursor.skip(2);
+                if !cursor.skip_digits(8) {
+                    return (State::Initial(InitialState), TokenKind::Unknown);
+                }
+            }
+            ('0', 'x') => {
+                cursor.skip(2);
+                if !cursor.skip_digits(16) {
+                    return (State::Initial(InitialState), TokenKind::Unknown);
+                }
+            }
+            _ => {
+                cursor.skip_digits(10);
+                match cursor.peek(0) {
+                    '.' if cursor.peek(1) != '.' && !cursor.peek(0).is_identifier_start() => {
+                        if cursor.skip_digits(10) {
+                            if cursor.peek(0) == 'E' || cursor.peek(1) == 'e' {
+                                if !cursor.skip_exponent() {
+                                    return (State::Initial(InitialState), TokenKind::Unknown);
+                                }
+                            }
+                        }
+                    }
+                    'E' | 'e' => {
+                        if !cursor.skip_exponent() {
+                            return (State::Initial(InitialState), TokenKind::Unknown);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        cursor.skip_suffix();
+        (State::Initial(InitialState), TokenKind::Number)
+    }
+
     fn string(self, cursor: &mut Cursor) -> (State, TokenKind) {
         self.double_quoted_string(cursor)
     }
@@ -575,13 +687,38 @@ impl<'a> Cursor<'a> {
         }
     }
 
+    fn skip_exponent(&mut self) -> bool {
+        debug_assert!(self.peek(0) == 'E' || self.peek(0) == 'e');
+        self.skip(1);
+        if self.peek(0) == '+' || self.peek(1) == '-' {
+            self.skip(1);
+        }
+        self.skip_digits(10)
+    }
+
+    fn skip_digits(&mut self, radix: u32) -> bool {
+        let mut has_skip_digits = false;
+        loop {
+            match self.peek(0) {
+                '_' => {
+                    self.skip(1);
+                }
+                ch if ch.is_digit(radix) => {
+                    self.skip(1);
+                    has_skip_digits = true;
+                }
+                _ => break,
+            }
+        }
+        has_skip_digits
+    }
+
     fn skip_suffix(&mut self) {
         if self.peek(0).is_identifier_start() {
             self.skip(1);
             while self.skip_if(|ch| ch.is_identifier_continue()) {}
         }
     }
-
 }
 
 #[derive(Debug)]
@@ -595,6 +732,8 @@ pub enum TokenKind {
     Comment,
     Identifier,
     Keyword,
+    Number,
+    Punctuator,
     String,
     Unknown,
 }

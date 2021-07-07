@@ -12,12 +12,6 @@ use {
     makepad_widget::*,
 };
 
-const TEST: &str = r##"
-    This raw string only exists for testing purposes.
-
-    Let's see if we can tokenize this correctly.
-"##;
-
 /* This is a test comment
  * 
  * It spans multiple lines.
