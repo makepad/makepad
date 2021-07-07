@@ -12,6 +12,16 @@ use {
     makepad_widget::*,
 };
 
+const TEST: &str = r##"
+    This raw string only exists for testing purposes.
+
+    Let's see if we can tokenize this correctly.
+"##;
+
+/* This is a test comment
+ * 
+ * It spans multiple lines.
+ */
 pub struct App {
     window: DesktopWindow,
     dock: Dock,
@@ -45,6 +55,7 @@ impl App {
         self.window.handle_desktop_window(cx, event);
         self.dock.handle_event(cx, event);
         self.file_tree.handle_event(cx, event);
+        self.code_editor.handle_event(cx, event, &mut self.document);
     }
 
     pub fn draw_app(&mut self, cx: &mut Cx) {
