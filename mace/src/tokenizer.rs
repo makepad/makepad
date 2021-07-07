@@ -41,12 +41,15 @@ impl InitialState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
         match (cursor.peek(0), cursor.peek(1), cursor.peek(2)) {
             ('r', '#', '"') | ('r', '#', '#') => self.raw_string(cursor),
+            ('b', 'r', '"') | ('b', 'r', '#') => self.raw_byte_string(cursor),
             ('.', '.', '.') | ('.', '.', '=') | ('<', '<', '=') | ('>', '>', '=') => {
                 cursor.skip(3);
                 (State::Initial(InitialState), TokenKind::Punctuator)
             }
-            ('/', '*', _) => self.block_comment(cursor),
             ('/', '/', _) => self.line_comment(cursor),
+            ('/', '*', _) => self.block_comment(cursor),
+            ('b', '\'', _) => self.byte(cursor),
+            ('b', '"', _) => self.byte_string(cursor),
             ('!', '=', _)
             | ('%', '=', _)
             | ('&', '&', _)
@@ -70,6 +73,7 @@ impl InitialState {
                 cursor.skip(2);
                 (State::Initial(InitialState), TokenKind::Punctuator)
             }
+            ('\'', _, _) => self.char_or_lifetime(cursor),
             ('"', _, _) => self.string(cursor),
             ('!', _, _)
             | ('#', _, _)
@@ -103,6 +107,7 @@ impl InitialState {
             }
             (ch, _, _) if ch.is_identifier_start() => self.identifier_or_keyword(cursor),
             (ch, _, _) if ch.is_digit(10) => self.number(cursor),
+            (ch, _, _) if ch.is_whitespace() => self.whitespace(cursor),
             _ => {
                 cursor.skip(1);
                 (State::Initial(InitialState), TokenKind::Unknown)
@@ -110,17 +115,17 @@ impl InitialState {
         }
     }
 
-    fn block_comment(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
-        debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '*');
-        cursor.skip(2);
-        BlockCommentTailState { depth: 0 }.next(cursor)
-    }
-
     fn line_comment(self, cursor: &mut Cursor) -> (State, TokenKind) {
         debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '/');
         cursor.skip(2);
         while cursor.skip_if(|ch| ch != '\0') {}
         (State::Initial(InitialState), TokenKind::Comment)
+    }
+
+    fn block_comment(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '*');
+        cursor.skip(2);
+        BlockCommentTailState { depth: 0 }.next(cursor)
     }
 
     fn identifier_or_keyword(self, cursor: &mut Cursor) -> (State, TokenKind) {
@@ -553,14 +558,37 @@ impl InitialState {
         (State::Initial(InitialState), TokenKind::Number)
     }
 
+    fn char_or_lifetime(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        if cursor.peek(1).is_identifier_start() && cursor.peek(2) != '\'' {
+            debug_assert!(cursor.peek(0) == '\'');
+            cursor.skip(2);
+            while cursor.skip_if(|ch| ch.is_identifier_continue()) {}
+            if cursor.peek(0) == '\'' {
+                cursor.skip(1);
+                cursor.skip_suffix();
+                (State::Initial(InitialState), TokenKind::String)
+            } else {
+                (State::Initial(InitialState), TokenKind::Identifier)
+            }
+        } else {
+            self.single_quoted_string(cursor)
+        }
+    }
+
+    fn byte(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0) == 'b');
+        cursor.skip(1);
+        self.single_quoted_string(cursor)
+    }
+
     fn string(self, cursor: &mut Cursor) -> (State, TokenKind) {
         self.double_quoted_string(cursor)
     }
 
-    fn double_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
-        debug_assert!(cursor.peek(0) == '"');
+    fn byte_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0) == 'b');
         cursor.skip(1);
-        DoubleQuotedStringTailState.next(cursor)
+        self.double_quoted_string(cursor)
     }
 
     fn raw_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
@@ -569,12 +597,49 @@ impl InitialState {
         self.raw_double_quoted_string(cursor)
     }
 
+    fn raw_byte_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0) == 'b' && cursor.peek(1) == 'r');
+        cursor.skip(2);
+        self.raw_double_quoted_string(cursor)
+    }
+
+    fn single_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0) == '\'');
+        cursor.skip(1);
+        loop {
+            match (cursor.peek(0), cursor.peek(1)) {
+                ('\'', _) => {
+                    cursor.skip(1);
+                    cursor.skip_suffix();
+                    break;
+                }
+                ('\0', _) => return (State::Initial(InitialState), TokenKind::Unknown),
+                ('\\', '\'') | ('\\', '\\') => cursor.skip(2),
+                _ => cursor.skip(1),
+            }
+        }
+        (State::Initial(InitialState), TokenKind::String)
+    }
+
+    fn double_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0) == '"');
+        cursor.skip(1);
+        DoubleQuotedStringTailState.next(cursor)
+    }
+
     fn raw_double_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
         let mut start_hash_count = 0;
         while cursor.skip_if(|ch| ch == '#') {
             start_hash_count += 1;
         }
         RawDoubleQuotedStringTailState { start_hash_count }.next(cursor)
+    }
+
+    fn whitespace(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        debug_assert!(cursor.peek(0).is_whitespace());
+        cursor.skip(1);
+        while cursor.skip_if(|ch| ch.is_whitespace()) {}
+        (State::Initial(InitialState), TokenKind::Whitespace)
     }
 }
 
@@ -735,6 +800,7 @@ pub enum TokenKind {
     Number,
     Punctuator,
     String,
+    Whitespace,
     Unknown,
 }
 
