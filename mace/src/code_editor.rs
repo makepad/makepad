@@ -7,6 +7,8 @@ pub struct CodeEditor {
     text_color_comment: Vec4,
     text_color_identifier: Vec4,
     text_color_keyword: Vec4,
+    text_color_number: Vec4,
+    text_color_punctuator: Vec4,
     text_color_string: Vec4,
     text_color_unknown: Vec4,
 }
@@ -20,6 +22,8 @@ impl CodeEditor {
             self::text_color_comment: #638d54;
             self::text_color_identifier: #d4d4d4;
             self::text_color_keyword: #5b9bd3;
+            self::text_color_number: #b6ceaa;
+            self::text_color_punctuator: #d4d4d4;
             self::text_color_string: #cc917b;
             self::text_color_unknown: #808080;
         })
@@ -32,6 +36,8 @@ impl CodeEditor {
             text_glyph_size: Vec2::default(),
             text_color_comment: Vec4::default(),
             text_color_identifier: Vec4::default(),
+            text_color_number: Vec4::default(),
+            text_color_punctuator: Vec4::default(),
             text_color_keyword: Vec4::default(),
             text_color_string: Vec4::default(),
             text_color_unknown: Vec4::default(),
@@ -90,7 +96,9 @@ impl CodeEditor {
         self.text_glyph_size = self.text.text_style.font_size * self.text.get_monospace_base(cx);
         self.text_color_comment = live_vec4!(cx, self::text_color_comment);
         self.text_color_identifier = live_vec4!(cx, self::text_color_identifier);
+        self.text_color_punctuator = live_vec4!(cx, self::text_color_punctuator);
         self.text_color_keyword = live_vec4!(cx, self::text_color_keyword);
+        self.text_color_number = live_vec4!(cx, self::text_color_number);
         self.text_color_string = live_vec4!(cx, self::text_color_string);
         self.text_color_unknown = live_vec4!(cx, self::text_color_unknown);
     }
@@ -100,6 +108,8 @@ impl CodeEditor {
             TokenKind::Comment => self.text_color_comment,
             TokenKind::Identifier => self.text_color_identifier,
             TokenKind::Keyword => self.text_color_keyword,
+            TokenKind::Number => self.text_color_number,
+            TokenKind::Punctuator => self.text_color_punctuator,
             TokenKind::String => self.text_color_string,
             TokenKind::Unknown => self.text_color_unknown,
         }
