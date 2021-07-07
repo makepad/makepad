@@ -10,6 +10,7 @@ pub struct CodeEditor {
     text_color_number: Vec4,
     text_color_punctuator: Vec4,
     text_color_string: Vec4,
+    text_color_whitespace: Vec4,
     text_color_unknown: Vec4,
 }
 
@@ -25,6 +26,7 @@ impl CodeEditor {
             self::text_color_number: #b6ceaa;
             self::text_color_punctuator: #d4d4d4;
             self::text_color_string: #cc917b;
+            self::text_color_whitespace: #6e6e6e;
             self::text_color_unknown: #808080;
         })
     }
@@ -40,6 +42,7 @@ impl CodeEditor {
             text_color_punctuator: Vec4::default(),
             text_color_keyword: Vec4::default(),
             text_color_string: Vec4::default(),
+            text_color_whitespace: Vec4::default(),
             text_color_unknown: Vec4::default(),
         }
     }
@@ -100,6 +103,7 @@ impl CodeEditor {
         self.text_color_keyword = live_vec4!(cx, self::text_color_keyword);
         self.text_color_number = live_vec4!(cx, self::text_color_number);
         self.text_color_string = live_vec4!(cx, self::text_color_string);
+        self.text_color_whitespace = live_vec4!(cx, self::text_color_whitespace);
         self.text_color_unknown = live_vec4!(cx, self::text_color_unknown);
     }
 
@@ -111,6 +115,7 @@ impl CodeEditor {
             TokenKind::Number => self.text_color_number,
             TokenKind::Punctuator => self.text_color_punctuator,
             TokenKind::String => self.text_color_string,
+            TokenKind::Whitespace => self.text_color_whitespace,
             TokenKind::Unknown => self.text_color_unknown,
         }
     }
