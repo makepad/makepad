@@ -1,5 +1,5 @@
 use {
-    crate::list_logic::{self, ListLogic, ItemId},
+    crate::list_logic::{self, ItemId, ListLogic},
     makepad_render::*,
     makepad_widget::*,
 };
