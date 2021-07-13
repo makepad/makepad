@@ -1,6 +1,6 @@
 use {
     crate::{position::Position, size::Size},
-    std::{cmp::Ordering, ops::Deref, slice::Iter},
+    std::{ops::Deref, slice::Iter},
 };
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
