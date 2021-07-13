@@ -1,5 +1,9 @@
 use {
-    crate::{list_logic::ItemId, splitter::{self, Splitter}, tab_bar::TabBar},
+    crate::{
+        list_logic::ItemId,
+        splitter::{self, Splitter},
+        tab_bar::TabBar,
+    },
     makepad_render::*,
     std::collections::HashMap,
 };
