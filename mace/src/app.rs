@@ -1,11 +1,12 @@
 use {
     crate::{
-        code_editor::{CodeEditor, Document},
-        dock::{Dock, ContainerId},
+        code_editor::{CodeEditor, Session, Document},
+        dock::{ContainerId, Dock},
         file_tree::FileTree,
         list_logic::ItemId,
         splitter::Splitter,
         tab_bar::TabBar,
+        text::Text,
         tree_logic::NodeId,
     },
     makepad_render::*,
@@ -13,7 +14,7 @@ use {
 };
 
 /* This is a test comment
- * 
+ *
  * It spans multiple lines.
  */
 pub struct App {
@@ -21,6 +22,7 @@ pub struct App {
     dock: Dock,
     file_tree: FileTree,
     code_editor: CodeEditor,
+    session: Session,
     document: Document,
 }
 
@@ -39,9 +41,15 @@ impl App {
             dock: Dock::new(cx),
             file_tree: FileTree::new(cx),
             code_editor: CodeEditor::new(cx),
+            session: Session::default(),
             document: Document {
-                lines: include_str!("app.rs").lines().map(|line| line.chars().collect::<Vec<_>>()).collect::<Vec<_>>(),
-            }
+                text: Text::from(
+                    include_str!("app.rs")
+                        .lines()
+                        .map(|line| line.chars().collect::<Vec<_>>())
+                        .collect::<Vec<_>>(),
+                ),
+            },
         }
     }
 
@@ -49,11 +57,13 @@ impl App {
         self.window.handle_desktop_window(cx, event);
         self.dock.handle_event(cx, event);
         self.file_tree.handle_event(cx, event);
-        self.code_editor.handle_event(cx, event, &mut self.document);
+        self.code_editor.handle_event(cx, event, &mut self.session, &mut self.document);
     }
 
     pub fn draw_app(&mut self, cx: &mut Cx) {
-        self.dock.splitter_mut(cx, ContainerId(2)).set_axis(Axis::Vertical);
+        self.dock
+            .splitter_mut(cx, ContainerId(2))
+            .set_axis(Axis::Vertical);
         if self.window.begin_desktop_window(cx, None).is_ok() {
             if self.dock.begin_splitter(cx, ContainerId(0)).is_ok() {
                 if self.dock.begin_tab_bar(cx, ContainerId(1)).is_ok() {
@@ -85,7 +95,7 @@ impl App {
                     self.dock.end_tab_bar(cx);
                 }
                 cx.turtle_new_line();
-                self.code_editor.draw(cx, &self.document);
+                self.code_editor.draw(cx, &self.session, &self.document);
                 self.dock.end_splitter(cx);
             }
             self.window.end_desktop_window(cx);
