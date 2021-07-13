@@ -30,7 +30,7 @@ impl State {
             Some(Token {
                 len: end - start,
                 kind,
-            })
+            }),
         )
     }
 }
@@ -643,7 +643,9 @@ impl InitialState {
     }
 }
 
-pub struct BlockCommentTailState { depth: usize }
+pub struct BlockCommentTailState {
+    depth: usize,
+}
 
 impl BlockCommentTailState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
@@ -667,7 +669,6 @@ impl BlockCommentTailState {
                 _ => cursor.skip(1),
             }
         }
-
     }
 }
 
@@ -683,7 +684,10 @@ impl DoubleQuotedStringTailState {
                     break (State::Initial(InitialState), TokenKind::String);
                 }
                 ('\0', _) => {
-                    break (State::DoubleQuotedStringTail(DoubleQuotedStringTailState), TokenKind::String);
+                    break (
+                        State::DoubleQuotedStringTail(DoubleQuotedStringTailState),
+                        TokenKind::String,
+                    );
                 }
                 ('\\', '"') => cursor.skip(2),
                 _ => cursor.skip(1),
@@ -692,7 +696,9 @@ impl DoubleQuotedStringTailState {
     }
 }
 
-pub struct RawDoubleQuotedStringTailState { start_hash_count: usize }
+pub struct RawDoubleQuotedStringTailState {
+    start_hash_count: usize,
+}
 
 impl RawDoubleQuotedStringTailState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
@@ -715,7 +721,6 @@ impl RawDoubleQuotedStringTailState {
                 _ => cursor.skip(1),
             }
         }
-
     }
 }
 
@@ -726,10 +731,7 @@ pub struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     pub fn new(chars: &'a [char]) -> Cursor<'a> {
-        Cursor {
-            chars,
-            index: 0
-        }
+        Cursor { chars, index: 0 }
     }
 
     fn peek(&self, index: usize) -> char {

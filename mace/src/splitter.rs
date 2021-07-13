@@ -97,7 +97,7 @@ impl Splitter {
     pub fn axis(&self) -> Axis {
         self.axis
     }
-    
+
     pub fn set_axis(&mut self, axis: Axis) {
         self.axis = axis;
     }
@@ -140,7 +140,8 @@ impl Splitter {
                         Axis::Horizontal => event.abs.x - event.abs_start.x,
                         Axis::Vertical => event.abs.y - event.abs_start.y,
                     };
-                    let new_position = drag_start_align_position.to_position(self.axis, self.rect) + delta;
+                    let new_position =
+                        drag_start_align_position.to_position(self.axis, self.rect) + delta;
                     self.align_position = match self.axis {
                         Axis::Horizontal => {
                             let center = self.rect.size.x / 2.0;
