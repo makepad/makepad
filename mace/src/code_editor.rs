@@ -1,13 +1,13 @@
 use {
     crate::{
-        delta,
+        delta::{self, Delta, OperationSpan},
         position::Position,
         position_set::{self, PositionSet},
         range::Range,
         range_set::{self, RangeSet, Span},
         size::Size,
         text::Text,
-        tokenizer::{self, State, TokenKind},
+        tokenizer::{self, InitialState, State, Token, TokenKind},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -72,7 +72,7 @@ impl CodeEditor {
             self.apply_style(cx);
             let visible_lines = self.visible_lines(cx, document.text.as_lines().len());
             self.draw_selections(cx, &session.selections, &document.text, visible_lines);
-            self.draw_text(cx, &document.text, visible_lines);
+            self.draw_text(cx, &document, visible_lines);
             self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
             self.set_turtle_bounds(cx, &document.text);
             self.view.end_view(cx);
@@ -200,38 +200,36 @@ impl CodeEditor {
         self.selection.end_many(cx);
     }
 
-    fn draw_text(&mut self, cx: &mut Cx, text: &Text, visible_lines: VisibleLines) {
+    fn draw_text(&mut self, cx: &mut Cx, document: &Document, visible_lines: VisibleLines) {
         let origin = cx.get_turtle_pos();
-        let mut state = State::default();
         let mut start_y = visible_lines.start_y;
-        for line in &text.as_lines()[visible_lines.start..visible_lines.end] {
+        for (line, tokens) in document.text.as_lines()[visible_lines.start..visible_lines.end]
+            .iter()
+            .zip(
+                document.token_cache_lines[visible_lines.start..visible_lines.end]
+                    .iter()
+                    .map(|line| &line.as_ref().unwrap().tokens),
+            )
+        {
             let end_y = start_y + self.text_glyph_size.y;
             let mut start_x = origin.x;
             let mut start = 0;
-            let mut cursor = tokenizer::Cursor::new(&line);
-            loop {
-                let (next_state, token) = state.next(&mut cursor);
-                state = next_state;
-                match token {
-                    Some(token) => {
-                        let end_x = start_x + token.len as f32 * self.text_glyph_size.x;
-                        let end = start + token.len;
-                        self.text.color = self.text_color(token.kind);
-                        self.text.draw_text_chunk(
-                            cx,
-                            Vec2 {
-                                x: start_x,
-                                y: start_y,
-                            },
-                            0,
-                            &line[start..end],
-                            |_, _, _, _| 0.0,
-                        );
-                        start = end;
-                        start_x = end_x;
-                    }
-                    None => break,
-                }
+            for token in tokens {
+                let end_x = start_x + token.len as f32 * self.text_glyph_size.x;
+                let end = start + token.len;
+                self.text.color = self.text_color(token.kind);
+                self.text.draw_text_chunk(
+                    cx,
+                    Vec2 {
+                        x: start_x,
+                        y: start_y,
+                    },
+                    0,
+                    &line[start..end],
+                    |_, _, _, _| 0.0,
+                );
+                start = end;
+                start_x = end_x;
             }
             start_y = end_y;
         }
@@ -524,7 +522,7 @@ impl Session {
             cursor.tail = cursor.head;
             cursor.max_column = cursor.head.column;
         }
-        document.text.apply_delta(delta);
+        document.apply_delta(delta);
         self.update_selections_and_carets();
     }
 
@@ -544,16 +542,6 @@ impl Default for Session {
             selections,
             carets,
         }
-    }
-}
-
-pub struct Document {
-    text: Text,
-}
-
-impl Document {
-    pub fn new(text: Text) -> Document {
-        Document { text }
     }
 }
 
@@ -598,6 +586,93 @@ impl Cursor {
             end: self.head.max(self.tail),
         }
     }
+}
+
+pub struct Document {
+    text: Text,
+    token_cache_lines: Vec<Option<TokenCacheLine>>,
+}
+
+impl Document {
+    pub fn new(text: Text) -> Document {
+        let token_cache_lines = (0..text.as_lines().len()).map(|_| None).collect::<Vec<_>>();
+        let mut document = Document {
+            text,
+            token_cache_lines,
+        };
+        document.refresh_token_cache();
+        document
+    }
+
+    pub fn apply_delta(&mut self, delta: Delta) {
+        self.invalidate_token_cache(&delta);
+        self.text.apply_delta(delta);
+        self.refresh_token_cache();
+    }
+
+    fn invalidate_token_cache(&mut self, delta: &Delta) {
+        let mut line = 0;
+        for operation in delta {
+            match operation.span() {
+                OperationSpan::Retain(count) => {
+                    line += count.line;
+                }
+                OperationSpan::Insert(count) => {
+                    self.token_cache_lines
+                        .splice(line..line, (0..count.line).map(|_| None));
+                    line += count.line;
+                    if count.column > 0 {
+                        self.token_cache_lines[line] = None;
+                    }
+                }
+                OperationSpan::Delete(count) => {
+                    self.token_cache_lines.drain(line..line + count.line);
+                    if count.column > 0 {
+                        self.token_cache_lines[line] = None;
+                    }
+                }
+            }
+        }
+    }
+
+    fn refresh_token_cache(&mut self) {
+        let mut state = State::Initial(InitialState);
+        for (index, line) in self.token_cache_lines.iter_mut().enumerate() {
+            match line {
+                Some(TokenCacheLine {
+                    start_state,
+                    end_state,
+                    ..
+                }) if state == *start_state => {
+                    state = *end_state;
+                }
+                _ => {
+                    let start_state = state;
+                    let mut tokens = Vec::new();
+                    let mut cursor = tokenizer::Cursor::new(&self.text.as_lines()[index]);
+                    loop {
+                        let (next_state, token) = state.next(&mut cursor);
+                        state = next_state;
+                        match token {
+                            Some(token) => tokens.push(token),
+                            None => break,
+                        }
+                    }
+                    *line = Some(TokenCacheLine {
+                        start_state,
+                        end_state: state,
+                        tokens,
+                    });
+                }
+            }
+        }
+    }
+}
+
+struct TokenCacheLine {
+    start_state: State,
+    end_state: State,
+    tokens: Vec<Token>,
 }
 
 #[derive(Clone, Copy)]
