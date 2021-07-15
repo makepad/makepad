@@ -1,5 +1,9 @@
 use {
-    crate::{position::Position, size::Size},
+    crate::{
+        delta::{Delta, Operation},
+        position::Position,
+        size::Size,
+    },
     std::{iter, mem, ops::AddAssign},
 };
 
@@ -83,6 +87,21 @@ impl Text {
                 position.line..position.line + count.line + 1,
                 iter::once(line),
             );
+        }
+    }
+
+    pub fn apply_delta(&mut self, delta: Delta) {
+        let mut position = Position::origin();
+        for operation in delta {
+            match operation {
+                Operation::Retain(len) => position += len,
+                Operation::Insert(text) => {
+                    let len = text.len();
+                    self.insert(position, text);
+                    position += len;
+                }
+                Operation::Delete(len) => self.delete(position, len),
+            }
         }
     }
 }
