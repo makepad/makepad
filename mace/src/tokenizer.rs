@@ -1,3 +1,4 @@
+#[derive(Clone, Copy, PartialEq)]
 pub enum State {
     Initial(InitialState),
     BlockCommentTail(BlockCommentTailState),
@@ -35,6 +36,7 @@ impl State {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
 pub struct InitialState;
 
 impl InitialState {
@@ -643,6 +645,7 @@ impl InitialState {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
 pub struct BlockCommentTailState {
     depth: usize,
 }
@@ -672,6 +675,7 @@ impl BlockCommentTailState {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
 pub struct DoubleQuotedStringTailState;
 
 impl DoubleQuotedStringTailState {
@@ -696,6 +700,7 @@ impl DoubleQuotedStringTailState {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
 pub struct RawDoubleQuotedStringTailState {
     start_hash_count: usize,
 }
@@ -794,7 +799,7 @@ pub struct Token {
     pub kind: TokenKind,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum TokenKind {
     Comment,
     Identifier,

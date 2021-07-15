@@ -94,13 +94,13 @@ impl Text {
         let mut position = Position::origin();
         for operation in delta {
             match operation {
-                Operation::Retain(len) => position += len,
+                Operation::Retain(count) => position += count,
                 Operation::Insert(text) => {
                     let len = text.len();
                     self.insert(position, text);
                     position += len;
                 }
-                Operation::Delete(len) => self.delete(position, len),
+                Operation::Delete(count) => self.delete(position, count),
             }
         }
     }
