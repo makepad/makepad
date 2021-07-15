@@ -1,5 +1,6 @@
 use {
     crate::{
+        delta,
         position::Position,
         position_set::{self, PositionSet},
         range::Range,
@@ -10,6 +11,7 @@ use {
     },
     makepad_render::*,
     makepad_widget::*,
+    std::collections::HashMap,
 };
 
 pub struct CodeEditor {
@@ -327,7 +329,7 @@ impl CodeEditor {
                 match modifiers {
                     KeyModifiers { control: true, .. } => {
                         session.add_cursor(self.position(&document.text, rel));
-                    },
+                    }
                     KeyModifiers { shift, .. } => {
                         session.move_cursors_to(self.position(&document.text, rel), shift);
                     }
@@ -364,6 +366,17 @@ impl CodeEditor {
                 ..
             }) => {
                 session.move_cursors_down(&document.text, shift);
+                self.view.redraw_view(cx);
+            }
+            Event::TextInput(TextInputEvent { input, .. }) => {
+                session.insert_text(
+                    document,
+                    input
+                        .lines()
+                        .map(|line| line.chars().collect::<Vec<_>>())
+                        .collect::<Vec<_>>()
+                        .into(),
+                );
                 self.view.redraw_view(cx);
             }
             _ => {}
@@ -478,6 +491,43 @@ impl Session {
         self.update_selections_and_carets();
     }
 
+    fn insert_text(&mut self, document: &mut Document, text: Text) {
+        let mut builder = delta::Builder::new();
+        for span in self.selections.spans() {
+            if span.is_included {
+                builder.delete(span.len);
+            } else {
+                builder.retain(span.len);
+            }
+        }
+        let delta_0 = builder.build();
+        let mut builder = delta::Builder::new();
+        let mut position = Position::origin();
+        for distance in self.carets.distances() {
+            builder.retain(distance);
+            position += distance;
+            if !self.selections.contains_position(position) {
+                builder.insert(text.clone());
+                position += text.len();
+            }
+        }
+        let delta_1 = builder.build();
+        let (_, delta_1) = delta_0.clone().transform(delta_1);
+        let delta = delta_0.compose(delta_1);
+        let map = self
+            .carets
+            .iter()
+            .zip(self.carets.transform(&delta))
+            .collect::<HashMap<_, _>>();
+        for cursor in &mut self.cursors.0 {
+            cursor.head = *map.get(&cursor.head).unwrap();
+            cursor.tail = cursor.head;
+            cursor.max_column = cursor.head.column;
+        }
+        document.text.apply_delta(delta);
+        self.update_selections_and_carets();
+    }
+
     fn update_selections_and_carets(&mut self) {
         self.selections = self.cursors.selections();
         self.carets = self.cursors.carets();
@@ -530,15 +580,7 @@ impl CursorSet {
 
 impl Default for CursorSet {
     fn default() -> CursorSet {
-        // TODO
-        CursorSet(vec![Cursor {
-            head: Position {
-                line: 2,
-                column: 10,
-            },
-            tail: Position { line: 0, column: 0 },
-            max_column: 10,
-        }])
+        CursorSet(vec![Cursor::default()])
     }
 }
 
