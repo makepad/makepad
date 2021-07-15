@@ -1,6 +1,6 @@
 use {
     crate::{
-        code_editor::{CodeEditor, Session, Document},
+        code_editor::{CodeEditor, Document, Session},
         dock::{ContainerId, Dock},
         file_tree::FileTree,
         list_logic::ItemId,
@@ -42,14 +42,12 @@ impl App {
             file_tree: FileTree::new(cx),
             code_editor: CodeEditor::new(cx),
             session: Session::default(),
-            document: Document {
-                text: Text::from(
-                    include_str!("app.rs")
-                        .lines()
-                        .map(|line| line.chars().collect::<Vec<_>>())
-                        .collect::<Vec<_>>(),
-                ),
-            },
+            document: Document::new(Text::from(
+                include_str!("app.rs")
+                    .lines()
+                    .map(|line| line.chars().collect::<Vec<_>>())
+                    .collect::<Vec<_>>(),
+            )),
         }
     }
 
@@ -57,7 +55,8 @@ impl App {
         self.window.handle_desktop_window(cx, event);
         self.dock.handle_event(cx, event);
         self.file_tree.handle_event(cx, event);
-        self.code_editor.handle_event(cx, event, &mut self.session, &mut self.document);
+        self.code_editor
+            .handle_event(cx, event, &mut self.session, &mut self.document);
     }
 
     pub fn draw_app(&mut self, cx: &mut Cx) {
