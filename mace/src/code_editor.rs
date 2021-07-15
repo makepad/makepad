@@ -31,6 +31,7 @@ pub struct CodeEditor {
 impl CodeEditor {
     pub fn style(cx: &mut Cx) {
         live_body!(cx, {
+            self::selection_color: #294e75;
             self::text_text_style: TextStyle {
                 ..makepad_widget::widgetstyle::text_style_fixed
             }
@@ -42,6 +43,7 @@ impl CodeEditor {
             self::text_color_string: #cc917b;
             self::text_color_whitespace: #6e6e6e;
             self::text_color_unknown: #808080;
+            self::caret_color: #b0b0b0;
         })
     }
 
@@ -76,7 +78,7 @@ impl CodeEditor {
     }
 
     fn apply_style(&mut self, cx: &mut Cx) {
-        self.selection.color = Vec4 { x: 1.0, y: 1.0, z: 0.0, w: 1.0 }; // TODO
+        self.selection.color = live_vec4!(cx, self::selection_color);
         self.text.text_style = live_text_style!(cx, self::text_text_style);
         self.text_glyph_size = self.text.text_style.font_size * self.text.get_monospace_base(cx);
         self.text_color_comment = live_vec4!(cx, self::text_color_comment);
@@ -87,7 +89,7 @@ impl CodeEditor {
         self.text_color_string = live_vec4!(cx, self::text_color_string);
         self.text_color_whitespace = live_vec4!(cx, self::text_color_whitespace);
         self.text_color_unknown = live_vec4!(cx, self::text_color_unknown);
-        self.caret.color = Vec4 { x: 0.0, y: 1.0, z: 1.0, w: 1.0 }; // TODO
+        self.caret.color = live_vec4!(cx, self::caret_color);
     }
 
     fn visible_lines(&mut self, cx: &mut Cx, line_count: usize) -> VisibleLines {
@@ -126,7 +128,13 @@ impl CodeEditor {
         }
     }
 
-    fn draw_selections(&mut self, cx: &mut Cx, selections: &RangeSet, text: &Text, visible_lines: VisibleLines) {
+    fn draw_selections(
+        &mut self,
+        cx: &mut Cx,
+        selections: &RangeSet,
+        text: &Text,
+        visible_lines: VisibleLines,
+    ) {
         let origin = cx.get_turtle_pos();
         let mut line_count = visible_lines.start;
         let mut span_iter = selections.spans();
@@ -227,7 +235,13 @@ impl CodeEditor {
         }
     }
 
-    fn draw_carets(&mut self, cx: &mut Cx, selections: &RangeSet, carets: &PositionSet, visible_lines: VisibleLines) {
+    fn draw_carets(
+        &mut self,
+        cx: &mut Cx,
+        selections: &RangeSet,
+        carets: &PositionSet,
+        visible_lines: VisibleLines,
+    ) {
         let mut caret_iter = carets.iter().peekable();
         loop {
             match caret_iter.peek() {
@@ -289,12 +303,10 @@ impl CodeEditor {
                 .as_lines()
                 .iter()
                 .map(|line| line.len() as f32 * self.text_glyph_size.x)
-                .fold(0.0, |max_line_width, line_width| max_line_width.max(line_width)),
-            y: text
-                .as_lines()
-                .iter()
-                .map(|_| self.text_glyph_size.y)
-                .sum()
+                .fold(0.0, |max_line_width, line_width| {
+                    max_line_width.max(line_width)
+                }),
+            y: text.as_lines().iter().map(|_| self.text_glyph_size.y).sum(),
         });
     }
 
@@ -302,23 +314,171 @@ impl CodeEditor {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        _session: &mut Session,
-        _document: &mut Document,
+        session: &mut Session,
+        document: &mut Document,
     ) {
         if self.view.handle_scroll_view(cx, event) {
             self.view.redraw_view(cx);
+        }
+        match event.hits(cx, self.view.area(), HitOpt::default()) {
+            Event::FingerDown(FingerDownEvent { rel, modifiers, .. }) => {
+                // TODO
+                cx.set_key_focus(self.view.area());
+                match modifiers {
+                    KeyModifiers { control: true, .. } => {
+                        session.add_cursor(self.position(&document.text, rel));
+                    },
+                    KeyModifiers { shift, .. } => {
+                        session.move_cursors_to(self.position(&document.text, rel), shift);
+                    }
+                }
+                self.view.redraw_view(cx);
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowLeft,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                session.move_cursors_left(&document.text, shift);
+                self.view.redraw_view(cx);
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowRight,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                session.move_cursors_right(&document.text, shift);
+                self.view.redraw_view(cx);
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowUp,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                session.move_cursors_up(&document.text, shift);
+                self.view.redraw_view(cx);
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowDown,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                session.move_cursors_down(&document.text, shift);
+                self.view.redraw_view(cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn position(&self, text: &Text, position: Vec2) -> Position {
+        let line = (position.y / self.text_glyph_size.y) as usize;
+        Position {
+            line,
+            column: ((position.x / self.text_glyph_size.x) as usize)
+                .min(text.as_lines()[line].len()),
         }
     }
 }
 
 pub struct Session {
-    pub cursors: CursorSet,
-    pub selections: RangeSet,
-    pub carets: PositionSet,
+    cursors: CursorSet,
+    selections: RangeSet,
+    carets: PositionSet,
 }
 
 impl Session {
-    pub fn update_selections_and_carets(&mut self) {
+    fn add_cursor(&mut self, position: Position) {
+        self.cursors.0.push(Cursor {
+            head: position,
+            tail: position,
+            max_column: position.column,
+        });
+        self.update_selections_and_carets();
+    }
+
+    fn move_cursors_left(&mut self, text: &Text, select: bool) {
+        for cursor in &mut self.cursors.0 {
+            if cursor.head.column == 0 {
+                if cursor.head.line > 0 {
+                    cursor.head.line -= 1;
+                    cursor.head.column = text.as_lines()[cursor.head.line].len();
+                }
+            } else {
+                cursor.head.column -= 1;
+            }
+            if !select {
+                cursor.tail = cursor.head;
+            }
+            cursor.max_column = cursor.head.column;
+        }
+        self.update_selections_and_carets();
+    }
+
+    fn move_cursors_right(&mut self, text: &Text, select: bool) {
+        for cursor in &mut self.cursors.0 {
+            if cursor.head.column == text.as_lines()[cursor.head.line].len() {
+                if cursor.head.line < text.as_lines().len() {
+                    cursor.head.line += 1;
+                    cursor.head.column = 0;
+                }
+            } else {
+                cursor.head.column += 1;
+            }
+            if !select {
+                cursor.tail = cursor.head;
+            }
+            cursor.max_column = cursor.head.column;
+        }
+        self.update_selections_and_carets();
+    }
+
+    fn move_cursors_up(&mut self, text: &Text, select: bool) {
+        for cursor in &mut self.cursors.0 {
+            if cursor.head.line == 0 {
+                continue;
+            }
+            cursor.head.line -= 1;
+            cursor.head.column = cursor
+                .max_column
+                .min(text.as_lines()[cursor.head.line].len());
+            if !select {
+                cursor.tail = cursor.head;
+            }
+        }
+        self.update_selections_and_carets();
+    }
+
+    fn move_cursors_down(&mut self, text: &Text, select: bool) {
+        for cursor in &mut self.cursors.0 {
+            if cursor.head.line == text.as_lines().len() - 1 {
+                continue;
+            }
+            cursor.head.line += 1;
+            cursor.head.column = cursor
+                .max_column
+                .min(text.as_lines()[cursor.head.line].len());
+            if !select {
+                cursor.tail = cursor.head;
+            }
+        }
+        self.update_selections_and_carets();
+    }
+
+    fn move_cursors_to(&mut self, position: Position, select: bool) {
+        let cursors = &mut self.cursors;
+        if !select {
+            cursors.0.drain(..cursors.0.len() - 1);
+        }
+        let mut cursor = cursors.0.last_mut().unwrap();
+        cursor.head = position;
+        if !select {
+            cursor.tail = position;
+        }
+        cursor.max_column = position.column;
+        self.update_selections_and_carets();
+    }
+
+    fn update_selections_and_carets(&mut self) {
         self.selections = self.cursors.selections();
         self.carets = self.cursors.carets();
     }
@@ -337,11 +497,21 @@ impl Default for Session {
     }
 }
 
+pub struct Document {
+    text: Text,
+}
+
+impl Document {
+    pub fn new(text: Text) -> Document {
+        Document { text }
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct CursorSet(pub Vec<Cursor>);
+struct CursorSet(pub Vec<Cursor>);
 
 impl CursorSet {
-    pub fn selections(&self) -> RangeSet {
+    fn selections(&self) -> RangeSet {
         let mut builder = range_set::Builder::new();
         for cursor in &self.0 {
             builder.include(cursor.range());
@@ -349,7 +519,7 @@ impl CursorSet {
         builder.build()
     }
 
-    pub fn carets(&self) -> PositionSet {
+    fn carets(&self) -> PositionSet {
         let mut builder = position_set::Builder::new();
         for cursor in &self.0 {
             builder.insert(cursor.head);
@@ -366,33 +536,26 @@ impl Default for CursorSet {
                 line: 2,
                 column: 10,
             },
-            tail: Position {
-                line: 0,
-                column: 0,
-            },
+            tail: Position { line: 0, column: 0 },
             max_column: 10,
         }])
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct Cursor {
-    pub head: Position,
-    pub tail: Position,
-    pub max_column: usize,
+struct Cursor {
+    head: Position,
+    tail: Position,
+    max_column: usize,
 }
 
 impl Cursor {
-    pub fn range(self) -> Range {
+    fn range(self) -> Range {
         Range {
             start: self.head.min(self.tail),
             end: self.head.max(self.tail),
         }
     }
-}
-
-pub struct Document {
-    pub text: Text,
 }
 
 #[derive(Clone, Copy)]
