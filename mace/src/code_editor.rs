@@ -8,7 +8,7 @@ use {
         size::Size,
         text::Text,
         token_cache::{self, TokenCache},
-        tokenizer::{Token, TokenKind},
+        token::{Delimiter, Token, Kind},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -22,6 +22,7 @@ pub struct CodeEditor {
     text_glyph_size: Vec2,
     text_color_comment: Vec4,
     text_color_identifier: Vec4,
+    text_color_function_identifier: Vec4,
     text_color_keyword: Vec4,
     text_color_number: Vec4,
     text_color_punctuator: Vec4,
@@ -40,6 +41,7 @@ impl CodeEditor {
             }
             self::text_color_comment: #638d54;
             self::text_color_identifier: #d4d4d4;
+            self::text_color_function_identifier: #dcdcae;
             self::text_color_keyword: #5b9bd3;
             self::text_color_number: #b6ceaa;
             self::text_color_punctuator: #d4d4d4;
@@ -58,6 +60,7 @@ impl CodeEditor {
             text_glyph_size: Vec2::default(),
             text_color_comment: Vec4::default(),
             text_color_identifier: Vec4::default(),
+            text_color_function_identifier: Vec4::default(),
             text_color_number: Vec4::default(),
             text_color_punctuator: Vec4::default(),
             text_color_keyword: Vec4::default(),
@@ -96,6 +99,7 @@ impl CodeEditor {
         self.text_glyph_size = self.text.text_style.font_size * self.text.get_monospace_base(cx);
         self.text_color_comment = live_vec4!(cx, self::text_color_comment);
         self.text_color_identifier = live_vec4!(cx, self::text_color_identifier);
+        self.text_color_function_identifier = live_vec4!(cx, self::text_color_function_identifier);
         self.text_color_punctuator = live_vec4!(cx, self::text_color_punctuator);
         self.text_color_keyword = live_vec4!(cx, self::text_color_keyword);
         self.text_color_number = live_vec4!(cx, self::text_color_number);
@@ -218,10 +222,13 @@ impl CodeEditor {
             let end_y = start_y + self.text_glyph_size.y;
             let mut start_x = origin.x;
             let mut start = 0;
-            for token in line.tokens {
+            let mut token_iter = line.tokens.iter();
+            let mut token_slot = token_iter.next();
+            while let Some(token) = token_slot {
+                let next_token = token_iter.next();
                 let end_x = start_x + token.len as f32 * self.text_glyph_size.x;
                 let end = start + token.len;
-                self.text.color = self.text_color(token.kind);
+                self.text.color = self.text_color(token.kind, next_token.map(|next_token| next_token.kind));
                 self.text.draw_text_chunk(
                     cx,
                     Vec2 {
@@ -232,6 +239,7 @@ impl CodeEditor {
                     &line.chars[start..end],
                     |_, _, _, _| 0.0,
                 );
+                token_slot = next_token;
                 start = end;
                 start_x = end_x;
             }
@@ -288,16 +296,18 @@ impl CodeEditor {
         self.caret.end_many(cx);
     }
 
-    fn text_color(&self, kind: TokenKind) -> Vec4 {
-        match kind {
-            TokenKind::Comment => self.text_color_comment,
-            TokenKind::Identifier => self.text_color_identifier,
-            TokenKind::Keyword => self.text_color_keyword,
-            TokenKind::Number => self.text_color_number,
-            TokenKind::Punctuator => self.text_color_punctuator,
-            TokenKind::String => self.text_color_string,
-            TokenKind::Whitespace => self.text_color_whitespace,
-            TokenKind::Unknown => self.text_color_unknown,
+    fn text_color(&self, kind: Kind, next_kind: Option<Kind>) -> Vec4 {
+        match (kind, next_kind) {
+            (Kind::Comment, _) => self.text_color_comment,
+            (Kind::Delimiter(_), _) => self.text_color_punctuator,
+            (Kind::Identifier, Some(Kind::Delimiter(Delimiter::LeftParen))) => self.text_color_function_identifier,
+            (Kind::Identifier, _) => self.text_color_identifier,
+            (Kind::Keyword, _) => self.text_color_keyword,
+            (Kind::Number, _) => self.text_color_number,
+            (Kind::Punctuator, _) => self.text_color_punctuator,
+            (Kind::String, _) => self.text_color_string,
+            (Kind::Whitespace, _) => self.text_color_whitespace,
+            (Kind::Unknown, _) => self.text_color_unknown,
         }
     }
 

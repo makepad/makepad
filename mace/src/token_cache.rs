@@ -1,7 +1,8 @@
 use {
     crate::{
         delta::{Delta, OperationSpan},
-        tokenizer::{Cursor, InitialState, State, Token},
+        token::Token,
+        tokenizer::{Cursor, InitialState, State},
         text::Text,
     },
     std::slice::Iter,
