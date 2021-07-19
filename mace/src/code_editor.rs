@@ -1,7 +1,7 @@
 use {
     crate::{
         cursor_set::CursorSet,
-        delta::{Delta, OperationSpan},
+        delta::{self, Delta, OperationSpan},
         position::Position,
         position_set::PositionSet,
         range_set::{RangeSet, Span},
@@ -11,6 +11,7 @@ use {
     },
     makepad_render::*,
     makepad_widget::*,
+    std::collections::HashMap,
 };
 
 pub struct CodeEditor {
@@ -335,12 +336,10 @@ impl CodeEditor {
                 cx.set_key_focus(self.view.area());
                 match modifiers {
                     KeyModifiers { control: true, .. } => {
-                        session.cursors.insert(self.position(&document.text, rel));
+                        session.insert_cursor(self.position(&document.text, rel));
                     }
                     KeyModifiers { shift, .. } => {
-                        session
-                            .cursors
-                            .move_to(self.position(&document.text, rel), shift);
+                        session.move_cursors_to(self.position(&document.text, rel), shift);
                     }
                 }
                 self.view.redraw_view(cx);
@@ -350,7 +349,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.cursors.move_left(&document.text, shift);
+                session.move_cursors_left(&document.text, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -358,7 +357,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.cursors.move_right(&document.text, shift);
+                session.move_cursors_right(&document.text, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -366,7 +365,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.cursors.move_up(&document.text, shift);
+                session.move_cursors_up(&document.text, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -374,28 +373,25 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.cursors.move_down(&document.text, shift);
+                session.move_cursors_down(&document.text, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Return,
                 ..
             }) => {
-                let text = Text::from(vec![vec![], vec![]]);
-                let delta = session.cursors.create_delta(text);
-                session.cursors.apply_delta(&delta);
-                document.apply_delta(delta);
+                session.replace_text(document, Text::from(vec![vec![], vec![]]));
                 self.view.redraw_view(cx);
             }
             Event::TextInput(TextInputEvent { input, .. }) => {
-                let text = input
-                    .lines()
-                    .map(|line| line.chars().collect::<Vec<_>>())
-                    .collect::<Vec<_>>()
-                    .into();
-                let delta = session.cursors.create_delta(text);
-                session.cursors.apply_delta(&delta);
-                document.apply_delta(delta);
+                session.replace_text(
+                    document,
+                    input
+                        .lines()
+                        .map(|line| line.chars().collect::<Vec<_>>())
+                        .collect::<Vec<_>>()
+                        .into(),
+                );
                 self.view.redraw_view(cx);
             }
             _ => {}
@@ -412,9 +408,92 @@ impl CodeEditor {
     }
 }
 
-#[derive(Default)]
 pub struct Session {
     cursors: CursorSet,
+    selections: RangeSet,
+    carets: PositionSet,
+}
+
+impl Session {
+    pub fn insert_cursor(&mut self, position: Position) {
+        self.cursors.insert(position);
+        self.update_selections_and_carets();
+    }
+
+    pub fn move_cursors_left(&mut self, text: &Text, select: bool) {
+        self.cursors.move_left(text, select);
+        self.update_selections_and_carets();
+    }
+
+    pub fn move_cursors_right(&mut self, text: &Text, select: bool) {
+        self.cursors.move_right(text, select);
+        self.update_selections_and_carets();
+    }
+
+    pub fn move_cursors_up(&mut self, text: &Text, select: bool) {
+        self.cursors.move_up(text, select);
+        self.update_selections_and_carets();
+    }
+
+    pub fn move_cursors_down(&mut self, text: &Text, select: bool) {
+        self.cursors.move_down(text, select);
+        self.update_selections_and_carets();
+    }
+
+    pub fn move_cursors_to(&mut self, position: Position, select: bool) {
+        self.cursors.move_to(position, select);
+        self.update_selections_and_carets();
+    }
+
+    pub fn replace_text(&mut self, document: &mut Document, text: Text) {
+        let mut builder = delta::Builder::new();
+        for span in self.selections.spans() {
+            if span.is_included {
+                builder.delete(span.len);
+            } else {
+                builder.retain(span.len);
+            }
+        }
+        let delta_0 = builder.build();
+        let mut builder = delta::Builder::new();
+        let mut position = Position::origin();
+        for distance in self.carets.distances() {
+            builder.retain(distance);
+            position += distance;
+            if !self.selections.contains_position(position) {
+                builder.insert(text.clone());
+                position += text.len();
+            }
+        }
+        let delta_1 = builder.build();
+        let (_, delta_1) = delta_0.clone().transform(delta_1);
+        let delta = delta_0.compose(delta_1);
+        let transformation = self.carets
+                .iter()
+                .cloned()
+                .zip(self.carets.transform(&delta))
+                .collect::<HashMap<_, _>>();
+        self.cursors.transform(&transformation);
+        document.apply_delta(delta);
+        self.update_selections_and_carets();
+    }
+
+    fn update_selections_and_carets(&mut self) {
+        self.selections = self.cursors.selections();
+        self.carets = self.cursors.carets();
+    }
+}
+
+impl Default for Session {
+    fn default() -> Session {
+        let mut session = Session {
+            cursors: CursorSet::default(),
+            selections: RangeSet::default(),
+            carets: PositionSet::default(),
+        };
+        session.update_selections_and_carets();
+        session
+    }
 }
 
 pub struct Document {
@@ -457,7 +536,8 @@ impl Document {
                 }
                 OperationSpan::Delete(count) => {
                     self.token_cache_lines[line] = None;
-                    self.token_cache_lines.drain(line + 1..line + 1 + count.line);
+                    self.token_cache_lines
+                        .drain(line + 1..line + 1 + count.line);
                     if count.column > 0 {
                         self.token_cache_lines[line] = None;
                     }
