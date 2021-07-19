@@ -60,8 +60,7 @@ impl Text {
                 ..0,
                 self.lines[position.line][..position.column].iter().cloned(),
             );
-            text.lines.last_mut().unwrap().splice(
-                self.lines[position.line].len()..,
+            text.lines.last_mut().unwrap().extend(
                 self.lines[position.line][position.column..].iter().cloned(),
             );
             self.lines
