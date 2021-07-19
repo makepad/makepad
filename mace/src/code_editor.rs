@@ -1,17 +1,16 @@
 use {
     crate::{
-        delta::{self, Delta, OperationSpan},
+        cursor_set::CursorSet,
+        delta::{Delta, OperationSpan},
         position::Position,
-        position_set::{self, PositionSet},
-        range::Range,
-        range_set::{self, RangeSet, Span},
+        position_set::PositionSet,
+        range_set::{RangeSet, Span},
         size::Size,
         text::Text,
         tokenizer::{self, InitialState, State, Token, TokenKind},
     },
     makepad_render::*,
     makepad_widget::*,
-    std::collections::HashMap,
 };
 
 pub struct CodeEditor {
@@ -71,9 +70,19 @@ impl CodeEditor {
         if self.view.begin_view(cx, Layout::default()).is_ok() {
             self.apply_style(cx);
             let visible_lines = self.visible_lines(cx, document.text.as_lines().len());
-            self.draw_selections(cx, &session.selections, &document.text, visible_lines);
+            self.draw_selections(
+                cx,
+                &session.cursors.selections(),
+                &document.text,
+                visible_lines,
+            );
             self.draw_text(cx, &document, visible_lines);
-            self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
+            self.draw_carets(
+                cx,
+                &session.cursors.selections(),
+                &session.cursors.carets(),
+                visible_lines,
+            );
             self.set_turtle_bounds(cx, &document.text);
             self.view.end_view(cx);
         }
@@ -326,10 +335,12 @@ impl CodeEditor {
                 cx.set_key_focus(self.view.area());
                 match modifiers {
                     KeyModifiers { control: true, .. } => {
-                        session.add_cursor(self.position(&document.text, rel));
+                        session.cursors.insert(self.position(&document.text, rel));
                     }
                     KeyModifiers { shift, .. } => {
-                        session.move_cursors_to(self.position(&document.text, rel), shift);
+                        session
+                            .cursors
+                            .move_to(self.position(&document.text, rel), shift);
                     }
                 }
                 self.view.redraw_view(cx);
@@ -339,7 +350,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_left(&document.text, shift);
+                session.cursors.move_left(&document.text, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -347,7 +358,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_right(&document.text, shift);
+                session.cursors.move_right(&document.text, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -355,7 +366,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_up(&document.text, shift);
+                session.cursors.move_up(&document.text, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -363,18 +374,18 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_down(&document.text, shift);
+                session.cursors.move_down(&document.text, shift);
                 self.view.redraw_view(cx);
             }
             Event::TextInput(TextInputEvent { input, .. }) => {
-                session.insert_text(
-                    document,
-                    input
-                        .lines()
-                        .map(|line| line.chars().collect::<Vec<_>>())
-                        .collect::<Vec<_>>()
-                        .into(),
-                );
+                let text = input
+                    .lines()
+                    .map(|line| line.chars().collect::<Vec<_>>())
+                    .collect::<Vec<_>>()
+                    .into();
+                let delta = session.cursors.create_delta(text);
+                session.cursors.apply_delta(&delta);
+                document.apply_delta(delta);
                 self.view.redraw_view(cx);
             }
             _ => {}
@@ -391,201 +402,9 @@ impl CodeEditor {
     }
 }
 
+#[derive(Default)]
 pub struct Session {
     cursors: CursorSet,
-    selections: RangeSet,
-    carets: PositionSet,
-}
-
-impl Session {
-    fn add_cursor(&mut self, position: Position) {
-        self.cursors.0.push(Cursor {
-            head: position,
-            tail: position,
-            max_column: position.column,
-        });
-        self.update_selections_and_carets();
-    }
-
-    fn move_cursors_left(&mut self, text: &Text, select: bool) {
-        for cursor in &mut self.cursors.0 {
-            if cursor.head.column == 0 {
-                if cursor.head.line > 0 {
-                    cursor.head.line -= 1;
-                    cursor.head.column = text.as_lines()[cursor.head.line].len();
-                }
-            } else {
-                cursor.head.column -= 1;
-            }
-            if !select {
-                cursor.tail = cursor.head;
-            }
-            cursor.max_column = cursor.head.column;
-        }
-        self.update_selections_and_carets();
-    }
-
-    fn move_cursors_right(&mut self, text: &Text, select: bool) {
-        for cursor in &mut self.cursors.0 {
-            if cursor.head.column == text.as_lines()[cursor.head.line].len() {
-                if cursor.head.line < text.as_lines().len() {
-                    cursor.head.line += 1;
-                    cursor.head.column = 0;
-                }
-            } else {
-                cursor.head.column += 1;
-            }
-            if !select {
-                cursor.tail = cursor.head;
-            }
-            cursor.max_column = cursor.head.column;
-        }
-        self.update_selections_and_carets();
-    }
-
-    fn move_cursors_up(&mut self, text: &Text, select: bool) {
-        for cursor in &mut self.cursors.0 {
-            if cursor.head.line == 0 {
-                continue;
-            }
-            cursor.head.line -= 1;
-            cursor.head.column = cursor
-                .max_column
-                .min(text.as_lines()[cursor.head.line].len());
-            if !select {
-                cursor.tail = cursor.head;
-            }
-        }
-        self.update_selections_and_carets();
-    }
-
-    fn move_cursors_down(&mut self, text: &Text, select: bool) {
-        for cursor in &mut self.cursors.0 {
-            if cursor.head.line == text.as_lines().len() - 1 {
-                continue;
-            }
-            cursor.head.line += 1;
-            cursor.head.column = cursor
-                .max_column
-                .min(text.as_lines()[cursor.head.line].len());
-            if !select {
-                cursor.tail = cursor.head;
-            }
-        }
-        self.update_selections_and_carets();
-    }
-
-    fn move_cursors_to(&mut self, position: Position, select: bool) {
-        let cursors = &mut self.cursors;
-        if !select {
-            cursors.0.drain(..cursors.0.len() - 1);
-        }
-        let mut cursor = cursors.0.last_mut().unwrap();
-        cursor.head = position;
-        if !select {
-            cursor.tail = position;
-        }
-        cursor.max_column = position.column;
-        self.update_selections_and_carets();
-    }
-
-    fn insert_text(&mut self, document: &mut Document, text: Text) {
-        let mut builder = delta::Builder::new();
-        for span in self.selections.spans() {
-            if span.is_included {
-                builder.delete(span.len);
-            } else {
-                builder.retain(span.len);
-            }
-        }
-        let delta_0 = builder.build();
-        let mut builder = delta::Builder::new();
-        let mut position = Position::origin();
-        for distance in self.carets.distances() {
-            builder.retain(distance);
-            position += distance;
-            if !self.selections.contains_position(position) {
-                builder.insert(text.clone());
-                position += text.len();
-            }
-        }
-        let delta_1 = builder.build();
-        let (_, delta_1) = delta_0.clone().transform(delta_1);
-        let delta = delta_0.compose(delta_1);
-        let map = self
-            .carets
-            .iter()
-            .zip(self.carets.transform(&delta))
-            .collect::<HashMap<_, _>>();
-        for cursor in &mut self.cursors.0 {
-            cursor.head = *map.get(&cursor.head).unwrap();
-            cursor.tail = cursor.head;
-            cursor.max_column = cursor.head.column;
-        }
-        document.apply_delta(delta);
-        self.update_selections_and_carets();
-    }
-
-    fn update_selections_and_carets(&mut self) {
-        self.selections = self.cursors.selections();
-        self.carets = self.cursors.carets();
-    }
-}
-
-impl Default for Session {
-    fn default() -> Session {
-        let cursors = CursorSet::default();
-        let selections = cursors.selections();
-        let carets = cursors.carets();
-        Session {
-            cursors,
-            selections,
-            carets,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct CursorSet(pub Vec<Cursor>);
-
-impl CursorSet {
-    fn selections(&self) -> RangeSet {
-        let mut builder = range_set::Builder::new();
-        for cursor in &self.0 {
-            builder.include(cursor.range());
-        }
-        builder.build()
-    }
-
-    fn carets(&self) -> PositionSet {
-        let mut builder = position_set::Builder::new();
-        for cursor in &self.0 {
-            builder.insert(cursor.head);
-        }
-        builder.build()
-    }
-}
-
-impl Default for CursorSet {
-    fn default() -> CursorSet {
-        CursorSet(vec![Cursor::default()])
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-struct Cursor {
-    head: Position,
-    tail: Position,
-    max_column: usize,
-}
-
-impl Cursor {
-    fn range(self) -> Range {
-        Range {
-            start: self.head.min(self.tail),
-            end: self.head.max(self.tail),
-        }
-    }
 }
 
 pub struct Document {
