@@ -1,11 +1,11 @@
 #[derive(Clone, Copy, Debug)]
 pub struct Token {
     pub len: usize,
-    pub kind: Kind,
+    pub kind: TokenKind,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum Kind {
+pub enum TokenKind {
     Comment,
     Identifier,
     Keyword(Keyword),
@@ -18,6 +18,8 @@ pub enum Kind {
 
 #[derive(Clone, Copy, Debug)]
 pub enum Keyword {
+    Branch,
+    Loop,
     Other,
 }
 
@@ -25,5 +27,5 @@ pub enum Keyword {
 pub enum Punctuator {
     LeftParen,
     RightParen,
-    Other
+    Other,
 }
