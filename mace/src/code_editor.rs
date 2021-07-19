@@ -377,6 +377,16 @@ impl CodeEditor {
                 session.cursors.move_down(&document.text, shift);
                 self.view.redraw_view(cx);
             }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Return,
+                ..
+            }) => {
+                let text = Text::from(vec![vec![], vec![]]);
+                let delta = session.cursors.create_delta(text);
+                session.cursors.apply_delta(&delta);
+                document.apply_delta(delta);
+                self.view.redraw_view(cx);
+            }
             Event::TextInput(TextInputEvent { input, .. }) => {
                 let text = input
                     .lines()
@@ -437,15 +447,17 @@ impl Document {
                     line += count.line;
                 }
                 OperationSpan::Insert(count) => {
+                    self.token_cache_lines[line] = None;
                     self.token_cache_lines
-                        .splice(line..line, (0..count.line).map(|_| None));
+                        .splice(line + 1..line + 1, (0..count.line).map(|_| None));
                     line += count.line;
                     if count.column > 0 {
                         self.token_cache_lines[line] = None;
                     }
                 }
                 OperationSpan::Delete(count) => {
-                    self.token_cache_lines.drain(line..line + count.line);
+                    self.token_cache_lines[line] = None;
+                    self.token_cache_lines.drain(line + 1..line + 1 + count.line);
                     if count.column > 0 {
                         self.token_cache_lines[line] = None;
                     }
