@@ -7,8 +7,8 @@ use {
         range_set::{RangeSet, Span},
         size::Size,
         text::Text,
-        token_cache::{self, TokenCache},
-        token::{Delimiter, Token, Kind},
+        tokenizer::{Tokenizer, Tokens},
+        token::{Keyword, Punctuator, Token, TokenKind},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -23,7 +23,7 @@ pub struct CodeEditor {
     text_color_comment: Vec4,
     text_color_identifier: Vec4,
     text_color_function_identifier: Vec4,
-    text_color_keyword: Vec4,
+    text_color_other_keyword: Vec4,
     text_color_number: Vec4,
     text_color_punctuator: Vec4,
     text_color_string: Vec4,
@@ -42,7 +42,7 @@ impl CodeEditor {
             self::text_color_comment: #638d54;
             self::text_color_identifier: #d4d4d4;
             self::text_color_function_identifier: #dcdcae;
-            self::text_color_keyword: #5b9bd3;
+            self::text_color_other_keyword: #5b9bd3;
             self::text_color_number: #b6ceaa;
             self::text_color_punctuator: #d4d4d4;
             self::text_color_string: #cc917b;
@@ -63,7 +63,7 @@ impl CodeEditor {
             text_color_function_identifier: Vec4::default(),
             text_color_number: Vec4::default(),
             text_color_punctuator: Vec4::default(),
-            text_color_keyword: Vec4::default(),
+            text_color_other_keyword: Vec4::default(),
             text_color_string: Vec4::default(),
             text_color_whitespace: Vec4::default(),
             text_color_unknown: Vec4::default(),
@@ -101,7 +101,7 @@ impl CodeEditor {
         self.text_color_identifier = live_vec4!(cx, self::text_color_identifier);
         self.text_color_function_identifier = live_vec4!(cx, self::text_color_function_identifier);
         self.text_color_punctuator = live_vec4!(cx, self::text_color_punctuator);
-        self.text_color_keyword = live_vec4!(cx, self::text_color_keyword);
+        self.text_color_other_keyword = live_vec4!(cx, self::text_color_other_keyword);
         self.text_color_number = live_vec4!(cx, self::text_color_number);
         self.text_color_string = live_vec4!(cx, self::text_color_string);
         self.text_color_whitespace = live_vec4!(cx, self::text_color_whitespace);
@@ -296,18 +296,17 @@ impl CodeEditor {
         self.caret.end_many(cx);
     }
 
-    fn text_color(&self, kind: Kind, next_kind: Option<Kind>) -> Vec4 {
+    fn text_color(&self, kind: TokenKind, next_kind: Option<TokenKind>) -> Vec4 {
         match (kind, next_kind) {
-            (Kind::Comment, _) => self.text_color_comment,
-            (Kind::Delimiter(_), _) => self.text_color_punctuator,
-            (Kind::Identifier, Some(Kind::Delimiter(Delimiter::LeftParen))) => self.text_color_function_identifier,
-            (Kind::Identifier, _) => self.text_color_identifier,
-            (Kind::Keyword, _) => self.text_color_keyword,
-            (Kind::Number, _) => self.text_color_number,
-            (Kind::Punctuator, _) => self.text_color_punctuator,
-            (Kind::String, _) => self.text_color_string,
-            (Kind::Whitespace, _) => self.text_color_whitespace,
-            (Kind::Unknown, _) => self.text_color_unknown,
+            (TokenKind::Comment, _) => self.text_color_comment,
+            (TokenKind::Identifier, Some(TokenKind::Punctuator(Punctuator::LeftParen))) => self.text_color_function_identifier,
+            (TokenKind::Identifier, _) => self.text_color_identifier,
+            (TokenKind::Keyword(Keyword::Other), _) => self.text_color_other_keyword,
+            (TokenKind::Number, _) => self.text_color_number,
+            (TokenKind::Punctuator(_), _) => self.text_color_punctuator,
+            (TokenKind::String, _) => self.text_color_string,
+            (TokenKind::Whitespace, _) => self.text_color_whitespace,
+            (TokenKind::Unknown, _) => self.text_color_unknown,
         }
     }
 
@@ -502,35 +501,35 @@ impl Default for Session {
 
 pub struct Document {
     text: Text,
-    token_cache: TokenCache,
+    tokenizer: Tokenizer,
 }
 
 impl Document {
     pub fn new(text: Text) -> Document {
-        let token_cache = TokenCache::new(&text);
+        let tokenizer = Tokenizer::new(&text);
         Document {
             text,
-            token_cache,
+            tokenizer,
         }
     }
 
     pub fn lines(&self) -> Lines<'_> {
         Lines {
             chars_iter: self.text.as_lines().iter(),
-            tokens_iter: self.token_cache.lines(),
+            tokens_iter: self.tokenizer.tokens(),
         }
     }
 
     pub fn apply_delta(&mut self, delta: Delta) {
-        self.token_cache.invalidate(&delta);
+        self.tokenizer.invalidate_cache(&delta);
         self.text.apply_delta(delta);
-        self.token_cache.refresh(&self.text);
+        self.tokenizer.refresh_cache(&self.text);
     }
 }
 
 pub struct Lines<'a> {
     chars_iter: Iter<'a, Vec<char>>,
-    tokens_iter: token_cache::Lines<'a>,
+    tokens_iter: Tokens<'a>,
 }
 
 impl<'a> Iterator for Lines<'a> {

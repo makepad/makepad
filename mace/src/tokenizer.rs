@@ -1,7 +1,106 @@
-use crate::token::{Delimiter, Token, Kind};
+use {crate::{delta::{Delta, OperationSpan}, text::Text, token::{Keyword, Punctuator, Token, Kind}}, std::slice::Iter};
+
+pub struct Tokenizer {
+    lines: Vec<Option<Line>>
+}
+
+impl Tokenizer {
+    pub fn new(text: &Text) -> Tokenizer {
+        let mut tokenizer = Tokenizer {
+            lines: (0..text.as_lines().len()).map(|_| None).collect::<Vec<_>>()
+        };
+        tokenizer.refresh_cache(text);
+        tokenizer
+    }
+
+    pub fn tokens(&self) -> Tokens {
+        Tokens {
+            iter: self.lines.iter(),
+        }
+    }
+
+    pub fn invalidate_cache(&mut self, delta: &Delta) {
+        let mut line = 0;
+        for operation in delta {
+            match operation.span() {
+                OperationSpan::Retain(count) => {
+                    line += count.line;
+                }
+                OperationSpan::Insert(count) => {
+                    self.lines[line] = None;
+                    self.lines
+                        .splice(line + 1..line + 1, (0..count.line).map(|_| None));
+                    line += count.line;
+                    if count.column > 0 {
+                        self.lines[line] = None;
+                    }
+                }
+                OperationSpan::Delete(count) => {
+                    self.lines[line] = None;
+                    self.lines
+                        .drain(line + 1..line + 1 + count.line);
+                    if count.column > 0 {
+                        self.lines[line] = None;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn refresh_cache(&mut self, text: &Text) {
+        let mut state = State::Initial(InitialState);
+        for (line, line_data) in self.lines.iter_mut().enumerate() {
+            match line_data {
+                Some(Line {
+                    start_state,
+                    end_state,
+                    ..
+                }) if state == *start_state => {
+                    state = *end_state;
+                }
+                _ => {
+                    let start_state = state;
+                    let mut tokens = Vec::new();
+                    let mut cursor = Cursor::new(&text.as_lines()[line]);
+                    loop {
+                        let (next_state, token) = state.next(&mut cursor);
+                        state = next_state;
+                        match token {
+                            Some(token) => tokens.push(token),
+                            None => break,
+                        }
+                    }
+                    *line_data = Some(Line {
+                        start_state,
+                        end_state: state,
+                        tokens,
+                    });
+                }
+            }
+        }
+    }
+}
+
+pub struct Tokens<'a> {
+    iter: Iter<'a, Option<Line>>
+}
+
+impl<'a> Iterator for Tokens<'a> {
+    type Item = &'a Vec<Token>;
+
+    fn next(&mut self) -> Option<&'a Vec<Token>> {
+        Some(&self.iter.next()?.as_ref().unwrap().tokens)
+    }
+}
+
+struct Line {
+    start_state: State,
+    end_state: State,
+    tokens: Vec<Token>,
+}
 
 #[derive(Clone, Copy, PartialEq)]
-pub enum State {
+enum State {
     Initial(InitialState),
     BlockCommentTail(BlockCommentTailState),
     DoubleQuotedStringTail(DoubleQuotedStringTailState),
@@ -39,7 +138,7 @@ impl State {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-pub struct InitialState;
+struct InitialState;
 
 impl InitialState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, Kind) {
@@ -48,7 +147,7 @@ impl InitialState {
             ('b', 'r', '"') | ('b', 'r', '#') => self.raw_byte_string(cursor),
             ('.', '.', '.') | ('.', '.', '=') | ('<', '<', '=') | ('>', '>', '=') => {
                 cursor.skip(3);
-                (State::Initial(InitialState), Kind::Punctuator)
+                (State::Initial(InitialState), Kind::Punctuator(Punctuator::Other))
             }
             ('/', '/', _) => self.line_comment(cursor),
             ('/', '*', _) => self.block_comment(cursor),
@@ -75,17 +174,17 @@ impl InitialState {
             | ('|', '=', _)
             | ('|', '|', _) => {
                 cursor.skip(2);
-                (State::Initial(InitialState), Kind::Punctuator)
+                (State::Initial(InitialState), Kind::Punctuator(Punctuator::Other))
             }
             ('\'', _, _) => self.char_or_lifetime(cursor),
             ('"', _, _) => self.string(cursor),
             ('(', _, _) => {
                 cursor.skip(1);
-                (State::Initial(InitialState), Kind::Delimiter(Delimiter::LeftParen))
+                (State::Initial(InitialState), Kind::Punctuator(Punctuator::LeftParen))
             }
             (')', _, _) => {
                 cursor.skip(1);
-                (State::Initial(InitialState), Kind::Delimiter(Delimiter::RightParen))
+                (State::Initial(InitialState), Kind::Punctuator(Punctuator::RightParen))
             }
             ('!', _, _)
             | ('#', _, _)
@@ -113,7 +212,7 @@ impl InitialState {
             | ('|', _, _)
             | ('}', _, _) => {
                 cursor.skip(1);
-                (State::Initial(InitialState), Kind::Punctuator)
+                (State::Initial(InitialState), Kind::Punctuator(Punctuator::Other))
             }
             (ch, _, _) if ch.is_identifier_start() => self.identifier_or_keyword(cursor),
             (ch, _, _) if ch.is_digit(10) => self.number(cursor),
@@ -146,18 +245,18 @@ impl InitialState {
                 match cursor.peek(0) {
                     'b' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("stract", cursor)
+                        self.identifier_or_keyword_tail("stract", Keyword::Other, cursor)
                     }
                     's' => {
                         cursor.skip(1);
                         match cursor.peek(0) {
-                            'y' => self.identifier_or_keyword_tail("nc", cursor),
-                            _ => self.identifier_or_keyword_tail("", cursor),
+                            'y' => self.identifier_or_keyword_tail("nc", Keyword::Other, cursor),
+                            _ => self.identifier_or_keyword_tail("", Keyword::Other, cursor),
                         }
                     }
                     'w' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("ait", cursor)
+                        self.identifier_or_keyword_tail("ait", Keyword::Other, cursor)
                     }
                     _ => self.identifier_tail(cursor),
                 }
@@ -167,15 +266,15 @@ impl InitialState {
                 match cursor.peek(0) {
                     'e' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("come", cursor)
+                        self.identifier_or_keyword_tail("come", Keyword::Other, cursor)
                     }
                     'o' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("x", cursor)
+                        self.identifier_or_keyword_tail("x", Keyword::Other, cursor)
                     }
                     'r' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("reak", cursor)
+                        self.identifier_or_keyword_tail("reak", Keyword::Other, cursor)
                     }
                     _ => self.identifier_tail(cursor),
                 }
@@ -191,11 +290,11 @@ impl InitialState {
                                 match cursor.peek(0) {
                                     's' => {
                                         cursor.skip(1);
-                                        self.identifier_or_keyword_tail("t", cursor)
+                                        self.identifier_or_keyword_tail("t", Keyword::Other, cursor)
                                     }
                                     't' => {
                                         cursor.skip(1);
-                                        self.identifier_or_keyword_tail("inue", cursor)
+                                        self.identifier_or_keyword_tail("inue", Keyword::Other, cursor)
                                     }
                                     _ => self.identifier_tail(cursor),
                                 }
@@ -205,7 +304,7 @@ impl InitialState {
                     }
                     'r' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("ate", cursor)
+                        self.identifier_or_keyword_tail("ate", Keyword::Other, cursor)
                     }
                     _ => self.identifier_tail(cursor),
                 }
@@ -215,11 +314,11 @@ impl InitialState {
                 match cursor.peek(0) {
                     'o' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("", cursor)
+                        self.identifier_or_keyword_tail("", Keyword::Other, cursor)
                     }
                     'y' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("n", cursor)
+                        self.identifier_or_keyword_tail("n", Keyword::Other, cursor)
                     }
                     _ => self.identifier_tail(cursor),
                 }
@@ -229,15 +328,15 @@ impl InitialState {
                 match cursor.peek(0) {
                     'l' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("se", cursor)
+                        self.identifier_or_keyword_tail("se", Keyword::Other, cursor)
                     }
                     'n' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("um", cursor)
+                        self.identifier_or_keyword_tail("um", Keyword::Other, cursor)
                     }
                     'x' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("tern", cursor)
+                        self.identifier_or_keyword_tail("tern", Keyword::Other, cursor)
                     }
                     _ => self.identifier_tail(cursor),
                 }
@@ -247,19 +346,19 @@ impl InitialState {
                 match cursor.peek(0) {
                     'a' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("lse", cursor)
+                        self.identifier_or_keyword_tail("lse", Keyword::Other, cursor)
                     }
                     'i' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("nal", cursor)
+                        self.identifier_or_keyword_tail("nal", Keyword::Other, cursor)
                     }
                     'n' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("", cursor)
+                        self.identifier_or_keyword_tail("", Keyword::Other, cursor)
                     }
                     'o' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("r", cursor)
+                        self.identifier_or_keyword_tail("r", Keyword::Other, cursor)
                     }
                     _ => self.identifier_tail(cursor),
                 }
@@ -269,15 +368,15 @@ impl InitialState {
                 match cursor.peek(0) {
                     'f' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("", cursor)
+                        self.identifier_or_keyword_tail("", Keyword::Other, cursor)
                     }
                     'm' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("pl", cursor)
+                        self.identifier_or_keyword_tail("pl", Keyword::Other, cursor)
                     }
                     'n' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("", cursor)
+                        self.identifier_or_keyword_tail("", Keyword::Other, cursor)
                     }
                     _ => self.identifier_tail(cursor),
                 }
@@ -287,11 +386,11 @@ impl InitialState {
                 match cursor.peek(0) {
                     'e' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("t", cursor)
+                        self.identifier_or_keyword_tail("t", Keyword::Other, cursor)
                     }
                     'o' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("op", cursor)
+                        self.identifier_or_keyword_tail("op", Keyword::Other, cursor)
                     }
                     _ => self.identifier_tail(cursor),
                 }
@@ -304,11 +403,11 @@ impl InitialState {
                         match cursor.peek(0) {
                             'c' => {
                                 cursor.skip(1);
-                                self.identifier_or_keyword_tail("ro", cursor)
+                                self.identifier_or_keyword_tail("ro", Keyword::Other, cursor)
                             }
                             't' => {
                                 cursor.skip(1);
-                                self.identifier_or_keyword_tail("ch", cursor)
+                                self.identifier_or_keyword_tail("ch", Keyword::Other, cursor)
                             }
                             _ => self.identifier_tail(cursor),
                         }
@@ -318,36 +417,36 @@ impl InitialState {
                         match cursor.peek(0) {
                             'd' => {
                                 cursor.skip(1);
-                                self.identifier_or_keyword_tail("", cursor)
+                                self.identifier_or_keyword_tail("", Keyword::Other, cursor)
                             }
                             'v' => {
                                 cursor.skip(1);
-                                self.identifier_or_keyword_tail("e", cursor)
+                                self.identifier_or_keyword_tail("e", Keyword::Other, cursor)
                             }
                             _ => self.identifier_tail(cursor),
                         }
                     }
                     'u' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("t", cursor)
+                        self.identifier_or_keyword_tail("t", Keyword::Other, cursor)
                     }
                     _ => self.identifier_tail(cursor),
                 }
             }
             'o' => {
                 cursor.skip(1);
-                self.identifier_or_keyword_tail("verride", cursor)
+                self.identifier_or_keyword_tail("verride", Keyword::Other, cursor)
             }
             'p' => {
                 cursor.skip(1);
                 match cursor.peek(0) {
                     'r' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("iv", cursor)
+                        self.identifier_or_keyword_tail("iv", Keyword::Other, cursor)
                     }
                     'u' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("b", cursor)
+                        self.identifier_or_keyword_tail("b", Keyword::Other, cursor)
                     }
                     _ => self.identifier_tail(cursor),
                 }
@@ -360,11 +459,11 @@ impl InitialState {
                         match cursor.peek(0) {
                             'f' => {
                                 cursor.skip(1);
-                                self.identifier_or_keyword_tail("", cursor)
+                                self.identifier_or_keyword_tail("", Keyword::Other, cursor)
                             }
                             't' => {
                                 cursor.skip(1);
-                                self.identifier_or_keyword_tail("urn", cursor)
+                                self.identifier_or_keyword_tail("urn", Keyword::Other, cursor)
                             }
                             _ => self.identifier_tail(cursor),
                         }
@@ -377,25 +476,25 @@ impl InitialState {
                 match cursor.peek(0) {
                     'e' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("lf", cursor)
+                        self.identifier_or_keyword_tail("lf", Keyword::Other, cursor)
                     }
                     't' => {
                         cursor.skip(1);
                         match cursor.peek(0) {
                             'a' => {
                                 cursor.skip(1);
-                                self.identifier_or_keyword_tail("tic", cursor)
+                                self.identifier_or_keyword_tail("tic", Keyword::Other, cursor)
                             }
                             'r' => {
                                 cursor.skip(1);
-                                self.identifier_or_keyword_tail("uct", cursor)
+                                self.identifier_or_keyword_tail("uct", Keyword::Other, cursor)
                             }
                             _ => self.identifier_tail(cursor),
                         }
                     }
                     'u' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("per", cursor)
+                        self.identifier_or_keyword_tail("per", Keyword::Other, cursor)
                     }
                     _ => self.identifier_tail(cursor),
                 }
@@ -408,11 +507,11 @@ impl InitialState {
                         match cursor.peek(0) {
                             'a' => {
                                 cursor.skip(1);
-                                self.identifier_or_keyword_tail("it", cursor)
+                                self.identifier_or_keyword_tail("it", Keyword::Other, cursor)
                             }
                             'u' => {
                                 cursor.skip(1);
-                                self.identifier_or_keyword_tail("e", cursor)
+                                self.identifier_or_keyword_tail("e", Keyword::Other, cursor)
                             }
                             _ => self.identifier_tail(cursor),
                         }
@@ -428,9 +527,9 @@ impl InitialState {
                                         match cursor.peek(0) {
                                             'o' => {
                                                 cursor.skip(1);
-                                                self.identifier_or_keyword_tail("f", cursor)
+                                                self.identifier_or_keyword_tail("f", Keyword::Other, cursor)
                                             }
-                                            _ => self.identifier_or_keyword_tail("", cursor),
+                                            _ => self.identifier_or_keyword_tail("", Keyword::Other, cursor),
                                         }
                                     }
                                     _ => self.identifier_tail(cursor),
@@ -453,11 +552,11 @@ impl InitialState {
                                 match cursor.peek(0) {
                                     'a' => {
                                         cursor.skip(1);
-                                        self.identifier_or_keyword_tail("fe", cursor)
+                                        self.identifier_or_keyword_tail("fe", Keyword::Other, cursor)
                                     }
                                     'i' => {
                                         cursor.skip(1);
-                                        self.identifier_or_keyword_tail("zed", cursor)
+                                        self.identifier_or_keyword_tail("zed", Keyword::Other, cursor)
                                     }
                                     _ => self.identifier_tail(cursor),
                                 }
@@ -467,14 +566,14 @@ impl InitialState {
                     }
                     's' => {
                         cursor.skip(1);
-                        self.identifier_or_keyword_tail("e", cursor)
+                        self.identifier_or_keyword_tail("e", Keyword::Other, cursor)
                     }
                     _ => self.identifier_tail(cursor),
                 }
             }
             'v' => {
                 cursor.skip(1);
-                self.identifier_or_keyword_tail("irtual", cursor)
+                self.identifier_or_keyword_tail("irtual", Keyword::Other, cursor)
             }
             'w' => {
                 cursor.skip(1);
@@ -484,11 +583,11 @@ impl InitialState {
                         match cursor.peek(0) {
                             'e' => {
                                 cursor.skip(1);
-                                self.identifier_or_keyword_tail("re", cursor)
+                                self.identifier_or_keyword_tail("re", Keyword::Other, cursor)
                             }
                             'i' => {
                                 cursor.skip(1);
-                                self.identifier_or_keyword_tail("le", cursor)
+                                self.identifier_or_keyword_tail("le", Keyword::Other, cursor)
                             }
                             _ => self.identifier_tail(cursor),
                         }
@@ -498,13 +597,13 @@ impl InitialState {
             }
             'y' => {
                 cursor.skip(1);
-                self.identifier_or_keyword_tail("ield", cursor)
+                self.identifier_or_keyword_tail("ield", Keyword::Other, cursor)
             }
             _ => self.identifier_tail(cursor),
         }
     }
 
-    fn identifier_or_keyword_tail(self, string: &str, cursor: &mut Cursor) -> (State, Kind) {
+    fn identifier_or_keyword_tail(self, string: &str, keyword: Keyword, cursor: &mut Cursor) -> (State, Kind) {
         for expected in string.chars() {
             if !cursor.skip_if(|actual| actual == expected) {
                 return (State::Initial(InitialState), Kind::Identifier);
@@ -514,7 +613,7 @@ impl InitialState {
             cursor.skip(1);
             return self.identifier_tail(cursor);
         }
-        (State::Initial(InitialState), Kind::Keyword)
+        (State::Initial(InitialState), Kind::Keyword(keyword))
     }
 
     fn identifier_tail(self, cursor: &mut Cursor) -> (State, Kind) {
@@ -654,7 +753,7 @@ impl InitialState {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-pub struct BlockCommentTailState {
+struct BlockCommentTailState {
     depth: usize,
 }
 
@@ -684,7 +783,7 @@ impl BlockCommentTailState {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-pub struct DoubleQuotedStringTailState;
+struct DoubleQuotedStringTailState;
 
 impl DoubleQuotedStringTailState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, Kind) {
@@ -709,7 +808,7 @@ impl DoubleQuotedStringTailState {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-pub struct RawDoubleQuotedStringTailState {
+struct RawDoubleQuotedStringTailState {
     start_hash_count: usize,
 }
 
@@ -737,13 +836,13 @@ impl RawDoubleQuotedStringTailState {
     }
 }
 
-pub struct Cursor<'a> {
+struct Cursor<'a> {
     chars: &'a [char],
     index: usize,
 }
 
 impl<'a> Cursor<'a> {
-    pub fn new(chars: &'a [char]) -> Cursor<'a> {
+    fn new(chars: &'a [char]) -> Cursor<'a> {
         Cursor { chars, index: 0 }
     }
 
