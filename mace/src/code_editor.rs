@@ -1,17 +1,18 @@
 use {
     crate::{
         cursor_set::CursorSet,
-        delta::{self, Delta, OperationSpan},
+        delta::{self, Delta},
         position::Position,
         position_set::PositionSet,
         range_set::{RangeSet, Span},
         size::Size,
         text::Text,
-        tokenizer::{self, InitialState, State, Token, TokenKind},
+        token_cache::{self, TokenCache},
+        tokenizer::{Token, TokenKind},
     },
     makepad_render::*,
     makepad_widget::*,
-    std::collections::HashMap,
+    std::{collections::HashMap, slice::Iter},
 };
 
 pub struct CodeEditor {
@@ -213,18 +214,11 @@ impl CodeEditor {
     fn draw_text(&mut self, cx: &mut Cx, document: &Document, visible_lines: VisibleLines) {
         let origin = cx.get_turtle_pos();
         let mut start_y = visible_lines.start_y;
-        for (line, tokens) in document.text.as_lines()[visible_lines.start..visible_lines.end]
-            .iter()
-            .zip(
-                document.token_cache_lines[visible_lines.start..visible_lines.end]
-                    .iter()
-                    .map(|line| &line.as_ref().unwrap().tokens),
-            )
-        {
+        for line in document.lines() {
             let end_y = start_y + self.text_glyph_size.y;
             let mut start_x = origin.x;
             let mut start = 0;
-            for token in tokens {
+            for token in line.tokens {
                 let end_x = start_x + token.len as f32 * self.text_glyph_size.x;
                 let end = start + token.len;
                 self.text.color = self.text_color(token.kind);
@@ -235,7 +229,7 @@ impl CodeEditor {
                         y: start_y,
                     },
                     0,
-                    &line[start..end],
+                    &line.chars[start..end],
                     |_, _, _, _| 0.0,
                 );
                 start = end;
@@ -498,92 +492,51 @@ impl Default for Session {
 
 pub struct Document {
     text: Text,
-    token_cache_lines: Vec<Option<TokenCacheLine>>,
+    token_cache: TokenCache,
 }
 
 impl Document {
     pub fn new(text: Text) -> Document {
-        let token_cache_lines = (0..text.as_lines().len()).map(|_| None).collect::<Vec<_>>();
-        let mut document = Document {
+        let token_cache = TokenCache::new(&text);
+        Document {
             text,
-            token_cache_lines,
-        };
-        document.refresh_token_cache();
-        document
+            token_cache,
+        }
+    }
+
+    pub fn lines(&self) -> Lines<'_> {
+        Lines {
+            chars_iter: self.text.as_lines().iter(),
+            tokens_iter: self.token_cache.lines(),
+        }
     }
 
     pub fn apply_delta(&mut self, delta: Delta) {
-        self.invalidate_token_cache(&delta);
+        self.token_cache.invalidate(&delta);
         self.text.apply_delta(delta);
-        self.refresh_token_cache();
-    }
-
-    fn invalidate_token_cache(&mut self, delta: &Delta) {
-        let mut line = 0;
-        for operation in delta {
-            match operation.span() {
-                OperationSpan::Retain(count) => {
-                    line += count.line;
-                }
-                OperationSpan::Insert(count) => {
-                    self.token_cache_lines[line] = None;
-                    self.token_cache_lines
-                        .splice(line + 1..line + 1, (0..count.line).map(|_| None));
-                    line += count.line;
-                    if count.column > 0 {
-                        self.token_cache_lines[line] = None;
-                    }
-                }
-                OperationSpan::Delete(count) => {
-                    self.token_cache_lines[line] = None;
-                    self.token_cache_lines
-                        .drain(line + 1..line + 1 + count.line);
-                    if count.column > 0 {
-                        self.token_cache_lines[line] = None;
-                    }
-                }
-            }
-        }
-    }
-
-    fn refresh_token_cache(&mut self) {
-        let mut state = State::Initial(InitialState);
-        for (index, line) in self.token_cache_lines.iter_mut().enumerate() {
-            match line {
-                Some(TokenCacheLine {
-                    start_state,
-                    end_state,
-                    ..
-                }) if state == *start_state => {
-                    state = *end_state;
-                }
-                _ => {
-                    let start_state = state;
-                    let mut tokens = Vec::new();
-                    let mut cursor = tokenizer::Cursor::new(&self.text.as_lines()[index]);
-                    loop {
-                        let (next_state, token) = state.next(&mut cursor);
-                        state = next_state;
-                        match token {
-                            Some(token) => tokens.push(token),
-                            None => break,
-                        }
-                    }
-                    *line = Some(TokenCacheLine {
-                        start_state,
-                        end_state: state,
-                        tokens,
-                    });
-                }
-            }
-        }
+        self.token_cache.refresh(&self.text);
     }
 }
 
-struct TokenCacheLine {
-    start_state: State,
-    end_state: State,
-    tokens: Vec<Token>,
+pub struct Lines<'a> {
+    chars_iter: Iter<'a, Vec<char>>,
+    tokens_iter: token_cache::Lines<'a>,
+}
+
+impl<'a> Iterator for Lines<'a> {
+    type Item = Line<'a>;
+
+    fn next(&mut self) -> Option<Line<'a>> {
+        Some(Line {
+            chars: self.chars_iter.next()?,
+            tokens: self.tokens_iter.next()?,
+        }) 
+    }
+}
+
+pub struct Line<'a> {
+    chars: &'a [char],
+    tokens: &'a [Token],
 }
 
 #[derive(Clone, Copy)]
