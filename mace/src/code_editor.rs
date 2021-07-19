@@ -7,8 +7,8 @@ use {
         range_set::{RangeSet, Span},
         size::Size,
         text::Text,
-        tokenizer::{Tokenizer, Tokens},
         token::{Keyword, Punctuator, Token, TokenKind},
+        tokenizer::{Tokenizer, Tokens},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -23,6 +23,8 @@ pub struct CodeEditor {
     text_color_comment: Vec4,
     text_color_identifier: Vec4,
     text_color_function_identifier: Vec4,
+    text_color_branch_keyword: Vec4,
+    text_color_loop_keyword: Vec4,
     text_color_other_keyword: Vec4,
     text_color_number: Vec4,
     text_color_punctuator: Vec4,
@@ -42,6 +44,8 @@ impl CodeEditor {
             self::text_color_comment: #638d54;
             self::text_color_identifier: #d4d4d4;
             self::text_color_function_identifier: #dcdcae;
+            self::text_color_branch_keyword: #c485be;
+            self::text_color_loop_keyword: #ff8c00;
             self::text_color_other_keyword: #5b9bd3;
             self::text_color_number: #b6ceaa;
             self::text_color_punctuator: #d4d4d4;
@@ -63,6 +67,8 @@ impl CodeEditor {
             text_color_function_identifier: Vec4::default(),
             text_color_number: Vec4::default(),
             text_color_punctuator: Vec4::default(),
+            text_color_branch_keyword: Vec4::default(),
+            text_color_loop_keyword: Vec4::default(),
             text_color_other_keyword: Vec4::default(),
             text_color_string: Vec4::default(),
             text_color_whitespace: Vec4::default(),
@@ -101,6 +107,8 @@ impl CodeEditor {
         self.text_color_identifier = live_vec4!(cx, self::text_color_identifier);
         self.text_color_function_identifier = live_vec4!(cx, self::text_color_function_identifier);
         self.text_color_punctuator = live_vec4!(cx, self::text_color_punctuator);
+        self.text_color_branch_keyword = live_vec4!(cx, self::text_color_branch_keyword);
+        self.text_color_loop_keyword = live_vec4!(cx, self::text_color_loop_keyword);
         self.text_color_other_keyword = live_vec4!(cx, self::text_color_other_keyword);
         self.text_color_number = live_vec4!(cx, self::text_color_number);
         self.text_color_string = live_vec4!(cx, self::text_color_string);
@@ -218,7 +226,11 @@ impl CodeEditor {
     fn draw_text(&mut self, cx: &mut Cx, document: &Document, visible_lines: VisibleLines) {
         let origin = cx.get_turtle_pos();
         let mut start_y = visible_lines.start_y;
-        for line in document.lines().skip(visible_lines.start).take(visible_lines.end - visible_lines.start) {
+        for line in document
+            .lines()
+            .skip(visible_lines.start)
+            .take(visible_lines.end - visible_lines.start)
+        {
             let end_y = start_y + self.text_glyph_size.y;
             let mut start_x = origin.x;
             let mut start = 0;
@@ -228,7 +240,8 @@ impl CodeEditor {
                 let next_token = token_iter.next();
                 let end_x = start_x + token.len as f32 * self.text_glyph_size.x;
                 let end = start + token.len;
-                self.text.color = self.text_color(token.kind, next_token.map(|next_token| next_token.kind));
+                self.text.color =
+                    self.text_color(token.kind, next_token.map(|next_token| next_token.kind));
                 self.text.draw_text_chunk(
                     cx,
                     Vec2 {
@@ -299,8 +312,12 @@ impl CodeEditor {
     fn text_color(&self, kind: TokenKind, next_kind: Option<TokenKind>) -> Vec4 {
         match (kind, next_kind) {
             (TokenKind::Comment, _) => self.text_color_comment,
-            (TokenKind::Identifier, Some(TokenKind::Punctuator(Punctuator::LeftParen))) => self.text_color_function_identifier,
+            (TokenKind::Identifier, Some(TokenKind::Punctuator(Punctuator::LeftParen))) => {
+                self.text_color_function_identifier
+            }
             (TokenKind::Identifier, _) => self.text_color_identifier,
+            (TokenKind::Keyword(Keyword::Branch), _) => self.text_color_branch_keyword,
+            (TokenKind::Keyword(Keyword::Loop), _) => self.text_color_loop_keyword,
             (TokenKind::Keyword(Keyword::Other), _) => self.text_color_other_keyword,
             (TokenKind::Number, _) => self.text_color_number,
             (TokenKind::Punctuator(_), _) => self.text_color_punctuator,
@@ -471,11 +488,12 @@ impl Session {
         let delta_1 = builder.build();
         let (_, delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(delta_1);
-        let transformation = self.carets
-                .iter()
-                .cloned()
-                .zip(self.carets.transform(&delta))
-                .collect::<HashMap<_, _>>();
+        let transformation = self
+            .carets
+            .iter()
+            .cloned()
+            .zip(self.carets.transform(&delta))
+            .collect::<HashMap<_, _>>();
         self.cursors.transform(&transformation);
         document.apply_delta(delta);
         self.update_selections_and_carets();
@@ -507,10 +525,7 @@ pub struct Document {
 impl Document {
     pub fn new(text: Text) -> Document {
         let tokenizer = Tokenizer::new(&text);
-        Document {
-            text,
-            tokenizer,
-        }
+        Document { text, tokenizer }
     }
 
     pub fn lines(&self) -> Lines<'_> {
@@ -539,7 +554,7 @@ impl<'a> Iterator for Lines<'a> {
         Some(Line {
             chars: self.chars_iter.next()?,
             tokens: self.tokens_iter.next()?,
-        }) 
+        })
     }
 }
 
