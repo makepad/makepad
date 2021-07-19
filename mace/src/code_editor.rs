@@ -396,15 +396,8 @@ impl CodeEditor {
                 session.move_cursors_down(&document.text, shift);
                 self.view.redraw_view(cx);
             }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::Return,
-                ..
-            }) => {
-                session.replace_text(document, Text::from(vec![vec![], vec![]]));
-                self.view.redraw_view(cx);
-            }
             Event::TextInput(TextInputEvent { input, .. }) => {
-                session.replace_text(
+                session.insert_text(
                     document,
                     input
                         .lines()
@@ -412,6 +405,20 @@ impl CodeEditor {
                         .collect::<Vec<_>>()
                         .into(),
                 );
+                self.view.redraw_view(cx);
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Return,
+                ..
+            }) => {
+                session.insert_text(document, Text::from(vec![vec![], vec![]]));
+                self.view.redraw_view(cx);
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Backspace,
+                ..
+            }) => {
+                session.insert_backspace(document);
                 self.view.redraw_view(cx);
             }
             _ => {}
@@ -465,7 +472,7 @@ impl Session {
         self.update_selections_and_carets();
     }
 
-    pub fn replace_text(&mut self, document: &mut Document, text: Text) {
+    pub fn insert_text(&mut self, document: &mut Document, text: Text) {
         let mut builder = delta::Builder::new();
         for span in self.selections.spans() {
             if span.is_included {
@@ -478,8 +485,8 @@ impl Session {
         let mut builder = delta::Builder::new();
         let mut position = Position::origin();
         for distance in self.carets.distances() {
-            builder.retain(distance);
             position += distance;
+            builder.retain(distance);
             if !self.selections.contains_position(position) {
                 builder.insert(text.clone());
                 position += text.len();
@@ -487,7 +494,53 @@ impl Session {
         }
         let delta_1 = builder.build();
         let (_, delta_1) = delta_0.clone().transform(delta_1);
-        let delta = delta_0.compose(delta_1);
+        self.apply_delta(document, delta_0.compose(delta_1));
+    }
+
+    pub fn insert_backspace(&mut self, document: &mut Document) {
+        let mut builder = delta::Builder::new();
+        for span in self.selections.spans() {
+            if span.is_included {
+                builder.delete(span.len);
+            } else {
+                builder.retain(span.len);
+            }
+        }
+        let delta_0 = builder.build();
+        let mut builder = delta::Builder::new();
+        let mut position = Position::origin();
+        for distance in self.carets.distances() {
+            position += distance;
+            if !self.selections.contains_position(position) {
+                if distance.column == 0 {
+                    builder.retain(Size {
+                        line: distance.line - 1,
+                        column: document.text.as_lines()[position.line - 1].len(),
+                    });
+                    builder.delete(Size {
+                        line: 1,
+                        column: 0,
+                    })
+                } else {
+                    builder.retain(Size {
+                        line: distance.line,
+                        column: distance.column - 1,
+                    });
+                    builder.delete(Size {
+                        line: 0,
+                        column: 1
+                    });
+                }
+            } else {
+                builder.retain(distance);
+            }
+        }
+        let delta_1 = builder.build();
+        let (_, delta_1) = delta_0.clone().transform(delta_1);
+        self.apply_delta(document, delta_0.compose(delta_1));
+    }
+
+    fn apply_delta(&mut self, document: &mut Document, delta: Delta) {
         let transformation = self
             .carets
             .iter()
