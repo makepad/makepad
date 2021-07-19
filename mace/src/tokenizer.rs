@@ -1,3 +1,5 @@
+use crate::token::{Delimiter, Token, Kind};
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum State {
     Initial(InitialState),
@@ -40,13 +42,13 @@ impl State {
 pub struct InitialState;
 
 impl InitialState {
-    fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
+    fn next(self, cursor: &mut Cursor<'_>) -> (State, Kind) {
         match (cursor.peek(0), cursor.peek(1), cursor.peek(2)) {
             ('r', '#', '"') | ('r', '#', '#') => self.raw_string(cursor),
             ('b', 'r', '"') | ('b', 'r', '#') => self.raw_byte_string(cursor),
             ('.', '.', '.') | ('.', '.', '=') | ('<', '<', '=') | ('>', '>', '=') => {
                 cursor.skip(3);
-                (State::Initial(InitialState), TokenKind::Punctuator)
+                (State::Initial(InitialState), Kind::Punctuator)
             }
             ('/', '/', _) => self.line_comment(cursor),
             ('/', '*', _) => self.block_comment(cursor),
@@ -73,17 +75,23 @@ impl InitialState {
             | ('|', '=', _)
             | ('|', '|', _) => {
                 cursor.skip(2);
-                (State::Initial(InitialState), TokenKind::Punctuator)
+                (State::Initial(InitialState), Kind::Punctuator)
             }
             ('\'', _, _) => self.char_or_lifetime(cursor),
             ('"', _, _) => self.string(cursor),
+            ('(', _, _) => {
+                cursor.skip(1);
+                (State::Initial(InitialState), Kind::Delimiter(Delimiter::LeftParen))
+            }
+            (')', _, _) => {
+                cursor.skip(1);
+                (State::Initial(InitialState), Kind::Delimiter(Delimiter::RightParen))
+            }
             ('!', _, _)
             | ('#', _, _)
             | ('$', _, _)
             | ('%', _, _)
             | ('&', _, _)
-            | ('(', _, _)
-            | (')', _, _)
             | ('*', _, _)
             | ('+', _, _)
             | (',', _, _)
@@ -105,32 +113,32 @@ impl InitialState {
             | ('|', _, _)
             | ('}', _, _) => {
                 cursor.skip(1);
-                (State::Initial(InitialState), TokenKind::Punctuator)
+                (State::Initial(InitialState), Kind::Punctuator)
             }
             (ch, _, _) if ch.is_identifier_start() => self.identifier_or_keyword(cursor),
             (ch, _, _) if ch.is_digit(10) => self.number(cursor),
             (ch, _, _) if ch.is_whitespace() => self.whitespace(cursor),
             _ => {
                 cursor.skip(1);
-                (State::Initial(InitialState), TokenKind::Unknown)
+                (State::Initial(InitialState), Kind::Unknown)
             }
         }
     }
 
-    fn line_comment(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn line_comment(self, cursor: &mut Cursor) -> (State, Kind) {
         debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '/');
         cursor.skip(2);
         while cursor.skip_if(|ch| ch != '\0') {}
-        (State::Initial(InitialState), TokenKind::Comment)
+        (State::Initial(InitialState), Kind::Comment)
     }
 
-    fn block_comment(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
+    fn block_comment(self, cursor: &mut Cursor<'_>) -> (State, Kind) {
         debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '*');
         cursor.skip(2);
         BlockCommentTailState { depth: 0 }.next(cursor)
     }
 
-    fn identifier_or_keyword(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn identifier_or_keyword(self, cursor: &mut Cursor) -> (State, Kind) {
         debug_assert!(cursor.peek(0).is_identifier_start());
         match cursor.peek(0) {
             'a' => {
@@ -496,43 +504,43 @@ impl InitialState {
         }
     }
 
-    fn identifier_or_keyword_tail(self, string: &str, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn identifier_or_keyword_tail(self, string: &str, cursor: &mut Cursor) -> (State, Kind) {
         for expected in string.chars() {
             if !cursor.skip_if(|actual| actual == expected) {
-                return (State::Initial(InitialState), TokenKind::Identifier);
+                return (State::Initial(InitialState), Kind::Identifier);
             }
         }
         if cursor.peek(0).is_identifier_continue() {
             cursor.skip(1);
             return self.identifier_tail(cursor);
         }
-        (State::Initial(InitialState), TokenKind::Keyword)
+        (State::Initial(InitialState), Kind::Keyword)
     }
 
-    fn identifier_tail(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn identifier_tail(self, cursor: &mut Cursor) -> (State, Kind) {
         while cursor.skip_if(|ch| ch.is_identifier_continue()) {}
-        (State::Initial(InitialState), TokenKind::Identifier)
+        (State::Initial(InitialState), Kind::Identifier)
     }
 
-    fn number(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn number(self, cursor: &mut Cursor) -> (State, Kind) {
         debug_assert!(cursor.peek(0).is_digit(10));
         match (cursor.peek(0), cursor.peek(1)) {
             ('0', 'b') => {
                 cursor.skip(2);
                 if !cursor.skip_digits(2) {
-                    return (State::Initial(InitialState), TokenKind::Unknown);
+                    return (State::Initial(InitialState), Kind::Unknown);
                 }
             }
             ('0', 'o') => {
                 cursor.skip(2);
                 if !cursor.skip_digits(8) {
-                    return (State::Initial(InitialState), TokenKind::Unknown);
+                    return (State::Initial(InitialState), Kind::Unknown);
                 }
             }
             ('0', 'x') => {
                 cursor.skip(2);
                 if !cursor.skip_digits(16) {
-                    return (State::Initial(InitialState), TokenKind::Unknown);
+                    return (State::Initial(InitialState), Kind::Unknown);
                 }
             }
             _ => {
@@ -542,14 +550,14 @@ impl InitialState {
                         if cursor.skip_digits(10) {
                             if cursor.peek(0) == 'E' || cursor.peek(1) == 'e' {
                                 if !cursor.skip_exponent() {
-                                    return (State::Initial(InitialState), TokenKind::Unknown);
+                                    return (State::Initial(InitialState), Kind::Unknown);
                                 }
                             }
                         }
                     }
                     'E' | 'e' => {
                         if !cursor.skip_exponent() {
-                            return (State::Initial(InitialState), TokenKind::Unknown);
+                            return (State::Initial(InitialState), Kind::Unknown);
                         }
                     }
                     _ => {}
@@ -557,10 +565,10 @@ impl InitialState {
             }
         };
         cursor.skip_suffix();
-        (State::Initial(InitialState), TokenKind::Number)
+        (State::Initial(InitialState), Kind::Number)
     }
 
-    fn char_or_lifetime(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn char_or_lifetime(self, cursor: &mut Cursor) -> (State, Kind) {
         if cursor.peek(1).is_identifier_start() && cursor.peek(2) != '\'' {
             debug_assert!(cursor.peek(0) == '\'');
             cursor.skip(2);
@@ -568,44 +576,44 @@ impl InitialState {
             if cursor.peek(0) == '\'' {
                 cursor.skip(1);
                 cursor.skip_suffix();
-                (State::Initial(InitialState), TokenKind::String)
+                (State::Initial(InitialState), Kind::String)
             } else {
-                (State::Initial(InitialState), TokenKind::Identifier)
+                (State::Initial(InitialState), Kind::Identifier)
             }
         } else {
             self.single_quoted_string(cursor)
         }
     }
 
-    fn byte(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn byte(self, cursor: &mut Cursor) -> (State, Kind) {
         debug_assert!(cursor.peek(0) == 'b');
         cursor.skip(1);
         self.single_quoted_string(cursor)
     }
 
-    fn string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn string(self, cursor: &mut Cursor) -> (State, Kind) {
         self.double_quoted_string(cursor)
     }
 
-    fn byte_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn byte_string(self, cursor: &mut Cursor) -> (State, Kind) {
         debug_assert!(cursor.peek(0) == 'b');
         cursor.skip(1);
         self.double_quoted_string(cursor)
     }
 
-    fn raw_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn raw_string(self, cursor: &mut Cursor) -> (State, Kind) {
         debug_assert!(cursor.peek(0) == 'r');
         cursor.skip(1);
         self.raw_double_quoted_string(cursor)
     }
 
-    fn raw_byte_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn raw_byte_string(self, cursor: &mut Cursor) -> (State, Kind) {
         debug_assert!(cursor.peek(0) == 'b' && cursor.peek(1) == 'r');
         cursor.skip(2);
         self.raw_double_quoted_string(cursor)
     }
 
-    fn single_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn single_quoted_string(self, cursor: &mut Cursor) -> (State, Kind) {
         debug_assert!(cursor.peek(0) == '\'');
         cursor.skip(1);
         loop {
@@ -615,21 +623,21 @@ impl InitialState {
                     cursor.skip_suffix();
                     break;
                 }
-                ('\0', _) => return (State::Initial(InitialState), TokenKind::Unknown),
+                ('\0', _) => return (State::Initial(InitialState), Kind::Unknown),
                 ('\\', '\'') | ('\\', '\\') => cursor.skip(2),
                 _ => cursor.skip(1),
             }
         }
-        (State::Initial(InitialState), TokenKind::String)
+        (State::Initial(InitialState), Kind::String)
     }
 
-    fn double_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn double_quoted_string(self, cursor: &mut Cursor) -> (State, Kind) {
         debug_assert!(cursor.peek(0) == '"');
         cursor.skip(1);
         DoubleQuotedStringTailState.next(cursor)
     }
 
-    fn raw_double_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn raw_double_quoted_string(self, cursor: &mut Cursor) -> (State, Kind) {
         let mut start_hash_count = 0;
         while cursor.skip_if(|ch| ch == '#') {
             start_hash_count += 1;
@@ -637,11 +645,11 @@ impl InitialState {
         RawDoubleQuotedStringTailState { start_hash_count }.next(cursor)
     }
 
-    fn whitespace(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn whitespace(self, cursor: &mut Cursor) -> (State, Kind) {
         debug_assert!(cursor.peek(0).is_whitespace());
         cursor.skip(1);
         while cursor.skip_if(|ch| ch.is_whitespace()) {}
-        (State::Initial(InitialState), TokenKind::Whitespace)
+        (State::Initial(InitialState), Kind::Whitespace)
     }
 }
 
@@ -651,7 +659,7 @@ pub struct BlockCommentTailState {
 }
 
 impl BlockCommentTailState {
-    fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
+    fn next(self, cursor: &mut Cursor<'_>) -> (State, Kind) {
         let mut state = self;
         loop {
             match (cursor.peek(0), cursor.peek(1)) {
@@ -662,12 +670,12 @@ impl BlockCommentTailState {
                 ('*', '/') => {
                     cursor.skip(2);
                     if state.depth == 0 {
-                        break (State::Initial(InitialState), TokenKind::Comment);
+                        break (State::Initial(InitialState), Kind::Comment);
                     }
                     state.depth -= 1;
                 }
                 ('\0', _) => {
-                    break (State::BlockCommentTail(state), TokenKind::Comment);
+                    break (State::BlockCommentTail(state), Kind::Comment);
                 }
                 _ => cursor.skip(1),
             }
@@ -679,18 +687,18 @@ impl BlockCommentTailState {
 pub struct DoubleQuotedStringTailState;
 
 impl DoubleQuotedStringTailState {
-    fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
+    fn next(self, cursor: &mut Cursor<'_>) -> (State, Kind) {
         loop {
             match (cursor.peek(0), cursor.peek(1)) {
                 ('"', _) => {
                     cursor.skip(1);
                     cursor.skip_suffix();
-                    break (State::Initial(InitialState), TokenKind::String);
+                    break (State::Initial(InitialState), Kind::String);
                 }
                 ('\0', _) => {
                     break (
                         State::DoubleQuotedStringTail(DoubleQuotedStringTailState),
-                        TokenKind::String,
+                        Kind::String,
                     );
                 }
                 ('\\', '"') => cursor.skip(2),
@@ -706,7 +714,7 @@ pub struct RawDoubleQuotedStringTailState {
 }
 
 impl RawDoubleQuotedStringTailState {
-    fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
+    fn next(self, cursor: &mut Cursor<'_>) -> (State, Kind) {
         loop {
             match cursor.peek(0) {
                 '"' => {
@@ -717,11 +725,11 @@ impl RawDoubleQuotedStringTailState {
                     }
                     if end_hash_count == self.start_hash_count {
                         cursor.skip_suffix();
-                        break (State::Initial(InitialState), TokenKind::String);
+                        break (State::Initial(InitialState), Kind::String);
                     }
                 }
                 '\0' => {
-                    break (State::RawDoubleQuotedStringTail(self), TokenKind::String);
+                    break (State::RawDoubleQuotedStringTail(self), Kind::String);
                 }
                 _ => cursor.skip(1),
             }
@@ -791,24 +799,6 @@ impl<'a> Cursor<'a> {
             while self.skip_if(|ch| ch.is_identifier_continue()) {}
         }
     }
-}
-
-#[derive(Debug)]
-pub struct Token {
-    pub len: usize,
-    pub kind: TokenKind,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum TokenKind {
-    Comment,
-    Identifier,
-    Keyword,
-    Number,
-    Punctuator,
-    String,
-    Whitespace,
-    Unknown,
 }
 
 trait CharExt {
