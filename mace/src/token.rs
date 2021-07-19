@@ -7,18 +7,23 @@ pub struct Token {
 #[derive(Clone, Copy, Debug)]
 pub enum Kind {
     Comment,
-    Delimiter(Delimiter),
     Identifier,
-    Keyword,
+    Keyword(Keyword),
     Number,
-    Punctuator,
+    Punctuator(Punctuator),
     String,
     Whitespace,
     Unknown,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum Delimiter {
+pub enum Keyword {
+    Other,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Punctuator {
     LeftParen,
     RightParen,
+    Other
 }
