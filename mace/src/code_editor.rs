@@ -214,7 +214,7 @@ impl CodeEditor {
     fn draw_text(&mut self, cx: &mut Cx, document: &Document, visible_lines: VisibleLines) {
         let origin = cx.get_turtle_pos();
         let mut start_y = visible_lines.start_y;
-        for line in document.lines() {
+        for line in document.lines().skip(visible_lines.start).take(visible_lines.end - visible_lines.start) {
             let end_y = start_y + self.text_glyph_size.y;
             let mut start_x = origin.x;
             let mut start = 0;
