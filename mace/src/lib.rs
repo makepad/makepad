@@ -1,5 +1,6 @@
 pub mod app;
 pub mod code_editor;
+pub mod cursor_set;
 pub mod delta;
 pub mod dock;
 pub mod file_tree;
