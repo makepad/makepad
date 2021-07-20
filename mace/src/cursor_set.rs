@@ -1,12 +1,9 @@
-use {
-    crate::{
-        position::Position,
-        position_set::{self, PositionSet},
-        range::Range,
-        range_set::{self, RangeSet},
-        text::Text,
-    },
-    std::collections::HashMap,
+use crate::{
+    cursor::Cursor,
+    position::Position,
+    position_set::{self, PositionSet},
+    range_set::{self, RangeSet},
+    text::Text,
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -120,11 +117,12 @@ impl CursorSet {
         cursor.max_column = position.column;
     }
 
-    pub fn transform(&mut self, transformation: &HashMap<Position, Position>) {
+    pub fn map<F>(&mut self, mut f: F)
+    where
+        F: FnMut(Cursor) -> Cursor
+    {
         for cursor in &mut self.cursors {
-            cursor.head = *transformation.get(&cursor.head).unwrap();
-            cursor.tail = cursor.head;
-            cursor.max_column = cursor.head.column;
+            *cursor = f(*cursor);
         }
     }
 }
@@ -133,22 +131,6 @@ impl Default for CursorSet {
     fn default() -> CursorSet {
         CursorSet {
             cursors: vec![Cursor::default()],
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-struct Cursor {
-    head: Position,
-    tail: Position,
-    max_column: usize,
-}
-
-impl Cursor {
-    fn range(self) -> Range {
-        Range {
-            start: self.head.min(self.tail),
-            end: self.head.max(self.tail),
         }
     }
 }

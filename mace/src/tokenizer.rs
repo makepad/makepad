@@ -20,8 +20,8 @@ impl Tokenizer {
         tokenizer
     }
 
-    pub fn tokens(&self) -> Tokens {
-        Tokens {
+    pub fn lines(&self) -> Lines {
+        Lines {
             iter: self.lines.iter(),
         }
     }
@@ -87,11 +87,11 @@ impl Tokenizer {
     }
 }
 
-pub struct Tokens<'a> {
+pub struct Lines<'a> {
     iter: Iter<'a, Option<Line>>,
 }
 
-impl<'a> Iterator for Tokens<'a> {
+impl<'a> Iterator for Lines<'a> {
     type Item = &'a Vec<Token>;
 
     fn next(&mut self) -> Option<&'a Vec<Token>> {
