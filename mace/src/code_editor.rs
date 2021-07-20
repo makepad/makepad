@@ -1,6 +1,7 @@
 use {
     crate::{
         cursor_set::CursorSet,
+        cursor::Cursor,
         delta::{self, Delta},
         position::Position,
         position_set::PositionSet,
@@ -8,7 +9,7 @@ use {
         size::Size,
         text::Text,
         token::{Keyword, Punctuator, Token, TokenKind},
-        tokenizer::{Tokenizer, Tokens},
+        tokenizer::{self, Tokenizer},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -541,13 +542,20 @@ impl Session {
     }
 
     fn apply_delta(&mut self, document: &mut Document, delta: Delta) {
-        let transformation = self
+        let map = self
             .carets
             .iter()
             .cloned()
             .zip(self.carets.transform(&delta))
             .collect::<HashMap<_, _>>();
-        self.cursors.transform(&transformation);
+        self.cursors.map(|cursor| {
+            let new_head = *map.get(&cursor.head).unwrap();
+            Cursor {
+                head: new_head,
+                tail: new_head,
+                max_column: new_head.column,
+            }
+        });
         document.apply_delta(delta);
         self.update_selections_and_carets();
     }
@@ -584,7 +592,7 @@ impl Document {
     pub fn lines(&self) -> Lines<'_> {
         Lines {
             chars_iter: self.text.as_lines().iter(),
-            tokens_iter: self.tokenizer.tokens(),
+            tokens_iter: self.tokenizer.lines(),
         }
     }
 
@@ -597,7 +605,7 @@ impl Document {
 
 pub struct Lines<'a> {
     chars_iter: Iter<'a, Vec<char>>,
-    tokens_iter: Tokens<'a>,
+    tokens_iter: tokenizer::Lines<'a>,
 }
 
 impl<'a> Iterator for Lines<'a> {
