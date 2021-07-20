@@ -353,8 +353,9 @@ impl CodeEditor {
         }
         match event.hits(cx, self.view.area(), HitOpt::default()) {
             Event::FingerDown(FingerDownEvent { rel, modifiers, .. }) => {
-                // TODO
+                // TODO: How to handle key focus?
                 cx.set_key_focus(self.view.area());
+                cx.set_hover_mouse_cursor(MouseCursor::Text);
                 match modifiers {
                     KeyModifiers { control: true, .. } => {
                         session.insert_cursor(self.position(&document.text, rel));
@@ -363,6 +364,10 @@ impl CodeEditor {
                         session.move_cursors_to(self.position(&document.text, rel), shift);
                     }
                 }
+                self.view.redraw_view(cx);
+            }
+            Event::FingerMove(FingerMoveEvent { rel, .. }) => {
+                session.move_cursors_to(self.position(&document.text, rel), true);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -397,17 +402,6 @@ impl CodeEditor {
                 session.move_cursors_down(&document.text, shift);
                 self.view.redraw_view(cx);
             }
-            Event::TextInput(TextInputEvent { input, .. }) => {
-                session.insert_text(
-                    document,
-                    input
-                        .lines()
-                        .map(|line| line.chars().collect::<Vec<_>>())
-                        .collect::<Vec<_>>()
-                        .into(),
-                );
-                self.view.redraw_view(cx);
-            }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Return,
                 ..
@@ -420,6 +414,17 @@ impl CodeEditor {
                 ..
             }) => {
                 session.insert_backspace(document);
+                self.view.redraw_view(cx);
+            }
+            Event::TextInput(TextInputEvent { input, .. }) => {
+                session.insert_text(
+                    document,
+                    input
+                        .lines()
+                        .map(|line| line.chars().collect::<Vec<_>>())
+                        .collect::<Vec<_>>()
+                        .into(),
+                );
                 self.view.redraw_view(cx);
             }
             _ => {}
