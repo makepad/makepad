@@ -1,6 +1,12 @@
 use {
-    crate::size::Size,
-    std::ops::{Add, AddAssign, Sub},
+    crate::{
+        delta::{Delta, OperationSpan},
+        size::Size,
+    },
+    std::{
+        cmp::Ordering,
+        ops::{Add, AddAssign, Sub},
+    },
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -16,6 +22,51 @@ impl Position {
 
     pub fn is_origin(self) -> bool {
         self.line == 0 && self.column == 0
+    }
+
+    pub fn apply_delta(&mut self, delta: &Delta) -> Position {
+        let mut position = Position::origin();
+        let mut distance = *self - Position::origin();
+        let mut operation_span_iter = delta.iter().map(|operation| operation.span());
+        let mut operation_span_slot = operation_span_iter.next();
+        loop {
+            match operation_span_slot {
+                Some(OperationSpan::Retain(count)) => match distance.cmp(&count) {
+                    Ordering::Less => {
+                        break position + distance;
+                    }
+                    Ordering::Equal => {
+                        position += distance;
+                        distance = Size::zero();
+                        operation_span_slot = operation_span_iter.next();
+                    }
+                    Ordering::Greater => {
+                        position += count;
+                        distance -= count;
+                        operation_span_slot = operation_span_iter.next();
+                    }
+                },
+                Some(OperationSpan::Insert(count)) => {
+                    position += count;
+                    operation_span_slot = operation_span_iter.next();
+                }
+                Some(OperationSpan::Delete(count)) => match distance.cmp(&count) {
+                    Ordering::Less => {
+                        break position + distance;
+                    }
+                    Ordering::Equal => {
+                        break position;
+                    }
+                    Ordering::Greater => {
+                        distance -= count;
+                        operation_span_slot = operation_span_iter.next();
+                    }
+                },
+                None => {
+                    break position + distance;
+                }
+            }
+        }
     }
 }
 
