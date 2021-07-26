@@ -32,7 +32,7 @@ impl CursorSet {
         builder.build()
     }
 
-    pub fn insert(&mut self, position: Position) {
+    pub fn add(&mut self, position: Position) {
         self.cursors.push(Cursor {
             head: position,
             tail: position,
@@ -119,7 +119,7 @@ impl CursorSet {
 
     pub fn map<F>(&mut self, mut f: F)
     where
-        F: FnMut(Cursor) -> Cursor
+        F: FnMut(Cursor) -> Cursor,
     {
         for cursor in &mut self.cursors {
             *cursor = f(*cursor);
