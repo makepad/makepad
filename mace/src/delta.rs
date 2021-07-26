@@ -14,7 +14,7 @@ impl Delta {
     }
 
     pub fn compose(self, other: Delta) -> Delta {
-        let mut builder = Builder::new();
+        let mut builder = DeltaBuilder::new();
         let mut operation_iter_0 = self.operations.into_iter();
         let mut operation_iter_1 = other.operations.into_iter();
         let mut operation_slot_0 = operation_iter_0.next();
@@ -133,8 +133,8 @@ impl Delta {
     }
 
     pub fn transform(self, other: Delta) -> (Delta, Delta) {
-        let mut builder_0 = Builder::new();
-        let mut builder_1 = Builder::new();
+        let mut builder_0 = DeltaBuilder::new();
+        let mut builder_1 = DeltaBuilder::new();
         let mut operation_iter_0 = self.operations.into_iter();
         let mut operation_iter_1 = other.operations.into_iter();
         let mut operation_slot_0 = operation_iter_0.next();
@@ -286,13 +286,13 @@ impl IntoIterator for Delta {
 }
 
 #[derive(Debug, Default)]
-pub struct Builder {
+pub struct DeltaBuilder {
     operations: Vec<Operation>,
 }
 
-impl Builder {
-    pub fn new() -> Builder {
-        Builder::default()
+impl DeltaBuilder {
+    pub fn new() -> DeltaBuilder {
+        DeltaBuilder::default()
     }
 
     pub fn retain(&mut self, count: Size) {
