@@ -1,8 +1,9 @@
 use crate::{
     cursor::Cursor,
+    delta::Delta,
     position::Position,
-    position_set::{self, PositionSet},
-    range_set::{self, RangeSet},
+    position_set::{PositionSet, PositionSetBuilder},
+    range_set::{RangeSet, RangeSetBuilder},
     text::Text,
 };
 
@@ -17,7 +18,7 @@ impl CursorSet {
     }
 
     pub fn selections(&self) -> RangeSet {
-        let mut builder = range_set::Builder::new();
+        let mut builder = RangeSetBuilder::new();
         for cursor in &self.cursors {
             builder.include(cursor.range());
         }
@@ -25,7 +26,7 @@ impl CursorSet {
     }
 
     pub fn carets(&self) -> PositionSet {
-        let mut builder = position_set::Builder::new();
+        let mut builder = PositionSetBuilder::new();
         for cursor in &self.cursors {
             builder.insert(cursor.head);
         }
@@ -117,12 +118,14 @@ impl CursorSet {
         cursor.max_column = position.column;
     }
 
-    pub fn map<F>(&mut self, mut f: F)
-    where
-        F: FnMut(Cursor) -> Cursor,
-    {
+    pub fn apply_delta(&mut self, delta: &Delta) {
         for cursor in &mut self.cursors {
-            *cursor = f(*cursor);
+            let new_head = cursor.head.apply_delta(&delta);
+            *cursor = Cursor {
+                head: new_head,
+                tail: new_head,
+                max_column: new_head.column,
+            };
         }
     }
 }
