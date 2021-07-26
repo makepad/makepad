@@ -1,16 +1,18 @@
 use {
     crate::{
-        code_editor::{CodeEditor, Document, Session},
+        code_editor::CodeEditor,
         dock::{ContainerId, Dock},
+        document::{Document, DocumentId},
         file_tree::FileTree,
         list_logic::ItemId,
+        session::{Session, SessionId},
         splitter::Splitter,
         tab_bar::TabBar,
-        text::Text,
         tree_logic::NodeId,
     },
     makepad_render::*,
     makepad_widget::*,
+    std::collections::HashMap,
 };
 
 /* This is a test comment
@@ -22,8 +24,8 @@ pub struct App {
     dock: Dock,
     file_tree: FileTree,
     code_editor: CodeEditor,
-    session: Session,
-    document: Document,
+    sessions: HashMap<SessionId, Session>,
+    documents: HashMap<DocumentId, Document>,
 }
 
 impl App {
@@ -36,18 +38,29 @@ impl App {
     }
 
     pub fn new(cx: &mut Cx) -> Self {
+        let mut documents = HashMap::new();
+        let document_id = DocumentId(0);
+        let document = Document::new(
+            include_str!("app.rs")
+                .lines()
+                .map(|line| line.chars().collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+                .into(),
+        );
+        documents.insert(document_id, document);
+        let mut sessions = HashMap::new();
+        let session_id = SessionId(0);
+        let session = Session::new(document_id);
+        sessions.insert(session_id, session);
+        let mut code_editor = CodeEditor::new(cx);
+        code_editor.set_session_id(session_id);
         Self {
             window: DesktopWindow::new(cx),
             dock: Dock::new(cx),
             file_tree: FileTree::new(cx),
-            code_editor: CodeEditor::new(cx),
-            session: Session::default(),
-            document: Document::new(Text::from(
-                include_str!("app.rs")
-                    .lines()
-                    .map(|line| line.chars().collect::<Vec<_>>())
-                    .collect::<Vec<_>>(),
-            )),
+            code_editor,
+            sessions,
+            documents,
         }
     }
 
@@ -56,7 +69,7 @@ impl App {
         self.dock.handle_event(cx, event);
         self.file_tree.handle_event(cx, event);
         self.code_editor
-            .handle_event(cx, event, &mut self.session, &mut self.document);
+            .handle_event(cx, event, &mut self.sessions, &mut self.documents);
     }
 
     pub fn draw_app(&mut self, cx: &mut Cx) {
@@ -94,7 +107,7 @@ impl App {
                     self.dock.end_tab_bar(cx);
                 }
                 cx.turtle_new_line();
-                self.code_editor.draw(cx, &self.session, &self.document);
+                self.code_editor.draw(cx, &self.sessions, &self.documents);
                 self.dock.end_splitter(cx);
             }
             self.window.end_desktop_window(cx);

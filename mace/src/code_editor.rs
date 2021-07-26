@@ -1,19 +1,18 @@
 use {
     crate::{
-        cursor_set::CursorSet,
-        cursor::Cursor,
-        delta::{self, Delta},
+        document::{Document, DocumentId},
         position::Position,
         position_set::PositionSet,
         range_set::{RangeSet, Span},
+        session::{Session, SessionId},
         size::Size,
         text::Text,
-        token::{Keyword, Punctuator, Token, TokenKind},
-        tokenizer::{self, Tokenizer},
+        token::{Keyword, Punctuator, TokenKind},
+        tokenizer::Tokens,
     },
     makepad_render::*,
     makepad_widget::*,
-    std::{collections::HashMap, slice::Iter},
+    std::collections::HashMap,
 };
 
 pub struct CodeEditor {
@@ -33,6 +32,7 @@ pub struct CodeEditor {
     text_color_whitespace: Vec4,
     text_color_unknown: Vec4,
     caret: DrawColor,
+    session_id: Option<SessionId>,
 }
 
 impl CodeEditor {
@@ -75,27 +75,25 @@ impl CodeEditor {
             text_color_whitespace: Vec4::default(),
             text_color_unknown: Vec4::default(),
             caret: DrawColor::new(cx, default_shader!()).with_draw_depth(3.0),
+            session_id: None,
         }
     }
 
-    pub fn draw(&mut self, cx: &mut Cx, session: &Session, document: &Document) {
+    pub fn draw(
+        &mut self,
+        cx: &mut Cx,
+        sessions: &HashMap<SessionId, Session>,
+        documents: &HashMap<DocumentId, Document>,
+    ) {
         if self.view.begin_view(cx, Layout::default()).is_ok() {
+            let session = &sessions[&self.session_id.unwrap()];
+            let document = &documents[&session.document_id()];
             self.apply_style(cx);
-            let visible_lines = self.visible_lines(cx, document.text.as_lines().len());
-            self.draw_selections(
-                cx,
-                &session.cursors.selections(),
-                &document.text,
-                visible_lines,
-            );
-            self.draw_text(cx, &document, visible_lines);
-            self.draw_carets(
-                cx,
-                &session.cursors.selections(),
-                &session.cursors.carets(),
-                visible_lines,
-            );
-            self.set_turtle_bounds(cx, &document.text);
+            let visible_lines = self.visible_lines(cx, document.text().as_lines().len());
+            self.draw_selections(cx, session.selections(), document.text(), visible_lines);
+            self.draw_text(cx, document.text(), document.tokens(), visible_lines);
+            self.draw_carets(cx, session.selections(), session.carets(), visible_lines);
+            self.set_turtle_bounds(cx, document.text());
             self.view.end_view(cx);
         }
     }
@@ -224,18 +222,26 @@ impl CodeEditor {
         self.selection.end_many(cx);
     }
 
-    fn draw_text(&mut self, cx: &mut Cx, document: &Document, visible_lines: VisibleLines) {
+    fn draw_text(
+        &mut self,
+        cx: &mut Cx,
+        text: &Text,
+        tokens: Tokens<'_>,
+        visible_lines: VisibleLines,
+    ) {
         let origin = cx.get_turtle_pos();
         let mut start_y = visible_lines.start_y;
-        for line in document
-            .lines()
+        for (line, tokens) in text
+            .as_lines()
+            .iter()
+            .zip(tokens)
             .skip(visible_lines.start)
             .take(visible_lines.end - visible_lines.start)
         {
             let end_y = start_y + self.text_glyph_size.y;
             let mut start_x = origin.x;
             let mut start = 0;
-            let mut token_iter = line.tokens.iter();
+            let mut token_iter = tokens.iter();
             let mut token_slot = token_iter.next();
             while let Some(token) = token_slot {
                 let next_token = token_iter.next();
@@ -250,7 +256,7 @@ impl CodeEditor {
                         y: start_y,
                     },
                     0,
-                    &line.chars[start..end],
+                    &line[start..end],
                     |_, _, _, _| 0.0,
                 );
                 token_slot = next_token;
@@ -341,13 +347,23 @@ impl CodeEditor {
         });
     }
 
+    pub fn session_id(&self) -> Option<SessionId> {
+        self.session_id
+    }
+
+    pub fn set_session_id(&mut self, session_id: SessionId) {
+        self.session_id = Some(session_id);
+    }
+
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        session: &mut Session,
-        document: &mut Document,
+        sessions: &mut HashMap<SessionId, Session>,
+        documents: &mut HashMap<DocumentId, Document>,
     ) {
+        let session = sessions.get_mut(&self.session_id.unwrap()).unwrap();
+        let document = documents.get_mut(&session.document_id()).unwrap();
         if self.view.handle_scroll_view(cx, event) {
             self.view.redraw_view(cx);
         }
@@ -358,16 +374,16 @@ impl CodeEditor {
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
                 match modifiers {
                     KeyModifiers { control: true, .. } => {
-                        session.insert_cursor(self.position(&document.text, rel));
+                        session.add_cursor(self.position(document.text(), rel));
                     }
                     KeyModifiers { shift, .. } => {
-                        session.move_cursors_to(self.position(&document.text, rel), shift);
+                        session.move_cursors_to(self.position(document.text(), rel), shift);
                     }
                 }
                 self.view.redraw_view(cx);
             }
             Event::FingerMove(FingerMoveEvent { rel, .. }) => {
-                session.move_cursors_to(self.position(&document.text, rel), true);
+                session.move_cursors_to(self.position(document.text(), rel), true);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -375,7 +391,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_left(&document.text, shift);
+                session.move_cursors_left(documents, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -383,7 +399,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_right(&document.text, shift);
+                session.move_cursors_right(documents, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -391,7 +407,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_up(&document.text, shift);
+                session.move_cursors_up(documents, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -399,26 +415,26 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_down(&document.text, shift);
+                session.move_cursors_down(documents, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Return,
                 ..
             }) => {
-                session.insert_text(document, Text::from(vec![vec![], vec![]]));
+                session.insert_text(documents, Text::from(vec![vec![], vec![]]));
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
                 ..
             }) => {
-                session.insert_backspace(document);
+                session.insert_backspace(documents);
                 self.view.redraw_view(cx);
             }
             Event::TextInput(TextInputEvent { input, .. }) => {
                 session.insert_text(
-                    document,
+                    documents,
                     input
                         .lines()
                         .map(|line| line.chars().collect::<Vec<_>>())
@@ -441,195 +457,7 @@ impl CodeEditor {
     }
 }
 
-pub struct Session {
-    cursors: CursorSet,
-    selections: RangeSet,
-    carets: PositionSet,
-}
-
-impl Session {
-    pub fn insert_cursor(&mut self, position: Position) {
-        self.cursors.insert(position);
-        self.update_selections_and_carets();
-    }
-
-    pub fn move_cursors_left(&mut self, text: &Text, select: bool) {
-        self.cursors.move_left(text, select);
-        self.update_selections_and_carets();
-    }
-
-    pub fn move_cursors_right(&mut self, text: &Text, select: bool) {
-        self.cursors.move_right(text, select);
-        self.update_selections_and_carets();
-    }
-
-    pub fn move_cursors_up(&mut self, text: &Text, select: bool) {
-        self.cursors.move_up(text, select);
-        self.update_selections_and_carets();
-    }
-
-    pub fn move_cursors_down(&mut self, text: &Text, select: bool) {
-        self.cursors.move_down(text, select);
-        self.update_selections_and_carets();
-    }
-
-    pub fn move_cursors_to(&mut self, position: Position, select: bool) {
-        self.cursors.move_to(position, select);
-        self.update_selections_and_carets();
-    }
-
-    pub fn insert_text(&mut self, document: &mut Document, text: Text) {
-        let mut builder = delta::Builder::new();
-        for span in self.selections.spans() {
-            if span.is_included {
-                builder.delete(span.len);
-            } else {
-                builder.retain(span.len);
-            }
-        }
-        let delta_0 = builder.build();
-        let mut builder = delta::Builder::new();
-        let mut position = Position::origin();
-        for distance in self.carets.distances() {
-            position += distance;
-            builder.retain(distance);
-            if !self.selections.contains_position(position) {
-                builder.insert(text.clone());
-                position += text.len();
-            }
-        }
-        let delta_1 = builder.build();
-        let (_, delta_1) = delta_0.clone().transform(delta_1);
-        self.apply_delta(document, delta_0.compose(delta_1));
-    }
-
-    pub fn insert_backspace(&mut self, document: &mut Document) {
-        let mut builder = delta::Builder::new();
-        for span in self.selections.spans() {
-            if span.is_included {
-                builder.delete(span.len);
-            } else {
-                builder.retain(span.len);
-            }
-        }
-        let delta_0 = builder.build();
-        let mut builder = delta::Builder::new();
-        let mut position = Position::origin();
-        for distance in self.carets.distances() {
-            position += distance;
-            if !self.selections.contains_position(position) {
-                if distance.column == 0 {
-                    builder.retain(Size {
-                        line: distance.line - 1,
-                        column: document.text.as_lines()[position.line - 1].len(),
-                    });
-                    builder.delete(Size {
-                        line: 1,
-                        column: 0,
-                    })
-                } else {
-                    builder.retain(Size {
-                        line: distance.line,
-                        column: distance.column - 1,
-                    });
-                    builder.delete(Size {
-                        line: 0,
-                        column: 1
-                    });
-                }
-            } else {
-                builder.retain(distance);
-            }
-        }
-        let delta_1 = builder.build();
-        let (_, delta_1) = delta_0.clone().transform(delta_1);
-        self.apply_delta(document, delta_0.compose(delta_1));
-    }
-
-    fn apply_delta(&mut self, document: &mut Document, delta: Delta) {
-        let map = self
-            .carets
-            .iter()
-            .cloned()
-            .zip(self.carets.transform(&delta))
-            .collect::<HashMap<_, _>>();
-        self.cursors.map(|cursor| {
-            let new_head = *map.get(&cursor.head).unwrap();
-            Cursor {
-                head: new_head,
-                tail: new_head,
-                max_column: new_head.column,
-            }
-        });
-        document.apply_delta(delta);
-        self.update_selections_and_carets();
-    }
-
-    fn update_selections_and_carets(&mut self) {
-        self.selections = self.cursors.selections();
-        self.carets = self.cursors.carets();
-    }
-}
-
-impl Default for Session {
-    fn default() -> Session {
-        let mut session = Session {
-            cursors: CursorSet::default(),
-            selections: RangeSet::default(),
-            carets: PositionSet::default(),
-        };
-        session.update_selections_and_carets();
-        session
-    }
-}
-
-pub struct Document {
-    text: Text,
-    tokenizer: Tokenizer,
-}
-
-impl Document {
-    pub fn new(text: Text) -> Document {
-        let tokenizer = Tokenizer::new(&text);
-        Document { text, tokenizer }
-    }
-
-    pub fn lines(&self) -> Lines<'_> {
-        Lines {
-            chars_iter: self.text.as_lines().iter(),
-            tokens_iter: self.tokenizer.lines(),
-        }
-    }
-
-    pub fn apply_delta(&mut self, delta: Delta) {
-        self.tokenizer.invalidate_cache(&delta);
-        self.text.apply_delta(delta);
-        self.tokenizer.refresh_cache(&self.text);
-    }
-}
-
-pub struct Lines<'a> {
-    chars_iter: Iter<'a, Vec<char>>,
-    tokens_iter: tokenizer::Lines<'a>,
-}
-
-impl<'a> Iterator for Lines<'a> {
-    type Item = Line<'a>;
-
-    fn next(&mut self) -> Option<Line<'a>> {
-        Some(Line {
-            chars: self.chars_iter.next()?,
-            tokens: self.tokens_iter.next()?,
-        })
-    }
-}
-
-pub struct Line<'a> {
-    chars: &'a [char],
-    tokens: &'a [Token],
-}
-
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct VisibleLines {
     start: usize,
     end: usize,
