@@ -1,8 +1,7 @@
 use {
     crate::{
-        cursor::Cursor,
         cursor_set::CursorSet,
-        delta::{self, Delta},
+        delta::{Delta, DeltaBuilder},
         document::{Document, DocumentId},
         position::Position,
         position_set::PositionSet,
@@ -58,7 +57,7 @@ impl Session {
 
     pub fn move_cursors_left(&mut self, documents: &HashMap<DocumentId, Document>, select: bool) {
         let document = &documents[&self.document_id];
-        self.cursors.move_right(document.text(), select);
+        self.cursors.move_left(document.text(), select);
         self.update_selections_and_carets();
     }
 
@@ -87,7 +86,7 @@ impl Session {
 
     pub fn insert_text(&mut self, documents: &mut HashMap<DocumentId, Document>, text: Text) {
         let document = documents.get_mut(&self.document_id).unwrap();
-        let mut builder = delta::Builder::new();
+        let mut builder = DeltaBuilder::new();
         for span in self.selections.spans() {
             if span.is_included {
                 builder.delete(span.len);
@@ -96,7 +95,7 @@ impl Session {
             }
         }
         let delta_0 = builder.build();
-        let mut builder = delta::Builder::new();
+        let mut builder = DeltaBuilder::new();
         let mut position = Position::origin();
         for distance in self.carets.distances() {
             position += distance;
@@ -113,7 +112,7 @@ impl Session {
 
     pub fn insert_backspace(&mut self, documents: &mut HashMap<DocumentId, Document>) {
         let document = documents.get_mut(&self.document_id).unwrap();
-        let mut builder = delta::Builder::new();
+        let mut builder = DeltaBuilder::new();
         for span in self.selections.spans() {
             if span.is_included {
                 builder.delete(span.len);
@@ -122,7 +121,7 @@ impl Session {
             }
         }
         let delta_0 = builder.build();
-        let mut builder = delta::Builder::new();
+        let mut builder = DeltaBuilder::new();
         let mut position = Position::origin();
         for distance in self.carets.distances() {
             position += distance;
@@ -150,20 +149,7 @@ impl Session {
     }
 
     fn apply_delta(&mut self, document: &mut Document, delta: Delta) {
-        let map = self
-            .carets
-            .iter()
-            .cloned()
-            .zip(self.carets.transform(&delta))
-            .collect::<HashMap<_, _>>();
-        self.cursors.map(|cursor| {
-            let new_head = *map.get(&cursor.head).unwrap();
-            Cursor {
-                head: new_head,
-                tail: new_head,
-                max_column: new_head.column,
-            }
-        });
+        self.cursors.apply_delta(&delta);
         document.apply_delta(delta);
         self.update_selections_and_carets();
     }
