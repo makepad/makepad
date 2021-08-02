@@ -976,7 +976,7 @@ impl<'a, 'b> BackendWriter for HlslBackendWriter<'a, 'b> {
             .unwrap();
     }
     
-    fn write_builtin_call_ident(&self, string: &mut String, ident: Ident, arg_exprs: &[Expr]) {
+    fn write_call_ident(&self, string: &mut String, ident: Ident, arg_exprs: &[Expr]) {
         if ident == Ident::new("atan") {
             if arg_exprs.len() == 2 {
                 write!(string, "atan2").unwrap();

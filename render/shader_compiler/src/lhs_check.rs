@@ -14,13 +14,15 @@ use crate::shaderast::Lit;
 use crate::shaderast::VarKind;
 use crate::shaderast::Ty;
 use crate::shaderast::DrawShaderFieldKind;
+use crate::shaderregistry::ShaderRegistry;
 use std::cell::Cell;
 
-pub struct LhsChecker<'a, 'b> {
-    pub env: &'a Env<'b>,
+pub struct LhsChecker<'a> {
+    pub env: &'a Env,
+    pub shader_registry: &'a ShaderRegistry,
 }
 
-impl<'a, 'b> LhsChecker<'a, 'b> {
+impl<'a> LhsChecker<'a> {
     pub fn lhs_check_expr(&mut self, expr: &Expr) -> Result<(), LiveError> {
         match expr.kind {
             ExprKind::Cond {
@@ -67,9 +69,8 @@ impl<'a, 'b> LhsChecker<'a, 'b> {
             ExprKind::Var {
                 span,
                 ref kind,
-                ident_path,
                 ..
-            } => self.lhs_check_var_expr(span, kind, ident_path),
+            } => self.lhs_check_var_expr(span, kind),
             ExprKind::Lit {span, lit} => self.lhs_check_lit_expr(span, lit),
         }
     }
@@ -130,7 +131,7 @@ impl<'a, 'b> LhsChecker<'a, 'b> {
         // lets grab the ty from expr
         match expr.ty.borrow().as_ref().unwrap(){
             Ty::DrawShader(shader_ptr)=>{
-                let field_decl = self.env.shader_registry.draw_shader_decl_from_ptr(*shader_ptr).unwrap().find_field(field_ident) .unwrap();
+                let field_decl = self.shader_registry.draw_shaders.get(shader_ptr).unwrap().find_field(field_ident) .unwrap();
                 match &field_decl.kind{
                     DrawShaderFieldKind::Varying{..}=>{
                         Ok(())
@@ -176,9 +177,8 @@ impl<'a, 'b> LhsChecker<'a, 'b> {
         &mut self,
         span: Span,
         kind: &Cell<Option<VarKind >>,
-        _ident_path: IdentPath,
     ) -> Result<(), LiveError> {
-        if let VarKind::MutLocal = kind.get().unwrap(){
+        if let VarKind::MutLocal(_) = kind.get().unwrap(){
             Ok(())
         }
         else{

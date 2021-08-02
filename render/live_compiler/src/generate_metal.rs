@@ -680,6 +680,8 @@ struct MetalBackendWriter<'a, 'b> {
 
 impl<'a, 'b> BackendWriter for MetalBackendWriter<'a, 'b> {
     fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, ident_path: IdentPath, shader: &ShaderAst, sep: &str) {
+        todo!()
+        /*
         let mut sep = sep;
         if let Some(decl) = shader.find_fn_decl(ident_path) {
             if use_const_table {
@@ -715,7 +717,7 @@ impl<'a, 'b> BackendWriter for MetalBackendWriter<'a, 'b> {
                     write!(string, "{}mpsc_varyings", sep).unwrap();
                 }
             }
-        }
+        }*/
     }
     
     fn generate_var_expr(&self, string: &mut String, span: Span, ident_path: IdentPath, kind: &Cell<Option<VarKind >>, shader: &ShaderAst, decl: &FnDecl, _ty: &Option<Ty>) {
@@ -931,7 +933,7 @@ impl<'a, 'b> BackendWriter for MetalBackendWriter<'a, 'b> {
             .unwrap();
     }
     
-    fn write_call_ident(&self, string: &mut String, ident: Ident, arg_exprs: &[Expr]) {
+    fn write_builtin_call_ident(&self, string: &mut String, ident: Ident, arg_exprs: &[Expr]) {
         if ident == Ident::new("atan") {
             if arg_exprs.len() == 2 {
                 write!(string, "atan2").unwrap();

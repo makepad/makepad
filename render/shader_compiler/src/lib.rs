@@ -13,3 +13,5 @@ pub mod ty_check;
 pub mod lhs_check;
 pub mod swizzle;
 pub mod util;
+pub mod generate;
+pub mod generate_glsl;
