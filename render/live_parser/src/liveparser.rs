@@ -498,6 +498,9 @@ impl<'a> LiveParser<'a> {
                                 if self.accept_token(token_punct!(:)) { // its a vardef
                                     self.expect_var_def_type() ?;
                                     // now an assignment might follow.
+
+                                    // we should parse full expressions here
+                                    // consts can only depend on other consts, not on live values
                                     if self.accept_token(token_punct!(=)){
                                         self.expect_value_literal()?;
                                     }

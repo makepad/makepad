@@ -999,7 +999,7 @@ impl<'a, 'b> BackendWriter for GlslBackendWriter<'a, 'b> {
             .unwrap();
     }
     
-    fn write_call_ident(&self, string: &mut String, ident: Ident, _arg_exprs: &[Expr]) {
+    fn write_builtin_call_ident(&self, string: &mut String, ident: Ident, _arg_exprs: &[Expr]) {
         self.write_ident(string, ident);
     }
     

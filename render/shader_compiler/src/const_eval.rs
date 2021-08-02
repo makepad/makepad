@@ -1,21 +1,20 @@
 use crate::shaderast::*;
+use crate::analyse::ShaderAnalyseOptions;
 use makepad_live_parser::LiveError;
 use makepad_live_parser::LiveErrorOrigin;
 use makepad_live_parser::live_error_origin;
-use crate::shaderast::{Ident,IdentPath};
+use crate::shaderast::Ident;
 use crate::shaderast::{Lit};
 use makepad_live_parser::Span;
 use crate::shaderast::Val;
-use crate::env::Env;
 use std::cell::Cell;
 
 #[derive(Debug)]
-pub struct ConstEvaluator<'a, 'b> {
-    pub env: &'a Env<'b>,
-    pub no_const_collapse: bool
+pub struct ConstEvaluator {
+    pub options: ShaderAnalyseOptions
 }
 
-impl<'a,'b> ConstEvaluator<'a,'b> {
+impl ConstEvaluator {
     pub fn const_eval_expr(&self, expr: &Expr) -> Result<Val, LiveError> {
         self.try_const_eval_expr(expr).ok_or_else(|| LiveError {
             origin:live_error_origin!(),
@@ -68,9 +67,8 @@ impl<'a,'b> ConstEvaluator<'a,'b> {
             ExprKind::Var {
                 span,
                 ref kind,
-                ident_path,
                 ..
-            } => self.try_const_eval_var_expr(span, kind, ident_path),
+            } => self.try_const_eval_var_expr(span, kind),
             ExprKind::Lit { span, lit } => self.try_const_eval_lit_expr(span, lit),
         };
         *expr.const_val.borrow_mut() = Some(const_val.clone());
@@ -107,7 +105,7 @@ impl<'a,'b> ConstEvaluator<'a,'b> {
         let right_val = self.try_const_eval_expr(right_expr);
         let left_val = left_val?;
         let right_val = right_val?;
-        if self.no_const_collapse{
+        if self.options.no_const_collapse{
             return None
         }
         match op {
@@ -178,7 +176,7 @@ impl<'a,'b> ConstEvaluator<'a,'b> {
     fn try_const_eval_un_expr(&self, _span: Span, op: UnOp, expr: &Expr) -> Option<Val> {
         let val = self.try_const_eval_expr(expr);
         let val = val?;
-        if self.no_const_collapse{
+        if self.options.no_const_collapse{
             return None
         }
         match op {
@@ -230,7 +228,7 @@ impl<'a,'b> ConstEvaluator<'a,'b> {
         &self,
         _span: Span,
         kind: &Cell<Option<VarKind>>,
-        _ident_path: IdentPath,
+        //_ident_path: IdentPath,
     ) -> Option<Val> {
         match kind.get().unwrap() {
             VarKind::Const(_const_node_ptr) =>{
