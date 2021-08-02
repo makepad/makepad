@@ -1,7 +1,7 @@
 use crate::{
     delta::Delta,
     text::Text,
-    tokenizer::{Tokenizer, Tokens},
+    tokenizer::{Tokenizer, TokensByLine},
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -22,8 +22,8 @@ impl Document {
         &self.text
     }
 
-    pub fn tokens(&self) -> Tokens<'_> {
-        self.tokenizer.tokens()
+    pub fn tokens_by_line(&self) -> TokensByLine<'_> {
+        self.tokenizer.tokens_by_line()
     }
 
     pub fn apply_delta(&mut self, delta: Delta) {
