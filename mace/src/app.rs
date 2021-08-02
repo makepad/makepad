@@ -5,7 +5,7 @@ use {
         document::{Document, DocumentId},
         file_tree::FileTree,
         list_logic::ItemId,
-        protocol::{Request, Response},
+        protocol::{self, Request, Response},
         server::Server,
         session::{Session, SessionId},
         splitter::Splitter,
@@ -31,6 +31,7 @@ pub struct App {
     dock: Dock,
     file_tree: FileTree,
     code_editor: CodeEditor,
+    next_node_id: NodeId,
     file_nodes_by_node_id: HashMap<NodeId, FileNode>,
     sessions: HashMap<SessionId, Session>,
     documents: HashMap<DocumentId, Document>,
@@ -49,6 +50,12 @@ impl App {
     }
 
     pub fn new(cx: &mut Cx) -> Self {
+        let mut file_nodes_by_node_id = HashMap::new();
+        file_nodes_by_node_id.insert(NodeId(0), FileNode {
+            parent_id: None,
+            name: String::from("root"),
+            child_ids: Some(Vec::new()),
+        });
         let mut documents = HashMap::new();
         let document_id = DocumentId(0);
         let document = Document::new(
@@ -83,7 +90,8 @@ impl App {
             dock: Dock::new(cx),
             file_tree: FileTree::new(cx),
             code_editor,
-            file_nodes_by_node_id: HashMap::new(),
+            next_node_id: NodeId(1),
+            file_nodes_by_node_id,
             sessions,
             documents,
             request_sender,
@@ -103,6 +111,7 @@ impl App {
                     self.dock.end_tab_bar(cx);
                 }
                 cx.turtle_new_line();
+                /*
                 if self.file_tree.begin(cx).is_ok() {
                     if self.file_tree.begin_folder(cx, NodeId(0), "A").is_ok() {
                         if self.file_tree.begin_folder(cx, NodeId(1), "B").is_ok() {
@@ -119,6 +128,8 @@ impl App {
                     }
                     self.file_tree.end(cx);
                 }
+                */
+                self.draw_file_tree(cx);
                 self.dock.middle_splitter(cx);
                 if self.dock.begin_tab_bar(cx, ContainerId(3)).is_ok() {
                     self.dock.tab(cx, ItemId(1), "AAA");
@@ -157,7 +168,62 @@ impl App {
             }
         }
 
-        if self.file_tree.begin(cx).is_ok() {}
+        if self.file_tree.begin(cx).is_ok() {
+            draw_file_node(
+                cx,
+                &mut self.file_tree,
+                &self.file_nodes_by_node_id,
+                NodeId(0),
+            );
+            self.file_tree.end(cx);
+        }
+    }
+
+    fn set_file_tree(&mut self, root: protocol::FileNode) {
+        fn create_file_node(
+            next_node_id: &mut NodeId,
+            file_nodes_by_node_id: &mut HashMap<NodeId, FileNode>,
+            parent_id: Option<NodeId>,
+            name: String,
+            node: protocol::FileNode,
+        ) -> NodeId {
+            let node_id = *next_node_id;
+            *next_node_id = NodeId(next_node_id.0 + 1);
+            let node = FileNode {
+                parent_id,
+                name,
+                child_ids: match node {
+                    protocol::FileNode::File => None,
+                    protocol::FileNode::Directory { children } => Some(
+                        children
+                            .into_iter()
+                            .map(|(name, child)| {
+                                create_file_node(
+                                    next_node_id,
+                                    file_nodes_by_node_id,
+                                    Some(node_id),
+                                    name.to_string_lossy().into_owned(),
+                                    child,
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                },
+            };
+            file_nodes_by_node_id.insert(node_id, node);
+            node_id
+        }
+
+        self.file_tree.forget();
+        self.next_node_id = NodeId(0);
+        self.file_nodes_by_node_id.clear();
+        create_file_node(
+            &mut self.next_node_id,
+            &mut self.file_nodes_by_node_id,
+            None,
+            String::from("root"),
+            root,
+        );
     }
 
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
@@ -167,28 +233,21 @@ impl App {
         self.code_editor
             .handle_event(cx, event, &mut self.sessions, &mut self.documents);
         match event {
-            Event::Signal(event) if event.signals.contains_key(&self.response_signal) => {
-                loop {
-                    match self.response_receiver.try_recv() {
-                        Ok(response) => {
-                            match response {
-                                Response::GetFileTree(response) => {
-                                    let response = response.unwrap();
-                                    self.file_tree.forget();
-                                    // TODO
-                                }
-                            }
-                        }
-                        Err(TryRecvError::Empty) => break,
-                        _ => panic!(),
-                    }
+            Event::Signal(event) if event.signals.contains_key(&self.response_signal) => loop {
+                match self.response_receiver.try_recv() {
+                    Ok(response) => match response {
+                        Response::GetFileTree(response) => self.set_file_tree(response.unwrap()),
+                    },
+                    Err(TryRecvError::Empty) => break,
+                    _ => panic!(),
                 }
-            }
+            },
             _ => {}
         }
     }
 }
 
+#[derive(Debug)]
 struct FileNode {
     parent_id: Option<NodeId>,
     name: String,
