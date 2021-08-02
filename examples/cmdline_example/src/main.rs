@@ -16,40 +16,51 @@ const SOURCE:&'static str = r#"
             //instance y: float
             uniform z: float
             varying w: float
+
             BlaComp:Component{
                 fn blup()->int{return 0;}
             }
             
             const CV:float = 1.0;
-             
+            bla: 1.0,
+            
+            MyStruct2:Struct{
+                field b:float
+                fn blip(self){}
+            }
+            
             MyStruct:Struct{
                 field x:float
                 field y:float
+                field z:float
+                field bb: MyStruct2
                 fn blop(self){}
                 fn bla()->Self{
                     let t = BlaComp::blup();
                     let v: Self;
                     v.x = CV;
                     v.y = 2.0;
+                    v.z = bla;
+                    v.bb.blip();
                     v.blop();
                     return v;
                 }
             }
             
-            
-            fn other(self){
+            fn other(self, x:float)->vec4{
+                return vec4(self.w+2.0);
             }
             
             fn pixel(self)->vec4{
                 let y:MyStruct;
                 let x = MyStruct::bla();
-                self.w = 1.0;
-                self.other();
+                self.other(1.0);
                 //let w = self.z;
                 return #f00;
             }
             
             fn vertex(self)->vec4{
+                self.w = 1.0;
                 return vec4(1.0);
             }
         }
@@ -119,6 +130,18 @@ fn main() {
             println!("OK!");
         }
     }
+    // ok the shader is analysed.
+    // now we will generate the glsl shader.
+    let result = sr.generate_glsl_shader(id!(main), id!(test), &[id!(DrawQuad)], Some(FileId(0)));
+    match result{
+        Err(e)=>{
+            println!("Error {}", e.to_live_file_error("", SOURCE));
+        }
+        Ok(_)=>{
+            println!("OK!");
+        }
+    }    
+    
     /*
     lr.register_component(id!(main), id!(test), id!(DrawQuad), Box::new(MyShaderFactory {}));
     

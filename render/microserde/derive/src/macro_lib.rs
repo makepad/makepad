@@ -385,6 +385,18 @@ impl TokenParser {
         false
     }
     
+    pub fn eat_any_punct(&mut self) -> Option<String> {
+        let mut out = String::new();
+        while let Some(TokenTree::Punct(current)) = &self.current {
+            out.push(current.as_char());
+            if current.spacing() == Spacing::Alone{
+                return Some(out);
+            }
+            self.advance();
+        }
+        None
+    }
+    
     pub fn eat_any_ident(&mut self) -> Option<String> {
         if let Some(TokenTree::Ident(ident)) = &self.current {
             let ret = Some(ident.to_string());

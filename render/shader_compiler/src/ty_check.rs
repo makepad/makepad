@@ -4,7 +4,7 @@ use crate::env::Env;
 use makepad_live_parser::LiveError;
 use makepad_live_parser::LiveErrorOrigin;
 use makepad_live_parser::live_error_origin;
-use crate::shaderast::{Ident, IdentPath};
+use crate::shaderast::Ident;
 use crate::lhs_check::LhsChecker;
 use crate::shaderast::Lit;
 use makepad_live_parser::Span;
@@ -14,15 +14,17 @@ use crate::util::CommaSep;
 use std::cell::Cell;
 use std::fmt::Write;
 use std::rc::Rc;
+use crate::shaderregistry::ShaderRegistry;
 
 #[derive(Clone, Debug)]
-pub struct TyChecker<'a, 'b> {
-    pub env: &'a Env<'b>,
+pub struct TyChecker<'a> {
+    pub env: &'a Env,
+    pub shader_registry: &'a ShaderRegistry
 }
 
-impl<'a, 'b> TyChecker<'a, 'b> {
+impl<'a> TyChecker<'a> {
     fn lhs_checker(&self) -> LhsChecker {
-        LhsChecker {env: self.env}
+        LhsChecker {env: self.env, shader_registry: self.shader_registry,}
     }
     
     pub fn ty_check_ty_expr(&mut self, ty_expr: &TyExpr) -> Result<Ty, LiveError> {
@@ -97,7 +99,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                 //ident,
                 fn_node_ptr,
                 ref arg_exprs,
-            } => self.ty_check_plain_call_expr(span,  arg_exprs, fn_node_ptr),
+            } => self.ty_check_plain_call_expr(span, arg_exprs, fn_node_ptr),
             ExprKind::MethodCall {
                 span,
                 ident,
@@ -112,7 +114,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                 span,
                 ty_lit,
                 ref arg_exprs,
-            } => self.ty_check_cons_call_expr(span, ty_lit, arg_exprs), 
+            } => self.ty_check_cons_call_expr(span, ty_lit, arg_exprs),
             ExprKind::Field {
                 span,
                 ref expr,
@@ -127,9 +129,8 @@ impl<'a, 'b> TyChecker<'a, 'b> {
             ExprKind::Var {
                 span,
                 ref kind,
-                ident_path,
-                live_scope_value,
-            } => self.ty_check_var_expr(span, kind, ident_path, live_scope_value),
+                var_resolve,
+            } => self.ty_check_var_expr(span, kind, var_resolve),
             ExprKind::Lit {span, lit} => self.ty_check_lit_expr(span, lit),
         } ?;
         *expr.ty.borrow_mut() = Some(ty.clone());
@@ -366,11 +367,11 @@ impl<'a, 'b> TyChecker<'a, 'b> {
         for arg_expr in arg_exprs {
             self.ty_check_expr(arg_expr) ?;
         }
-        // alright so. 
-        let fn_decl = self.env.shader_registry.plain_fn_decl_from_ptr(fn_node_ptr).expect("fn ptr invalid");
-    
-        self.check_call_args(span, fn_node_ptr, arg_exprs, &fn_decl)?;
-    
+        // alright so.
+        let fn_decl = self.shader_registry.plain_fns.get(&fn_node_ptr).expect("fn ptr invalid");
+        
+        self.check_call_args(span, fn_node_ptr, arg_exprs, &fn_decl) ?;
+        
         // lets return the right ty
         return Ok(fn_decl.return_ty.borrow().clone().unwrap())
     }
@@ -384,15 +385,15 @@ impl<'a, 'b> TyChecker<'a, 'b> {
         
         let ty = self.ty_check_expr(&arg_exprs[0]) ?;
         match ty {
-            Ty::DrawShader(shader_ptr)=>{ // a shader method call
+            Ty::DrawShader(shader_ptr) => { // a shader method call
                 for arg_expr in arg_exprs {
                     self.ty_check_expr(arg_expr) ?;
                 }
                 
-                if let Some(fn_decl) = self.env.shader_registry.draw_shader_method_from_ptr(shader_ptr, ident){
-                    self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl)?;
+                if let Some(fn_decl) = self.shader_registry.draw_shader_method_from_ptr(shader_ptr, ident) {
+                    self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl) ?;
                     
-                    if let Some(return_ty) = fn_decl.return_ty.borrow().clone(){
+                    if let Some(return_ty) = fn_decl.return_ty.borrow().clone() {
                         return Ok(return_ty);
                     }
                     return Err(LiveError {
@@ -408,10 +409,10 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                     self.ty_check_expr(arg_expr) ?;
                 }
                 // ok lets find 'ident' on struct_ptr
-                if let Some(fn_decl) = self.env.shader_registry.struct_method_from_ptr(struct_ptr, ident){
-                    self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl)?;
+                if let Some(fn_decl) = self.shader_registry.struct_method_from_ptr(struct_ptr, ident) {
+                    self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl) ?;
                     
-                    if let Some(return_ty) = fn_decl.return_ty.borrow().clone(){
+                    if let Some(return_ty) = fn_decl.return_ty.borrow().clone() {
                         return Ok(return_ty);
                     }
                     return Err(LiveError {
@@ -421,7 +422,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                     });
                 }
             },
-            _=>()
+            _ => ()
         }
         Err(LiveError {
             origin: live_error_origin!(),
@@ -440,7 +441,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
             self.ty_check_expr(arg_expr) ?;
         }
         
-        let builtin = self.env.shader_registry.builtins.get(&ident).unwrap();
+        let builtin = self.shader_registry.builtins.get(&ident).unwrap();
         let arg_tys = arg_exprs
             .iter()
             .map( | arg_expr | arg_expr.ty.borrow().as_ref().unwrap().clone())
@@ -475,7 +476,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                 span,
                 message: format!(
                     "not enough arguments for call to function `{}`: expected {}, got {}",
-                    self.env.shader_registry.fn_ident_from_ptr(fn_node_ptr),
+                    self.shader_registry.fn_ident_from_ptr(fn_node_ptr),
                     fn_decl.params.len(),
                     arg_exprs.len(),
                 )
@@ -488,7 +489,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                 span,
                 message: format!(
                     "too many arguments for call to function `{}`: expected {}, got {}",
-                    self.env.shader_registry.fn_ident_from_ptr(fn_node_ptr),
+                    self.shader_registry.fn_ident_from_ptr(fn_node_ptr),
                     fn_decl.params.len(),
                     arg_exprs.len()
                 )
@@ -508,7 +509,7 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                     message: format!(
                         "wrong type for argument {} in call to function `{}`: expected `{}`, got `{}`",
                         index + 1,
-                        self.env.shader_registry.fn_ident_from_ptr(fn_node_ptr),
+                        self.shader_registry.fn_ident_from_ptr(fn_node_ptr),
                         param_ty,
                         arg_ty,
                     ).into()
@@ -574,14 +575,14 @@ impl<'a, 'b> TyChecker<'a, 'b> {
                 })
             }
             Ty::Struct(struct_ptr) => {
-                Ok(self .env .shader_registry.struct_decl_from_ptr(struct_ptr) .unwrap() .find_field(field_ident) .ok_or(LiveError {
+                Ok(self.shader_registry.structs.get(&struct_ptr) .unwrap() .find_field(field_ident) .ok_or(LiveError {
                     origin: live_error_origin!(),
                     span,
                     message: format!("field `{}` is not defined on type `{:?}`", field_ident, struct_ptr),
                 }) ? .ty_expr .ty .borrow() .as_ref() .unwrap() .clone())
             },
-            Ty::DrawShader(shader_ptr)=>{
-                Ok(self.env.shader_registry.draw_shader_decl_from_ptr(shader_ptr).unwrap().find_field(field_ident) .ok_or(LiveError {
+            Ty::DrawShader(shader_ptr) => {
+                Ok(self.shader_registry.draw_shaders.get(&shader_ptr).unwrap().find_field(field_ident) .ok_or(LiveError {
                     origin: live_error_origin!(),
                     span,
                     message: format!("field `{}` is not defined on shader `{:?}`", field_ident, shader_ptr),
@@ -708,40 +709,37 @@ impl<'a, 'b> TyChecker<'a, 'b> {
         &mut self,
         span: Span,
         kind: &Cell<Option<VarKind >>,
-        ident_path: IdentPath,
-        live_scope_value: LiveScopeValue
+        var_resolve: VarResolve
     ) -> Result<Ty, LiveError> {
         
-        if ident_path.len() == 1 {
-            match self.env.find_sym_on_scopes(Ident(ident_path.segs[0]), span){
-                Some(sym)=>{
-                    // ok its either a local var or something.
-                    kind.set(Some(if sym.is_mut{VarKind::MutLocal}else{VarKind::Local}));
-                    return Ok(sym.ty)
-                }
-                _=>()
-            }
-        }
         // use the suggestion
-        match live_scope_value{
-            LiveScopeValue::Const(const_node_ptr)=>{
+        match var_resolve {
+            VarResolve::Const(const_node_ptr) => {
                 // ok we have a const, and we can fetch it,
                 // and it has a type
-                let const_decl = self.env.shader_registry.const_decl_from_ptr(const_node_ptr).unwrap();
+                let const_decl = self.shader_registry.consts.get(&const_node_ptr).unwrap();
                 kind.set(Some(VarKind::Const(const_node_ptr)));
                 return Ok(const_decl.ty_expr.ty.borrow().clone().unwrap());
                 //kind.set(Some(VarKind::Const(value_ptr)));
                 //return Ok(ty_lit.to_ty());
             },
-            LiveScopeValue::LiveValue(value_ptr, ty_lit)=>{
+            VarResolve::LiveValue(value_ptr, ty_lit) => {
                 kind.set(Some(VarKind::LiveValue(value_ptr)));
                 return Ok(ty_lit.to_ty());
             }
-            LiveScopeValue::NotFound=>{
+            VarResolve::NotFound(ident) => {
+                match self.env.find_sym_on_scopes(ident, span) {
+                    Some(sym) => {
+                        // ok its either a local var or something.
+                        kind.set(Some(if sym.is_mut {VarKind::MutLocal(ident)}else {VarKind::Local(ident)}));
+                        return Ok(sym.ty)
+                    }
+                    _ => ()
+                }
                 return Err(LiveError {
                     origin: live_error_origin!(),
                     span,
-                    message: format!("`{}` is not defined in this scope", ident_path),
+                    message: format!("`{}` is not defined in this scope", ident),
                 })
             }
         }

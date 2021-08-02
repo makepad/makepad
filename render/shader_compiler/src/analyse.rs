@@ -7,12 +7,14 @@ use crate::env::LocalSym;
 use crate::shaderast::Ident;
 use crate::shaderast::{Ty, TyExpr};
 use crate::ty_check::TyChecker;
+use crate::shaderregistry::ShaderRegistry;
 
 use makepad_live_parser::LiveError;
 use makepad_live_parser::LiveErrorOrigin;
 use makepad_live_parser::live_error_origin;
 use makepad_live_parser::id;
 use makepad_live_parser::Id;
+use makepad_live_parser::FileId;
 use makepad_live_parser::Span;
 
 use std::cell::RefCell;
@@ -47,37 +49,40 @@ pub fn analyse(shader: &ShaderAst, base_props:&[PropDef], sub_props: &[&PropDef]
 }*/
 
 #[derive(Debug, Clone, Copy)]
-pub struct ShaderCompileOptions {
-    pub gather_all: bool,
-    pub create_const_table: bool,
+pub struct ShaderAnalyseOptions {
     pub no_const_collapse: bool
 }
 
-
-#[derive(Debug)]
-pub struct StructAnalyser<'a, 'b> {
-    pub struct_decl: &'a StructDecl,
-    pub env: &'a mut Env<'b>,
-    pub options: ShaderCompileOptions,
+#[derive(Debug, Clone, Copy)]
+pub struct ShaderGenerateOptions {
+    pub const_file_id: Option<FileId>
 }
 
-impl<'a, 'b> StructAnalyser<'a, 'b> {
+#[derive(Debug)]
+pub struct StructAnalyser<'a> {
+    pub struct_decl: &'a StructDecl,
+    pub env: &'a mut Env,
+    pub shader_registry: &'a ShaderRegistry,
+    pub options: ShaderAnalyseOptions,
+}
+
+impl<'a> StructAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
+            shader_registry: self.shader_registry,
             env: self.env,
         }
     }
-    
+    /*
     fn const_gatherer(&self) -> ConstGatherer {
         ConstGatherer {
             env: self.env,
-            gather_all: self.options.gather_all,
         }
-    }
+    }*/
     
     pub fn analyse_struct(&mut self) -> Result<(), LiveError> {
         self.env.push_scope();
-        
+        self.struct_decl.init_analysis();
         // we need to analyse the fields and put them somewhere.
         for field in &self.struct_decl.fields {
             self.analyse_field_decl(field) ?;
@@ -91,6 +96,7 @@ impl<'a, 'b> StructAnalyser<'a, 'b> {
             FnDefAnalyser {
                 decl,
                 env: &mut self.env,
+                shader_registry: self.shader_registry,
                 options: self.options,
                 is_inside_loop: false,
             }
@@ -121,6 +127,16 @@ impl<'a, 'b> StructAnalyser<'a, 'b> {
     
     fn analyse_field_decl(&mut self, decl: &FieldDecl) -> Result<(), LiveError> {
         self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
+        // ok so. if this thing depends on structs, lets store them.
+        match decl.ty_expr.ty.borrow().as_ref().unwrap(){
+            Ty::Struct(struct_ptr)=>{
+                self.struct_decl.struct_refs.borrow_mut().as_mut().unwrap().insert(*struct_ptr);
+            }
+            Ty::Array{..}=>{
+                todo!();
+            }
+            _=>()
+        }
         Ok(())
     }
     
@@ -143,17 +159,19 @@ impl<'a, 'b> StructAnalyser<'a, 'b> {
 
 
 #[derive(Debug)]
-pub struct DrawShaderAnalyser<'a, 'b> {
+pub struct DrawShaderAnalyser<'a> {
     //pub body: &'a ShaderBody,
     pub draw_shader_decl: &'a DrawShaderDecl,
-    pub env: &'a mut Env<'b>,
-    pub options: ShaderCompileOptions,
+    pub env: &'a mut Env,
+    pub shader_registry: &'a ShaderRegistry,
+    pub options: ShaderAnalyseOptions,
 }
 
-impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
+impl<'a> DrawShaderAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
             env: self.env,
+            shader_registry: self.shader_registry,
         }
     }
     /*
@@ -163,15 +181,14 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
             no_const_collapse: self.options.no_const_collapse
         }
     }*/
-    
+    /*
     fn const_gatherer(&self) -> ConstGatherer {
         ConstGatherer {
             env: self.env,
-            gather_all: self.options.gather_all,
         }
-    }
+    }*/
     
-    pub fn analyse_shader(&mut self) -> Result<(), LiveError> {
+    pub fn analyse_shader(&mut self, shader_node_ptr:DrawShaderNodePtr) -> Result<(), LiveError> {
         self.env.push_scope();
 
         for decl in &self.draw_shader_decl.fields {
@@ -182,54 +199,106 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
             self.analyse_method_decl(decl) ?;
         }
         
-        // now analyse the functions
+        // now analyse the methods
         for decl in &self.draw_shader_decl.methods {
             FnDefAnalyser {
+                shader_registry: self.shader_registry,
                 decl,
                 env: &mut self.env,
                 options: self.options,
-                is_inside_loop: false,
+                is_inside_loop: false, 
             }
             .analyse_fn_def() ?;
         }
 
         self.env.pop_scope();
+        
+        let mut all_fns = Vec::new();
+        let mut vertex_fns = Vec::new();
+        // we should insert our vertex call
+        self.analyse_call_tree(
+            &mut Vec::new(),
+            self.draw_shader_decl.find_method(Ident(id!(vertex))).unwrap(),
+            Callee::DrawShaderMethod{shader_node_ptr, ident:Ident(id!(vertex))},
+            &mut vertex_fns,
+            &mut all_fns,
+        ) ?;
 
-        /*
+        let mut pixel_fns = Vec::new();
         self.analyse_call_tree(
-            ShaderKind::Vertex,
             &mut Vec::new(),
-            self.shader.shader_body.find_fn_decl(Ident(id!("vertex"))).unwrap(),
+            self.draw_shader_decl.find_method(Ident(id!(pixel))).unwrap(),
+            Callee::DrawShaderMethod{shader_node_ptr, ident:Ident(id!(pixel))},
+            &mut pixel_fns,
+            &mut all_fns,
         ) ?;
-        self.analyse_call_tree(
-            ShaderKind::Fragment,
-            &mut Vec::new(),
-            self.shader.shader_body.find_fn_decl(Ident(id!("pixel"))).unwrap(),
-        ) ?;
-        let mut visited = HashSet::new();
-        let vertex_decl = self.shader.shader_body.find_fn_decl(Ident(id!("vertex"))).unwrap();
-        self.propagate_deps(&mut visited, vertex_decl) ?;
-        let fragment_decl = self.shader.shader_body.find_fn_decl(Ident(id!("pixel"))).unwrap();
-        self.propagate_deps(&mut visited, fragment_decl) ?;
-        for &geometry_dep in fragment_decl.geometry_deps.borrow().as_ref().unwrap() {
-            self.shader
-                .find_geometry_decl(geometry_dep)
-                .unwrap()
-                .is_used_in_fragment_shader
-                .set(Some(true));
+
+        // mark all the draw_shader_refs we reference in pixelshaders.
+        for pixel_fn in &pixel_fns{
+            // if we run into a DrawShaderMethod mark it as 
+            if let Callee::DrawShaderMethod{shader_node_ptr, ident} = pixel_fn{
+                if let Some(fn_decl) = self.shader_registry.draw_shader_method_from_ptr(*shader_node_ptr, *ident){
+                    // lets iterate all 
+                    for dsr in fn_decl.draw_shader_refs.borrow().as_ref().unwrap(){
+                        // ok we have a draw shader ident we use, now mark it on our draw_shader_decl.
+                        for field in &self.draw_shader_decl.fields{
+                            if field.ident == *dsr{ // we found it
+                                match &field.kind{
+                                    DrawShaderFieldKind::Geometry{ref is_used_in_pixel_shader, ..}=>{
+                                        is_used_in_pixel_shader.set(true);
+                                    }
+                                    DrawShaderFieldKind::Instance{ref is_used_in_pixel_shader, ..}=>{
+                                        is_used_in_pixel_shader.set(true);
+                                    }
+                                    _=>()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-        for &instance_dep in fragment_decl.instance_deps.borrow().as_ref().unwrap() {
-            self.shader
-                .find_instance_decl(instance_dep)
-                .unwrap()
-                .is_used_in_fragment_shader
-                .set(Some(true));
-        }*/
-        Ok(())
+        
+        let mut all_structs = Vec::new();
+        let mut pixel_structs = Vec::new();
+        let mut vertex_structs = Vec::new();
+        
+        for pixel_fn in &pixel_fns{
+            let fn_decl = self.shader_registry.fn_decl_from_callee(pixel_fn).unwrap();
+            // lets collect all structs
+            for struct_ptr in fn_decl.struct_refs.borrow().as_ref().unwrap().iter(){
+                let struct_decl = self.shader_registry.structs.get(struct_ptr).unwrap();
+                self.analyse_struct_tree(&mut Vec::new(), *struct_ptr, struct_decl, &mut pixel_structs, &mut all_structs)?;
+            }
+        }
+        for vertex_fn in &vertex_fns{
+            let fn_decl = self.shader_registry.fn_decl_from_callee(vertex_fn).unwrap();
+            // lets collect all structs
+            for struct_ptr in fn_decl.struct_refs.borrow().as_ref().unwrap().iter(){
+                let struct_decl = self.shader_registry.structs.get(struct_ptr).unwrap();
+                self.analyse_struct_tree(&mut Vec::new(), *struct_ptr, struct_decl, &mut vertex_structs, &mut all_structs)?;
+            }
+        }
+        
+        *self.draw_shader_decl.all_fns.borrow_mut() = all_fns;
+        *self.draw_shader_decl.vertex_fns.borrow_mut() = vertex_fns;
+        *self.draw_shader_decl.pixel_fns.borrow_mut() = pixel_fns;
+
+        *self.draw_shader_decl.all_structs.borrow_mut() = all_structs;
+        *self.draw_shader_decl.vertex_structs.borrow_mut() = vertex_structs;
+        *self.draw_shader_decl.pixel_structs.borrow_mut() = pixel_structs;
+        /*
+        *self.draw_shader_decl.const_table.borrow_mut() = 
+            Some(self.env.const_table.borrow_mut().take().unwrap());
+        
+        *self.draw_shader_decl.const_table_spans.borrow_mut() = 
+            Some(self.env.const_table_spans.borrow_mut().take().unwrap());
+        */
+        Ok(()) 
     }
     
     fn analyse_field_decl(&mut self, decl: &DrawShaderFieldDecl) -> Result<(), LiveError> {
-        match decl.kind {
+        let ty = match decl.kind {
             DrawShaderFieldKind::Geometry {..} => {
                 let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
                 match ty {
@@ -243,8 +312,8 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
                             ),
                         })
                     }
-                }
-                Ok(())
+                } 
+                ty
             }
             DrawShaderFieldKind::Instance {..} => {
                 let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
@@ -260,7 +329,7 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
                         })
                     }
                 }
-                Ok(())
+                ty
             }
             DrawShaderFieldKind::Texture {..} => {
                 let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
@@ -274,11 +343,11 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
                         })
                     }
                 }
-                Ok(())
+                ty
             }
             DrawShaderFieldKind::Uniform {..} => {
-                let _ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
-                Ok(())
+                let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
+                ty
             },
             DrawShaderFieldKind::Varying {..} => {
                 let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
@@ -294,9 +363,11 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
                         })
                     }
                 }
-                Ok(())
+                ty
             }
-        }
+        };
+        *decl.ty_expr.ty.borrow_mut() = Some(ty);
+        Ok(())
     }
     
     fn analyse_method_decl(&mut self, decl: &FnDecl) -> Result<(), LiveError> {
@@ -310,7 +381,7 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
             .transpose() ?
         .unwrap_or(Ty::Void);
         
-        if decl.ident == Ident(id!("vertex")) {
+        if decl.ident == Ident(id!(vertex)) {
             match return_ty {
                 Ty::Vec4 => {}
                 _ => {
@@ -323,7 +394,7 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
                     })
                 }
             }
-        } else if decl.ident == Ident(id!("pixel")) {
+        } else if decl.ident == Ident(id!(pixel)) {
             match return_ty {
                 Ty::Vec4 => {}
                 _ => {
@@ -367,39 +438,83 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
         )
     }*/
     
-    /*
-    fn analyse_call_tree_for_kind(
-        &mut self,
-        kind: ShaderKind,
-        call_stack: &mut Vec<FnCall>,
-        decl: &FnDecl,
+    fn analyse_struct_tree(
+        &self,
+        call_stack: &mut Vec<StructNodePtr>,
+        struct_ptr: StructNodePtr,
+        struct_decl: &StructDecl,
+        deps: &mut Vec<StructNodePtr>,
+        all_deps: &mut Vec<StructNodePtr>,
     ) -> Result<(), LiveError> {
-        call_stack.push(decl.ident);
-        for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
-            let callee_decl = self.shader.shader_body.find_fn_decl(callee).unwrap();
-            if match kind {
-                ShaderKind::Vertex => callee_decl.is_used_in_vertex_shader.get().unwrap(),
-                ShaderKind::Fragment => callee_decl.is_used_in_fragment_shader.get().unwrap(),
-            } {
-                continue;
-            }
-            if call_stack.contains(&callee) {
+        // lets see if callee is already in the vec, ifso remove it
+        if let Some(index) = deps.iter().position(|v| v == &struct_ptr){
+            deps.remove(index);
+        }
+        deps.push(struct_ptr);
+
+        if let Some(index) = all_deps.iter().position(|v| v == &struct_ptr){
+            all_deps.remove(index);
+        }
+        all_deps.push(struct_ptr);
+
+        call_stack.push(struct_ptr);
+        
+        for sub_ptr in struct_decl.struct_refs.borrow().as_ref().unwrap().iter() {
+            // ok now we need a fn decl for this callee
+            let sub_decl = self.shader_registry.structs.get(sub_ptr).unwrap();
+            if call_stack.contains(&sub_ptr) {
                 return Err(LiveError {
                     origin:live_error_origin!(),
-                    span: decl.span,
-                    message: format!("function `{}` recursively calls `{}`", decl.ident_path, callee),
+                    span: sub_decl.span,
+                    message: format!("Struct has recursively dependency"),
                 });
             }
-            self.analyse_call_tree_for_kind(kind, call_stack, callee_decl) ?;
+           
+            self.analyse_struct_tree(call_stack, *sub_ptr, sub_decl, deps, all_deps) ?;
         }
         call_stack.pop();
-        match kind {
-            ShaderKind::Vertex => decl.is_used_in_vertex_shader.set(Some(true)),
-            ShaderKind::Fragment => decl.is_used_in_fragment_shader.set(Some(true)),
-        }
         Ok(())
     }
     
+    
+    fn analyse_call_tree(
+        &self,
+        call_stack: &mut Vec<FnNodePtr>,
+        decl: &FnDecl,
+        callee: Callee,
+        deps: &mut Vec<Callee>,
+        all_deps: &mut Vec<Callee>,
+    ) -> Result<(), LiveError> {
+        // lets see if callee is already in the vec, ifso remove it
+        if let Some(index) = deps.iter().position(|v| v == &callee){
+            deps.remove(index);
+        }
+        deps.push(callee.clone());
+
+        if let Some(index) = all_deps.iter().position(|v| v == &callee){
+            all_deps.remove(index);
+        }
+        all_deps.push(callee.clone());
+
+        call_stack.push(decl.fn_node_ptr);
+        for callee in decl.callees.borrow().as_ref().unwrap().iter() {
+            // ok now we need a fn decl for this callee
+            let callee_decl = self.shader_registry.fn_decl_from_callee(callee).unwrap();
+            if call_stack.contains(&callee_decl.fn_node_ptr) {
+                return Err(LiveError {
+                    origin:live_error_origin!(),
+                    span: decl.span,
+                    message: format!("function `{}` recursively calls `{}`", decl.ident, callee_decl.ident),
+                });
+            }
+           
+            self.analyse_call_tree(call_stack, callee_decl, *callee, deps, all_deps) ?;
+        }
+        call_stack.pop();
+
+        Ok(())
+    }
+    /*
     fn propagate_deps(&mut self, visited: &mut HashSet<IdentPath>, decl: &FnDecl) -> Result<(), LiveError> {
         if visited.contains(&decl.ident_path) {
             return Ok(());
@@ -489,23 +604,24 @@ impl<'a, 'b> DrawShaderAnalyser<'a, 'b> {
 
 
 #[derive(Debug)]
-pub struct ConstAnalyser<'a, 'b> {
+pub struct ConstAnalyser<'a> {
     pub decl: &'a ConstDecl,
-    pub env: &'a mut Env<'b>,
-    pub options: ShaderCompileOptions,
+    pub env: &'a mut Env,
+    pub shader_registry: &'a ShaderRegistry,
+    pub options: ShaderAnalyseOptions,
 }
 
-impl<'a, 'b> ConstAnalyser<'a, 'b> {
+impl<'a> ConstAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
+            shader_registry: self.shader_registry,
             env: self.env,
         }
     }
     
     fn const_evaluator(&self) -> ConstEvaluator {
         ConstEvaluator {
-            env: self.env,
-            no_const_collapse: self.options.no_const_collapse
+            options: self.options
         }
     }
     
@@ -530,38 +646,39 @@ impl<'a, 'b> ConstAnalyser<'a, 'b> {
 
 
 #[derive(Debug)]
-pub struct FnDefAnalyser<'a, 'b> {
+pub struct FnDefAnalyser<'a> {
     pub decl: &'a FnDecl,
-    pub env: &'a mut Env<'b>,
-    pub options: ShaderCompileOptions,
+    pub env: &'a mut Env,
+    pub shader_registry: &'a ShaderRegistry,
+    pub options: ShaderAnalyseOptions,
     pub is_inside_loop: bool,
 }
 
 
 
-impl<'a, 'b> FnDefAnalyser<'a, 'b> {
+impl<'a> FnDefAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
+            shader_registry: self.shader_registry,
             env: self.env,
         }
     }
     
     fn const_evaluator(&self) -> ConstEvaluator {
         ConstEvaluator {
-            env: self.env,
-            no_const_collapse: self.options.no_const_collapse
+            options: self.options
         }
     }
     
     fn const_gatherer(&self) -> ConstGatherer {
         ConstGatherer {
-            env: self.env,
-            gather_all: self.options.gather_all,
+            decl: self.decl
         }
     }
     
     fn dep_analyser(&self) -> DepAnalyser {
         DepAnalyser {
+            shader_registry: self.shader_registry,
             decl: self.decl,
             env: &self.env,
         }

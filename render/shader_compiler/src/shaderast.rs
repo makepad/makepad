@@ -33,6 +33,8 @@ pub struct ValueNodePtr(pub FullNodePtr);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct VarDefNodePtr(pub FullNodePtr);
 
+
+
 //impl FnNodePtr {pub fn to_scope_ptr(self) -> ScopeNodePtr {ScopeNodePtr(self.0)}}
 //impl VarDefNodePtr {pub fn to_scope_ptr(self) -> ScopeNodePtr {ScopeNodePtr(self.0)}}
 
@@ -48,6 +50,15 @@ pub struct DrawShaderDecl {
     pub default_geometry: Option<ShaderResourceId>,
     pub fields: Vec<DrawShaderFieldDecl>,
     pub methods: Vec<FnDecl>,
+    
+    //pub structs: RefCell<Vec<StructNodePtr>>,
+    pub all_fns: RefCell<Vec<Callee>>,
+    pub vertex_fns: RefCell<Vec<Callee>>,
+    pub pixel_fns: RefCell<Vec<Callee>>,
+    // we have a vertex_structs
+    pub all_structs: RefCell<Vec<StructNodePtr>>,
+    pub vertex_structs: RefCell<Vec<StructNodePtr>>,
+    pub pixel_structs: RefCell<Vec<StructNodePtr>>,
 }
 
 #[derive(Clone, Debug)]
@@ -59,7 +70,7 @@ pub struct ConstDecl {
 }
 
 // the unique identification of a fn call
-#[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Ord, PartialOrd, Eq, PartialEq)]
 pub enum Callee {
     PlainFn {fn_node_ptr: FnNodePtr},
     DrawShaderMethod {shader_node_ptr: DrawShaderNodePtr, ident: Ident},
@@ -96,12 +107,16 @@ pub struct FnDecl {
     // analysis
     pub callees: RefCell<Option<BTreeSet<Callee >> >,
     pub builtin_deps: RefCell<Option<BTreeSet<Ident >> >,
+
+    // the const table (per function)
+    pub const_table: RefCell<Option<Vec<f32 >> >,
+    pub const_table_spans: RefCell<Option<Vec<(usize, Span) >> >,
     
     // which props we reffed on self
     pub draw_shader_refs: RefCell<Option<BTreeSet<Ident >> >,
     pub const_refs: RefCell<Option<BTreeSet<ConstNodePtr >> >,
     pub live_refs: RefCell<Option<BTreeSet<ValueNodePtr >> >,
-    
+    pub struct_refs: RefCell<Option<BTreeSet<StructNodePtr >> >,
     pub cons_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>) >> >,
     
     // base
@@ -112,11 +127,11 @@ pub struct FnDecl {
     pub block: Block,
 }
 
-
 #[derive(Clone, Debug)]
 pub struct StructDecl {
     pub span: Span,
     //pub ident: Ident,
+    pub struct_refs: RefCell<Option<BTreeSet<StructNodePtr >> >,
     pub fields: Vec<FieldDecl>,
     pub methods: Vec<FnDecl>,
 }
@@ -138,11 +153,11 @@ pub struct DrawShaderFieldDecl {
 #[derive(Clone, Debug)]
 pub enum DrawShaderFieldKind {
     Geometry {
-        is_used_in_fragment_shader: Cell<Option<bool >>,
+        is_used_in_pixel_shader: Cell<bool >,
         var_def_node_ptr: VarDefNodePtr,
     },
     Instance {
-        is_used_in_fragment_shader: Cell<Option<bool >>,
+        is_used_in_pixel_shader: Cell<bool >,
         input_node_ptr: InputNodePtr,
     },
     Texture {
@@ -283,8 +298,8 @@ pub enum ExprKind {
     Var {
         span: Span,
         kind: Cell<Option<VarKind >>,
-        live_scope_value: LiveScopeValue,
-        ident_path: IdentPath,
+        var_resolve: VarResolve,
+        //ident_path: IdentPath,
     },
     Lit {
         span: Span,
@@ -293,16 +308,16 @@ pub enum ExprKind {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum LiveScopeValue {
-    NotFound,
+pub enum VarResolve {
+    NotFound(Ident),
     Const(ConstNodePtr),
     LiveValue(ValueNodePtr, TyLit)
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum VarKind {
-    Local,
-    MutLocal,
+    Local(Ident),
+    MutLocal(Ident),
     Const(ConstNodePtr),
     LiveValue(ValueNodePtr)
 }
@@ -427,38 +442,25 @@ pub enum Val {
 #[derive(Clone, Copy, Ord, PartialOrd, Default, Eq, Hash, PartialEq)]
 pub struct Ident(pub Id);
 
-/*
-impl ShaderBody {
-    
-    pub fn find_const_decl(&self, _ident: Ident) -> Option<&ConstDecl> {
-        /*
-        self.decls.iter().find_map( | decl | {
-            match decl {
-                Decl::Const(decl) => Some(decl),
-                _ => None,
-            }
-            .filter( | decl | decl.ident == ident)
-        })
-        */
-        return None
+
+impl StructDecl {
+    pub fn init_analysis(&self) {
+        *self.struct_refs.borrow_mut() = Some(BTreeSet::new());
     }
-    
-    pub fn find_fn_decl(&self, ident: Ident) -> Option<&FnDecl> {
-        self.fn_decls.iter().rev().find_map( | decl | {
-            Some(decl)
-                .filter( | decl | decl.ident == ident)
-        })
-    }
-}*/
+}
+
 
 impl FnDecl {
     pub fn init_analysis(&self) {
+        *self.struct_refs.borrow_mut() = Some(BTreeSet::new());
         *self.callees.borrow_mut() = Some(BTreeSet::new());
         *self.builtin_deps.borrow_mut() = Some(BTreeSet::new());
         *self.cons_fn_deps.borrow_mut() = Some(BTreeSet::new());
         *self.draw_shader_refs.borrow_mut() = Some(BTreeSet::new());
         *self.const_refs.borrow_mut() = Some(BTreeSet::new());
         *self.live_refs.borrow_mut() = Some(BTreeSet::new());
+        *self.const_table.borrow_mut() = Some(Vec::new());
+        *self.const_table_spans.borrow_mut() = Some(Vec::new());
     }
 }
 
@@ -469,6 +471,13 @@ impl DrawShaderDecl {
             decl.ident == ident
         })
     }
+    
+    pub fn find_method(&self, ident: Ident) -> Option<&FnDecl> {
+        self.methods.iter().find( | method | {
+            method.ident == ident
+        })
+    }
+    
 }
 
 impl BinOp {
@@ -983,3 +992,26 @@ impl fmt::Display for Val {
     }
 }
 
+impl fmt::Display for StructNodePtr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "mpsc_st_{}", self.0)
+    }
+}
+
+impl fmt::Display for FnNodePtr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "mpsc_fn_{}", self.0)
+    }
+}
+
+impl fmt::Display for ConstNodePtr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "mpsc_ct_{}", self.0)
+    }
+}
+
+impl fmt::Display for ValueNodePtr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "mpsc_lv_{}", self.0)
+    }
+}

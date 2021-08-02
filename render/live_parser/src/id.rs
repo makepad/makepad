@@ -6,7 +6,7 @@ use std::fmt;
 use std::cmp::Ordering;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialOrd, Hash, PartialEq)]
-pub struct FileId(u16);
+pub struct FileId(pub u16);
 
 impl FileId{
     pub fn index(index:usize)->FileId{FileId(index as u16)}
@@ -26,6 +26,13 @@ pub struct LocalNodePtr {
 pub struct FullNodePtr {
     pub file_id: FileId,
     pub local_ptr: LocalNodePtr,
+}
+
+
+impl fmt::Display for FullNodePtr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}_{}_{}", self.file_id.0, self.local_ptr.level, self.local_ptr.index)
+    }
 }
 
 

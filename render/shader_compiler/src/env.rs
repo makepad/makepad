@@ -1,7 +1,5 @@
 use makepad_live_parser::LiveError;
-use crate::shaderregistry::ShaderRegistry;
 use makepad_live_parser::Span;
-use makepad_live_parser::FullNodePtr;
 //use makepad_live_parser::LiveValue;
 use makepad_live_parser::LiveErrorOrigin;
 use makepad_live_parser::live_error_origin;
@@ -10,80 +8,21 @@ use crate::shaderast::Ty;
 use crate::shaderast::Ident;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::cell::RefCell;
-use std::collections::BTreeSet;
 
 type Scope = HashMap<Ident, LocalSym>;
 
 #[derive(Clone, Debug)]
-pub struct Env<'a> {
-    pub const_table: RefCell<Option<Vec<f32 >> >,
-    pub const_table_spans: RefCell<Option<Vec<(usize, Span) >> >,
-    pub live_uniform_deps: RefCell<Option<BTreeSet<(Ty, FullNodePtr) >> >,
+pub struct Env {
+    //pub live_uniform_deps: RefCell<Option<BTreeSet<(Ty, FullNodePtr) >> >,
     pub scopes: Vec<Scope>,
-    pub shader_registry: &'a ShaderRegistry
 }
 
-impl<'a> Env<'a> {
-    pub fn new(shader_registry: &'a ShaderRegistry) -> Env {
+impl Env {
+    pub fn new() -> Env {
         Env {
-            const_table: RefCell::new(Some(Vec::new())),
-            const_table_spans: RefCell::new(Some(Vec::new())),
-            live_uniform_deps: RefCell::new(Some(BTreeSet::new())),
             scopes: Vec::new(),
-            shader_registry
         }
     }
-    /*
-    pub fn find_fn_decl(&self, ident_path: IdentPath) -> Option<&FnDecl> {
-        return None
-        /*
-        self.decls.iter().rev().find_map( | decl | {
-            match decl {
-                Decl::Fn(decl) => Some(decl),
-                _ => None,
-            }
-            .filter( | decl | decl.ident_path == ident_path)
-        })*/
-    }*/
-    /*
-    pub fn find_const_decl(&self, _ident: Ident, _scope_node_ptr: ScopeNodePtr) -> Option<&ConstDecl> {
-        return None
-        /*
-        self.decls.iter().find_map( | decl | {
-            match decl {
-                Decl::Const(decl) => Some(decl),
-                _ => None,
-            }
-            .filter( | decl | decl.ident == ident)
-        })
-        */
-    }*/
-    /*
-    pub fn find_struct_ptr(&self, ident: Ident, scope_node_ptr: ScopeNodePtr) -> Option<StructNodePtr> {
-        // ok we have to find MyStruct on the scope of _fn_node_ptr.
-        let (doc,fn_node) = self.shader_registry.live_registry.resolve_ptr(scope_node_ptr.0);
-        // ok so what if the struct we had to find is our Self.
-        
-        // ok lets look in our scopes
-        match fn_node.value {
-            LiveValue::Fn {scope_start, scope_count, ..} | LiveValue::VarDef {scope_start, scope_count, ..} => {
-                for i in (0..scope_count).rev() {
-                    let item = &doc.scopes[scope_start as usize + i as usize];
-                    if item.id == ident.0{
-                        let struct_ptr = StructNodePtr(item.target.to_full_node_ptr(scope_node_ptr.0.file_id));
-                        return Some(struct_ptr);
-                    }
-                }
-                
-            }
-            
-            _ => ()
-        }
-        return None
-        //return None
-    }
-    */
     
     pub fn find_sym_on_scopes(&self, ident: Ident, _span: Span,) -> Option<LocalSym> {
         

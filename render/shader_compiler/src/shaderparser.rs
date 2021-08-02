@@ -2,47 +2,10 @@ use std::iter::Cloned;
 use std::slice::Iter;
 use std::cell::Cell;
 use std::cell::RefCell;
-use makepad_live_parser::FileId;
-use makepad_live_parser::TokenWithSpan;
-use makepad_live_parser::Token;
-use makepad_live_parser::Span;
-use makepad_live_parser::LiveError;
-use makepad_live_parser::LiveErrorOrigin;
-use makepad_live_parser::LiveScopeItem;
-use makepad_live_parser::Id;
-use makepad_live_parser::token_punct;
-use makepad_live_parser::token_ident;
-use makepad_live_parser::id;
-use makepad_live_parser::live_error_origin;
-use makepad_live_parser::FullNodePtr;
-use makepad_live_parser::LiveScopeTarget;
+use makepad_live_parser::*;
+use crate::shaderast::*;
 use crate::shaderregistry::ShaderRegistry;
 use crate::shaderregistry::LiveNodeFindResult;
-use crate::shaderast::Lit;
-use crate::shaderast::TyLit;
-use crate::shaderast::Ident;
-use crate::shaderast::IdentPath;
-use crate::shaderast::TyExprKind;
-use crate::shaderast::TyExpr;
-use crate::shaderast::FnDecl;
-use crate::shaderast::Block;
-use crate::shaderast::Expr;
-use crate::shaderast::ExprKind;
-use crate::shaderast::Param;
-use crate::shaderast::Stmt;
-use crate::shaderast::BinOp;
-use crate::shaderast::UnOp;
-use crate::shaderast::DrawShaderFieldDecl;
-use crate::shaderast::DrawShaderFieldKind;
-use crate::shaderast::FieldDecl;
-use crate::shaderast::FnNodePtr;
-use crate::shaderast::VarDefNodePtr;
-use crate::shaderast::InputNodePtr;
-use crate::shaderast::StructNodePtr;
-use crate::shaderast::ConstNodePtr;
-use crate::shaderast::FnSelfKind;
-use crate::shaderast::LiveScopeValue;
-use crate::shaderast::ConstDecl;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum ShaderParserDep{
@@ -249,7 +212,7 @@ impl<'a> ShaderParser<'a> {
             Ident(id!(geometry)) => {
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDecl{
                     kind:DrawShaderFieldKind::Geometry{
-                        is_used_in_fragment_shader: Cell::new(None),
+                        is_used_in_pixel_shader: Cell::new(false),
                         var_def_node_ptr: VarDefNodePtr(decl_node_ptr),
                     },
                     span,
@@ -260,7 +223,7 @@ impl<'a> ShaderParser<'a> {
             Ident(id!(instance)) => {
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDecl{
                     kind: DrawShaderFieldKind::Instance{
-                        is_used_in_fragment_shader: Cell::new(None),
+                        is_used_in_pixel_shader: Cell::new(false),
                         input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
                     },
                     span,
@@ -413,9 +376,12 @@ impl<'a> ShaderParser<'a> {
             return_ty: RefCell::new(None),
             const_refs: RefCell::new(None),
             live_refs: RefCell::new(None),
+            struct_refs: RefCell::new(None),
             callees: RefCell::new(None),
             builtin_deps: RefCell::new(None),
             cons_fn_deps: RefCell::new(None),
+            const_table: RefCell::new(None),
+            const_table_spans: RefCell::new(None),
             params,
             return_ty_expr,
             block,
@@ -454,11 +420,14 @@ impl<'a> ShaderParser<'a> {
             self_kind,
             const_refs: RefCell::new(None),
             live_refs: RefCell::new(None),
+            struct_refs: RefCell::new(None),
             draw_shader_refs: RefCell::new(None),
             return_ty: RefCell::new(None),
             callees: RefCell::new(None),
             builtin_deps: RefCell::new(None),
             cons_fn_deps: RefCell::new(None),
+            const_table: RefCell::new(None),
+            const_table_spans:RefCell::new(None),
             params,
             return_ty_expr,
             block,
@@ -1108,15 +1077,15 @@ impl<'a> ShaderParser<'a> {
                             }
                         }
                         _ => {
-                            let mut live_scope_value = LiveScopeValue::NotFound;
+                            let mut var_resolve = VarResolve::NotFound(Ident(ident_path.segs[0]));
                             if let Some(ptr) = self.scan_scope_for_live_ptr(ident_path.segs[0]) {
                                 match self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]) {
                                     LiveNodeFindResult::LiveValue(value_ptr,ty)=>{
-                                        live_scope_value = LiveScopeValue::LiveValue(value_ptr, ty);
+                                        var_resolve = VarResolve::LiveValue(value_ptr, ty);
                                     }
                                     LiveNodeFindResult::Const(const_ptr)=>{
                                         self.type_deps.push(ShaderParserDep::Const(const_ptr));
-                                        live_scope_value = LiveScopeValue::Const(const_ptr);
+                                        var_resolve = VarResolve::Const(const_ptr);
                                     }
                                     _=>()
                                 }
@@ -1128,9 +1097,8 @@ impl<'a> ShaderParser<'a> {
                                 const_index: Cell::new(None),
                                 kind: ExprKind::Var {
                                     span,
-                                    live_scope_value,
+                                    var_resolve,
                                     kind: Cell::new(None),
-                                    ident_path,
                                 },
                             }))
                         },
