@@ -223,6 +223,10 @@ impl FileTree {
         }
     }
 
+    pub fn forget(&mut self) {
+        self.logic.forget();
+    }
+
     pub fn node_is_expanded(&mut self, node_id: NodeId) -> bool {
         self.logic.node_is_expanded(node_id)
     }

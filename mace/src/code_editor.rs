@@ -8,7 +8,7 @@ use {
         size::Size,
         text::Text,
         token::{Keyword, Punctuator, TokenKind},
-        tokenizer::Tokens,
+        tokenizer::TokensByLine,
     },
     makepad_render::*,
     makepad_widget::*,
@@ -91,7 +91,12 @@ impl CodeEditor {
             self.apply_style(cx);
             let visible_lines = self.visible_lines(cx, document.text().as_lines().len());
             self.draw_selections(cx, session.selections(), document.text(), visible_lines);
-            self.draw_text(cx, document.text(), document.tokens(), visible_lines);
+            self.draw_text(
+                cx,
+                document.text(),
+                document.tokens_by_line(),
+                visible_lines,
+            );
             self.draw_carets(cx, session.selections(), session.carets(), visible_lines);
             self.set_turtle_bounds(cx, document.text());
             self.view.end_view(cx);
@@ -226,7 +231,7 @@ impl CodeEditor {
         &mut self,
         cx: &mut Cx,
         text: &Text,
-        tokens: Tokens<'_>,
+        tokens_by_line: TokensByLine<'_>,
         visible_lines: VisibleLines,
     ) {
         let origin = cx.get_turtle_pos();
@@ -234,7 +239,7 @@ impl CodeEditor {
         for (line, tokens) in text
             .as_lines()
             .iter()
-            .zip(tokens)
+            .zip(tokens_by_line)
             .skip(visible_lines.start)
             .take(visible_lines.end - visible_lines.start)
         {
