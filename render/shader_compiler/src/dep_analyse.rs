@@ -1,20 +1,22 @@
 #![allow(unused_variables)]
 use crate::shaderast::*;
 use crate::env::Env;
-use crate::shaderast::{Ident, IdentPath};
+use crate::shaderast::Ident;
 use makepad_live_parser::Span;
 //use makepad_live_parser::Id;
 //use makepad_live_parser::id;
 use crate::shaderast::{Ty, TyLit};
 use std::cell::{Cell};
+use crate::shaderregistry::ShaderRegistry;
 
 #[derive(Clone, Debug)]
-pub struct DepAnalyser<'a, 'b> {
+pub struct DepAnalyser<'a> {
     pub decl: &'a FnDecl,
-    pub env: &'a Env<'b>,
+    pub shader_registry: &'a ShaderRegistry,
+    pub env: &'a Env,
 }
 
-impl<'a, 'b> DepAnalyser<'a, 'b> {
+impl<'a> DepAnalyser<'a> {
     pub fn dep_analyse_expr(&mut self, expr: &Expr) {
         match expr.kind {
             ExprKind::Cond {
@@ -64,9 +66,8 @@ impl<'a, 'b> DepAnalyser<'a, 'b> {
             ExprKind::Var {
                 span,
                 ref kind,
-                ident_path,
                 ..
-            } => self.dep_analyse_var_expr(span, kind, ident_path),
+            } => self.dep_analyse_var_expr(span, expr.ty.borrow().as_ref(), kind),
             ExprKind::Lit {span, lit} => self.dep_analyse_lit_expr(span, lit),
         }
     }
@@ -132,7 +133,7 @@ impl<'a, 'b> DepAnalyser<'a, 'b> {
         }
     }
     
-    
+    /*
     fn dep_analyse_static_call_expr(
         &mut self,
         span: Span,
@@ -150,7 +151,7 @@ impl<'a, 'b> DepAnalyser<'a, 'b> {
             }
             _ => panic!(),
         }
-    }
+    }*/
     
     fn dep_analyse_builtin_call_expr(
         &mut self,
@@ -243,7 +244,7 @@ impl<'a, 'b> DepAnalyser<'a, 'b> {
         ));
     }
     
-    fn dep_analyse_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind >>, ident_path: IdentPath) {
+    fn dep_analyse_var_expr(&mut self, _span: Span, ty:Option<&Ty>, kind: &Cell<Option<VarKind >>) {
         // alright so. a var expr..
         match kind.get().unwrap() {
             VarKind::Const(const_ptr) =>{
@@ -252,7 +253,17 @@ impl<'a, 'b> DepAnalyser<'a, 'b> {
             VarKind::LiveValue(value_ptr)=>{
                 self.decl.live_refs.borrow_mut().as_mut().unwrap().insert(value_ptr);
             }
-            _ => ()
+            VarKind::Local(_) | VarKind::MutLocal(_)=>{ // we need to store the type
+                match ty{
+                    Some(Ty::Struct(struct_ptr))=>{
+                        self.decl.struct_refs.borrow_mut().as_mut().unwrap().insert(*struct_ptr);
+                    }
+                    Some(Ty::Array{..})=>{
+                        todo!();
+                    }
+                    _=>()
+                }
+            },
         };
         /*
         match kind.get().unwrap() {

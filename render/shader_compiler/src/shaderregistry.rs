@@ -1,52 +1,20 @@
 #![allow(unused_variables)]
-use makepad_live_parser::LiveRegistry;
-use makepad_live_parser::Id;
-use makepad_live_parser::IdUnpack;
-use makepad_live_parser::LiveError;
-use makepad_live_parser::LiveErrorOrigin;
-use makepad_live_parser::LiveValue;
-use makepad_live_parser::Span;
-use makepad_live_parser::CrateModule;
-use makepad_live_parser::IdPack;
-use makepad_live_parser::id_pack;
-use makepad_live_parser::id;
-use makepad_live_parser::live_error_origin;
-use makepad_live_parser::IdFmt;
-use makepad_live_parser::FullNodePtr;
-use makepad_live_parser::LocalNodePtr;
-use makepad_live_parser::LiveDocument;
-use makepad_live_parser::Token;
-use crate::shaderast::DrawShaderDecl;
-use crate::shaderast::StructDecl;
-use crate::shaderast::DrawShaderFieldDecl;
-use crate::shaderast::DrawShaderFieldKind;
-use crate::shaderast::FnDecl;
-use crate::shaderast::TyExpr;
-use crate::shaderast::TyExprKind;
-use crate::shaderast::TyLit;
-use crate::shaderast::Ident;
-use crate::shaderast::FnNodePtr;
-use crate::shaderast::VarDefNodePtr;
+
+use makepad_live_parser::*;
+use crate::shaderast::*;
+use crate::analyse::*;
+
+//use crate::generate::*;
+
 use crate::shaderparser::ShaderParser;
 use crate::shaderparser::ShaderParserDep;
-use crate::shaderast::InputNodePtr;
-use crate::shaderast::StructNodePtr;
-use crate::shaderast::DrawShaderNodePtr;
-use crate::shaderast::ValueNodePtr;
-use crate::shaderast::ConstNodePtr;
-use crate::shaderast::FnSelfKind;
-use crate::shaderast::ConstDecl;
 use std::fmt;
-use std::cell::Cell;
+use std::cell::{RefCell,Cell};
 use std::collections::HashMap;
 use crate::builtin::Builtin;
 use crate::builtin::generate_builtins;
-use crate::analyse::StructAnalyser;
-use crate::analyse::FnDefAnalyser;
-use crate::analyse::ConstAnalyser;
-use crate::analyse::DrawShaderAnalyser;
-use crate::analyse::ShaderCompileOptions;
 use crate::env::Env;
+use crate::generate_glsl;
 
 #[derive(Clone, Debug, Copy, Hash, Eq, PartialEq)]
 pub struct ShaderResourceId(CrateModule, Id);
@@ -60,7 +28,6 @@ impl fmt::Display for ShaderResourceId {
 #[derive(Debug)]
 pub struct ShaderRegistry {
     pub live_registry: LiveRegistry,
-    pub shader_compile_options: ShaderCompileOptions,
     pub consts: HashMap<ConstNodePtr, ConstDecl>,
     pub plain_fns: HashMap<FnNodePtr, FnDecl>,
     pub draw_shaders: HashMap<DrawShaderNodePtr, DrawShaderDecl>,
@@ -73,11 +40,6 @@ pub struct ShaderRegistry {
 impl ShaderRegistry {
     pub fn new() -> Self {
         Self {
-            shader_compile_options: ShaderCompileOptions {
-                gather_all: false,
-                create_const_table: false,
-                no_const_collapse: false
-            },
             live_registry: LiveRegistry::default(),
             structs: HashMap::new(),
             consts: HashMap::new(),
@@ -130,8 +92,8 @@ pub enum LiveNodeFindResult {
 
 impl ShaderRegistry {
     
-    
-    pub fn plain_fn_decl_from_ptr(&self, fn_ptr: FnNodePtr) -> Option<&FnDecl> {
+    /*
+    pub fn get_plain_fn_decl(&self, fn_ptr: FnNodePtr) -> Option<&FnDecl> {
         self.plain_fns.get(&fn_ptr)
     }
     
@@ -139,15 +101,14 @@ impl ShaderRegistry {
         self.structs.get(&struct_ptr)
     }
     
-    
     pub fn draw_shader_decl_from_ptr(&self, shader_ptr: DrawShaderNodePtr) -> Option<&DrawShaderDecl> {
         self.draw_shaders.get(&shader_ptr)
     }
     
     pub fn const_decl_from_ptr(&self, const_ptr: ConstNodePtr) -> Option<&ConstDecl> {
         self.consts.get(&const_ptr)
-    }
-    
+    }*/
+
     pub fn struct_method_from_ptr(&self, struct_node_ptr: StructNodePtr, ident: Ident) -> Option<&FnDecl> {
         if let Some(s) = self.structs.get(&struct_node_ptr) {
             if let Some(node) = s.methods.iter().find( | fn_decl | fn_decl.ident == ident) {
@@ -164,6 +125,21 @@ impl ShaderRegistry {
             }
         }
         None
+    }
+    
+    pub fn plain_fn_from_ptr(&self, fn_ptr: FnNodePtr) -> Option<&FnDecl> {
+        if let Some(s) = self.plain_fns.get(&fn_ptr) {
+            return Some(s)
+        }
+        None
+    }
+    
+    pub fn fn_decl_from_callee(&self, callee:&Callee) -> Option<&FnDecl> {
+        match callee{
+            Callee::PlainFn {fn_node_ptr}=>self.plain_fn_from_ptr(*fn_node_ptr),
+            Callee::DrawShaderMethod {shader_node_ptr, ident}=>self.draw_shader_method_from_ptr(*shader_node_ptr, *ident),
+            Callee::StructMethod {struct_node_ptr, ident}=>self.struct_method_from_ptr(*struct_node_ptr, *ident),
+        }
     }
     
     pub fn fn_ident_from_ptr(&self, fn_node_ptr: FnNodePtr) -> Ident {
@@ -366,11 +342,13 @@ impl ShaderRegistry {
                 
                 self.analyse_deps(&parser_deps) ?;
                 
-                let mut env = Env::new(self);
                 let mut ca = ConstAnalyser {
                     decl: self.consts.get(&const_ptr).unwrap(),
-                    env: &mut env,
-                    options: self.shader_compile_options,
+                    env: &mut Env::new(),
+                    shader_registry: self,
+                    options: ShaderAnalyseOptions{
+                        no_const_collapse: true
+                    },
                 };
                 ca.analyse_const_decl() ?;
             }
@@ -410,15 +388,13 @@ impl ShaderRegistry {
                 self.analyse_deps(&parser_deps) ?;
                 
                 // ok analyse the struct methods now.
-                let mut env = Env::new(self);
                 let mut fa = FnDefAnalyser {
                     decl: self.plain_fns.get(&fn_ptr).unwrap(),
-                    env: &mut env,
+                    env: &mut Env::new(),
+                    shader_registry: self,
                     is_inside_loop: false,
-                    options: ShaderCompileOptions {
-                        gather_all: false,
-                        create_const_table: false,
-                        no_const_collapse: false
+                    options: ShaderAnalyseOptions {
+                        no_const_collapse: true
                     }
                 };
                 fa.analyse_fn_decl() ?;
@@ -447,6 +423,7 @@ impl ShaderRegistry {
                 let mut struct_decl = StructDecl {
                     span: self.live_registry.token_id_to_span(class_node.token_id),
                     // ident: Ident(class_node.id_pack.unwrap_single()),
+                    struct_refs: RefCell::new(None),
                     fields: Vec::new(),
                     methods: Vec::new()
                     //    struct_body: ShaderBody::default()
@@ -512,18 +489,16 @@ impl ShaderRegistry {
                 self.analyse_deps(&parser_deps) ?;
                 
                 // ok analyse the struct methods now.
-                let mut env = Env::new(self);
                 let mut sa = StructAnalyser {
                     struct_decl: self.structs.get(&struct_ptr).unwrap(),
-                    env: &mut env,
-                    options: ShaderCompileOptions {
-                        gather_all: false,
-                        create_const_table: false,
-                        no_const_collapse: false
+                    env: &mut Env::new(),
+                    shader_registry: self,
+                    options: ShaderAnalyseOptions {
+                        no_const_collapse: true
                     }
                 };
                 sa.analyse_struct() ?;
-                println!("STRUCT");
+                //println!("STRUCT");
                 
             }
             _ => ()
@@ -644,7 +619,7 @@ impl ShaderRegistry {
                                 draw_shader_decl.fields.push(
                                     DrawShaderFieldDecl {
                                         kind: DrawShaderFieldKind::Instance {
-                                            is_used_in_fragment_shader: Cell::new(None),
+                                            is_used_in_pixel_shader: Cell::new(false),
                                             input_node_ptr: InputNodePtr::ShaderResourceId(draw_input_srid),
                                         },
                                         span,
@@ -695,17 +670,15 @@ impl ShaderRegistry {
                     
                     self.analyse_deps(&parser_deps) ?;
                     
-                    let mut env = Env::new(self);
                     let mut sa = DrawShaderAnalyser {
                         draw_shader_decl: self.draw_shaders.get(&shader_ptr).unwrap(),
-                        env: &mut env,
-                        options: ShaderCompileOptions {
-                            gather_all: false,
-                            create_const_table: false,
-                            no_const_collapse: false
+                        env: &mut Env::new(),
+                        shader_registry: self,
+                        options: ShaderAnalyseOptions {
+                            no_const_collapse: true
                         }
                     };
-                    sa.analyse_shader() ?;
+                    sa.analyse_shader(shader_ptr) ?;
                     
                     // ok we have all structs
                     return Ok(())
@@ -719,5 +692,27 @@ impl ShaderRegistry {
             message: format!("analyse_draw_shader could not find {} {} {} ", crate_id, module_id, ids[0])
         })
     }
+    
+    pub fn generate_glsl_shader(&mut self, crate_id: Id, module_id: Id, ids: &[Id], const_file_id:Option<FileId>) -> Result<(String, String), LiveError> {
+        // lets find the FullPointer
+        if let Some(shader_ptr) = self.live_registry.find_full_node_ptr_from_ids(crate_id, module_id, ids) {
+            // lets generate a vertex shader
+            
+            if let Some(draw_shader_decl) = self.draw_shaders.get(&DrawShaderNodePtr(shader_ptr)) {
+                // TODO this env needs its const table transferred
+                let result = generate_glsl::generate_pixel_shader(draw_shader_decl, self, ShaderGenerateOptions{
+                    const_file_id
+                });
+                println!("GOT RESULT {}", result);
+            }
+            
+        }
+        return Err(LiveError {
+            origin: live_error_origin!(),
+            span: Span::default(),
+            message: format!("generate_glsl_shader could not find {} {} {} ", crate_id, module_id, ids[0])
+        })
+    }
+    
     
 }
