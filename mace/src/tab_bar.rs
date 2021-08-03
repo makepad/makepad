@@ -76,15 +76,15 @@ impl TabBar {
         self.view.end_view(cx);
     }
 
-    pub fn tab(&mut self, cx: &mut Cx, tab_id: ItemId, name: &str) {
-        let info = self.logic.begin_item(tab_id);
+    pub fn tab(&mut self, cx: &mut Cx, item_id: ItemId, name: &str) {
+        let info = self.logic.begin_item(item_id);
         self.tab.base.color = self.tab_color(info.is_selected);
         self.tab.begin_quad(cx, self.tab_layout());
         self.tab_name.color = self.tab_name_color(info.is_selected);
         self.tab_name.draw_text_walk(cx, name);
         cx.turtle_align_y();
         self.tab.end_quad(cx);
-        self.logic.set_item_area(tab_id, self.tab.area());
+        self.logic.set_item_area(item_id, self.tab.area());
         self.logic.end_item();
     }
 
@@ -144,12 +144,12 @@ impl TabBar {
         }
     }
 
-    pub fn selected_tab_id(&self) -> Option<ItemId> {
+    pub fn selected_item_id(&self) -> Option<ItemId> {
         self.logic.selected_item_id()
     }
 
-    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, tab_id: Option<ItemId>) {
-        if self.logic.set_selected_item_id(tab_id) {
+    pub fn set_selected_item_id(&mut self, cx: &mut Cx, item_id: Option<ItemId>) {
+        if self.logic.set_selected_item_id(item_id) {
             self.view.redraw_view(cx);
         }
     }
@@ -167,8 +167,8 @@ impl TabBar {
             .handle_event(cx, event, &mut |action| actions.push(action));
         for action in actions {
             match action {
-                list_logic::Action::SetSelectedItemId(tab_id) => {
-                    self.set_selected_tab_id(cx, tab_id);
+                list_logic::Action::SetSelectedItemId(item_id) => {
+                    self.set_selected_item_id(cx, item_id);
                 }
             }
         }
