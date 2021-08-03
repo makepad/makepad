@@ -93,7 +93,7 @@ impl Dock {
     pub fn tab_bar_mut(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut TabBar {
         self.panels_by_panel_id
             .entry(panel_id)
-            .or_insert_with(|| Panel::Splitter(Splitter::new(cx)))
+            .or_insert_with(|| Panel::TabBar(TabBar::new(cx)))
             .as_tab_bar_mut()
     }
 
