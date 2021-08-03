@@ -1,6 +1,6 @@
 use {
     crate::{
-        document::{Document, DocumentId},
+        document::Document,
         position::Position,
         position_set::PositionSet,
         range_set::{RangeSet, Span},
@@ -12,7 +12,7 @@ use {
     },
     makepad_render::*,
     makepad_widget::*,
-    std::collections::HashMap,
+    std::{collections::HashMap, path::PathBuf},
 };
 
 pub struct CodeEditor {
@@ -82,12 +82,12 @@ impl CodeEditor {
     pub fn draw(
         &mut self,
         cx: &mut Cx,
-        sessions: &HashMap<SessionId, Session>,
-        documents: &HashMap<DocumentId, Document>,
+        sessions_by_session_id: &HashMap<SessionId, Session>,
+        documents_by_path: &HashMap<PathBuf, Document>,
     ) {
         if self.view.begin_view(cx, Layout::default()).is_ok() {
-            let session = &sessions[&self.session_id.unwrap()];
-            let document = &documents[&session.document_id()];
+            let session = &sessions_by_session_id[&self.session_id.unwrap()];
+            let document = &documents_by_path[session.path()];
             self.apply_style(cx);
             let visible_lines = self.visible_lines(cx, document.text().as_lines().len());
             self.draw_selections(cx, session.selections(), document.text(), visible_lines);
@@ -364,11 +364,13 @@ impl CodeEditor {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        sessions: &mut HashMap<SessionId, Session>,
-        documents: &mut HashMap<DocumentId, Document>,
+        sessions_by_session_id: &mut HashMap<SessionId, Session>,
+        documents_by_path: &mut HashMap<PathBuf, Document>,
     ) {
-        let session = sessions.get_mut(&self.session_id.unwrap()).unwrap();
-        let document = documents.get_mut(&session.document_id()).unwrap();
+        let session = sessions_by_session_id
+            .get_mut(&self.session_id.unwrap())
+            .unwrap();
+        let document = documents_by_path.get_mut(session.path()).unwrap();
         if self.view.handle_scroll_view(cx, event) {
             self.view.redraw_view(cx);
         }
@@ -396,7 +398,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_left(documents, shift);
+                session.move_cursors_left(documents_by_path, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -404,7 +406,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_right(documents, shift);
+                session.move_cursors_right(documents_by_path, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -412,7 +414,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_up(documents, shift);
+                session.move_cursors_up(documents_by_path, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -420,26 +422,26 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_down(documents, shift);
+                session.move_cursors_down(documents_by_path, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Return,
                 ..
             }) => {
-                session.insert_text(documents, Text::from(vec![vec![], vec![]]));
+                session.insert_text(documents_by_path, Text::from(vec![vec![], vec![]]));
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
                 ..
             }) => {
-                session.insert_backspace(documents);
+                session.insert_backspace(documents_by_path);
                 self.view.redraw_view(cx);
             }
             Event::TextInput(TextInputEvent { input, .. }) => {
                 session.insert_text(
-                    documents,
+                    documents_by_path,
                     input
                         .lines()
                         .map(|line| line.chars().collect::<Vec<_>>())
