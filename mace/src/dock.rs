@@ -9,98 +9,98 @@ use {
 };
 
 pub struct Dock {
-    containers_by_container_id: HashMap<ContainerId, Container>,
-    container_id_stack: Vec<ContainerId>,
+    panels_by_panel_id: HashMap<PanelId, Panel>,
+    panel_id_stack: Vec<PanelId>,
 }
 
 impl Dock {
     pub fn new(_cx: &mut Cx) -> Dock {
         Dock {
-            containers_by_container_id: HashMap::new(),
-            container_id_stack: Vec::new(),
+            panels_by_panel_id: HashMap::new(),
+            panel_id_stack: Vec::new(),
         }
     }
 
-    pub fn begin_splitter(&mut self, cx: &mut Cx, container_id: ContainerId) -> Result<(), ()> {
+    pub fn begin_splitter(&mut self, cx: &mut Cx, panel_id: PanelId) -> Result<(), ()> {
         let splitter = self
-            .containers_by_container_id
-            .entry(container_id)
-            .or_insert_with(|| Container::Splitter(Splitter::new(cx)))
+            .panels_by_panel_id
+            .entry(panel_id)
+            .or_insert_with(|| Panel::Splitter(Splitter::new(cx)))
             .as_splitter_mut();
         splitter.begin(cx)?;
-        self.container_id_stack.push(container_id);
+        self.panel_id_stack.push(panel_id);
         Ok(())
     }
 
     pub fn middle_splitter(&mut self, cx: &mut Cx) {
-        let container_id = self.container_id_stack.last().unwrap();
+        let panel_id = self.panel_id_stack.last().unwrap();
         let splitter = self
-            .containers_by_container_id
-            .get_mut(&container_id)
+            .panels_by_panel_id
+            .get_mut(&panel_id)
             .unwrap()
             .as_splitter_mut();
         splitter.middle(cx);
     }
 
     pub fn end_splitter(&mut self, cx: &mut Cx) {
-        let container_id = self.container_id_stack.pop().unwrap();
+        let panel_id = self.panel_id_stack.pop().unwrap();
         let splitter = self
-            .containers_by_container_id
-            .get_mut(&container_id)
+            .panels_by_panel_id
+            .get_mut(&panel_id)
             .unwrap()
             .as_splitter_mut();
         splitter.end(cx);
     }
 
-    pub fn begin_tab_bar(&mut self, cx: &mut Cx, container_id: ContainerId) -> Result<(), ()> {
+    pub fn begin_tab_bar(&mut self, cx: &mut Cx, panel_id: PanelId) -> Result<(), ()> {
         let tab_bar = self
-            .containers_by_container_id
-            .entry(container_id)
-            .or_insert_with(|| Container::TabBar(TabBar::new(cx)))
+            .panels_by_panel_id
+            .entry(panel_id)
+            .or_insert_with(|| Panel::TabBar(TabBar::new(cx)))
             .as_tab_bar_mut();
         tab_bar.begin(cx)?;
-        self.container_id_stack.push(container_id);
+        self.panel_id_stack.push(panel_id);
         Ok(())
     }
 
     pub fn end_tab_bar(&mut self, cx: &mut Cx) {
-        let container_id = self.container_id_stack.pop().unwrap();
+        let panel_id = self.panel_id_stack.pop().unwrap();
         let tab_bar = self
-            .containers_by_container_id
-            .get_mut(&container_id)
+            .panels_by_panel_id
+            .get_mut(&panel_id)
             .unwrap()
             .as_tab_bar_mut();
         tab_bar.end(cx);
     }
 
     pub fn tab(&mut self, cx: &mut Cx, tab_id: ItemId, name: &str) {
-        let container_id = self.container_id_stack.last().unwrap();
+        let panel_id = self.panel_id_stack.last().unwrap();
         let tab_bar = self
-            .containers_by_container_id
-            .get_mut(&container_id)
+            .panels_by_panel_id
+            .get_mut(&panel_id)
             .unwrap()
             .as_tab_bar_mut();
         tab_bar.tab(cx, tab_id, name);
     }
 
-    pub fn splitter_mut(&mut self, cx: &mut Cx, container_id: ContainerId) -> &mut Splitter {
-        self.containers_by_container_id
-            .entry(container_id)
-            .or_insert_with(|| Container::Splitter(Splitter::new(cx)))
+    pub fn splitter_mut(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut Splitter {
+        self.panels_by_panel_id
+            .entry(panel_id)
+            .or_insert_with(|| Panel::Splitter(Splitter::new(cx)))
             .as_splitter_mut()
     }
 
-    pub fn tab_bar_mut(&mut self, cx: &mut Cx, container_id: ContainerId) -> &mut TabBar {
-        self.containers_by_container_id
-            .entry(container_id)
-            .or_insert_with(|| Container::Splitter(Splitter::new(cx)))
+    pub fn tab_bar_mut(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut TabBar {
+        self.panels_by_panel_id
+            .entry(panel_id)
+            .or_insert_with(|| Panel::Splitter(Splitter::new(cx)))
             .as_tab_bar_mut()
     }
 
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
-        for (_, container) in &mut self.containers_by_container_id {
-            match container {
-                Container::Splitter(splitter) => {
+        for (_, panel) in &mut self.panels_by_panel_id {
+            match panel {
+                Panel::Splitter(splitter) => {
                     let mut actions = Vec::new();
                     splitter.handle_event(cx, event, &mut |action| actions.push(action));
                     for action in actions {
@@ -111,7 +111,7 @@ impl Dock {
                         }
                     }
                 }
-                Container::TabBar(tab_bar) => {
+                Panel::TabBar(tab_bar) => {
                     tab_bar.handle_event(cx, event);
                 }
             }
@@ -120,24 +120,24 @@ impl Dock {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ContainerId(pub usize);
+pub struct PanelId(pub usize);
 
-enum Container {
+enum Panel {
     Splitter(Splitter),
     TabBar(TabBar),
 }
 
-impl Container {
+impl Panel {
     fn as_splitter_mut(&mut self) -> &mut Splitter {
         match self {
-            Container::Splitter(splitter) => splitter,
+            Panel::Splitter(splitter) => splitter,
             _ => panic!(),
         }
     }
 
     fn as_tab_bar_mut(&mut self) -> &mut TabBar {
         match self {
-            Container::TabBar(tab_bar) => tab_bar,
+            Panel::TabBar(tab_bar) => tab_bar,
             _ => panic!(),
         }
     }
