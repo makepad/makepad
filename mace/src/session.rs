@@ -2,14 +2,17 @@ use {
     crate::{
         cursor_set::CursorSet,
         delta::{Delta, DeltaBuilder},
-        document::{Document, DocumentId},
+        document::Document,
         position::Position,
         position_set::PositionSet,
         range_set::RangeSet,
         size::Size,
         text::Text,
     },
-    std::collections::HashMap,
+    std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -19,16 +22,16 @@ pub struct Session {
     cursors: CursorSet,
     selections: RangeSet,
     carets: PositionSet,
-    document_id: DocumentId,
+    path: PathBuf,
 }
 
 impl Session {
-    pub fn new(document_id: DocumentId) -> Session {
+    pub fn new(path: PathBuf) -> Session {
         let mut session = Session {
             cursors: CursorSet::new(),
             selections: RangeSet::new(),
             carets: PositionSet::new(),
-            document_id,
+            path,
         };
         session.update_selections_and_carets();
         session
@@ -46,8 +49,8 @@ impl Session {
         &self.carets
     }
 
-    pub fn document_id(&self) -> DocumentId {
-        self.document_id
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn add_cursor(&mut self, position: Position) {
@@ -55,26 +58,42 @@ impl Session {
         self.update_selections_and_carets();
     }
 
-    pub fn move_cursors_left(&mut self, documents: &HashMap<DocumentId, Document>, select: bool) {
-        let document = &documents[&self.document_id];
+    pub fn move_cursors_left(
+        &mut self,
+        documents_by_path: &HashMap<PathBuf, Document>,
+        select: bool,
+    ) {
+        let document = &documents_by_path[&self.path];
         self.cursors.move_left(document.text(), select);
         self.update_selections_and_carets();
     }
 
-    pub fn move_cursors_right(&mut self, documents: &HashMap<DocumentId, Document>, select: bool) {
-        let document = &documents[&self.document_id];
+    pub fn move_cursors_right(
+        &mut self,
+        documents_by_path: &HashMap<PathBuf, Document>,
+        select: bool,
+    ) {
+        let document = &documents_by_path[&self.path];
         self.cursors.move_right(document.text(), select);
         self.update_selections_and_carets();
     }
 
-    pub fn move_cursors_up(&mut self, documents: &HashMap<DocumentId, Document>, select: bool) {
-        let document = &documents[&self.document_id];
+    pub fn move_cursors_up(
+        &mut self,
+        documents_by_path: &HashMap<PathBuf, Document>,
+        select: bool,
+    ) {
+        let document = &documents_by_path[&self.path];
         self.cursors.move_up(document.text(), select);
         self.update_selections_and_carets();
     }
 
-    pub fn move_cursors_down(&mut self, documents: &HashMap<DocumentId, Document>, select: bool) {
-        let document = &documents[&self.document_id];
+    pub fn move_cursors_down(
+        &mut self,
+        documents_by_path: &HashMap<PathBuf, Document>,
+        select: bool,
+    ) {
+        let document = &documents_by_path[&self.path];
         self.cursors.move_down(document.text(), select);
         self.update_selections_and_carets();
     }
@@ -84,8 +103,8 @@ impl Session {
         self.update_selections_and_carets();
     }
 
-    pub fn insert_text(&mut self, documents: &mut HashMap<DocumentId, Document>, text: Text) {
-        let document = documents.get_mut(&self.document_id).unwrap();
+    pub fn insert_text(&mut self, documents_by_path: &mut HashMap<PathBuf, Document>, text: Text) {
+        let document = documents_by_path.get_mut(&self.path).unwrap();
         let mut builder = DeltaBuilder::new();
         for span in self.selections.spans() {
             if span.is_included {
@@ -110,8 +129,8 @@ impl Session {
         self.apply_delta(document, delta_0.compose(delta_1));
     }
 
-    pub fn insert_backspace(&mut self, documents: &mut HashMap<DocumentId, Document>) {
-        let document = documents.get_mut(&self.document_id).unwrap();
+    pub fn insert_backspace(&mut self, documents_by_path: &mut HashMap<PathBuf, Document>) {
+        let document = documents_by_path.get_mut(&self.path).unwrap();
         let mut builder = DeltaBuilder::new();
         for span in self.selections.spans() {
             if span.is_included {
