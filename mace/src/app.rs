@@ -2,7 +2,7 @@ use {
     crate::{
         code_editor::CodeEditor,
         dock::{ContainerId, Dock},
-        document::{Document, DocumentId},
+        document::Document,
         file_tree::FileTree,
         list_logic::ItemId,
         protocol::{self, Request, Response},
@@ -17,6 +17,7 @@ use {
     std::{
         collections::HashMap,
         env,
+        path::PathBuf,
         sync::mpsc::{self, Receiver, Sender, TryRecvError},
         thread,
     },
@@ -33,8 +34,8 @@ pub struct App {
     code_editor: CodeEditor,
     next_node_id: NodeId,
     file_nodes_by_node_id: HashMap<NodeId, FileNode>,
-    sessions: HashMap<SessionId, Session>,
-    documents: HashMap<DocumentId, Document>,
+    sessions_by_session_id: HashMap<SessionId, Session>,
+    documents_by_path: HashMap<PathBuf, Document>,
     request_sender: Sender<Request>,
     response_receiver: Receiver<Response>,
     response_signal: Signal,
@@ -51,13 +52,16 @@ impl App {
 
     pub fn new(cx: &mut Cx) -> Self {
         let mut file_nodes_by_node_id = HashMap::new();
-        file_nodes_by_node_id.insert(NodeId(0), FileNode {
-            parent_id: None,
-            name: String::from("root"),
-            child_ids: Some(Vec::new()),
-        });
-        let mut documents = HashMap::new();
-        let document_id = DocumentId(0);
+        file_nodes_by_node_id.insert(
+            NodeId(0),
+            FileNode {
+                parent_id: None,
+                name: String::from("root"),
+                child_ids: Some(Vec::new()),
+            },
+        );
+        let mut documents_by_path = HashMap::new();
+        let path = PathBuf::from("app.rs");
         let document = Document::new(
             include_str!("app.rs")
                 .lines()
@@ -65,11 +69,11 @@ impl App {
                 .collect::<Vec<_>>()
                 .into(),
         );
-        documents.insert(document_id, document);
-        let mut sessions = HashMap::new();
+        documents_by_path.insert(path.clone(), document);
+        let mut sessions_by_session_id = HashMap::new();
         let session_id = SessionId(0);
-        let session = Session::new(document_id);
-        sessions.insert(session_id, session);
+        let session = Session::new(path);
+        sessions_by_session_id.insert(session_id, session);
         let mut code_editor = CodeEditor::new(cx);
         code_editor.set_session_id(session_id);
         let server = Server::new(env::current_dir().unwrap());
@@ -92,8 +96,8 @@ impl App {
             code_editor,
             next_node_id: NodeId(1),
             file_nodes_by_node_id,
-            sessions,
-            documents,
+            sessions_by_session_id,
+            documents_by_path,
             request_sender,
             response_receiver,
             response_signal,
@@ -138,7 +142,8 @@ impl App {
                     self.dock.end_tab_bar(cx);
                 }
                 cx.turtle_new_line();
-                self.code_editor.draw(cx, &self.sessions, &self.documents);
+                self.code_editor
+                    .draw(cx, &self.sessions_by_session_id, &self.documents_by_path);
                 self.dock.end_splitter(cx);
             }
             self.window.end_desktop_window(cx);
@@ -230,8 +235,12 @@ impl App {
         self.window.handle_desktop_window(cx, event);
         self.dock.handle_event(cx, event);
         self.file_tree.handle_event(cx, event);
-        self.code_editor
-            .handle_event(cx, event, &mut self.sessions, &mut self.documents);
+        self.code_editor.handle_event(
+            cx,
+            event,
+            &mut self.sessions_by_session_id,
+            &mut self.documents_by_path,
+        );
         match event {
             Event::Signal(event) if event.signals.contains_key(&self.response_signal) => loop {
                 match self.response_receiver.try_recv() {
