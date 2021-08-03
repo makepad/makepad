@@ -4,9 +4,6 @@ use crate::{
     tokenizer::{Tokenizer, TokensByLine},
 };
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct DocumentId(pub usize);
-
 pub struct Document {
     text: Text,
     tokenizer: Tokenizer,
