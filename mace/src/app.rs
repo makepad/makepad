@@ -1,7 +1,7 @@
 use {
     crate::{
         code_editor::CodeEditor,
-        dock::{PanelId, Dock},
+        dock::{Dock, PanelId},
         document::Document,
         file_tree::FileTree,
         list_logic::ItemId,
@@ -96,56 +96,63 @@ impl AppInner {
     }
 
     fn draw(&mut self, cx: &mut Cx, state: &State) {
-        self.dock
-            .splitter_mut(cx, PanelId(2))
-            .set_axis(Axis::Vertical);
         if self.window.begin_desktop_window(cx, None).is_ok() {
-            if self.dock.begin_splitter(cx, PanelId(0)).is_ok() {
-                if self.dock.begin_tab_bar(cx, PanelId(1)).is_ok() {
-                    self.dock.tab(cx, ItemId(0), "File tree");
-                    self.dock.end_tab_bar(cx);
-                }
-                cx.turtle_new_line();
-                self.draw_file_tree(cx, &state.file_nodes_by_node_id);
-                self.dock.middle_splitter(cx);
-                if self.dock.begin_tab_bar(cx, PanelId(3)).is_ok() {
-                    self.dock.tab(cx, ItemId(1), "AAA");
-                    self.dock.tab(cx, ItemId(2), "BBB");
-                    self.dock.tab(cx, ItemId(3), "CCC");
-                    self.dock.end_tab_bar(cx);
-                }
-                cx.turtle_new_line();
-                self.code_editor
-                    .draw(cx, &state.sessions_by_session_id, &state.documents_by_path);
-                self.dock.end_splitter(cx);
-            }
+            self.draw_panel(cx, state, PanelId(0));
             self.window.end_desktop_window(cx);
         }
     }
 
-    fn draw_file_tree(&mut self, cx: &mut Cx, file_nodes_by_node_id: &HashMap<NodeId, FileNode>) {
+    fn draw_panel(&mut self, cx: &mut Cx, state: &State, panel_id: PanelId) {
+        let panel = &state.panels_by_panel_id[&panel_id];
+        match panel {
+            Panel::Splitter { panel_ids } => {
+                if self.dock.begin_splitter(cx, panel_id).is_ok() {
+                    self.draw_panel(cx, state, panel_ids.0);
+                    self.dock.middle_splitter(cx);
+                    self.draw_panel(cx, state, panel_ids.1);
+                    self.dock.end_splitter(cx);
+                }
+            }
+            Panel::TabBar { item_ids } => {
+                if self.dock.begin_tab_bar(cx, panel_id).is_ok() {
+                    for item_id in item_ids {
+                        self.dock.tab(cx, *item_id, "TODO"); // TODO
+                    }
+                    self.dock.end_tab_bar(cx);
+                }
+                if let Some(item_id) = self.dock.tab_bar_mut(cx, panel_id).selected_item_id() {
+                    cx.turtle_new_line();
+                    self.draw_tab(cx, state, item_id);
+                }
+            }
+        }
+    }
+
+    fn draw_tab(&mut self, cx: &mut Cx, state: &State, item_id: ItemId) {
+        let tab = &state.tabs_by_item_id[&item_id];
+        match tab {
+            Tab::FileTree => self.draw_file_tree(cx, state),
+            Tab::CodeEditor => {
+                self.code_editor
+                    .draw(cx, &state.sessions_by_session_id, &state.documents_by_path)
+            }
+        }
+    }
+
+    fn draw_file_tree(&mut self, cx: &mut Cx, state: &State) {
         if self.file_tree.begin(cx).is_ok() {
-            self.draw_file_node(
-                cx,
-                file_nodes_by_node_id,
-                NodeId(0),
-            );
+            self.draw_file_node(cx, state, NodeId(0));
             self.file_tree.end(cx);
         }
     }
 
-    fn draw_file_node(
-        &mut self,
-        cx: &mut Cx,
-        file_nodes_by_node_id: &HashMap<NodeId, FileNode>,
-        node_id: NodeId,
-    ) {
-        let node = &file_nodes_by_node_id[&node_id];
+    fn draw_file_node(&mut self, cx: &mut Cx, state: &State, node_id: NodeId) {
+        let node = &state.file_nodes_by_node_id[&node_id];
         match &node.child_ids {
             Some(child_ids) => {
                 if self.file_tree.begin_folder(cx, node_id, &node.name).is_ok() {
                     for child_id in child_ids {
-                        self.draw_file_node(cx, file_nodes_by_node_id, *child_id);
+                        self.draw_file_node(cx, state, *child_id);
                     }
                     self.file_tree.end_folder();
                 }
@@ -154,6 +161,12 @@ impl AppInner {
                 self.file_tree.file(cx, node_id, &node.name);
             }
         }
+    }
+
+    fn set_file_tree(&mut self, cx: &mut Cx, state: &mut State, root: protocol::FileNode) {
+        self.file_tree.forget();
+        state.set_file_tree(root);
+        self.file_tree.redraw(cx);
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, state: &mut State) {
@@ -171,9 +184,8 @@ impl AppInner {
                 match self.response_receiver.try_recv() {
                     Ok(response) => match response {
                         Response::GetFileTree(response) => {
-                            self.file_tree.forget();
-                            state.set_file_tree(response.unwrap());
-                        },
+                            self.set_file_tree(cx, state, response.unwrap())
+                        }
                     },
                     Err(TryRecvError::Empty) => break,
                     _ => panic!(),
@@ -185,10 +197,7 @@ impl AppInner {
 }
 
 struct State {
-    next_panel_id: PanelId,
-    next_item_id: ItemId,
     next_node_id: NodeId,
-    next_session_id: SessionId,
     panels_by_panel_id: HashMap<PanelId, Panel>,
     tabs_by_item_id: HashMap<ItemId, Tab>,
     file_nodes_by_node_id: HashMap<NodeId, FileNode>,
@@ -199,20 +208,27 @@ struct State {
 impl State {
     fn new() -> State {
         let mut panels_by_panel_id = HashMap::new();
-        panels_by_panel_id.insert(PanelId(0), Panel::Splitter {
-            panel_ids: (PanelId(1), PanelId(2))
-        });
-        panels_by_panel_id.insert(PanelId(1), Panel::TabBar {
-            item_ids: vec![ItemId(0)]
-        });
-        panels_by_panel_id.insert(PanelId(2), Panel::TabBar {
-            item_ids: vec![ItemId(1)]
-        });
+        panels_by_panel_id.insert(
+            PanelId(0),
+            Panel::Splitter {
+                panel_ids: (PanelId(1), PanelId(2)),
+            },
+        );
+        panels_by_panel_id.insert(
+            PanelId(1),
+            Panel::TabBar {
+                item_ids: vec![ItemId(0)],
+            },
+        );
+        panels_by_panel_id.insert(
+            PanelId(2),
+            Panel::TabBar {
+                item_ids: vec![ItemId(1)],
+            },
+        );
         let mut tabs_by_item_id = HashMap::new();
         tabs_by_item_id.insert(ItemId(0), Tab::FileTree);
-        tabs_by_item_id.insert(ItemId(1), Tab::CodeEditor {
-            session_id: SessionId(0)
-        });
+        tabs_by_item_id.insert(ItemId(1), Tab::CodeEditor);
         let mut file_nodes_by_node_id = HashMap::new();
         file_nodes_by_node_id.insert(
             NodeId(0),
@@ -225,18 +241,18 @@ impl State {
         let mut sessions_by_session_id = HashMap::new();
         sessions_by_session_id.insert(SessionId(0), Session::new(PathBuf::from("app.rs")));
         let mut documents_by_path = HashMap::new();
-        documents_by_path.insert(PathBuf::from("app.rs"), Document::new(
-            include_str!("app.rs")
-                .lines()
-                .map(|line| line.chars().collect::<Vec<_>>())
-                .collect::<Vec<_>>()
-                .into(),
-        ));
+        documents_by_path.insert(
+            PathBuf::from("app.rs"),
+            Document::new(
+                include_str!("app.rs")
+                    .lines()
+                    .map(|line| line.chars().collect::<Vec<_>>())
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+        );
         State {
-            next_panel_id: PanelId(3),
-            next_item_id: ItemId(2),
             next_node_id: NodeId(1),
-            next_session_id: SessionId(1),
             panels_by_panel_id,
             tabs_by_item_id,
             file_nodes_by_node_id,
@@ -293,19 +309,13 @@ impl State {
 }
 
 enum Panel {
-    Splitter {
-        panel_ids: (PanelId, PanelId),
-    },
-    TabBar {
-        item_ids: Vec<ItemId>,
-    },
+    Splitter { panel_ids: (PanelId, PanelId) },
+    TabBar { item_ids: Vec<ItemId> },
 }
 
 enum Tab {
     FileTree,
-    CodeEditor {
-        session_id: SessionId,
-    }
+    CodeEditor,
 }
 
 #[derive(Debug)]
