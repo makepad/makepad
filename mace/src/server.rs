@@ -1,7 +1,9 @@
 use {
-    crate::protocol::{Error, FileNode, Request, Response},
+    crate::{
+        protocol::{DirectoryEntry, Error, FileNode, Request, Response},
+        text::Text,
+    },
     std::{
-        ffi::OsString,
         fs,
         path::{Path, PathBuf},
         sync::Arc,
@@ -34,32 +36,42 @@ impl Connection {
     pub fn handle_request(&self, request: Request) -> Response {
         match request {
             Request::GetFileTree() => Response::GetFileTree(self.get_file_tree()),
+            Request::OpenFile(path) => Response::OpenFile(self.open_file(path)),
         }
     }
 
     pub fn get_file_tree(&self) -> Result<FileNode, Error> {
-        fn get_children(path: &Path) -> Result<Vec<(OsString, FileNode)>, Error> {
-            let mut children = Vec::new();
+        fn get_directory_entries(path: &Path) -> Result<Vec<DirectoryEntry>, Error> {
+            let mut entries = Vec::new();
             for entry in fs::read_dir(path)? {
                 let entry = entry?;
                 let entry_path = entry.path();
-                children.push((
-                    entry.file_name(),
-                    if entry_path.is_dir() {
+                entries.push(DirectoryEntry {
+                    name: entry.file_name(),
+                    node: if entry_path.is_dir() {
                         FileNode::Directory {
-                            children: get_children(&entry_path)?,
+                            entries: get_directory_entries(&entry_path)?,
                         }
                     } else {
                         FileNode::File
                     },
-                ));
+                });
             }
-            Ok(children)
+            Ok(entries)
         }
 
         Ok(FileNode::Directory {
-            children: get_children(&self.shared.path)?,
+            entries: get_directory_entries(&self.shared.path)?,
         })
+    }
+
+    pub fn open_file(&self, path: PathBuf) -> Result<Text, Error> {
+        let bytes = fs::read(path)?;
+        Ok(String::from_utf8_lossy(&bytes)
+            .lines()
+            .map(|line| line.chars().collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+            .into())
     }
 }
 

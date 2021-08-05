@@ -143,7 +143,7 @@ impl TreeLogic {
                         new_animating_node_ids.insert(*node_id);
                     }
                 }
-                dispatch_action(Action::Redraw);
+                dispatch_action(Action::TreeDidAnimate);
                 self.animating_node_ids = new_animating_node_ids;
                 self.update_next_frame(cx);
             }
@@ -154,17 +154,16 @@ impl TreeLogic {
                             cx.set_hover_mouse_cursor(MouseCursor::Hand);
                             match fe.hover_state {
                                 HoverState::In => {
-                                    dispatch_action(Action::SetHoveredNodeId(Some(*node_id)));
+                                    dispatch_action(Action::NodeWasEntered(*node_id));
                                 }
                                 HoverState::Out => {
-                                    dispatch_action(Action::SetHoveredNodeId(None));
+                                    dispatch_action(Action::NodeWasLeft(*node_id));
                                 }
                                 _ => {}
                             }
                         }
                         Event::FingerDown(_) => {
-                            dispatch_action(Action::ToggleNodeIsExpanded(*node_id, true));
-                            dispatch_action(Action::SetSelectedNodeId(*node_id));
+                            dispatch_action(Action::NodeWasPressed(*node_id));
                             break;
                         }
                         _ => {}
@@ -213,7 +212,7 @@ impl Node {
 impl Default for Node {
     fn default() -> Self {
         Self {
-            is_expanded: AnimatedBool::new(true),
+            is_expanded: AnimatedBool::new(false),
         }
     }
 }
@@ -259,8 +258,8 @@ impl AnimatedBool {
 }
 
 pub enum Action {
-    ToggleNodeIsExpanded(NodeId, bool),
-    SetHoveredNodeId(Option<NodeId>),
-    SetSelectedNodeId(NodeId),
-    Redraw,
+    TreeDidAnimate,
+    NodeWasEntered(NodeId),
+    NodeWasLeft(NodeId),
+    NodeWasPressed(NodeId),
 }
