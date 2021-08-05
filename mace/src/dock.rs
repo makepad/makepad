@@ -2,7 +2,7 @@ use {
     crate::{
         list_logic::ItemId,
         splitter::{self, Splitter},
-        tab_bar::TabBar,
+        tab_bar::{self, TabBar},
     },
     makepad_render::*,
     std::collections::HashMap,
@@ -97,7 +97,8 @@ impl Dock {
             .as_tab_bar_mut()
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event,
+        dispatch_action: &mut dyn FnMut(Action)) {
         for (_, panel) in &mut self.panels_by_panel_id {
             match panel {
                 Panel::Splitter(splitter) => {
@@ -112,7 +113,15 @@ impl Dock {
                     }
                 }
                 Panel::TabBar(tab_bar) => {
-                    tab_bar.handle_event(cx, event);
+                    let mut actions = Vec::new();
+                    tab_bar.handle_event(cx, event, &mut |action| actions.push(action));
+                    for action in actions {
+                        match action {
+                            tab_bar::Action::TabWasPressed(item_id) => {
+                                dispatch_action(Action::TabWasPressed(item_id))
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -121,6 +130,10 @@ impl Dock {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PanelId(pub usize);
+
+pub enum Action {
+    TabWasPressed(ItemId)
+}
 
 enum Panel {
     Splitter(Splitter),

@@ -356,8 +356,9 @@ impl CodeEditor {
         self.session_id
     }
 
-    pub fn set_session_id(&mut self, session_id: SessionId) {
+    pub fn set_session_id(&mut self, cx: &mut Cx, session_id: SessionId) {
         self.session_id = Some(session_id);
+        self.view.redraw_view(cx);
     }
 
     pub fn handle_event(
