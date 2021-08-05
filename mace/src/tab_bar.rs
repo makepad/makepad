@@ -158,7 +158,9 @@ impl TabBar {
         self.view.redraw_view(cx)
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, 
+        dispatch_action: &mut dyn FnMut(Action))
+    {
         if self.view.handle_scroll_view(cx, event) {
             self.view.redraw_view(cx);
         }
@@ -167,17 +169,22 @@ impl TabBar {
             .handle_event(cx, event, &mut |action| actions.push(action));
         for action in actions {
             match action {
-                list_logic::Action::SetSelectedItemId(item_id) => {
-                    self.set_selected_item_id(cx, item_id);
+                list_logic::Action::ItemWasPressed(item_id) => {
+                    self.set_selected_item_id(cx, Some(item_id));
+                    dispatch_action(Action::TabWasPressed(item_id));
                 }
             }
         }
     }
 }
 
+pub enum Action {
+    TabWasPressed(ItemId)
+}
+
 #[derive(Clone, DrawQuad)]
 #[repr(C)]
-pub struct DrawTab {
+struct DrawTab {
     #[default_shader(self::draw_tab_shader)]
     base: DrawColor,
     border_width: f32,
