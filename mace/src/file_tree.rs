@@ -95,7 +95,6 @@ impl FileTree {
     }
 
     pub fn end(&mut self, cx: &mut Cx) {
-        println!();
         self.logic.end();
         self.view.end_view(cx);
     }
@@ -271,7 +270,12 @@ impl FileTree {
         self.view.redraw_view(cx);
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        dispatch_action: &mut dyn FnMut(Action),
+    ) {
         if self.view.handle_scroll_view(cx, event) {
             self.view.redraw_view(cx);
         }
@@ -280,19 +284,25 @@ impl FileTree {
             .handle_event(cx, event, &mut |action| actions.push(action));
         for action in actions {
             match action {
-                tree_logic::Action::ToggleNodeIsExpanded(node_id, should_animate) => {
-                    self.toggle_node_is_expanded(cx, node_id, should_animate)
-                }
-                tree_logic::Action::SetHoveredNodeId(node_id) => {
-                    self.set_hovered_node_id(cx, node_id);
-                }
-                tree_logic::Action::SetSelectedNodeId(node_id) => {
-                    self.set_selected_node_id(cx, node_id);
-                }
-                tree_logic::Action::Redraw => {
+                tree_logic::Action::TreeDidAnimate => {
                     self.redraw(cx);
+                }
+                tree_logic::Action::NodeWasPressed(node_id) => {
+                    self.toggle_node_is_expanded(cx, node_id, true);
+                    self.set_selected_node_id(cx, node_id);
+                    dispatch_action(Action::FileWasPressed(node_id));
+                }
+                tree_logic::Action::NodeWasEntered(node_id) => {
+                    self.set_hovered_node_id(cx, Some(node_id));
+                }
+                tree_logic::Action::NodeWasLeft(_) => {
+                    self.set_hovered_node_id(cx, None);
                 }
             }
         }
     }
+}
+
+pub enum Action {
+    FileWasPressed(NodeId),
 }

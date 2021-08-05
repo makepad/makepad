@@ -54,7 +54,7 @@ impl ListLogic {
         for (area, item_id) in &self.item_ids_by_area {
             match event.hits(cx, *area, HitOpt::default()) {
                 Event::FingerDown(_) => {
-                    dispatch_action(Action::SetSelectedItemId(Some(*item_id)));
+                    dispatch_action(Action::ItemWasPressed(*item_id));
                 }
                 _ => {}
             }
@@ -71,5 +71,5 @@ pub struct TabInfo {
 }
 
 pub enum Action {
-    SetSelectedItemId(Option<ItemId>),
+    ItemWasPressed(ItemId),
 }

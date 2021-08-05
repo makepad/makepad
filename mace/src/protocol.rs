@@ -1,19 +1,30 @@
-use std::{ffi::OsString, io};
+use {
+    crate::text::Text,
+    std::{ffi::OsString, io, path::PathBuf},
+};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Request {
     GetFileTree(),
+    OpenFile(PathBuf),
 }
 
 #[derive(Debug)]
 pub enum Response {
     GetFileTree(Result<FileNode, Error>),
+    OpenFile(Result<Text, Error>),
 }
 
 #[derive(Debug)]
 pub enum FileNode {
+    Directory { entries: Vec<DirectoryEntry> },
     File,
-    Directory { children: Vec<(OsString, FileNode)> },
+}
+
+#[derive(Debug)]
+pub struct DirectoryEntry {
+    pub name: OsString,
+    pub node: FileNode,
 }
 
 #[derive(Debug)]
