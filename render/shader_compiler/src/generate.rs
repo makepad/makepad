@@ -37,6 +37,10 @@ pub trait BackendWriter {
     
     // fn generate_var_expr(&self, string: &mut String, span:Span, ident_path: IdentPath, kind: &Cell<Option<VarKind>>, shader: &DrawShaderDecl, decl: &FnDecl, ty:&Option<Ty>);
     
+    fn needs_bare_struct_cons(&self) -> bool {
+        true
+    }
+        
     fn write_ident(&self, string: &mut String, ident: Ident);
     
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
@@ -368,6 +372,11 @@ impl<'a> ExprGenerator<'a> {
                     ty_lit,
                     ref arg_exprs,
                 } => self.generate_cons_call_expr(span, ty_lit, arg_exprs),
+                ExprKind::StructCons{
+                    struct_node_ptr,
+                    span,
+                    ref args
+                } => self.generate_struct_cons(struct_node_ptr, span, args),
                 ExprKind::Var {
                     span,
                     ref kind,
@@ -542,6 +551,26 @@ impl<'a> ExprGenerator<'a> {
                 self.generate_expr(expr);
                 write!(self.string, ".{}", field_ident).unwrap();
             }
+        }
+    }
+
+    fn generate_struct_cons(
+        &mut self,
+        struct_node_ptr: StructNodePtr,
+        _span: Span,
+        args: &Vec<(Ident,Expr)>,
+    ) {
+        let struct_decl = self.shader_registry.structs.get(&struct_node_ptr).unwrap();
+        if self.backend_writer.needs_bare_struct_cons(){
+            write!(self.string, "{}(", struct_node_ptr).unwrap();
+            for (index,field) in struct_decl.fields.iter().enumerate(){
+                if index !=0 {
+                    write!(self.string, ",").unwrap();
+                }
+                let arg = args.iter().find(|(ident,_)| field.ident == *ident).unwrap();
+                self.generate_expr(&arg.1);
+            }
+            write!(self.string, ")").unwrap();
         }
     }
     

@@ -14,48 +14,13 @@ use makepad_live_parser::LiveErrorOrigin;
 use makepad_live_parser::live_error_origin;
 use makepad_live_parser::id;
 use makepad_live_parser::Id;
-use makepad_live_parser::FileId;
 use makepad_live_parser::Span;
 
 use std::cell::RefCell;
-/*
-pub fn analyse(shader: &ShaderAst, base_props:&[PropDef], sub_props: &[&PropDef], gather_all: bool) -> Result<(), Error> {
-    let builtins = builtin::generate_builtins();
-    let mut env = Env::new();
-    env.push_scope();
-
-    for &ident in builtins.keys() {
-        env.insert_sym(Span::default(), ident, Sym::Builtin)?;
-    }
-       
-
-    for prop in sub_props {
-        env.insert_sym(
-            Span::default(),
-            Ident::new(&prop.ident),
-            Sym::TyVar {
-                ty: prop.prop_id.shader_ty(),
-            },
-        )?;
-    }
-    env.push_scope();
-    ShaderAnalyser {
-        builtins,
-        shader,
-        env,
-        gather_all,
-    }
-    .analyse_shader()
-}*/
 
 #[derive(Debug, Clone, Copy)]
 pub struct ShaderAnalyseOptions {
     pub no_const_collapse: bool
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ShaderGenerateOptions {
-    pub const_file_id: Option<FileId>
 }
 
 #[derive(Debug)]
@@ -73,12 +38,6 @@ impl<'a> StructAnalyser<'a> {
             env: self.env,
         }
     }
-    /*
-    fn const_gatherer(&self) -> ConstGatherer {
-        ConstGatherer {
-            env: self.env,
-        }
-    }*/
     
     pub fn analyse_struct(&mut self) -> Result<(), LiveError> {
         self.env.push_scope();
@@ -105,26 +64,7 @@ impl<'a> StructAnalyser<'a> {
         self.env.pop_scope();
         Ok(())
     }
-    /*
-    fn analyse_const_decl(&mut self, decl: &ConstDecl) -> Result<(), LiveError> {
-        let expected_ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
-        let actual_ty = self.ty_checker().ty_check_expr_with_expected_ty(
-            decl.span,
-            &decl.expr,
-            &expected_ty,
-        ) ?;
-        self.const_evaluator().const_eval_expr(&decl.expr) ?;
-        self.env.insert_sym(
-            decl.span,
-            decl.ident.to_ident_path(),
-            Sym::Var {
-                is_mut: false,
-                ty: actual_ty,
-                kind: VarKind::Const,
-            },
-        )
-    }*/
-    
+
     fn analyse_field_decl(&mut self, decl: &FieldDecl) -> Result<(), LiveError> {
         self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
         // ok so. if this thing depends on structs, lets store them.
@@ -151,7 +91,6 @@ impl<'a> StructAnalyser<'a> {
             .transpose() ?
         .unwrap_or(Ty::Void);
         *decl.return_ty.borrow_mut() = Some(return_ty);
-        //self.env.insert_sym(decl.span, decl.ident, Sym::Fn).ok();
         Ok(())
     }
     
@@ -160,7 +99,6 @@ impl<'a> StructAnalyser<'a> {
 
 #[derive(Debug)]
 pub struct DrawShaderAnalyser<'a> {
-    //pub body: &'a ShaderBody,
     pub draw_shader_decl: &'a DrawShaderDecl,
     pub env: &'a mut Env,
     pub shader_registry: &'a ShaderRegistry,
@@ -174,19 +112,6 @@ impl<'a> DrawShaderAnalyser<'a> {
             shader_registry: self.shader_registry,
         }
     }
-    /*
-    fn const_evaluator(&self) -> ConstEvaluator {
-        ConstEvaluator {
-            env: self.env,
-            no_const_collapse: self.options.no_const_collapse
-        }
-    }*/
-    /*
-    fn const_gatherer(&self) -> ConstGatherer {
-        ConstGatherer {
-            env: self.env,
-        }
-    }*/
     
     pub fn analyse_shader(&mut self, shader_node_ptr:DrawShaderNodePtr) -> Result<(), LiveError> {
         self.env.push_scope();
@@ -287,13 +212,7 @@ impl<'a> DrawShaderAnalyser<'a> {
         *self.draw_shader_decl.all_structs.borrow_mut() = all_structs;
         *self.draw_shader_decl.vertex_structs.borrow_mut() = vertex_structs;
         *self.draw_shader_decl.pixel_structs.borrow_mut() = pixel_structs;
-        /*
-        *self.draw_shader_decl.const_table.borrow_mut() = 
-            Some(self.env.const_table.borrow_mut().take().unwrap());
-        
-        *self.draw_shader_decl.const_table_spans.borrow_mut() = 
-            Some(self.env.const_table_spans.borrow_mut().take().unwrap());
-        */
+
         Ok(()) 
     }
     
@@ -424,20 +343,6 @@ impl<'a> DrawShaderAnalyser<'a> {
         Ok(())
     }
     
-    /*
-    fn analyse_struct_decl(&mut self, decl: &StructDecl) -> Result<(), LiveError> {
-        for field in &decl.fields {
-            self.ty_checker().ty_check_ty_expr(&field.ty_expr) ?;
-        }
-        self.env.insert_sym(
-            decl.span,
-            decl.ident.to_ident_path(),
-            Sym::TyVar {
-                ty: Ty::Struct {ident: decl.ident},
-            },
-        )
-    }*/
-    
     fn analyse_struct_tree(
         &self,
         call_stack: &mut Vec<StructNodePtr>,
@@ -514,91 +419,6 @@ impl<'a> DrawShaderAnalyser<'a> {
 
         Ok(())
     }
-    /*
-    fn propagate_deps(&mut self, visited: &mut HashSet<IdentPath>, decl: &FnDecl) -> Result<(), LiveError> {
-        if visited.contains(&decl.ident_path) {
-            return Ok(());
-        }
-        for &callee in decl.callees.borrow().as_ref().unwrap().iter() {
-            let callee_decl = self.shader.shader_body.find_fn_decl(callee).unwrap();
-            self.propagate_deps(visited, callee_decl) ?;
-            decl.uniform_block_deps
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .extend(callee_decl.uniform_block_deps.borrow().as_ref().unwrap());
-            decl.has_texture_deps.set(Some(
-                decl.has_texture_deps.get().unwrap() || callee_decl.has_texture_deps.get().unwrap(),
-            ));
-            decl.geometry_deps
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .extend(callee_decl.geometry_deps.borrow().as_ref().unwrap());
-            decl.instance_deps
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .extend(callee_decl.instance_deps.borrow().as_ref().unwrap());
-            decl.has_varying_deps.set(Some(
-                decl.has_varying_deps.get().unwrap() || callee_decl.has_varying_deps.get().unwrap(),
-            ));
-            decl.builtin_deps.borrow_mut().as_mut().unwrap().extend(
-                callee_decl
-                    .builtin_deps
-                    .borrow()
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .cloned(),
-            );
-            decl.cons_fn_deps.borrow_mut().as_mut().unwrap().extend(
-                callee_decl
-                    .cons_fn_deps
-                    .borrow()
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .cloned(),
-            );
-        }
-        if decl.is_used_in_vertex_shader.get().unwrap()
-            && decl.is_used_in_fragment_shader.get().unwrap()
-        {
-            if !decl.geometry_deps.borrow().as_ref().unwrap().is_empty() {
-                return Err(LiveError {
-                    origin:live_error_origin!(),
-                    span: decl.span,
-                    message: format!(
-                        "function `{}` can't access any geometries, since it's used in both the vertex and fragment shader",
-                        decl.ident_path
-                    ),
-                });
-            }
-            if !decl.instance_deps.borrow().as_ref().unwrap().is_empty() {
-                return Err(LiveError {
-                    origin:live_error_origin!(),
-                    span: decl.span,
-                    message: format!(
-                        "function `{}` can't access any instances, since it's used in both the vertex and fragment shader",
-                        decl.ident_path
-                    ),
-                });
-            }
-            if decl.has_varying_deps.get().unwrap() {
-                return Err(LiveError {
-                    origin:live_error_origin!(),
-                    span: decl.span,
-                    message: format!(
-                        "function `{}` can't access any varyings, since it's used in both the vertex and fragment shader",
-                        decl.ident_path
-                    ),
-                });
-            }
-        }
-        visited.insert(decl.ident_path);
-        Ok(())
-    }*/
 }
 
 
@@ -889,6 +709,13 @@ impl<'a> FnDefAnalyser<'a> {
         expr: &Option<Expr>,
     ) -> Result<(), LiveError> {
         *ty.borrow_mut() = Some(if let Some(ty_expr) = ty_expr {
+            if expr.is_none(){
+                 return Err(LiveError {
+                    origin: live_error_origin!(),
+                    span,
+                    message: format!("cannot define an uninitialised variable `{}`", ident),
+                });
+            }
             let expected_ty = self.ty_checker().ty_check_ty_expr(ty_expr) ?;
             if let Some(expr) = expr {
                 let actual_ty =
@@ -899,6 +726,7 @@ impl<'a> FnDefAnalyser<'a> {
             } else {
                 expected_ty
             }
+            
         } else if let Some(expr) = expr {
             let ty = self.ty_checker().ty_check_expr(expr) ?;
             if ty == Ty::Void {

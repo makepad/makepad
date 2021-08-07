@@ -131,6 +131,11 @@ impl<'a> TyChecker<'a> {
                 ref kind,
                 var_resolve,
             } => self.ty_check_var_expr(span, kind, var_resolve),
+            ExprKind::StructCons{
+                struct_node_ptr,
+                span,
+                ref args
+            } => self.ty_check_struct_cons(struct_node_ptr, span, args),            
             ExprKind::Lit {span, lit} => self.ty_check_lit_expr(span, lit),
         } ?;
         *expr.ty.borrow_mut() = Some(ty.clone());
@@ -629,7 +634,6 @@ impl<'a> TyChecker<'a> {
         Ok(elem_ty)
     }
     
-    
     #[allow(clippy::redundant_closure_call)]
     fn ty_check_cons_call_expr(
         &mut self,
@@ -743,6 +747,61 @@ impl<'a> TyChecker<'a> {
                 })
             }
         }
+    }
+    
+    fn ty_check_struct_cons(
+        &mut self,
+        struct_node_ptr: StructNodePtr,
+        span: Span,
+        args: &Vec<(Ident,Expr)>,
+    ) -> Result<Ty, LiveError> {
+        let struct_decl = self.shader_registry.structs.get(&struct_node_ptr).unwrap();
+        for (ident,expr) in args{
+            self.ty_check_expr(expr)?;
+            // ok so now we find ident, then check the type
+            if let Some(field) = struct_decl.fields.iter().find(|field| field.ident == *ident){
+                // ok so the field has a TyExpr
+                let field_ty = field.ty_expr.ty.borrow();
+                let my_ty = expr.ty.borrow();
+                if field_ty.as_ref() != my_ty.as_ref(){
+                    return Err(LiveError {
+                        origin: live_error_origin!(),
+                        span,
+                        message: format!("field `{}` is the wrong type {} instead of {}", ident, my_ty.as_ref().unwrap(), field_ty.as_ref().unwrap()),
+                    })
+                }
+            }
+            else{
+                return Err(LiveError {
+                    origin: live_error_origin!(),
+                    span,
+                    message: format!("`{}` is not a valid struct field", ident),
+                })
+            }
+        }
+        // if we are missing idents or have doubles, error
+        for field in &struct_decl.fields{
+            if args.iter().position(|(ident, expr)| ident == &field.ident).is_none(){
+                return Err(LiveError {
+                    origin: live_error_origin!(),
+                    span,
+                    message: format!("`{}` field is missing", field.ident),
+                })
+            }
+        }
+        for i in 0..args.len(){
+            for j in (i+1)..args.len(){
+                if args[i].0 == args[j].0{ // duplicate
+                     return Err(LiveError {
+                        origin: live_error_origin!(),
+                        span,
+                        message: format!("`{}` field is duplicated", args[i].0),
+                    })
+                }
+            }
+        }
+        // its all ok.
+        Ok(Ty::Struct(struct_node_ptr))
     }
     
     fn ty_check_lit_expr(&mut self, _span: Span, lit: Lit) -> Result<Ty, LiveError> {

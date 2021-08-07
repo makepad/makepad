@@ -8,8 +8,9 @@ use crate::analyse::*;
 
 use crate::shaderparser::ShaderParser;
 use crate::shaderparser::ShaderParserDep;
+use std::collections::BTreeMap;
 use std::fmt;
-use std::cell::{RefCell,Cell};
+use std::cell::{RefCell, Cell};
 use std::collections::HashMap;
 use crate::builtin::Builtin;
 use crate::builtin::generate_builtins;
@@ -75,7 +76,7 @@ impl DrawShaderInput {
         self.uniforms.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr});
     }
     
-    pub fn add_instance(&mut self, modpath: &str, cls: &str, name: &str, ty_expr: TyExpr) {
+    pub fn add_instance(&mut self, name: &str, ty_expr: TyExpr) {
         self.instances.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr});
     }
 }
@@ -90,25 +91,35 @@ pub enum LiveNodeFindResult {
     LiveValue(ValueNodePtr, TyLit)
 }
 
+#[derive(Clone, Default)]
+pub struct FinalConstTable {
+    pub table: Vec<f32>,
+    pub offsets: BTreeMap<Callee, usize>
+}
+
 impl ShaderRegistry {
     
-    /*
-    pub fn get_plain_fn_decl(&self, fn_ptr: FnNodePtr) -> Option<&FnDecl> {
-        self.plain_fns.get(&fn_ptr)
+    pub fn compute_final_const_table(&self, draw_shader_decl: &DrawShaderDecl, filter_file_id: Option<FileId>) -> FinalConstTable {
+        if let Some(filter_file_id) = filter_file_id {
+            let mut offsets = BTreeMap::new();
+            let mut table = Vec::new();
+            let mut offset = 0;
+            for callee in draw_shader_decl.all_fns.borrow().iter() {
+                let fn_decl = self.fn_decl_from_callee(callee).unwrap();
+                if fn_decl.span.file_id() == filter_file_id {
+                    let sub_table = fn_decl.const_table.borrow();
+                    table.extend(sub_table.as_ref().unwrap().iter());
+                    offsets.insert(*callee, offset);
+                    offset += sub_table.as_ref().unwrap().len();
+                }
+            }
+            FinalConstTable {table, offsets}
+        }
+        else {
+            FinalConstTable::default()
+        }
     }
     
-    pub fn struct_decl_from_ptr(&self, struct_ptr: StructNodePtr) -> Option<&StructDecl> {
-        self.structs.get(&struct_ptr)
-    }
-    
-    pub fn draw_shader_decl_from_ptr(&self, shader_ptr: DrawShaderNodePtr) -> Option<&DrawShaderDecl> {
-        self.draw_shaders.get(&shader_ptr)
-    }
-    
-    pub fn const_decl_from_ptr(&self, const_ptr: ConstNodePtr) -> Option<&ConstDecl> {
-        self.consts.get(&const_ptr)
-    }*/
-
     pub fn struct_method_from_ptr(&self, struct_node_ptr: StructNodePtr, ident: Ident) -> Option<&FnDecl> {
         if let Some(s) = self.structs.get(&struct_node_ptr) {
             if let Some(node) = s.methods.iter().find( | fn_decl | fn_decl.ident == ident) {
@@ -134,11 +145,11 @@ impl ShaderRegistry {
         None
     }
     
-    pub fn fn_decl_from_callee(&self, callee:&Callee) -> Option<&FnDecl> {
-        match callee{
-            Callee::PlainFn {fn_node_ptr}=>self.plain_fn_from_ptr(*fn_node_ptr),
-            Callee::DrawShaderMethod {shader_node_ptr, ident}=>self.draw_shader_method_from_ptr(*shader_node_ptr, *ident),
-            Callee::StructMethod {struct_node_ptr, ident}=>self.struct_method_from_ptr(*struct_node_ptr, *ident),
+    pub fn fn_decl_from_callee(&self, callee: &Callee) -> Option<&FnDecl> {
+        match callee {
+            Callee::PlainFn {fn_node_ptr} => self.plain_fn_from_ptr(*fn_node_ptr),
+            Callee::DrawShaderMethod {shader_node_ptr, ident} => self.draw_shader_method_from_ptr(*shader_node_ptr, *ident),
+            Callee::StructMethod {struct_node_ptr, ident} => self.struct_method_from_ptr(*struct_node_ptr, *ident),
         }
     }
     
@@ -346,7 +357,7 @@ impl ShaderRegistry {
                     decl: self.consts.get(&const_ptr).unwrap(),
                     env: &mut Env::new(),
                     shader_registry: self,
-                    options: ShaderAnalyseOptions{
+                    options: ShaderAnalyseOptions {
                         no_const_collapse: true
                     },
                 };
@@ -663,9 +674,22 @@ impl ShaderRegistry {
                                 message: format!("Cannot find draw_input {}", draw_input_srid)
                             })
                         }
-                        
-                        
                     }
+                    // lets check for duplicate fields
+                    for i in 0..draw_shader_decl.fields.len(){
+                        for j in (i+1)..draw_shader_decl.fields.len(){
+                            let field_a = &draw_shader_decl.fields[i]; 
+                            let field_b = &draw_shader_decl.fields[j]; 
+                            if field_a.ident == field_b.ident{
+                               return Err(LiveError {
+                                    origin: live_error_origin!(),
+                                    span:field_a.span,
+                                    message: format!("Field double declaration {}", field_b.ident)
+                                })
+                            }
+                        }
+                    }
+                    
                     self.draw_shaders.insert(shader_ptr, draw_shader_decl);
                     
                     self.analyse_deps(&parser_deps) ?;
@@ -693,17 +717,18 @@ impl ShaderRegistry {
         })
     }
     
-    pub fn generate_glsl_shader(&mut self, crate_id: Id, module_id: Id, ids: &[Id], const_file_id:Option<FileId>) -> Result<(String, String), LiveError> {
+    pub fn generate_glsl_shader(&mut self, crate_id: Id, module_id: Id, ids: &[Id], const_file_id: Option<FileId>) -> Result<(String, String), LiveError> {
         // lets find the FullPointer
         if let Some(shader_ptr) = self.live_registry.find_full_node_ptr_from_ids(crate_id, module_id, ids) {
             // lets generate a vertex shader
             
             if let Some(draw_shader_decl) = self.draw_shaders.get(&DrawShaderNodePtr(shader_ptr)) {
                 // TODO this env needs its const table transferred
-                let result = generate_glsl::generate_pixel_shader(draw_shader_decl, self, ShaderGenerateOptions{
-                    const_file_id
-                });
-                println!("GOT RESULT {}", result);
+                let final_const_table = self.compute_final_const_table(draw_shader_decl, const_file_id);
+                
+                let vertex = generate_glsl::generate_vertex_shader(draw_shader_decl, &final_const_table, self);
+                let pixel = generate_glsl::generate_pixel_shader(draw_shader_decl, &final_const_table, self);
+                return Ok((vertex, pixel))
             }
             
         }
