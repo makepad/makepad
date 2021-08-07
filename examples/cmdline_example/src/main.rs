@@ -37,7 +37,7 @@ const SOURCE:&'static str = r#"
                 fn blop(self){}
                 fn bla()->Self{
                     let t = BlaComp::blup();
-                    let v: Self;
+                    let v = Self{x:1.0,y:2.0,z:3.0,bb:MyStruct2{b:1.0}};
                     v.x = CV;
                     v.y = 2.0;
                     v.z = bla;
@@ -52,9 +52,9 @@ const SOURCE:&'static str = r#"
             }
             
             fn pixel(self)->vec4{
-                let y:MyStruct;
+                let y = MyStruct{x:1.0,y:2.0,z:3.0,bb:MyStruct2{b:1.0}};
                 let x = MyStruct::bla();
-                self.other(1.0);
+                self.other(1.0 + self.duni + self.dinst);
                 //let w = self.z;
                 return #f00;
             }
@@ -117,7 +117,8 @@ fn main() {
     }
     
     let mut di = DrawShaderInput::default();
-    di.add_uniform("w", TyLit::Float.to_ty_expr());
+    di.add_uniform("duni", TyLit::Float.to_ty_expr());
+    di.add_instance("dinst", TyLit::Float.to_ty_expr());
     sr.register_draw_input("main::test", "DrawQuad", di);
     
     // lets just call the shader compiler on this thing
@@ -132,13 +133,13 @@ fn main() {
     }
     // ok the shader is analysed.
     // now we will generate the glsl shader.
-    let result = sr.generate_glsl_shader(id!(main), id!(test), &[id!(DrawQuad)], Some(FileId(0)));
+    let result = sr.generate_glsl_shader(id!(main), id!(test), &[id!(DrawQuad)], None);//Some(FileId(0)));
     match result{
         Err(e)=>{
             println!("Error {}", e.to_live_file_error("", SOURCE));
         }
-        Ok(_)=>{
-            println!("OK!");
+        Ok((vertex,pixel))=>{
+            println!("Vertex shader:\n{}\n\nPixel shader:\n{}", vertex,pixel);
         }
     }    
     

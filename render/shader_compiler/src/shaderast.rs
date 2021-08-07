@@ -104,7 +104,6 @@ pub struct FnDecl {
     
     pub self_kind: Option<FnSelfKind>,
     
-    // analysis
     pub callees: RefCell<Option<BTreeSet<Callee >> >,
     pub builtin_deps: RefCell<Option<BTreeSet<Ident >> >,
 
@@ -117,7 +116,7 @@ pub struct FnDecl {
     pub const_refs: RefCell<Option<BTreeSet<ConstNodePtr >> >,
     pub live_refs: RefCell<Option<BTreeSet<ValueNodePtr >> >,
     pub struct_refs: RefCell<Option<BTreeSet<StructNodePtr >> >,
-    pub cons_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>) >> >,
+    pub constructor_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>) >> >,
     
     // base
     pub span: Span,
@@ -134,6 +133,14 @@ pub struct StructDecl {
     pub struct_refs: RefCell<Option<BTreeSet<StructNodePtr >> >,
     pub fields: Vec<FieldDecl>,
     pub methods: Vec<FnDecl>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FieldDecl {
+    pub var_def_node_ptr: VarDefNodePtr,
+    pub span: Span,
+    pub ident: Ident,
+    pub ty_expr: TyExpr,
 }
 
 impl StructDecl {
@@ -181,13 +188,6 @@ pub struct Param {
     pub ty_expr: TyExpr,
 }
 
-#[derive(Clone, Debug)]
-pub struct FieldDecl {
-    pub var_def_node_ptr: VarDefNodePtr,
-    pub span: Span,
-    pub ident: Ident,
-    pub ty_expr: TyExpr,
-}
 
 #[derive(Clone, Debug)]
 pub struct Block {
@@ -294,6 +294,11 @@ pub enum ExprKind {
         span: Span,
         ty_lit: TyLit,
         arg_exprs: Vec<Expr>,
+    },
+    StructCons {
+        struct_node_ptr: StructNodePtr,
+        span: Span,
+        args: Vec<(Ident, Expr)>
     },
     Var {
         span: Span,
@@ -455,7 +460,7 @@ impl FnDecl {
         *self.struct_refs.borrow_mut() = Some(BTreeSet::new());
         *self.callees.borrow_mut() = Some(BTreeSet::new());
         *self.builtin_deps.borrow_mut() = Some(BTreeSet::new());
-        *self.cons_fn_deps.borrow_mut() = Some(BTreeSet::new());
+        *self.constructor_fn_deps.borrow_mut() = Some(BTreeSet::new());
         *self.draw_shader_refs.borrow_mut() = Some(BTreeSet::new());
         *self.const_refs.borrow_mut() = Some(BTreeSet::new());
         *self.live_refs.borrow_mut() = Some(BTreeSet::new());

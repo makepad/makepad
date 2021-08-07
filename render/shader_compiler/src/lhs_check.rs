@@ -66,6 +66,10 @@ impl<'a> LhsChecker<'a> {
                 span,
                 ..
             } => self.lhs_check_all_call_expr(span),
+            ExprKind::StructCons {
+                span,
+                ..
+            } => self.lhs_check_all_call_expr(span),
             ExprKind::Var {
                 span,
                 ref kind,

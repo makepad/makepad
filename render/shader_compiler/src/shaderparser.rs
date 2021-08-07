@@ -379,7 +379,7 @@ impl<'a> ShaderParser<'a> {
             struct_refs: RefCell::new(None),
             callees: RefCell::new(None),
             builtin_deps: RefCell::new(None),
-            cons_fn_deps: RefCell::new(None),
+            constructor_fn_deps: RefCell::new(None),
             const_table: RefCell::new(None),
             const_table_spans: RefCell::new(None),
             params,
@@ -425,7 +425,7 @@ impl<'a> ShaderParser<'a> {
             return_ty: RefCell::new(None),
             callees: RefCell::new(None),
             builtin_deps: RefCell::new(None),
-            cons_fn_deps: RefCell::new(None),
+            constructor_fn_deps: RefCell::new(None),
             const_table: RefCell::new(None),
             const_table_spans:RefCell::new(None),
             params,
@@ -505,12 +505,12 @@ impl<'a> ShaderParser<'a> {
                 else {
                     if id == id!(Self) {
                         self.skip_token();
-                        if let Some(FnSelfKind::Struct(shader)) = self.self_kind{
+                        if let Some(FnSelfKind::Struct(struct_node_ptr)) = self.self_kind{
                             
                             return Ok(span.end(self, | span | TyExpr {
                                 span,
                                 ty: RefCell::new(None),
-                                kind: TyExprKind::Struct(shader),
+                                kind: TyExprKind::Struct(struct_node_ptr),
                             }))
                         }
                         return Err(span.error(self, live_error_origin!(), format!("Use of Self not allowed here").into()));
@@ -534,7 +534,7 @@ impl<'a> ShaderParser<'a> {
                             LiveNodeFindResult::Struct(struct_ptr) => {
                                 //yay .. lets make a struct typedep
                                 self.type_deps.push(ShaderParserDep::Struct(struct_ptr));
-                                
+
                                 return Ok(span.end(self, | span | TyExpr {
                                     span,
                                     ty: RefCell::new(None),
@@ -1010,6 +1010,69 @@ impl<'a> ShaderParser<'a> {
                 else {
                     let ident_path = self.expect_ident_path() ?;
                     match self.peek_token() {
+                        Token::OpenBrace =>{ // its a struct constructor call
+                            
+                            let struct_node_ptr = if ident_path.len() == 1 && ident_path.segs[0] == id!(Self) {
+                                if let Some(FnSelfKind::Struct(struct_node_ptr)) = self.self_kind{
+                                    struct_node_ptr
+                                }
+                                else{
+                                    return Err(span.error(self, live_error_origin!(), format!("Use of Self not allowed here").into()));
+                                }
+                            }                            
+                            else if let Some(ptr) = self.scan_scope_for_live_ptr(ident_path.segs[0]) {
+                                match self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]) {
+                                    LiveNodeFindResult::Struct(struct_ptr)=>{
+                                        struct_ptr
+                                    }
+                                    LiveNodeFindResult::NotFound => {
+                                        return Err(span.error(self, live_error_origin!(), format!("Struct not found `{}`", ident_path).into()))
+                                    }
+                                    LiveNodeFindResult::PossibleStatic(_, _)
+                                    | LiveNodeFindResult::Function(_) 
+                                    | LiveNodeFindResult::Component(_) 
+                                    | LiveNodeFindResult::Const(_)
+                                    | LiveNodeFindResult::LiveValue(_,_) => {
+                                        return Err(span.error(self, live_error_origin!(), format!("Not a struct `{}`", ident_path).into()))
+                                    }
+                                }
+                            }
+                            else{
+                                return Err(span.error(self, live_error_origin!(), format!("Struct not found `{}`", ident_path).into()))
+                            };
+                            
+                            self.skip_token();
+                            let mut args = Vec::new();
+                            loop{
+                                let name = self.expect_ident()?;
+                                self.expect_token(token_punct!(:))?;
+                                let expr = self.expect_expr()?;
+                                self.accept_token(token_punct!(,));
+                                args.push((name, expr));
+                                // see if we have a } or a ,
+                                match self.peek_token(){
+                                    Token::Eof=>{
+                                         return Err(span.error(self, live_error_origin!(), format!("Unexpected Eof").into()))
+                                    }
+                                    Token::CloseBrace=>{
+                                        self.skip_token();
+                                        return Ok(span.end(self, | span | Expr {
+                                            span,
+                                            ty: RefCell::new(None),
+                                            const_val: RefCell::new(None),
+                                            const_index: Cell::new(None),
+                                            kind: ExprKind::StructCons {
+                                                struct_node_ptr,
+                                                span,
+                                                args
+                                            },
+                                        }))
+                                    }
+                                    _=>()
+                                }
+                                
+                            }
+                        }
                         Token::OpenParen => {
                             let arg_exprs = self.expect_arg_exprs() ?;
                             if ident_path.len() == 1 && self.shader_registry.builtins.get(&Ident(ident_path.segs[0])).is_some() {
