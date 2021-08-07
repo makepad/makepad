@@ -82,6 +82,11 @@ impl<'a> ConstGatherer<'a> {
                 ref kind,
                 ..
             } => self.const_gather_var_expr(span, kind),
+            ExprKind::StructCons{
+                struct_node_ptr,
+                span,
+                ref args
+            } => self.const_gather_struct_cons(struct_node_ptr, span, args),
             ExprKind::Lit { span, lit } => self.const_gather_lit_expr(span, lit),
         }
     }
@@ -125,6 +130,17 @@ impl<'a> ConstGatherer<'a> {
     fn const_gather_var_expr(&self, _span: Span, _kind: &Cell<Option<VarKind>>) {}
 
     fn const_gather_lit_expr(&self, _span: Span, _lit: Lit) {}
+
+    fn const_gather_struct_cons(
+        &self,
+        _struct_node_ptr: StructNodePtr,
+        _span: Span,
+        args: &Vec<(Ident,Expr)>,
+    ) {
+        for arg in args{
+            self.const_gather_expr(&arg.1);
+        }
+    }
 
     fn write_span(&self, span: &Span) {
         let index = self.decl.const_table.borrow().as_ref().unwrap().len();

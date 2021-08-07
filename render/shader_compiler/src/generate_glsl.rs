@@ -1,21 +1,19 @@
 use crate::shaderast::*;
 use makepad_live_parser::*;
 use crate::generate::*;
-use crate::env::*;
-use crate::analyse::ShaderGenerateOptions;
 use crate::swizzle::Swizzle;
 use std::fmt::Write;
 use std::fmt;
 use std::collections::BTreeSet;
 use crate::shaderregistry::ShaderRegistry;
+use crate::shaderregistry::FinalConstTable;
 
-pub fn generate_vertex_shader(draw_shader_decl:&DrawShaderDecl, shader_registry:&ShaderRegistry, options:ShaderGenerateOptions) -> String {
+pub fn generate_vertex_shader(draw_shader_decl:&DrawShaderDecl, final_const_table:&FinalConstTable, shader_registry:&ShaderRegistry) -> String {
     let mut string = String::new();
     DrawShaderGenerator {
         draw_shader_decl,
         shader_registry,
-        env:&Env::new(),
-        options,
+        final_const_table,
         string: &mut string,
         backend_writer: &GlslBackendWriter {shader_registry}
     }
@@ -23,13 +21,12 @@ pub fn generate_vertex_shader(draw_shader_decl:&DrawShaderDecl, shader_registry:
     string
 }
 
-pub fn generate_pixel_shader(draw_shader_decl:&DrawShaderDecl, shader_registry:&ShaderRegistry, options:ShaderGenerateOptions) -> String {
+pub fn generate_pixel_shader(draw_shader_decl:&DrawShaderDecl, final_const_table:&FinalConstTable, shader_registry:&ShaderRegistry) -> String {
     let mut string = String::new();
     DrawShaderGenerator {
         draw_shader_decl,
         shader_registry,
-        env:&Env::new(),
-        options,
+        final_const_table,
         string: &mut string,
         backend_writer: &GlslBackendWriter {shader_registry}
     }
@@ -39,9 +36,8 @@ pub fn generate_pixel_shader(draw_shader_decl:&DrawShaderDecl, shader_registry:&
 
 struct DrawShaderGenerator<'a> {
     draw_shader_decl: &'a DrawShaderDecl,
-    env: &'a Env,
     shader_registry: &'a ShaderRegistry,
-    options: ShaderGenerateOptions,
+    final_const_table: &'a FinalConstTable,
     string: &'a mut String,
     backend_writer: &'a dyn BackendWriter
 }
@@ -117,7 +113,9 @@ impl<'a> DrawShaderGenerator<'a> {
                 _ => {}
             }
         }
-
+        
+        // we need to use the all_fns to compute our const table offsets.
+        
         self.generate_shader_body(&self.draw_shader_decl.vertex_fns.borrow(),&self.draw_shader_decl.vertex_structs.borrow());
         
         writeln!(self.string, "void main() {{").unwrap();
@@ -178,12 +176,12 @@ impl<'a> DrawShaderGenerator<'a> {
         // alright so. we have our fn deps which have struct deps
         // and we have struct deps in our struct deps.
         let mut all_consts = BTreeSet::new();
-        let mut all_cons_fns = BTreeSet::new();
+        let mut all_constructor_fns = BTreeSet::new();
         let mut all_live_refs = BTreeSet::new();
         
         for callee in fn_deps.iter().rev(){
             let decl = self.shader_registry.fn_decl_from_callee(callee).unwrap();
-            all_cons_fns.extend(decl.cons_fn_deps.borrow().as_ref().unwrap().iter().cloned());
+            all_constructor_fns.extend(decl.constructor_fn_deps.borrow().as_ref().unwrap().iter().cloned());
             all_consts.extend(decl.const_refs.borrow().as_ref().unwrap().iter().cloned());
             all_live_refs.extend(decl.live_refs.borrow().as_ref().unwrap().iter().cloned());
         }
@@ -193,7 +191,7 @@ impl<'a> DrawShaderGenerator<'a> {
             self.generate_struct_decl(*struct_ptr, struct_decl);
         }
         
-        for (ty_lit,  param_tys) in all_cons_fns
+        for (ty_lit,  param_tys) in all_constructor_fns
         {
             self.generate_cons_fn(ty_lit, &param_tys);
         }
@@ -209,8 +207,8 @@ impl<'a> DrawShaderGenerator<'a> {
         // lets walk our deps backwards and output the fns
         for callee in fn_deps.iter().rev(){
             let decl = self.shader_registry.fn_decl_from_callee(callee).unwrap();
-            
-            self.generate_fn_decl(decl, self.backend_writer, None);
+            let offset = self.final_const_table.offsets.get(callee).cloned();
+            self.generate_fn_decl(decl, self.backend_writer, offset);
         }
     }
     
@@ -290,17 +288,14 @@ impl<'a> DrawShaderGenerator<'a> {
         packed_instances_size: Option<usize>,
         packed_varyings_size: usize,
     ) {
-        /*
-        if self.options.create_const_table {
-            let const_table_len = self.draw_shader_decl.const_table.borrow().as_ref().unwrap().len();
-            if const_table_len != 0{
-                writeln!(
-                    self.string,
-                    "uniform float mpsc_const_table[{}];",
-                    const_table_len
-                ).unwrap();
-            }
-        }*/
+        
+        if self.final_const_table.table.len()>0 {
+            writeln!(
+                self.string,
+                "uniform float mpsc_const_table[{}];",
+                self.final_const_table.table.len()
+            ).unwrap();
+        }
         
         for decl in &self.draw_shader_decl.fields {
             match decl.kind {
@@ -839,6 +834,10 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
         }
     } 
     */
+    fn needs_bare_struct_cons(&self) -> bool {
+        true
+    }
+    
     fn needs_mul_fn_for_matrix_multiplication(&self) -> bool {
         false
     }
