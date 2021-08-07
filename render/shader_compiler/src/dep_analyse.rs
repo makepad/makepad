@@ -63,6 +63,11 @@ impl<'a> DepAnalyser<'a> {
                 ty_lit,
                 ref arg_exprs,
             } => self.dep_analyse_cons_call_expr(span, ty_lit, arg_exprs),
+            ExprKind::StructCons{
+                struct_node_ptr,
+                span,
+                ref args
+            } => self.dep_analyse_struct_cons(struct_node_ptr, span, args),
             ExprKind::Var {
                 span,
                 ref kind,
@@ -231,7 +236,7 @@ impl<'a> DepAnalyser<'a> {
             self.dep_analyse_expr(arg_expr);
         }
         self.decl
-            .cons_fn_deps
+            .constructor_fn_deps
             .borrow_mut()
             .as_mut()
             .unwrap()
@@ -243,6 +248,19 @@ impl<'a> DepAnalyser<'a> {
                 .collect::<Vec<_ >> (),
         ));
     }
+    
+    fn dep_analyse_struct_cons(
+        &mut self,
+        struct_node_ptr: StructNodePtr,
+        _span: Span,
+        args: &Vec<(Ident,Expr)>,
+    ) {
+        // alright we have a struct constructor
+        self.decl.struct_refs.borrow_mut().as_mut().unwrap().insert(struct_node_ptr);
+        for arg in args{
+            self.dep_analyse_expr(&arg.1);
+        }
+    }    
     
     fn dep_analyse_var_expr(&mut self, _span: Span, ty:Option<&Ty>, kind: &Cell<Option<VarKind >>) {
         // alright so. a var expr..
