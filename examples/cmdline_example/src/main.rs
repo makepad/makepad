@@ -24,6 +24,10 @@ const SOURCE:&'static str = r#"
             const CV:float = 1.0;
             bla: 1.0,
             
+            fn closure_test(self, x:float, y:fn(v1:float, v2:float)->float){
+                y(1.0,2.0);
+            }
+            
             MyStruct2:Struct{
                 field b:float
                 fn blip(self){}
@@ -52,6 +56,8 @@ const SOURCE:&'static str = r#"
             }
             
             fn pixel(self)->vec4{
+                self.closure_test(1.0, |x, y| x+y);
+                
                 let y = MyStruct{x:1.0,y:2.0,z:3.0,bb:MyStruct2{b:1.0}};
                 let x = MyStruct::bla();
                 self.other(1.0 + self.duni + self.dinst);
@@ -139,7 +145,8 @@ fn main() {
             println!("Error {}", e.to_live_file_error("", SOURCE));
         }
         Ok((vertex,pixel))=>{
-            println!("Vertex shader:\n{}\n\nPixel shader:\n{}", vertex,pixel);
+            //println!("Vertex shader:\n{}\n\nPixel shader:\n{}", vertex,pixel);
+            println!("{}", pixel);
         }
     }    
     

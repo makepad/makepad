@@ -1,6 +1,7 @@
 #![allow(unused_variables)]
 use crate::shaderast::*;
 use crate::env::Env;
+use crate::env::ClosureDef;
 use makepad_live_parser::LiveError;
 use makepad_live_parser::LiveErrorOrigin;
 use makepad_live_parser::live_error_origin;
@@ -15,6 +16,7 @@ use std::cell::Cell;
 use std::fmt::Write;
 use std::rc::Rc;
 use crate::shaderregistry::ShaderRegistry;
+use crate::env::Sym;
 
 #[derive(Clone, Debug)]
 pub struct TyChecker<'a> {
@@ -28,14 +30,23 @@ impl<'a> TyChecker<'a> {
     }
     
     pub fn ty_check_ty_expr(&mut self, ty_expr: &TyExpr) -> Result<Ty, LiveError> {
-        let ty = match ty_expr.kind {
+        let ty = match &ty_expr.kind {
             TyExprKind::Array {
                 ref elem_ty_expr,
                 len,
-            } => self.ty_check_array_ty_expr(ty_expr.span, elem_ty_expr, len),
-            TyExprKind::Lit {ty_lit} => self.ty_check_lit_ty_expr(ty_expr.span, ty_lit),
-            TyExprKind::Struct(struct_ptr) => Ok(Ty::Struct(struct_ptr)),
-            TyExprKind::DrawShader(shader_ptr) => Ok(Ty::DrawShader(shader_ptr)),
+            } => self.ty_check_array_ty_expr(ty_expr.span, elem_ty_expr, *len),
+            TyExprKind::Lit {ty_lit} => self.ty_check_lit_ty_expr(ty_expr.span, *ty_lit),
+            TyExprKind::Struct(struct_ptr) => Ok(Ty::Struct(*struct_ptr)),
+            TyExprKind::DrawShader(shader_ptr) => Ok(Ty::DrawShader(*shader_ptr)),
+            TyExprKind::Closure {return_ty_expr, params, return_ty} => {
+                // check the closure
+                let checked_return_ty = self.ty_check_ty_expr(return_ty_expr.as_ref().as_ref().unwrap()).unwrap_or(Ty::Void);
+                *return_ty.borrow_mut() = Some(checked_return_ty);
+                for param in params {
+                    self.ty_check_ty_expr(&param.ty_expr) ?;
+                }
+                Ok(Ty::Closure)
+            }
         } ?;
         *ty_expr.ty.borrow_mut() = Some(ty.clone());
         Ok(ty)
@@ -110,6 +121,21 @@ impl<'a> TyChecker<'a> {
                 ident,
                 ref arg_exprs,
             } => self.ty_check_builtin_call_expr(span, ident, arg_exprs),
+            ExprKind::ClosureCall {
+                span,
+                ident,
+                ref arg_exprs,
+            } => self.ty_check_closure_call_expr(span, ident, arg_exprs),
+            ExprKind::ClosureExpr { // we need to emit these
+                span,
+                ref params,
+                ref expr
+            } => self.ty_check_closure_expr(span, params, expr),
+            ExprKind::ClosureBlock {
+                span,
+                ref params,
+                ref block
+            } => self.ty_check_closure_block(span, params, block),
             ExprKind::ConsCall {
                 span,
                 ty_lit,
@@ -131,15 +157,39 @@ impl<'a> TyChecker<'a> {
                 ref kind,
                 var_resolve,
             } => self.ty_check_var_expr(span, kind, var_resolve),
-            ExprKind::StructCons{
+            ExprKind::StructCons {
                 struct_node_ptr,
                 span,
                 ref args
-            } => self.ty_check_struct_cons(struct_node_ptr, span, args),            
+            } => self.ty_check_struct_cons(struct_node_ptr, span, args),
             ExprKind::Lit {span, lit} => self.ty_check_lit_expr(span, lit),
         } ?;
         *expr.ty.borrow_mut() = Some(ty.clone());
         Ok(ty)
+    }
+    
+    fn ty_check_closure_expr(
+        &mut self,
+        span: Span,
+        params: &Vec<Ident>,
+        expr: &Expr
+    ) -> Result<Ty, LiveError> {
+        self.env.closures.borrow_mut().push(
+            ClosureDef::Expr {span, params:params.clone(), expr:expr.clone()}
+        );
+        Ok(Ty::Closure)
+    }
+    
+    fn ty_check_closure_block(
+        &mut self,
+        span: Span,
+        params: &Vec<Ident>,
+        block: &Block
+    ) -> Result<Ty, LiveError> {
+        self.env.closures.borrow_mut().push(
+            ClosureDef::Block {span, params:params.clone(), block:block.clone()}
+        );
+        Ok(Ty::Closure)
     }
     
     fn ty_check_cond_expr(
@@ -436,6 +486,31 @@ impl<'a> TyChecker<'a> {
         })
     }
     
+    fn ty_check_closure_call_expr(
+        &mut self,
+        span: Span,
+        ident: Ident,
+        arg_exprs: &[Expr],
+    ) -> Result<Ty, LiveError> {
+        
+        for arg_expr in arg_exprs {
+            self.ty_check_expr(arg_expr) ?;
+        }
+        match self.env.find_sym_on_scopes(ident, span) {
+            Some(Sym::Closure {return_ty, params}) => {
+                self.check_params_against_args(span, &params, arg_exprs) ?;
+                return Ok(return_ty)
+            }
+            _ => ()
+        }
+        Err(LiveError {
+            origin: live_error_origin!(),
+            span,
+            message: format!("Closure call `{}` is not defined on", ident),
+        })
+    }
+    
+    
     fn ty_check_builtin_call_expr(
         &mut self,
         span: Span,
@@ -475,33 +550,49 @@ impl<'a> TyChecker<'a> {
         arg_exprs: &[Expr],
         fn_decl: &FnDecl,
     ) -> Result<(), LiveError> {
-        if arg_exprs.len() < fn_decl.params.len() {
+        if let Err(err) = self.check_params_against_args(span, &fn_decl.params, arg_exprs) {
+            Err(LiveError {
+                origin: live_error_origin!(),
+                span,
+                message: format!("function: `{}`: {}", self.shader_registry.fn_ident_from_ptr(fn_node_ptr), err.message)
+            })
+        }
+        else {
+            Ok(())
+        }
+    }
+    
+    fn check_params_against_args(
+        &mut self,
+        span: Span,
+        params: &[Param],
+        arg_exprs: &[Expr],
+    ) -> Result<(), LiveError> {
+        if arg_exprs.len() < params.len() {
             return Err(LiveError {
                 origin: live_error_origin!(),
                 span,
                 message: format!(
-                    "not enough arguments for call to function `{}`: expected {}, got {}",
-                    self.shader_registry.fn_ident_from_ptr(fn_node_ptr),
-                    fn_decl.params.len(),
+                    "not enough arguments expected {}, got {}",
+                    params.len(),
                     arg_exprs.len(),
                 )
                     .into(),
             });
         }
-        if arg_exprs.len() > fn_decl.params.len() {
+        if arg_exprs.len() > params.len() {
             return Err(LiveError {
                 origin: live_error_origin!(),
                 span,
                 message: format!(
-                    "too many arguments for call to function `{}`: expected {}, got {}",
-                    self.shader_registry.fn_ident_from_ptr(fn_node_ptr),
-                    fn_decl.params.len(),
+                    "too many arguments for call expected {}, got {}",
+                    params.len(),
                     arg_exprs.len()
                 )
                     .into(),
             });
         }
-        for (index, (arg_expr, param)) in arg_exprs.iter().zip(fn_decl.params.iter()).enumerate()
+        for (index, (arg_expr, param)) in arg_exprs.iter().zip(params.iter()).enumerate()
         {
             let arg_ty = arg_expr.ty.borrow();
             let arg_ty = arg_ty.as_ref().unwrap();
@@ -512,9 +603,8 @@ impl<'a> TyChecker<'a> {
                     origin: live_error_origin!(),
                     span,
                     message: format!(
-                        "wrong type for argument {} in call to function `{}`: expected `{}`, got `{}`",
+                        "wrong type for argument {} expected `{}`, got `{}`",
                         index + 1,
-                        self.shader_registry.fn_ident_from_ptr(fn_node_ptr),
                         param_ty,
                         arg_ty,
                     ).into()
@@ -733,10 +823,10 @@ impl<'a> TyChecker<'a> {
             }
             VarResolve::NotFound(ident) => {
                 match self.env.find_sym_on_scopes(ident, span) {
-                    Some(sym) => {
+                    Some(Sym::Local {is_mut, ty}) => {
                         // ok its either a local var or something.
-                        kind.set(Some(if sym.is_mut {VarKind::MutLocal(ident)}else {VarKind::Local(ident)}));
-                        return Ok(sym.ty)
+                        kind.set(Some(if is_mut {VarKind::MutLocal(ident)}else {VarKind::Local(ident)}));
+                        return Ok(ty)
                     }
                     _ => ()
                 }
@@ -753,17 +843,17 @@ impl<'a> TyChecker<'a> {
         &mut self,
         struct_node_ptr: StructNodePtr,
         span: Span,
-        args: &Vec<(Ident,Expr)>,
+        args: &Vec<(Ident, Expr)>,
     ) -> Result<Ty, LiveError> {
         let struct_decl = self.shader_registry.structs.get(&struct_node_ptr).unwrap();
-        for (ident,expr) in args{
-            self.ty_check_expr(expr)?;
+        for (ident, expr) in args {
+            self.ty_check_expr(expr) ?;
             // ok so now we find ident, then check the type
-            if let Some(field) = struct_decl.fields.iter().find(|field| field.ident == *ident){
+            if let Some(field) = struct_decl.fields.iter().find( | field | field.ident == *ident) {
                 // ok so the field has a TyExpr
                 let field_ty = field.ty_expr.ty.borrow();
                 let my_ty = expr.ty.borrow();
-                if field_ty.as_ref() != my_ty.as_ref(){
+                if field_ty.as_ref() != my_ty.as_ref() {
                     return Err(LiveError {
                         origin: live_error_origin!(),
                         span,
@@ -771,7 +861,7 @@ impl<'a> TyChecker<'a> {
                     })
                 }
             }
-            else{
+            else {
                 return Err(LiveError {
                     origin: live_error_origin!(),
                     span,
@@ -780,8 +870,8 @@ impl<'a> TyChecker<'a> {
             }
         }
         // if we are missing idents or have doubles, error
-        for field in &struct_decl.fields{
-            if args.iter().position(|(ident, expr)| ident == &field.ident).is_none(){
+        for field in &struct_decl.fields {
+            if args.iter().position( | (ident, expr) | ident == &field.ident).is_none() {
                 return Err(LiveError {
                     origin: live_error_origin!(),
                     span,
@@ -789,10 +879,10 @@ impl<'a> TyChecker<'a> {
                 })
             }
         }
-        for i in 0..args.len(){
-            for j in (i+1)..args.len(){
-                if args[i].0 == args[j].0{ // duplicate
-                     return Err(LiveError {
+        for i in 0..args.len() {
+            for j in (i + 1)..args.len() {
+                if args[i].0 == args[j].0 { // duplicate
+                    return Err(LiveError {
                         origin: live_error_origin!(),
                         span,
                         message: format!("`{}` field is duplicated", args[i].0),

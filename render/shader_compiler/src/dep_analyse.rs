@@ -58,6 +58,17 @@ impl<'a> DepAnalyser<'a> {
                 ident,
                 ref arg_exprs,
             } => self.dep_analyse_builtin_call_expr(span, ident, arg_exprs),
+            ExprKind::ClosureCall {
+                span,
+                ident,
+                ref arg_exprs,
+            } => self.dep_analyse_closure_call_expr(span, ident, arg_exprs),
+            ExprKind::ClosureExpr {
+                ..
+            } => (),
+            ExprKind::ClosureBlock {
+                ..
+            } => (),
             ExprKind::ConsCall {
                 span,
                 ty_lit,
@@ -157,6 +168,25 @@ impl<'a> DepAnalyser<'a> {
             _ => panic!(),
         }
     }*/
+    
+    fn dep_analyse_closure_call_expr(
+        &mut self,
+        span: Span,
+        ident: Ident,
+        arg_exprs: &[Expr],
+    ) {
+        for arg_expr in arg_exprs {
+            self.dep_analyse_expr(arg_expr);
+        }
+        // ok so this must be a closure call.
+        
+        self.decl
+            .closure_deps
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .insert(ident);
+    }
     
     fn dep_analyse_builtin_call_expr(
         &mut self,
