@@ -58,6 +58,18 @@ impl<'a> LhsChecker<'a> {
                 span,
                 ..
             } => self.lhs_check_all_call_expr(span),
+            ExprKind::ClosureCall {
+                span,
+                ..
+            } => self.lhs_check_all_call_expr(span),
+             ExprKind::ClosureExpr { // we need to emit these
+                 span,
+                ..
+            } => self.lhs_check_closure(span),
+            ExprKind::ClosureBlock {
+                span,
+                ..
+            } => self.lhs_check_closure(span),
             ExprKind::BuiltinCall {
                 span,
                 ..
@@ -77,6 +89,17 @@ impl<'a> LhsChecker<'a> {
             } => self.lhs_check_var_expr(span, kind),
             ExprKind::Lit {span, lit} => self.lhs_check_lit_expr(span, lit),
         }
+    }
+    
+    fn lhs_check_closure(
+        &mut self,
+        span: Span,
+    ) -> Result<(), LiveError> {
+        return Err(LiveError {
+            origin: live_error_origin!(),
+            span,
+            message: String::from("expression is not a valid left hand side"),
+        });
     }
     
     fn lhs_check_cond_expr(

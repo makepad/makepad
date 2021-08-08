@@ -63,6 +63,16 @@ impl<'a> ConstGatherer<'a> {
                 ref arg_exprs,
                 ..
             } => self.const_gather_all_call_expr(arg_exprs),
+            ExprKind::ClosureCall {
+                ref arg_exprs,
+                ..
+            } => self.const_gather_all_call_expr(arg_exprs),
+            ExprKind::ClosureExpr {
+                ..
+            } => (),
+            ExprKind::ClosureBlock {
+                ..
+            } => (),
             ExprKind::ConsCall {
                 ref arg_exprs,
                 ..

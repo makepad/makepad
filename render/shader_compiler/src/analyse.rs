@@ -3,7 +3,7 @@ use crate::const_eval::ConstEvaluator;
 use crate::const_gather::ConstGatherer;
 use crate::dep_analyse::DepAnalyser;
 use crate::env::Env;
-use crate::env::LocalSym;
+use crate::env::Sym;
 use crate::shaderast::Ident;
 use crate::shaderast::{Ty, TyExpr};
 use crate::ty_check::TyChecker;
@@ -522,14 +522,29 @@ impl<'a> FnDefAnalyser<'a> {
     pub fn analyse_fn_def(&mut self) -> Result<(), LiveError> {
         self.env.push_scope();
         for param in &self.decl.params {
-            self.env.insert_sym(
-                param.span,
-                param.ident,
-                LocalSym {
-                    is_mut: true,
-                    ty: param.ty_expr.ty.borrow().as_ref().unwrap().clone(),
-                },
-            ) ?;
+            match &param.ty_expr.kind{
+                TyExprKind::Closure{return_ty, params, ..}=>{
+                    self.env.insert_sym(
+                        param.span,
+                        param.ident,
+                        Sym::Closure {
+                            return_ty: return_ty.borrow().clone().unwrap(),
+                            params: params.clone()
+                        },
+                    ) ?;
+                }
+                _=>{
+                    self.env.insert_sym(
+                        param.span,
+                        param.ident,
+                        Sym::Local {
+                            is_mut: true,
+                            ty: param.ty_expr.ty.borrow().as_ref().unwrap().clone(),
+                        },
+                    ) ?;
+                }
+            }
+            
         }
         *self.decl.return_ty.borrow_mut() = Some(
             self.decl
@@ -664,7 +679,7 @@ impl<'a> FnDefAnalyser<'a> {
         self.env.insert_sym(
             span,
             ident,
-            LocalSym {
+            Sym::Local {
                 is_mut: false,
                 ty: Ty::Int,
             },
@@ -750,7 +765,7 @@ impl<'a> FnDefAnalyser<'a> {
         self.env.insert_sym(
             span,
             ident,
-            LocalSym {
+            Sym::Local {
                 is_mut: true,
                 ty: ty.borrow().as_ref().unwrap().clone(),
             },

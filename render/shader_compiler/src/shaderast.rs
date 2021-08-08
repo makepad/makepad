@@ -106,6 +106,7 @@ pub struct FnDecl {
     
     pub callees: RefCell<Option<BTreeSet<Callee >> >,
     pub builtin_deps: RefCell<Option<BTreeSet<Ident >> >,
+    pub closure_deps: RefCell<Option<BTreeSet<Ident >> >,
 
     // the const table (per function)
     pub const_table: RefCell<Option<Vec<f32 >> >,
@@ -179,6 +180,13 @@ pub enum DrawShaderFieldKind {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct ClosureParam {
+    pub span: Span,
+    pub is_inout: bool,
+    pub ident: Option<Ident>,
+    pub ty_expr: TyExpr,
+}
 
 #[derive(Clone, Debug)]
 pub struct Param {
@@ -187,7 +195,6 @@ pub struct Param {
     pub ident: Ident,
     pub ty_expr: TyExpr,
 }
-
 
 #[derive(Clone, Debug)]
 pub struct Block {
@@ -290,6 +297,21 @@ pub enum ExprKind {
         ident: Ident,
         arg_exprs: Vec<Expr>,
     },
+    ClosureCall{
+        span: Span,
+        ident: Ident,
+        arg_exprs: Vec<Expr>,
+    },
+    ClosureBlock{
+        span:Span,
+        params: Vec<Ident>,
+        block: Block,
+    },
+    ClosureExpr{
+        span:Span,
+        params: Vec<Ident>,
+        expr: Box<Expr>
+    },
     ConsCall {
         span: Span,
         ty_lit: TyLit,
@@ -311,6 +333,7 @@ pub enum ExprKind {
         lit: Lit,
     },
 }
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum VarResolve {
@@ -344,6 +367,11 @@ pub enum TyExprKind {
     DrawShader(DrawShaderNodePtr),
     Lit {
         ty_lit: TyLit,
+    },
+    Closure{
+        return_ty: RefCell<Option<Ty >>,
+        return_ty_expr: Box<Option<TyExpr>>,
+        params: Vec<Param>
     },
 }
 
@@ -403,6 +431,7 @@ pub enum Ty {
     Array {elem_ty: Rc<Ty>, len: usize},
     Struct(StructNodePtr),
     DrawShader(DrawShaderNodePtr),
+    Closure
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -460,6 +489,7 @@ impl FnDecl {
         *self.struct_refs.borrow_mut() = Some(BTreeSet::new());
         *self.callees.borrow_mut() = Some(BTreeSet::new());
         *self.builtin_deps.borrow_mut() = Some(BTreeSet::new());
+        *self.closure_deps.borrow_mut() = Some(BTreeSet::new());
         *self.constructor_fn_deps.borrow_mut() = Some(BTreeSet::new());
         *self.draw_shader_refs.borrow_mut() = Some(BTreeSet::new());
         *self.const_refs.borrow_mut() = Some(BTreeSet::new());
@@ -622,7 +652,8 @@ impl Ty {
             Ty::Texture2D => Some(TyLit::Bool),
             Ty::Array {..} => None,
             Ty::Struct(_) => None,
-            Ty::DrawShader(_) => None
+            Ty::DrawShader(_) => None,
+            Ty::Closure => None
         }
     }
     
@@ -668,6 +699,7 @@ impl Ty {
             Ty::Array {elem_ty, len} => elem_ty.size() * len,
             Ty::Struct(_) => panic!(),
             Ty::DrawShader(_) => panic!(),
+            Ty::Closure => panic!(),
         }
     }
 }
@@ -695,6 +727,7 @@ impl fmt::Display for Ty {
             Ty::Array {elem_ty, len} => write!(f, "{}[{}]", elem_ty, len),
             Ty::Struct(struct_ptr) => write!(f, "Struct:{:?}", struct_ptr),
             Ty::DrawShader(shader_ptr) => write!(f, "DrawShader:{:?}", shader_ptr),
+            Ty::Closure => write!(f, "Closure"),
         }
     }
 }

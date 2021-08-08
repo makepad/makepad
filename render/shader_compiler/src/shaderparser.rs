@@ -8,7 +8,7 @@ use crate::shaderregistry::ShaderRegistry;
 use crate::shaderregistry::LiveNodeFindResult;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub enum ShaderParserDep{
+pub enum ShaderParserDep {
     Const(ConstNodePtr),
     Struct(StructNodePtr),
     Function(Option<StructNodePtr>, FnNodePtr)
@@ -210,8 +210,8 @@ impl<'a> ShaderParser<'a> {
         let ty_expr = self.expect_ty_expr() ?;
         match decl_ty {
             Ident(id!(geometry)) => {
-                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl{
-                    kind:DrawShaderFieldKind::Geometry{
+                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl {
+                    kind: DrawShaderFieldKind::Geometry {
                         is_used_in_pixel_shader: Cell::new(false),
                         var_def_node_ptr: VarDefNodePtr(decl_node_ptr),
                     },
@@ -221,8 +221,8 @@ impl<'a> ShaderParser<'a> {
                 })))
             }
             Ident(id!(instance)) => {
-                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl{
-                    kind: DrawShaderFieldKind::Instance{
+                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl {
+                    kind: DrawShaderFieldKind::Instance {
                         is_used_in_pixel_shader: Cell::new(false),
                         input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
                     },
@@ -238,8 +238,8 @@ impl<'a> ShaderParser<'a> {
                 else {
                     Ident(id!(default))
                 };
-                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl{
-                    kind: DrawShaderFieldKind::Uniform{
+                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl {
+                    kind: DrawShaderFieldKind::Uniform {
                         input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
                         block_ident,
                     },
@@ -249,8 +249,8 @@ impl<'a> ShaderParser<'a> {
                 })))
             }
             Ident(id!(varying)) => {
-                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl{
-                    kind: DrawShaderFieldKind::Varying{
+                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl {
+                    kind: DrawShaderFieldKind::Varying {
                         var_def_node_ptr: VarDefNodePtr(decl_node_ptr),
                     },
                     span,
@@ -259,8 +259,8 @@ impl<'a> ShaderParser<'a> {
                 })))
             }
             Ident(id!(texture)) => {
-                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl{
-                    kind: DrawShaderFieldKind::Texture{
+                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl {
+                    kind: DrawShaderFieldKind::Texture {
                         input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
                     },
                     span,
@@ -277,7 +277,7 @@ impl<'a> ShaderParser<'a> {
         }
     }
     
-        // lets parse a function.
+    // lets parse a function.
     pub fn expect_const_decl(&mut self, ident: Ident) -> Result<ConstDecl, LiveError> {
         let span = self.begin_span();
         let decl_ty = self.expect_ident() ?;
@@ -288,11 +288,11 @@ impl<'a> ShaderParser<'a> {
         self.expect_token(token_punct!(:)) ?;
         // now we expect a type
         let ty_expr = self.expect_ty_expr() ?;
-        self.expect_token(token_punct!(=)) ?;
+        self.expect_token(token_punct!( =)) ?;
         
-        let expr = self.expect_expr()?;
+        let expr = self.expect_expr() ?;
         
-        if decl_ty != Ident(id!(const)){
+        if decl_ty != Ident(id!(const)) {
             panic!()
         }
         
@@ -332,17 +332,17 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_method_decl(&mut self, fn_node_ptr:FnNodePtr, ident:Ident) -> Result<Option<FnDecl>, LiveError> {
+    pub fn expect_method_decl(&mut self, fn_node_ptr: FnNodePtr, ident: Ident) -> Result<Option<FnDecl>, LiveError> {
         let span = self.begin_span();
-
+        
         self.expect_token(Token::OpenParen) ?;
         let mut params = Vec::new();
         if !self.accept_token(Token::CloseParen) {
             
             let span = self.begin_span();
             let is_inout = self.accept_token(token_ident!(inout));
-            self.expect_token(token_ident!(self))?;
-        
+            self.expect_token(token_ident!(self)) ?;
+            
             let kind = self.self_kind.unwrap().to_ty_expr_kind();
             params.push(span.end(self, | span | Param {
                 span,
@@ -354,7 +354,7 @@ impl<'a> ShaderParser<'a> {
                     kind
                 },
             }));
-
+            
             while self.accept_token(token_punct!(,)) {
                 params.push(self.expect_param() ?);
             }
@@ -378,6 +378,7 @@ impl<'a> ShaderParser<'a> {
             live_refs: RefCell::new(None),
             struct_refs: RefCell::new(None),
             callees: RefCell::new(None),
+            closure_deps: RefCell::new(None),
             builtin_deps: RefCell::new(None),
             constructor_fn_deps: RefCell::new(None),
             const_table: RefCell::new(None),
@@ -389,14 +390,14 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_plain_fn_decl(&mut self, fn_node_ptr:FnNodePtr, ident:Ident) -> Result<FnDecl, LiveError> {
+    pub fn expect_plain_fn_decl(&mut self, fn_node_ptr: FnNodePtr, ident: Ident) -> Result<FnDecl, LiveError> {
         let span = self.begin_span();
-
+        
         self.expect_token(Token::OpenParen) ?;
         let mut params = Vec::new();
         if !self.accept_token(Token::CloseParen) {
-            let param =self.expect_param() ?; 
-            if param.ident == Ident(id!(self)){
+            let param = self.expect_param() ?;
+            if param.ident == Ident(id!(self)) {
                 return Err(span.error(self, live_error_origin!(), format!("use of self not allowed in plain function").into()))
             }
             
@@ -424,10 +425,11 @@ impl<'a> ShaderParser<'a> {
             draw_shader_refs: RefCell::new(None),
             return_ty: RefCell::new(None),
             callees: RefCell::new(None),
+            closure_deps: RefCell::new(None),
             builtin_deps: RefCell::new(None),
             constructor_fn_deps: RefCell::new(None),
             const_table: RefCell::new(None),
-            const_table_spans:RefCell::new(None),
+            const_table_spans: RefCell::new(None),
             params,
             return_ty_expr,
             block,
@@ -493,7 +495,34 @@ impl<'a> ShaderParser<'a> {
         match self.peek_token() {
             Token::Ident(id) => {
                 // properly parse type here
-                
+                if id == id!(fn) {
+                    self.skip_token();
+                    // ok now we parse (ident:ty, ty)
+                    self.expect_token(Token::OpenParen) ?;
+                    let mut params = Vec::new();
+                    if !self.accept_token(Token::CloseParen) {
+                        params.push(self.expect_param() ?);
+                        while self.accept_token(token_punct!(,)) {
+                            params.push(self.expect_param() ?);
+                        }
+                        self.expect_token(Token::CloseParen) ?;
+                    }
+                    let return_ty_expr = if self.accept_token(token_punct!( ->)) {
+                        Some(self.expect_ty_expr() ?)
+                    } else {
+                        None
+                    };
+                    Ok(span.end(self, | span | TyExpr {
+                        ty: RefCell::new(None),
+                        span,
+                        kind: TyExprKind::Closure {
+                            params,
+                            return_ty: RefCell::new(None),
+                            return_ty_expr:Box::new(return_ty_expr)
+                        },
+                    }))
+                }
+                else
                 if let Some(ty_lit) = TyLit::from_id(id) {
                     self.skip_token();
                     Ok(span.end(self, | span | TyExpr {
@@ -505,7 +534,7 @@ impl<'a> ShaderParser<'a> {
                 else {
                     if id == id!(Self) {
                         self.skip_token();
-                        if let Some(FnSelfKind::Struct(struct_node_ptr)) = self.self_kind{
+                        if let Some(FnSelfKind::Struct(struct_node_ptr)) = self.self_kind {
                             
                             return Ok(span.end(self, | span | TyExpr {
                                 span,
@@ -521,20 +550,20 @@ impl<'a> ShaderParser<'a> {
                     
                     if let Some(ptr) = self.scan_scope_for_live_ptr(ident_path.segs[0]) {
                         match self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]) {
-                            LiveNodeFindResult::NotFound =>{
+                            LiveNodeFindResult::NotFound => {
                                 return Err(span.error(self, live_error_origin!(), format!("Struct not found `{}`", ident_path).into()))
                             }
-                            LiveNodeFindResult::Function(_) 
-                            |  LiveNodeFindResult::Const(_)
-                            |  LiveNodeFindResult::Component(_)
-                            |  LiveNodeFindResult::LiveValue(_,_)
-                            | LiveNodeFindResult::PossibleStatic(_,_) => {
+                            LiveNodeFindResult::Function(_)
+                                | LiveNodeFindResult::Const(_)
+                                | LiveNodeFindResult::Component(_)
+                                | LiveNodeFindResult::LiveValue(_, _)
+                                | LiveNodeFindResult::PossibleStatic(_, _) => {
                                 return Err(span.error(self, live_error_origin!(), format!("Not a Struct type `{}`", ident_path).into()))
                             }
                             LiveNodeFindResult::Struct(struct_ptr) => {
                                 //yay .. lets make a struct typedep
                                 self.type_deps.push(ShaderParserDep::Struct(struct_ptr));
-
+                                
                                 return Ok(span.end(self, | span | TyExpr {
                                     span,
                                     ty: RefCell::new(None),
@@ -543,7 +572,7 @@ impl<'a> ShaderParser<'a> {
                             }
                         }
                     }
-                    else{
+                    else {
                         return Err(span.error(self, live_error_origin!(), format!("Cannot find type `{}`", ident_path).into()));
                     }
                 }
@@ -565,7 +594,6 @@ impl<'a> ShaderParser<'a> {
             ty_expr,
         }))
     }
-    
     
     fn expect_block(&mut self) -> Result<Block, LiveError> {
         self.expect_token(Token::OpenBrace) ?;
@@ -1010,51 +1038,51 @@ impl<'a> ShaderParser<'a> {
                 else {
                     let ident_path = self.expect_ident_path() ?;
                     match self.peek_token() {
-                        Token::OpenBrace =>{ // its a struct constructor call
+                        Token::OpenBrace => { // its a struct constructor call
                             
                             let struct_node_ptr = if ident_path.len() == 1 && ident_path.segs[0] == id!(Self) {
-                                if let Some(FnSelfKind::Struct(struct_node_ptr)) = self.self_kind{
+                                if let Some(FnSelfKind::Struct(struct_node_ptr)) = self.self_kind {
                                     struct_node_ptr
                                 }
-                                else{
+                                else {
                                     return Err(span.error(self, live_error_origin!(), format!("Use of Self not allowed here").into()));
                                 }
-                            }                            
+                            }
                             else if let Some(ptr) = self.scan_scope_for_live_ptr(ident_path.segs[0]) {
                                 match self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]) {
-                                    LiveNodeFindResult::Struct(struct_ptr)=>{
+                                    LiveNodeFindResult::Struct(struct_ptr) => {
                                         struct_ptr
                                     }
                                     LiveNodeFindResult::NotFound => {
                                         return Err(span.error(self, live_error_origin!(), format!("Struct not found `{}`", ident_path).into()))
                                     }
                                     LiveNodeFindResult::PossibleStatic(_, _)
-                                    | LiveNodeFindResult::Function(_) 
-                                    | LiveNodeFindResult::Component(_) 
-                                    | LiveNodeFindResult::Const(_)
-                                    | LiveNodeFindResult::LiveValue(_,_) => {
+                                        | LiveNodeFindResult::Function(_)
+                                        | LiveNodeFindResult::Component(_)
+                                        | LiveNodeFindResult::Const(_)
+                                        | LiveNodeFindResult::LiveValue(_, _) => {
                                         return Err(span.error(self, live_error_origin!(), format!("Not a struct `{}`", ident_path).into()))
                                     }
                                 }
                             }
-                            else{
+                            else {
                                 return Err(span.error(self, live_error_origin!(), format!("Struct not found `{}`", ident_path).into()))
                             };
                             
                             self.skip_token();
                             let mut args = Vec::new();
-                            loop{
-                                let name = self.expect_ident()?;
-                                self.expect_token(token_punct!(:))?;
-                                let expr = self.expect_expr()?;
+                            loop {
+                                let name = self.expect_ident() ?;
+                                self.expect_token(token_punct!(:)) ?;
+                                let expr = self.expect_expr() ?;
                                 self.accept_token(token_punct!(,));
                                 args.push((name, expr));
                                 // see if we have a } or a ,
-                                match self.peek_token(){
-                                    Token::Eof=>{
-                                         return Err(span.error(self, live_error_origin!(), format!("Unexpected Eof").into()))
+                                match self.peek_token() {
+                                    Token::Eof => {
+                                        return Err(span.error(self, live_error_origin!(), format!("Unexpected Eof").into()))
                                     }
-                                    Token::CloseBrace=>{
+                                    Token::CloseBrace => {
                                         self.skip_token();
                                         return Ok(span.end(self, | span | Expr {
                                             span,
@@ -1068,7 +1096,7 @@ impl<'a> ShaderParser<'a> {
                                             },
                                         }))
                                     }
-                                    _=>()
+                                    _ => ()
                                 }
                                 
                             }
@@ -1093,14 +1121,14 @@ impl<'a> ShaderParser<'a> {
                                     LiveNodeFindResult::NotFound => {
                                         Err(span.error(self, live_error_origin!(), format!("Function not found `{}`", ident_path).into()))
                                     }
-                                    LiveNodeFindResult::Component(_) 
-                                    | LiveNodeFindResult::Struct(_) 
-                                    | LiveNodeFindResult::Const(_)
-                                    | LiveNodeFindResult::LiveValue(_,_) => {
+                                    LiveNodeFindResult::Component(_)
+                                        | LiveNodeFindResult::Struct(_)
+                                        | LiveNodeFindResult::Const(_)
+                                        | LiveNodeFindResult::LiveValue(_, _) => {
                                         Err(span.error(self, live_error_origin!(), format!("Not a function `{}`", ident_path).into()))
                                     }
                                     LiveNodeFindResult::Function(fn_node_ptr) => {
-                                        self.type_deps.push(ShaderParserDep::Function(None,fn_node_ptr));
+                                        self.type_deps.push(ShaderParserDep::Function(None, fn_node_ptr));
                                         Ok(span.end(self, | span | Expr {
                                             span,
                                             ty: RefCell::new(None),
@@ -1135,7 +1163,21 @@ impl<'a> ShaderParser<'a> {
                                     
                                 }
                             }
-                            else {
+                            else if ident_path.len() == 1{
+                                // it must be a closure call, even though we don't know if its really there.
+                                Ok(span.end(self, | span | Expr {
+                                    span,
+                                    ty: RefCell::new(None),
+                                    const_val: RefCell::new(None),
+                                    const_index: Cell::new(None),
+                                    kind: ExprKind::ClosureCall {
+                                        span,
+                                        ident: Ident(ident_path.segs[0]),
+                                        arg_exprs,
+                                    },
+                                }))
+                            }
+                            else{
                                 Err(span.error(self, live_error_origin!(), format!("Call not found `{}`", ident_path).into()))
                             }
                         }
@@ -1143,14 +1185,14 @@ impl<'a> ShaderParser<'a> {
                             let mut var_resolve = VarResolve::NotFound(Ident(ident_path.segs[0]));
                             if let Some(ptr) = self.scan_scope_for_live_ptr(ident_path.segs[0]) {
                                 match self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]) {
-                                    LiveNodeFindResult::LiveValue(value_ptr,ty)=>{
+                                    LiveNodeFindResult::LiveValue(value_ptr, ty) => {
                                         var_resolve = VarResolve::LiveValue(value_ptr, ty);
                                     }
-                                    LiveNodeFindResult::Const(const_ptr)=>{
+                                    LiveNodeFindResult::Const(const_ptr) => {
                                         self.type_deps.push(ShaderParserDep::Const(const_ptr));
                                         var_resolve = VarResolve::Const(const_ptr);
                                     }
-                                    _=>()
+                                    _ => ()
                                 }
                             }
                             Ok(span.end(self, | span | Expr {
@@ -1207,6 +1249,40 @@ impl<'a> ShaderParser<'a> {
                     const_index: Cell::new(None),
                     kind: ExprKind::Lit {span, lit: Lit::Color(v)},
                 }))
+            }
+            token_punct!(|)=>{
+                // ok its an actual closure def
+                self.skip_token();
+                let mut params = Vec::new();
+                if !self.accept_token(token_punct!(|)) {
+                    loop {
+                        params.push(self.expect_ident()?);
+                        if !self.accept_token(token_punct!(,)) {
+                            break;
+                        }
+                    }
+                    self.expect_token(token_punct!(|)) ?;
+                }
+                if self.peek_token() == Token::OpenBrace{
+                    let block = self.expect_block()?;
+                    Ok(span.end(self, | span | Expr {
+                        span,
+                        ty: RefCell::new(None),
+                        const_val: RefCell::new(None),
+                        const_index: Cell::new(None),
+                        kind: ExprKind::ClosureBlock {span, params, block},
+                    }))
+                }
+                else{
+                    let expr = self.expect_expr()?;
+                    Ok(span.end(self, | span | Expr {
+                        span,
+                        ty: RefCell::new(None),
+                        const_val: RefCell::new(None),
+                        const_index: Cell::new(None),
+                        kind: ExprKind::ClosureExpr {span, params, expr:Box::new(expr)},
+                    }))
+                }
             }
             Token::OpenParen => {
                 self.skip_token();

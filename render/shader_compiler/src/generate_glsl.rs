@@ -943,6 +943,11 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
                 //panic!();
                 return false
             }
+            Ty::Closure=> {
+                // we should output nothing
+                //panic!();
+                return false
+            }
             Ty::Struct(ptr)=> {
                 write!(string, "{} {}", ptr, ident).unwrap();
             }
