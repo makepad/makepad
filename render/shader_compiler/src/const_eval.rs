@@ -60,6 +60,16 @@ impl ConstEvaluator {
                 ref arg_exprs,
                 ..
             } => self.try_const_eval_all_call_expr(arg_exprs),
+            ExprKind::ClosureCall {
+                ref arg_exprs,
+                ..
+            } => self.try_const_eval_all_call_expr(arg_exprs),
+            ExprKind::ClosureExpr {
+                ..
+            } => None,
+            ExprKind::ClosureBlock {
+                ..
+            } => None,
             ExprKind::ConsCall {
                 ref arg_exprs,
                 ..

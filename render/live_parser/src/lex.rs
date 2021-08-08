@@ -157,6 +157,7 @@ C: Iterator<Item = char>,
                 self.skip_two_chars();
                 Token::Punct(id!( &&))
             }
+            
             ('*', '=') => {
                 self.skip_two_chars();
                 Token::Punct(id!( *=))
@@ -292,6 +293,30 @@ C: Iterator<Item = char>,
                 self.skip_char();
                 Token::Punct(id!( ?))
             }
+            ('&', '=') => {
+                self.skip_two_chars();
+                Token::Punct(id!( &=))
+            }
+            ('&', _) => {
+                self.skip_char();
+                Token::Punct(id!( &))
+            }
+            ('|', '=') => {
+                self.skip_two_chars();
+                Token::Punct(id!( |=))
+            }
+            ('|', _) => {
+                self.skip_char();
+                Token::Punct(id!(|))
+            }
+            ('^', '=') => {
+                self.skip_two_chars();
+                Token::Punct(id!(^=))
+            }
+            ('^', _) => {
+                self.skip_char();
+                Token::Punct(id!(^))
+            }                        
             (ch, _) if ch.is_ascii_alphabetic() || ch == '_' => {
                 self.temp_string.truncate(0);
                 let ch = self.read_char();
