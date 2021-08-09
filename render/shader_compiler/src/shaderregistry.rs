@@ -426,7 +426,7 @@ impl ShaderRegistry {
                 let id = fn_node.id_pack.unwrap_single();
                 let mut parser_deps = Vec::new();
                 // lets parse this thing
-                let mut parser = ShaderParser::new(
+                let parser = ShaderParser::new(
                     self,
                     doc.get_tokens(token_start, token_count + 1),
                     doc.get_scopes(scope_start, scope_count),
@@ -510,7 +510,7 @@ impl ShaderRegistry {
                         LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
                             let id = prop.id_pack.unwrap_single();
                             // lets parse this thing
-                            let mut parser = ShaderParser::new(
+                            let parser = ShaderParser::new(
                                 self,
                                 doc.get_tokens(token_start, token_count + 1),
                                 doc.get_scopes(scope_start, scope_count),
@@ -639,7 +639,7 @@ impl ShaderRegistry {
                             LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
                                 if let IdUnpack::Single(id) = prop.id_pack.unpack() {
                                     // lets parse this thing
-                                    let mut parser = ShaderParser::new(
+                                    let parser = ShaderParser::new(
                                         self,
                                         doc.get_tokens(token_start, token_count + 1),
                                         doc.get_scopes(scope_start, scope_count),
@@ -749,7 +749,7 @@ impl ShaderRegistry {
                             no_const_collapse: true
                         }
                     };
-                    sa.analyse_shader(shader_ptr) ?;
+                    sa.analyse_shader() ?;
                     
                     // ok we have all structs
                     return Ok(())
