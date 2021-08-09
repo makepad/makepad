@@ -4,6 +4,8 @@ use makepad_live_parser::Id;
 use makepad_live_parser::token_punct;
 use makepad_live_parser::FullNodePtr;
 use makepad_live_parser::Vec4;
+use makepad_live_parser::LiveError;
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
@@ -12,6 +14,9 @@ use std::rc::Rc;
 use makepad_live_parser::PrettyPrintedF32;
 use makepad_live_parser::id;
 use crate::shaderregistry::ShaderResourceId;
+use std::collections::hash_map::Entry;
+use makepad_live_parser::LiveErrorOrigin;
+use makepad_live_parser::live_error_origin;
 
 // all the Live node pointer newtypes
 
@@ -119,6 +124,8 @@ pub struct FnDecl {
     pub struct_refs: RefCell<Option<BTreeSet<StructNodePtr >> >,
     pub constructor_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>) >> >,
     
+    pub closure_defs: RefCell<Option<Vec<ClosureDef>>>,
+    
     // base
     pub span: Span,
     pub return_ty: RefCell<Option<Ty >>,
@@ -126,6 +133,36 @@ pub struct FnDecl {
     pub return_ty_expr: Option<TyExpr>,
     pub block: Block,
 }
+
+#[derive(Clone, Debug)]
+pub enum Sym {
+    Local{
+        is_mut: bool, 
+        ty: Ty, 
+    },
+    Closure{
+        return_ty: Ty,
+        params: Vec<Param>
+    }
+}
+
+pub type Scope = HashMap<Ident, Sym>;
+
+#[derive(Clone, Debug)]
+pub struct ClosureDef{
+    pub callee: Callee,
+    pub scopes: Vec<Scope>,
+    pub span:Span,
+    pub params: Vec<Ident>,
+    pub kind:ClosureDefKind
+}
+
+#[derive(Clone, Debug)]
+pub enum ClosureDefKind{
+    Expr(Expr),
+    Block(Block)
+}
+
 
 #[derive(Clone, Debug)]
 pub struct StructDecl {
@@ -178,14 +215,6 @@ pub enum DrawShaderFieldKind {
     Varying {
         var_def_node_ptr: VarDefNodePtr,
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct ClosureParam {
-    pub span: Span,
-    pub is_inout: bool,
-    pub ident: Option<Ident>,
-    pub ty_expr: TyExpr,
 }
 
 #[derive(Clone, Debug)]
@@ -473,6 +502,54 @@ pub enum Val {
 }
 
 
+#[derive(Clone, Debug)] 
+pub struct Scopes {
+    //pub live_uniform_deps: RefCell<Option<BTreeSet<(Ty, FullNodePtr) >> >,
+    pub scopes: Vec<Scope>,
+    pub closures: RefCell<Vec<ClosureDef>>
+}
+
+
+impl Scopes {
+    pub fn new() -> Scopes {
+        Scopes {
+            closures: RefCell::new(Vec::new()),
+            scopes: Vec::new(),
+        }
+    }
+    
+    pub fn find_sym_on_scopes(&self, ident: Ident, _span: Span,) -> Option<Sym> {
+        
+        let ret = self.scopes.iter().rev().find_map( | scope | scope.get(&ident));
+        if ret.is_some() {
+            return Some(ret.unwrap().clone())
+        }
+        return None
+    }
+    
+    pub fn push_scope(&mut self) {
+        self.scopes.push(Scope::new())
+    }
+    
+    pub fn pop_scope(&mut self) {
+        self.scopes.pop().unwrap();
+    }
+    
+    pub fn insert_sym(&mut self, span: Span, ident: Ident, sym: Sym) -> Result<(), LiveError> {
+        match self.scopes.last_mut().unwrap().entry(ident) {
+            Entry::Vacant(entry) => {
+                entry.insert(sym);
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(LiveError {
+                origin:live_error_origin!(),
+                span,
+                message: format!("`{}` is already defined in this scope", ident),
+            }),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Ord, PartialOrd, Default, Eq, Hash, PartialEq)]
 pub struct Ident(pub Id);
 
@@ -496,6 +573,7 @@ impl FnDecl {
         *self.live_refs.borrow_mut() = Some(BTreeSet::new());
         *self.const_table.borrow_mut() = Some(Vec::new());
         *self.const_table_spans.borrow_mut() = Some(Vec::new());
+        *self.closure_defs.borrow_mut() = Some(Vec::new());
     }
 }
 

@@ -1,5 +1,4 @@
-
-use crate::env::Env;
+use crate::shaderast::Scopes;
 use makepad_live_parser::LiveError;
 use makepad_live_parser::LiveErrorOrigin;
 use makepad_live_parser::live_error_origin;
@@ -18,7 +17,7 @@ use crate::shaderregistry::ShaderRegistry;
 use std::cell::Cell;
 
 pub struct LhsChecker<'a> {
-    pub env: &'a Env,
+    pub scopes: &'a Scopes,
     pub shader_registry: &'a ShaderRegistry,
 }
 
