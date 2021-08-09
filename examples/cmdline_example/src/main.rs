@@ -1,4 +1,19 @@
 const SOURCE:&'static str = r#"
+        DrawQuad: Shader{
+            fn closure_test(self, x:float, y:fn(v1:float, v2:float)->float){
+                y(1.0,2.0);
+            }
+            
+            fn pixel(self)->vec4{
+                self.closure_test(1.0, |x, y| x+y);
+                return #f00;
+            }
+            
+            fn vertex(self)->vec4{
+                return vec4(1.0);
+            }
+        }
+/*
         ViewShader: Shader{
             uniform camera_projection: mat4 in pass;
             uniform draw_scroll: vec4 in draw;
@@ -70,6 +85,7 @@ const SOURCE:&'static str = r#"
                 return vec4(1.0);
             }
         }
+        */
     "#;
     
 use makepad_live_parser::*;

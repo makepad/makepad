@@ -1,6 +1,6 @@
 #![allow(unused_variables)]
 use crate::shaderast::*;
-use crate::env::Env;
+use crate::shaderast::Scopes;
 use crate::shaderast::Ident;
 use makepad_live_parser::Span;
 //use makepad_live_parser::Id;
@@ -13,7 +13,7 @@ use crate::shaderregistry::ShaderRegistry;
 pub struct DepAnalyser<'a> {
     pub decl: &'a FnDecl,
     pub shader_registry: &'a ShaderRegistry,
-    pub env: &'a Env,
+    pub scopes: &'a Scopes,
 }
 
 impl<'a> DepAnalyser<'a> {
