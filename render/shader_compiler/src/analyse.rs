@@ -2,8 +2,8 @@ use crate::shaderast::*;
 use crate::const_eval::ConstEvaluator;
 use crate::const_gather::ConstGatherer;
 use crate::dep_analyse::DepAnalyser;
-use crate::env::Env;
-use crate::env::Sym;
+use crate::shaderast::Scopes;
+use crate::shaderast::Sym;
 use crate::shaderast::Ident;
 use crate::shaderast::{Ty, TyExpr};
 use crate::ty_check::TyChecker;
@@ -26,7 +26,7 @@ pub struct ShaderAnalyseOptions {
 #[derive(Debug)]
 pub struct StructAnalyser<'a> {
     pub struct_decl: &'a StructDecl,
-    pub env: &'a mut Env,
+    pub scopes: &'a mut Scopes,
     pub shader_registry: &'a ShaderRegistry,
     pub options: ShaderAnalyseOptions,
 }
@@ -35,12 +35,12 @@ impl<'a> StructAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
             shader_registry: self.shader_registry,
-            env: self.env,
+            scopes: self.scopes,
         }
     }
     
     pub fn analyse_struct(&mut self) -> Result<(), LiveError> {
-        self.env.push_scope();
+        self.scopes.push_scope();
         self.struct_decl.init_analysis();
         // we need to analyse the fields and put them somewhere.
         for field in &self.struct_decl.fields {
@@ -54,14 +54,14 @@ impl<'a> StructAnalyser<'a> {
         for decl in &self.struct_decl.methods {
             FnDefAnalyser {
                 decl,
-                env: &mut self.env,
+                scopes: &mut self.scopes,
                 shader_registry: self.shader_registry,
                 options: self.options,
                 is_inside_loop: false,
             }
             .analyse_fn_def() ?;
         }
-        self.env.pop_scope();
+        self.scopes.pop_scope();
         Ok(())
     }
 
@@ -100,7 +100,7 @@ impl<'a> StructAnalyser<'a> {
 #[derive(Debug)]
 pub struct DrawShaderAnalyser<'a> {
     pub draw_shader_decl: &'a DrawShaderDecl,
-    pub env: &'a mut Env,
+    pub scopes: &'a mut Scopes,
     pub shader_registry: &'a ShaderRegistry,
     pub options: ShaderAnalyseOptions,
 }
@@ -108,13 +108,13 @@ pub struct DrawShaderAnalyser<'a> {
 impl<'a> DrawShaderAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
-            env: self.env,
+            scopes: self.scopes,
             shader_registry: self.shader_registry,
         }
     }
     
     pub fn analyse_shader(&mut self, shader_node_ptr:DrawShaderNodePtr) -> Result<(), LiveError> {
-        self.env.push_scope();
+        self.scopes.push_scope();
 
         for decl in &self.draw_shader_decl.fields {
             self.analyse_field_decl(decl) ?;
@@ -129,14 +129,14 @@ impl<'a> DrawShaderAnalyser<'a> {
             FnDefAnalyser {
                 shader_registry: self.shader_registry,
                 decl,
-                env: &mut self.env,
+                scopes: &mut self.scopes,
                 options: self.options,
                 is_inside_loop: false, 
             }
             .analyse_fn_def() ?;
         }
 
-        self.env.pop_scope();
+        self.scopes.pop_scope();
         
         let mut all_fns = Vec::new();
         let mut vertex_fns = Vec::new();
@@ -426,7 +426,7 @@ impl<'a> DrawShaderAnalyser<'a> {
 #[derive(Debug)]
 pub struct ConstAnalyser<'a> {
     pub decl: &'a ConstDecl,
-    pub env: &'a mut Env,
+    pub scopes: &'a mut Scopes,
     pub shader_registry: &'a ShaderRegistry,
     pub options: ShaderAnalyseOptions,
 }
@@ -435,7 +435,7 @@ impl<'a> ConstAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
             shader_registry: self.shader_registry,
-            env: self.env,
+            scopes: self.scopes,
         }
     }
     
@@ -468,19 +468,17 @@ impl<'a> ConstAnalyser<'a> {
 #[derive(Debug)]
 pub struct FnDefAnalyser<'a> {
     pub decl: &'a FnDecl,
-    pub env: &'a mut Env,
+    pub scopes: &'a mut Scopes,
     pub shader_registry: &'a ShaderRegistry,
     pub options: ShaderAnalyseOptions,
     pub is_inside_loop: bool,
 }
 
-
-
 impl<'a> FnDefAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
             shader_registry: self.shader_registry,
-            env: self.env,
+            scopes: self.scopes,
         }
     }
     
@@ -500,10 +498,9 @@ impl<'a> FnDefAnalyser<'a> {
         DepAnalyser {
             shader_registry: self.shader_registry,
             decl: self.decl,
-            env: &self.env,
+            scopes: &self.scopes,
         }
     }
-    
     
     pub fn analyse_fn_decl(&mut self) -> Result<(), LiveError> {
         for param in &self.decl.params {
@@ -520,11 +517,11 @@ impl<'a> FnDefAnalyser<'a> {
     }
     
     pub fn analyse_fn_def(&mut self) -> Result<(), LiveError> {
-        self.env.push_scope();
+        self.scopes.push_scope();
         for param in &self.decl.params {
             match &param.ty_expr.kind{
                 TyExprKind::Closure{return_ty, params, ..}=>{
-                    self.env.insert_sym(
+                    self.scopes.insert_sym(
                         param.span,
                         param.ident,
                         Sym::Closure {
@@ -534,7 +531,7 @@ impl<'a> FnDefAnalyser<'a> {
                     ) ?;
                 }
                 _=>{
-                    self.env.insert_sym(
+                    self.scopes.insert_sym(
                         param.span,
                         param.ident,
                         Sym::Local {
@@ -555,7 +552,16 @@ impl<'a> FnDefAnalyser<'a> {
         );
         self.decl.init_analysis();
         self.analyse_block(&self.decl.block) ?;
-        self.env.pop_scope();
+        self.scopes.pop_scope();
+        
+        // lets move the closures from env to 
+        
+        // ok now we have to analyse all closure defs that are stored on env
+        // and store them on our fndecl
+        // also if our fn has closure-args, this fn needs to be specialised for every call.
+        // including our 'scope' args
+        // we have to kinda keep looping until the env runs out of new closures.
+        
         Ok(())
     }
     
@@ -675,8 +681,8 @@ impl<'a> FnDefAnalyser<'a> {
             }
             self.dep_analyser().dep_analyse_expr(step_expr);
         }
-        self.env.push_scope();
-        self.env.insert_sym(
+        self.scopes.push_scope();
+        self.scopes.insert_sym(
             span,
             ident,
             Sym::Local {
@@ -688,7 +694,7 @@ impl<'a> FnDefAnalyser<'a> {
         self.is_inside_loop = true;
         self.analyse_block(block) ?;
         self.is_inside_loop = was_inside_loop;
-        self.env.pop_scope();
+        self.scopes.pop_scope();
         Ok(())
     }
     
@@ -704,13 +710,13 @@ impl<'a> FnDefAnalyser<'a> {
         self.const_evaluator().try_const_eval_expr(expr);
         self.const_gatherer().const_gather_expr(expr);
         self.dep_analyser().dep_analyse_expr(expr);
-        self.env.push_scope();
+        self.scopes.push_scope();
         self.analyse_block(block_if_true) ?;
-        self.env.pop_scope();
+        self.scopes.pop_scope();
         if let Some(block_if_false) = block_if_false {
-            self.env.push_scope();
+            self.scopes.push_scope();
             self.analyse_block(block_if_false) ?;
-            self.env.pop_scope();
+            self.scopes.pop_scope();
         }
         Ok(())
     }
@@ -762,7 +768,7 @@ impl<'a> FnDefAnalyser<'a> {
                 message: format!("can't infer type of variable `{}`", ident),
             });
         });
-        self.env.insert_sym(
+        self.scopes.insert_sym(
             span,
             ident,
             Sym::Local {
@@ -796,9 +802,9 @@ impl<'a> FnDefAnalyser<'a> {
     }
     
     fn analyse_block_stmt(&mut self, _span: Span, block: &Block) -> Result<(), LiveError> {
-        self.env.push_scope();
+        self.scopes.push_scope();
         self.analyse_block(block) ?;
-        self.env.pop_scope();
+        self.scopes.pop_scope();
         Ok(())
     }
     

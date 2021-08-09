@@ -1,7 +1,7 @@
 #![allow(unused_variables)]
 use crate::shaderast::*;
-use crate::env::Env;
-use crate::env::ClosureDef;
+use crate::shaderast::Scopes;
+use crate::shaderast::ClosureDef;
 use makepad_live_parser::LiveError;
 use makepad_live_parser::LiveErrorOrigin;
 use makepad_live_parser::live_error_origin;
@@ -16,17 +16,17 @@ use std::cell::Cell;
 use std::fmt::Write;
 use std::rc::Rc;
 use crate::shaderregistry::ShaderRegistry;
-use crate::env::Sym;
+use crate::shaderast::Sym;
 
 #[derive(Clone, Debug)]
 pub struct TyChecker<'a> {
-    pub env: &'a Env,
+    pub scopes: &'a Scopes,
     pub shader_registry: &'a ShaderRegistry
 }
 
 impl<'a> TyChecker<'a> {
     fn lhs_checker(&self) -> LhsChecker {
-        LhsChecker {env: self.env, shader_registry: self.shader_registry,}
+        LhsChecker {scopes: self.scopes, shader_registry: self.shader_registry,}
     }
     
     pub fn ty_check_ty_expr(&mut self, ty_expr: &TyExpr) -> Result<Ty, LiveError> {
@@ -174,8 +174,13 @@ impl<'a> TyChecker<'a> {
         params: &Vec<Ident>,
         expr: &Expr
     ) -> Result<Ty, LiveError> {
-        self.env.closures.borrow_mut().push(
-            ClosureDef::Expr {span, params:params.clone(), expr:expr.clone()}
+        self.scopes.closures.borrow_mut().push(
+            ClosureDef {
+                scopes: self.scopes.scopes.clone(),
+                span,
+                params: params.clone(),
+                kind: ClosureDefKind::Expr(expr.clone())
+            }
         );
         Ok(Ty::Closure)
     }
@@ -186,8 +191,13 @@ impl<'a> TyChecker<'a> {
         params: &Vec<Ident>,
         block: &Block
     ) -> Result<Ty, LiveError> {
-        self.env.closures.borrow_mut().push(
-            ClosureDef::Block {span, params:params.clone(), block:block.clone()}
+        self.scopes.closures.borrow_mut().push(
+            ClosureDef {
+                scopes: self.scopes.scopes.clone(),
+                span,
+                params: params.clone(),
+                kind: ClosureDefKind::Block(block.clone())
+            }
         );
         Ok(Ty::Closure)
     }
@@ -496,7 +506,7 @@ impl<'a> TyChecker<'a> {
         for arg_expr in arg_exprs {
             self.ty_check_expr(arg_expr) ?;
         }
-        match self.env.find_sym_on_scopes(ident, span) {
+        match self.scopes.find_sym_on_scopes(ident, span) {
             Some(Sym::Closure {return_ty, params}) => {
                 self.check_params_against_args(span, &params, arg_exprs) ?;
                 return Ok(return_ty)
@@ -822,7 +832,7 @@ impl<'a> TyChecker<'a> {
                 return Ok(ty_lit.to_ty());
             }
             VarResolve::NotFound(ident) => {
-                match self.env.find_sym_on_scopes(ident, span) {
+                match self.scopes.find_sym_on_scopes(ident, span) {
                     Some(Sym::Local {is_mut, ty}) => {
                         // ok its either a local var or something.
                         kind.set(Some(if is_mut {VarKind::MutLocal(ident)}else {VarKind::Local(ident)}));
