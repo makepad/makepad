@@ -128,10 +128,11 @@ impl<'a> DepAnalyser<'a> {
                     self.dep_analyse_expr(arg_expr);
                 }
                 let mut set = self.decl.callees.borrow_mut();
-                set.as_mut().unwrap().insert(Callee::StructMethod {
-                    struct_node_ptr: *struct_ptr,
-                    ident: method_ident
-                });
+                // ok we need to find the method FnPtr from the struct_ptr
+                let struct_decl = self.shader_registry.structs.get(struct_ptr).unwrap();
+                if let Some(fn_node_ptr) = self.shader_registry.struct_method_ptr_from_ident(struct_decl, method_ident){
+                    set.as_mut().unwrap().insert(fn_node_ptr);
+                }
                 //panic!("IMPL")
             }
             Ty::DrawShader(shader_ptr)=>{
@@ -140,10 +141,10 @@ impl<'a> DepAnalyser<'a> {
                     self.dep_analyse_expr(arg_expr);
                 }
                 let mut set = self.decl.callees.borrow_mut();
-                set.as_mut().unwrap().insert(Callee::DrawShaderMethod {
-                    shader_node_ptr: *shader_ptr,
-                    ident: method_ident
-                });
+                let draw_shader_decl = self.shader_registry.draw_shaders.get(shader_ptr).unwrap();
+                if let Some(fn_node_ptr) = self.shader_registry.draw_shader_method_ptr_from_ident(draw_shader_decl, method_ident){
+                    set.as_mut().unwrap().insert(fn_node_ptr);
+                }
             }
             _ => panic!(),
         }
@@ -218,9 +219,7 @@ impl<'a> DepAnalyser<'a> {
             self.dep_analyse_expr(arg_expr);
         }
         let mut set = self.decl.callees.borrow_mut();
-        set.as_mut().unwrap().insert(Callee::PlainFn {
-            fn_node_ptr
-        });
+        set.as_mut().unwrap().insert(fn_node_ptr);
         /*
         match self.env.find_sym(ident, span).unwrap() {
             Sym::Builtin => {
