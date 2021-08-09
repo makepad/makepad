@@ -147,7 +147,9 @@ impl<'a> DrawShaderGenerator<'a> {
                 _ => {}
             }
         }
-        let vertex_decl = self.draw_shader_decl.find_method(Ident(id!(vertex))).unwrap();
+
+        let vertex_decl = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_decl, Ident(id!(vertex))).unwrap();
+
         writeln!(self.string, "    gl_Position = {}();", MpscFnName(vertex_decl.fn_node_ptr, vertex_decl.ident)).unwrap();
         let mut varying_packer = VarPacker::new(
             "mpsc_packed_varying",
@@ -171,7 +173,7 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, "}}").unwrap();
     }
     
-    pub fn generate_shader_body(&mut self, fn_deps:&Vec<Callee>, struct_deps:&Vec<StructNodePtr>){
+    pub fn generate_shader_body(&mut self, fn_deps:&Vec<FnNodePtr>, struct_deps:&Vec<StructNodePtr>){
         
         // alright so. we have our fn deps which have struct deps
         // and we have struct deps in our struct deps.
@@ -180,7 +182,7 @@ impl<'a> DrawShaderGenerator<'a> {
         let mut all_live_refs = BTreeSet::new();
         
         for callee in fn_deps.iter().rev(){
-            let decl = self.shader_registry.fn_decl_from_callee(callee).unwrap();
+            let decl = self.shader_registry.all_fns.get(callee).unwrap();
             all_constructor_fns.extend(decl.constructor_fn_deps.borrow().as_ref().unwrap().iter().cloned());
             all_consts.extend(decl.const_refs.borrow().as_ref().unwrap().iter().cloned());
             all_live_refs.extend(decl.live_refs.borrow().as_ref().unwrap().iter().cloned());
@@ -206,7 +208,7 @@ impl<'a> DrawShaderGenerator<'a> {
         
         // lets walk our deps backwards and output the fns
         for callee in fn_deps.iter().rev(){
-            let decl = self.shader_registry.fn_decl_from_callee(callee).unwrap();
+            let decl = self.shader_registry.all_fns.get(callee).unwrap();
             let offset = self.final_const_table.offsets.get(callee).cloned();
             self.generate_fn_decl(decl, self.backend_writer, offset);
         }
@@ -277,7 +279,7 @@ impl<'a> DrawShaderGenerator<'a> {
             }
         }
         // we need to collect all consts
-        let pixel_decl = self.draw_shader_decl.find_method(Ident(id!(pixel))).unwrap();
+        let pixel_decl = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_decl, Ident(id!(pixel))).unwrap();
         writeln!(self.string, "    gl_FragColor = {}();", MpscFnName(pixel_decl.fn_node_ptr, pixel_decl.ident)).unwrap();
         writeln!(self.string, "}}").unwrap();
     }

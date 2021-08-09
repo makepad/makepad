@@ -31,7 +31,7 @@ pub trait BackendWriter {
         is_packed: bool,
         ident: &dyn fmt::Display,
         ty: &Ty,
-    )->bool;
+    ) -> bool;
     
     // fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, fn_node_ptr: FnNodePtr, shader: &DrawShaderDecl, sep: &str);
     
@@ -40,7 +40,7 @@ pub trait BackendWriter {
     fn needs_bare_struct_cons(&self) -> bool {
         true
     }
-        
+    
     fn write_ident(&self, string: &mut String, ident: Ident);
     
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
@@ -58,7 +58,7 @@ pub trait BackendWriter {
 
 pub struct BlockGenerator<'a> {
     pub decl: &'a FnDecl,
-   // pub env: &'a Env,
+    // pub env: &'a Env,
     pub shader_registry: &'a ShaderRegistry,
     pub backend_writer: &'a dyn BackendWriter,
     pub const_table_offset: Option<usize>,
@@ -234,7 +234,7 @@ impl<'a> BlockGenerator<'a> {
     
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
-           // env: self.env,
+            // env: self.env,
             decl: Some(self.decl),
             shader_registry: self.shader_registry,
             backend_writer: self.backend_writer,
@@ -260,7 +260,7 @@ impl<'a> BlockGenerator<'a> {
 
 pub struct ExprGenerator<'a> {
     pub decl: Option<&'a FnDecl>,
-   // pub env: &'a Env,
+    // pub env: &'a Env,
     pub shader_registry: &'a ShaderRegistry,
     pub backend_writer: &'a dyn BackendWriter,
     pub const_table_offset: Option<usize>,
@@ -290,10 +290,10 @@ impl<'a> ExprGenerator<'a> {
                 for _ in 0..4 {
                     write!(self.string, "{}mpsc_const_table", sep).unwrap();
                     if self.backend_writer.const_table_is_vec4() {
-                        const_table_index_to_vec4(self.string, index+const_table_offset);
+                        const_table_index_to_vec4(self.string, index + const_table_offset);
                     }
                     else {
-                        write!(self.string, "[{}]", index+const_table_offset).unwrap();
+                        write!(self.string, "[{}]", index + const_table_offset).unwrap();
                     }
                     sep = ", ";
                     index += 1;
@@ -304,10 +304,10 @@ impl<'a> ExprGenerator<'a> {
                 let const_table_offset = self.const_table_offset.unwrap();
                 write!(self.string, "mpsc_const_table").unwrap();
                 if self.backend_writer.const_table_is_vec4() {
-                    const_table_index_to_vec4(self.string, index+const_table_offset);
+                    const_table_index_to_vec4(self.string, index + const_table_offset);
                 }
                 else {
-                    write!(self.string, "[{}]", index+const_table_offset).unwrap();
+                    write!(self.string, "[{}]", index + const_table_offset).unwrap();
                 }
             }
             // TODO: Extract the next three cases into a write_val function
@@ -383,7 +383,7 @@ impl<'a> ExprGenerator<'a> {
                     ty_lit,
                     ref arg_exprs,
                 } => self.generate_cons_call_expr(span, ty_lit, arg_exprs),
-                ExprKind::StructCons{
+                ExprKind::StructCons {
                     struct_node_ptr,
                     span,
                     ref args
@@ -505,7 +505,10 @@ impl<'a> ExprGenerator<'a> {
         // ok so. what is expr
         match arg_exprs[0].ty.borrow().as_ref().unwrap() {
             Ty::Struct(struct_ptr) => {
-                let fn_decl = self.shader_registry.struct_method_from_ptr(*struct_ptr, ident).unwrap();
+                let fn_decl = self.shader_registry.struct_method_decl_from_ident(
+                    self.shader_registry.structs.get(struct_ptr).unwrap(),
+                    ident
+                ).unwrap();
                 
                 write!(self.string, "{}_{} (", fn_decl.fn_node_ptr, ident).unwrap();
                 let mut sep = "";
@@ -521,7 +524,10 @@ impl<'a> ExprGenerator<'a> {
                 write!(self.string, ")").unwrap();
             }
             Ty::DrawShader(shader_ptr) => {
-                let fn_decl = self.shader_registry.draw_shader_method_from_ptr(*shader_ptr, ident).unwrap();
+                let fn_decl = self.shader_registry.draw_shader_method_decl_from_ident(
+                    self.shader_registry.draw_shaders.get(shader_ptr).unwrap(),
+                    ident
+                ).unwrap();
                 
                 write!(self.string, "{}_{} (", fn_decl.fn_node_ptr, ident).unwrap();
                 let mut sep = "";
@@ -564,21 +570,21 @@ impl<'a> ExprGenerator<'a> {
             }
         }
     }
-
+    
     fn generate_struct_cons(
         &mut self,
         struct_node_ptr: StructNodePtr,
         _span: Span,
-        args: &Vec<(Ident,Expr)>,
+        args: &Vec<(Ident, Expr)>,
     ) {
         let struct_decl = self.shader_registry.structs.get(&struct_node_ptr).unwrap();
-        if self.backend_writer.needs_bare_struct_cons(){
+        if self.backend_writer.needs_bare_struct_cons() {
             write!(self.string, "{}(", struct_node_ptr).unwrap();
-            for (index,field) in struct_decl.fields.iter().enumerate(){
-                if index !=0 {
+            for (index, field) in struct_decl.fields.iter().enumerate() {
+                if index != 0 {
                     write!(self.string, ",").unwrap();
                 }
-                let arg = args.iter().find(|(ident,_)| field.ident == *ident).unwrap();
+                let arg = args.iter().find( | (ident, _) | field.ident == *ident).unwrap();
                 self.generate_expr(&arg.1);
             }
             write!(self.string, ")").unwrap();
@@ -594,7 +600,7 @@ impl<'a> ExprGenerator<'a> {
     
     fn generate_plain_call_expr(&mut self, _span: Span, fn_node_ptr: FnNodePtr, arg_exprs: &[Expr]) {
         // lets create a fn name for this thing.
-        let fn_decl = self.shader_registry.plain_fn_from_ptr(fn_node_ptr).unwrap();
+        let fn_decl = self.shader_registry.all_fns.get(&fn_node_ptr).unwrap();
         write!(self.string, "{}_{} (", fn_node_ptr, fn_decl.ident).unwrap();
         let mut sep = "";
         for arg_expr in arg_exprs {
@@ -670,11 +676,11 @@ impl<'a> ExprGenerator<'a> {
             }
             VarKind::Const(const_node_ptr) => {
                 // we have a const
-                write!(self.string, "{}", const_node_ptr).unwrap(); 
+                write!(self.string, "{}", const_node_ptr).unwrap();
             }
             VarKind::LiveValue(value_node_ptr) => {
                 // this is a live value..
-                write!(self.string, "{}", value_node_ptr).unwrap(); 
+                write!(self.string, "{}", value_node_ptr).unwrap();
                 
             }
         }

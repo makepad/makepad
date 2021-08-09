@@ -47,11 +47,13 @@ impl<'a> StructAnalyser<'a> {
             self.analyse_field_decl(field) ?;
         }
         // first analyse decls
-        for decl in &self.struct_decl.methods {
-            self.analyse_method_decl(decl) ?;
+        for fn_node_ptr in &self.struct_decl.methods {
+            let fn_decl = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
+            self.analyse_method_decl(fn_decl) ?;
         }
         // now analyse the functions
-        for decl in &self.struct_decl.methods {
+        for fn_node_ptr in &self.struct_decl.methods {
+            let decl = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
             FnDefAnalyser {
                 decl,
                 scopes: &mut self.scopes,
@@ -64,18 +66,18 @@ impl<'a> StructAnalyser<'a> {
         self.scopes.pop_scope();
         Ok(())
     }
-
+    
     fn analyse_field_decl(&mut self, decl: &FieldDecl) -> Result<(), LiveError> {
         self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
         // ok so. if this thing depends on structs, lets store them.
-        match decl.ty_expr.ty.borrow().as_ref().unwrap(){
-            Ty::Struct(struct_ptr)=>{
+        match decl.ty_expr.ty.borrow().as_ref().unwrap() {
+            Ty::Struct(struct_ptr) => {
                 self.struct_decl.struct_refs.borrow_mut().as_mut().unwrap().insert(*struct_ptr);
             }
-            Ty::Array{..}=>{
+            Ty::Array {..} => {
                 todo!();
             }
-            _=>()
+            _ => ()
         }
         Ok(())
     }
@@ -113,69 +115,70 @@ impl<'a> DrawShaderAnalyser<'a> {
         }
     }
     
-    pub fn analyse_shader(&mut self, shader_node_ptr:DrawShaderNodePtr) -> Result<(), LiveError> {
+    pub fn analyse_shader(&mut self, shader_node_ptr: DrawShaderNodePtr) -> Result<(), LiveError> {
         self.scopes.push_scope();
-
+        
         for decl in &self.draw_shader_decl.fields {
             self.analyse_field_decl(decl) ?;
         }
         // first analyse decls
-        for decl in &self.draw_shader_decl.methods {
-            self.analyse_method_decl(decl) ?;
+        for fn_node_ptr in &self.draw_shader_decl.methods {
+            let fn_decl = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
+            self.analyse_method_decl(fn_decl) ?;
         }
         
         // now analyse the methods
-        for decl in &self.draw_shader_decl.methods {
+        for fn_node_ptr in &self.draw_shader_decl.methods {
+            let decl = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
             FnDefAnalyser {
                 shader_registry: self.shader_registry,
                 decl,
                 scopes: &mut self.scopes,
                 options: self.options,
-                is_inside_loop: false, 
+                is_inside_loop: false,
             }
             .analyse_fn_def() ?;
         }
-
+        
         self.scopes.pop_scope();
         
         let mut all_fns = Vec::new();
         let mut vertex_fns = Vec::new();
         // we should insert our vertex call
+        
         self.analyse_call_tree(
             &mut Vec::new(),
-            self.draw_shader_decl.find_method(Ident(id!(vertex))).unwrap(),
-            Callee::DrawShaderMethod{shader_node_ptr, ident:Ident(id!(vertex))},
+            self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_decl, Ident(id!(vertex))).unwrap(),
             &mut vertex_fns,
             &mut all_fns,
         ) ?;
-
+        
         let mut pixel_fns = Vec::new();
         self.analyse_call_tree(
             &mut Vec::new(),
-            self.draw_shader_decl.find_method(Ident(id!(pixel))).unwrap(),
-            Callee::DrawShaderMethod{shader_node_ptr, ident:Ident(id!(pixel))},
+            self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_decl, Ident(id!(pixel))).unwrap(),
             &mut pixel_fns,
             &mut all_fns,
         ) ?;
-
+        
         // mark all the draw_shader_refs we reference in pixelshaders.
-        for pixel_fn in &pixel_fns{
-            // if we run into a DrawShaderMethod mark it as 
-            if let Callee::DrawShaderMethod{shader_node_ptr, ident} = pixel_fn{
-                if let Some(fn_decl) = self.shader_registry.draw_shader_method_from_ptr(*shader_node_ptr, *ident){
-                    // lets iterate all 
-                    for dsr in fn_decl.draw_shader_refs.borrow().as_ref().unwrap(){
+        for pixel_fn in &pixel_fns {
+            // if we run into a DrawShaderMethod mark it as
+            if let Some(fn_decl) = self.shader_registry.all_fns.get(pixel_fn) {
+                if let Some(FnSelfKind::DrawShader(shader_ptr)) = fn_decl.self_kind {
+                    // lets iterate all
+                    for dsr in fn_decl.draw_shader_refs.borrow().as_ref().unwrap() {
                         // ok we have a draw shader ident we use, now mark it on our draw_shader_decl.
-                        for field in &self.draw_shader_decl.fields{
-                            if field.ident == *dsr{ // we found it
-                                match &field.kind{
-                                    DrawShaderFieldKind::Geometry{ref is_used_in_pixel_shader, ..}=>{
+                        for field in &self.draw_shader_decl.fields {
+                            if field.ident == *dsr { // we found it
+                                match &field.kind {
+                                    DrawShaderFieldKind::Geometry {ref is_used_in_pixel_shader, ..} => {
                                         is_used_in_pixel_shader.set(true);
                                     }
-                                    DrawShaderFieldKind::Instance{ref is_used_in_pixel_shader, ..}=>{
+                                    DrawShaderFieldKind::Instance {ref is_used_in_pixel_shader, ..} => {
                                         is_used_in_pixel_shader.set(true);
                                     }
-                                    _=>()
+                                    _ => ()
                                 }
                             }
                         }
@@ -188,32 +191,32 @@ impl<'a> DrawShaderAnalyser<'a> {
         let mut pixel_structs = Vec::new();
         let mut vertex_structs = Vec::new();
         
-        for pixel_fn in &pixel_fns{
-            let fn_decl = self.shader_registry.fn_decl_from_callee(pixel_fn).unwrap();
+        for pixel_fn in &pixel_fns {
+            let fn_decl = self.shader_registry.all_fns.get(pixel_fn).unwrap();
             // lets collect all structs
-            for struct_ptr in fn_decl.struct_refs.borrow().as_ref().unwrap().iter(){
+            for struct_ptr in fn_decl.struct_refs.borrow().as_ref().unwrap().iter() {
                 let struct_decl = self.shader_registry.structs.get(struct_ptr).unwrap();
-                self.analyse_struct_tree(&mut Vec::new(), *struct_ptr, struct_decl, &mut pixel_structs, &mut all_structs)?;
+                self.analyse_struct_tree(&mut Vec::new(), *struct_ptr, struct_decl, &mut pixel_structs, &mut all_structs) ?;
             }
         }
-        for vertex_fn in &vertex_fns{
-            let fn_decl = self.shader_registry.fn_decl_from_callee(vertex_fn).unwrap();
+        for vertex_fn in &vertex_fns {
+            let fn_decl = self.shader_registry.all_fns.get(vertex_fn).unwrap();
             // lets collect all structs
-            for struct_ptr in fn_decl.struct_refs.borrow().as_ref().unwrap().iter(){
+            for struct_ptr in fn_decl.struct_refs.borrow().as_ref().unwrap().iter() {
                 let struct_decl = self.shader_registry.structs.get(struct_ptr).unwrap();
-                self.analyse_struct_tree(&mut Vec::new(), *struct_ptr, struct_decl, &mut vertex_structs, &mut all_structs)?;
+                self.analyse_struct_tree(&mut Vec::new(), *struct_ptr, struct_decl, &mut vertex_structs, &mut all_structs) ?;
             }
         }
         
         *self.draw_shader_decl.all_fns.borrow_mut() = all_fns;
         *self.draw_shader_decl.vertex_fns.borrow_mut() = vertex_fns;
         *self.draw_shader_decl.pixel_fns.borrow_mut() = pixel_fns;
-
+        
         *self.draw_shader_decl.all_structs.borrow_mut() = all_structs;
         *self.draw_shader_decl.vertex_structs.borrow_mut() = vertex_structs;
         *self.draw_shader_decl.pixel_structs.borrow_mut() = pixel_structs;
-
-        Ok(()) 
+        
+        Ok(())
     }
     
     fn analyse_field_decl(&mut self, decl: &DrawShaderFieldDecl) -> Result<(), LiveError> {
@@ -231,7 +234,7 @@ impl<'a> DrawShaderAnalyser<'a> {
                             ),
                         })
                     }
-                } 
+                }
                 ty
             }
             DrawShaderFieldKind::Instance {..} => {
@@ -352,16 +355,16 @@ impl<'a> DrawShaderAnalyser<'a> {
         all_deps: &mut Vec<StructNodePtr>,
     ) -> Result<(), LiveError> {
         // lets see if callee is already in the vec, ifso remove it
-        if let Some(index) = deps.iter().position(|v| v == &struct_ptr){
+        if let Some(index) = deps.iter().position( | v | v == &struct_ptr) {
             deps.remove(index);
         }
         deps.push(struct_ptr);
-
-        if let Some(index) = all_deps.iter().position(|v| v == &struct_ptr){
+        
+        if let Some(index) = all_deps.iter().position( | v | v == &struct_ptr) {
             all_deps.remove(index);
         }
         all_deps.push(struct_ptr);
-
+        
         call_stack.push(struct_ptr);
         
         for sub_ptr in struct_decl.struct_refs.borrow().as_ref().unwrap().iter() {
@@ -369,12 +372,12 @@ impl<'a> DrawShaderAnalyser<'a> {
             let sub_decl = self.shader_registry.structs.get(sub_ptr).unwrap();
             if call_stack.contains(&sub_ptr) {
                 return Err(LiveError {
-                    origin:live_error_origin!(),
+                    origin: live_error_origin!(),
                     span: sub_decl.span,
                     message: format!("Struct has recursively dependency"),
                 });
             }
-           
+            
             self.analyse_struct_tree(call_stack, *sub_ptr, sub_decl, deps, all_deps) ?;
         }
         call_stack.pop();
@@ -386,37 +389,37 @@ impl<'a> DrawShaderAnalyser<'a> {
         &self,
         call_stack: &mut Vec<FnNodePtr>,
         decl: &FnDecl,
-        callee: Callee,
-        deps: &mut Vec<Callee>,
-        all_deps: &mut Vec<Callee>,
+        //callee: Callee,
+        deps: &mut Vec<FnNodePtr>,
+        all_deps: &mut Vec<FnNodePtr>,
     ) -> Result<(), LiveError> {
         // lets see if callee is already in the vec, ifso remove it
-        if let Some(index) = deps.iter().position(|v| v == &callee){
+        if let Some(index) = deps.iter().position( | v | v == &decl.fn_node_ptr) {
             deps.remove(index);
         }
-        deps.push(callee.clone());
-
-        if let Some(index) = all_deps.iter().position(|v| v == &callee){
+        deps.push(decl.fn_node_ptr);
+        
+        if let Some(index) = all_deps.iter().position( | v | v == &decl.fn_node_ptr) {
             all_deps.remove(index);
         }
-        all_deps.push(callee.clone());
-
+        all_deps.push(decl.fn_node_ptr);
+        
         call_stack.push(decl.fn_node_ptr);
         for callee in decl.callees.borrow().as_ref().unwrap().iter() {
             // ok now we need a fn decl for this callee
-            let callee_decl = self.shader_registry.fn_decl_from_callee(callee).unwrap();
+            let callee_decl = self.shader_registry.all_fns.get(&callee).unwrap();
             if call_stack.contains(&callee_decl.fn_node_ptr) {
                 return Err(LiveError {
-                    origin:live_error_origin!(),
+                    origin: live_error_origin!(),
                     span: decl.span,
                     message: format!("function `{}` recursively calls `{}`", decl.ident, callee_decl.ident),
                 });
             }
-           
-            self.analyse_call_tree(call_stack, callee_decl, *callee, deps, all_deps) ?;
+            
+            self.analyse_call_tree(call_stack, callee_decl, deps, all_deps) ?;
         }
         call_stack.pop();
-
+        
         Ok(())
     }
 }
@@ -518,9 +521,10 @@ impl<'a> FnDefAnalyser<'a> {
     
     pub fn analyse_fn_def(&mut self) -> Result<(), LiveError> {
         self.scopes.push_scope();
+        self.scopes.push_fn_node_ptr(self.decl.fn_node_ptr);
         for param in &self.decl.params {
-            match &param.ty_expr.kind{
-                TyExprKind::Closure{return_ty, params, ..}=>{
+            match &param.ty_expr.kind {
+                TyExprKind::Closure {return_ty, params, ..} => {
                     self.scopes.insert_sym(
                         param.span,
                         param.ident,
@@ -530,7 +534,7 @@ impl<'a> FnDefAnalyser<'a> {
                         },
                     ) ?;
                 }
-                _=>{
+                _ => {
                     self.scopes.insert_sym(
                         param.span,
                         param.ident,
@@ -552,9 +556,10 @@ impl<'a> FnDefAnalyser<'a> {
         );
         self.decl.init_analysis();
         self.analyse_block(&self.decl.block) ?;
+        self.scopes.pop_fn_node_ptr();
         self.scopes.pop_scope();
         
-        // lets move the closures from env to 
+        // lets move the closures from env to
         
         // ok now we have to analyse all closure defs that are stored on env
         // and store them on our fndecl
@@ -730,8 +735,8 @@ impl<'a> FnDefAnalyser<'a> {
         expr: &Option<Expr>,
     ) -> Result<(), LiveError> {
         *ty.borrow_mut() = Some(if let Some(ty_expr) = ty_expr {
-            if expr.is_none(){
-                 return Err(LiveError {
+            if expr.is_none() {
+                return Err(LiveError {
                     origin: live_error_origin!(),
                     span,
                     message: format!("cannot define an uninitialised variable `{}`", ident),
