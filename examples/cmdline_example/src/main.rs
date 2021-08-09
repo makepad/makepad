@@ -5,6 +5,7 @@ const SOURCE:&'static str = r#"
             }
             
             fn pixel(self)->vec4{
+                let t = |x| x;
                 self.closure_test(1.0, |x, y| x+y);
                 return #f00;
             }
@@ -160,7 +161,7 @@ fn main() {
         Err(e)=>{
             println!("Error {}", e.to_live_file_error("", SOURCE));
         }
-        Ok((vertex,pixel))=>{
+        Ok((_vertex,pixel))=>{
             //println!("Vertex shader:\n{}\n\nPixel shader:\n{}", vertex,pixel);
             println!("{}", pixel);
         }

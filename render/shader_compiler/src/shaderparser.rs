@@ -21,6 +21,7 @@ pub struct ShaderParser<'a> {
     pub live_scope: &'a [LiveScopeItem],
     pub shader_registry: &'a ShaderRegistry,
     pub type_deps: &'a mut Vec<ShaderParserDep>,
+    pub closure_defs: Vec<ClosureDef>,
     pub token_with_span: TokenWithSpan,
     pub self_kind: Option<FnSelfKind>,
     pub end: usize,
@@ -38,6 +39,7 @@ impl<'a> ShaderParser<'a> {
         let mut tokens_with_span = tokens.iter().cloned();
         let token_with_span = tokens_with_span.next().unwrap();
         ShaderParser {
+            closure_defs:Vec::new(),
             shader_registry,
             file_id: FileId::default(),
             live_scope,
@@ -332,7 +334,7 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_method_decl(&mut self, fn_node_ptr: FnNodePtr, ident: Ident) -> Result<Option<FnDecl>, LiveError> {
+    pub fn expect_method_decl(mut self, fn_node_ptr: FnNodePtr, ident: Ident) -> Result<Option<FnDecl>, LiveError> {
         let span = self.begin_span();
         
         self.expect_token(Token::OpenParen) ?;
@@ -344,7 +346,7 @@ impl<'a> ShaderParser<'a> {
             self.expect_token(token_ident!(self)) ?;
             
             let kind = self.self_kind.unwrap().to_ty_expr_kind();
-            params.push(span.end(self, | span | Param {
+            params.push(span.end(&mut self, | span | Param {
                 span,
                 is_inout,
                 ident: Ident(id!(self)),
@@ -367,12 +369,13 @@ impl<'a> ShaderParser<'a> {
         };
         let block = self.expect_block() ?;
         let self_kind = self.self_kind.clone();
-        Ok(Some(span.end(self, | span | FnDecl {
+        let span = span.end(&mut self, | span | span);
+        Ok(Some( FnDecl {
             fn_node_ptr,
             span,
             ident,
             self_kind,
-            closure_defs: RefCell::new(None),
+            closure_defs: self.closure_defs,
             draw_shader_refs: RefCell::new(None),
             return_ty: RefCell::new(None),
             const_refs: RefCell::new(None),
@@ -387,11 +390,11 @@ impl<'a> ShaderParser<'a> {
             params,
             return_ty_expr,
             block,
-        })))
+        }))
     }
     
     // lets parse a function.
-    pub fn expect_plain_fn_decl(&mut self, fn_node_ptr: FnNodePtr, ident: Ident) -> Result<FnDecl, LiveError> {
+    pub fn expect_plain_fn_decl(mut self, fn_node_ptr: FnNodePtr, ident: Ident) -> Result<FnDecl, LiveError> {
         let span = self.begin_span();
         
         self.expect_token(Token::OpenParen) ?;
@@ -399,7 +402,7 @@ impl<'a> ShaderParser<'a> {
         if !self.accept_token(Token::CloseParen) {
             let param = self.expect_param() ?;
             if param.ident == Ident(id!(self)) {
-                return Err(span.error(self, live_error_origin!(), format!("use of self not allowed in plain function").into()))
+                return Err(span.error(&mut self, live_error_origin!(), format!("use of self not allowed in plain function").into()))
             }
             
             params.push(param);
@@ -415,12 +418,13 @@ impl<'a> ShaderParser<'a> {
         };
         let block = self.expect_block() ?;
         let self_kind = self.self_kind.clone();
-        Ok(span.end(self, | span | FnDecl {
+        let span = span.end(&mut self, | span | span);
+        Ok(FnDecl {
             fn_node_ptr,
             span,
             ident,
             self_kind,
-            closure_defs: RefCell::new(None),
+            closure_defs: self.closure_defs,
             const_refs: RefCell::new(None),
             live_refs: RefCell::new(None),
             struct_refs: RefCell::new(None),
@@ -435,7 +439,7 @@ impl<'a> ShaderParser<'a> {
             params,
             return_ty_expr,
             block,
-        }))
+        })
     }
     
     fn expect_ty_expr(&mut self) -> Result<TyExpr, LiveError> {
@@ -517,7 +521,7 @@ impl<'a> ShaderParser<'a> {
                     Ok(span.end(self, | span | TyExpr {
                         ty: RefCell::new(None),
                         span,
-                        kind: TyExprKind::Closure {
+                        kind: TyExprKind::ClosureDecl {
                             params,
                             return_ty: RefCell::new(None),
                             return_ty_expr:Box::new(return_ty_expr)
@@ -1265,25 +1269,38 @@ impl<'a> ShaderParser<'a> {
                     }
                     self.expect_token(token_punct!(|)) ?;
                 }
+                let closure_def_index = ClosureDefIndex(self.closure_defs.len());
                 if self.peek_token() == Token::OpenBrace{
                     let block = self.expect_block()?;
-                    Ok(span.end(self, | span | Expr {
+                    let span = span.end(self, |span| span);
+                    self.closure_defs.push(ClosureDef {
+                        span,
+                        params,
+                        kind: ClosureDefKind::Block(block)
+                    });
+                    Ok(Expr {
                         span,
                         ty: RefCell::new(None),
                         const_val: RefCell::new(None),
                         const_index: Cell::new(None),
-                        kind: ExprKind::ClosureBlock {span, params, block},
-                    }))
+                        kind: ExprKind::ClosureDef(closure_def_index)
+                    })
                 }
                 else{
                     let expr = self.expect_expr()?;
-                    Ok(span.end(self, | span | Expr {
+                    let span = span.end(self, |span| span);
+                    self.closure_defs.push(ClosureDef {
+                        span,
+                        params,
+                        kind: ClosureDefKind::Expr(expr)
+                    });
+                    Ok(Expr {
                         span,
                         ty: RefCell::new(None),
                         const_val: RefCell::new(None),
                         const_index: Cell::new(None),
-                        kind: ExprKind::ClosureExpr {span, params, expr:Box::new(expr)},
-                    }))
+                        kind: ExprKind::ClosureDef(closure_def_index)
+                    })
                 }
             }
             Token::OpenParen => {

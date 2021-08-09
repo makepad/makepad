@@ -115,7 +115,7 @@ impl<'a> DrawShaderAnalyser<'a> {
         }
     }
     
-    pub fn analyse_shader(&mut self, shader_node_ptr: DrawShaderNodePtr) -> Result<(), LiveError> {
+    pub fn analyse_shader(&mut self) -> Result<(), LiveError> {
         self.scopes.push_scope();
         
         for decl in &self.draw_shader_decl.fields {
@@ -165,7 +165,7 @@ impl<'a> DrawShaderAnalyser<'a> {
         for pixel_fn in &pixel_fns {
             // if we run into a DrawShaderMethod mark it as
             if let Some(fn_decl) = self.shader_registry.all_fns.get(pixel_fn) {
-                if let Some(FnSelfKind::DrawShader(shader_ptr)) = fn_decl.self_kind {
+                if let Some(FnSelfKind::DrawShader(_)) = fn_decl.self_kind {
                     // lets iterate all
                     for dsr in fn_decl.draw_shader_refs.borrow().as_ref().unwrap() {
                         // ok we have a draw shader ident we use, now mark it on our draw_shader_decl.
@@ -521,10 +521,9 @@ impl<'a> FnDefAnalyser<'a> {
     
     pub fn analyse_fn_def(&mut self) -> Result<(), LiveError> {
         self.scopes.push_scope();
-        self.scopes.push_fn_node_ptr(self.decl.fn_node_ptr);
         for param in &self.decl.params {
             match &param.ty_expr.kind {
-                TyExprKind::Closure {return_ty, params, ..} => {
+                TyExprKind::ClosureDecl {return_ty, params, ..} => {
                     self.scopes.insert_sym(
                         param.span,
                         param.ident,
@@ -556,7 +555,6 @@ impl<'a> FnDefAnalyser<'a> {
         );
         self.decl.init_analysis();
         self.analyse_block(&self.decl.block) ?;
-        self.scopes.pop_fn_node_ptr();
         self.scopes.pop_scope();
         
         // lets move the closures from env to
