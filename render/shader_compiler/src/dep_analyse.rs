@@ -63,12 +63,7 @@ impl<'a> DepAnalyser<'a> {
                 ident,
                 ref arg_exprs,
             } => self.dep_analyse_closure_call_expr(span, ident, arg_exprs),
-            ExprKind::ClosureExpr {
-                ..
-            } => (),
-            ExprKind::ClosureBlock {
-                ..
-            } => (),
+            ExprKind::ClosureDef(_) => (),
             ExprKind::ConsCall {
                 span,
                 ty_lit,

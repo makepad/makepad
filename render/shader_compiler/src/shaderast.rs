@@ -124,7 +124,7 @@ pub struct FnDecl {
     pub struct_refs: RefCell<Option<BTreeSet<StructNodePtr >> >,
     pub constructor_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>) >> >,
     
-    pub closure_defs: RefCell<Option<Vec<ClosureDef>>>,
+    pub closure_defs: Vec<ClosureDef>,
     
     // base
     pub span: Span,
@@ -148,10 +148,11 @@ pub enum Sym {
 
 pub type Scope = HashMap<Ident, Sym>;
 
+#[derive(Clone, Copy, Debug,Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub struct ClosureDefIndex(pub usize);
+
 #[derive(Clone, Debug)]
 pub struct ClosureDef{
-    pub callee: FnNodePtr,
-    pub scopes: Vec<Scope>,
     pub span:Span,
     pub params: Vec<Ident>,
     pub kind:ClosureDefKind
@@ -332,16 +333,7 @@ pub enum ExprKind {
         ident: Ident,
         arg_exprs: Vec<Expr>,
     },
-    ClosureBlock{
-        span:Span,
-        params: Vec<Ident>,
-        block: Block,
-    },
-    ClosureExpr{
-        span:Span,
-        params: Vec<Ident>,
-        expr: Box<Expr>
-    },
+    ClosureDef(ClosureDefIndex),
     ConsCall {
         span: Span,
         ty_lit: TyLit,
@@ -398,7 +390,7 @@ pub enum TyExprKind {
     Lit {
         ty_lit: TyLit,
     },
-    Closure{
+    ClosureDecl{
         return_ty: RefCell<Option<Ty >>,
         return_ty_expr: Box<Option<TyExpr>>,
         params: Vec<Param>
@@ -461,7 +453,8 @@ pub enum Ty {
     Array {elem_ty: Rc<Ty>, len: usize},
     Struct(StructNodePtr),
     DrawShader(DrawShaderNodePtr),
-    Closure
+    ClosureDef(ClosureDefIndex),
+    ClosureDecl
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -492,8 +485,6 @@ pub enum Lit {
     Color(u32),
 }
 
-
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum Val {
     Bool(bool),
@@ -502,21 +493,30 @@ pub enum Val {
     Vec4(Vec4),
 }
 
+#[derive(Clone, Debug)]
+pub struct ClosureInstance{ // 
+    pub fn_node_ptr: FnNodePtr,
+    pub scope: Scope,
+    pub closure_args: Vec<ClosureInstanceArg>
+}
+
+#[derive(Clone, Debug)]
+pub struct ClosureInstanceArg{
+    pub arg_index: usize,
+    pub def_index: ClosureDefIndex
+}
 
 #[derive(Clone, Debug)] 
 pub struct Scopes {
-    //pub live_uniform_deps: RefCell<Option<BTreeSet<(Ty, FullNodePtr) >> >,
     pub scopes: Vec<Scope>,
-    pub closures: RefCell<Vec<ClosureDef>>,
-    pub current_fn_node_ptr: Option<FnNodePtr>
+    pub closure_instances: RefCell<Vec<ClosureInstance>>,
 }
-
 
 impl Scopes {
     pub fn new() -> Scopes {
         Scopes {
-            current_fn_node_ptr: None,
-            closures: RefCell::new(Vec::new()),
+           // call_ptrs: RefCell::new(Vec::new()),
+            closure_instances: RefCell::new(Vec::new()),
             scopes: Vec::new(),
         }
     }
@@ -528,20 +528,6 @@ impl Scopes {
             return Some(ret.unwrap().clone())
         }
         return None
-    }
-    
-    pub fn push_fn_node_ptr(&mut self, fn_node_ptr: FnNodePtr){
-        if self.current_fn_node_ptr.is_some(){
-            panic!()
-        }
-        self.current_fn_node_ptr = Some(fn_node_ptr);
-    }
-    
-    pub fn pop_fn_node_ptr(&mut self){
-        if self.current_fn_node_ptr.is_none(){
-            panic!()
-        }
-        self.current_fn_node_ptr = None;
     }
     
     pub fn push_scope(&mut self) {
@@ -590,7 +576,6 @@ impl FnDecl {
         *self.live_refs.borrow_mut() = Some(BTreeSet::new());
         *self.const_table.borrow_mut() = Some(Vec::new());
         *self.const_table_spans.borrow_mut() = Some(Vec::new());
-        *self.closure_defs.borrow_mut() = Some(Vec::new());
     }
 }
 
@@ -601,13 +586,6 @@ impl DrawShaderDecl {
             decl.ident == ident
         })
     }
-    /*
-    pub fn find_method(&self, ident: Ident) -> Option<&FnDecl> {
-        self.methods.iter().find( | method | {
-            method.ident == ident
-        })
-    }*/
-    
 }
 
 impl BinOp {
@@ -748,7 +726,8 @@ impl Ty {
             Ty::Array {..} => None,
             Ty::Struct(_) => None,
             Ty::DrawShader(_) => None,
-            Ty::Closure => None
+            Ty::ClosureDecl => None,
+            Ty::ClosureDef{..} => None
         }
     }
     
@@ -794,7 +773,8 @@ impl Ty {
             Ty::Array {elem_ty, len} => elem_ty.size() * len,
             Ty::Struct(_) => panic!(),
             Ty::DrawShader(_) => panic!(),
-            Ty::Closure => panic!(),
+            Ty::ClosureDecl => panic!(),
+            Ty::ClosureDef{..}  => panic!(),
         }
     }
 }
@@ -822,7 +802,8 @@ impl fmt::Display for Ty {
             Ty::Array {elem_ty, len} => write!(f, "{}[{}]", elem_ty, len),
             Ty::Struct(struct_ptr) => write!(f, "Struct:{:?}", struct_ptr),
             Ty::DrawShader(shader_ptr) => write!(f, "DrawShader:{:?}", shader_ptr),
-            Ty::Closure => write!(f, "Closure"),
+            Ty::ClosureDecl => write!(f, "ClosureDecl"),
+            Ty::ClosureDef{..}  => write!(f, "ClosureDef"),
         }
     }
 }

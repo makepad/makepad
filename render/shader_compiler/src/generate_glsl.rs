@@ -945,7 +945,10 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
                 //panic!();
                 return false
             }
-            Ty::Closure=> {
+            Ty::ClosureDef{..}=>{
+                return false
+            }
+            Ty::ClosureDecl=> {
                 // we should output nothing
                 //panic!();
                 return false
