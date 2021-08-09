@@ -176,6 +176,7 @@ impl<'a> TyChecker<'a> {
     ) -> Result<Ty, LiveError> {
         self.scopes.closures.borrow_mut().push(
             ClosureDef {
+                callee: self.scopes.current_fn_node_ptr.unwrap(),
                 scopes: self.scopes.scopes.clone(),
                 span,
                 params: params.clone(),
@@ -193,6 +194,7 @@ impl<'a> TyChecker<'a> {
     ) -> Result<Ty, LiveError> {
         self.scopes.closures.borrow_mut().push(
             ClosureDef {
+                callee: self.scopes.current_fn_node_ptr.unwrap(),
                 scopes: self.scopes.scopes.clone(),
                 span,
                 params: params.clone(),
@@ -433,7 +435,7 @@ impl<'a> TyChecker<'a> {
             self.ty_check_expr(arg_expr) ?;
         }
         // alright so.
-        let fn_decl = self.shader_registry.plain_fns.get(&fn_node_ptr).expect("fn ptr invalid");
+        let fn_decl = self.shader_registry.all_fns.get(&fn_node_ptr).expect("fn ptr invalid");
         
         self.check_call_args(span, fn_node_ptr, arg_exprs, &fn_decl) ?;
         
@@ -455,7 +457,10 @@ impl<'a> TyChecker<'a> {
                     self.ty_check_expr(arg_expr) ?;
                 }
                 
-                if let Some(fn_decl) = self.shader_registry.draw_shader_method_from_ptr(shader_ptr, ident) {
+                if let Some(fn_decl) = self.shader_registry.draw_shader_method_decl_from_ident(
+                    self.shader_registry.draw_shaders.get(&shader_ptr).unwrap(),
+                    ident
+                ) {
                     self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl) ?;
                     
                     if let Some(return_ty) = fn_decl.return_ty.borrow().clone() {
@@ -474,7 +479,10 @@ impl<'a> TyChecker<'a> {
                     self.ty_check_expr(arg_expr) ?;
                 }
                 // ok lets find 'ident' on struct_ptr
-                if let Some(fn_decl) = self.shader_registry.struct_method_from_ptr(struct_ptr, ident) {
+                if let Some(fn_decl) = self.shader_registry.struct_method_decl_from_ident(
+                    self.shader_registry.structs.get(&struct_ptr).unwrap(),
+                    ident
+                ) {
                     self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl) ?;
                     
                     if let Some(return_ty) = fn_decl.return_ty.borrow().clone() {

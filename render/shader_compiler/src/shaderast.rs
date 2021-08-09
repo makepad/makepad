@@ -54,12 +54,12 @@ pub struct DrawShaderDecl {
     pub debug: bool,
     pub default_geometry: Option<ShaderResourceId>,
     pub fields: Vec<DrawShaderFieldDecl>,
-    pub methods: Vec<FnDecl>,
+    pub methods: Vec<FnNodePtr>,
     
     //pub structs: RefCell<Vec<StructNodePtr>>,
-    pub all_fns: RefCell<Vec<Callee>>,
-    pub vertex_fns: RefCell<Vec<Callee>>,
-    pub pixel_fns: RefCell<Vec<Callee>>,
+    pub all_fns: RefCell<Vec<FnNodePtr>>,
+    pub vertex_fns: RefCell<Vec<FnNodePtr>>,
+    pub pixel_fns: RefCell<Vec<FnNodePtr>>,
     // we have a vertex_structs
     pub all_structs: RefCell<Vec<StructNodePtr>>,
     pub vertex_structs: RefCell<Vec<StructNodePtr>>,
@@ -75,12 +75,12 @@ pub struct ConstDecl {
 }
 
 // the unique identification of a fn call
-#[derive(Clone, Copy, Debug, Ord, PartialOrd, Eq, PartialEq)]
-pub enum Callee {
-    PlainFn {fn_node_ptr: FnNodePtr},
-    DrawShaderMethod {shader_node_ptr: DrawShaderNodePtr, ident: Ident},
-    StructMethod {struct_node_ptr: StructNodePtr, ident: Ident},
-}
+//#[derive(Clone, Copy, Debug, Ord, PartialOrd, Eq, PartialEq)]
+//pub enum Callee {
+//    PlainFn {fn_node_ptr: FnNodePtr},
+//    DrawShaderMethod {shader_node_ptr: DrawShaderNodePtr, ident: Ident},
+//    StructMethod {struct_node_ptr: StructNodePtr, ident: Ident},
+//}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum FnSelfKind {
@@ -109,7 +109,7 @@ pub struct FnDecl {
     
     pub self_kind: Option<FnSelfKind>,
     
-    pub callees: RefCell<Option<BTreeSet<Callee >> >,
+    pub callees: RefCell<Option<BTreeSet<FnNodePtr >> >,
     pub builtin_deps: RefCell<Option<BTreeSet<Ident >> >,
     pub closure_deps: RefCell<Option<BTreeSet<Ident >> >,
 
@@ -150,7 +150,7 @@ pub type Scope = HashMap<Ident, Sym>;
 
 #[derive(Clone, Debug)]
 pub struct ClosureDef{
-    pub callee: Callee,
+    pub callee: FnNodePtr,
     pub scopes: Vec<Scope>,
     pub span:Span,
     pub params: Vec<Ident>,
@@ -170,7 +170,7 @@ pub struct StructDecl {
     //pub ident: Ident,
     pub struct_refs: RefCell<Option<BTreeSet<StructNodePtr >> >,
     pub fields: Vec<FieldDecl>,
-    pub methods: Vec<FnDecl>,
+    pub methods: Vec<FnNodePtr>,
 }
 
 #[derive(Clone, Debug)]
@@ -185,6 +185,7 @@ impl StructDecl {
     pub fn find_field(&self, ident: Ident) -> Option<&FieldDecl> {
         self.fields.iter().find( | field | field.ident == ident)
     }
+
 }
 
 #[derive(Clone, Debug)]
@@ -506,13 +507,15 @@ pub enum Val {
 pub struct Scopes {
     //pub live_uniform_deps: RefCell<Option<BTreeSet<(Ty, FullNodePtr) >> >,
     pub scopes: Vec<Scope>,
-    pub closures: RefCell<Vec<ClosureDef>>
+    pub closures: RefCell<Vec<ClosureDef>>,
+    pub current_fn_node_ptr: Option<FnNodePtr>
 }
 
 
 impl Scopes {
     pub fn new() -> Scopes {
         Scopes {
+            current_fn_node_ptr: None,
             closures: RefCell::new(Vec::new()),
             scopes: Vec::new(),
         }
@@ -525,6 +528,20 @@ impl Scopes {
             return Some(ret.unwrap().clone())
         }
         return None
+    }
+    
+    pub fn push_fn_node_ptr(&mut self, fn_node_ptr: FnNodePtr){
+        if self.current_fn_node_ptr.is_some(){
+            panic!()
+        }
+        self.current_fn_node_ptr = Some(fn_node_ptr);
+    }
+    
+    pub fn pop_fn_node_ptr(&mut self){
+        if self.current_fn_node_ptr.is_none(){
+            panic!()
+        }
+        self.current_fn_node_ptr = None;
     }
     
     pub fn push_scope(&mut self) {
@@ -584,12 +601,12 @@ impl DrawShaderDecl {
             decl.ident == ident
         })
     }
-    
+    /*
     pub fn find_method(&self, ident: Ident) -> Option<&FnDecl> {
         self.methods.iter().find( | method | {
             method.ident == ident
         })
-    }
+    }*/
     
 }
 

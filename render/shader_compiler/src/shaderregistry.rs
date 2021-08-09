@@ -30,7 +30,10 @@ impl fmt::Display for ShaderResourceId {
 pub struct ShaderRegistry {
     pub live_registry: LiveRegistry,
     pub consts: HashMap<ConstNodePtr, ConstDecl>,
-    pub plain_fns: HashMap<FnNodePtr, FnDecl>,
+    
+    pub all_fns: HashMap<FnNodePtr, FnDecl>,
+    
+    //pub plain_fns: HashMap<FnNodePtr, FnDecl>,
     pub draw_shaders: HashMap<DrawShaderNodePtr, DrawShaderDecl>,
     pub structs: HashMap<StructNodePtr, StructDecl>,
     
@@ -45,7 +48,8 @@ impl ShaderRegistry {
             structs: HashMap::new(),
             consts: HashMap::new(),
             draw_shaders: HashMap::new(),
-            plain_fns: HashMap::new(),
+            all_fns: HashMap::new(),
+            //plain_fns: HashMap::new(),
             draw_inputs: HashMap::new(),
             builtins: generate_builtins()
         }
@@ -94,7 +98,7 @@ pub enum LiveNodeFindResult {
 #[derive(Clone, Default)]
 pub struct FinalConstTable {
     pub table: Vec<f32>,
-    pub offsets: BTreeMap<Callee, usize>
+    pub offsets: BTreeMap<FnNodePtr, usize>
 }
 
 impl ShaderRegistry {
@@ -105,7 +109,7 @@ impl ShaderRegistry {
             let mut table = Vec::new();
             let mut offset = 0;
             for callee in draw_shader_decl.all_fns.borrow().iter() {
-                let fn_decl = self.fn_decl_from_callee(callee).unwrap();
+                let fn_decl = self.all_fns.get(callee).unwrap();
                 if fn_decl.span.file_id() == filter_file_id {
                     let sub_table = fn_decl.const_table.borrow();
                     table.extend(sub_table.as_ref().unwrap().iter());
@@ -119,7 +123,7 @@ impl ShaderRegistry {
             FinalConstTable::default()
         }
     }
-    
+    /*
     pub fn struct_method_from_ptr(&self, struct_node_ptr: StructNodePtr, ident: Ident) -> Option<&FnDecl> {
         if let Some(s) = self.structs.get(&struct_node_ptr) {
             if let Some(node) = s.methods.iter().find( | fn_decl | fn_decl.ident == ident) {
@@ -144,19 +148,60 @@ impl ShaderRegistry {
         }
         None
     }
-    
-    pub fn fn_decl_from_callee(&self, callee: &Callee) -> Option<&FnDecl> {
-        match callee {
-            Callee::PlainFn {fn_node_ptr} => self.plain_fn_from_ptr(*fn_node_ptr),
-            Callee::DrawShaderMethod {shader_node_ptr, ident} => self.draw_shader_method_from_ptr(*shader_node_ptr, *ident),
-            Callee::StructMethod {struct_node_ptr, ident} => self.struct_method_from_ptr(*struct_node_ptr, *ident),
+    */
+    /*
+    pub fn fn_decl_from_ptr(&self, fn_ptr: FnNodePtr) -> Option<&FnDecl> {
+        if let Some(s) = self.all_fns.get(&fn_ptr) {
+            return Some(s)
         }
-    }
+        None
+    }*/
     
     pub fn fn_ident_from_ptr(&self, fn_node_ptr: FnNodePtr) -> Ident {
         let (_, node) = self.live_registry.resolve_ptr(fn_node_ptr.0);
         Ident(node.id_pack.unwrap_single())
     }
+    
+    pub fn draw_shader_method_ptr_from_ident(&self, draw_shader_decl:&DrawShaderDecl, ident: Ident) -> Option<FnNodePtr> {
+        for fn_node_ptr in &draw_shader_decl.methods{
+            let fn_decl = self.all_fns.get(fn_node_ptr).unwrap();
+            if fn_decl.ident == ident{
+                return Some(*fn_node_ptr);
+            }
+        }
+        None
+    }
+    
+     pub fn struct_method_ptr_from_ident(&self, struct_decl:&StructDecl, ident: Ident) -> Option<FnNodePtr> {
+        for fn_node_ptr in &struct_decl.methods{
+            let fn_decl = self.all_fns.get(fn_node_ptr).unwrap();
+            if fn_decl.ident == ident{
+                return Some(*fn_node_ptr);
+            }
+        }
+        None
+    }
+    
+    pub fn draw_shader_method_decl_from_ident(&self, draw_shader_decl:&DrawShaderDecl, ident: Ident) -> Option<&FnDecl> {
+        for fn_node_ptr in &draw_shader_decl.methods{
+            let fn_decl = self.all_fns.get(fn_node_ptr).unwrap();
+            if fn_decl.ident == ident{
+                return Some(fn_decl)
+            }
+        }
+        None
+    }
+    
+     pub fn struct_method_decl_from_ident(&self, struct_decl:&StructDecl, ident: Ident) -> Option<&FnDecl> {
+        for fn_node_ptr in &struct_decl.methods{
+            let fn_decl = self.all_fns.get(fn_node_ptr).unwrap();
+            if fn_decl.ident == ident{
+                return Some(fn_decl)
+            }
+        }
+        None
+    }
+    
     
     pub fn find_live_node_by_path(&self, base_ptr: FullNodePtr, ids: &[Id]) -> LiveNodeFindResult {
         // what are the types of things we can find.
@@ -371,7 +416,7 @@ impl ShaderRegistry {
     // lets compile the thing
     pub fn analyse_plain_fn(&mut self, struct_ptr: Option<StructNodePtr>, fn_ptr: FnNodePtr) -> Result<(), LiveError> {
         
-        if self.plain_fns.get(&fn_ptr).is_some() {
+        if self.all_fns.get(&fn_ptr).is_some() {
             return Ok(());
         }
         // alright lets parse and analyse a plain fn
@@ -394,13 +439,13 @@ impl ShaderRegistry {
                     fn_ptr,
                     Ident(id),
                 ) ?;
-                self.plain_fns.insert(fn_ptr, fn_decl);
+                self.all_fns.insert(fn_ptr, fn_decl);
                 
                 self.analyse_deps(&parser_deps) ?;
                 
                 // ok analyse the struct methods now.
                 let mut fa = FnDefAnalyser {
-                    decl: self.plain_fns.get(&fn_ptr).unwrap(),
+                    decl: self.all_fns.get(&fn_ptr).unwrap(),
                     scopes: &mut Scopes::new(),
                     shader_registry: self,
                     is_inside_loop: false,
@@ -482,7 +527,8 @@ impl ShaderRegistry {
                             // statics need a pointer to their struct to resolve Self
                             // so we can't treat them purely as loose methods
                             if let Some(fn_decl) = fn_decl {
-                                struct_decl.methods.push(fn_decl)
+                                struct_decl.methods.push(fn_decl.fn_node_ptr);
+                                self.all_fns.insert(fn_decl.fn_node_ptr, fn_decl);
                             }
                         }
                         _ => {
@@ -607,7 +653,8 @@ impl ShaderRegistry {
                                         Ident(id),
                                     ) ?;
                                     if let Some(fn_decl) = fn_decl {
-                                        draw_shader_decl.methods.push(fn_decl)
+                                        draw_shader_decl.methods.push(fn_decl.fn_node_ptr);
+                                        self.all_fns.insert(fn_decl.fn_node_ptr, fn_decl);
                                     }
                                 }
                             }
