@@ -14,7 +14,7 @@ use std::cell::{RefCell, Cell};
 use std::collections::HashMap;
 use crate::builtin::Builtin;
 use crate::builtin::generate_builtins;
-use crate::env::Env;
+use crate::shaderast::Scopes;
 use crate::generate_glsl;
 
 #[derive(Clone, Debug, Copy, Hash, Eq, PartialEq)]
@@ -355,7 +355,7 @@ impl ShaderRegistry {
                 
                 let mut ca = ConstAnalyser {
                     decl: self.consts.get(&const_ptr).unwrap(),
-                    env: &mut Env::new(),
+                    scopes: &mut Scopes::new(),
                     shader_registry: self,
                     options: ShaderAnalyseOptions {
                         no_const_collapse: true
@@ -401,7 +401,7 @@ impl ShaderRegistry {
                 // ok analyse the struct methods now.
                 let mut fa = FnDefAnalyser {
                     decl: self.plain_fns.get(&fn_ptr).unwrap(),
-                    env: &mut Env::new(),
+                    scopes: &mut Scopes::new(),
                     shader_registry: self,
                     is_inside_loop: false,
                     options: ShaderAnalyseOptions {
@@ -502,7 +502,7 @@ impl ShaderRegistry {
                 // ok analyse the struct methods now.
                 let mut sa = StructAnalyser {
                     struct_decl: self.structs.get(&struct_ptr).unwrap(),
-                    env: &mut Env::new(),
+                    scopes: &mut Scopes::new(),
                     shader_registry: self,
                     options: ShaderAnalyseOptions {
                         no_const_collapse: true
@@ -696,7 +696,7 @@ impl ShaderRegistry {
                     
                     let mut sa = DrawShaderAnalyser {
                         draw_shader_decl: self.draw_shaders.get(&shader_ptr).unwrap(),
-                        env: &mut Env::new(),
+                        scopes: &mut Scopes::new(),
                         shader_registry: self,
                         options: ShaderAnalyseOptions {
                             no_const_collapse: true

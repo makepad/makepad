@@ -3,7 +3,7 @@
 pub mod shaderparser;
 pub mod shaderast;
 pub mod shaderregistry;
-pub mod env;
+//pub mod env;
 pub mod analyse;
 pub mod builtin;
 pub mod const_eval;
