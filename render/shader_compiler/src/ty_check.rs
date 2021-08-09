@@ -1,7 +1,6 @@
 #![allow(unused_variables)]
 use crate::shaderast::*;
 use crate::shaderast::Scopes;
-use crate::shaderast::ClosureDef;
 use makepad_live_parser::LiveError;
 use makepad_live_parser::LiveErrorOrigin;
 use makepad_live_parser::live_error_origin;
@@ -38,14 +37,14 @@ impl<'a> TyChecker<'a> {
             TyExprKind::Lit {ty_lit} => self.ty_check_lit_ty_expr(ty_expr.span, *ty_lit),
             TyExprKind::Struct(struct_ptr) => Ok(Ty::Struct(*struct_ptr)),
             TyExprKind::DrawShader(shader_ptr) => Ok(Ty::DrawShader(*shader_ptr)),
-            TyExprKind::Closure {return_ty_expr, params, return_ty} => {
+            TyExprKind::ClosureDecl {return_ty_expr, params, return_ty} => {
                 // check the closure
                 let checked_return_ty = self.ty_check_ty_expr(return_ty_expr.as_ref().as_ref().unwrap()).unwrap_or(Ty::Void);
                 *return_ty.borrow_mut() = Some(checked_return_ty);
                 for param in params {
                     self.ty_check_ty_expr(&param.ty_expr) ?;
                 }
-                Ok(Ty::Closure)
+                Ok(Ty::ClosureDecl)
             }
         } ?;
         *ty_expr.ty.borrow_mut() = Some(ty.clone());
@@ -126,16 +125,7 @@ impl<'a> TyChecker<'a> {
                 ident,
                 ref arg_exprs,
             } => self.ty_check_closure_call_expr(span, ident, arg_exprs),
-            ExprKind::ClosureExpr { // we need to emit these
-                span,
-                ref params,
-                ref expr
-            } => self.ty_check_closure_expr(span, params, expr),
-            ExprKind::ClosureBlock {
-                span,
-                ref params,
-                ref block
-            } => self.ty_check_closure_block(span, params, block),
+            ExprKind::ClosureDef(index) => self.ty_check_closure_def(index),
             ExprKind::ConsCall {
                 span,
                 ty_lit,
@@ -168,40 +158,11 @@ impl<'a> TyChecker<'a> {
         Ok(ty)
     }
     
-    fn ty_check_closure_expr(
+    fn ty_check_closure_def(
         &mut self,
-        span: Span,
-        params: &Vec<Ident>,
-        expr: &Expr
+        index: ClosureDefIndex,
     ) -> Result<Ty, LiveError> {
-        self.scopes.closures.borrow_mut().push(
-            ClosureDef {
-                callee: self.scopes.current_fn_node_ptr.unwrap(),
-                scopes: self.scopes.scopes.clone(),
-                span,
-                params: params.clone(),
-                kind: ClosureDefKind::Expr(expr.clone())
-            }
-        );
-        Ok(Ty::Closure)
-    }
-    
-    fn ty_check_closure_block(
-        &mut self,
-        span: Span,
-        params: &Vec<Ident>,
-        block: &Block
-    ) -> Result<Ty, LiveError> {
-        self.scopes.closures.borrow_mut().push(
-            ClosureDef {
-                callee: self.scopes.current_fn_node_ptr.unwrap(),
-                scopes: self.scopes.scopes.clone(),
-                span,
-                params: params.clone(),
-                kind: ClosureDefKind::Block(block.clone())
-            }
-        );
-        Ok(Ty::Closure)
+        Ok(Ty::ClosureDef(index))
     }
     
     fn ty_check_cond_expr(
@@ -430,10 +391,11 @@ impl<'a> TyChecker<'a> {
         arg_exprs: &[Expr],
         fn_node_ptr: FnNodePtr,
     ) -> Result<Ty, LiveError> {
-        
+
         for arg_expr in arg_exprs {
             self.ty_check_expr(arg_expr) ?;
         }
+
         // alright so.
         let fn_decl = self.shader_registry.all_fns.get(&fn_node_ptr).expect("fn ptr invalid");
         
@@ -453,14 +415,16 @@ impl<'a> TyChecker<'a> {
         let ty = self.ty_check_expr(&arg_exprs[0]) ?;
         match ty {
             Ty::DrawShader(shader_ptr) => { // a shader method call
-                for arg_expr in arg_exprs {
-                    self.ty_check_expr(arg_expr) ?;
-                }
                 
                 if let Some(fn_decl) = self.shader_registry.draw_shader_method_decl_from_ident(
                     self.shader_registry.draw_shaders.get(&shader_ptr).unwrap(),
                     ident
                 ) {
+
+                    for arg_expr in arg_exprs {
+                        self.ty_check_expr(arg_expr) ?;
+                    }
+
                     self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl) ?;
                     
                     if let Some(return_ty) = fn_decl.return_ty.borrow().clone() {
@@ -475,14 +439,15 @@ impl<'a> TyChecker<'a> {
             },
             Ty::Struct(struct_ptr) => {
                 //println!("GOT STRUCT {:?}", struct_ptr);
-                for arg_expr in arg_exprs {
-                    self.ty_check_expr(arg_expr) ?;
-                }
                 // ok lets find 'ident' on struct_ptr
                 if let Some(fn_decl) = self.shader_registry.struct_method_decl_from_ident(
                     self.shader_registry.structs.get(&struct_ptr).unwrap(),
                     ident
                 ) {
+                    for arg_expr in arg_exprs {
+                        self.ty_check_expr(arg_expr) ?;
+                    }
+
                     self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl) ?;
                     
                     if let Some(return_ty) = fn_decl.return_ty.borrow().clone() {
@@ -516,7 +481,15 @@ impl<'a> TyChecker<'a> {
         }
         match self.scopes.find_sym_on_scopes(ident, span) {
             Some(Sym::Closure {return_ty, params}) => {
-                self.check_params_against_args(span, &params, arg_exprs) ?;
+                let closure_args = self.check_params_against_args(span, &params, arg_exprs) ?;
+                // error out
+                if closure_args.len() > 0{
+                    return Err(LiveError {
+                        origin: live_error_origin!(),
+                        span,
+                        message: format!("Cannot pass closures to closures, please implement"),
+                    })
+                }
                 return Ok(return_ty)
             }
             _ => ()
@@ -568,15 +541,23 @@ impl<'a> TyChecker<'a> {
         arg_exprs: &[Expr],
         fn_decl: &FnDecl,
     ) -> Result<(), LiveError> {
-        if let Err(err) = self.check_params_against_args(span, &fn_decl.params, arg_exprs) {
-            Err(LiveError {
+        match self.check_params_against_args(span, &fn_decl.params, arg_exprs) {
+           Err(err)=> Err(LiveError {
                 origin: live_error_origin!(),
                 span,
                 message: format!("function: `{}`: {}", self.shader_registry.fn_ident_from_ptr(fn_node_ptr), err.message)
-            })
-        }
-        else {
-            Ok(())
+            }),
+            Ok(closure_args)=>{
+                if closure_args.len()>0{
+                    let mut ci = self.scopes.closure_instances.borrow_mut();
+                    ci.push(ClosureInstance{
+                        fn_node_ptr,
+                        scope: self.scopes.scopes.last().cloned().unwrap(),
+                        closure_args
+                    })
+                }
+                Ok(())
+            }
         }
     }
     
@@ -585,7 +566,7 @@ impl<'a> TyChecker<'a> {
         span: Span,
         params: &[Param],
         arg_exprs: &[Expr],
-    ) -> Result<(), LiveError> {
+    ) -> Result<Vec<ClosureInstanceArg>, LiveError> {
         if arg_exprs.len() < params.len() {
             return Err(LiveError {
                 origin: live_error_origin!(),
@@ -610,19 +591,33 @@ impl<'a> TyChecker<'a> {
                     .into(),
             });
         }
-        for (index, (arg_expr, param)) in arg_exprs.iter().zip(params.iter()).enumerate()
+        let mut closure_args= Vec::new();
+        for (arg_index, (arg_expr, param)) in arg_exprs.iter().zip(params.iter()).enumerate()
         {
             let arg_ty = arg_expr.ty.borrow();
             let arg_ty = arg_ty.as_ref().unwrap();
             let param_ty = param.ty_expr.ty.borrow();
             let param_ty = param_ty.as_ref().unwrap();
+            
+            // if the thing is a closure def / decl we have to do a deep compare
+            // we should have the closure def on our scopes
+            // and the closure decl should be on our param.ty_expr
+            if let Ty::ClosureDef(def_index) = arg_ty{
+                if let Ty::ClosureDecl = param_ty{
+                    closure_args.push(ClosureInstanceArg{
+                        arg_index,
+                        def_index:*def_index,
+                    });
+                    continue
+                }
+            }
             if arg_ty != param_ty {
                 return Err(LiveError {
                     origin: live_error_origin!(),
                     span,
                     message: format!(
                         "wrong type for argument {} expected `{}`, got `{}`",
-                        index + 1,
+                        arg_index + 1,
                         param_ty,
                         arg_ty,
                     ).into()
@@ -632,7 +627,10 @@ impl<'a> TyChecker<'a> {
                 self.lhs_checker().lhs_check_expr(arg_expr) ?;
             }
         }
-        Ok(())
+        if closure_args.len()>0{
+            
+        }
+        Ok(closure_args)
     }
     
     fn ty_check_field_expr(

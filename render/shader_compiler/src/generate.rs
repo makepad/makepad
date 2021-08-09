@@ -372,12 +372,7 @@ impl<'a> ExprGenerator<'a> {
                     ident,
                     ref arg_exprs,
                 } => self.generate_builtin_call_expr(span, ident, arg_exprs),
-                ExprKind::ClosureExpr {
-                    ..
-                } => (),
-                ExprKind::ClosureBlock {
-                    ..
-                } => (),
+                ExprKind::ClosureDef(_)=>(),
                 ExprKind::ConsCall {
                     span,
                     ty_lit,
