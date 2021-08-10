@@ -158,9 +158,12 @@ impl TabBar {
         self.view.redraw_view(cx)
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, 
-        dispatch_action: &mut dyn FnMut(Action))
-    {
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        dispatch_action: &mut dyn FnMut(Action),
+    ) {
         if self.view.handle_scroll_view(cx, event) {
             self.view.redraw_view(cx);
         }
@@ -179,7 +182,7 @@ impl TabBar {
 }
 
 pub enum Action {
-    TabWasPressed(ItemId)
+    TabWasPressed(ItemId),
 }
 
 #[derive(Clone, DrawQuad)]

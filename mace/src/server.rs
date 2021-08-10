@@ -10,6 +10,7 @@ use {
     },
 };
 
+#[derive(Clone)]
 pub struct Server {
     shared: Arc<Shared>,
 }
@@ -43,8 +44,8 @@ impl Connection {
     pub fn get_file_tree(&self) -> Result<FileNode, Error> {
         fn get_directory_entries(path: &Path) -> Result<Vec<DirectoryEntry>, Error> {
             let mut entries = Vec::new();
-            for entry in fs::read_dir(path)? {
-                let entry = entry?;
+            for entry in fs::read_dir(path).map_err(|error| Error::Unknown(error.to_string()))? {
+                let entry = entry.map_err(|error| Error::Unknown(error.to_string()))?;
                 let entry_path = entry.path();
                 entries.push(DirectoryEntry {
                     name: entry.file_name(),
@@ -66,7 +67,7 @@ impl Connection {
     }
 
     pub fn open_file(&self, path: PathBuf) -> Result<Text, Error> {
-        let bytes = fs::read(path)?;
+        let bytes = fs::read(path).map_err(|error| Error::Unknown(error.to_string()))?;
         Ok(String::from_utf8_lossy(&bytes)
             .lines()
             .map(|line| line.chars().collect::<Vec<_>>())

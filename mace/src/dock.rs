@@ -97,8 +97,12 @@ impl Dock {
             .as_tab_bar_mut()
     }
 
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event,
-        dispatch_action: &mut dyn FnMut(Action)) {
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        dispatch_action: &mut dyn FnMut(Action),
+    ) {
         for (_, panel) in &mut self.panels_by_panel_id {
             match panel {
                 Panel::Splitter(splitter) => {
@@ -132,7 +136,7 @@ impl Dock {
 pub struct PanelId(pub usize);
 
 pub enum Action {
-    TabWasPressed(ItemId)
+    TabWasPressed(ItemId),
 }
 
 enum Panel {
