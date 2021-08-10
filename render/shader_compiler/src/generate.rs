@@ -6,20 +6,28 @@ use std::fmt::Write;
 use std::fmt;
 use crate::shaderregistry::ShaderRegistry;
 
-pub struct MpscDsIdent(pub Ident);
+pub struct DisplayDsIdent(pub Ident);
 
-impl fmt::Display for MpscDsIdent {
+impl fmt::Display for DisplayDsIdent {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "mpsc_ds_{}", self.0)
+        write!(f, "ds_{}", self.0)
+    }
+}
+
+pub struct DisplayFnName(pub FnNodePtr, pub Ident);
+
+impl fmt::Display for DisplayFnName {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}_{}", self.0, self.1)
     }
 }
 
 
-pub struct MpscFnName(pub FnNodePtr, pub Ident);
+pub struct DisplayVarName(pub Ident, pub ScopeSymShadow);
 
-impl fmt::Display for MpscFnName {
+impl fmt::Display for DisplayVarName {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}_{}", self.0, self.1)
+        write!(f, "var_{}_{}", self.0, self.1.0)
     }
 }
 
@@ -41,7 +49,7 @@ pub trait BackendWriter {
         true
     }
     
-    fn write_ident(&self, string: &mut String, ident: Ident);
+    //fn write_ident(&self, string: &mut String, ident: Ident);
     
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
     
@@ -107,7 +115,8 @@ impl<'a> BlockGenerator<'a> {
                 ident,
                 ref ty_expr,
                 ref expr,
-            } => self.generate_let_stmt(span, ty, ident, ty_expr, expr),
+                ref shadow
+            } => self.generate_let_stmt(span, ty, ident, ty_expr, expr, shadow),
             Stmt::Return {span, ref expr} => self.generate_return_stmt(span, expr),
             Stmt::Block {span, ref block} => self.generate_block_stmt(span, block),
             Stmt::Expr {span, ref expr} => self.generate_expr_stmt(span, expr),
@@ -204,8 +213,15 @@ impl<'a> BlockGenerator<'a> {
         ident: Ident,
         _ty_expr: &Option<TyExpr>,
         expr: &Option<Expr>,
+        shadow: &Cell<Option<ScopeSymShadow >>
     ) {
-        self.write_var_decl(false, false, ident, ty.borrow().as_ref().unwrap());
+        self.backend_writer.write_var_decl(
+            &mut self.string,
+            false,
+            false,
+            &DisplayVarName(ident, shadow.get().unwrap()),
+            ty.borrow().as_ref().unwrap()
+        );
         if let Some(expr) = expr {
             write!(self.string, " = ").unwrap();
             self.generate_expr(expr);
@@ -252,10 +268,10 @@ impl<'a> BlockGenerator<'a> {
         }
     }
     
-    fn write_var_decl(&mut self, is_inout: bool, is_packed: bool, ident: Ident, ty: &Ty) {
-        self.backend_writer
-            .write_var_decl(&mut self.string, is_inout, is_packed, &ident, ty);
-    }
+    //fn write_var_decl(&mut self, is_inout: bool, is_packed: bool, ident: Ident, ty: &Ty) {
+    //    self.backend_writer
+    //       .write_var_decl(&mut self.string, is_inout, is_packed, &ident, ty);
+    // }
 }
 
 pub struct ExprGenerator<'a> {
@@ -372,7 +388,7 @@ impl<'a> ExprGenerator<'a> {
                     ident,
                     ref arg_exprs,
                 } => self.generate_builtin_call_expr(span, ident, arg_exprs),
-                ExprKind::ClosureDef(_)=>(),
+                ExprKind::ClosureDef(_) => (),
                 ExprKind::ConsCall {
                     span,
                     ty_lit,
@@ -557,7 +573,7 @@ impl<'a> ExprGenerator<'a> {
     fn generate_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident) {
         match expr.ty.borrow().as_ref() {
             Some(Ty::DrawShader(_)) => {
-                write!(self.string, "{}", &MpscDsIdent(field_ident)).unwrap();
+                write!(self.string, "{}", &DisplayDsIdent(field_ident)).unwrap();
             }
             _ => {
                 self.generate_expr(expr);
@@ -663,11 +679,13 @@ impl<'a> ExprGenerator<'a> {
     fn generate_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind >>, _ty: &Option<Ty>) {
         // ok so we have a few varkinds
         match kind.get().unwrap() {
-            VarKind::Local(ident) => {
-                self.backend_writer.write_ident(self.string, ident);
+            VarKind::Local {ident, shadow} => {
+                write!(self.string, "{}", DisplayVarName(ident, shadow)).unwrap();
+                //self.backend_writer.write_ident(self.string, ident);
             }
-            VarKind::MutLocal(ident) => {
-                self.backend_writer.write_ident(self.string, ident);
+            VarKind::MutLocal {ident, shadow} => {
+                write!(self.string, "{}", DisplayVarName(ident, shadow)).unwrap();
+                //self.backend_writer.write_ident(self.string, ident);
             }
             VarKind::Const(const_node_ptr) => {
                 // we have a const
@@ -689,9 +707,9 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, "{}", lit).unwrap();
     }
     
-    fn write_ident(&mut self, ident: Ident) {
-        self.backend_writer.write_ident(&mut self.string, ident);
-    }
+    //fn write_ident(&mut self, ident: Ident) {
+    //    self.backend_writer.write_ident(&mut self.string, ident);
+    //}
     
     fn write_ty_lit(&mut self, ty_lit: TyLit) {
         self.backend_writer.write_ty_lit(&mut self.string, ty_lit);

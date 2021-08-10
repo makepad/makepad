@@ -3,7 +3,7 @@ use crate::const_eval::ConstEvaluator;
 use crate::const_gather::ConstGatherer;
 use crate::dep_analyse::DepAnalyser;
 use crate::shaderast::Scopes;
-use crate::shaderast::Sym;
+use crate::shaderast::ScopeSymKind;
 use crate::shaderast::Ident;
 use crate::shaderast::{Ty, TyExpr};
 use crate::ty_check::TyChecker;
@@ -17,6 +17,8 @@ use makepad_live_parser::Id;
 use makepad_live_parser::Span;
 
 use std::cell::RefCell;
+use std::cell::Cell;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ShaderAnalyseOptions {
@@ -527,21 +529,19 @@ impl<'a> FnDefAnalyser<'a> {
                     self.scopes.insert_sym(
                         param.span,
                         param.ident,
-                        Sym::Closure {
+                        ScopeSymKind::Closure {
                             return_ty: return_ty.borrow().clone().unwrap(),
                             params: params.clone()
                         },
-                    ) ?;
+                    );
                 }
                 _ => {
-                    self.scopes.insert_sym(
+                    let shadow = self.scopes.insert_sym(
                         param.span,
                         param.ident,
-                        Sym::Local {
-                            is_mut: true,
-                            ty: param.ty_expr.ty.borrow().as_ref().unwrap().clone(),
-                        },
-                    ) ?;
+                        ScopeSymKind::MutLocal(param.ty_expr.ty.borrow().as_ref().unwrap().clone()),
+                    );
+                    param.shadow.set(Some(shadow));
                 }
             }
             
@@ -556,15 +556,84 @@ impl<'a> FnDefAnalyser<'a> {
         self.decl.init_analysis();
         self.analyse_block(&self.decl.block) ?;
         self.scopes.pop_scope();
-        
+        // alright we have closures to analyse
+        // let closure_isntances = self.
         // lets move the closures from env to
+        // then analyse it
+        self.analyse_closures() ?;
         
-        // ok now we have to analyse all closure defs that are stored on env
-        // and store them on our fndecl
-        // also if our fn has closure-args, this fn needs to be specialised for every call.
-        // including our 'scope' args
-        // we have to kinda keep looping until the env runs out of new closures.
         
+        Ok(())
+    }
+    
+    fn analyse_closures(&mut self) -> Result<(), LiveError> {
+        let closure_instances = self.scopes.closure_instances.replace(Vec::new());
+        let mut closure_scopes = self.scopes.closure_scopes.replace(HashMap::new());
+        for ci in closure_instances {
+            let fn_decl = self.shader_registry.all_fns.get(&ci.fn_node_ptr).unwrap();
+            
+            // lets start the closure
+            for ci_arg in ci.closure_args {
+                
+                let mut scopes = closure_scopes.get_mut(&ci_arg.def_index).unwrap();
+                // lets swap our scopes for the closure scopes
+                std::mem::swap(&mut self.scopes.scopes, &mut scopes);
+                
+                // ok now we analyse the closure
+                // lets fetch the fn_decl
+                self.scopes.push_scope();
+                let closure_def = &self.decl.closure_defs[ci_arg.def_index.0];
+                let fn_param = &fn_decl.params[ci_arg.arg_index];
+                
+                if let TyExprKind::ClosureDecl {params, ..} = &fn_param.ty_expr.kind {
+                    // alright we have a fn_decl and a closure_def
+                    // lets get the closure-decl
+                    if closure_def.params.len() != params.len() {
+                        return Err(LiveError {
+                            origin: live_error_origin!(),
+                            span: closure_def.span,
+                            message: format!(
+                                "Closure does not have the same number of arguments as function decl: {} expected: {}",
+                                closure_def.params.len(), params.len()
+                            ),
+                        });
+                    }
+                    // lets now push the argument idents on the scope
+                    for i in 0..closure_def.params.len() {
+                        let def_param = &closure_def.params[i];
+                        let decl_param = &params[i];
+                        // the decl params should already be analysed
+                        // the def params not.
+                        let shadow = self.scopes.insert_sym(
+                            def_param.span,
+                            def_param.ident,
+                            ScopeSymKind::MutLocal(decl_param.ty_expr.ty.borrow().as_ref().unwrap().clone()),
+                        );
+                        def_param.shadow.set(Some(shadow));
+                    }
+                    // ok and now we go analyse the body.
+                    match &closure_def.kind{
+                        ClosureDefKind::Expr(expr)=>{
+                            self.analyse_expr_stmt(closure_def.span, expr)?;
+                        }
+                        ClosureDefKind::Block(block)=>{
+                            self.analyse_block(block)?;
+                        }
+                    }
+                    
+                }
+                else {
+                    panic!()
+                }
+                // lets figure out what the
+                
+                self.scopes.pop_scope();
+                
+                std::mem::swap(&mut self.scopes.scopes, &mut scopes);
+            }
+            // ok now we declare the inputs of the closure on the scope stack
+            
+        }
         Ok(())
     }
     
@@ -597,9 +666,10 @@ impl<'a> FnDefAnalyser<'a> {
                 span,
                 ref ty,
                 ident,
+                ref shadow,
                 ref ty_expr,
                 ref expr,
-            } => self.analyse_let_stmt(span, ty, ident, ty_expr, expr),
+            } => self.analyse_let_stmt(span, ty, ident, ty_expr, expr, shadow),
             Stmt::Return {span, ref expr} => self.analyse_return_stmt(span, expr),
             Stmt::Block {span, ref block} => self.analyse_block_stmt(span, block),
             Stmt::Expr {span, ref expr} => self.analyse_expr_stmt(span, expr),
@@ -688,11 +758,8 @@ impl<'a> FnDefAnalyser<'a> {
         self.scopes.insert_sym(
             span,
             ident,
-            Sym::Local {
-                is_mut: false,
-                ty: Ty::Int,
-            },
-        ) ?;
+            ScopeSymKind::Local(Ty::Int),
+        );
         let was_inside_loop = self.is_inside_loop;
         self.is_inside_loop = true;
         self.analyse_block(block) ?;
@@ -731,6 +798,7 @@ impl<'a> FnDefAnalyser<'a> {
         ident: Ident,
         ty_expr: &Option<TyExpr>,
         expr: &Option<Expr>,
+        shadow: &Cell<Option<ScopeSymShadow>>,
     ) -> Result<(), LiveError> {
         *ty.borrow_mut() = Some(if let Some(ty_expr) = ty_expr {
             if expr.is_none() {
@@ -771,14 +839,13 @@ impl<'a> FnDefAnalyser<'a> {
                 message: format!("can't infer type of variable `{}`", ident),
             });
         });
-        self.scopes.insert_sym(
+        let new_shadow = self.scopes.insert_sym(
             span,
             ident,
-            Sym::Local {
-                is_mut: true,
-                ty: ty.borrow().as_ref().unwrap().clone(),
-            },
-        )
+            ScopeSymKind::MutLocal(ty.borrow().as_ref().unwrap().clone()),
+        );
+        shadow.set(Some(new_shadow));
+        Ok(())
     }
     
     fn analyse_return_stmt(&mut self, span: Span, expr: &Option<Expr>) -> Result<(), LiveError> {

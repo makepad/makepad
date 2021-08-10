@@ -83,7 +83,7 @@ impl<'a> DrawShaderGenerator<'a> {
                 DrawShaderFieldKind::Geometry{..} => {
                     self.write_var_decl(
                         false,
-                        &MpscDsIdent(field.ident),
+                        &DisplayDsIdent(field.ident),
                         field.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
                     write!(self.string, "=").unwrap();
@@ -93,7 +93,7 @@ impl<'a> DrawShaderGenerator<'a> {
                 DrawShaderFieldKind::Instance{..} => {
                     self.write_var_decl(
                         false,
-                        &MpscDsIdent(field.ident),
+                        &DisplayDsIdent(field.ident),
                         field.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
                     write!(self.string, "=").unwrap();
@@ -103,7 +103,7 @@ impl<'a> DrawShaderGenerator<'a> {
                 DrawShaderFieldKind::Varying{..} => {
                     self.write_var_decl(
                         false,
-                        &MpscDsIdent(field.ident),
+                        &DisplayDsIdent(field.ident),
                         field.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
                     write!(self.string, "=").unwrap();
@@ -150,7 +150,7 @@ impl<'a> DrawShaderGenerator<'a> {
 
         let vertex_decl = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_decl, Ident(id!(vertex))).unwrap();
 
-        writeln!(self.string, "    gl_Position = {}();", MpscFnName(vertex_decl.fn_node_ptr, vertex_decl.ident)).unwrap();
+        writeln!(self.string, "    gl_Position = {}();", DisplayFnName(vertex_decl.fn_node_ptr, vertex_decl.ident)).unwrap();
         let mut varying_packer = VarPacker::new(
             "mpsc_packed_varying",
             packed_varyings_size,
@@ -222,7 +222,7 @@ impl<'a> DrawShaderGenerator<'a> {
                 DrawShaderFieldKind::Geometry{is_used_in_pixel_shader,..} if is_used_in_pixel_shader.get() => {
                     self.write_var_decl(
                         false,
-                        &MpscDsIdent(field.ident),
+                        &DisplayDsIdent(field.ident),
                         field.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
                     write!(self.string, "=").unwrap();
@@ -232,7 +232,7 @@ impl<'a> DrawShaderGenerator<'a> {
                 DrawShaderFieldKind::Instance{is_used_in_pixel_shader,..} if is_used_in_pixel_shader.get() => {
                     self.write_var_decl(
                         false,
-                        &MpscDsIdent(field.ident),
+                        &DisplayDsIdent(field.ident),
                         field.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
                     write!(self.string, "=").unwrap();
@@ -242,7 +242,7 @@ impl<'a> DrawShaderGenerator<'a> {
                 DrawShaderFieldKind::Varying{..} => {
                     self.write_var_decl(
                         false,
-                        &MpscDsIdent(field.ident),
+                        &DisplayDsIdent(field.ident),
                         field.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
                     write!(self.string, "=").unwrap();
@@ -280,7 +280,7 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         // we need to collect all consts
         let pixel_decl = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_decl, Ident(id!(pixel))).unwrap();
-        writeln!(self.string, "    gl_FragColor = {}();", MpscFnName(pixel_decl.fn_node_ptr, pixel_decl.ident)).unwrap();
+        writeln!(self.string, "    gl_FragColor = {}();", DisplayFnName(pixel_decl.fn_node_ptr, pixel_decl.ident)).unwrap();
         writeln!(self.string, "}}").unwrap();
     }
     
@@ -365,7 +365,7 @@ impl<'a> DrawShaderGenerator<'a> {
         write!(self.string, "uniform ").unwrap();
         self.write_var_decl(
             false,
-            &MpscDsIdent(decl.ident),
+            &DisplayDsIdent(decl.ident),
             decl.ty_expr.ty.borrow().as_ref().unwrap(),
         );
         writeln!(self.string, ";").unwrap();
@@ -375,7 +375,7 @@ impl<'a> DrawShaderGenerator<'a> {
         write!(self.string, "uniform ").unwrap();
         self.write_var_decl(
             false,
-            &MpscDsIdent(decl.ident),
+            &DisplayDsIdent(decl.ident),
             decl.ty_expr.ty.borrow().as_ref().unwrap(),
         );
         writeln!(self.string, ";").unwrap();
@@ -568,10 +568,9 @@ impl<'a> DrawShaderGenerator<'a> {
         self.backend_writer.write_var_decl(&mut self.string, is_inout, false, ident, ty);
     }
     
-    
-    fn write_ident(&mut self, ident: Ident) {
-        self.backend_writer.write_ident(&mut self.string, ident);
-    }
+    //fn write_ident(&mut self, ident: Ident) {
+     //   self.backend_writer.write_ident(&mut self.string, ident);
+    //}
     
     fn write_ty_lit(&mut self, ty_lit: TyLit) {
         self.backend_writer.write_ty_lit(&mut self.string, ty_lit);
@@ -595,19 +594,21 @@ impl<'a> FnDeclGenerator<'a> {
 
         self.write_var_decl(
             false,
-            &MpscFnName(self.decl.fn_node_ptr, self.decl.ident),// here we must expand IdentPath to something
+            &DisplayFnName(self.decl.fn_node_ptr, self.decl.ident),// here we must expand IdentPath to something
             self.decl.return_ty.borrow().as_ref().unwrap(),
         );
         write!(self.string, "(").unwrap();
         let mut sep = "";
         for param in &self.decl.params {
             write!(self.string, "{}", sep).unwrap();
-            if self.write_var_decl(
-                param.is_inout,
-                &param.ident,
-                param.ty_expr.ty.borrow().as_ref().unwrap(),
-            ){
-                sep = ", ";
+            if !param.shadow.get().is_none(){
+                if self.write_var_decl(
+                    param.is_inout,
+                    &DisplayVarName(param.ident, param.shadow.get().unwrap()),
+                    param.ty_expr.ty.borrow().as_ref().unwrap(),
+                ){
+                    sep = ", ";
+                }
             }
         }
         write!(self.string, ") ").unwrap();
@@ -756,7 +757,7 @@ impl<'a> VarUnpacker<'a> {
             let count = var_size - var_offset;
             let packed_count = self.packed_var_size - self.packed_var_offset;
             let min_count = if var_size > 4 {1} else {count.min(packed_count)};
-            write!(self.string, "    {}", &MpscDsIdent(ident)).unwrap();
+            write!(self.string, "    {}", &DisplayDsIdent(ident)).unwrap();
             if var_size > 1 {
                 if var_size <= 4 { // its a matrix
                     in_matrix = None;
@@ -987,13 +988,14 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
     }
     
     fn write_builtin_call_ident(&self, string: &mut String, ident: Ident, _arg_exprs: &[Expr]) {
-        self.write_ident(string, ident);
+        write!(string,"{}",ident);
     }
     /*
     fn write_call_ident(&self, string: &mut String, ident: Ident, _arg_exprs: &[Expr]) {
         self.write_ident(string, ident);
     }
     */
+    /*
     fn write_ident(&self, string: &mut String, ident: Ident) {
         ident.0.as_string( | ident_string | {
             let ident_string = ident_string.unwrap();
@@ -1008,5 +1010,5 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
             )
                 .unwrap()
         })
-    }
+    }*/
 }
