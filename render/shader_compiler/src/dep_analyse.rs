@@ -295,7 +295,7 @@ impl<'a> DepAnalyser<'a> {
             VarKind::LiveValue(value_ptr)=>{
                 self.decl.live_refs.borrow_mut().as_mut().unwrap().insert(value_ptr);
             }
-            VarKind::Local(_) | VarKind::MutLocal(_)=>{ // we need to store the type
+            VarKind::Local{..} | VarKind::MutLocal{..}=>{ // we need to store the type
                 match ty{
                     Some(Ty::Struct(struct_ptr))=>{
                         self.decl.struct_refs.borrow_mut().as_mut().unwrap().insert(*struct_ptr);
