@@ -5,19 +5,22 @@ use {
         document::Document,
         file_tree::{self, FileTree},
         list_logic::ItemId,
-        protocol::{self, Request, Response},
-        server::Server,
+        protocol::{self, Request, Response, ResponseOrNotification},
+        server::{Connection, Server},
         session::{Session, SessionId},
         splitter::Splitter,
         tab_bar::TabBar,
         tree_logic::NodeId,
     },
+    makepad_microserde::*,
     makepad_render::*,
     makepad_widget::*,
     std::{
         collections::{HashMap, VecDeque},
         env,
         ffi::OsString,
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
         path::PathBuf,
         sync::mpsc::{self, Receiver, Sender, TryRecvError},
         thread,
@@ -65,24 +68,28 @@ struct AppInner {
     code_editors_by_panel_id: HashMap<PanelId, CodeEditor>,
     outstanding_requests: VecDeque<Request>,
     request_sender: Sender<Request>,
-    response_signal: Signal,
-    response_receiver: Receiver<Response>,
+    response_or_notification_signal: Signal,
+    response_or_notification_receiver: Receiver<ResponseOrNotification>,
 }
 
 impl AppInner {
     fn new(cx: &mut Cx) -> AppInner {
         let server = Server::new(env::current_dir().unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        println!(
+            "Server listening to port {}",
+            listener.local_addr().unwrap().port()
+        );
+        spawn_connection_listener(listener, server.clone());
         let (request_sender, request_receiver) = mpsc::channel();
-        let response_signal = cx.new_signal();
-        let (response_sender, response_receiver) = mpsc::channel();
-        let connection = server.connect();
-        thread::spawn(move || {
-            while let Ok(request) = request_receiver.recv() {
-                let response = connection.handle_request(request);
-                response_sender.send(response).unwrap();
-                Cx::post_signal(response_signal, StatusId::default());
-            }
-        });
+        let response_or_notification_signal = cx.new_signal();
+        let (response_or_notification_sender, response_or_notification_receiver) = mpsc::channel();
+        spawn_local_request_handler(
+            server.connect(),
+            request_receiver,
+            response_or_notification_signal,
+            response_or_notification_sender,
+        );
         let mut inner = AppInner {
             window: DesktopWindow::new(cx),
             dock: Dock::new(cx),
@@ -90,8 +97,8 @@ impl AppInner {
             code_editors_by_panel_id: HashMap::new(),
             outstanding_requests: VecDeque::new(),
             request_sender,
-            response_signal,
-            response_receiver,
+            response_or_notification_signal,
+            response_or_notification_receiver,
         };
         inner.send_request(Request::GetFileTree());
         inner
@@ -176,7 +183,8 @@ impl AppInner {
     fn set_file_tree(&mut self, cx: &mut Cx, state: &mut State, root: protocol::FileNode) {
         self.file_tree.forget();
         state.set_file_tree(root);
-        self.file_tree.set_node_is_expanded(cx, NodeId(0), true, true);
+        self.file_tree
+            .set_node_is_expanded(cx, NodeId(0), true, true);
         self.file_tree.redraw(cx);
     }
 
@@ -188,13 +196,14 @@ impl AppInner {
     fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, state: &mut State) {
         self.window.handle_desktop_window(cx, event);
         let mut actions = Vec::new();
-        self.dock.handle_event(cx, event, &mut |action| actions.push(action));
+        self.dock
+            .handle_event(cx, event, &mut |action| actions.push(action));
         for action in actions {
             match action {
                 dock::Action::TabWasPressed(item_id) => {
                     let tab = &state.tabs_by_item_id[&item_id];
                     match tab.kind {
-                        TabKind::FileTree => {},
+                        TabKind::FileTree => {}
                         TabKind::CodeEditor { session_id } => {
                             let code_editor = self
                                 .code_editors_by_panel_id
@@ -231,60 +240,88 @@ impl AppInner {
             );
         }
         match event {
-            Event::Signal(event) if event.signals.contains_key(&self.response_signal) => loop {
-                match self.response_receiver.try_recv() {
-                    Ok(response) => self.handle_response(cx, state, response),
-                    Err(TryRecvError::Empty) => break,
-                    _ => panic!(),
+            Event::Signal(event)
+                if event
+                    .signals
+                    .contains_key(&self.response_or_notification_signal) =>
+            {
+                loop {
+                    match self.response_or_notification_receiver.try_recv() {
+                        Ok(response_or_notification) => self.handle_response_or_notification(
+                            cx,
+                            state,
+                            response_or_notification,
+                        ),
+                        Err(TryRecvError::Empty) => break,
+                        _ => panic!(),
+                    }
                 }
-            },
+            }
             _ => {}
         }
     }
 
-    fn handle_response(&mut self, cx: &mut Cx, state: &mut State, response: Response) {
-        let request = self.outstanding_requests.pop_front().unwrap();
-        match response {
-            Response::GetFileTree(response) => {
-                self.set_file_tree(cx, state, response.unwrap());
-                self.dock.tab_bar_mut(cx, PanelId(1)).set_selected_item_id(cx, Some(ItemId(0)));
-            }
-            Response::OpenFile(response) => {
-                match request {
-                    Request::OpenFile(path) => {
-                        let panel_id = PanelId(2); // TODO;
-                        let item_id = state.next_item_id;
-                        state.next_item_id = ItemId(state.next_item_id.0 + 1);
-                        let session_id = state.next_session_id;
-                        state.next_session_id = SessionId(state.next_session_id.0 + 1);
-                        match state.panels_by_panel_id.get_mut(&panel_id).unwrap() {
-                            Panel::TabBar { item_ids } => item_ids.push(item_id),
+    fn handle_response_or_notification(
+        &mut self,
+        cx: &mut Cx,
+        state: &mut State,
+        response_or_notification: ResponseOrNotification,
+    ) {
+        match response_or_notification {
+            ResponseOrNotification::Response(response) => {
+                let request = self.outstanding_requests.pop_front().unwrap();
+                match response {
+                    Response::GetFileTree(response) => {
+                        self.set_file_tree(cx, state, response.unwrap());
+                        self.dock
+                            .tab_bar_mut(cx, PanelId(1))
+                            .set_selected_item_id(cx, Some(ItemId(0)));
+                    }
+                    Response::OpenFile(response) => {
+                        match request {
+                            Request::OpenFile(path) => {
+                                let panel_id = PanelId(2); // TODO;
+                                let item_id = state.next_item_id;
+                                state.next_item_id = ItemId(state.next_item_id.0 + 1);
+                                let session_id = state.next_session_id;
+                                state.next_session_id = SessionId(state.next_session_id.0 + 1);
+                                match state.panels_by_panel_id.get_mut(&panel_id).unwrap() {
+                                    Panel::TabBar { item_ids } => item_ids.push(item_id),
+                                    _ => panic!(),
+                                }
+                                state.tabs_by_item_id.insert(
+                                    item_id,
+                                    Tab {
+                                        panel_id,
+                                        name: path
+                                            .file_name()
+                                            .unwrap()
+                                            .to_string_lossy()
+                                            .into_owned(),
+                                        kind: TabKind::CodeEditor { session_id },
+                                    },
+                                );
+                                state
+                                    .sessions_by_session_id
+                                    .insert(session_id, Session::new(path.clone()));
+                                state
+                                    .documents_by_path
+                                    .insert(path, Document::new(response.unwrap()));
+                                self.dock
+                                    .tab_bar_mut(cx, panel_id)
+                                    .set_selected_item_id(cx, Some(item_id));
+                                let code_editor = self
+                                    .code_editors_by_panel_id
+                                    .entry(panel_id)
+                                    .or_insert_with(|| CodeEditor::new(cx));
+                                code_editor.set_session_id(cx, session_id);
+                            }
                             _ => panic!(),
                         }
-                        state.tabs_by_item_id.insert(
-                            item_id,
-                            Tab {
-                                panel_id,
-                                name: path.file_name().unwrap().to_string_lossy().into_owned(),
-                                kind: TabKind::CodeEditor { session_id },
-                            },
-                        );
-                        state
-                            .sessions_by_session_id
-                            .insert(session_id, Session::new(path.clone()));
-                        state
-                            .documents_by_path
-                            .insert(path, Document::new(response.unwrap()));
-                        self.dock.tab_bar_mut(cx, panel_id).set_selected_item_id(cx, Some(item_id));
-                        let code_editor = self
-                            .code_editors_by_panel_id
-                            .entry(panel_id)
-                            .or_insert_with(|| CodeEditor::new(cx));
-                        code_editor.set_session_id(cx, session_id);
                     }
-                    _ => panic!(),
                 }
             }
+            ResponseOrNotification::Notification(_) => unimplemented!(), // TODO
         }
     }
 }
@@ -441,4 +478,84 @@ impl FileNode {
 struct FileEdge {
     name: OsString,
     node_id: NodeId,
+}
+
+fn spawn_connection_listener(
+    listener: TcpListener,
+    server: Server
+) {
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let stream = stream.unwrap();
+            let connection = server.connect();
+            let (response_or_notification_sender, response_or_notification_receiver) =
+                mpsc::channel();
+            spawn_remote_request_handler(
+                connection,
+                stream.try_clone().unwrap(),
+                response_or_notification_sender
+            );
+            spawn_response_or_notification_sender(
+                response_or_notification_receiver,
+                stream
+            );
+        }
+    });
+}
+
+fn spawn_remote_request_handler(
+    connection: Connection,
+    stream: TcpStream,
+    response_or_notification_sender: Sender<ResponseOrNotification>,
+) {
+    thread::spawn({
+        let mut stream = stream.try_clone().unwrap();
+        move || loop {
+            let mut len_bytes = [0; 8];
+            stream.read_exact(&mut len_bytes).unwrap();
+            let len = usize::from_be_bytes(len_bytes);
+            let mut request_bytes = vec![0; len];
+            stream.read_exact(&mut request_bytes).unwrap();
+            let mut pos = 0;
+            let request = Request::de_bin(&mut pos, &request_bytes).unwrap();
+            let response = connection.handle_request(request);
+            response_or_notification_sender
+                .send(ResponseOrNotification::Response(response))
+                .unwrap();
+        }
+    });
+}
+
+fn spawn_response_or_notification_sender(
+    response_or_notification_receiver: Receiver<ResponseOrNotification>,
+    stream: TcpStream
+) {
+    thread::spawn({
+        let mut stream = stream;
+        move || loop {
+            let response_or_notification =
+                response_or_notification_receiver.recv().unwrap();
+            let mut response_or_notification_bytes = Vec::new();
+            response_or_notification.ser_bin(&mut response_or_notification_bytes);
+            let len_bytes = response_or_notification_bytes.len().to_be_bytes();
+            stream.write_all(&len_bytes).unwrap();
+            stream.write_all(&response_or_notification_bytes).unwrap();
+        }
+    });
+}
+
+fn spawn_local_request_handler(
+    connection: Connection,
+    request_receiver: Receiver<Request>,
+    response_or_notification_signal: Signal,
+    response_or_notification_sender: Sender<ResponseOrNotification>,
+) {
+    thread::spawn(move || loop {
+        let request = request_receiver.recv().unwrap();
+        let response = connection.handle_request(request);
+        response_or_notification_sender
+            .send(ResponseOrNotification::Response(response))
+            .unwrap();
+        Cx::post_signal(response_or_notification_signal, StatusId::default());
+    });
 }
