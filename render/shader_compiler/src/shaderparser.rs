@@ -350,6 +350,7 @@ impl<'a> ShaderParser<'a> {
                 span,
                 is_inout,
                 ident: Ident(id!(self)),
+                shadow: Cell::new(None),
                 ty_expr: TyExpr {
                     span,
                     ty: RefCell::new(None),
@@ -594,6 +595,7 @@ impl<'a> ShaderParser<'a> {
         self.expect_token(token_punct!(:)) ?;
         let ty_expr = self.expect_ty_expr() ?;
         Ok(span.end(self, | span | Param {
+            shadow: Cell::new(None),
             span,
             is_inout,
             ident,
@@ -704,6 +706,7 @@ impl<'a> ShaderParser<'a> {
         self.expect_token(token_punct!(;)) ?;
         Ok(span.end(self, | span | Stmt::Let {
             span,
+            shadow: Cell::new(None),
             ty: RefCell::new(None),
             ident,
             ty_expr,
@@ -1262,7 +1265,12 @@ impl<'a> ShaderParser<'a> {
                 let mut params = Vec::new();
                 if !self.accept_token(token_punct!(|)) {
                     loop {
-                        params.push(self.expect_ident()?);
+                        let span = self.begin_span();
+                        params.push(ClosureParam{
+                            ident: self.expect_ident()?,
+                            span: span.end(self, |span| span),
+                            shadow: Cell::new(None)
+                        });
                         if !self.accept_token(token_punct!(,)) {
                             break;
                         }

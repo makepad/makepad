@@ -197,7 +197,7 @@ impl<'a> LhsChecker<'a> {
         span: Span,
         kind: &Cell<Option<VarKind >>,
     ) -> Result<(), LiveError> {
-        if let VarKind::MutLocal(_) = kind.get().unwrap(){
+        if let VarKind::MutLocal{..} = kind.get().unwrap(){
             Ok(())
         }
         else{

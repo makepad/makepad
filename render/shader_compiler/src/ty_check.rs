@@ -15,7 +15,7 @@ use std::cell::Cell;
 use std::fmt::Write;
 use std::rc::Rc;
 use crate::shaderregistry::ShaderRegistry;
-use crate::shaderast::Sym;
+use crate::shaderast::ScopeSymKind;
 
 #[derive(Clone, Debug)]
 pub struct TyChecker<'a> {
@@ -162,6 +162,8 @@ impl<'a> TyChecker<'a> {
         &mut self,
         index: ClosureDefIndex,
     ) -> Result<Ty, LiveError> {
+        // we kinda need to capture the scope here.
+        self.scopes.capture_closure_scope(index);
         Ok(Ty::ClosureDef(index))
     }
     
@@ -480,17 +482,20 @@ impl<'a> TyChecker<'a> {
             self.ty_check_expr(arg_expr) ?;
         }
         match self.scopes.find_sym_on_scopes(ident, span) {
-            Some(Sym::Closure {return_ty, params}) => {
-                let closure_args = self.check_params_against_args(span, &params, arg_exprs) ?;
-                // error out
-                if closure_args.len() > 0{
-                    return Err(LiveError {
-                        origin: live_error_origin!(),
-                        span,
-                        message: format!("Cannot pass closures to closures, please implement"),
-                    })
+            Some(scopesym)=> match &scopesym.kind{
+                ScopeSymKind::Closure{return_ty, params} => {
+                    let closure_args = self.check_params_against_args(span, &params, arg_exprs) ?;
+                    // error out
+                    if closure_args.len() > 0{
+                        return Err(LiveError {
+                            origin: live_error_origin!(),
+                            span,
+                            message: format!("Cannot pass closures to closures, please implement"),
+                        })
+                    }
+                    return Ok(return_ty.clone())
                 }
-                return Ok(return_ty)
+                _=>()
             }
             _ => ()
         }
@@ -552,7 +557,6 @@ impl<'a> TyChecker<'a> {
                     let mut ci = self.scopes.closure_instances.borrow_mut();
                     ci.push(ClosureInstance{
                         fn_node_ptr,
-                        scope: self.scopes.scopes.last().cloned().unwrap(),
                         closure_args
                     })
                 }
@@ -838,13 +842,25 @@ impl<'a> TyChecker<'a> {
                 return Ok(ty_lit.to_ty());
             }
             VarResolve::NotFound(ident) => {
-                match self.scopes.find_sym_on_scopes(ident, span) {
-                    Some(Sym::Local {is_mut, ty}) => {
-                        // ok its either a local var or something.
-                        kind.set(Some(if is_mut {VarKind::MutLocal(ident)}else {VarKind::Local(ident)}));
-                        return Ok(ty)
+                 match self.scopes.find_sym_on_scopes(ident, span) {
+                    Some(scopesym)=> match &scopesym.kind{
+                        ScopeSymKind::MutLocal(ty) => {
+                            kind.set(Some(VarKind::MutLocal{ident, shadow:scopesym.shadow}));
+                            return Ok(ty.clone())
+                        }
+                        ScopeSymKind::Local(ty) => {
+                            kind.set(Some(VarKind::Local{ident, shadow:scopesym.shadow}));
+                            return Ok(ty.clone())
+                        }
+                        ScopeSymKind::Closure{..}=>{
+                            return Err(LiveError {
+                                origin: live_error_origin!(),
+                                span,
+                                message: format!("`{}` is a closure and cannot be used as a variable", ident),
+                            })
+                        }
                     }
-                    _ => ()
+                    _=>()
                 }
                 return Err(LiveError {
                     origin: live_error_origin!(),
