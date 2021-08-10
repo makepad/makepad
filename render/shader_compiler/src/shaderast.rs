@@ -4,19 +4,15 @@ use makepad_live_parser::Id;
 use makepad_live_parser::token_punct;
 use makepad_live_parser::FullNodePtr;
 use makepad_live_parser::Vec4;
-use makepad_live_parser::LiveError;
-use std::collections::HashMap;
 use std::fmt::Write;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::rc::Rc;
 use makepad_live_parser::PrettyPrintedF32;
 use makepad_live_parser::id;
 use crate::shaderregistry::ShaderResourceId;
-use std::collections::hash_map::Entry;
-use makepad_live_parser::LiveErrorOrigin;
-use makepad_live_parser::live_error_origin;
 
 // all the Live node pointer newtypes
 
@@ -134,27 +130,20 @@ pub struct FnDecl {
     pub block: Block,
 }
 
-#[derive(Clone, Debug)]
-pub enum Sym {
-    Local{
-        is_mut: bool, 
-        ty: Ty, 
-    },
-    Closure{
-        return_ty: Ty,
-        params: Vec<Param>
-    }
-}
-
-pub type Scope = HashMap<Ident, Sym>;
-
 #[derive(Clone, Copy, Debug,Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct ClosureDefIndex(pub usize);
 
 #[derive(Clone, Debug)]
+pub struct ClosureParam{
+    pub span: Span,
+    pub ident: Ident,
+    pub shadow: Cell<Option<ScopeSymShadow>>
+}
+
+#[derive(Clone, Debug)]
 pub struct ClosureDef{
     pub span:Span,
-    pub params: Vec<Ident>,
+    pub params: Vec<ClosureParam>,
     pub kind:ClosureDefKind
 }
 
@@ -224,6 +213,7 @@ pub struct Param {
     pub span: Span,
     pub is_inout: bool,
     pub ident: Ident,
+    pub shadow: Cell<Option<ScopeSymShadow>>,
     pub ty_expr: TyExpr,
 }
 
@@ -257,6 +247,7 @@ pub enum Stmt {
     Let {
         span: Span,
         ty: RefCell<Option<Ty >>,
+        shadow: Cell<Option<ScopeSymShadow>>,
         ident: Ident,
         ty_expr: Option<TyExpr>,
         expr: Option<Expr>,
@@ -366,8 +357,8 @@ pub enum VarResolve {
 
 #[derive(Clone, Copy, Debug)]
 pub enum VarKind {
-    Local(Ident),
-    MutLocal(Ident),
+    Local{ident:Ident, shadow:ScopeSymShadow},
+    MutLocal{ident:Ident, shadow:ScopeSymShadow},
     Const(ConstNodePtr),
     LiveValue(ValueNodePtr)
 }
@@ -496,7 +487,6 @@ pub enum Val {
 #[derive(Clone, Debug)]
 pub struct ClosureInstance{ // 
     pub fn_node_ptr: FnNodePtr,
-    pub scope: Scope,
     pub closure_args: Vec<ClosureInstanceArg>
 }
 
@@ -506,49 +496,87 @@ pub struct ClosureInstanceArg{
     pub def_index: ClosureDefIndex
 }
 
+pub type Scope = HashMap<Ident, ScopeSym>;
+
 #[derive(Clone, Debug)] 
 pub struct Scopes {
     pub scopes: Vec<Scope>,
+    pub closure_scopes: RefCell<HashMap<ClosureDefIndex, Vec<Scope>>>,
     pub closure_instances: RefCell<Vec<ClosureInstance>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ScopeSymShadow(pub usize);
+
+#[derive(Clone, Debug)]
+pub struct ScopeSym {
+    pub span: Span,
+    pub shadow: ScopeSymShadow, // how many times this symbol has been shadowed
+    pub referenced: Cell<bool>,
+    pub kind: ScopeSymKind
+}
+
+#[derive(Clone, Debug)]
+pub enum ScopeSymKind {
+    Local(Ty),
+    MutLocal(Ty),
+    Closure{
+        return_ty: Ty,
+        params: Vec<Param>
+    }
 }
 
 impl Scopes {
     pub fn new() -> Scopes {
         Scopes {
-           // call_ptrs: RefCell::new(Vec::new()),
+            closure_scopes: RefCell::new(HashMap::new()),
             closure_instances: RefCell::new(Vec::new()),
             scopes: Vec::new(),
         }
     }
     
-    pub fn find_sym_on_scopes(&self, ident: Ident, _span: Span,) -> Option<Sym> {
-        
+    pub fn find_sym_on_scopes(&self, ident: Ident, _span: Span,) -> Option<&ScopeSym> {
         let ret = self.scopes.iter().rev().find_map( | scope | scope.get(&ident));
         if ret.is_some() {
-            return Some(ret.unwrap().clone())
+            return Some(ret.unwrap())
         }
         return None
     }
     
+    pub fn capture_closure_scope(&self, index:ClosureDefIndex){
+        self.closure_scopes.borrow_mut().insert(index, self.scopes.clone());
+    }
+    
     pub fn push_scope(&mut self) {
-        self.scopes.push(Scope::new())
+       self.scopes.push(Scope::new())
     }
     
     pub fn pop_scope(&mut self) {
         self.scopes.pop().unwrap();
     }
     
-    pub fn insert_sym(&mut self, span: Span, ident: Ident, sym: Sym) -> Result<(), LiveError> {
-        match self.scopes.last_mut().unwrap().entry(ident) {
-            Entry::Vacant(entry) => {
-                entry.insert(sym);
-                Ok(())
+    pub fn insert_sym(&mut self, span: Span, ident: Ident, sym_kind: ScopeSymKind)->ScopeSymShadow {
+        
+        if let Some(item) = self.scopes.last_mut().unwrap().get_mut(&ident){
+            item.shadow = ScopeSymShadow(item.shadow.0+1);
+            item.kind = sym_kind;
+            item.shadow
+        }
+        else{
+            // find it anyway
+            let shadow = if let Some(ret) = self.scopes.iter().rev().find_map( | scope | scope.get(&ident)){
+                ScopeSymShadow(ret.shadow.0+1)
             }
-            Entry::Occupied(_) => Err(LiveError {
-                origin:live_error_origin!(),
+            else{
+                ScopeSymShadow(0)
+            };
+            self.scopes.last_mut().unwrap().insert(ident,ScopeSym{
+                shadow,
                 span,
-                message: format!("`{}` is already defined in this scope", ident),
-            }),
+                referenced: Cell::new(false),
+                kind: sym_kind
+            });
+            shadow
         }
     }
 }
@@ -1108,24 +1136,24 @@ impl fmt::Display for Val {
 
 impl fmt::Display for StructNodePtr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "mpsc_st_{}", self.0)
+        write!(f, "struct_{}", self.0)
     }
 }
 
 impl fmt::Display for FnNodePtr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "mpsc_fn_{}", self.0)
+        write!(f, "fn_{}", self.0)
     }
 }
 
 impl fmt::Display for ConstNodePtr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "mpsc_ct_{}", self.0)
+        write!(f, "const_{}", self.0)
     }
 }
 
 impl fmt::Display for ValueNodePtr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "mpsc_lv_{}", self.0)
+        write!(f, "live_{}", self.0)
     }
 }
