@@ -5,5 +5,6 @@ authors = ["Eddy Bruel <ejpbruel@gmail.com>"]
 edition = "2018"
 
 [dependencies]
+makepad-microserde = { path = "../render/microserde" }
 makepad-render = { path = "../render" }
 makepad-widget = { path = "../widget" }

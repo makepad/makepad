@@ -1,6 +1,11 @@
-use std::collections::{HashMap};
-use std::hash::Hash;
-use std::convert::TryInto;
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    convert::TryInto,
+    ffi::{OsStr, OsString},
+    path::{PathBuf, Path},
+    str,
+};
 
 pub trait SerBin {
     fn serialize_bin(&self)->Vec<u8>{
@@ -23,23 +28,26 @@ pub trait DeBin:Sized {
 
 pub struct DeBinErr{
     pub msg: String,
-    pub o:usize,
+    pub o: usize,
     pub l: usize,
     pub s: usize
 }
 
 impl std::fmt::Display for DeBinErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Bin deserialize error in:{}, at:{} wanted:{} bytes but max size is {}", self.msg, self.o, self.l, self.s)
+        write!(f, "Error deserializing {} ", self.msg)?;
+        if self.l != 0 {
+            write!(f, "while trying to read {} bytes ", self.l)?
+        }
+        write!(f, " at offset {} in buffer of size {}", self.o, self.s)
     }
 }
 
 impl std::fmt::Debug for DeBinErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Bin deserialize error in:{}, at:{} wanted:{} bytes but max size is {}", self.msg, self.o, self.l, self.s)
+        std::fmt::Display::fmt(self, f)
     }
 }
-
 
 macro_rules! impl_ser_de_bin_for {
     ($ty:ident) => {
@@ -167,12 +175,12 @@ impl<T> DeBin for Vec<T> where T:DeBin{
 
 impl<T> SerBin for Option<T> where T: SerBin {
     fn ser_bin(&self, s: &mut Vec<u8>) {
-        if let Some(v) = self{
-            s.push(1);
-            v.ser_bin(s);
-        }
-        else{
-            s.push(0);
+        match self {
+            None => s.push(0),
+            Some(v) => {
+                s.push(1);
+                v.ser_bin(s);
+            }
         }
     }
 }
@@ -184,12 +192,41 @@ impl<T> DeBin for Option<T> where T:DeBin{
         } 
         let m = d[*o];
         *o += 1;
-        if m == 1{
-            Ok(Some(DeBin::de_bin(o,d)?))
+        Ok(match m {
+            0 => None,
+            1 => Some(DeBin::de_bin(o,d)?),
+            _ => return Err(DeBinErr{o:*o, l:0, s:d.len(), msg:format!("Option<T>")}),
+        })
+    }
+}
+
+impl<T, E> SerBin for Result<T, E> where T: SerBin, E: SerBin {
+    fn ser_bin(&self, s: &mut Vec<u8>) {
+        match self {
+            Ok(v) => {
+                s.push(0);
+                v.ser_bin(s);
+            }
+            Err(e) => {
+                s.push(1);
+                e.ser_bin(s);
+            }
         }
-        else{
-            Ok(None)
+    }
+}
+
+impl<T, E> DeBin for Result<T, E> where T: DeBin, E: DeBin {
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
+        if *o + 1 > d.len() {
+            return Err(DeBinErr{o:*o, l:1, s:d.len(), msg:format!("Result<T, E>")});
         }
+        let m = d[*o];
+        *o += 1;
+        Ok(match m {
+            0 => Ok(T::de_bin(o, d)?),
+            1 => Err(E::de_bin(o, d)?),
+            _ => return Err(DeBinErr{o:*o, l:0, s:d.len(), msg:format!("Result<T, E>")}),
+        })
     }
 }
 
@@ -302,4 +339,95 @@ impl<T> DeBin for Box<T> where T: DeBin {
     fn de_bin(o:&mut usize, d:&[u8])->Result<Box<T>, DeBinErr> {
         Ok(Box::new(DeBin::de_bin(o,d)?))
     }
+}
+
+impl SerBin for PathBuf {
+    fn ser_bin(&self, s: &mut Vec<u8>) {
+        self.as_os_str().ser_bin(s)
+    }
+}
+
+impl SerBin for Path {
+    fn ser_bin(&self, s: &mut Vec<u8>) {
+        self.as_os_str().ser_bin(s)
+    }
+}
+
+impl SerBin for OsString {
+    fn ser_bin(&self, s: &mut Vec<u8>) {
+        self.as_os_str().ser_bin(s)
+    }
+}
+
+#[cfg(unix)]
+impl SerBin for OsStr {
+    fn ser_bin(&self, s: &mut Vec<u8>) {
+        use std::os::unix::ffi::OsStrExt;
+
+        self.as_bytes().ser_bin(s)
+    }
+}
+
+impl SerBin for char {
+    fn ser_bin(&self, s: &mut Vec<u8>) {
+        let mut bytes = [0; 4];
+        self.encode_utf8(&mut bytes).as_bytes().ser_bin(s);
+    }
+}
+
+#[cfg(unix)]
+impl DeBin for PathBuf {
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
+        Ok(PathBuf::from(OsString::de_bin(o, d)?))
+    }
+}
+
+#[cfg(unix)]
+impl DeBin for OsString {
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
+        use std::os::unix::ffi::OsStringExt;
+
+        Ok(OsString::from_vec(Vec::de_bin(o, d)?))
+    }
+}
+
+impl DeBin for char {
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
+        let mut bytes = [0; 4];
+        bytes[0] = u8::de_bin(o, d)?;
+        let width = utf8_char_width(bytes[0]);
+        for index in 1..width {
+            bytes[index] = u8::de_bin(o, d)?;
+        }
+        Ok(str::from_utf8(&bytes[..width])
+            .unwrap()
+            .chars()
+            .next()
+            .unwrap())
+    }
+}
+
+// Given a first byte, determines how many bytes are in this UTF-8 character.
+#[inline]
+pub fn utf8_char_width(b: u8) -> usize {
+    static UTF8_CHAR_WIDTH: [u8; 256] = [
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, // 0x1F
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, // 0x3F
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, // 0x5F
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, // 0x7F
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, // 0x9F
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, // 0xBF
+        0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+        2, // 0xDF
+        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, // 0xEF
+        4, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 0xFF
+    ];
+
+    UTF8_CHAR_WIDTH[b as usize] as usize
 }
