@@ -12,7 +12,6 @@ use {
         tab_bar::TabBar,
         tree_logic::NodeId,
     },
-    makepad_microserde::*,
     makepad_render::*,
     makepad_widget::*,
     std::{
@@ -75,21 +74,37 @@ struct AppInner {
 impl AppInner {
     fn new(cx: &mut Cx) -> AppInner {
         let server = Server::new(env::current_dir().unwrap());
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        println!(
-            "Server listening to port {}",
-            listener.local_addr().unwrap().port()
-        );
-        spawn_connection_listener(listener, server.clone());
+        spawn_connection_listener(TcpListener::bind("127.0.0.1:0").unwrap(), server.clone());
         let (request_sender, request_receiver) = mpsc::channel();
         let response_or_notification_signal = cx.new_signal();
         let (response_or_notification_sender, response_or_notification_receiver) = mpsc::channel();
-        spawn_local_request_handler(
-            server.connect(),
-            request_receiver,
-            response_or_notification_signal,
-            response_or_notification_sender,
-        );
+        match env::args().nth(1) {
+            Some(arg) => {
+                let stream = TcpStream::connect(arg).unwrap();
+                spawn_request_sender(request_receiver, stream.try_clone().unwrap());
+                spawn_response_or_notification_receiver(
+                    stream,
+                    response_or_notification_signal,
+                    response_or_notification_sender,
+                );
+            }
+            None => {
+                spawn_local_request_handler(
+                    request_receiver,
+                    server.connect(Box::new({
+                        let response_or_notification_sender =
+                            response_or_notification_sender.clone();
+                        move |notification| {
+                            response_or_notification_sender
+                                .send(ResponseOrNotification::Notification(notification))
+                                .unwrap();
+                        }
+                    })),
+                    response_or_notification_signal,
+                    response_or_notification_sender,
+                );
+            }
+        }
         let mut inner = AppInner {
             window: DesktopWindow::new(cx),
             dock: Dock::new(cx),
@@ -281,10 +296,10 @@ impl AppInner {
                         match request {
                             Request::OpenFile(path) => {
                                 let panel_id = PanelId(2); // TODO;
-                                let item_id = state.next_item_id;
-                                state.next_item_id = ItemId(state.next_item_id.0 + 1);
-                                let session_id = state.next_session_id;
-                                state.next_session_id = SessionId(state.next_session_id.0 + 1);
+                                let item_id = ItemId(state.next_item_id);
+                                state.next_item_id += 1;
+                                let session_id = SessionId(state.next_session_id);
+                                state.next_session_id += 1;
                                 match state.panels_by_panel_id.get_mut(&panel_id).unwrap() {
                                     Panel::TabBar { item_ids } => item_ids.push(item_id),
                                     _ => panic!(),
@@ -304,9 +319,10 @@ impl AppInner {
                                 state
                                     .sessions_by_session_id
                                     .insert(session_id, Session::new(path.clone()));
+                                let (revision, text) = response.unwrap();
                                 state
                                     .documents_by_path
-                                    .insert(path, Document::new(response.unwrap()));
+                                    .insert(path, Document::new(revision, text));
                                 self.dock
                                     .tab_bar_mut(cx, panel_id)
                                     .set_selected_item_id(cx, Some(item_id));
@@ -327,9 +343,9 @@ impl AppInner {
 }
 
 struct State {
-    next_node_id: NodeId,
-    next_item_id: ItemId,
-    next_session_id: SessionId,
+    next_node_id: usize,
+    next_item_id: usize,
+    next_session_id: usize,
     panels_by_panel_id: HashMap<PanelId, Panel>,
     tabs_by_item_id: HashMap<ItemId, Tab>,
     file_nodes_by_node_id: HashMap<NodeId, FileNode>,
@@ -372,9 +388,9 @@ impl State {
             },
         );
         State {
-            next_node_id: NodeId(1),
-            next_item_id: ItemId(1),
-            next_session_id: SessionId(0),
+            next_node_id: 1,
+            next_item_id: 1,
+            next_session_id: 0,
             panels_by_panel_id,
             tabs_by_item_id,
             file_nodes_by_node_id,
@@ -385,13 +401,13 @@ impl State {
 
     fn set_file_tree(&mut self, root: protocol::FileNode) {
         fn create_file_node(
-            next_node_id: &mut NodeId,
+            next_node_id: &mut usize,
             file_nodes_by_node_id: &mut HashMap<NodeId, FileNode>,
             parent_edge: Option<FileEdge>,
             node: protocol::FileNode,
         ) -> NodeId {
-            let node_id = *next_node_id;
-            *next_node_id = NodeId(next_node_id.0 + 1);
+            let node_id = NodeId(*next_node_id);
+            *next_node_id += 1;
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),
                 |edge| edge.name.to_string_lossy().into_owned(),
@@ -424,7 +440,7 @@ impl State {
             node_id
         }
 
-        self.next_node_id = NodeId(0);
+        self.next_node_id = 0;
         self.file_nodes_by_node_id.clear();
         create_file_node(
             &mut self.next_node_id,
@@ -480,73 +496,105 @@ struct FileEdge {
     node_id: NodeId,
 }
 
-fn spawn_connection_listener(
-    listener: TcpListener,
-    server: Server
-) {
+fn spawn_connection_listener(listener: TcpListener, server: Server) {
     thread::spawn(move || {
+        println!("Server listening on {}", listener.local_addr().unwrap());
         for stream in listener.incoming() {
             let stream = stream.unwrap();
-            let connection = server.connect();
+            println!("Incoming connection from {}", stream.peer_addr().unwrap());
             let (response_or_notification_sender, response_or_notification_receiver) =
                 mpsc::channel();
+            let connection = server.connect(Box::new({
+                let response_or_notification_sender = response_or_notification_sender.clone();
+                move |notification| {
+                    response_or_notification_sender
+                        .send(ResponseOrNotification::Notification(notification))
+                        .unwrap();
+                }
+            }));
             spawn_remote_request_handler(
                 connection,
                 stream.try_clone().unwrap(),
-                response_or_notification_sender
+                response_or_notification_sender,
             );
-            spawn_response_or_notification_sender(
-                response_or_notification_receiver,
-                stream
-            );
+            spawn_response_or_notification_sender(response_or_notification_receiver, stream);
         }
     });
 }
 
 fn spawn_remote_request_handler(
     connection: Connection,
-    stream: TcpStream,
+    mut stream: TcpStream,
     response_or_notification_sender: Sender<ResponseOrNotification>,
 ) {
-    thread::spawn({
-        let mut stream = stream.try_clone().unwrap();
-        move || loop {
-            let mut len_bytes = [0; 8];
-            stream.read_exact(&mut len_bytes).unwrap();
-            let len = usize::from_be_bytes(len_bytes);
-            let mut request_bytes = vec![0; len];
-            stream.read_exact(&mut request_bytes).unwrap();
-            let mut pos = 0;
-            let request = Request::de_bin(&mut pos, &request_bytes).unwrap();
-            let response = connection.handle_request(request);
-            response_or_notification_sender
-                .send(ResponseOrNotification::Response(response))
-                .unwrap();
-        }
+    thread::spawn(move || loop {
+        let mut len_bytes = [0; 8];
+        stream.read_exact(&mut len_bytes).unwrap();
+        let len = usize::from_be_bytes(len_bytes);
+        let mut request_bytes = vec![0; len];
+        stream.read_exact(&mut request_bytes).unwrap();
+        let request = bincode::deserialize_from(request_bytes.as_slice()).unwrap();
+        let response = connection.handle_request(request);
+        response_or_notification_sender
+            .send(ResponseOrNotification::Response(response))
+            .unwrap();
     });
 }
 
 fn spawn_response_or_notification_sender(
     response_or_notification_receiver: Receiver<ResponseOrNotification>,
-    stream: TcpStream
+    mut stream: TcpStream,
 ) {
-    thread::spawn({
-        let mut stream = stream;
-        move || loop {
-            let response_or_notification =
-                response_or_notification_receiver.recv().unwrap();
-            let mut response_or_notification_bytes = Vec::new();
-            response_or_notification.ser_bin(&mut response_or_notification_bytes);
-            let len_bytes = response_or_notification_bytes.len().to_be_bytes();
-            stream.write_all(&len_bytes).unwrap();
-            stream.write_all(&response_or_notification_bytes).unwrap();
-        }
+    thread::spawn(move || loop {
+        let response_or_notification = response_or_notification_receiver.recv().unwrap();
+        let mut response_or_notification_bytes = Vec::new();
+        bincode::serialize_into(
+            &mut response_or_notification_bytes,
+            &response_or_notification,
+        )
+        .unwrap();
+        let len_bytes = response_or_notification_bytes.len().to_be_bytes();
+        stream.write_all(&len_bytes).unwrap();
+        stream.write_all(&response_or_notification_bytes).unwrap();
+    });
+}
+
+fn spawn_request_sender(request_receiver: Receiver<Request>, mut stream: TcpStream) {
+    thread::spawn(move || loop {
+        let request = request_receiver.recv().unwrap();
+        let mut request_bytes = Vec::new();
+        bincode::serialize_into(&mut request_bytes, &request).unwrap();
+        let len_bytes = request_bytes.len().to_be_bytes();
+        stream.write_all(&len_bytes).unwrap();
+        stream.write_all(&request_bytes).unwrap();
+    });
+}
+
+fn spawn_response_or_notification_receiver(
+    mut stream: TcpStream,
+    response_or_notification_signal: Signal,
+    response_or_notification_sender: Sender<ResponseOrNotification>,
+) {
+    thread::spawn(move || loop {
+        let mut len_bytes = [0; 8];
+        stream.read_exact(&mut len_bytes).unwrap();
+        let len = usize::from_be_bytes(len_bytes);
+        let mut response_or_notification_bytes = vec![0; len];
+        stream
+            .read_exact(&mut response_or_notification_bytes)
+            .unwrap();
+        let response_or_notification =
+            bincode::deserialize_from(response_or_notification_bytes.as_slice()).unwrap();
+        response_or_notification_sender
+            .send(response_or_notification)
+            .unwrap();
+        Cx::post_signal(response_or_notification_signal, StatusId::default());
     });
 }
 
 fn spawn_local_request_handler(
-    connection: Connection,
     request_receiver: Receiver<Request>,
+    connection: Connection,
     response_or_notification_signal: Signal,
     response_or_notification_sender: Sender<ResponseOrNotification>,
 ) {

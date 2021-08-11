@@ -1,43 +1,43 @@
 use {
     crate::text::Text,
-    makepad_microserde::*,
+    serde::{Deserialize, Serialize},
     std::{ffi::OsString, path::PathBuf},
 };
 
-#[derive(Clone, Debug, DeBin, SerBin)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Request {
     GetFileTree(),
     OpenFile(PathBuf),
 }
 
-#[derive(Debug, DeBin, SerBin)]
+#[derive(Debug, Deserialize, Serialize)]
 pub enum ResponseOrNotification {
     Response(Response),
     Notification(Notification),
 }
 
-#[derive(Debug, DeBin, SerBin)]
+#[derive(Debug, Deserialize, Serialize)]
 pub enum Response {
     GetFileTree(Result<FileNode, Error>),
-    OpenFile(Result<Text, Error>),
+    OpenFile(Result<(usize, Text), Error>),
 }
 
-#[derive(Debug, DeBin, SerBin)]
+#[derive(Debug, Deserialize, Serialize)]
 pub enum FileNode {
     Directory { entries: Vec<DirectoryEntry> },
     File,
 }
 
-#[derive(Debug, DeBin, SerBin)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct DirectoryEntry {
     pub name: OsString,
     pub node: FileNode,
 }
 
-#[derive(Debug, DeBin, SerBin)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Notification {}
 
-#[derive(Debug, DeBin, SerBin)]
+#[derive(Debug, Deserialize, Serialize)]
 pub enum Error {
     Unknown(String),
 }
