@@ -1,5 +1,5 @@
 use {
-    crate::text::Text,
+    crate::{delta::Delta, text::Text},
     serde::{Deserialize, Serialize},
     std::{ffi::OsString, path::PathBuf},
 };
@@ -8,6 +8,7 @@ use {
 pub enum Request {
     GetFileTree(),
     OpenFile(PathBuf),
+    ApplyDelta(PathBuf, usize, Delta),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -20,6 +21,7 @@ pub enum ResponseOrNotification {
 pub enum Response {
     GetFileTree(Result<FileNode, Error>),
     OpenFile(Result<(usize, Text), Error>),
+    ApplyDelta(Result<(), Error>),
 }
 
 #[derive(Debug, Deserialize, Serialize)]

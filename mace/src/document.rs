@@ -30,7 +30,7 @@ impl Document {
 
     pub fn apply_delta(&mut self, delta: Delta) {
         self.tokenizer.invalidate_cache(&delta);
-        self.text.apply_delta(delta);
+        self.text.apply_delta(delta.clone());
         self.tokenizer.refresh_cache(&self.text);
     }
 }
