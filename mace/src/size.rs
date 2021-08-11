@@ -1,6 +1,11 @@
-use std::ops::{Add, AddAssign, Sub, SubAssign};
+use {
+    serde::{Deserialize, Serialize},
+    std::ops::{Add, AddAssign, Sub, SubAssign},
+};
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+)]
 pub struct Size {
     pub line: usize,
     pub column: usize,
