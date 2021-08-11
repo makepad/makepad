@@ -1,12 +1,12 @@
 use {
     crate::{
+        delta::Delta,
         protocol::{DirectoryEntry, Error, FileNode, Notification, Request, Response},
         text::Text,
     },
     std::{
         collections::HashMap,
-        fmt,
-        fs,
+        fmt, fs,
         path::{Path, PathBuf},
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -55,6 +55,9 @@ impl Connection {
         match request {
             Request::GetFileTree() => Response::GetFileTree(self.get_file_tree()),
             Request::OpenFile(path) => Response::OpenFile(self.open_file(path)),
+            Request::ApplyDelta(path, revision, delta) => {
+                Response::ApplyDelta(self.apply_delta(path, revision, delta))
+            }
         }
     }
 
@@ -119,6 +122,10 @@ impl Connection {
                 Ok((0, text))
             }
         }
+    }
+
+    fn apply_delta(&self, path: PathBuf, revision: usize, delta: Delta) -> Result<(), Error> {
+        unimplemented!()
     }
 }
 

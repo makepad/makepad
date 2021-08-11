@@ -335,9 +335,16 @@ impl AppInner {
                             _ => panic!(),
                         }
                     }
+                    Response::ApplyDelta(response) => match request {
+                        Request::ApplyDelta(_path, _revision, _delta) => {
+                            let _ = response.unwrap();
+                            unimplemented!()
+                        }
+                        _ => panic!(),
+                    },
                 }
             }
-            ResponseOrNotification::Notification(_) => unimplemented!(), // TODO
+            ResponseOrNotification::Notification(_) => unimplemented!(),
         }
     }
 }

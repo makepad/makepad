@@ -1,9 +1,10 @@
 use {
     crate::{size::Size, text::Text},
+    serde::{Deserialize, Serialize},
     std::{cmp::Ordering, mem, ops::Deref, slice::Iter, vec::IntoIter},
 };
 
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct Delta {
     operations: Vec<Operation>,
 }
@@ -348,7 +349,7 @@ impl DeltaBuilder {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum Operation {
     Retain(Size),
     Insert(Text),
