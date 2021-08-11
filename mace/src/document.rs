@@ -5,14 +5,19 @@ use crate::{
 };
 
 pub struct Document {
+    revision: usize,
     text: Text,
     tokenizer: Tokenizer,
 }
 
 impl Document {
-    pub fn new(text: Text) -> Document {
+    pub fn new(revision: usize, text: Text) -> Document {
         let tokenizer = Tokenizer::new(&text);
-        Document { text, tokenizer }
+        Document {
+            revision,
+            text,
+            tokenizer,
+        }
     }
 
     pub fn text(&self) -> &Text {
