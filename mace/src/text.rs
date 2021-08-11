@@ -4,11 +4,11 @@ use {
         position::Position,
         size::Size,
     },
-    makepad_microserde::*,
+    serde::{Deserialize, Serialize},
     std::{iter, mem, ops::AddAssign},
 };
 
-#[derive(Clone, Debug, DeBin, Eq, Hash, PartialEq, SerBin)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct Text {
     lines: Vec<Vec<char>>,
 }
