@@ -1,14 +1,15 @@
 const SOURCE:&'static str = r#"
         DrawQuad: Shader{
-            fn closure_test(self, x:float, y:fn(v1:float, v2:float)->float){
-                y(1.0,2.0+x);
+            fn closure_test(self, x:float, y:fn(v2:float)->float, z:fn(v2:float)->float){
+                y(1.+x);
+                z(2.+x);
             }
             
             fn pixel(self)->vec4{
                 let i = 1.0;
-                let i = 1.0;
+                let j = 2.0;
                 //let t = |x, y| x-y;
-                self.closure_test(1.0, |x, y| x+y+i);
+                self.closure_test(1.0, |x| x+i, |x| x+i+j);
                 //self.closure_test(2.0, t);
                 return #f00;
             }

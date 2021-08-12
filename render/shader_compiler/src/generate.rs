@@ -29,11 +29,11 @@ impl fmt::Display for DisplayFnName {
     }
 }
 
-pub struct DisplayFnNameWithClosureArgs(pub FnNodePtr, pub FnNodePtr, pub usize);
+pub struct DisplayFnNameWithClosureArgs(pub usize, pub FnNodePtr);
 
 impl fmt::Display for DisplayFnNameWithClosureArgs {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "closurearg_{}_for_{}_site_{}", self.0, self.1, self.2)
+        write!(f, "closuresite_{}_for_{}", self.0, self.1)
     }
 }
 
@@ -54,11 +54,11 @@ impl fmt::Display for DisplayVarName {
 }
 
 
-pub struct DisplayClosedOverArg(pub usize);
+pub struct DisplayClosedOverArg(pub Ident, pub ScopeSymShadow);
 
 impl fmt::Display for DisplayClosedOverArg {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "pass_{}", self.0)
+        write!(f, "pass_{}_{}", self.0,self.1.0)
     }
 }
 
@@ -689,6 +689,7 @@ impl<'a> ExprGenerator<'a> {
         let closure_site_info = self.closure_site_info.as_ref().unwrap();
         // find our closure def
         let closure_def_index = closure_site_info.closure_site.closure_args.iter().find(|arg| arg.param_index == param_index).unwrap().closure_def_index;
+        let closure_def = &self.shader_registry.all_fns.get(&closure_site_info.call_ptr).unwrap().closure_defs[closure_def_index.0];
         
         write!(self.string, "{}", DisplayClosureName(closure_site_info.call_ptr, closure_def_index)).unwrap();
         
@@ -699,9 +700,15 @@ impl<'a> ExprGenerator<'a> {
             self.generate_expr(arg_expr);
             sep = ", ";
         }
-        
-        // ok now we need to pass in the closed over args
-        // the question is which ones of course
+        // alright now we have to pass in the closed over syms IN order
+        for sym in closure_def.closed_over_syms.borrow().as_ref().unwrap(){
+            if let Ty::DrawShader(_) = sym.ty{
+                continue;
+            }
+            write!(self.string, "{}", sep).unwrap();
+            write!(self.string, "{}", DisplayClosedOverArg(sym.ident, sym.shadow)).unwrap();
+            sep = ", ";
+        }
         
         write!(self.string, ")").unwrap();
 
