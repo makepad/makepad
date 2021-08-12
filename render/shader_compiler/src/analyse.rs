@@ -529,6 +529,7 @@ impl<'a> FnDefAnalyser<'a> {
                     self.scopes.insert_sym(
                         param.span,
                         param.ident,
+                        Ty::ClosureDecl,
                         ScopeSymKind::Closure {
                             param_index,
                             return_ty: return_ty.borrow().clone().unwrap(),
@@ -540,7 +541,8 @@ impl<'a> FnDefAnalyser<'a> {
                     let shadow = self.scopes.insert_sym(
                         param.span,
                         param.ident,
-                        ScopeSymKind::MutLocal(param.ty_expr.ty.borrow().as_ref().unwrap().clone()),
+                        param.ty_expr.ty.borrow().as_ref().unwrap().clone(),
+                        ScopeSymKind::MutLocal,
                     );
                     param.shadow.set(Some(shadow));
                 }
@@ -568,22 +570,22 @@ impl<'a> FnDefAnalyser<'a> {
     }
     
     fn analyse_closures(&mut self) -> Result<(), LiveError> {
-        let closure_sites = self.scopes.closure_sites.replace(Vec::new());
+        let mut closure_sites = self.scopes.closure_sites.replace(Vec::new());
         let mut closure_scopes = self.scopes.closure_scopes.replace(HashMap::new());
-        for ci in &closure_sites {
-            let fn_decl = self.shader_registry.all_fns.get(&ci.call_to).unwrap();
+        for closure_site in &mut closure_sites {
+            let fn_decl = self.shader_registry.all_fns.get(&closure_site.call_to).unwrap();
             
             // lets start the closure
-            for ci_arg in &ci.closure_args {
+            for closure_arg in &closure_site.closure_args {
                 
-                let mut scopes = closure_scopes.get_mut(&ci_arg.closure_def_index).unwrap();
+                let mut scopes = closure_scopes.get_mut(&closure_arg.closure_def_index).unwrap();
                 // lets swap our scopes for the closure scopes
                 std::mem::swap(&mut self.scopes.scopes, &mut scopes);
                 
                 // ok now we analyse the closure
                 // lets fetch the fn_decl
-                let closure_def = &self.fn_def.closure_defs[ci_arg.closure_def_index.0];
-                let fn_param = &fn_decl.params[ci_arg.param_index];
+                let closure_def = &self.fn_def.closure_defs[closure_arg.closure_def_index.0];
+                let fn_param = &fn_decl.params[closure_arg.param_index];
                 
                 if let TyExprKind::ClosureDecl {params, ..} = &fn_param.ty_expr.kind {
                     self.scopes.push_scope();
@@ -608,7 +610,8 @@ impl<'a> FnDefAnalyser<'a> {
                         let shadow = self.scopes.insert_sym(
                             def_param.span,
                             def_param.ident,
-                            ScopeSymKind::MutLocal(decl_param.ty_expr.ty.borrow().as_ref().unwrap().clone()),
+                            decl_param.ty_expr.ty.borrow().as_ref().unwrap().clone(),
+                            ScopeSymKind::MutLocal,
                         );
                         def_param.shadow.set(Some(shadow));
                     }
@@ -623,11 +626,12 @@ impl<'a> FnDefAnalyser<'a> {
                     }
                     self.scopes.pop_scope();
                     // ok we also have something else.
-                    
-                    
                     // ok we have to store the variables we have accessed on frpm scope
-                    *closure_def.closed_over_syms.borrow_mut() = Some(self.scopes.all_referenced_syms());
-                    
+                    let all_syms = self.scopes.all_referenced_syms();
+                    for sym in &all_syms{
+                        closure_site.all_closed_over.insert(sym.clone());
+                    }
+                    *closure_def.closed_over_syms.borrow_mut() = Some(all_syms);
                 }
                 else {
                     panic!()
@@ -775,7 +779,8 @@ impl<'a> FnDefAnalyser<'a> {
         self.scopes.insert_sym(
             span,
             ident,
-            ScopeSymKind::Local(Ty::Int),
+            Ty::Int,
+            ScopeSymKind::Local,
         );
         let was_inside_loop = self.is_inside_loop;
         self.is_inside_loop = true;
@@ -859,7 +864,8 @@ impl<'a> FnDefAnalyser<'a> {
         let new_shadow = self.scopes.insert_sym(
             span,
             ident,
-            ScopeSymKind::MutLocal(ty.borrow().as_ref().unwrap().clone()),
+            ty.borrow().as_ref().unwrap().clone(),
+            ScopeSymKind::MutLocal,
         );
         shadow.set(Some(new_shadow));
         Ok(())

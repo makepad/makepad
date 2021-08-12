@@ -758,9 +758,8 @@ impl<'a> FnDefWithClosureArgsGenerator<'a> {
             false,
             false,
             &DisplayFnNameWithClosureArgs(
-                self.fn_def.fn_node_ptr,
+                self.closure_site_info.site_index,
                 self.call_def.fn_node_ptr,
-                self.closure_site_info.site_index
             ), // here we must expand IdentPath to something
             self.fn_def.return_ty.borrow().as_ref().unwrap()
         );
@@ -781,27 +780,17 @@ impl<'a> FnDefWithClosureArgsGenerator<'a> {
             }
         }
         // now we iterate over the closures in our site,
-        // and their closed over args. and just add them
-        let mut arg_counter = 0;
-        for closure_site_arg in &self.closure_site_info.closure_site.closure_args {
-            let def = &self.call_def.closure_defs[closure_site_arg.closure_def_index.0];
-            for sym in def.closed_over_syms.borrow().as_ref().unwrap(){
-                match &sym.kind{
-                    ScopeSymKind::Local(ty) | ScopeSymKind::MutLocal(ty)=>{
-                        if self.backend_writer.write_var_decl(
-                            &mut self.string,
-                            sep,
-                            false,
-                            false,
-                            &DisplayClosedOverArg(arg_counter),
-                            ty,
-                        ) {
-                            sep = ", ";
-                            arg_counter += 1;
-                        }
-                    }
-                    _=>panic!()
-                }
+        // and we need to merge the set of closed over args.
+        for sym in &self.closure_site_info.closure_site.all_closed_over {
+            if self.backend_writer.write_var_decl(
+                &mut self.string,
+                sep,
+                false,
+                false,
+                &DisplayClosedOverArg(sym.ident, sym.shadow),
+                &sym.ty,
+            ) {
+                sep = ", ";
             }
         }
         
@@ -882,20 +871,15 @@ impl<'a> ClosureDefGenerator<'a> {
         }
         
         for sym in self.closure_def.closed_over_syms.borrow().as_ref().unwrap() {
-            match &sym.kind {
-                ScopeSymKind::Local(ty) | ScopeSymKind::MutLocal(ty) => {
-                    if self.backend_writer.write_var_decl(
-                        &mut self.string,
-                        sep,
-                        false,
-                        false,
-                        &DisplayVarName(sym.ident, sym.shadow),
-                        ty,
-                    ) {
-                        sep = ", ";
-                    }
-                }
-                _ => panic!()
+            if self.backend_writer.write_var_decl(
+                &mut self.string,
+                sep,
+                false,
+                false,
+                &DisplayVarName(sym.ident, sym.shadow),
+                &sym.ty,
+            ) {
+                sep = ", ";
             }
         }
         writeln!(self.string, ") {{").unwrap();

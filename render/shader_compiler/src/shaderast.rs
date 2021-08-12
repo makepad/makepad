@@ -144,7 +144,7 @@ pub struct ClosureParam{
 #[derive(Clone, Debug)]
 pub struct ClosureDef{
     pub span:Span,
-    pub closed_over_syms: RefCell<Option<Vec<ScopeSym>>>,
+    pub closed_over_syms: RefCell<Option<Vec<Sym>>>,
     pub params: Vec<ClosureParam>,
     pub kind:ClosureDefKind
 }
@@ -158,6 +158,7 @@ pub enum ClosureDefKind{
 #[derive(Clone, Debug)]
 pub struct ClosureSite{ // 
     pub call_to: FnNodePtr,
+    pub all_closed_over: BTreeSet<Sym>,
     pub closure_args: Vec<ClosureSiteArg>
 }
 
@@ -508,25 +509,31 @@ pub struct Scopes {
     pub closure_sites: RefCell<Vec<ClosureSite>>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct ScopeSymShadow(pub usize);
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub struct Sym {
+    pub ident: Ident,
+    pub ty: Ty,
+    pub shadow: ScopeSymShadow, // how many times this symbol has been shadowed
+}
 
 #[derive(Clone, Debug)]
 pub struct ScopeSym {
-    pub ident: Ident,
     pub span: Span,
-    pub shadow: ScopeSymShadow, // how many times this symbol has been shadowed
+    pub sym: Sym,
     pub referenced: Cell<bool>,
     pub kind: ScopeSymKind
 }
 
 #[derive(Clone, Debug)]
 pub enum ScopeSymKind {
-    Local(Ty),
-    MutLocal(Ty),
+    Local,
+    MutLocal,
     Closure{
-        param_index: usize,
         return_ty: Ty,
+        param_index: usize,
         params: Vec<Param>
     }
 }
@@ -560,36 +567,39 @@ impl Scopes {
         self.scopes.pop().unwrap();
     }
     
-    pub fn all_referenced_syms(&self)->Vec<ScopeSym>{
+    pub fn all_referenced_syms(&self)->Vec<Sym>{
         let mut ret = Vec::new();
         for scope in self.scopes.iter().rev(){
             for (_, sym) in scope{
                 if sym.referenced.get(){
-                    ret.push(sym.clone());
+                    ret.push(sym.sym.clone());
                 }
             }
         }
         ret
     }
     
-    pub fn insert_sym(&mut self, span: Span, ident: Ident, sym_kind: ScopeSymKind)->ScopeSymShadow {
+    pub fn insert_sym(&mut self, span: Span, ident: Ident, ty: Ty, sym_kind: ScopeSymKind)->ScopeSymShadow {
         
         if let Some(item) = self.scopes.last_mut().unwrap().get_mut(&ident){
-            item.shadow = ScopeSymShadow(item.shadow.0+1);
+            item.sym.shadow = ScopeSymShadow(item.sym.shadow.0+1);
             item.kind = sym_kind;
-            item.shadow
+            item.sym.shadow
         }
         else{
             // find it anyway
             let shadow = if let Some(ret) = self.scopes.iter().rev().find_map( | scope | scope.get(&ident)){
-                ScopeSymShadow(ret.shadow.0+1)
+                ScopeSymShadow(ret.sym.shadow.0+1)
             }
             else{
                 ScopeSymShadow(0)
             };
             self.scopes.last_mut().unwrap().insert(ident,ScopeSym{
-                ident,
-                shadow,
+                sym: Sym{
+                    ty,
+                    ident,
+                    shadow,
+                },
                 span,
                 referenced: Cell::new(false),
                 kind: sym_kind

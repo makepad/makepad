@@ -12,6 +12,7 @@ use crate::swizzle::Swizzle;
 use crate::shaderast::{Ty, TyLit, TyExprKind, TyExpr};
 use crate::util::CommaSep;
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::rc::Rc;
 use crate::shaderregistry::ShaderRegistry;
@@ -560,6 +561,7 @@ impl<'a> TyChecker<'a> {
                     let mut ci = self.scopes.closure_sites.borrow_mut();
                     ci.push(ClosureSite{
                         call_to: fn_node_ptr,
+                        all_closed_over: BTreeSet::new(),
                         closure_args
                     })
                 }
@@ -849,13 +851,13 @@ impl<'a> TyChecker<'a> {
                     Some(scopesym)=> {
                         scopesym.referenced.set(true);
                         match &scopesym.kind{
-                            ScopeSymKind::MutLocal(ty) => {
-                                kind.set(Some(VarKind::MutLocal{ident, shadow:scopesym.shadow}));
-                                return Ok(ty.clone())
+                            ScopeSymKind::MutLocal => {
+                                kind.set(Some(VarKind::MutLocal{ident, shadow:scopesym.sym.shadow}));
+                                return Ok(scopesym.sym.ty.clone())
                             }
-                            ScopeSymKind::Local(ty) => {
-                                kind.set(Some(VarKind::Local{ident, shadow:scopesym.shadow}));
-                                return Ok(ty.clone())
+                            ScopeSymKind::Local => {
+                                kind.set(Some(VarKind::Local{ident, shadow:scopesym.sym.shadow}));
+                                return Ok(scopesym.sym.ty.clone())
                             }
                             ScopeSymKind::Closure{..}=>{
                                 return Err(LiveError {
