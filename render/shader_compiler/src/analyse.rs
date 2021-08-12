@@ -570,8 +570,10 @@ impl<'a> FnDefAnalyser<'a> {
     }
     
     fn analyse_closures(&mut self) -> Result<(), LiveError> {
+        
         let mut closure_sites = self.scopes.closure_sites.replace(Vec::new());
         let mut closure_scopes = self.scopes.closure_scopes.replace(HashMap::new());
+        
         for closure_site in &mut closure_sites {
             let fn_decl = self.shader_registry.all_fns.get(&closure_site.call_to).unwrap();
             
@@ -588,6 +590,7 @@ impl<'a> FnDefAnalyser<'a> {
                 let fn_param = &fn_decl.params[closure_arg.param_index];
                 
                 if let TyExprKind::ClosureDecl {params, ..} = &fn_param.ty_expr.kind {
+                    self.scopes.clear_referenced_syms();
                     self.scopes.push_scope();
                     // alright we have a fn_decl and a closure_def
                     // lets get the closure-decl

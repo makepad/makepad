@@ -281,41 +281,6 @@ impl<'a> DrawShaderGenerator<'a> {
             }
         }
         
-        
-        
-        /*
-        // alright so. we have a scan_decl with the closures we need,
-        for (closure_index, closure_def) in call_def.closure_defs.iter().enumerate() {
-            // alright so we have closed_over_syms.
-            ClosureDefGenerator {
-                closure_def_index,
-                closure_def,
-                fn_def,
-                call_def,
-                shader_registry: self.shader_registry,
-                //env:self.env,
-                const_table_offset,
-                backend_writer,
-                string: self.string,
-            }
-            .generate_fn_def()
-        }*/
-        // so.. lets output them.
-        // its a closure closure_scanfn_to_args_fn
-        // ok we need to generate the closures
-        // and then specialise the args_decl for these closures
-        // and then the call-site we'll do later.
-        /*
-        FnDeclGenerator {
-            decl,
-            shader_registry: self.shader_registry,
-            //env:self.env,
-            const_table_offset,
-            backend_writer,
-            string: self.string,
-        }
-        .generate_fn_decl()*/
-        
     }
     
     pub fn generate_pixel_shader(&mut self) {
