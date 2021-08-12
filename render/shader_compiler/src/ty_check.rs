@@ -110,12 +110,16 @@ impl<'a> TyChecker<'a> {
                 //ident,
                 fn_node_ptr,
                 ref arg_exprs,
-            } => self.ty_check_plain_call_expr(span, arg_exprs, fn_node_ptr),
+                ref closure_site_index,
+                ..
+            } => self.ty_check_plain_call_expr(span, arg_exprs, fn_node_ptr, closure_site_index),
             ExprKind::MethodCall {
                 span,
                 ident,
                 ref arg_exprs,
-            } => self.ty_check_method_call_expr(span, ident, arg_exprs),
+                ref closure_site_index,
+                ..
+            } => self.ty_check_method_call_expr(span, ident, arg_exprs, closure_site_index),
             ExprKind::BuiltinCall {
                 span,
                 ident,
@@ -394,6 +398,7 @@ impl<'a> TyChecker<'a> {
         //ident: Ident,
         arg_exprs: &[Expr],
         fn_node_ptr: FnNodePtr,
+        closure_site_index: &Cell<Option<usize>>,
     ) -> Result<Ty, LiveError> {
 
         for arg_expr in arg_exprs {
@@ -403,7 +408,7 @@ impl<'a> TyChecker<'a> {
         // alright so.
         let fn_decl = self.shader_registry.all_fns.get(&fn_node_ptr).expect("fn ptr invalid");
         
-        self.check_call_args(span, fn_node_ptr, arg_exprs, &fn_decl) ?;
+        self.check_call_args(span, fn_node_ptr, arg_exprs, &fn_decl, Some(closure_site_index)) ?;
         
         // lets return the right ty
         return Ok(fn_decl.return_ty.borrow().clone().unwrap())
@@ -414,6 +419,7 @@ impl<'a> TyChecker<'a> {
         span: Span,
         ident: Ident,
         arg_exprs: &[Expr],
+        closure_site_index: &Cell<Option<usize>>,
     ) -> Result<Ty, LiveError> {
         
         let ty = self.ty_check_expr(&arg_exprs[0]) ?;
@@ -429,7 +435,7 @@ impl<'a> TyChecker<'a> {
                         self.ty_check_expr(arg_expr) ?;
                     }
 
-                    self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl) ?;
+                    self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl, Some(closure_site_index)) ?;
                     
                     if let Some(return_ty) = fn_decl.return_ty.borrow().clone() {
                         return Ok(return_ty);
@@ -452,7 +458,7 @@ impl<'a> TyChecker<'a> {
                         self.ty_check_expr(arg_expr) ?;
                     }
 
-                    self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl) ?;
+                    self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl, Some(closure_site_index)) ?;
                     
                     if let Some(return_ty) = fn_decl.return_ty.borrow().clone() {
                         return Ok(return_ty);
@@ -549,6 +555,7 @@ impl<'a> TyChecker<'a> {
         fn_node_ptr: FnNodePtr,
         arg_exprs: &[Expr],
         fn_def: &FnDef,
+        closure_site_index: Option<&Cell<Option<usize>>>
     ) -> Result<(), LiveError> {
         match self.check_params_against_args(span, &fn_def.params, arg_exprs) {
            Err(err)=> Err(LiveError {
@@ -559,6 +566,14 @@ impl<'a> TyChecker<'a> {
             Ok(closure_args)=>{
                 if closure_args.len()>0{
                     let mut ci = self.scopes.closure_sites.borrow_mut();
+                    if closure_site_index.is_none(){
+                        return Err(LiveError {
+                            origin: live_error_origin!(),
+                            span,
+                            message: format!("Closures not supported here {}", self.shader_registry.fn_ident_from_ptr(fn_node_ptr))
+                        });
+                    }
+                    closure_site_index.unwrap().set(Some(ci.len()));
                     ci.push(ClosureSite{
                         call_to: fn_node_ptr,
                         all_closed_over: BTreeSet::new(),

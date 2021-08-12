@@ -23,8 +23,8 @@ pub struct Lex<C> {
 
 // put all the words here that the lexer might not see for collision check
 pub fn fill_collisions() {
-    IdMap::with(|idmap|{
-        if idmap.contains("use"){
+    IdMap::with( | idmap | {
+        if idmap.contains("use") {
             return
         }
         let collision_seed = [
@@ -57,7 +57,7 @@ pub fn fill_collisions() {
             ">",
             "?"
         ];
-        for seed in &collision_seed{
+        for seed in &collision_seed {
             idmap.add(seed);
         }
     })
@@ -299,7 +299,7 @@ C: Iterator<Item = char>,
             }
             ('&', _) => {
                 self.skip_char();
-                Token::Punct(id!( &))
+                Token::Punct(id!(&))
             }
             ('|', '=') => {
                 self.skip_two_chars();
@@ -307,25 +307,50 @@ C: Iterator<Item = char>,
             }
             ('|', _) => {
                 self.skip_char();
-                Token::Punct(id!(|))
+                Token::Punct(id!( |))
             }
             ('^', '=') => {
                 self.skip_two_chars();
-                Token::Punct(id!(^=))
+                Token::Punct(id!( ^=))
             }
             ('^', _) => {
                 self.skip_char();
-                Token::Punct(id!(^))
-            }                        
+                Token::Punct(id!( ^))
+            }
             (ch, _) if ch.is_ascii_alphabetic() || ch == '_' => {
+                // you cant give ids a _ at start or _ at end or __ in the middle
                 self.temp_string.truncate(0);
-                let ch = self.read_char();
-                self.temp_string.push(ch);
-                self.read_chars_while( | ch | ch.is_ascii_alphanumeric() || ch == '_');
+                let first_ch = self.read_char();
+                
+                self.temp_string.push(first_ch);
+                
+                // this underscore filtering is because otherwise transpiling to glsl would
+                // be unable to use the real identifiers in the generated code.
+                // this makes it much harder to read and debug. 
+                let mut last_ch = '\0';
+                let mut double_underscore = false;
+                self.read_chars_while( | ch | {
+                    if ch == '_' && last_ch == '_' {double_underscore = true};
+                    if ch.is_ascii_alphanumeric() || ch == '_'{
+                        last_ch = ch;
+                        true
+                    }
+                    else{
+                        false
+                    }
+                });
+                
+                if first_ch == '_' || last_ch == '_' {
+                    return Err(span.error(self, format!("Id's cannot start or end with an underscore {}", self.temp_string).into()));
+                }
+                if double_underscore{
+                    return Err(span.error(self, format!("Id's cannot contain double underscores {}", self.temp_string).into()));
+                }
+                
                 match self.temp_string.as_str() {
                     "true" => Token::Bool(true),
                     "false" => Token::Bool(false),
-                    _=>{
+                    _ => {
                         let id = Id::from_str(&self.temp_string);
                         if let Some(collide) = id.check_collision(&self.temp_string) {
                             return Err(span.error(self, format!("Id has collision {} with {}, please rename one of them", self.temp_string, collide).into()));
@@ -342,7 +367,7 @@ C: Iterator<Item = char>,
             (')', _) => {
                 if let Some(exp) = self.group_stack.pop() {
                     if exp != ')' {
-                        return Err(span.error(self, format!("Expected {} but got )",exp).into()));
+                        return Err(span.error(self, format!("Expected {} but got )", exp).into()));
                     }
                 }
                 else {
@@ -359,7 +384,7 @@ C: Iterator<Item = char>,
             (']', _) => {
                 if let Some(exp) = self.group_stack.pop() {
                     if exp != ']' {
-                        return Err(span.error(self, format!("Expected {} but got ]",exp).into()));
+                        return Err(span.error(self, format!("Expected {} but got ]", exp).into()));
                     }
                 }
                 else {
@@ -374,9 +399,9 @@ C: Iterator<Item = char>,
                 Token::OpenBrace
             }
             ('}', _) => {
-               if let Some(exp) = self.group_stack.pop() {
+                if let Some(exp) = self.group_stack.pop() {
                     if exp != '}' {
-                        return Err(span.error(self, format!("Expected {} but got }}",exp).into()));
+                        return Err(span.error(self, format!("Expected {} but got }}", exp).into()));
                     }
                 }
                 else {
@@ -477,7 +502,7 @@ C: Iterator<Item = char>,
     }
 }
 
-pub struct LexResult{
+pub struct LexResult {
     pub strings: Vec<char>,
     pub tokens: Vec<TokenWithSpan>
 }
@@ -503,20 +528,20 @@ C: IntoIterator<Item = char>,
         strings: Vec::new(),
         is_done: false,
     };
-    loop{
-        match lex.read_token_with_span(){
-            Err(err)=>{
+    loop {
+        match lex.read_token_with_span() {
+            Err(err) => {
                 return Err(err)
             },
-            Ok(tok)=>{
+            Ok(tok) => {
                 tokens.push(tok);
-                if tok.token == Token::Eof{
+                if tok.token == Token::Eof {
                     break
                 }
             }
         }
     }
-    return Ok(LexResult{
+    return Ok(LexResult {
         strings: lex.strings,
         tokens
     });
@@ -545,7 +570,7 @@ impl SpanTracker {
             span: Span::new(
                 self.file_id,
                 self.start,
-                 lex.index,
+                lex.index,
             ),
             message,
         }
