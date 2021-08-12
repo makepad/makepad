@@ -27,7 +27,7 @@ pub struct ShaderAnalyseOptions {
 
 #[derive(Debug)]
 pub struct StructAnalyser<'a> {
-    pub struct_decl: &'a StructDecl,
+    pub struct_def: &'a StructDef,
     pub scopes: &'a mut Scopes,
     pub shader_registry: &'a ShaderRegistry,
     pub options: ShaderAnalyseOptions,
@@ -43,21 +43,21 @@ impl<'a> StructAnalyser<'a> {
     
     pub fn analyse_struct(&mut self) -> Result<(), LiveError> {
         self.scopes.push_scope();
-        self.struct_decl.init_analysis();
+        self.struct_def.init_analysis();
         // we need to analyse the fields and put them somewhere.
-        for field in &self.struct_decl.fields {
+        for field in &self.struct_def.fields {
             self.analyse_field_decl(field) ?;
         }
         // first analyse decls
-        for fn_node_ptr in &self.struct_decl.methods {
+        for fn_node_ptr in &self.struct_def.methods {
             let fn_decl = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
             self.analyse_method_decl(fn_decl) ?;
         }
         // now analyse the functions
-        for fn_node_ptr in &self.struct_decl.methods {
-            let decl = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
+        for fn_node_ptr in &self.struct_def.methods {
+            let fn_def = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
             FnDefAnalyser {
-                decl,
+                fn_def,
                 scopes: &mut self.scopes,
                 shader_registry: self.shader_registry,
                 options: self.options,
@@ -74,7 +74,7 @@ impl<'a> StructAnalyser<'a> {
         // ok so. if this thing depends on structs, lets store them.
         match decl.ty_expr.ty.borrow().as_ref().unwrap() {
             Ty::Struct(struct_ptr) => {
-                self.struct_decl.struct_refs.borrow_mut().as_mut().unwrap().insert(*struct_ptr);
+                self.struct_def.struct_refs.borrow_mut().as_mut().unwrap().insert(*struct_ptr);
             }
             Ty::Array {..} => {
                 todo!();
@@ -84,7 +84,7 @@ impl<'a> StructAnalyser<'a> {
         Ok(())
     }
     
-    fn analyse_method_decl(&mut self, decl: &FnDecl) -> Result<(), LiveError> {
+    fn analyse_method_decl(&mut self, decl: &FnDef) -> Result<(), LiveError> {
         for param in &decl.params {
             self.ty_checker().ty_check_ty_expr(&param.ty_expr) ?;
         }
@@ -103,7 +103,7 @@ impl<'a> StructAnalyser<'a> {
 
 #[derive(Debug)]
 pub struct DrawShaderAnalyser<'a> {
-    pub draw_shader_decl: &'a DrawShaderDecl,
+    pub draw_shader_def: &'a DrawShaderDef,
     pub scopes: &'a mut Scopes,
     pub shader_registry: &'a ShaderRegistry,
     pub options: ShaderAnalyseOptions,
@@ -120,21 +120,21 @@ impl<'a> DrawShaderAnalyser<'a> {
     pub fn analyse_shader(&mut self) -> Result<(), LiveError> {
         self.scopes.push_scope();
         
-        for decl in &self.draw_shader_decl.fields {
+        for decl in &self.draw_shader_def.fields {
             self.analyse_field_decl(decl) ?;
         }
         // first analyse decls
-        for fn_node_ptr in &self.draw_shader_decl.methods {
-            let fn_decl = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
-            self.analyse_method_decl(fn_decl) ?;
+        for fn_node_ptr in &self.draw_shader_def.methods {
+            let fn_def = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
+            self.analyse_method_def(fn_def) ?;
         }
         
         // now analyse the methods
-        for fn_node_ptr in &self.draw_shader_decl.methods {
-            let decl = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
+        for fn_node_ptr in &self.draw_shader_def.methods {
+            let fn_def = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
             FnDefAnalyser {
                 shader_registry: self.shader_registry,
-                decl,
+                fn_def,
                 scopes: &mut self.scopes,
                 options: self.options,
                 is_inside_loop: false,
@@ -150,7 +150,7 @@ impl<'a> DrawShaderAnalyser<'a> {
         
         self.analyse_call_tree(
             &mut Vec::new(),
-            self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_decl, Ident(id!(vertex))).unwrap(),
+            self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(vertex))).unwrap(),
             &mut vertex_fns,
             &mut all_fns,
         ) ?;
@@ -158,7 +158,7 @@ impl<'a> DrawShaderAnalyser<'a> {
         let mut pixel_fns = Vec::new();
         self.analyse_call_tree(
             &mut Vec::new(),
-            self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_decl, Ident(id!(pixel))).unwrap(),
+            self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(pixel))).unwrap(),
             &mut pixel_fns,
             &mut all_fns,
         ) ?;
@@ -171,7 +171,7 @@ impl<'a> DrawShaderAnalyser<'a> {
                     // lets iterate all
                     for dsr in fn_decl.draw_shader_refs.borrow().as_ref().unwrap() {
                         // ok we have a draw shader ident we use, now mark it on our draw_shader_decl.
-                        for field in &self.draw_shader_decl.fields {
+                        for field in &self.draw_shader_def.fields {
                             if field.ident == *dsr { // we found it
                                 match &field.kind {
                                     DrawShaderFieldKind::Geometry {ref is_used_in_pixel_shader, ..} => {
@@ -210,18 +210,18 @@ impl<'a> DrawShaderAnalyser<'a> {
             }
         }
         
-        *self.draw_shader_decl.all_fns.borrow_mut() = all_fns;
-        *self.draw_shader_decl.vertex_fns.borrow_mut() = vertex_fns;
-        *self.draw_shader_decl.pixel_fns.borrow_mut() = pixel_fns;
+        *self.draw_shader_def.all_fns.borrow_mut() = all_fns;
+        *self.draw_shader_def.vertex_fns.borrow_mut() = vertex_fns;
+        *self.draw_shader_def.pixel_fns.borrow_mut() = pixel_fns;
         
-        *self.draw_shader_decl.all_structs.borrow_mut() = all_structs;
-        *self.draw_shader_decl.vertex_structs.borrow_mut() = vertex_structs;
-        *self.draw_shader_decl.pixel_structs.borrow_mut() = pixel_structs;
+        *self.draw_shader_def.all_structs.borrow_mut() = all_structs;
+        *self.draw_shader_def.vertex_structs.borrow_mut() = vertex_structs;
+        *self.draw_shader_def.pixel_structs.borrow_mut() = pixel_structs;
         
         Ok(())
     }
     
-    fn analyse_field_decl(&mut self, decl: &DrawShaderFieldDecl) -> Result<(), LiveError> {
+    fn analyse_field_decl(&mut self, decl: &DrawShaderFieldDef) -> Result<(), LiveError> {
         let ty = match decl.kind {
             DrawShaderFieldKind::Geometry {..} => {
                 let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
@@ -294,37 +294,37 @@ impl<'a> DrawShaderAnalyser<'a> {
         Ok(())
     }
     
-    fn analyse_method_decl(&mut self, decl: &FnDecl) -> Result<(), LiveError> {
-        for param in &decl.params {
+    fn analyse_method_def(&mut self, def: &FnDef) -> Result<(), LiveError> {
+        for param in &def.params {
             self.ty_checker().ty_check_ty_expr(&param.ty_expr) ?;
         }
-        let return_ty = decl
+        let return_ty = def
             .return_ty_expr
             .as_ref()
             .map( | return_ty_expr | self.ty_checker().ty_check_ty_expr(return_ty_expr))
             .transpose() ?
         .unwrap_or(Ty::Void);
         
-        if decl.ident == Ident(id!(vertex)) {
+        if def.ident == Ident(id!(vertex)) {
             match return_ty {
                 Ty::Vec4 => {}
                 _ => {
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span: decl.span,
+                        span: def.span,
                         message: String::from(
                             "function `vertex` must return a value of type `vec4`",
                         ),
                     })
                 }
             }
-        } else if decl.ident == Ident(id!(pixel)) {
+        } else if def.ident == Ident(id!(pixel)) {
             match return_ty {
                 Ty::Vec4 => {}
                 _ => {
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span: decl.span,
+                        span: def.span,
                         message: String::from(
                             "function `fragment` must return a value of type `vec4`",
                         ),
@@ -336,14 +336,14 @@ impl<'a> DrawShaderAnalyser<'a> {
                 Ty::Array {..} => {
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span: decl.span,
+                        span: def.span,
                         message: String::from("functions can't return arrays"),
                     })
                 }
                 _ => {}
             }
         }
-        *decl.return_ty.borrow_mut() = Some(return_ty);
+        *def.return_ty.borrow_mut() = Some(return_ty);
         //self.env.insert_sym(decl.span, decl.ident, Sym::Fn).ok();
         Ok(())
     }
@@ -352,7 +352,7 @@ impl<'a> DrawShaderAnalyser<'a> {
         &self,
         call_stack: &mut Vec<StructNodePtr>,
         struct_ptr: StructNodePtr,
-        struct_decl: &StructDecl,
+        struct_def: &StructDef,
         deps: &mut Vec<StructNodePtr>,
         all_deps: &mut Vec<StructNodePtr>,
     ) -> Result<(), LiveError> {
@@ -369,7 +369,7 @@ impl<'a> DrawShaderAnalyser<'a> {
         
         call_stack.push(struct_ptr);
         
-        for sub_ptr in struct_decl.struct_refs.borrow().as_ref().unwrap().iter() {
+        for sub_ptr in struct_def.struct_refs.borrow().as_ref().unwrap().iter() {
             // ok now we need a fn decl for this callee
             let sub_decl = self.shader_registry.structs.get(sub_ptr).unwrap();
             if call_stack.contains(&sub_ptr) {
@@ -390,31 +390,31 @@ impl<'a> DrawShaderAnalyser<'a> {
     fn analyse_call_tree(
         &self,
         call_stack: &mut Vec<FnNodePtr>,
-        decl: &FnDecl,
+        def: &FnDef,
         //callee: Callee,
         deps: &mut Vec<FnNodePtr>,
         all_deps: &mut Vec<FnNodePtr>,
     ) -> Result<(), LiveError> {
         // lets see if callee is already in the vec, ifso remove it
-        if let Some(index) = deps.iter().position( | v | v == &decl.fn_node_ptr) {
+        if let Some(index) = deps.iter().position( | v | v == &def.fn_node_ptr) {
             deps.remove(index);
         }
-        deps.push(decl.fn_node_ptr);
+        deps.push(def.fn_node_ptr);
         
-        if let Some(index) = all_deps.iter().position( | v | v == &decl.fn_node_ptr) {
+        if let Some(index) = all_deps.iter().position( | v | v == &def.fn_node_ptr) {
             all_deps.remove(index);
         }
-        all_deps.push(decl.fn_node_ptr);
+        all_deps.push(def.fn_node_ptr);
         
-        call_stack.push(decl.fn_node_ptr);
-        for callee in decl.callees.borrow().as_ref().unwrap().iter() {
+        call_stack.push(def.fn_node_ptr);
+        for callee in def.callees.borrow().as_ref().unwrap().iter() {
             // ok now we need a fn decl for this callee
             let callee_decl = self.shader_registry.all_fns.get(&callee).unwrap();
             if call_stack.contains(&callee_decl.fn_node_ptr) {
                 return Err(LiveError {
                     origin: live_error_origin!(),
-                    span: decl.span,
-                    message: format!("function `{}` recursively calls `{}`", decl.ident, callee_decl.ident),
+                    span: def.span,
+                    message: format!("function `{}` recursively calls `{}`", def.ident, callee_decl.ident),
                 });
             }
             
@@ -430,7 +430,7 @@ impl<'a> DrawShaderAnalyser<'a> {
 
 #[derive(Debug)]
 pub struct ConstAnalyser<'a> {
-    pub decl: &'a ConstDecl,
+    pub const_def: &'a ConstDef,
     pub scopes: &'a mut Scopes,
     pub shader_registry: &'a ShaderRegistry,
     pub options: ShaderAnalyseOptions,
@@ -451,20 +451,20 @@ impl<'a> ConstAnalyser<'a> {
     }
     
     pub fn analyse_const_decl(&mut self) -> Result<(), LiveError> {
-        let expected_ty = self.ty_checker().ty_check_ty_expr(&self.decl.ty_expr) ?;
+        let expected_ty = self.ty_checker().ty_check_ty_expr(&self.const_def.ty_expr) ?;
         let actual_ty = self.ty_checker().ty_check_expr_with_expected_ty(
-            self.decl.span,
-            &self.decl.expr,
+            self.const_def.span,
+            &self.const_def.expr,
             &expected_ty,
         ) ?;
         if expected_ty != actual_ty {
             return Err(LiveError {
                 origin: live_error_origin!(),
-                span: self.decl.span,
+                span: self.const_def.span,
                 message: String::from("Declared type and inferred type not the same"),
             } .into());
         }
-        self.const_evaluator().const_eval_expr(&self.decl.expr) ?;
+        self.const_evaluator().const_eval_expr(&self.const_def.expr) ?;
         Ok(())
     }
 }
@@ -472,7 +472,7 @@ impl<'a> ConstAnalyser<'a> {
 
 #[derive(Debug)]
 pub struct FnDefAnalyser<'a> {
-    pub decl: &'a FnDecl,
+    pub fn_def: &'a FnDef,
     pub scopes: &'a mut Scopes,
     pub shader_registry: &'a ShaderRegistry,
     pub options: ShaderAnalyseOptions,
@@ -495,41 +495,42 @@ impl<'a> FnDefAnalyser<'a> {
     
     fn const_gatherer(&self) -> ConstGatherer {
         ConstGatherer {
-            decl: self.decl
+            fn_def: self.fn_def
         }
     }
     
     fn dep_analyser(&self) -> DepAnalyser {
         DepAnalyser {
             shader_registry: self.shader_registry,
-            decl: self.decl,
+            fn_def: self.fn_def,
             scopes: &self.scopes,
         }
     }
     
     pub fn analyse_fn_decl(&mut self) -> Result<(), LiveError> {
-        for param in &self.decl.params {
+        for param in &self.fn_def.params {
             self.ty_checker().ty_check_ty_expr(&param.ty_expr) ?;
         }
-        let return_ty = self.decl
+        let return_ty = self.fn_def
             .return_ty_expr
             .as_ref()
             .map( | return_ty_expr | self.ty_checker().ty_check_ty_expr(return_ty_expr))
             .transpose() ?
         .unwrap_or(Ty::Void);
-        *self.decl.return_ty.borrow_mut() = Some(return_ty);
+        *self.fn_def.return_ty.borrow_mut() = Some(return_ty);
         Ok(())
     }
     
     pub fn analyse_fn_def(&mut self) -> Result<(), LiveError> {
         self.scopes.push_scope();
-        for param in &self.decl.params {
+        for (param_index, param) in self.fn_def.params.iter().enumerate() {
             match &param.ty_expr.kind {
                 TyExprKind::ClosureDecl {return_ty, params, ..} => {
                     self.scopes.insert_sym(
                         param.span,
                         param.ident,
                         ScopeSymKind::Closure {
+                            param_index,
                             return_ty: return_ty.borrow().clone().unwrap(),
                             params: params.clone()
                         },
@@ -546,15 +547,15 @@ impl<'a> FnDefAnalyser<'a> {
             }
             
         }
-        *self.decl.return_ty.borrow_mut() = Some(
-            self.decl
+        *self.fn_def.return_ty.borrow_mut() = Some(
+            self.fn_def
                 .return_ty_expr
                 .as_ref()
                 .map( | return_ty_expr | return_ty_expr.ty.borrow().as_ref().unwrap().clone())
                 .unwrap_or(Ty::Void),
         );
-        self.decl.init_analysis();
-        self.analyse_block(&self.decl.block) ?;
+        self.fn_def.init_analysis();
+        self.analyse_block(&self.fn_def.block) ?;
         self.scopes.pop_scope();
         // alright we have closures to analyse
         // let closure_isntances = self.
@@ -567,25 +568,25 @@ impl<'a> FnDefAnalyser<'a> {
     }
     
     fn analyse_closures(&mut self) -> Result<(), LiveError> {
-        let closure_instances = self.scopes.closure_instances.replace(Vec::new());
+        let closure_sites = self.scopes.closure_sites.replace(Vec::new());
         let mut closure_scopes = self.scopes.closure_scopes.replace(HashMap::new());
-        for ci in closure_instances {
-            let fn_decl = self.shader_registry.all_fns.get(&ci.fn_node_ptr).unwrap();
+        for ci in &closure_sites {
+            let fn_decl = self.shader_registry.all_fns.get(&ci.call_to).unwrap();
             
             // lets start the closure
-            for ci_arg in ci.closure_args {
+            for ci_arg in &ci.closure_args {
                 
-                let mut scopes = closure_scopes.get_mut(&ci_arg.def_index).unwrap();
+                let mut scopes = closure_scopes.get_mut(&ci_arg.closure_def_index).unwrap();
                 // lets swap our scopes for the closure scopes
                 std::mem::swap(&mut self.scopes.scopes, &mut scopes);
                 
                 // ok now we analyse the closure
                 // lets fetch the fn_decl
-                self.scopes.push_scope();
-                let closure_def = &self.decl.closure_defs[ci_arg.def_index.0];
-                let fn_param = &fn_decl.params[ci_arg.arg_index];
+                let closure_def = &self.fn_def.closure_defs[ci_arg.closure_def_index.0];
+                let fn_param = &fn_decl.params[ci_arg.param_index];
                 
                 if let TyExprKind::ClosureDecl {params, ..} = &fn_param.ty_expr.kind {
+                    self.scopes.push_scope();
                     // alright we have a fn_decl and a closure_def
                     // lets get the closure-decl
                     if closure_def.params.len() != params.len() {
@@ -620,6 +621,12 @@ impl<'a> FnDefAnalyser<'a> {
                             self.analyse_block(block)?;
                         }
                     }
+                    self.scopes.pop_scope();
+                    // ok we also have something else.
+                    
+                    
+                    // ok we have to store the variables we have accessed on frpm scope
+                    *closure_def.closed_over_syms.borrow_mut() = Some(self.scopes.all_referenced_syms());
                     
                 }
                 else {
@@ -627,12 +634,22 @@ impl<'a> FnDefAnalyser<'a> {
                 }
                 // lets figure out what the
                 
-                self.scopes.pop_scope();
                 
                 std::mem::swap(&mut self.scopes.scopes, &mut scopes);
             }
             // ok now we declare the inputs of the closure on the scope stack
-            
+        }
+        // move or extend
+        let mut closure_sites_out = self.fn_def.closure_sites.borrow_mut();
+        if closure_sites_out.is_some(){
+            closure_sites_out.as_mut().unwrap().extend(closure_sites)
+        }
+        else{
+            *closure_sites_out = Some(closure_sites);
+        }
+        // recur
+        if self.scopes.closure_sites.borrow().len()>0{
+            self.analyse_closures()?;
         }
         Ok(())
     }
@@ -855,13 +872,13 @@ impl<'a> FnDefAnalyser<'a> {
             self.ty_checker().ty_check_expr_with_expected_ty(
                 span,
                 expr,
-                self.decl.return_ty.borrow().as_ref().unwrap(),
+                self.fn_def.return_ty.borrow().as_ref().unwrap(),
             ) ?;
             
             self.const_evaluator().try_const_eval_expr(expr);
             self.const_gatherer().const_gather_expr(expr);
             self.dep_analyser().dep_analyse_expr(expr);
-        } else if self.decl.return_ty.borrow().as_ref().unwrap() != &Ty::Void {
+        } else if self.fn_def.return_ty.borrow().as_ref().unwrap() != &Ty::Void {
             return Err(LiveError {
                 origin: live_error_origin!(),
                 span,

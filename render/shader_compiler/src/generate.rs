@@ -6,6 +6,13 @@ use std::fmt::Write;
 use std::fmt;
 use crate::shaderregistry::ShaderRegistry;
 
+#[derive(Clone)]
+pub struct ClosureSiteInfo<'a>{
+    pub site_index: usize,
+    pub closure_site: &'a ClosureSite,
+    pub call_ptr: FnNodePtr
+}
+
 pub struct DisplayDsIdent(pub Ident);
 
 impl fmt::Display for DisplayDsIdent {
@@ -22,6 +29,21 @@ impl fmt::Display for DisplayFnName {
     }
 }
 
+pub struct DisplayFnNameWithClosureArgs(pub FnNodePtr, pub FnNodePtr, pub usize);
+
+impl fmt::Display for DisplayFnNameWithClosureArgs {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "closurearg_{}_for_{}_site_{}", self.0, self.1, self.2)
+    }
+}
+
+pub struct DisplayClosureName(pub FnNodePtr, pub ClosureDefIndex);
+
+impl fmt::Display for DisplayClosureName {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "closuredef_{}_in_{}", self.1.0, self.0)
+    }
+}
 
 pub struct DisplayVarName(pub Ident, pub ScopeSymShadow);
 
@@ -31,10 +53,20 @@ impl fmt::Display for DisplayVarName {
     }
 }
 
+
+pub struct DisplayClosedOverArg(pub usize);
+
+impl fmt::Display for DisplayClosedOverArg {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "pass_{}", self.0)
+    }
+}
+
 pub trait BackendWriter {
     fn write_var_decl(
         &self,
         string: &mut String,
+        sep: &'static str,
         is_inout: bool,
         is_packed: bool,
         ident: &dyn fmt::Display,
@@ -63,9 +95,10 @@ pub trait BackendWriter {
     
     fn use_cons_fn(&self, what: &str) -> bool;
 }
-
+ 
 pub struct BlockGenerator<'a> {
-    pub decl: &'a FnDecl,
+    pub fn_def: &'a FnDef,
+    pub closure_site_info: Option<ClosureSiteInfo<'a>>,
     // pub env: &'a Env,
     pub shader_registry: &'a ShaderRegistry,
     pub backend_writer: &'a dyn BackendWriter,
@@ -217,6 +250,7 @@ impl<'a> BlockGenerator<'a> {
     ) {
         self.backend_writer.write_var_decl(
             &mut self.string,
+            "",
             false,
             false,
             &DisplayVarName(ident, shadow.get().unwrap()),
@@ -251,7 +285,8 @@ impl<'a> BlockGenerator<'a> {
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             // env: self.env,
-            decl: Some(self.decl),
+            closure_site_info: self.closure_site_info.clone(),
+            fn_def: Some(self.fn_def),
             shader_registry: self.shader_registry,
             backend_writer: self.backend_writer,
             const_table_offset: self.const_table_offset,
@@ -275,7 +310,8 @@ impl<'a> BlockGenerator<'a> {
 }
 
 pub struct ExprGenerator<'a> {
-    pub decl: Option<&'a FnDecl>,
+    pub fn_def: Option<&'a FnDef>,
+    pub closure_site_info: Option<ClosureSiteInfo<'a>>,
     // pub env: &'a Env,
     pub shader_registry: &'a ShaderRegistry,
     pub backend_writer: &'a dyn BackendWriter,
@@ -304,7 +340,7 @@ impl<'a> ExprGenerator<'a> {
                 write!(self.string, "(").unwrap();
                 let mut sep = "";
                 for _ in 0..4 {
-                    write!(self.string, "{}mpsc_const_table", sep).unwrap();
+                    write!(self.string, "{}const_table", sep).unwrap();
                     if self.backend_writer.const_table_is_vec4() {
                         const_table_index_to_vec4(self.string, index + const_table_offset);
                     }
@@ -318,7 +354,7 @@ impl<'a> ExprGenerator<'a> {
             },
             (Some(Some(Val::Float(_))), Some(index)) if self.const_table_offset.is_some() => {
                 let const_table_offset = self.const_table_offset.unwrap();
-                write!(self.string, "mpsc_const_table").unwrap();
+                write!(self.string, "const_table").unwrap();
                 if self.backend_writer.const_table_is_vec4() {
                     const_table_index_to_vec4(self.string, index + const_table_offset);
                 }
@@ -387,7 +423,8 @@ impl<'a> ExprGenerator<'a> {
                     span,
                     ident,
                     ref arg_exprs,
-                } => self.generate_builtin_call_expr(span, ident, arg_exprs),
+                    ref param_index,
+                } => self.generate_closure_call_expr(span,  arg_exprs,param_index),
                 ExprKind::ClosureDef(_) => (),
                 ExprKind::ConsCall {
                     span,
@@ -645,6 +682,31 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, ")").unwrap();
     }
     
+    fn generate_closure_call_expr(&mut self, _span: Span, arg_exprs: &[Expr], param_index: &Cell<Option<usize>>) {
+
+        let param_index = param_index.get().unwrap();
+
+        let closure_site_info = self.closure_site_info.as_ref().unwrap();
+        // find our closure def
+        let closure_def_index = closure_site_info.closure_site.closure_args.iter().find(|arg| arg.param_index == param_index).unwrap().closure_def_index;
+        
+        write!(self.string, "{}", DisplayClosureName(closure_site_info.call_ptr, closure_def_index)).unwrap();
+        
+        write!(self.string, "(").unwrap();
+        let mut sep = "";
+        for arg_expr in arg_exprs {
+            write!(self.string, "{}", sep).unwrap();
+            self.generate_expr(arg_expr);
+            sep = ", ";
+        }
+        
+        // ok now we need to pass in the closed over args
+        // the question is which ones of course
+        
+        write!(self.string, ")").unwrap();
+
+    }
+    
     fn generate_macro_call_expr(
         &mut self,
         _analysis: &Cell<Option<MacroCallAnalysis >>,
@@ -657,7 +719,7 @@ impl<'a> ExprGenerator<'a> {
     
     fn generate_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {
         // lets build the constructor name
-        let mut cons_name = format!("mpsc_{}", ty_lit);
+        let mut cons_name = format!("cons_{}", ty_lit);
         for arg_expr in arg_exprs {
             write!(cons_name, "_{}", arg_expr.ty.borrow().as_ref().unwrap()).unwrap();
         }
