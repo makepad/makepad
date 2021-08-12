@@ -124,7 +124,8 @@ impl<'a> TyChecker<'a> {
                 span,
                 ident,
                 ref arg_exprs,
-            } => self.ty_check_closure_call_expr(span, ident, arg_exprs),
+                ref param_index,
+            } => self.ty_check_closure_call_expr(span, ident, arg_exprs, param_index),
             ExprKind::ClosureDef(index) => self.ty_check_closure_def(index),
             ExprKind::ConsCall {
                 span,
@@ -476,6 +477,7 @@ impl<'a> TyChecker<'a> {
         span: Span,
         ident: Ident,
         arg_exprs: &[Expr],
+        outer_param_index: &Cell<Option<usize>>,
     ) -> Result<Ty, LiveError> {
         
         for arg_expr in arg_exprs {
@@ -483,7 +485,7 @@ impl<'a> TyChecker<'a> {
         }
         match self.scopes.find_sym_on_scopes(ident, span) {
             Some(scopesym)=> match &scopesym.kind{
-                ScopeSymKind::Closure{return_ty, params} => {
+                ScopeSymKind::Closure{return_ty, params, param_index} => {
                     let closure_args = self.check_params_against_args(span, &params, arg_exprs) ?;
                     // error out
                     if closure_args.len() > 0{
@@ -493,6 +495,7 @@ impl<'a> TyChecker<'a> {
                             message: format!("Cannot pass closures to closures, please implement"),
                         })
                     }
+                    outer_param_index.set(Some(*param_index));
                     return Ok(return_ty.clone())
                 }
                 _=>()
@@ -544,9 +547,9 @@ impl<'a> TyChecker<'a> {
         span: Span,
         fn_node_ptr: FnNodePtr,
         arg_exprs: &[Expr],
-        fn_decl: &FnDecl,
+        fn_def: &FnDef,
     ) -> Result<(), LiveError> {
-        match self.check_params_against_args(span, &fn_decl.params, arg_exprs) {
+        match self.check_params_against_args(span, &fn_def.params, arg_exprs) {
            Err(err)=> Err(LiveError {
                 origin: live_error_origin!(),
                 span,
@@ -554,9 +557,9 @@ impl<'a> TyChecker<'a> {
             }),
             Ok(closure_args)=>{
                 if closure_args.len()>0{
-                    let mut ci = self.scopes.closure_instances.borrow_mut();
-                    ci.push(ClosureInstance{
-                        fn_node_ptr,
+                    let mut ci = self.scopes.closure_sites.borrow_mut();
+                    ci.push(ClosureSite{
+                        call_to: fn_node_ptr,
                         closure_args
                     })
                 }
@@ -570,7 +573,7 @@ impl<'a> TyChecker<'a> {
         span: Span,
         params: &[Param],
         arg_exprs: &[Expr],
-    ) -> Result<Vec<ClosureInstanceArg>, LiveError> {
+    ) -> Result<Vec<ClosureSiteArg>, LiveError> {
         if arg_exprs.len() < params.len() {
             return Err(LiveError {
                 origin: live_error_origin!(),
@@ -596,7 +599,7 @@ impl<'a> TyChecker<'a> {
             });
         }
         let mut closure_args= Vec::new();
-        for (arg_index, (arg_expr, param)) in arg_exprs.iter().zip(params.iter()).enumerate()
+        for (param_index, (arg_expr, param)) in arg_exprs.iter().zip(params.iter()).enumerate()
         {
             let arg_ty = arg_expr.ty.borrow();
             let arg_ty = arg_ty.as_ref().unwrap();
@@ -606,11 +609,11 @@ impl<'a> TyChecker<'a> {
             // if the thing is a closure def / decl we have to do a deep compare
             // we should have the closure def on our scopes
             // and the closure decl should be on our param.ty_expr
-            if let Ty::ClosureDef(def_index) = arg_ty{
+            if let Ty::ClosureDef(closure_def_index) = arg_ty{
                 if let Ty::ClosureDecl = param_ty{
-                    closure_args.push(ClosureInstanceArg{
-                        arg_index,
-                        def_index:*def_index,
+                    closure_args.push(ClosureSiteArg{
+                        param_index,
+                        closure_def_index:*closure_def_index,
                     });
                     continue
                 }
@@ -621,7 +624,7 @@ impl<'a> TyChecker<'a> {
                     span,
                     message: format!(
                         "wrong type for argument {} expected `{}`, got `{}`",
-                        arg_index + 1,
+                        param_index + 1,
                         param_ty,
                         arg_ty,
                     ).into()
@@ -843,21 +846,24 @@ impl<'a> TyChecker<'a> {
             }
             VarResolve::NotFound(ident) => {
                  match self.scopes.find_sym_on_scopes(ident, span) {
-                    Some(scopesym)=> match &scopesym.kind{
-                        ScopeSymKind::MutLocal(ty) => {
-                            kind.set(Some(VarKind::MutLocal{ident, shadow:scopesym.shadow}));
-                            return Ok(ty.clone())
-                        }
-                        ScopeSymKind::Local(ty) => {
-                            kind.set(Some(VarKind::Local{ident, shadow:scopesym.shadow}));
-                            return Ok(ty.clone())
-                        }
-                        ScopeSymKind::Closure{..}=>{
-                            return Err(LiveError {
-                                origin: live_error_origin!(),
-                                span,
-                                message: format!("`{}` is a closure and cannot be used as a variable", ident),
-                            })
+                    Some(scopesym)=> {
+                        scopesym.referenced.set(true);
+                        match &scopesym.kind{
+                            ScopeSymKind::MutLocal(ty) => {
+                                kind.set(Some(VarKind::MutLocal{ident, shadow:scopesym.shadow}));
+                                return Ok(ty.clone())
+                            }
+                            ScopeSymKind::Local(ty) => {
+                                kind.set(Some(VarKind::Local{ident, shadow:scopesym.shadow}));
+                                return Ok(ty.clone())
+                            }
+                            ScopeSymKind::Closure{..}=>{
+                                return Err(LiveError {
+                                    origin: live_error_origin!(),
+                                    span,
+                                    message: format!("`{}` is a closure and cannot be used as a variable", ident),
+                                })
+                            }
                         }
                     }
                     _=>()

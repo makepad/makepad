@@ -200,7 +200,7 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_self_decl(&mut self, ident: Ident, decl_node_ptr: FullNodePtr) -> Result<Option<DrawShaderFieldDecl>, LiveError> {
+    pub fn expect_self_decl(&mut self, ident: Ident, decl_node_ptr: FullNodePtr) -> Result<Option<DrawShaderFieldDef>, LiveError> {
         let span = self.begin_span();
         let decl_ty = self.expect_ident() ?;
         let decl_name = self.expect_ident() ?;
@@ -212,7 +212,7 @@ impl<'a> ShaderParser<'a> {
         let ty_expr = self.expect_ty_expr() ?;
         match decl_ty {
             Ident(id!(geometry)) => {
-                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl {
+                return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Geometry {
                         is_used_in_pixel_shader: Cell::new(false),
                         var_def_node_ptr: VarDefNodePtr(decl_node_ptr),
@@ -223,7 +223,7 @@ impl<'a> ShaderParser<'a> {
                 })))
             }
             Ident(id!(instance)) => {
-                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl {
+                return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Instance {
                         is_used_in_pixel_shader: Cell::new(false),
                         input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
@@ -240,7 +240,7 @@ impl<'a> ShaderParser<'a> {
                 else {
                     Ident(id!(default))
                 };
-                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl {
+                return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Uniform {
                         input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
                         block_ident,
@@ -251,7 +251,7 @@ impl<'a> ShaderParser<'a> {
                 })))
             }
             Ident(id!(varying)) => {
-                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl {
+                return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Varying {
                         var_def_node_ptr: VarDefNodePtr(decl_node_ptr),
                     },
@@ -261,7 +261,7 @@ impl<'a> ShaderParser<'a> {
                 })))
             }
             Ident(id!(texture)) => {
-                return span.end(self, | span | Ok(Some(DrawShaderFieldDecl {
+                return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Texture {
                         input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
                     },
@@ -280,7 +280,7 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_const_decl(&mut self, ident: Ident) -> Result<ConstDecl, LiveError> {
+    pub fn expect_const_def(&mut self, ident: Ident) -> Result<ConstDef, LiveError> {
         let span = self.begin_span();
         let decl_ty = self.expect_ident() ?;
         let decl_name = self.expect_ident() ?;
@@ -299,7 +299,7 @@ impl<'a> ShaderParser<'a> {
         }
         
         // ok lets parse the value
-        return span.end(self, | span | Ok(ConstDecl {
+        return span.end(self, | span | Ok(ConstDef {
             span,
             ident,
             ty_expr,
@@ -334,7 +334,7 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_method_decl(mut self, fn_node_ptr: FnNodePtr, ident: Ident) -> Result<Option<FnDecl>, LiveError> {
+    pub fn expect_method_def(mut self, fn_node_ptr: FnNodePtr, ident: Ident) -> Result<Option<FnDef>, LiveError> {
         let span = self.begin_span();
         
         self.expect_token(Token::OpenParen) ?;
@@ -371,13 +371,14 @@ impl<'a> ShaderParser<'a> {
         let block = self.expect_block() ?;
         let self_kind = self.self_kind.clone();
         let span = span.end(&mut self, | span | span);
-        Ok(Some( FnDecl {
+        Ok(Some( FnDef {
             fn_node_ptr,
             span,
             ident,
             self_kind,
             closure_defs: self.closure_defs,
             draw_shader_refs: RefCell::new(None),
+            closure_sites: RefCell::new(None),
             return_ty: RefCell::new(None),
             const_refs: RefCell::new(None),
             live_refs: RefCell::new(None),
@@ -395,7 +396,7 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_plain_fn_decl(mut self, fn_node_ptr: FnNodePtr, ident: Ident) -> Result<FnDecl, LiveError> {
+    pub fn expect_plain_fn_def(mut self, fn_node_ptr: FnNodePtr, ident: Ident) -> Result<FnDef, LiveError> {
         let span = self.begin_span();
         
         self.expect_token(Token::OpenParen) ?;
@@ -420,12 +421,13 @@ impl<'a> ShaderParser<'a> {
         let block = self.expect_block() ?;
         let self_kind = self.self_kind.clone();
         let span = span.end(&mut self, | span | span);
-        Ok(FnDecl {
+        Ok(FnDef {
             fn_node_ptr,
             span,
             ident,
             self_kind,
             closure_defs: self.closure_defs,
+            closure_sites: RefCell::new(None),
             const_refs: RefCell::new(None),
             live_refs: RefCell::new(None),
             struct_refs: RefCell::new(None),
@@ -1180,6 +1182,7 @@ impl<'a> ShaderParser<'a> {
                                     const_val: RefCell::new(None),
                                     const_index: Cell::new(None),
                                     kind: ExprKind::ClosureCall {
+                                        param_index: Cell::new(None),
                                         span,
                                         ident: Ident(ident_path.segs[0]),
                                         arg_exprs,
@@ -1284,6 +1287,7 @@ impl<'a> ShaderParser<'a> {
                     self.closure_defs.push(ClosureDef {
                         span,
                         params,
+                        closed_over_syms: RefCell::new(None),
                         kind: ClosureDefKind::Block(block)
                     });
                     Ok(Expr {
@@ -1300,6 +1304,7 @@ impl<'a> ShaderParser<'a> {
                     self.closure_defs.push(ClosureDef {
                         span,
                         params,
+                        closed_over_syms: RefCell::new(None),
                         kind: ClosureDefKind::Expr(expr)
                     });
                     Ok(Expr {

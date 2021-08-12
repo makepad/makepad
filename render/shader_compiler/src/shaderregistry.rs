@@ -29,13 +29,13 @@ impl fmt::Display for ShaderResourceId {
 #[derive(Debug)]
 pub struct ShaderRegistry {
     pub live_registry: LiveRegistry,
-    pub consts: HashMap<ConstNodePtr, ConstDecl>,
+    pub consts: HashMap<ConstNodePtr, ConstDef>,
     
-    pub all_fns: HashMap<FnNodePtr, FnDecl>,
+    pub all_fns: HashMap<FnNodePtr, FnDef>,
     
     //pub plain_fns: HashMap<FnNodePtr, FnDecl>,
-    pub draw_shaders: HashMap<DrawShaderNodePtr, DrawShaderDecl>,
-    pub structs: HashMap<StructNodePtr, StructDecl>,
+    pub draw_shaders: HashMap<DrawShaderNodePtr, DrawShaderDef>,
+    pub structs: HashMap<StructNodePtr, StructDef>,
     
     pub draw_inputs: HashMap<ShaderResourceId, DrawShaderInput>,
     pub builtins: HashMap<Ident, Builtin>,
@@ -103,12 +103,12 @@ pub struct FinalConstTable {
 
 impl ShaderRegistry {
     
-    pub fn compute_final_const_table(&self, draw_shader_decl: &DrawShaderDecl, filter_file_id: Option<FileId>) -> FinalConstTable {
+    pub fn compute_final_const_table(&self, draw_shader_def: &DrawShaderDef, filter_file_id: Option<FileId>) -> FinalConstTable {
         if let Some(filter_file_id) = filter_file_id {
             let mut offsets = BTreeMap::new();
             let mut table = Vec::new();
             let mut offset = 0;
-            for callee in draw_shader_decl.all_fns.borrow().iter() {
+            for callee in draw_shader_def.all_fns.borrow().iter() {
                 let fn_decl = self.all_fns.get(callee).unwrap();
                 if fn_decl.span.file_id() == filter_file_id {
                     let sub_table = fn_decl.const_table.borrow();
@@ -162,8 +162,8 @@ impl ShaderRegistry {
         Ident(node.id_pack.unwrap_single())
     }
     
-    pub fn draw_shader_method_ptr_from_ident(&self, draw_shader_decl:&DrawShaderDecl, ident: Ident) -> Option<FnNodePtr> {
-        for fn_node_ptr in &draw_shader_decl.methods{
+    pub fn draw_shader_method_ptr_from_ident(&self, draw_shader_def:&DrawShaderDef, ident: Ident) -> Option<FnNodePtr> {
+        for fn_node_ptr in &draw_shader_def.methods{
             let fn_decl = self.all_fns.get(fn_node_ptr).unwrap();
             if fn_decl.ident == ident{
                 return Some(*fn_node_ptr);
@@ -172,8 +172,8 @@ impl ShaderRegistry {
         None
     }
     
-     pub fn struct_method_ptr_from_ident(&self, struct_decl:&StructDecl, ident: Ident) -> Option<FnNodePtr> {
-        for fn_node_ptr in &struct_decl.methods{
+     pub fn struct_method_ptr_from_ident(&self, struct_def:&StructDef, ident: Ident) -> Option<FnNodePtr> {
+        for fn_node_ptr in &struct_def.methods{
             let fn_decl = self.all_fns.get(fn_node_ptr).unwrap();
             if fn_decl.ident == ident{
                 return Some(*fn_node_ptr);
@@ -182,8 +182,8 @@ impl ShaderRegistry {
         None
     }
     
-    pub fn draw_shader_method_decl_from_ident(&self, draw_shader_decl:&DrawShaderDecl, ident: Ident) -> Option<&FnDecl> {
-        for fn_node_ptr in &draw_shader_decl.methods{
+    pub fn draw_shader_method_decl_from_ident(&self, draw_shader_def:&DrawShaderDef, ident: Ident) -> Option<&FnDef> {
+        for fn_node_ptr in &draw_shader_def.methods{
             let fn_decl = self.all_fns.get(fn_node_ptr).unwrap();
             if fn_decl.ident == ident{
                 return Some(fn_decl)
@@ -192,8 +192,8 @@ impl ShaderRegistry {
         None
     }
     
-     pub fn struct_method_decl_from_ident(&self, struct_decl:&StructDecl, ident: Ident) -> Option<&FnDecl> {
-        for fn_node_ptr in &struct_decl.methods{
+     pub fn struct_method_decl_from_ident(&self, struct_def:&StructDef, ident: Ident) -> Option<&FnDef> {
+        for fn_node_ptr in &struct_def.methods{
             let fn_decl = self.all_fns.get(fn_node_ptr).unwrap();
             if fn_decl.ident == ident{
                 return Some(fn_decl)
@@ -393,13 +393,13 @@ impl ShaderRegistry {
                     //Some(struct_full_ptr)
                 );
                 
-                let const_decl = parser.expect_const_decl(Ident(id)) ?;
+                let const_decl = parser.expect_const_def(Ident(id)) ?;
                 self.consts.insert(const_ptr, const_decl);
                 
                 self.analyse_deps(&parser_deps) ?;
                 
                 let mut ca = ConstAnalyser {
-                    decl: self.consts.get(&const_ptr).unwrap(),
+                    const_def: self.consts.get(&const_ptr).unwrap(),
                     scopes: &mut Scopes::new(),
                     shader_registry: self,
                     options: ShaderAnalyseOptions {
@@ -435,17 +435,17 @@ impl ShaderRegistry {
                     //Some(struct_full_ptr)
                 );
                 
-                let fn_decl = parser.expect_plain_fn_decl(
+                let fn_def = parser.expect_plain_fn_def(
                     fn_ptr,
                     Ident(id),
                 ) ?;
-                self.all_fns.insert(fn_ptr, fn_decl);
+                self.all_fns.insert(fn_ptr, fn_def);
                 
                 self.analyse_deps(&parser_deps) ?;
                 
                 // ok analyse the struct methods now.
                 let mut fa = FnDefAnalyser {
-                    decl: self.all_fns.get(&fn_ptr).unwrap(),
+                    fn_def: self.all_fns.get(&fn_ptr).unwrap(),
                     scopes: &mut Scopes::new(),
                     shader_registry: self,
                     is_inside_loop: false,
@@ -476,7 +476,7 @@ impl ShaderRegistry {
         
         match class_node.value {
             LiveValue::Class {node_start, node_count, class} => {
-                let mut struct_decl = StructDecl {
+                let mut struct_def = StructDef {
                     span: self.live_registry.token_id_to_span(class_node.token_id),
                     // ident: Ident(class_node.id_pack.unwrap_single()),
                     struct_refs: RefCell::new(None),
@@ -505,7 +505,7 @@ impl ShaderRegistry {
                             );
                             // we only allow a field def
                             let decl = parser.expect_field(Ident(id), VarDefNodePtr(prop_ptr)) ?;
-                            struct_decl.fields.push(decl);
+                            struct_def.fields.push(decl);
                         },
                         LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
                             let id = prop.id_pack.unwrap_single();
@@ -519,16 +519,16 @@ impl ShaderRegistry {
                                 //Some(struct_full_ptr)
                             );
                             
-                            let fn_decl = parser.expect_method_decl(
+                            let fn_def = parser.expect_method_def(
                                 FnNodePtr(prop_ptr),
                                 Ident(id),
                             ) ?;
                             // if we get false, this was not a method but could be static.
                             // statics need a pointer to their struct to resolve Self
                             // so we can't treat them purely as loose methods
-                            if let Some(fn_decl) = fn_decl {
-                                struct_decl.methods.push(fn_decl.fn_node_ptr);
-                                self.all_fns.insert(fn_decl.fn_node_ptr, fn_decl);
+                            if let Some(fn_def) = fn_def {
+                                struct_def.methods.push(fn_def.fn_node_ptr);
+                                self.all_fns.insert(fn_def.fn_node_ptr, fn_def);
                             }
                         }
                         _ => {
@@ -541,13 +541,13 @@ impl ShaderRegistry {
                     }
                 }
                 // we should store the structs
-                self.structs.insert(struct_ptr, struct_decl);
+                self.structs.insert(struct_ptr, struct_def);
                 
                 self.analyse_deps(&parser_deps) ?;
                 
                 // ok analyse the struct methods now.
                 let mut sa = StructAnalyser {
-                    struct_decl: self.structs.get(&struct_ptr).unwrap(),
+                    struct_def: self.structs.get(&struct_ptr).unwrap(),
                     scopes: &mut Scopes::new(),
                     shader_registry: self,
                     options: ShaderAnalyseOptions {
@@ -570,7 +570,7 @@ impl ShaderRegistry {
         
         if let Some(shader_ptr) = self.live_registry.find_full_node_ptr_from_ids(crate_id, module_id, ids) {
             let shader_ptr = DrawShaderNodePtr(shader_ptr);
-            let mut draw_shader_decl = DrawShaderDecl::default();
+            let mut draw_shader_def = DrawShaderDef::default();
             // we have a pointer to the thing to instance.
             let (doc, class_node) = self.live_registry.resolve_ptr(shader_ptr.0);
             
@@ -607,7 +607,7 @@ impl ShaderRegistry {
                                             target,
                                             &doc.multi_ids
                                         ) ?;
-                                        draw_shader_decl.default_geometry = Some(srid);
+                                        draw_shader_def.default_geometry = Some(srid);
                                     },
                                     _ => { // unknown
                                         return Err(LiveError {
@@ -630,7 +630,7 @@ impl ShaderRegistry {
                                     );
                                     let decl = parser.expect_self_decl(Ident(id), prop_ptr) ?;
                                     if let Some(decl) = decl {
-                                        draw_shader_decl.fields.push(decl);
+                                        draw_shader_def.fields.push(decl);
                                     }
                                     //else{ // it was a const
                                     //}
@@ -648,13 +648,13 @@ impl ShaderRegistry {
                                         //None
                                     );
                                     
-                                    let fn_decl = parser.expect_method_decl(
+                                    let fn_def = parser.expect_method_def(
                                         FnNodePtr(prop_ptr),
                                         Ident(id),
                                     ) ?;
-                                    if let Some(fn_decl) = fn_decl {
-                                        draw_shader_decl.methods.push(fn_decl.fn_node_ptr);
-                                        self.all_fns.insert(fn_decl.fn_node_ptr, fn_decl);
+                                    if let Some(fn_def) = fn_def {
+                                        draw_shader_def.methods.push(fn_def.fn_node_ptr);
+                                        self.all_fns.insert(fn_def.fn_node_ptr, fn_def);
                                     }
                                 }
                             }
@@ -664,7 +664,7 @@ impl ShaderRegistry {
                     // if we have a draw_input process it.
                     if let Some((draw_input_srid, span)) = draw_input_srid {
                         if let Some(draw_input) = self.draw_inputs.get(&draw_input_srid) {
-                            for decl in &draw_shader_decl.fields {
+                            for decl in &draw_shader_def.fields {
                                 if let DrawShaderFieldKind::Instance {..} = decl.kind {
                                     return Err(LiveError {
                                         origin: live_error_origin!(),
@@ -674,8 +674,8 @@ impl ShaderRegistry {
                                 }
                             }
                             for instance in &draw_input.instances {
-                                draw_shader_decl.fields.push(
-                                    DrawShaderFieldDecl {
+                                draw_shader_def.fields.push(
+                                    DrawShaderFieldDef {
                                         kind: DrawShaderFieldKind::Instance {
                                             is_used_in_pixel_shader: Cell::new(false),
                                             input_node_ptr: InputNodePtr::ShaderResourceId(draw_input_srid),
@@ -688,8 +688,8 @@ impl ShaderRegistry {
                             }
                             
                             for uniform in &draw_input.uniforms {
-                                draw_shader_decl.fields.push(
-                                    DrawShaderFieldDecl {
+                                draw_shader_def.fields.push(
+                                    DrawShaderFieldDef {
                                         kind: DrawShaderFieldKind::Uniform {
                                             block_ident: Ident(id!(default)),
                                             input_node_ptr: InputNodePtr::ShaderResourceId(draw_input_srid),
@@ -702,8 +702,8 @@ impl ShaderRegistry {
                             }
                             
                             for texture in &draw_input.textures {
-                                draw_shader_decl.fields.push(
-                                    DrawShaderFieldDecl {
+                                draw_shader_def.fields.push(
+                                    DrawShaderFieldDef {
                                         kind: DrawShaderFieldKind::Texture {
                                             input_node_ptr: InputNodePtr::ShaderResourceId(draw_input_srid),
                                         },
@@ -723,10 +723,10 @@ impl ShaderRegistry {
                         }
                     }
                     // lets check for duplicate fields
-                    for i in 0..draw_shader_decl.fields.len(){
-                        for j in (i+1)..draw_shader_decl.fields.len(){
-                            let field_a = &draw_shader_decl.fields[i]; 
-                            let field_b = &draw_shader_decl.fields[j]; 
+                    for i in 0..draw_shader_def.fields.len(){
+                        for j in (i+1)..draw_shader_def.fields.len(){
+                            let field_a = &draw_shader_def.fields[i]; 
+                            let field_b = &draw_shader_def.fields[j]; 
                             if field_a.ident == field_b.ident{
                                return Err(LiveError {
                                     origin: live_error_origin!(),
@@ -737,12 +737,12 @@ impl ShaderRegistry {
                         }
                     }
                     
-                    self.draw_shaders.insert(shader_ptr, draw_shader_decl);
+                    self.draw_shaders.insert(shader_ptr, draw_shader_def);
                     
                     self.analyse_deps(&parser_deps) ?;
                     
                     let mut sa = DrawShaderAnalyser {
-                        draw_shader_decl: self.draw_shaders.get(&shader_ptr).unwrap(),
+                        draw_shader_def: self.draw_shaders.get(&shader_ptr).unwrap(),
                         scopes: &mut Scopes::new(),
                         shader_registry: self,
                         options: ShaderAnalyseOptions {

@@ -7,7 +7,7 @@ use std::cell::Cell;
 
 #[derive(Clone, Debug)]
 pub struct ConstGatherer<'a> {
-    pub decl: &'a FnDecl,
+    pub fn_def: &'a FnDef,
 }
 
 impl<'a> ConstGatherer<'a> {
@@ -17,7 +17,7 @@ impl<'a> ConstGatherer<'a> {
         match expr.const_val.borrow().as_ref().unwrap() {
             Some(Val::Vec4(val)) => {
                 expr.const_index.set(Some(
-                    self.decl.const_table.borrow().as_ref().unwrap().len(),
+                    self.fn_def.const_table.borrow().as_ref().unwrap().len(),
                 ));
                 self.write_span(&expr.span);
                 self.write_f32(val.x);
@@ -28,7 +28,7 @@ impl<'a> ConstGatherer<'a> {
             }
             Some(Val::Float(val)) => {
                 expr.const_index.set(Some(
-                    self.decl.const_table.borrow().as_ref().unwrap().len(),
+                    self.fn_def.const_table.borrow().as_ref().unwrap().len(),
                 ));
                 self.write_span(&expr.span);
                 self.write_f32(*val);
@@ -148,8 +148,8 @@ impl<'a> ConstGatherer<'a> {
     }
 
     fn write_span(&self, span: &Span) {
-        let index = self.decl.const_table.borrow().as_ref().unwrap().len();
-        self.decl
+        let index = self.fn_def.const_table.borrow().as_ref().unwrap().len();
+        self.fn_def
             .const_table_spans
             .borrow_mut()
             .as_mut()
@@ -158,7 +158,7 @@ impl<'a> ConstGatherer<'a> {
     }
 
     fn write_f32(&self, val: f32) {
-        self.decl
+        self.fn_def
             .const_table
             .borrow_mut()
             .as_mut()
