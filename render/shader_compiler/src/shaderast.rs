@@ -321,11 +321,13 @@ pub enum ExprKind {
     MethodCall {
         span: Span,
         ident: Ident,
+        closure_site_index: Cell<Option<usize>>,
         arg_exprs: Vec<Expr>,
     },
     PlainCall {
         span: Span,
         fn_node_ptr: FnNodePtr,
+        closure_site_index: Cell<Option<usize>>,
         arg_exprs: Vec<Expr>,
     },
     BuiltinCall {

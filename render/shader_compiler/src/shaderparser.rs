@@ -976,6 +976,7 @@ impl<'a> ShaderParser<'a> {
                                 span,
                                 ident,
                                 arg_exprs,
+                                closure_site_index:Cell::new(None)
                             },
                         })
                     } else {
@@ -1150,6 +1151,7 @@ impl<'a> ShaderParser<'a> {
                                                 fn_node_ptr,
                                                 //ident: Ident(ident_path.segs[0]),
                                                 arg_exprs,
+                                                closure_site_index:Cell::new(None),
                                             },
                                         }))
                                         //Err(span.error(self, live_error_origin!(), format!("Cannot call a struct `{}`", ident_path).into()))
@@ -1167,6 +1169,7 @@ impl<'a> ShaderParser<'a> {
                                                 span,
                                                 fn_node_ptr,
                                                 arg_exprs,
+                                                closure_site_index:Cell::new(None),
                                             },
                                         }))
                                         //Err(span.error(self, live_error_origin!(), format!("Cannot call a struct `{}`", ident_path).into()))
