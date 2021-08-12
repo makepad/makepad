@@ -609,7 +609,7 @@ impl<'a> ExprGenerator<'a> {
                 match arg_expr.ty.borrow().as_ref().unwrap(){
                     Ty::ClosureDef(_)=>{
                         continue;
-                    }
+                    },
                     _=>()
                 }
                 
@@ -619,16 +619,16 @@ impl<'a> ExprGenerator<'a> {
             }
             // and now the closed over values
             for sym in &closure_site.all_closed_over {
-                if self.backend_writer.write_var_decl(
-                    &mut self.string,
-                    sep,
-                    false,
-                    false,
-                    &DisplayClosedOverArg(sym.ident, sym.shadow),
-                    &sym.ty,
-                ) {
-                    sep = ", ";
+                match sym.ty{
+                    Ty::DrawShader(_)=>{
+                        continue;
+                    }
+                    Ty::ClosureDef(_) | Ty::ClosureDecl=>panic!(),
+                    _=>()
                 }
+                write!(self.string, "{}", sep).unwrap();
+                write!(self.string, "{}", DisplayVarName(sym.ident, sym.shadow)).unwrap();
+                sep = ", ";
             }
             write!(self.string, ")").unwrap();
         }

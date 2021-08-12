@@ -569,6 +569,14 @@ impl Scopes {
         self.scopes.pop().unwrap();
     }
     
+    pub fn clear_referenced_syms(&self){
+        for scope in self.scopes.iter().rev(){
+            for (_, sym) in scope{
+                sym.referenced.set(false);
+            }
+        }
+    }
+    
     pub fn all_referenced_syms(&self)->Vec<Sym>{
         let mut ret = Vec::new();
         for scope in self.scopes.iter().rev(){

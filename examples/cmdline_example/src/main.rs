@@ -2,22 +2,22 @@ const SOURCE:&'static str = r#"
         DrawQuad: Shader{
             uniform t:float
             
-            fn closure_inner(self, y:fn(v2:float)->float){
-                y(3.);
+            fn closure_inner(self, t:float, b:fn(v2:float)->float){
+                b(3. + t);
             }
             
-            fn closure_test(self, x:float, y:fn(v2:float)->float, z:fn(v2:float)->float){
-                y(1.+x);
-                z(2.+x);
-               // closure_inner(y);
+            fn closure_test(self, x1:float, y:fn(v2:float)->float, z:fn(v2:float)->float){
+                y(1.+x1);
+                z(2.+x1);
+                self.closure_inner(1.0, |w|w + x1);
             }
             
             fn pixel(self)->vec4{
                 let i = 1.0;
                 let j = 2.0;
+                let t = |x| x+j;
                 let j = 2.0;
-                //let t = |x, y| x-y;
-                self.closure_test(1.0, |x| x+i+self.t, |x| x);
+                self.closure_test(1.0, |x| x+i+self.t+j, t);
                 //self.closure_test(2.0, t);
                 return #f00;
             }

@@ -875,6 +875,9 @@ impl<'a> TyChecker<'a> {
                                 return Ok(scopesym.sym.ty.clone())
                             }
                             ScopeSymKind::Closure{..}=>{
+                                // ok the thing is a closure..
+                                // except we dont know what kind of closure
+                                
                                 return Err(LiveError {
                                     origin: live_error_origin!(),
                                     span,
