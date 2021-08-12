@@ -760,6 +760,7 @@ impl<'a> FnDefWithClosureArgsGenerator<'a> {
             &DisplayFnNameWithClosureArgs(
                 self.closure_site_info.site_index,
                 self.call_def.fn_node_ptr,
+                self.fn_def.ident
             ), // here we must expand IdentPath to something
             self.fn_def.return_ty.borrow().as_ref().unwrap()
         );
@@ -893,11 +894,9 @@ impl<'a> ClosureDefGenerator<'a> {
             }
             ClosureDefKind::Block(block) => {
                 self.generate_block(block);
+                writeln!(self.string).unwrap();
             }
         }
-        
-        writeln!(self.string).unwrap();
-        
         //self.visited.insert(self.decl.ident_path);
     }
     

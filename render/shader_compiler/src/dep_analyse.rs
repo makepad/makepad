@@ -46,12 +46,14 @@ impl<'a> DepAnalyser<'a> {
                 span,
                 ident,
                 ref arg_exprs,
+                ..
             } => self.dep_analyse_method_call_expr(span, ident, arg_exprs),
             ExprKind::PlainCall {
                 span,
                 //dent,
                 ref arg_exprs,
                 fn_node_ptr,
+                ..
             } => self.dep_analyse_plain_call_expr(span, arg_exprs, fn_node_ptr),
             ExprKind::BuiltinCall {
                 span,

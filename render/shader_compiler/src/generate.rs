@@ -7,7 +7,7 @@ use std::fmt;
 use crate::shaderregistry::ShaderRegistry;
 
 #[derive(Clone)]
-pub struct ClosureSiteInfo<'a>{
+pub struct ClosureSiteInfo<'a> {
     pub site_index: usize,
     pub closure_site: &'a ClosureSite,
     pub call_ptr: FnNodePtr
@@ -29,11 +29,11 @@ impl fmt::Display for DisplayFnName {
     }
 }
 
-pub struct DisplayFnNameWithClosureArgs(pub usize, pub FnNodePtr);
+pub struct DisplayFnNameWithClosureArgs(pub usize, pub FnNodePtr, pub Ident);
 
 impl fmt::Display for DisplayFnNameWithClosureArgs {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "closuresite_{}_for_{}", self.0, self.1)
+        write!(f, "site_{}_of_{}_{}", self.0, self.1, self.2)
     }
 }
 
@@ -41,7 +41,7 @@ pub struct DisplayClosureName(pub FnNodePtr, pub ClosureDefIndex);
 
 impl fmt::Display for DisplayClosureName {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "closuredef_{}_in_{}", self.1.0, self.0)
+        write!(f, "closure_{}_in_{}", self.1.0, self.0)
     }
 }
 
@@ -58,7 +58,7 @@ pub struct DisplayClosedOverArg(pub Ident, pub ScopeSymShadow);
 
 impl fmt::Display for DisplayClosedOverArg {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "pass_{}_{}", self.0,self.1.0)
+        write!(f, "pass_{}_{}", self.0, self.1.0)
     }
 }
 
@@ -95,10 +95,10 @@ pub trait BackendWriter {
     
     fn use_cons_fn(&self, what: &str) -> bool;
 }
- 
+
 pub struct BlockGenerator<'a> {
     pub fn_def: &'a FnDef,
-    pub closure_site_info: Option<ClosureSiteInfo<'a>>,
+    pub closure_site_info: Option<ClosureSiteInfo<'a >>,
     // pub env: &'a Env,
     pub shader_registry: &'a ShaderRegistry,
     pub backend_writer: &'a dyn BackendWriter,
@@ -311,7 +311,7 @@ impl<'a> BlockGenerator<'a> {
 
 pub struct ExprGenerator<'a> {
     pub fn_def: Option<&'a FnDef>,
-    pub closure_site_info: Option<ClosureSiteInfo<'a>>,
+    pub closure_site_info: Option<ClosureSiteInfo<'a >>,
     // pub env: &'a Env,
     pub shader_registry: &'a ShaderRegistry,
     pub backend_writer: &'a dyn BackendWriter,
@@ -408,12 +408,14 @@ impl<'a> ExprGenerator<'a> {
                     span,
                     ident,
                     ref arg_exprs,
-                } => self.generate_method_call_expr(span, ident, arg_exprs),
+                    ref closure_site_index,
+                } => self.generate_method_call_expr(span, ident, arg_exprs, closure_site_index),
                 ExprKind::PlainCall {
                     span,
                     fn_node_ptr,
                     ref arg_exprs,
-                } => self.generate_plain_call_expr(span, fn_node_ptr, arg_exprs),
+                    ref closure_site_index,
+                } => self.generate_plain_call_expr(span, fn_node_ptr, arg_exprs, closure_site_index),
                 ExprKind::BuiltinCall {
                     span,
                     ident,
@@ -424,7 +426,7 @@ impl<'a> ExprGenerator<'a> {
                     ident,
                     ref arg_exprs,
                     ref param_index,
-                } => self.generate_closure_call_expr(span,  arg_exprs,param_index),
+                } => self.generate_closure_call_expr(span, arg_exprs, param_index),
                 ExprKind::ClosureDef(_) => (),
                 ExprKind::ConsCall {
                     span,
@@ -549,62 +551,98 @@ impl<'a> ExprGenerator<'a> {
         self.generate_expr(expr);
     }
     
-    fn generate_method_call_expr(&mut self, _span: Span, ident: Ident, arg_exprs: &[Expr]) {
+    fn generate_method_call_expr(&mut self, _span: Span, ident: Ident, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>) {
+        // alright so. what if we have
+        // lets check if this is a call with closure args
+        
         // ok so. what is expr
         match arg_exprs[0].ty.borrow().as_ref().unwrap() {
             Ty::Struct(struct_ptr) => {
-                let fn_decl = self.shader_registry.struct_method_decl_from_ident(
+                let fn_def = self.shader_registry.struct_method_decl_from_ident(
                     self.shader_registry.structs.get(struct_ptr).unwrap(),
                     ident
                 ).unwrap();
                 
-                write!(self.string, "{}_{} (", fn_decl.fn_node_ptr, ident).unwrap();
-                let mut sep = "";
-                for i in 0..arg_exprs.len() {
-                    let arg_expr = &arg_exprs[i];
-                    
-                    write!(self.string, "{}", sep).unwrap();
-                    
-                    self.generate_expr(arg_expr);
-                    
-                    sep = ", ";
-                }
-                write!(self.string, ")").unwrap();
+                self.generate_call_body(_span, fn_def, arg_exprs, closure_site_index);
             }
             Ty::DrawShader(shader_ptr) => {
-                let fn_decl = self.shader_registry.draw_shader_method_decl_from_ident(
+                let fn_def = self.shader_registry.draw_shader_method_decl_from_ident(
                     self.shader_registry.draw_shaders.get(shader_ptr).unwrap(),
                     ident
                 ).unwrap();
                 
-                write!(self.string, "{}_{} (", fn_decl.fn_node_ptr, ident).unwrap();
-                let mut sep = "";
-                for i in 1..arg_exprs.len() {
-                    let arg_expr = &arg_exprs[i];
+                if fn_def.has_closure_args() {
+                    // ok so..
                     
-                    write!(self.string, "{}", sep).unwrap();
-                    
-                    self.generate_expr(arg_expr);
-                    
-                    sep = ", ";
                 }
-                write!(self.string, ")").unwrap();
+                self.generate_call_body(_span, fn_def, &arg_exprs[1..], closure_site_index);
             }
             _ => panic!(),
         }
-        /*
-        match arg_exprs[0].ty.borrow().as_ref().unwrap() {
-            Ty::Struct {
-                ident: struct_ident,
-            } => {
-                self.generate_call_expr(
-                    span,
-                    IdentPath::from_two(*struct_ident, ident),
-                    arg_exprs,
-                );
+    }
+    
+    fn generate_plain_call_expr(&mut self, _span: Span, fn_node_ptr: FnNodePtr, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>) {
+        // lets create a fn name for this thing.
+        let fn_def = self.shader_registry.all_fns.get(&fn_node_ptr).unwrap();
+        self.generate_call_body(_span, fn_def, arg_exprs, closure_site_index);
+    }
+    
+    fn generate_call_body(&mut self, _span: Span, fn_def: &FnDef, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>) {
+        // lets create a fn name for this thing.
+        if let Some(closure_site_index) = closure_site_index.get() {
+            // ok so.. we have closure args. this means we have a callsite
+            let call_fn = self.fn_def.unwrap();
+            let closure_sites = &call_fn.closure_sites.borrow();
+            let closure_site = &closure_sites.as_ref().unwrap()[closure_site_index];
+            // ok our function name is different now:
+            
+            // and then our args
+            write!(self.string, "{} (", DisplayFnNameWithClosureArgs(
+                closure_site_index,
+                call_fn.fn_node_ptr,
+                fn_def.ident
+            )).unwrap();
+            
+            let mut sep = "";
+            for arg_expr in arg_exprs {
+                // check if the args is a closure, ifso skip it
+                match arg_expr.ty.borrow().as_ref().unwrap(){
+                    Ty::ClosureDef(_)=>{
+                        continue;
+                    }
+                    _=>()
+                }
+                
+                write!(self.string, "{}", sep).unwrap();
+                self.generate_expr(arg_expr);
+                sep = ", ";
             }
-            _ => panic!(),
-        }*/
+            // and now the closed over values
+            for sym in &closure_site.all_closed_over {
+                if self.backend_writer.write_var_decl(
+                    &mut self.string,
+                    sep,
+                    false,
+                    false,
+                    &DisplayClosedOverArg(sym.ident, sym.shadow),
+                    &sym.ty,
+                ) {
+                    sep = ", ";
+                }
+            }
+            write!(self.string, ")").unwrap();
+        }
+        else {
+            write!(self.string, "{}_{} (", fn_def.fn_node_ptr, fn_def.ident).unwrap();
+            let mut sep = "";
+            for arg_expr in arg_exprs {
+                write!(self.string, "{}", sep).unwrap();
+                self.generate_expr(arg_expr);
+                
+                sep = ", ";
+            }
+            write!(self.string, ")").unwrap();
+        }
     }
     
     fn generate_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident) {
@@ -646,23 +684,6 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, "]").unwrap();
     }
     
-    fn generate_plain_call_expr(&mut self, _span: Span, fn_node_ptr: FnNodePtr, arg_exprs: &[Expr]) {
-        // lets create a fn name for this thing.
-        let fn_decl = self.shader_registry.all_fns.get(&fn_node_ptr).unwrap();
-        write!(self.string, "{}_{} (", fn_node_ptr, fn_decl.ident).unwrap();
-        let mut sep = "";
-        for arg_expr in arg_exprs {
-            write!(self.string, "{}", sep).unwrap();
-            
-            self.generate_expr(arg_expr);
-            
-            sep = ", ";
-        }
-        
-        //self.backend_writer.write_call_expr_hidden_args(&mut self.string, self.create_const_table, fn_node_ptr, &self.draw_shader_decl, &sep);
-        
-        write!(self.string, ")").unwrap();
-    }
     
     fn generate_builtin_call_expr(&mut self, _span: Span, ident: Ident, arg_exprs: &[Expr]) {
         // lets create a fn name for this thing.
@@ -682,13 +703,13 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, ")").unwrap();
     }
     
-    fn generate_closure_call_expr(&mut self, _span: Span, arg_exprs: &[Expr], param_index: &Cell<Option<usize>>) {
-
+    fn generate_closure_call_expr(&mut self, _span: Span, arg_exprs: &[Expr], param_index: &Cell<Option<usize >>) {
+        
         let param_index = param_index.get().unwrap();
-
+        
         let closure_site_info = self.closure_site_info.as_ref().unwrap();
         // find our closure def
-        let closure_def_index = closure_site_info.closure_site.closure_args.iter().find(|arg| arg.param_index == param_index).unwrap().closure_def_index;
+        let closure_def_index = closure_site_info.closure_site.closure_args.iter().find( | arg | arg.param_index == param_index).unwrap().closure_def_index;
         let closure_def = &self.shader_registry.all_fns.get(&closure_site_info.call_ptr).unwrap().closure_defs[closure_def_index.0];
         
         write!(self.string, "{}", DisplayClosureName(closure_site_info.call_ptr, closure_def_index)).unwrap();
@@ -701,8 +722,8 @@ impl<'a> ExprGenerator<'a> {
             sep = ", ";
         }
         // alright now we have to pass in the closed over syms IN order
-        for sym in closure_def.closed_over_syms.borrow().as_ref().unwrap(){
-            if let Ty::DrawShader(_) = sym.ty{
+        for sym in closure_def.closed_over_syms.borrow().as_ref().unwrap() {
+            if let Ty::DrawShader(_) = sym.ty {
                 continue;
             }
             write!(self.string, "{}", sep).unwrap();
@@ -711,7 +732,7 @@ impl<'a> ExprGenerator<'a> {
         }
         
         write!(self.string, ")").unwrap();
-
+        
     }
     
     fn generate_macro_call_expr(
