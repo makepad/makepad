@@ -11,7 +11,7 @@ use crate::shaderregistry::ShaderRegistry;
 
 #[derive(Clone, Debug)]
 pub struct DepAnalyser<'a> {
-    pub decl: &'a FnDecl,
+    pub fn_def: &'a FnDef,
     pub shader_registry: &'a ShaderRegistry,
     pub scopes: &'a Scopes,
 }
@@ -62,6 +62,7 @@ impl<'a> DepAnalyser<'a> {
                 span,
                 ident,
                 ref arg_exprs,
+                ..
             } => self.dep_analyse_closure_call_expr(span, ident, arg_exprs),
             ExprKind::ClosureDef(_) => (),
             ExprKind::ConsCall {
@@ -122,7 +123,7 @@ impl<'a> DepAnalyser<'a> {
                 for arg_expr in arg_exprs {
                     self.dep_analyse_expr(arg_expr);
                 }
-                let mut set = self.decl.callees.borrow_mut();
+                let mut set = self.fn_def.callees.borrow_mut();
                 // ok we need to find the method FnPtr from the struct_ptr
                 let struct_decl = self.shader_registry.structs.get(struct_ptr).unwrap();
                 if let Some(fn_node_ptr) = self.shader_registry.struct_method_ptr_from_ident(struct_decl, method_ident){
@@ -135,7 +136,7 @@ impl<'a> DepAnalyser<'a> {
                 for arg_expr in arg_exprs {
                     self.dep_analyse_expr(arg_expr);
                 }
-                let mut set = self.decl.callees.borrow_mut();
+                let mut set = self.fn_def.callees.borrow_mut();
                 let draw_shader_decl = self.shader_registry.draw_shaders.get(shader_ptr).unwrap();
                 if let Some(fn_node_ptr) = self.shader_registry.draw_shader_method_ptr_from_ident(draw_shader_decl, method_ident){
                     set.as_mut().unwrap().insert(fn_node_ptr);
@@ -176,7 +177,7 @@ impl<'a> DepAnalyser<'a> {
         }
         // ok so this must be a closure call.
         
-        self.decl
+        self.fn_def
             .closure_deps
             .borrow_mut()
             .as_mut()
@@ -193,7 +194,7 @@ impl<'a> DepAnalyser<'a> {
         for arg_expr in arg_exprs {
             self.dep_analyse_expr(arg_expr);
         }
-        self.decl
+        self.fn_def
             .builtin_deps
             .borrow_mut()
             .as_mut()
@@ -213,7 +214,7 @@ impl<'a> DepAnalyser<'a> {
         for arg_expr in arg_exprs {
             self.dep_analyse_expr(arg_expr);
         }
-        let mut set = self.decl.callees.borrow_mut();
+        let mut set = self.fn_def.callees.borrow_mut();
         set.as_mut().unwrap().insert(fn_node_ptr);
         /*
         match self.env.find_sym(ident, span).unwrap() {
@@ -241,7 +242,7 @@ impl<'a> DepAnalyser<'a> {
         // so we have to store which 'shader props' we use
         match expr.ty.borrow().as_ref().unwrap(){
             Ty::DrawShader(shader_ptr)=>{
-                self.decl.draw_shader_refs.borrow_mut().as_mut().unwrap().insert(field_ident);
+                self.fn_def.draw_shader_refs.borrow_mut().as_mut().unwrap().insert(field_ident);
             }
             _=>{
                   self.dep_analyse_expr(expr)
@@ -259,7 +260,7 @@ impl<'a> DepAnalyser<'a> {
         for arg_expr in arg_exprs {
             self.dep_analyse_expr(arg_expr);
         }
-        self.decl
+        self.fn_def
             .constructor_fn_deps
             .borrow_mut()
             .as_mut()
@@ -280,7 +281,7 @@ impl<'a> DepAnalyser<'a> {
         args: &Vec<(Ident,Expr)>,
     ) {
         // alright we have a struct constructor
-        self.decl.struct_refs.borrow_mut().as_mut().unwrap().insert(struct_node_ptr);
+        self.fn_def.struct_refs.borrow_mut().as_mut().unwrap().insert(struct_node_ptr);
         for arg in args{
             self.dep_analyse_expr(&arg.1);
         }
@@ -290,15 +291,15 @@ impl<'a> DepAnalyser<'a> {
         // alright so. a var expr..
         match kind.get().unwrap() {
             VarKind::Const(const_ptr) =>{
-                self.decl.const_refs.borrow_mut().as_mut().unwrap().insert(const_ptr);
+                self.fn_def.const_refs.borrow_mut().as_mut().unwrap().insert(const_ptr);
             }
             VarKind::LiveValue(value_ptr)=>{
-                self.decl.live_refs.borrow_mut().as_mut().unwrap().insert(value_ptr);
+                self.fn_def.live_refs.borrow_mut().as_mut().unwrap().insert(value_ptr);
             }
             VarKind::Local{..} | VarKind::MutLocal{..}=>{ // we need to store the type
                 match ty{
                     Some(Ty::Struct(struct_ptr))=>{
-                        self.decl.struct_refs.borrow_mut().as_mut().unwrap().insert(*struct_ptr);
+                        self.fn_def.struct_refs.borrow_mut().as_mut().unwrap().insert(*struct_ptr);
                     }
                     Some(Ty::Array{..})=>{
                         todo!();

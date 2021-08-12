@@ -7,8 +7,9 @@ const SOURCE:&'static str = r#"
             fn pixel(self)->vec4{
                 let i = 1.0;
                 let i = 1.0;
-                let t = |x| x+i;
+                //let t = |x, y| x-y;
                 self.closure_test(1.0, |x, y| x+y+i);
+                //self.closure_test(2.0, t);
                 return #f00;
             }
             

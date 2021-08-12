@@ -46,10 +46,10 @@ pub enum InputNodePtr {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct DrawShaderDecl {
+pub struct DrawShaderDef {
     pub debug: bool,
     pub default_geometry: Option<ShaderResourceId>,
-    pub fields: Vec<DrawShaderFieldDecl>,
+    pub fields: Vec<DrawShaderFieldDef>,
     pub methods: Vec<FnNodePtr>,
     
     //pub structs: RefCell<Vec<StructNodePtr>>,
@@ -63,7 +63,7 @@ pub struct DrawShaderDecl {
 }
 
 #[derive(Clone, Debug)]
-pub struct ConstDecl {
+pub struct ConstDef {
     pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
@@ -98,7 +98,7 @@ impl FnSelfKind {
 }
 
 #[derive(Clone, Debug)]
-pub struct FnDecl {
+pub struct FnDef {
     pub fn_node_ptr: FnNodePtr,
     
     pub ident: Ident,
@@ -121,6 +121,7 @@ pub struct FnDecl {
     pub constructor_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>) >> >,
     
     pub closure_defs: Vec<ClosureDef>,
+    pub closure_sites: RefCell<Option<Vec<ClosureSite>>>,
     
     // base
     pub span: Span,
@@ -143,6 +144,7 @@ pub struct ClosureParam{
 #[derive(Clone, Debug)]
 pub struct ClosureDef{
     pub span:Span,
+    pub closed_over_syms: RefCell<Option<Vec<ScopeSym>>>,
     pub params: Vec<ClosureParam>,
     pub kind:ClosureDefKind
 }
@@ -153,9 +155,20 @@ pub enum ClosureDefKind{
     Block(Block)
 }
 
+#[derive(Clone, Debug)]
+pub struct ClosureSite{ // 
+    pub call_to: FnNodePtr,
+    pub closure_args: Vec<ClosureSiteArg>
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ClosureSiteArg{
+    pub param_index: usize,
+    pub closure_def_index: ClosureDefIndex
+}
 
 #[derive(Clone, Debug)]
-pub struct StructDecl {
+pub struct StructDef {
     pub span: Span,
     //pub ident: Ident,
     pub struct_refs: RefCell<Option<BTreeSet<StructNodePtr >> >,
@@ -171,7 +184,7 @@ pub struct FieldDecl {
     pub ty_expr: TyExpr,
 }
 
-impl StructDecl {
+impl StructDef {
     pub fn find_field(&self, ident: Ident) -> Option<&FieldDecl> {
         self.fields.iter().find( | field | field.ident == ident)
     }
@@ -179,7 +192,7 @@ impl StructDecl {
 }
 
 #[derive(Clone, Debug)]
-pub struct DrawShaderFieldDecl {
+pub struct DrawShaderFieldDef {
     pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
@@ -322,6 +335,7 @@ pub enum ExprKind {
     ClosureCall{
         span: Span,
         ident: Ident,
+        param_index: Cell<Option<usize>>,
         arg_exprs: Vec<Expr>,
     },
     ClosureDef(ClosureDefIndex),
@@ -484,17 +498,6 @@ pub enum Val {
     Vec4(Vec4),
 }
 
-#[derive(Clone, Debug)]
-pub struct ClosureInstance{ // 
-    pub fn_node_ptr: FnNodePtr,
-    pub closure_args: Vec<ClosureInstanceArg>
-}
-
-#[derive(Clone, Debug)]
-pub struct ClosureInstanceArg{
-    pub arg_index: usize,
-    pub def_index: ClosureDefIndex
-}
 
 pub type Scope = HashMap<Ident, ScopeSym>;
 
@@ -502,7 +505,7 @@ pub type Scope = HashMap<Ident, ScopeSym>;
 pub struct Scopes {
     pub scopes: Vec<Scope>,
     pub closure_scopes: RefCell<HashMap<ClosureDefIndex, Vec<Scope>>>,
-    pub closure_instances: RefCell<Vec<ClosureInstance>>,
+    pub closure_sites: RefCell<Vec<ClosureSite>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -510,6 +513,7 @@ pub struct ScopeSymShadow(pub usize);
 
 #[derive(Clone, Debug)]
 pub struct ScopeSym {
+    pub ident: Ident,
     pub span: Span,
     pub shadow: ScopeSymShadow, // how many times this symbol has been shadowed
     pub referenced: Cell<bool>,
@@ -521,6 +525,7 @@ pub enum ScopeSymKind {
     Local(Ty),
     MutLocal(Ty),
     Closure{
+        param_index: usize,
         return_ty: Ty,
         params: Vec<Param>
     }
@@ -530,7 +535,7 @@ impl Scopes {
     pub fn new() -> Scopes {
         Scopes {
             closure_scopes: RefCell::new(HashMap::new()),
-            closure_instances: RefCell::new(Vec::new()),
+            closure_sites: RefCell::new(Vec::new()),
             scopes: Vec::new(),
         }
     }
@@ -555,6 +560,18 @@ impl Scopes {
         self.scopes.pop().unwrap();
     }
     
+    pub fn all_referenced_syms(&self)->Vec<ScopeSym>{
+        let mut ret = Vec::new();
+        for scope in self.scopes.iter().rev(){
+            for (_, sym) in scope{
+                if sym.referenced.get(){
+                    ret.push(sym.clone());
+                }
+            }
+        }
+        ret
+    }
+    
     pub fn insert_sym(&mut self, span: Span, ident: Ident, sym_kind: ScopeSymKind)->ScopeSymShadow {
         
         if let Some(item) = self.scopes.last_mut().unwrap().get_mut(&ident){
@@ -571,6 +588,7 @@ impl Scopes {
                 ScopeSymShadow(0)
             };
             self.scopes.last_mut().unwrap().insert(ident,ScopeSym{
+                ident,
                 shadow,
                 span,
                 referenced: Cell::new(false),
@@ -585,14 +603,14 @@ impl Scopes {
 pub struct Ident(pub Id);
 
 
-impl StructDecl {
+impl StructDef {
     pub fn init_analysis(&self) {
         *self.struct_refs.borrow_mut() = Some(BTreeSet::new());
     }
 }
 
 
-impl FnDecl {
+impl FnDef {
     pub fn init_analysis(&self) {
         *self.struct_refs.borrow_mut() = Some(BTreeSet::new());
         *self.callees.borrow_mut() = Some(BTreeSet::new());
@@ -605,11 +623,20 @@ impl FnDecl {
         *self.const_table.borrow_mut() = Some(Vec::new());
         *self.const_table_spans.borrow_mut() = Some(Vec::new());
     }
+    
+    pub fn has_closure_args(&self)->bool{
+        for param in &self.params {
+            if let TyExprKind::ClosureDecl {..} = &param.ty_expr.kind {
+                return true
+            }
+        }
+        return false
+    }
 }
 
-impl DrawShaderDecl {
+impl DrawShaderDef{
     
-    pub fn find_field(&self, ident: Ident) -> Option<&DrawShaderFieldDecl> {
+    pub fn find_field(&self, ident: Ident) -> Option<&DrawShaderFieldDef> {
         self.fields.iter().find( | decl | {
             decl.ident == ident
         })
