@@ -124,8 +124,9 @@ impl Connection {
         }
     }
 
-    fn apply_delta(&self, path: PathBuf, revision: usize, delta: Delta) -> Result<(), Error> {
-        unimplemented!()
+    fn apply_delta(&self, _path: PathBuf, _revision: usize, _delta: Delta) -> Result<(), Error> {
+        println!("DELTA APPLIED BY CONNECTION {:?}", self.connection_id);
+        Ok(())
     }
 }
 

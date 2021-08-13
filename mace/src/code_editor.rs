@@ -1,5 +1,6 @@
 use {
     crate::{
+        delta::Delta,
         document::Document,
         position::Position,
         position_set::PositionSet,
@@ -367,6 +368,7 @@ impl CodeEditor {
         event: &mut Event,
         sessions_by_session_id: &mut HashMap<SessionId, Session>,
         documents_by_path: &mut HashMap<PathBuf, Document>,
+        dispatch_action: &mut dyn FnMut(Action),
     ) {
         let session = sessions_by_session_id
             .get_mut(&self.session_id.unwrap())
@@ -430,14 +432,24 @@ impl CodeEditor {
                 key_code: KeyCode::Return,
                 ..
             }) => {
-                session.insert_text(documents_by_path, Text::from(vec![vec![], vec![]]));
+                session.insert_text(
+                    documents_by_path,
+                    Text::from(vec![vec![], vec![]]),
+                    &mut |path, revision, delta| {
+                        dispatch_action(Action::ApplyDeltaRequestWasPosted(
+                            path, revision, delta,
+                        ));
+                    },
+                );
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
                 ..
             }) => {
-                session.insert_backspace(documents_by_path);
+                session.insert_backspace(documents_by_path, &mut |path, revision, delta| {
+                    dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
+                });
                 self.view.redraw_view(cx);
             }
             Event::TextInput(TextInputEvent { input, .. }) => {
@@ -448,6 +460,11 @@ impl CodeEditor {
                         .map(|line| line.chars().collect::<Vec<_>>())
                         .collect::<Vec<_>>()
                         .into(),
+                    &mut |path, revision, delta| {
+                        dispatch_action(Action::ApplyDeltaRequestWasPosted(
+                            path, revision, delta,
+                        ));
+                    },
                 );
                 self.view.redraw_view(cx);
             }
@@ -463,6 +480,10 @@ impl CodeEditor {
                 .min(text.as_lines()[line].len()),
         }
     }
+}
+
+pub enum Action {
+    ApplyDeltaRequestWasPosted(PathBuf, usize, Delta),
 }
 
 #[derive(Clone, Copy, Debug)]
