@@ -19,6 +19,7 @@ use {
 pub struct SessionId(pub usize);
 
 pub struct Session {
+    session_id: SessionId,
     cursors: CursorSet,
     selections: RangeSet,
     carets: PositionSet,
@@ -26,11 +27,18 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(path: PathBuf) -> Session {
+    pub fn new(
+        documents_by_path: &mut HashMap<PathBuf, Document>,
+        session_id: SessionId,
+        path: PathBuf,
+    ) -> Session {
+        let document = documents_by_path.get_mut(&path).unwrap();
+        document.add_session_id(session_id);
         let mut session = Session {
             cursors: CursorSet::new(),
             selections: RangeSet::new(),
             carets: PositionSet::new(),
+            session_id,
             path,
         };
         session.update_selections_and_carets();
@@ -131,7 +139,7 @@ impl Session {
         }
         let delta_1 = builder.build();
         let (_, delta_1) = delta_0.clone().transform(delta_1);
-        self.apply_delta(document, delta_0.compose(delta_1), post_apply_delta_request);
+        self.apply_local_delta(document, delta_0.compose(delta_1), post_apply_delta_request);
     }
 
     pub fn insert_backspace(
@@ -173,20 +181,33 @@ impl Session {
         }
         let delta_1 = builder.build();
         let (_, delta_1) = delta_0.clone().transform(delta_1);
-        self.apply_delta(document, delta_0.compose(delta_1), post_apply_delta_request);
+        self.apply_local_delta(document, delta_0.compose(delta_1), post_apply_delta_request);
     }
 
-    fn apply_delta(
+    pub fn set_path(&mut self, documents_by_path: &mut HashMap<PathBuf, Document>, path: PathBuf) {
+        let old_document = documents_by_path.get_mut(&self.path).unwrap();
+        old_document.remove_session_id(self.session_id);
+        self.path = path;
+        let new_document = documents_by_path.get_mut(&self.path).unwrap();
+        new_document.add_session_id(self.session_id);
+    }
+
+    fn apply_local_delta(
         &mut self,
         document: &mut Document,
         delta: Delta,
         post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
     ) {
-        self.cursors.apply_delta(&delta);
-        document.apply_delta(delta, {
+        self.cursors.apply_local_delta(&delta);
+        document.start_applying_local_delta(delta, {
             let path = &self.path;
             &mut move |revision, delta| post_apply_delta_request(path.clone(), revision, delta)
         });
+        self.update_selections_and_carets();
+    }
+
+    pub fn apply_remote_delta(&mut self, delta: &Delta) {
+        self.cursors.apply_remote_delta(delta);
         self.update_selections_and_carets();
     }
 

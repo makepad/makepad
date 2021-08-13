@@ -1,0 +1,3 @@
+- Fix bug in transforming cursor sets
+- Implement OT transformations
+- Select tab when file is already open
