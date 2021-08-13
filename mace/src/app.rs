@@ -1,6 +1,6 @@
 use {
     crate::{
-        code_editor::CodeEditor,
+        code_editor::{self, CodeEditor},
         dock::{self, Dock, PanelId},
         document::Document,
         file_tree::{self, FileTree},
@@ -246,13 +246,22 @@ impl AppInner {
                 }
             }
         }
+        let mut actions = Vec::new();
         for code_editor in self.code_editors_by_panel_id.values_mut() {
             code_editor.handle_event(
                 cx,
                 event,
                 &mut state.sessions_by_session_id,
                 &mut state.documents_by_path,
+                &mut |action| actions.push(action),
             );
+        }
+        for action in actions {
+            match action {
+                code_editor::Action::ApplyDeltaRequestWasPosted(path, revision, delta) => {
+                    self.send_request(Request::ApplyDelta(path, revision, delta));
+                }
+            }
         }
         match event {
             Event::Signal(event)
