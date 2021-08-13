@@ -123,39 +123,6 @@ impl ShaderRegistry {
             FinalConstTable::default()
         }
     }
-    /*
-    pub fn struct_method_from_ptr(&self, struct_node_ptr: StructNodePtr, ident: Ident) -> Option<&FnDecl> {
-        if let Some(s) = self.structs.get(&struct_node_ptr) {
-            if let Some(node) = s.methods.iter().find( | fn_decl | fn_decl.ident == ident) {
-                return Some(node)
-            }
-        }
-        None
-    }
-    
-    pub fn draw_shader_method_from_ptr(&self, shader_ptr: DrawShaderNodePtr, ident: Ident) -> Option<&FnDecl> {
-        if let Some(s) = self.draw_shaders.get(&shader_ptr) {
-            if let Some(node) = s.methods.iter().find( | fn_decl | fn_decl.ident == ident) {
-                return Some(node)
-            }
-        }
-        None
-    }
-    
-    pub fn plain_fn_from_ptr(&self, fn_ptr: FnNodePtr) -> Option<&FnDecl> {
-        if let Some(s) = self.plain_fns.get(&fn_ptr) {
-            return Some(s)
-        }
-        None
-    }
-    */
-    /*
-    pub fn fn_decl_from_ptr(&self, fn_ptr: FnNodePtr) -> Option<&FnDecl> {
-        if let Some(s) = self.all_fns.get(&fn_ptr) {
-            return Some(s)
-        }
-        None
-    }*/
     
     pub fn fn_ident_from_ptr(&self, fn_node_ptr: FnNodePtr) -> Ident {
         let (_, node) = self.live_registry.resolve_ptr(fn_node_ptr.0);
@@ -445,6 +412,7 @@ impl ShaderRegistry {
                 
                 // ok analyse the struct methods now.
                 let mut fa = FnDefAnalyser {
+                    closure_return_ty: None,
                     fn_def: self.all_fns.get(&fn_ptr).unwrap(),
                     scopes: &mut Scopes::new(),
                     shader_registry: self,
@@ -504,8 +472,10 @@ impl ShaderRegistry {
                                 //Some(struct_full_ptr)
                             );
                             // we only allow a field def
-                            let decl = parser.expect_field(Ident(id), VarDefNodePtr(prop_ptr)) ?;
-                            struct_def.fields.push(decl);
+                            let def = parser.expect_field(Ident(id), VarDefNodePtr(prop_ptr)) ?;
+                            if let Some(def) = def{
+                                struct_def.fields.push(def);
+                            }
                         },
                         LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
                             let id = prop.id_pack.unwrap_single();

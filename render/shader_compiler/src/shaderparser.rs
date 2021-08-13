@@ -308,7 +308,7 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_field(&mut self, ident: Ident, var_def_node_ptr: VarDefNodePtr) -> Result<FieldDecl, LiveError> {
+    pub fn expect_field(&mut self, ident: Ident, var_def_node_ptr: VarDefNodePtr) -> Result<Option<FieldDecl>, LiveError> {
         let span = self.begin_span();
         let decl_ty = self.expect_ident() ?;
         let decl_name = self.expect_ident() ?;
@@ -320,13 +320,16 @@ impl<'a> ShaderParser<'a> {
         let ty_expr = self.expect_ty_expr() ?;
         match decl_ty {
             Ident(id!(field)) => {
-                return span.end(self, | span | Ok(FieldDecl {
+                return span.end(self, | span | Ok(Some(FieldDecl {
                     var_def_node_ptr,
                     span,
                     ident,
                     ty_expr
-                }))
+                })))
             }
+            Ident(id!(const)) => {
+                return Ok(None)
+            },
             _ => {
                 return Err(span.error(self, live_error_origin!(), format!("unexpected decl type in struct `{}`", decl_ty).into()))
             }
@@ -343,7 +346,12 @@ impl<'a> ShaderParser<'a> {
             
             let span = self.begin_span();
             let is_inout = self.accept_token(token_ident!(inout));
-            self.expect_token(token_ident!(self)) ?;
+            
+            if self.peek_token() != token_ident!(self){
+                return Ok(None)
+            }
+            self.skip_token();
+            //self.expect_token(token_ident!(self)) ?;
             
             let kind = self.self_kind.unwrap().to_ty_expr_kind();
             params.push(span.end(&mut self, | span | Param {
@@ -376,6 +384,7 @@ impl<'a> ShaderParser<'a> {
             span,
             ident,
             self_kind,
+            has_return: Cell::new(false),
             closure_defs: self.closure_defs,
             draw_shader_refs: RefCell::new(None),
             closure_sites: RefCell::new(None),
@@ -384,7 +393,7 @@ impl<'a> ShaderParser<'a> {
             live_refs: RefCell::new(None),
             struct_refs: RefCell::new(None),
             callees: RefCell::new(None),
-            closure_deps: RefCell::new(None),
+            //closure_deps: RefCell::new(None),
             builtin_deps: RefCell::new(None),
             constructor_fn_deps: RefCell::new(None),
             const_table: RefCell::new(None),
@@ -402,10 +411,10 @@ impl<'a> ShaderParser<'a> {
         self.expect_token(Token::OpenParen) ?;
         let mut params = Vec::new();
         if !self.accept_token(Token::CloseParen) {
-            let param = self.expect_param() ?;
-            if param.ident == Ident(id!(self)) {
+            if self.peek_token() == token_ident!(self){
                 return Err(span.error(&mut self, live_error_origin!(), format!("use of self not allowed in plain function").into()))
             }
+            let param = self.expect_param() ?;
             
             params.push(param);
             while self.accept_token(token_punct!(,)) {
@@ -426,6 +435,7 @@ impl<'a> ShaderParser<'a> {
             span,
             ident,
             self_kind,
+            has_return: Cell::new(false),
             closure_defs: self.closure_defs,
             closure_sites: RefCell::new(None),
             const_refs: RefCell::new(None),
@@ -434,7 +444,7 @@ impl<'a> ShaderParser<'a> {
             draw_shader_refs: RefCell::new(None),
             return_ty: RefCell::new(None),
             callees: RefCell::new(None),
-            closure_deps: RefCell::new(None),
+            //closure_deps: RefCell::new(None),
             builtin_deps: RefCell::new(None),
             constructor_fn_deps: RefCell::new(None),
             const_table: RefCell::new(None),
@@ -1063,6 +1073,7 @@ impl<'a> ShaderParser<'a> {
                             else if let Some(ptr) = self.scan_scope_for_live_ptr(ident_path.segs[0]) {
                                 match self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]) {
                                     LiveNodeFindResult::Struct(struct_ptr) => {
+                                        self.type_deps.push(ShaderParserDep::Struct(struct_ptr));
                                         struct_ptr
                                     }
                                     LiveNodeFindResult::NotFound => {
@@ -1148,9 +1159,10 @@ impl<'a> ShaderParser<'a> {
                                             const_index: Cell::new(None),
                                             kind: ExprKind::PlainCall {
                                                 span,
-                                                fn_node_ptr,
-                                                //ident: Ident(ident_path.segs[0]),
+                                                fn_node_ptr: Some(fn_node_ptr),
+                                                ident: if ident_path.len()==1{Some(Ident(ident_path.segs[0]))}else{None},
                                                 arg_exprs,
+                                                param_index:Cell::new(None),
                                                 closure_site_index:Cell::new(None),
                                             },
                                         }))
@@ -1167,8 +1179,10 @@ impl<'a> ShaderParser<'a> {
                                             const_index: Cell::new(None),
                                             kind: ExprKind::PlainCall {
                                                 span,
-                                                fn_node_ptr,
+                                                ident: if ident_path.len()==1{Some(Ident(ident_path.segs[0]))}else{None},
+                                                fn_node_ptr:Some(fn_node_ptr),
                                                 arg_exprs,
+                                                param_index:Cell::new(None),
                                                 closure_site_index:Cell::new(None),
                                             },
                                         }))
@@ -1184,11 +1198,13 @@ impl<'a> ShaderParser<'a> {
                                     ty: RefCell::new(None),
                                     const_val: RefCell::new(None),
                                     const_index: Cell::new(None),
-                                    kind: ExprKind::ClosureCall {
-                                        param_index: Cell::new(None),
+                                    kind:  ExprKind::PlainCall {
                                         span,
-                                        ident: Ident(ident_path.segs[0]),
+                                        ident: Some(Ident(ident_path.segs[0])),
+                                        fn_node_ptr:None,
                                         arg_exprs,
+                                        param_index:Cell::new(None),
+                                        closure_site_index:Cell::new(None),
                                     },
                                 }))
                             }
@@ -1197,7 +1213,9 @@ impl<'a> ShaderParser<'a> {
                             }
                         }
                         _ => {
-                            let mut var_resolve = VarResolve::NotFound(Ident(ident_path.segs[0]));
+                            // ok we wanna resolve, however if its multi-segment and not resolved it fails.
+                            
+                            let mut var_resolve = VarResolve::NotFound;
                             if let Some(ptr) = self.scan_scope_for_live_ptr(ident_path.segs[0]) {
                                 match self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]) {
                                     LiveNodeFindResult::LiveValue(value_ptr, ty) => {
@@ -1207,15 +1225,26 @@ impl<'a> ShaderParser<'a> {
                                         self.type_deps.push(ShaderParserDep::Const(const_ptr));
                                         var_resolve = VarResolve::Const(const_ptr);
                                     }
+                                    LiveNodeFindResult::Function(fn_ptr) => {
+                                        self.type_deps.push(ShaderParserDep::Function(None, fn_ptr));
+                                        var_resolve = VarResolve::Function(fn_ptr);
+                                    }
                                     _ => ()
                                 }
                             }
+                            if let VarResolve::NotFound = var_resolve{
+                                if ident_path.len()>1{
+                                    return  Err(span.error(self, live_error_origin!(), format!("Identifier not found `{}`", ident_path).into()))
+                                }
+                            }
+                            
                             Ok(span.end(self, | span | Expr {
                                 span,
                                 ty: RefCell::new(None),
                                 const_val: RefCell::new(None),
                                 const_index: Cell::new(None),
                                 kind: ExprKind::Var {
+                                    ident: if ident_path.len()>1{None} else {Some(Ident(ident_path.segs[0]))},
                                     span,
                                     var_resolve,
                                     kind: Cell::new(None),
@@ -1266,7 +1295,7 @@ impl<'a> ShaderParser<'a> {
                 }))
             }
             token_punct!(|)=>{
-                // ok its an actual closure def
+                // closure def
                 self.skip_token();
                 let mut params = Vec::new();
                 if !self.accept_token(token_punct!(|)) {
@@ -1283,10 +1312,10 @@ impl<'a> ShaderParser<'a> {
                     }
                     self.expect_token(token_punct!(|)) ?;
                 }
-                let closure_def_index = ClosureDefIndex(self.closure_defs.len());
                 if self.peek_token() == Token::OpenBrace{
                     let block = self.expect_block()?;
                     let span = span.end(self, |span| span);
+                    let closure_def_index = ClosureDefIndex(self.closure_defs.len());
                     self.closure_defs.push(ClosureDef {
                         span,
                         params,
@@ -1304,6 +1333,7 @@ impl<'a> ShaderParser<'a> {
                 else{
                     let expr = self.expect_expr()?;
                     let span = span.end(self, |span| span);
+                    let closure_def_index = ClosureDefIndex(self.closure_defs.len());
                     self.closure_defs.push(ClosureDef {
                         span,
                         params,

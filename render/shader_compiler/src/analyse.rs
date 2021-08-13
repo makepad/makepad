@@ -57,6 +57,7 @@ impl<'a> StructAnalyser<'a> {
         for fn_node_ptr in &self.struct_def.methods {
             let fn_def = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
             FnDefAnalyser {
+                closure_return_ty: None,
                 fn_def,
                 scopes: &mut self.scopes,
                 shader_registry: self.shader_registry,
@@ -133,6 +134,7 @@ impl<'a> DrawShaderAnalyser<'a> {
         for fn_node_ptr in &self.draw_shader_def.methods {
             let fn_def = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
             FnDefAnalyser {
+                closure_return_ty: None,
                 shader_registry: self.shader_registry,
                 fn_def,
                 scopes: &mut self.scopes,
@@ -473,6 +475,7 @@ impl<'a> ConstAnalyser<'a> {
 #[derive(Debug)]
 pub struct FnDefAnalyser<'a> {
     pub fn_def: &'a FnDef,
+    pub closure_return_ty: Option<&'a RefCell<Option<Ty>>>,
     pub scopes: &'a mut Scopes,
     pub shader_registry: &'a ShaderRegistry,
     pub options: ShaderAnalyseOptions,
@@ -565,6 +568,21 @@ impl<'a> FnDefAnalyser<'a> {
         // then analyse it
         self.analyse_closures() ?;
         
+        if let Some(ty_expr) = &self.fn_def.return_ty_expr{
+            if let Ty::Void = ty_expr.ty.borrow().as_ref().unwrap(){
+            }
+            else{
+                if !self.fn_def.has_return.get(){
+                    return Err(LiveError {
+                        origin: live_error_origin!(),
+                        span: self.fn_def.span,
+                        message: format!(
+                            "Function has no return",
+                        ),
+                    });
+                }
+            }
+        }
         
         Ok(())
     }
@@ -589,7 +607,7 @@ impl<'a> FnDefAnalyser<'a> {
                 let closure_def = &self.fn_def.closure_defs[closure_arg.closure_def_index.0];
                 let fn_param = &fn_decl.params[closure_arg.param_index];
                 
-                if let TyExprKind::ClosureDecl {params, ..} = &fn_param.ty_expr.kind {
+                if let TyExprKind::ClosureDecl {params, return_ty, ..} = &fn_param.ty_expr.kind {
                     self.scopes.clear_referenced_syms();
                     self.scopes.push_scope();
                     // alright we have a fn_decl and a closure_def
@@ -622,11 +640,28 @@ impl<'a> FnDefAnalyser<'a> {
                     match &closure_def.kind{
                         ClosureDefKind::Expr(expr)=>{
                             self.analyse_expr_stmt(closure_def.span, expr)?;
+                            // check the expr ty vs return ty
+                            if expr.ty.borrow().as_ref() != return_ty.borrow().as_ref(){
+                                return Err(LiveError {
+                                    origin: live_error_origin!(),
+                                    span: closure_def.span,
+                                    message: format!(
+                                        "Closure return type not correct: {} expected: {}",
+                                        expr.ty.borrow().as_ref().unwrap(), return_ty.borrow().as_ref().unwrap()
+                                    ),
+                                });
+                            }
                         }
                         ClosureDefKind::Block(block)=>{
+                            self.closure_return_ty = Some(return_ty);
+                            // ohdear. the return should be checked against the closure
+                            // not the fndef.
                             self.analyse_block(block)?;
+                            self.closure_return_ty = None;
                         }
                     }
+                    // TODO CHECK THE RETURN TYPE
+                    
                     self.scopes.pop_scope();
                     // ok we also have something else.
                     // ok we have to store the variables we have accessed on frpm scope
@@ -640,8 +675,6 @@ impl<'a> FnDefAnalyser<'a> {
                     panic!()
                 }
                 // lets figure out what the
-                
-                
                 std::mem::swap(&mut self.scopes.scopes, &mut scopes);
             }
             // ok now we declare the inputs of the closure on the scope stack
@@ -649,14 +682,19 @@ impl<'a> FnDefAnalyser<'a> {
         // move or extend
         let mut closure_sites_out = self.fn_def.closure_sites.borrow_mut();
         if closure_sites_out.is_some(){
-            closure_sites_out.as_mut().unwrap().extend(closure_sites)
+            closure_sites_out.as_mut().unwrap().extend(closure_sites);
         }
         else{
             *closure_sites_out = Some(closure_sites);
         }
         // recur
         if self.scopes.closure_sites.borrow().len()>0{
-            self.analyse_closures()?;
+            return Err(LiveError {
+                origin: live_error_origin!(),
+                span: self.fn_def.span,
+                message: format!("Nesting closures is not supported at the moment"),
+            });
+            
         }
         Ok(())
     }
@@ -876,13 +914,22 @@ impl<'a> FnDefAnalyser<'a> {
     
     fn analyse_return_stmt(&mut self, span: Span, expr: &Option<Expr>) -> Result<(), LiveError> {
         
-        
+        self.fn_def.has_return.set(true);
         if let Some(expr) = expr {
-            self.ty_checker().ty_check_expr_with_expected_ty(
-                span,
-                expr,
-                self.fn_def.return_ty.borrow().as_ref().unwrap(),
-            ) ?;
+            if let Some(ty) = self.closure_return_ty{
+                self.ty_checker().ty_check_expr_with_expected_ty(
+                    span,
+                    expr,
+                    ty.borrow().as_ref().unwrap()
+                ) ?;
+            }
+            else{
+                self.ty_checker().ty_check_expr_with_expected_ty(
+                    span,
+                    expr,
+                    self.fn_def.return_ty.borrow().as_ref().unwrap()
+                ) ?;
+            }
             
             self.const_evaluator().try_const_eval_expr(expr);
             self.const_gatherer().const_gather_expr(expr);

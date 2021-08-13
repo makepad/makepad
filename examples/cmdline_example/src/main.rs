@@ -1,32 +1,61 @@
-const SOURCE:&'static str = r#"
-        DrawQuad: Shader{
-            uniform t:float
-            
-            fn closure_inner(self, t:float, b:fn(v2:float)->float){
-                b(3. + t);
+const SOURCE: &'static str = r#"
+    DrawQuad: Shader {
+        uniform t: float
+        
+        live_var: 1.0,
+        
+        MyStruct2:Struct{
+            field b:float
+            const PI:float=1.0
+            fn bla()->float{return 2.0;}
+            fn c(self)->float{
+                return 1.0;
             }
-            
-            fn closure_test(self, x1:float, y:fn(v2:float)->float, z:fn(v2:float)->float){
-                y(1.+x1);
-                z(2.+x1);
-                self.closure_inner(1.0, |w|w + x1);
-            }
-            
-            fn pixel(self)->vec4{
-                let i = 1.0;
-                let j = 2.0;
-                let t = |x| x+j;
-                let j = 2.0;
-                self.closure_test(1.0, |x| x+i+self.t+j, t);
-                //self.closure_test(2.0, t);
-                return #f00;
-            }
-            
-            fn vertex(self)->vec4{
-                return vec4(1.0);
+            fn blip(self, b:fn()->float){
+                //let PI=2.0;
+                self.b+self.c()+PI;
             }
         }
-/*
+        
+        MyStruct3:MyStruct2{
+           const PI:float=2.0
+           //fn blip(self, b:fn()->float){
+           //    self.b+self.c()+MyStruct2::bla()+PI;
+           //}
+        }
+        
+        fn d(c:float)->float{
+            return 1.0;
+        }
+        
+        fn closure_inner(self, inout t: float,b: fn(inout v2: float) -> float) {
+            let x= live_var;
+            b(t); 
+        }
+        
+        fn closure_test(self, x1: float, y: fn(v2: float) -> float) { //}, z:fn(v2:float)->float){
+            y(1. + x1);
+            //z(2.+x1);
+        }
+        
+        fn pixel(self) -> vec4 {
+            let i = 1.0;
+            let j = 2.0;
+            // let t = |x| x+j;
+            let j = 2.0;
+            let x = MyStruct3{b:1.0};
+            x.blip(||1.0);
+            self.closure_inner(1.0, | x | {return 1.0;});
+            //self.closure_test(1.0, | x | i+2.0);
+            //self.closure_test(2.0, t);
+            return #f00;
+        }
+        
+        fn vertex(self) -> vec4 {
+            return vec4(1.0);
+        }
+    }
+    /*
         ViewShader: Shader{
             uniform camera_projection: mat4 in pass;
             uniform draw_scroll: vec4 in draw;
@@ -99,8 +128,8 @@ const SOURCE:&'static str = r#"
             }
         }
         */
-    "#;
-    
+"#;
+
 use makepad_live_parser::*;
 use makepad_shader_compiler::shaderregistry::ShaderRegistry;
 use makepad_shader_compiler::shaderregistry::DrawShaderInput;
@@ -158,26 +187,26 @@ fn main() {
     
     // lets just call the shader compiler on this thing
     let result = sr.analyse_draw_shader(id!(main), id!(test), &[id!(DrawQuad)]);
-    match result{
-        Err(e)=>{
+    match result {
+        Err(e) => {
             println!("Error {}", e.to_live_file_error("", SOURCE));
         }
-        Ok(_)=>{
+        Ok(_) => {
             println!("OK!");
         }
     }
     // ok the shader is analysed.
     // now we will generate the glsl shader.
-    let result = sr.generate_glsl_shader(id!(main), id!(test), &[id!(DrawQuad)], None);//Some(FileId(0)));
-    match result{
-        Err(e)=>{
+    let result = sr.generate_glsl_shader(id!(main), id!(test), &[id!(DrawQuad)], None); //Some(FileId(0)));
+    match result {
+        Err(e) => {
             println!("Error {}", e.to_live_file_error("", SOURCE));
         }
-        Ok((_vertex,pixel))=>{
+        Ok((_vertex, pixel)) => {
             //println!("Vertex shader:\n{}\n\nPixel shader:\n{}", vertex,pixel);
             println!("{}", pixel);
         }
-    }    
+    }
     
     /*
     lr.register_component(id!(main), id!(test), id!(DrawQuad), Box::new(MyShaderFactory {}));

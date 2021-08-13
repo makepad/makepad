@@ -57,10 +57,10 @@ impl<'a> LhsChecker<'a> {
                 span,
                 ..
             } => self.lhs_check_all_call_expr(span),
-            ExprKind::ClosureCall {
+           /* ExprKind::ClosureCall {
                 span,
                 ..
-            } => self.lhs_check_all_call_expr(span),
+            } => self.lhs_check_all_call_expr(span),*/
             ExprKind::ClosureDef(_) => self.lhs_check_closure(expr.span),
             ExprKind::BuiltinCall {
                 span,
