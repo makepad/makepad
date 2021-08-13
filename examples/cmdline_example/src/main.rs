@@ -1,4 +1,5 @@
 const SOURCE: &'static str = r#"
+
     DrawQuad: Shader {
         uniform t: float
         
@@ -7,10 +8,13 @@ const SOURCE: &'static str = r#"
         MyStruct2:Struct{
             field b:float
             const PI:float=1.0
+
             fn bla()->float{return 2.0;}
+
             fn c(self)->float{
                 return 1.0;
             }
+
             fn blip(self, b:fn()->float){
                 //let PI=2.0;
                 self.b+self.c()+PI;
