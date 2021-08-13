@@ -5,6 +5,7 @@ use crate::swizzle::Swizzle;
 use std::fmt::Write;
 use std::fmt;
 use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use crate::shaderregistry::ShaderRegistry;
 use crate::shaderregistry::FinalConstTable;
 
@@ -179,14 +180,25 @@ impl<'a> DrawShaderGenerator<'a> {
         // and we have struct deps in our struct deps.
         let mut all_consts = BTreeSet::new();
         let mut all_constructor_fns = BTreeSet::new();
-        let mut all_live_refs = BTreeSet::new();
         
         for callee in fn_deps.iter().rev() {
             let decl = self.shader_registry.all_fns.get(callee).unwrap();
             all_constructor_fns.extend(decl.constructor_fn_deps.borrow().as_ref().unwrap().iter().cloned());
             all_consts.extend(decl.const_refs.borrow().as_ref().unwrap().iter().cloned());
-            all_live_refs.extend(decl.live_refs.borrow().as_ref().unwrap().iter().cloned());
+            
+            for (live_ref, ty) in decl.live_refs.borrow().as_ref().unwrap().iter(){
+                // ok so its a nodeptr
+                self.generate_live_decl(*live_ref, ty);
+            }
+       }
+       
+         // we have all the structs already from analyse
+        for struct_ptr in struct_deps.iter().rev() {
+            let struct_decl = self.shader_registry.structs.get(struct_ptr).unwrap();
+            self.generate_struct_decl(*struct_ptr, struct_decl);
         }
+        
+        
         // we have all the structs already from analyse
         for struct_ptr in struct_deps.iter().rev() {
             let struct_decl = self.shader_registry.structs.get(struct_ptr).unwrap();
@@ -255,9 +267,7 @@ impl<'a> DrawShaderGenerator<'a> {
                 }
             }
         }
-        // great. we have output all the closures this fn_def needs.
-        // however we could have multiple uses in one function
-        // we need to create one function per call-site
+
         for (site_index, closure_site) in call_def.closure_sites.borrow().as_ref().unwrap().iter().enumerate() {
             // for each site
             if closure_site.call_to == fn_def.fn_node_ptr { // alright this site calls the fn_def
@@ -381,6 +391,13 @@ impl<'a> DrawShaderGenerator<'a> {
                 _ => {}
             }
         }
+        /*
+        for live_ref in &self.draw_shader_def.live_refs.borrow().as_ref().unwrap() {
+            match decl.kind {
+                DrawShaderFieldKind::Uniform {..} => self.generate_uniform_decl(decl),
+                _ => {}
+            }
+        }*/
         
         if let Some(packed_attributes_size) = packed_attributes_size {
             self.generate_packed_var_decls(
@@ -436,6 +453,16 @@ impl<'a> DrawShaderGenerator<'a> {
             false,
             &DisplayDsIdent(decl.ident),
             decl.ty_expr.ty.borrow().as_ref().unwrap(),
+        );
+        writeln!(self.string, ";").unwrap();
+    }
+    
+    fn generate_live_decl(&mut self, ptr: ValueNodePtr, ty: &Ty) {
+        write!(self.string, "uniform ").unwrap();
+        self.write_var_decl(
+            false,
+            &ptr,
+            ty,
         );
         writeln!(self.string, ";").unwrap();
     }
