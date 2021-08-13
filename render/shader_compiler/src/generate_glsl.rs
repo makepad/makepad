@@ -5,7 +5,6 @@ use crate::swizzle::Swizzle;
 use std::fmt::Write;
 use std::fmt;
 use std::collections::BTreeSet;
-use std::collections::BTreeMap;
 use crate::shaderregistry::ShaderRegistry;
 use crate::shaderregistry::FinalConstTable;
 
@@ -186,13 +185,13 @@ impl<'a> DrawShaderGenerator<'a> {
             all_constructor_fns.extend(decl.constructor_fn_deps.borrow().as_ref().unwrap().iter().cloned());
             all_consts.extend(decl.const_refs.borrow().as_ref().unwrap().iter().cloned());
             
-            for (live_ref, ty) in decl.live_refs.borrow().as_ref().unwrap().iter(){
+            for (live_ref, ty) in decl.live_refs.borrow().as_ref().unwrap().iter() {
                 // ok so its a nodeptr
                 self.generate_live_decl(*live_ref, ty);
             }
-       }
-       
-         // we have all the structs already from analyse
+        }
+        
+        // we have all the structs already from analyse
         for struct_ptr in struct_deps.iter().rev() {
             let struct_decl = self.shader_registry.structs.get(struct_ptr).unwrap();
             self.generate_struct_decl(*struct_ptr, struct_decl);
@@ -267,16 +266,16 @@ impl<'a> DrawShaderGenerator<'a> {
                 }
             }
         }
-
+        
         for (site_index, closure_site) in call_def.closure_sites.borrow().as_ref().unwrap().iter().enumerate() {
             // for each site
             if closure_site.call_to == fn_def.fn_node_ptr { // alright this site calls the fn_def
                 // alright we need a fn def for this site_index
                 FnDefWithClosureArgsGenerator {
-                    closure_site_info:ClosureSiteInfo{
+                    closure_site_info: ClosureSiteInfo {
                         site_index,
                         closure_site,
-                        call_ptr:call_def.fn_node_ptr,
+                        call_ptr: call_def.fn_node_ptr,
                     },
                     fn_def,
                     call_def,
@@ -840,7 +839,7 @@ impl<'a> ClosureDefGenerator<'a> {
                 &DisplayClosureName(self.call_def.fn_node_ptr, self.closure_site_arg.closure_def_index), // here we must expand IdentPath to something
                 return_ty.borrow().as_ref().unwrap(),
             );
-            write!(self.string, "(").unwrap();   
+            write!(self.string, "(").unwrap();
             
             // ok we have now params and names
             for (param_index, param) in params.iter().enumerate() {
@@ -1274,7 +1273,7 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
                 self.write_var_decl(string, "", is_inout, is_packed, ident, elem_ty);
                 write!(string, "[{}]", len).unwrap();
             }
-            Ty::DrawShader(_) => { 
+            Ty::DrawShader(_) => {
                 // we should output nothing
                 return false
             }

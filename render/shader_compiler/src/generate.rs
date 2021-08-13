@@ -702,7 +702,7 @@ impl<'a> ExprGenerator<'a> {
     }
     
     
-    fn generate_plain_call_expr(&mut self, _span: Span, ident: Option<Ident>, fn_node_ptr: Option<FnNodePtr>, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>, param_index: &Cell<Option<usize >>) {
+    fn generate_plain_call_expr(&mut self, _span: Span, _ident: Option<Ident>, fn_node_ptr: Option<FnNodePtr>, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>, param_index: &Cell<Option<usize >>) {
         // lets create a fn name for this thing.
         if param_index.get().is_some(){ // its a closure
             self.generate_closure_call_expr(_span, arg_exprs, param_index);
