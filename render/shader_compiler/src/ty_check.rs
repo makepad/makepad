@@ -40,7 +40,12 @@ impl<'a> TyChecker<'a> {
             TyExprKind::DrawShader(shader_ptr) => Ok(Ty::DrawShader(*shader_ptr)),
             TyExprKind::ClosureDecl {return_ty_expr, params, return_ty} => {
                 // check the closure
-                let checked_return_ty = self.ty_check_ty_expr(return_ty_expr.as_ref().as_ref().unwrap()).unwrap_or(Ty::Void);
+                let checked_return_ty = if let Some(return_ty) = return_ty_expr.as_ref().as_ref(){
+                    self.ty_check_ty_expr(return_ty).unwrap_or(Ty::Void)
+                }
+                else{
+                     Ty::Void
+                };
                 *return_ty.borrow_mut() = Some(checked_return_ty);
                 for param in params {
                     self.ty_check_ty_expr(&param.ty_expr) ?;
@@ -107,12 +112,13 @@ impl<'a> TyChecker<'a> {
             ExprKind::Un {span, op, ref expr} => self.ty_check_un_expr(span, op, expr),
             ExprKind::PlainCall {
                 span,
-                //ident,
+                ident,
                 fn_node_ptr,
                 ref arg_exprs,
                 ref closure_site_index,
+                ref param_index,
                 ..
-            } => self.ty_check_plain_call_expr(span, arg_exprs, fn_node_ptr, closure_site_index),
+            } => self.ty_check_plain_call_expr(span, ident, arg_exprs, fn_node_ptr, closure_site_index, param_index),
             ExprKind::MethodCall {
                 span,
                 ident,
@@ -125,12 +131,12 @@ impl<'a> TyChecker<'a> {
                 ident,
                 ref arg_exprs,
             } => self.ty_check_builtin_call_expr(span, ident, arg_exprs),
-            ExprKind::ClosureCall {
+            /*ExprKind::ClosureCall {
                 span,
                 ident,
                 ref arg_exprs,
                 ref param_index,
-            } => self.ty_check_closure_call_expr(span, ident, arg_exprs, param_index),
+            } => self.ty_check_closure_call_expr(span, ident, arg_exprs, param_index),*/
             ExprKind::ClosureDef(index) => self.ty_check_closure_def(index),
             ExprKind::ConsCall {
                 span,
@@ -152,7 +158,8 @@ impl<'a> TyChecker<'a> {
                 span,
                 ref kind,
                 var_resolve,
-            } => self.ty_check_var_expr(span, kind, var_resolve),
+                ident,
+            } => self.ty_check_var_expr(span, kind, var_resolve, ident),
             ExprKind::StructCons {
                 struct_node_ptr,
                 span,
@@ -392,26 +399,95 @@ impl<'a> TyChecker<'a> {
         })
     }
     
-    fn ty_check_plain_call_expr(
+    /*
+    fn ty_check_closure_call_expr(
         &mut self,
         span: Span,
-        //ident: Ident,
+        ident: Ident,
         arg_exprs: &[Expr],
-        fn_node_ptr: FnNodePtr,
-        closure_site_index: &Cell<Option<usize>>,
+        outer_param_index: &Cell<Option<usize>>,
     ) -> Result<Ty, LiveError> {
-
+        
         for arg_expr in arg_exprs {
             self.ty_check_expr(arg_expr) ?;
         }
-
-        // alright so.
-        let fn_decl = self.shader_registry.all_fns.get(&fn_node_ptr).expect("fn ptr invalid");
+        match self.scopes.find_sym_on_scopes(ident, span) {
+            Some(scopesym)=> match &scopesym.kind{
+                ScopeSymKind::Closure{return_ty, params, param_index} => {
+                    let closure_args = self.check_params_against_args(span, &params, arg_exprs) ?;
+                    // error out
+                    if closure_args.len() > 0{
+                        return Err(LiveError {
+                            origin: live_error_origin!(),
+                            span,
+                            message: format!("Cannot pass closures to closures, please implement"),
+                        })
+                    }
+                    outer_param_index.set(Some(*param_index));
+                    return Ok(return_ty.clone())
+                }
+                _=>()
+            }
+            _ => ()
+        }
+        Err(LiveError {
+            origin: live_error_origin!(),
+            span,
+            message: format!("Closure call `{}` is not defined on", ident),
+        })
+    }
+    */
+    
+    fn ty_check_plain_call_expr(
+        &mut self,
+        span: Span,
+        ident: Option<Ident>,
+        arg_exprs: &[Expr],
+        fn_node_ptr: Option<FnNodePtr>,
+        closure_site_index: &Cell<Option<usize>>,
+        outer_param_index: &Cell<Option<usize>>,
+    ) -> Result<Ty, LiveError> {
         
-        self.check_call_args(span, fn_node_ptr, arg_exprs, &fn_decl, Some(closure_site_index)) ?;
+        for arg_expr in arg_exprs {
+            self.ty_check_expr(arg_expr) ?;
+        }
         
-        // lets return the right ty
-        return Ok(fn_decl.return_ty.borrow().clone().unwrap())
+        if let Some(ident) = ident{
+            match self.scopes.find_sym_on_scopes(ident, span) {
+                Some(scopesym)=> match &scopesym.kind{
+                    ScopeSymKind::Closure{return_ty, params, param_index} => {
+                        let closure_args = self.check_params_against_args(span, &params, arg_exprs) ?;
+                        // error out
+                        if closure_args.len() > 0{
+                            return Err(LiveError {
+                                origin: live_error_origin!(),
+                                span,
+                                message: format!("Cannot pass closures to closures, please implement"),
+                            })
+                        }
+                        outer_param_index.set(Some(*param_index));
+                        return Ok(return_ty.clone())
+                    }
+                    _=>()
+                }
+                _ => ()
+            }
+        }
+        
+        // alright so.it must be a plain call
+        if let Some(fn_node_ptr) = fn_node_ptr{
+            let fn_def = self.shader_registry.all_fns.get(&fn_node_ptr).expect("fn ptr invalid");
+            
+            self.check_call_args(span, fn_node_ptr, arg_exprs, &fn_def, Some(closure_site_index)) ?;
+            
+            // lets return the right ty
+            return Ok(fn_def.return_ty.borrow().clone().unwrap())
+        }
+        return Err(LiveError {
+            origin: live_error_origin!(),
+            span,
+            message: format!("Function not found {}", ident.unwrap()),
+        }) 
     }
     
     fn ty_check_method_call_expr(
@@ -476,43 +552,6 @@ impl<'a> TyChecker<'a> {
             origin: live_error_origin!(),
             span,
             message: format!("method `{}` is not defined on type `{}`", ident, ty),
-        })
-    }
-    
-    fn ty_check_closure_call_expr(
-        &mut self,
-        span: Span,
-        ident: Ident,
-        arg_exprs: &[Expr],
-        outer_param_index: &Cell<Option<usize>>,
-    ) -> Result<Ty, LiveError> {
-        
-        for arg_expr in arg_exprs {
-            self.ty_check_expr(arg_expr) ?;
-        }
-        match self.scopes.find_sym_on_scopes(ident, span) {
-            Some(scopesym)=> match &scopesym.kind{
-                ScopeSymKind::Closure{return_ty, params, param_index} => {
-                    let closure_args = self.check_params_against_args(span, &params, arg_exprs) ?;
-                    // error out
-                    if closure_args.len() > 0{
-                        return Err(LiveError {
-                            origin: live_error_origin!(),
-                            span,
-                            message: format!("Cannot pass closures to closures, please implement"),
-                        })
-                    }
-                    outer_param_index.set(Some(*param_index));
-                    return Ok(return_ty.clone())
-                }
-                _=>()
-            }
-            _ => ()
-        }
-        Err(LiveError {
-            origin: live_error_origin!(),
-            span,
-            message: format!("Closure call `{}` is not defined on", ident),
         })
     }
     
@@ -843,12 +882,43 @@ impl<'a> TyChecker<'a> {
         &mut self,
         span: Span,
         kind: &Cell<Option<VarKind >>,
-        var_resolve: VarResolve
+        var_resolve: VarResolve,
+        ident: Option<Ident>,
     ) -> Result<Ty, LiveError> {
         
+        if let Some(ident) = ident{
+            match self.scopes.find_sym_on_scopes(ident, span) {
+                Some(scopesym)=> {
+                    scopesym.referenced.set(true);
+                    match &scopesym.kind{
+                        ScopeSymKind::MutLocal => {
+                            kind.set(Some(VarKind::MutLocal{ident, shadow:scopesym.sym.shadow}));
+                            return Ok(scopesym.sym.ty.clone())
+                        }
+                        ScopeSymKind::Local => {
+                            kind.set(Some(VarKind::Local{ident, shadow:scopesym.sym.shadow}));
+                            return Ok(scopesym.sym.ty.clone())
+                        }
+                        ScopeSymKind::Closure{..}=>{
+                            // ok the thing is a closure..
+                            // except we dont know what kind of closure
+                            
+                            return Err(LiveError {
+                                origin: live_error_origin!(),
+                                span,
+                                message: format!("`{}` is a closure and cannot be used as a variable", ident),
+                            })
+                        }
+                    }
+                }
+                _=>()
+            }
+        }
         // use the suggestion
         match var_resolve {
             VarResolve::Const(const_node_ptr) => {
+                // scope values take precedence
+                
                 // ok we have a const, and we can fetch it,
                 // and it has a type
                 let const_decl = self.shader_registry.consts.get(&const_node_ptr).unwrap();
@@ -861,37 +931,19 @@ impl<'a> TyChecker<'a> {
                 kind.set(Some(VarKind::LiveValue(value_ptr)));
                 return Ok(ty_lit.to_ty());
             }
-            VarResolve::NotFound(ident) => {
-                 match self.scopes.find_sym_on_scopes(ident, span) {
-                    Some(scopesym)=> {
-                        scopesym.referenced.set(true);
-                        match &scopesym.kind{
-                            ScopeSymKind::MutLocal => {
-                                kind.set(Some(VarKind::MutLocal{ident, shadow:scopesym.sym.shadow}));
-                                return Ok(scopesym.sym.ty.clone())
-                            }
-                            ScopeSymKind::Local => {
-                                kind.set(Some(VarKind::Local{ident, shadow:scopesym.sym.shadow}));
-                                return Ok(scopesym.sym.ty.clone())
-                            }
-                            ScopeSymKind::Closure{..}=>{
-                                // ok the thing is a closure..
-                                // except we dont know what kind of closure
-                                
-                                return Err(LiveError {
-                                    origin: live_error_origin!(),
-                                    span,
-                                    message: format!("`{}` is a closure and cannot be used as a variable", ident),
-                                })
-                            }
-                        }
-                    }
-                    _=>()
-                }
+            VarResolve::Function(fn_ptr) => {
                 return Err(LiveError {
                     origin: live_error_origin!(),
                     span,
-                    message: format!("`{}` is not defined in this scope", ident),
+                    message: format!("`{}` implement using functions as closure args", ident.unwrap()),
+                })
+            }
+            VarResolve::NotFound => {
+                 
+                return Err(LiveError {
+                    origin: live_error_origin!(),
+                    span,
+                    message: format!("`{}` is not defined in this scope", ident.unwrap()),
                 })
             }
         }
@@ -903,6 +955,7 @@ impl<'a> TyChecker<'a> {
         span: Span,
         args: &Vec<(Ident, Expr)>,
     ) -> Result<Ty, LiveError> {
+
         let struct_decl = self.shader_registry.structs.get(&struct_node_ptr).unwrap();
         for (ident, expr) in args {
             self.ty_check_expr(expr) ?;

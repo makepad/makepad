@@ -104,10 +104,11 @@ pub struct FnDef {
     pub ident: Ident,
     
     pub self_kind: Option<FnSelfKind>,
+    pub has_return: Cell<bool>,
     
     pub callees: RefCell<Option<BTreeSet<FnNodePtr >> >,
     pub builtin_deps: RefCell<Option<BTreeSet<Ident >> >,
-    pub closure_deps: RefCell<Option<BTreeSet<Ident >> >,
+   // pub closure_deps: RefCell<Option<BTreeSet<Ident >> >,
 
     // the const table (per function)
     pub const_table: RefCell<Option<Vec<f32 >> >,
@@ -324,21 +325,18 @@ pub enum ExprKind {
         closure_site_index: Cell<Option<usize>>,
         arg_exprs: Vec<Expr>,
     },
-    PlainCall {
+    PlainCall { // not very pretty but otherwise closures cannot override a normal fn
+        // possible solution is to capture it in a refcell sub-enum.
         span: Span,
-        fn_node_ptr: FnNodePtr,
-        closure_site_index: Cell<Option<usize>>,
+        fn_node_ptr: Option<FnNodePtr>,
+        ident: Option<Ident>,
+        param_index: Cell<Option<usize>>, // used by the closure case
+        closure_site_index: Cell<Option<usize>>, // used by the plain fn case
         arg_exprs: Vec<Expr>,
     },
     BuiltinCall {
         span: Span,
         ident: Ident,
-        arg_exprs: Vec<Expr>,
-    },
-    ClosureCall{
-        span: Span,
-        ident: Ident,
-        param_index: Cell<Option<usize>>,
         arg_exprs: Vec<Expr>,
     },
     ClosureDef(ClosureDefIndex),
@@ -354,6 +352,7 @@ pub enum ExprKind {
     },
     Var {
         span: Span,
+        ident: Option<Ident>,
         kind: Cell<Option<VarKind >>,
         var_resolve: VarResolve,
         //ident_path: IdentPath,
@@ -364,10 +363,16 @@ pub enum ExprKind {
     },
 }
 
+pub enum PlainCallType{
+    Plain{
+        
+    }    
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum VarResolve {
-    NotFound(Ident),
+    NotFound,
+    Function(FnNodePtr),
     Const(ConstNodePtr),
     LiveValue(ValueNodePtr, TyLit)
 }
@@ -635,7 +640,7 @@ impl FnDef {
         *self.struct_refs.borrow_mut() = Some(BTreeSet::new());
         *self.callees.borrow_mut() = Some(BTreeSet::new());
         *self.builtin_deps.borrow_mut() = Some(BTreeSet::new());
-        *self.closure_deps.borrow_mut() = Some(BTreeSet::new());
+        //*self.closure_deps.borrow_mut() = Some(BTreeSet::new());
         *self.constructor_fn_deps.borrow_mut() = Some(BTreeSet::new());
         *self.draw_shader_refs.borrow_mut() = Some(BTreeSet::new());
         *self.const_refs.borrow_mut() = Some(BTreeSet::new());
