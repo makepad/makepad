@@ -5,7 +5,7 @@ use {
         document::Document,
         file_tree::{self, FileTree},
         list_logic::ItemId,
-        protocol::{self, Request, Response, ResponseOrNotification},
+        protocol::{self, Notification, Request, Response, ResponseOrNotification},
         server::{Connection, Server},
         session::{Session, SessionId},
         splitter::Splitter,
@@ -98,6 +98,7 @@ impl AppInner {
                             response_or_notification_sender
                                 .send(ResponseOrNotification::Notification(notification))
                                 .unwrap();
+                            Cx::post_signal(response_or_notification_signal, StatusId::default());
                         }
                     })),
                     response_or_notification_signal,
@@ -309,51 +310,65 @@ impl AppInner {
                                 state.next_item_id += 1;
                                 let session_id = SessionId(state.next_session_id);
                                 state.next_session_id += 1;
-                                match state.panels_by_panel_id.get_mut(&panel_id).unwrap() {
-                                    Panel::TabBar { item_ids } => item_ids.push(item_id),
-                                    _ => panic!(),
-                                }
+                                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                                let (revision, text) = response.unwrap();
+                                state
+                                    .documents_by_path
+                                    .insert(path.clone(), Document::new(revision, text));
+                                state.sessions_by_session_id.insert(
+                                    session_id,
+                                    Session::new(&mut state.documents_by_path, session_id, path),
+                                );
                                 state.tabs_by_item_id.insert(
                                     item_id,
                                     Tab {
                                         panel_id,
-                                        name: path
-                                            .file_name()
-                                            .unwrap()
-                                            .to_string_lossy()
-                                            .into_owned(),
+                                        name,
                                         kind: TabKind::CodeEditor { session_id },
                                     },
                                 );
-                                state
-                                    .sessions_by_session_id
-                                    .insert(session_id, Session::new(path.clone()));
-                                let (revision, text) = response.unwrap();
-                                state
-                                    .documents_by_path
-                                    .insert(path, Document::new(revision, text));
-                                self.dock
-                                    .tab_bar_mut(cx, panel_id)
-                                    .set_selected_item_id(cx, Some(item_id));
+                                match state.panels_by_panel_id.get_mut(&panel_id).unwrap() {
+                                    Panel::TabBar { item_ids } => item_ids.push(item_id),
+                                    _ => panic!(),
+                                }
                                 let code_editor = self
                                     .code_editors_by_panel_id
                                     .entry(panel_id)
                                     .or_insert_with(|| CodeEditor::new(cx));
                                 code_editor.set_session_id(cx, session_id);
+                                self.dock
+                                    .tab_bar_mut(cx, panel_id)
+                                    .set_selected_item_id(cx, Some(item_id));
                             }
                             _ => panic!(),
                         }
                     }
                     Response::ApplyDelta(response) => match request {
-                        Request::ApplyDelta(_path, _revision, _delta) => {
+                        Request::ApplyDelta(path, _, _) => {
                             let _ = response.unwrap();
-                            unimplemented!()
+                            let document = state.documents_by_path.get_mut(&path).unwrap();
+                            let mut apply_delta_requests = Vec::new();
+                            document.finish_applying_local_delta(&mut |revision, delta| {
+                                apply_delta_requests.push((revision, delta));
+                            });
+                            for (revision, delta) in apply_delta_requests {
+                                self.send_request(Request::ApplyDelta(path.clone(), revision, delta));
+                            }
                         }
                         _ => panic!(),
                     },
                 }
             }
-            ResponseOrNotification::Notification(_) => unimplemented!(),
+            ResponseOrNotification::Notification(notification) => match notification {
+                Notification::DeltaWasApplied(path, delta) => {
+                    let document = state.documents_by_path.get_mut(&path).unwrap();
+                    document.apply_remote_delta(&mut state.sessions_by_session_id, delta);
+                    for code_editor in self.code_editors_by_panel_id.values_mut() {
+                        // TODO: Only redraw code editor if necessary
+                        code_editor.redraw(cx);
+                    }
+                }
+            },
         }
     }
 }
