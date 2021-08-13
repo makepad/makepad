@@ -413,20 +413,22 @@ impl<'a> ExprGenerator<'a> {
                 ExprKind::PlainCall {
                     span,
                     fn_node_ptr,
+                    ident,
                     ref arg_exprs,
                     ref closure_site_index,
-                } => self.generate_plain_call_expr(span, fn_node_ptr, arg_exprs, closure_site_index),
+                    ref param_index,
+                } => self.generate_plain_call_expr(span, ident, fn_node_ptr, arg_exprs, closure_site_index, param_index),
                 ExprKind::BuiltinCall {
                     span,
                     ident,
                     ref arg_exprs,
                 } => self.generate_builtin_call_expr(span, ident, arg_exprs),
-                ExprKind::ClosureCall {
+                /*ExprKind::ClosureCall {
                     span,
                     ident,
                     ref arg_exprs,
                     ref param_index,
-                } => self.generate_closure_call_expr(span, arg_exprs, param_index),
+                } => self.generate_closure_call_expr(span, arg_exprs, param_index),*/
                 ExprKind::ClosureDef(_) => (),
                 ExprKind::ConsCall {
                     span,
@@ -581,11 +583,6 @@ impl<'a> ExprGenerator<'a> {
         }
     }
     
-    fn generate_plain_call_expr(&mut self, _span: Span, fn_node_ptr: FnNodePtr, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>) {
-        // lets create a fn name for this thing.
-        let fn_def = self.shader_registry.all_fns.get(&fn_node_ptr).unwrap();
-        self.generate_call_body(_span, fn_def, arg_exprs, closure_site_index);
-    }
     
     fn generate_call_body(&mut self, _span: Span, fn_def: &FnDef, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>) {
         // lets create a fn name for this thing.
@@ -593,6 +590,7 @@ impl<'a> ExprGenerator<'a> {
             // ok so.. we have closure args. this means we have a callsite
             let call_fn = self.fn_def.unwrap();
             let closure_sites = &call_fn.closure_sites.borrow();
+
             let closure_site = &closure_sites.as_ref().unwrap()[closure_site_index];
             // ok our function name is different now:
             
@@ -702,6 +700,19 @@ impl<'a> ExprGenerator<'a> {
         
         write!(self.string, ")").unwrap();
     }
+    
+    
+    fn generate_plain_call_expr(&mut self, _span: Span, ident: Option<Ident>, fn_node_ptr: Option<FnNodePtr>, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>, param_index: &Cell<Option<usize >>) {
+        // lets create a fn name for this thing.
+        if param_index.get().is_some(){ // its a closure
+            self.generate_closure_call_expr(_span, arg_exprs, param_index);
+        }
+        else{
+            let fn_def = self.shader_registry.all_fns.get(&fn_node_ptr.unwrap()).unwrap();
+            self.generate_call_body(_span, fn_def, arg_exprs, closure_site_index);
+        }
+    }
+    
     
     fn generate_closure_call_expr(&mut self, _span: Span, arg_exprs: &[Expr], param_index: &Cell<Option<usize >>) {
         

@@ -52,20 +52,17 @@ impl<'a> DepAnalyser<'a> {
                 span,
                 //dent,
                 ref arg_exprs,
+                ref param_index,
                 fn_node_ptr,
                 ..
-            } => self.dep_analyse_plain_call_expr(span, arg_exprs, fn_node_ptr),
+            } => if param_index.get().is_none() {
+                self.dep_analyse_plain_call_expr(span, arg_exprs, fn_node_ptr.unwrap())
+            },
             ExprKind::BuiltinCall {
                 span,
                 ident,
                 ref arg_exprs,
             } => self.dep_analyse_builtin_call_expr(span, ident, arg_exprs),
-            ExprKind::ClosureCall {
-                span,
-                ident,
-                ref arg_exprs,
-                ..
-            } => self.dep_analyse_closure_call_expr(span, ident, arg_exprs),
             ExprKind::ClosureDef(_) => (),
             ExprKind::ConsCall {
                 span,
@@ -148,45 +145,6 @@ impl<'a> DepAnalyser<'a> {
         }
     }
     
-    /*
-    fn dep_analyse_static_call_expr(
-        &mut self,
-        span: Span,
-        method_ident: Ident,
-        arg_exprs: &[Expr],
-        struct_node_ptr: StructNodePtr,
-    ) {
-        match arg_exprs[0].ty.borrow().as_ref().unwrap() {
-            Ty::Struct(struct_ptr) => {
-                // this is a method call.
-                for arg_expr in arg_exprs {
-                    self.dep_analyse_expr(arg_expr);
-                }
-                panic!("IMPL")
-            }
-            _ => panic!(),
-        }
-    }*/
-    
-    fn dep_analyse_closure_call_expr(
-        &mut self,
-        span: Span,
-        ident: Ident,
-        arg_exprs: &[Expr],
-    ) {
-        for arg_expr in arg_exprs {
-            self.dep_analyse_expr(arg_expr);
-        }
-        // ok so this must be a closure call.
-        
-        self.fn_def
-            .closure_deps
-            .borrow_mut()
-            .as_mut()
-            .unwrap()
-            .insert(ident);
-    }
-    
     fn dep_analyse_builtin_call_expr(
         &mut self,
         span: Span,
@@ -210,7 +168,8 @@ impl<'a> DepAnalyser<'a> {
         span: Span,
         //ident: Ident,
         arg_exprs: &[Expr],
-        fn_node_ptr: FnNodePtr
+        fn_node_ptr: FnNodePtr,
+        
     ) {
         //let ident = ident_path.get_single().expect("IMPL");
         for arg_expr in arg_exprs {
@@ -218,26 +177,6 @@ impl<'a> DepAnalyser<'a> {
         }
         let mut set = self.fn_def.callees.borrow_mut();
         set.as_mut().unwrap().insert(fn_node_ptr);
-        /*
-        match self.env.find_sym(ident, span).unwrap() {
-            Sym::Builtin => {
-                self.decl
-                    .builtin_deps
-                    .borrow_mut()
-                    .as_mut()
-                    .unwrap()
-                    .insert(ident);
-            }
-            Sym::Fn => {
-                self.decl
-                    .callees
-                    .borrow_mut()
-                    .as_mut()
-                    .unwrap()
-                    .insert(FnCall::Call{ident});
-            }
-            _ => panic!(),
-        }*/
     }
     
     fn dep_analyse_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident) {
@@ -310,54 +249,8 @@ impl<'a> DepAnalyser<'a> {
                 }
             },
         };
-        /*
-        match kind.get().unwrap() {
-            VarKind::Geometry => {
-                self.decl
-                    .geometry_deps
-                    .borrow_mut()
-                    .as_mut()
-                    .unwrap()
-                    .insert(ident_path.get_single().expect("unexpected"));
-            }
-            VarKind::Instance => {
-                self.decl
-                    .instance_deps
-                    .borrow_mut()
-                    .as_mut()
-                    .unwrap()
-                    .insert(ident_path.get_single().expect("unexpected"));
-            }
-            VarKind::Texture => {
-                self.decl.has_texture_deps.set(Some(true));
-            }
-            VarKind::Uniform(block) => {
-                self.decl
-                    .uniform_block_deps
-                    .borrow_mut()
-                    .as_mut()
-                    .unwrap()
-                    .insert(block);
-            }
-            VarKind::Varying => {
-                self.decl.has_varying_deps.set(Some(true));
-            }
-            VarKind::Live(_) => {
-                self.decl
-                    .uniform_block_deps
-                    .borrow_mut()
-                    .as_mut()
-                    .unwrap()
-                    .insert(Ident(id!(live)));
-                
-            }
-            _ => {}
-        }*/
+        
     }
-    /*
-    fn dep_analyse_live_id_expr(&mut self, _span: Span, _kind: &Cell<Option<VarKind>>, _id:LiveItemId, _ident: Ident) {
 
-    }
-*/
     fn dep_analyse_lit_expr(&mut self, _span: Span, _lit: Lit) {}
 }
