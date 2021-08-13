@@ -91,11 +91,15 @@ impl Connection {
         match documents_by_path_guard.get(&path) {
             Some(document) => {
                 let mut document_guard = document.lock().unwrap();
-                document_guard
-                    .notification_senders_by_connection_id
-                    .insert(self.connection_id, self.notification_sender.clone());
                 let revision = document_guard.revision;
                 let text = document_guard.text.clone();
+                document_guard.sessions_by_connection_id.insert(
+                    self.connection_id,
+                    Session {
+                        revision,
+                        notification_sender: self.notification_sender.clone(),
+                    },
+                );
                 drop(document_guard);
                 drop(documents_by_path_guard);
                 Ok((revision, text))
@@ -107,15 +111,20 @@ impl Connection {
                     .map(|line| line.chars().collect::<Vec<_>>())
                     .collect::<Vec<_>>()
                     .into();
-                let mut notification_senders_by_connection_id = HashMap::new();
-                notification_senders_by_connection_id
-                    .insert(self.connection_id, self.notification_sender.clone());
+                let mut sessions_by_connection_id = HashMap::new();
+                sessions_by_connection_id.insert(
+                    self.connection_id,
+                    Session {
+                        revision: 0,
+                        notification_sender: self.notification_sender.clone(),
+                    },
+                );
                 documents_by_path_guard.insert(
                     path,
                     Mutex::new(Document {
                         revision: 0,
                         text: text.clone(),
-                        notification_senders_by_connection_id,
+                        sessions_by_connection_id,
                     }),
                 );
                 drop(documents_by_path_guard);
@@ -124,8 +133,21 @@ impl Connection {
         }
     }
 
-    fn apply_delta(&self, _path: PathBuf, _revision: usize, _delta: Delta) -> Result<(), Error> {
-        println!("DELTA APPLIED BY CONNECTION {:?}", self.connection_id);
+    fn apply_delta(&self, path: PathBuf, _revision: usize, delta: Delta) -> Result<(), Error> {
+        let mut documents_by_path_guard = self.shared.documents_by_path.write().unwrap();
+        let document = documents_by_path_guard.get_mut(&path).unwrap();
+        let document_guard = document.lock().unwrap();
+        // TODO: Transform delta against outstanding deltas
+        for (connection_id, session) in &document_guard.sessions_by_connection_id {
+            if *connection_id == self.connection_id {
+                continue;
+            }
+            session
+                .notification_sender
+                .send_notification(Notification::DeltaWasApplied(path.clone(), delta.clone()))
+        }
+        drop(document_guard);
+        drop(documents_by_path_guard);
         Ok(())
     }
 }
@@ -133,15 +155,15 @@ impl Connection {
 pub trait NotificationSender: Send {
     fn box_clone(&self) -> Box<dyn NotificationSender>;
 
-    fn send_notification(&mut self, notification: Notification);
+    fn send_notification(&self, notification: Notification);
 }
 
-impl<F: Clone + FnMut(Notification) + Send + 'static> NotificationSender for F {
+impl<F: Clone + Fn(Notification) + Send + 'static> NotificationSender for F {
     fn box_clone(&self) -> Box<dyn NotificationSender> {
         Box::new(self.clone())
     }
 
-    fn send_notification(&mut self, notification: Notification) {
+    fn send_notification(&self, notification: Notification) {
         self(notification)
     }
 }
@@ -172,5 +194,11 @@ struct ConnectionId(usize);
 struct Document {
     revision: usize,
     text: Text,
-    notification_senders_by_connection_id: HashMap<ConnectionId, Box<dyn NotificationSender>>,
+    sessions_by_connection_id: HashMap<ConnectionId, Session>,
+}
+
+#[derive(Debug)]
+struct Session {
+    revision: usize,
+    notification_sender: Box<dyn NotificationSender>,
 }

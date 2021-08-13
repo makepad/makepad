@@ -37,7 +37,9 @@ pub struct DirectoryEntry {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct Notification {}
+pub enum Notification {
+    DeltaWasApplied(PathBuf, Delta),
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub enum Error {
