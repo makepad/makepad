@@ -8,6 +8,7 @@ use std::fmt::Write;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 use makepad_live_parser::PrettyPrintedF32;
@@ -56,10 +57,12 @@ pub struct DrawShaderDef {
     pub all_fns: RefCell<Vec<FnNodePtr>>,
     pub vertex_fns: RefCell<Vec<FnNodePtr>>,
     pub pixel_fns: RefCell<Vec<FnNodePtr>>,
+
     // we have a vertex_structs
     pub all_structs: RefCell<Vec<StructNodePtr>>,
     pub vertex_structs: RefCell<Vec<StructNodePtr>>,
     pub pixel_structs: RefCell<Vec<StructNodePtr>>,
+
 }
 
 #[derive(Clone, Debug)]
@@ -117,7 +120,7 @@ pub struct FnDef {
     // which props we reffed on self
     pub draw_shader_refs: RefCell<Option<BTreeSet<Ident >> >,
     pub const_refs: RefCell<Option<BTreeSet<ConstNodePtr >> >,
-    pub live_refs: RefCell<Option<BTreeSet<ValueNodePtr >> >,
+    pub live_refs: RefCell<Option<BTreeMap<ValueNodePtr, Ty>> >,
     pub struct_refs: RefCell<Option<BTreeSet<StructNodePtr >> >,
     pub constructor_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>) >> >,
     
@@ -644,7 +647,7 @@ impl FnDef {
         *self.constructor_fn_deps.borrow_mut() = Some(BTreeSet::new());
         *self.draw_shader_refs.borrow_mut() = Some(BTreeSet::new());
         *self.const_refs.borrow_mut() = Some(BTreeSet::new());
-        *self.live_refs.borrow_mut() = Some(BTreeSet::new());
+        *self.live_refs.borrow_mut() = Some(BTreeMap::new());
         *self.const_table.borrow_mut() = Some(Vec::new());
         *self.const_table_spans.borrow_mut() = Some(Vec::new());
     }
