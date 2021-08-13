@@ -362,6 +362,10 @@ impl CodeEditor {
         self.view.redraw_view(cx);
     }
 
+    pub fn redraw(&mut self, cx: &mut Cx) {
+        self.view.redraw_view(cx);
+    }
+
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
@@ -436,9 +440,7 @@ impl CodeEditor {
                     documents_by_path,
                     Text::from(vec![vec![], vec![]]),
                     &mut |path, revision, delta| {
-                        dispatch_action(Action::ApplyDeltaRequestWasPosted(
-                            path, revision, delta,
-                        ));
+                        dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
                     },
                 );
                 self.view.redraw_view(cx);
@@ -461,9 +463,7 @@ impl CodeEditor {
                         .collect::<Vec<_>>()
                         .into(),
                     &mut |path, revision, delta| {
-                        dispatch_action(Action::ApplyDeltaRequestWasPosted(
-                            path, revision, delta,
-                        ));
+                        dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
                     },
                 );
                 self.view.redraw_view(cx);
