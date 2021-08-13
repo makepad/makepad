@@ -816,3 +816,251 @@ impl<'a> ExprGenerator<'a> {
         self.backend_writer.write_ty_lit(&mut self.string, ty_lit);
     }
 }
+
+pub struct FnDefGenerator<'a> {
+    pub fn_def: &'a FnDef,
+    pub shader_registry: &'a ShaderRegistry,
+    pub const_table_offset: Option<usize>,
+    pub string: &'a mut String,
+    pub backend_writer: &'a dyn BackendWriter
+}
+
+impl<'a> FnDefGenerator<'a> {
+    pub fn generate_fn_def(&mut self) {
+        
+        self.backend_writer.write_var_decl(
+            &mut self.string,
+            "",
+            false,
+            false,
+            &DisplayFnName(self.fn_def.fn_node_ptr, self.fn_def.ident), // here we must expand IdentPath to something
+            self.fn_def.return_ty.borrow().as_ref().unwrap()
+        );
+        write!(self.string, "(").unwrap();
+        let mut sep = "";
+        for param in &self.fn_def.params {
+            if !param.shadow.get().is_none() {
+                if self.backend_writer.write_var_decl(
+                    &mut self.string,
+                    sep,
+                    param.is_inout,
+                    false,
+                    &DisplayVarName(param.ident, param.shadow.get().unwrap()),
+                    param.ty_expr.ty.borrow().as_ref().unwrap(),
+                ) {
+                    sep = ", ";
+                }
+            }
+        }
+        write!(self.string, ") ").unwrap();
+        self.generate_block(&self.fn_def.block);
+        writeln!(self.string).unwrap();
+        //self.visited.insert(self.decl.ident_path);
+    }
+    
+    fn generate_block(&mut self, block: &Block) {
+        BlockGenerator {
+            shader_registry: self.shader_registry,
+            closure_site_info: None,
+            //env: self.env,
+            fn_def: self.fn_def,
+            backend_writer: self.backend_writer,
+            const_table_offset: self.const_table_offset,
+            indent_level: 0,
+            string: self.string,
+        }
+        .generate_block(block)
+    }
+}
+
+
+pub struct FnDefWithClosureArgsGenerator<'a> {
+    pub closure_site_info: ClosureSiteInfo<'a>,
+    pub fn_def: &'a FnDef,
+    pub call_def: &'a FnDef,
+    pub shader_registry: &'a ShaderRegistry,
+    pub const_table_offset: Option<usize>,
+    pub string: &'a mut String,
+    pub backend_writer: &'a dyn BackendWriter
+}
+
+impl<'a> FnDefWithClosureArgsGenerator<'a> {
+    pub fn generate_fn_def_with_closure_args(&mut self) {
+        
+        self.backend_writer.write_var_decl(
+            &mut self.string,
+            "",
+            false,
+            false,
+            &DisplayFnNameWithClosureArgs(
+                self.closure_site_info.site_index,
+                self.call_def.fn_node_ptr,
+                self.fn_def.ident
+            ), // here we must expand IdentPath to something
+            self.fn_def.return_ty.borrow().as_ref().unwrap()
+        );
+        write!(self.string, "(").unwrap();
+        let mut sep = "";
+        for param in &self.fn_def.params {
+            if !param.shadow.get().is_none() {
+                if self.backend_writer.write_var_decl(
+                    &mut self.string,
+                    sep,
+                    param.is_inout,
+                    false,
+                    &DisplayVarName(param.ident, param.shadow.get().unwrap()),
+                    param.ty_expr.ty.borrow().as_ref().unwrap(),
+                ) {
+                    sep = ", ";
+                }
+            }
+        }
+        // now we iterate over the closures in our site,
+        // and we need to merge the set of closed over args.
+        for sym in &self.closure_site_info.closure_site.all_closed_over {
+            if self.backend_writer.write_var_decl(
+                &mut self.string,
+                sep,
+                false,
+                false,
+                &DisplayClosedOverArg(sym.ident, sym.shadow),
+                &sym.ty,
+            ) {
+                sep = ", ";
+            }
+        }
+        
+        write!(self.string, ") ").unwrap();
+        // alright so here the block is generated.. however
+        // we need to know the names and the closed-over-args passthrough
+        self.generate_block(&self.fn_def.block);
+        
+        
+        writeln!(self.string).unwrap();
+        //self.visited.insert(self.decl.ident_path);
+    }
+    
+    fn generate_block(&mut self, block: &Block) {
+        BlockGenerator {
+            shader_registry: self.shader_registry,
+            closure_site_info: Some(self.closure_site_info.clone()),
+            //env: self.env,
+            fn_def: self.fn_def,
+            backend_writer: self.backend_writer,
+            const_table_offset: self.const_table_offset,
+            indent_level: 0,
+            string: self.string,
+        }
+        .generate_block(block)
+    }
+}
+
+pub struct ClosureDefGenerator<'a> {
+    pub closure_def: &'a ClosureDef,
+    pub closure_site_arg: ClosureSiteArg,
+    pub fn_def: &'a FnDef,
+    pub call_def: &'a FnDef,
+    pub shader_registry: &'a ShaderRegistry,
+    pub const_table_offset: Option<usize>,
+    pub string: &'a mut String,
+    pub backend_writer: &'a dyn BackendWriter
+}
+
+impl<'a> ClosureDefGenerator<'a> {
+    pub fn generate_fn_def(&mut self) {
+        
+        let fn_param = &self.fn_def.params[self.closure_site_arg.param_index];
+        
+        let mut sep = "";
+        
+        if let TyExprKind::ClosureDecl {params, return_ty, ..} = &fn_param.ty_expr.kind {
+            
+            self.backend_writer.write_var_decl(
+                &mut self.string,
+                "",
+                false,
+                false,
+                &DisplayClosureName(self.call_def.fn_node_ptr, self.closure_site_arg.closure_def_index), // here we must expand IdentPath to something
+                return_ty.borrow().as_ref().unwrap(),
+            );
+            write!(self.string, "(").unwrap();
+            
+            // ok we have now params and names
+            for (param_index, param) in params.iter().enumerate() {
+                // lets fetch the name of this thing
+                let closure_param = &self.closure_def.params[param_index];
+                let shadow = closure_param.shadow.get().unwrap();
+                if self.backend_writer.write_var_decl(
+                    &mut self.string,
+                    sep,
+                    param.is_inout,
+                    false,
+                    &DisplayVarName(closure_param.ident, shadow),
+                    param.ty_expr.ty.borrow().as_ref().unwrap(),
+                ) {
+                    sep = ", ";
+                }
+            }
+        }
+        else {
+            panic!()
+        }
+        
+        for sym in self.closure_def.closed_over_syms.borrow().as_ref().unwrap() {
+            if self.backend_writer.write_var_decl(
+                &mut self.string,
+                sep,
+                false,
+                false,
+                &DisplayVarName(sym.ident, sym.shadow),
+                &sym.ty,
+            ) {
+                sep = ", ";
+            }
+        }
+        writeln!(self.string, ") {{").unwrap();
+        
+        match &self.closure_def.kind {
+            ClosureDefKind::Expr(expr) => {
+                write!(self.string, "    return ").unwrap();
+                self.generate_expr(expr);
+                writeln!(self.string, ";").unwrap();
+                writeln!(self.string, "}}").unwrap();
+            }
+            ClosureDefKind::Block(block) => {
+                self.generate_block(block);
+                writeln!(self.string).unwrap();
+            }
+        }
+        //self.visited.insert(self.decl.ident_path);
+    }
+    
+    fn generate_block(&mut self, block: &Block) {
+        BlockGenerator {
+            shader_registry: self.shader_registry,
+            closure_site_info: None,
+            //env: self.env,
+            fn_def: self.fn_def,
+            backend_writer: self.backend_writer,
+            const_table_offset: self.const_table_offset,
+            indent_level: 0,
+            string: self.string,
+        }
+        .generate_block(block)
+    }
+    
+    
+    fn generate_expr(&mut self, expr: &Expr) {
+        ExprGenerator {
+            shader_registry: self.shader_registry,
+            closure_site_info: None,
+            //env: self.env,
+            fn_def: Some(self.fn_def),
+            backend_writer: self.backend_writer,
+            const_table_offset: self.const_table_offset,
+            string: self.string,
+        }
+        .generate_expr(expr)
+    }
+}
+

@@ -227,7 +227,6 @@ impl LiveRegistry {
         
         let mut dep_graph_set = HashSet::new();
         
-        // lets emit all our and check our imports
         for (_, nodes) in document.nodes.iter().enumerate() {
             for node in nodes {
                 match node.value {
@@ -253,7 +252,6 @@ impl LiveRegistry {
         }
         self.dep_graph.insert(own_crate_module, dep_graph_set);
         
-        // move these on there
         let live_file = LiveFile {
             crate_module: own_crate_module,
             file: file.to_string(),
@@ -261,7 +259,7 @@ impl LiveRegistry {
             document
         };
         self.crate_module_to_file_id.insert(own_crate_module, file_id);
-        // only insert the file id if it parsed
+
         if is_new_file_id {
             self.file_ids.insert(file.to_string(), file_id);
             self.live_files.push(live_file);
