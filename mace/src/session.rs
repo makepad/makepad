@@ -103,7 +103,12 @@ impl Session {
         self.update_selections_and_carets();
     }
 
-    pub fn insert_text(&mut self, documents_by_path: &mut HashMap<PathBuf, Document>, text: Text) {
+    pub fn insert_text(
+        &mut self,
+        documents_by_path: &mut HashMap<PathBuf, Document>,
+        text: Text,
+        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
+    ) {
         let document = documents_by_path.get_mut(&self.path).unwrap();
         let mut builder = DeltaBuilder::new();
         for span in self.selections.spans() {
@@ -126,10 +131,14 @@ impl Session {
         }
         let delta_1 = builder.build();
         let (_, delta_1) = delta_0.clone().transform(delta_1);
-        self.apply_delta(document, delta_0.compose(delta_1));
+        self.apply_delta(document, delta_0.compose(delta_1), post_apply_delta_request);
     }
 
-    pub fn insert_backspace(&mut self, documents_by_path: &mut HashMap<PathBuf, Document>) {
+    pub fn insert_backspace(
+        &mut self,
+        documents_by_path: &mut HashMap<PathBuf, Document>,
+        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
+    ) {
         let document = documents_by_path.get_mut(&self.path).unwrap();
         let mut builder = DeltaBuilder::new();
         for span in self.selections.spans() {
@@ -164,12 +173,20 @@ impl Session {
         }
         let delta_1 = builder.build();
         let (_, delta_1) = delta_0.clone().transform(delta_1);
-        self.apply_delta(document, delta_0.compose(delta_1));
+        self.apply_delta(document, delta_0.compose(delta_1), post_apply_delta_request);
     }
 
-    fn apply_delta(&mut self, document: &mut Document, delta: Delta) {
+    fn apply_delta(
+        &mut self,
+        document: &mut Document,
+        delta: Delta,
+        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
+    ) {
         self.cursors.apply_delta(&delta);
-        document.apply_delta(delta);
+        document.apply_delta(delta, {
+            let path = &self.path;
+            &mut move |revision, delta| post_apply_delta_request(path.clone(), revision, delta)
+        });
         self.update_selections_and_carets();
     }
 
