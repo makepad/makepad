@@ -74,7 +74,7 @@ fn expand() {
             r1: [1, 2, 3]
             o1: {x: 1, 1.0: 2}
             C2: Component {
-                vdef1 bla ::bla ::bla "SA:[local], EA:[local], pa:[local], pb:[local], pc:[local], pd:[local], pe:[local], pf:[local], f1:[local], r1:[local], o1:[local]"
+                vdef1:bla ::bla ::bla
                 vdef2 pa: float "SA:[local], EA:[local], pa:[local], pb:[local], pc:[local], pd:[local], pe:[local], pf:[local], f1:[local], r1:[local], o1:[local], vdef1:[local]"
                 pa: 1.0
                 a1: [1, 2, 3]
@@ -108,7 +108,7 @@ fn expand() {
     
     let file_2_check = r#"
         CB: NodePtr {file: 1, level: 1, index: 10} {
-            vdef1 bla ::bla ::bla "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9]"
+            vdef1:bla ::bla ::bla
             vdef2 pa: float "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9], vdef1:[F:1 L:2 I:7]"
             pa: 2.0
             a1: [1, 2, 3]
@@ -122,7 +122,7 @@ fn expand() {
             fn tst(a1) {let x = 1} "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
         }
         CC: NodePtr {file: 2, level: 0, index: 0} {
-            vdef1 bla ::bla ::bla "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9]"
+            vdef1:bla ::bla ::bla 
             vdef2 pa: float "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9], vdef1:[F:1 L:2 I:7]"
             pa: 2.0
             a1: [1, 2, 3]
@@ -147,7 +147,7 @@ fn expand() {
     
     let file_3_check = r#"
         CE: NodePtr {file: 2, level: 0, index: 1} {
-            vdef1 bla ::bla ::bla "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9]"
+            vdef1:bla ::bla ::bla 
             vdef2 pa: float "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9], vdef1:[F:1 L:2 I:7]"
             pa: 2.0
             a1: [1, 2, 3]
@@ -164,13 +164,13 @@ fn expand() {
     "#;
     
     let error_check = r#"
-        file1: 9 16 - Cannot find item on scope: id1
-        file1: 13 17 - Cannot find item on scope: x
-        file2: 12 28 - Cannot find item on scope: h1
-        file2: 12 22 - Cannot inherit with different node type c1.x4.p1
-        file2: 14 12 - Cannot find class SA.B
-        file2: 15 26 - Cannot inherit with different node type c1.x4.p1
-        file3: 5 12 - Cannot find item on scope: ERR
+        file1: 9 16 - Cannot find item on scope: id1 - origin: render/live_parser/src/liveregistry.rs:652 
+        file1: 13 17 - Cannot find item on scope: x - origin: render/live_parser/src/liveregistry.rs:652 
+        file2: 12 28 - Cannot find item on scope: h1 - origin: render/live_parser/src/liveregistry.rs:652 
+        file2: 12 22 - Cannot inherit with different node type c1.x4.p1 - origin: render/live_parser/src/livedocument.rs:232 
+        file2: 14 12 - Cannot find class SA.B - origin: render/live_parser/src/liveregistry.rs:612 
+        file2: 15 26 - Cannot inherit with different node type c1.x4.p1 - origin: render/live_parser/src/livedocument.rs:232 
+        file3: 5 12 - Cannot find item on scope: ERR - origin: render/live_parser/src/liveregistry.rs:652 
     "#;
     
     let sources = [(id_check!(file3), file_3, file_3_check), (id_check!(file1), file_1, file_1_check), (id_check!(file2), file_2, file_2_check)];
@@ -193,6 +193,7 @@ fn expand() {
         println!("{}", b);
         a.retain( | c | c != ' ' && c != '\n');
         b.retain( | c | c != ' ' && c != '\n');
+        
         return a == b
     }
     
