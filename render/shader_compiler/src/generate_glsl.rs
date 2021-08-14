@@ -881,127 +881,88 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
         ident: &dyn fmt::Display,
         ty: &Ty,
     ) -> bool {
+        fn prefix(string: &mut String, sep: &'static str, is_inout:bool){
+            write!(string, "{}", sep).unwrap();
+            if is_inout {
+                write!(string, "inout ").unwrap();
+            }
+        }
         match *ty {
             Ty::Void => {
                 write!(string, "{}void {}", sep, ident).unwrap();
             }
             Ty::Bool => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_ty_lit(string, TyLit::Bool);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Int => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_ty_lit(string, TyLit::Int);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Float => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_ty_lit(string, TyLit::Float);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Bvec2 => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_ty_lit(string, TyLit::Bvec2);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Bvec3 => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_ty_lit(string, TyLit::Bvec3);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Bvec4 => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_ty_lit(string, TyLit::Bvec4);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Ivec2 => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_ty_lit(string, TyLit::Ivec2);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Ivec3 => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_ty_lit(string, TyLit::Ivec3);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Ivec4 => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_ty_lit(string, TyLit::Ivec4);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Vec2 => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_ty_lit(string, TyLit::Vec2);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Vec3 => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_ty_lit(string, TyLit::Vec3);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Vec4 => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_ty_lit(string, TyLit::Vec4);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Mat2 => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_ty_lit(string, TyLit::Mat2);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Mat3 => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_ty_lit(string, TyLit::Mat3);
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Mat4 => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_ty_lit(string, TyLit::Mat4);
                 write!(string, " {}", ident).unwrap();
             }
@@ -1011,10 +972,7 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Array {ref elem_ty, len} => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{}", sep).unwrap();
+                prefix(string, sep, is_inout);
                 self.write_var_decl(string, "", is_inout, is_packed, ident, elem_ty);
                 write!(string, "[{}]", len).unwrap();
             }
@@ -1029,10 +987,8 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
                 return false
             }
             Ty::Struct(ptr) => {
-                if is_inout {
-                    write!(string, "inout ").unwrap();
-                }
-                write!(string, "{} {} {}", sep, ptr, ident).unwrap();
+                prefix(string, sep, is_inout);
+                write!(string, "{} {}", ptr, ident).unwrap();
             }
         }
         true
