@@ -884,7 +884,7 @@ impl LiveRegistry {
                         token_id: node.token_id,
                         id_pack: node.id_pack,
                         value: LiveValue::ResourceRef {
-                            target,
+                            target//:out_doc.clone_multi_id(target, &in_doc.multi_ids),
                         }
                     };
                     write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, &new_node);
