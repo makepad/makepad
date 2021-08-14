@@ -364,7 +364,7 @@ impl LiveDocument {
                 for i in 0..count {
                     self.multi_ids.push(other_ids[i + index]);
                 }
-                IdPack::multi(multi_index, self.multi_ids.len())
+                IdPack::multi(multi_index, self.multi_ids.len() - multi_index)
             }
             _ => {
                 id

@@ -1,8 +1,8 @@
 const SOURCE: &'static str = r#"
 
     DrawQuad: Shader {
-        
-        uniform t: float
+        uniform uni1: float
+        const cnst1: int = 1
         live_var: 1.0,
         
         MyStruct2:Struct{
