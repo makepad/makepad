@@ -433,7 +433,7 @@ impl fmt::Display for LiveDocument {
                 },
                 LiveValue::Color(val) => {
                     prefix(node.id_pack, ld, f);
-                    let _ = write!(f, "{:x}", val);
+                    let _ = write!(f, "#{:08x}", val);
                 },
                 LiveValue::Vec2(val) => {
                     prefix(node.id_pack, ld, f);

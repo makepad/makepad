@@ -145,7 +145,6 @@ C: Iterator<Item = char>,
                 while let Some(ch) = self.read_char_if( | ch | ch.is_ascii_hexdigit()) {
                     self.temp_hex.push(ch as u8)
                 }
-                
                 if let Ok(color) = hex_bytes_to_u32(&self.temp_hex) {
                     Token::Color(color)
                 }

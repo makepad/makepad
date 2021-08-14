@@ -67,7 +67,7 @@ fn expand() {
             pa: 1.0
             pb: true
             pc: 2
-            pd: ffff
+            pd: #0000ffff
             pe: id1
             pf: NodePtr {file: 1, level: 0, index: 1}
             fn f1(a1) {let x = 1} "SA:[local], EA:[local], pa:[local], pb:[local], pc:[local], pd:[local], pe:[local], pf:[local]"
