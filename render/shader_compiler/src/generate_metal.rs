@@ -111,11 +111,7 @@ impl<'a> DrawShaderGenerator<'a> {
     
     fn generate_uniform_structs(&mut self, fields_as_uniform_blocks: &BTreeMap<Ident, Vec<(usize, Ident) >>) {
         
-        let mut has_default = false;
         for (ident, vec) in fields_as_uniform_blocks {
-            if *ident == Ident(id!(default)) {
-                has_default = true;
-            }
             writeln!(self.string, "struct Uniforms_{} {{", ident).unwrap();
             for (index, _item) in vec {
                 let field = &self.draw_shader_def.fields[*index];
@@ -127,10 +123,6 @@ impl<'a> DrawShaderGenerator<'a> {
                 writeln!(self.string, ";").unwrap();
             }
             writeln!(self.string, "}};").unwrap();
-        }
-        
-        if !has_default {
-            writeln!(self.string, "struct Uniforms_default{{}};").unwrap();
         }
         
         writeln!(self.string, "struct LiveUniforms {{").unwrap();
@@ -357,13 +349,10 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, ", const device Instances *in_instances [[buffer(1)]]").unwrap();
         writeln!(self.string, ", constant LiveUniforms &live_uniforms [[buffer(2)]]").unwrap();
         writeln!(self.string, ", constant const float *const_table [[buffer(3)]]").unwrap();
-        writeln!(self.string, ", constant Uniforms_default &uniforms_default [[buffer(4)]]").unwrap();
-        let mut buffer_id = 5;
+        let mut buffer_id = 4;
         for (field, _set) in fields_as_uniform_blocks {
-            if *field != Ident(id!(default)) {
-                writeln!(self.string, ", constant Uniforms_{0} &uniforms_{0} [[buffer({1})]]", field, buffer_id).unwrap();
-                buffer_id += 1;
-            }
+            writeln!(self.string, ", constant Uniforms_{0} &uniforms_{0} [[buffer({1})]]", field, buffer_id).unwrap();
+            buffer_id += 1;
         }
         writeln!(self.string, ", uint vtx_id [[vertex_id]]").unwrap();
         writeln!(self.string, ", uint inst_id [[instance_id]]").unwrap();
@@ -401,7 +390,7 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         
         let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(vertex))).unwrap();
-        writeln!(self.string, "    varyings.position = {}", DisplayFnName(vertex_def.fn_node_ptr, vertex_def.ident)).unwrap();
+        write!(self.string, "    varyings.position = {}", DisplayFnName(vertex_def.fn_node_ptr, vertex_def.ident)).unwrap();
         
         
         write!(self.string, "(").unwrap();
@@ -441,13 +430,10 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, ", Textures textures").unwrap();
         writeln!(self.string, ", constant LiveUniforms &live_uniforms [[buffer(2)]]").unwrap();
         writeln!(self.string, ", constant const float *const_table [[buffer(3)]]").unwrap();
-        writeln!(self.string, ", constant Uniforms_default &uniforms_default [[buffer(4)]]").unwrap();
-        let mut buffer_id = 5;
+        let mut buffer_id = 4;
         for (field, _set) in fields_as_uniform_blocks {
-            if *field != Ident(id!(default)) {
-                writeln!(self.string, ", constant Uniforms_{0} &uniforms_{0} [[buffer({1})]]", field, buffer_id).unwrap();
-                buffer_id += 1;
-            }
+            writeln!(self.string, ", constant Uniforms_{0} &uniforms_{0} [[buffer({1})]]", field, buffer_id).unwrap();
+            buffer_id += 1;
         }
         
         writeln!(self.string, ") {{").unwrap();
@@ -455,7 +441,7 @@ impl<'a> DrawShaderGenerator<'a> {
         write!(self.string, "    return ").unwrap();
         
         let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(pixel))).unwrap();
-        writeln!(self.string, "    {};", DisplayFnName(pixel_def.fn_node_ptr, pixel_def.ident)).unwrap();
+        write!(self.string, "    {}", DisplayFnName(pixel_def.fn_node_ptr, pixel_def.ident)).unwrap();
         
         write!(self.string, "(").unwrap();
         //let mut sep = "";
@@ -493,131 +479,6 @@ impl<'a> DrawShaderGenerator<'a> {
     }
     
 }
-/*
-struct FnDeclGenerator<'a> {
-    shader: &'a ShaderAst,
-    decl: &'a FnDecl,
-    create_const_table: bool,
-    visited: &'a mut HashSet<IdentPath>,
-    string: &'a mut String,
-    backend_writer: &'a dyn BackendWriter
-}
-
-impl<'a> FnDeclGenerator<'a> {
-    fn generate_fn_decl(&mut self) {
-        if self.visited.contains(&self.decl.ident_path) {
-            return;
-        }
-        for &callee in self.decl.callees.borrow().as_ref().unwrap().iter() {
-            FnDeclGenerator {
-                shader: self.shader,
-                backend_writer: self.backend_writer,
-                decl: self.shader.find_fn_decl(callee).unwrap(),
-                create_const_table: self.create_const_table,
-                visited: self.visited,
-                string: self.string,
-            }
-            .generate_fn_decl()
-        }
-        self.write_var_decl(
-            false,
-            false,
-            self.decl.ident_path.to_struct_fn_ident(),
-            self.decl.return_ty.borrow().as_ref().unwrap(),
-        );
-        write!(self.string, "(").unwrap();
-        let mut sep = "";
-        for param in &self.decl.params {
-            write!(self.string, "{}", sep).unwrap();
-            self.write_var_decl(
-                param.is_inout,
-                false,
-                param.ident,
-                param.ty_expr.ty.borrow().as_ref().unwrap(),
-            );
-            sep = ", ";
-        }
-        if self.create_const_table {
-            write!(self.string, "{}constant float *mpsc_const_table", sep).unwrap();
-            sep = ", ";
-        }
-        for &ident in self.decl.uniform_block_deps.borrow().as_ref().unwrap() {
-            write!(
-                self.string,
-                "{}constant mpsc_{1}_Uniforms &mpsc_{1}_uniforms",
-                sep,
-                ident
-            )
-                .unwrap();
-            sep = ", ";
-        }
-        if self.decl.has_texture_deps.get().unwrap() {
-            write!(self.string, "{}mpsc_Textures mpsc_textures", sep).unwrap();
-            sep = ", ";
-        }
-        let is_used_in_vertex_shader = self.decl.is_used_in_vertex_shader.get().unwrap();
-        let is_used_in_fragment_shader = self.decl.is_used_in_fragment_shader.get().unwrap();
-        let has_geometry_deps = !self
-        .decl
-            .geometry_deps
-            .borrow()
-            .as_ref()
-            .unwrap()
-            .is_empty();
-        let has_instance_deps = !self
-        .decl
-            .instance_deps
-            .borrow()
-            .as_ref()
-            .unwrap()
-            .is_empty();
-        let has_varying_deps = self.decl.has_varying_deps.get().unwrap();
-        if is_used_in_vertex_shader {
-            if has_geometry_deps {
-                write!(
-                    self.string,
-                    "{}thread mpsc_Geometries &mpsc_geometries",
-                    sep
-                )
-                    .unwrap();
-                sep = ", ";
-            }
-            if has_instance_deps {
-                write!(self.string, "{}thread mpsc_Instances &mpsc_instances", sep).unwrap();
-                sep = ", ";
-            }
-            if has_varying_deps {
-                write!(self.string, "{}thread mpsc_Varyings &mpsc_varyings", sep).unwrap();
-            }
-        }
-        if is_used_in_fragment_shader {
-            if has_geometry_deps || has_instance_deps || has_varying_deps {
-                write!(self.string, "{}thread mpsc_Varyings &mpsc_varyings", sep).unwrap();
-            }
-        }
-        write!(self.string, ") ").unwrap();
-        self.generate_block(&self.decl.block);
-        writeln!(self.string).unwrap();
-        self.visited.insert(self.decl.ident_path);
-    }
-    
-    fn generate_block(&mut self, block: &Block) {
-        BlockGenerator {
-            shader: self.shader,
-            decl: self.decl,
-            backend_writer: self.backend_writer,
-            create_const_table: self.create_const_table,
-            // use_generated_cons_fns: false,
-            indent_level: 0,
-            string: self.string,
-        }
-        .generate_block(block)
-    }
-    
-    fn write_var_decl(&mut self, is_inout: bool, is_packed: bool, ident: Ident, ty: &Ty) {
-        self.backend_writer.write_var_decl(&mut self.string, is_inout, is_packed, ident, ty);
-    }
-}*/
 
 struct MetalBackendWriter<'a> {
     pub shader_registry: &'a ShaderRegistry,
@@ -625,59 +486,6 @@ struct MetalBackendWriter<'a> {
 }
 
 impl<'a> BackendWriter for MetalBackendWriter<'a> {
-    
-    // OK so..
-    // we need to compute which arguments we need to pass to this function.
-    // both in its declaraiton as well at the call-site
-    /*
-    fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, ident_path: IdentPath, shader: &ShaderAst, sep: &str) {
-        
-        // alright which values do we have.
-        
-        // a const table
-        // uniforms (and their blocks)
-        // textures
-        // geometries / instances/ varyings
-        
-        
-        let mut sep = sep;
-        if let Some(decl) = shader.find_fn_decl(ident_path) {
-            if use_const_table {
-                write!(string, "{}mpsc_const_table", sep).unwrap();
-                sep = ", ";
-            }
-            for &ident in decl.uniform_block_deps.borrow().as_ref().unwrap() {
-                write!(string, "{}mpsc_{}_uniforms", sep, ident).unwrap();
-                sep = ", ";
-            }
-            if decl.has_texture_deps.get().unwrap() {
-                write!(string, "{}mpsc_textures", sep).unwrap();
-                sep = ", ";
-            }
-            if decl.is_used_in_vertex_shader.get().unwrap() {
-                if !decl.geometry_deps.borrow().as_ref().unwrap().is_empty() {
-                    write!(string, "{}mpsc_geometries", sep).unwrap();
-                    sep = ", ";
-                }
-                if !decl.instance_deps.borrow().as_ref().unwrap().is_empty() {
-                    write!(string, "{}mpsc_instances", sep).unwrap();
-                    sep = ", ";
-                }
-                if decl.has_varying_deps.get().unwrap() {
-                    write!(string, "{}mpsc_varyings", sep).unwrap();
-                }
-            } else {
-                assert!(decl.is_used_in_fragment_shader.get().unwrap());
-                if !decl.geometry_deps.borrow().as_ref().unwrap().is_empty()
-                    || !decl.instance_deps.borrow().as_ref().unwrap().is_empty()
-                    || decl.has_varying_deps.get().unwrap()
-                {
-                    write!(string, "{}mpsc_varyings", sep).unwrap();
-                }
-            }
-        }
-    }*/
-    
     
     fn generate_draw_shader_prefix(&self, string: &mut String, _expr: &Expr, field_ident: Ident) {
         let field_def = self.draw_shader_def.find_field(field_ident).unwrap();

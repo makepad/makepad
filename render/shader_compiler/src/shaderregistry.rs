@@ -42,6 +42,8 @@ pub struct ShaderRegistry {
 
 impl ShaderRegistry {
     pub fn new() -> Self {
+        id_check!(default);
+        id_check!(x);
         Self {
             live_registry: LiveRegistry::default(),
             structs: HashMap::new(),
