@@ -119,7 +119,7 @@ impl<'a> ShaderParser<'a> {
         };
         
         loop {
-            if !self.accept_token(token_punct!(::)) {
+            if !self.accept_token(Token::Punct(id!(::))) {
                 return Ok(ident_path);
             }
             match self.peek_token() {
@@ -207,7 +207,7 @@ impl<'a> ShaderParser<'a> {
         if decl_name != ident {
             panic!()
         }
-        self.expect_token(token_punct!(:)) ?;
+        self.expect_token(Token::Punct(id!(:))) ?;
         // now we expect a type
         let ty_expr = self.expect_ty_expr() ?;
         match decl_ty {
@@ -226,7 +226,7 @@ impl<'a> ShaderParser<'a> {
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Instance {
                         is_used_in_pixel_shader: Cell::new(false),
-                        input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
+                        input_type: DrawShaderInputType::VarDef(decl_node_ptr),
                     },
                     span,
                     ident,
@@ -234,7 +234,7 @@ impl<'a> ShaderParser<'a> {
                 })))
             }
             Ident(id!(uniform)) => {
-                let block_ident = if self.accept_token(token_ident!(in)) {
+                let block_ident = if self.accept_token(Token::Ident(id!(in))) {
                     self.expect_ident() ?
                 }
                 else {
@@ -242,7 +242,7 @@ impl<'a> ShaderParser<'a> {
                 };
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Uniform {
-                        input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
+                        input_type: DrawShaderInputType::VarDef(decl_node_ptr),
                         block_ident,
                     },
                     span,
@@ -263,7 +263,7 @@ impl<'a> ShaderParser<'a> {
             Ident(id!(texture)) => {
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Texture {
-                        input_node_ptr: InputNodePtr::VarDef(decl_node_ptr),
+                        input_type: DrawShaderInputType::VarDef(decl_node_ptr),
                     },
                     span,
                     ident,
@@ -287,10 +287,10 @@ impl<'a> ShaderParser<'a> {
         if decl_name != ident {
             panic!()
         }
-        self.expect_token(token_punct!(:)) ?;
+        self.expect_token(Token::Punct(id!(:))) ?;
         // now we expect a type
         let ty_expr = self.expect_ty_expr() ?;
-        self.expect_token(token_punct!( =)) ?;
+        self.expect_token(Token::Punct(id!( =))) ?;
         
         let expr = self.expect_expr() ?;
         
@@ -308,19 +308,19 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_field(&mut self, ident: Ident, var_def_node_ptr: VarDefNodePtr) -> Result<Option<FieldDecl>, LiveError> {
+    pub fn expect_field(&mut self, ident: Ident, var_def_node_ptr: VarDefNodePtr) -> Result<Option<StructFieldDef>, LiveError> {
         let span = self.begin_span();
         let decl_ty = self.expect_ident() ?;
         let decl_name = self.expect_ident() ?;
         if decl_name != ident {
             panic!()
         }
-        self.expect_token(token_punct!(:)) ?;
+        self.expect_token(Token::Punct(id!(:))) ?;
         // now we expect a type
         let ty_expr = self.expect_ty_expr() ?;
         match decl_ty {
             Ident(id!(field)) => {
-                return span.end(self, | span | Ok(Some(FieldDecl {
+                return span.end(self, | span | Ok(Some(StructFieldDef {
                     var_def_node_ptr,
                     span,
                     ident,
@@ -345,9 +345,9 @@ impl<'a> ShaderParser<'a> {
         if !self.accept_token(Token::CloseParen) {
             
             let span = self.begin_span();
-            let is_inout = self.accept_token(token_ident!(inout));
+            let is_inout = self.accept_token(Token::Ident(id!(inout)));
             
-            if self.peek_token() != token_ident!(self){
+            if self.peek_token() != Token::Ident(id!(self)){
                 return Ok(None)
             }
             self.skip_token();
@@ -366,12 +366,12 @@ impl<'a> ShaderParser<'a> {
                 },
             }));
             
-            while self.accept_token(token_punct!(,)) {
+            while self.accept_token(Token::Punct(id!(,))) {
                 params.push(self.expect_param() ?);
             }
             self.expect_token(Token::CloseParen) ?;
         }
-        let return_ty_expr = if self.accept_token(token_punct!( ->)) {
+        let return_ty_expr = if self.accept_token(Token::Punct(id!( ->))) {
             Some(self.expect_ty_expr() ?)
         } else {
             None
@@ -379,29 +379,16 @@ impl<'a> ShaderParser<'a> {
         let block = self.expect_block() ?;
         let self_kind = self.self_kind.clone();
         let span = span.end(&mut self, | span | span);
-        Ok(Some( FnDef {
+        Ok(Some(FnDef::new(
             fn_node_ptr,
             span,
             ident,
             self_kind,
-            has_return: Cell::new(false),
-            closure_defs: self.closure_defs,
-            draw_shader_refs: RefCell::new(None),
-            closure_sites: RefCell::new(None),
-            return_ty: RefCell::new(None),
-            const_refs: RefCell::new(None),
-            live_refs: RefCell::new(None),
-            struct_refs: RefCell::new(None),
-            callees: RefCell::new(None),
-            //closure_deps: RefCell::new(None),
-            builtin_deps: RefCell::new(None),
-            constructor_fn_deps: RefCell::new(None),
-            const_table: RefCell::new(None),
-            const_table_spans: RefCell::new(None),
             params,
             return_ty_expr,
             block,
-        }))
+            self.closure_defs
+        )))
     }
     
     // lets parse a function.
@@ -411,18 +398,18 @@ impl<'a> ShaderParser<'a> {
         self.expect_token(Token::OpenParen) ?;
         let mut params = Vec::new();
         if !self.accept_token(Token::CloseParen) {
-            if self.peek_token() == token_ident!(self){
+            if self.peek_token() == Token::Ident(id!(self)){
                 return Err(span.error(&mut self, live_error_origin!(), format!("use of self not allowed in plain function").into()))
             }
             let param = self.expect_param() ?;
             
             params.push(param);
-            while self.accept_token(token_punct!(,)) {
+            while self.accept_token(Token::Punct(id!(,))) {
                 params.push(self.expect_param() ?);
             }
             self.expect_token(Token::CloseParen) ?;
         }
-        let return_ty_expr = if self.accept_token(token_punct!( ->)) {
+        let return_ty_expr = if self.accept_token(Token::Punct(id!( ->))) {
             Some(self.expect_ty_expr() ?)
         } else {
             None
@@ -430,29 +417,16 @@ impl<'a> ShaderParser<'a> {
         let block = self.expect_block() ?;
         let self_kind = self.self_kind.clone();
         let span = span.end(&mut self, | span | span);
-        Ok(FnDef {
+        Ok(FnDef::new(
             fn_node_ptr,
             span,
             ident,
             self_kind,
-            has_return: Cell::new(false),
-            closure_defs: self.closure_defs,
-            closure_sites: RefCell::new(None),
-            const_refs: RefCell::new(None),
-            live_refs: RefCell::new(None),
-            struct_refs: RefCell::new(None),
-            draw_shader_refs: RefCell::new(None),
-            return_ty: RefCell::new(None),
-            callees: RefCell::new(None),
-            //closure_deps: RefCell::new(None),
-            builtin_deps: RefCell::new(None),
-            constructor_fn_deps: RefCell::new(None),
-            const_table: RefCell::new(None),
-            const_table_spans: RefCell::new(None),
             params,
             return_ty_expr,
             block,
-        })
+            self.closure_defs
+        ))
     }
     
     fn expect_ty_expr(&mut self) -> Result<TyExpr, LiveError> {
@@ -521,12 +495,12 @@ impl<'a> ShaderParser<'a> {
                     let mut params = Vec::new();
                     if !self.accept_token(Token::CloseParen) {
                         params.push(self.expect_param() ?);
-                        while self.accept_token(token_punct!(,)) {
+                        while self.accept_token(Token::Punct(id!(,))) {
                             params.push(self.expect_param() ?);
                         }
                         self.expect_token(Token::CloseParen) ?;
                     }
-                    let return_ty_expr = if self.accept_token(token_punct!( ->)) {
+                    let return_ty_expr = if self.accept_token(Token::Punct(id!( ->))) {
                         Some(self.expect_ty_expr() ?)
                     } else {
                         None
@@ -602,9 +576,9 @@ impl<'a> ShaderParser<'a> {
     
     fn expect_param(&mut self) -> Result<Param, LiveError> {
         let span = self.begin_span();
-        let is_inout = self.accept_token(token_ident!(inout));
+        let is_inout = self.accept_token(Token::Ident(id!(inout)));
         let ident = self.expect_ident() ?;
-        self.expect_token(token_punct!(:)) ?;
+        self.expect_token(Token::Punct(id!(:))) ?;
         let ty_expr = self.expect_ty_expr() ?;
         Ok(span.end(self, | span | Param {
             shadow: Cell::new(None),
@@ -627,39 +601,39 @@ impl<'a> ShaderParser<'a> {
     
     fn expect_stmt(&mut self) -> Result<Stmt, LiveError> {
         match self.peek_token() {
-            token_ident!(break) => self.expect_break_stmt(),
-            token_ident!(continue) => self.expect_continue_stmt(),
-            token_ident!(for) => self.expect_for_stmt(),
-            token_ident!(if) => self.expect_if_stmt(),
-            token_ident!(let) => self.expect_let_stmt(),
-            token_ident!(return) => self.expect_return_stmt(),
+            Token::Ident(id!(break)) => self.expect_break_stmt(),
+            Token::Ident(id!(continue)) => self.expect_continue_stmt(),
+            Token::Ident(id!(for)) => self.expect_for_stmt(),
+            Token::Ident(id!(if)) => self.expect_if_stmt(),
+            Token::Ident(id!(let)) => self.expect_let_stmt(),
+            Token::Ident(id!(return)) => self.expect_return_stmt(),
             _ => self.expect_expr_stmt(),
         }
     }
     
     fn expect_break_stmt(&mut self) -> Result<Stmt, LiveError> {
         let span = self.begin_span();
-        self.expect_token(token_ident!(break)) ?;
-        self.expect_token(token_punct!(;)) ?;
+        self.expect_token(Token::Ident(id!(break))) ?;
+        self.expect_token(Token::Punct(id!(;))) ?;
         Ok(span.end(self, | span | Stmt::Break {span}))
     }
     
     fn expect_continue_stmt(&mut self) -> Result<Stmt, LiveError> {
         let span = self.begin_span();
-        self.expect_token(token_ident!(continue)) ?;
-        self.expect_token(token_punct!(;)) ?;
+        self.expect_token(Token::Ident(id!(continue))) ?;
+        self.expect_token(Token::Punct(id!(;))) ?;
         Ok(span.end(self, | span | Stmt::Continue {span}))
     }
     
     fn expect_for_stmt(&mut self) -> Result<Stmt, LiveError> {
         let span = self.begin_span();
-        self.expect_token(token_ident!(for)) ?;
+        self.expect_token(Token::Ident(id!(for))) ?;
         let ident = self.expect_ident() ?;
-        self.expect_token(token_ident!(from)) ?;
+        self.expect_token(Token::Ident(id!(from))) ?;
         let from_expr = self.expect_expr() ?;
-        self.expect_token(token_ident!(to)) ?;
+        self.expect_token(Token::Ident(id!(to))) ?;
         let to_expr = self.expect_expr() ?;
-        let step_expr = if self.accept_token(token_ident!(step)) {
+        let step_expr = if self.accept_token(Token::Ident(id!(step))) {
             Some(self.expect_expr() ?)
         } else {
             None
@@ -678,11 +652,11 @@ impl<'a> ShaderParser<'a> {
     
     fn expect_if_stmt(&mut self) -> Result<Stmt, LiveError> {
         let span = self.begin_span();
-        self.expect_token(token_ident!(if)) ?;
+        self.expect_token(Token::Ident(id!(if))) ?;
         let expr = self.expect_expr() ?;
         let block_if_true = Box::new(self.expect_block() ?);
-        let block_if_false = if self.accept_token(token_ident!(else)) {
-            if self.peek_token() == token_ident!(if) {
+        let block_if_false = if self.accept_token(Token::Ident(id!(else))) {
+            if self.peek_token() == Token::Ident(id!(if)) {
                 Some(Box::new(Block {
                     stmts: vec![self.expect_if_stmt() ?],
                 }))
@@ -703,19 +677,19 @@ impl<'a> ShaderParser<'a> {
     
     fn expect_let_stmt(&mut self) -> Result<Stmt, LiveError> {
         let span = self.begin_span();
-        self.expect_token(token_ident!(let)) ?;
+        self.expect_token(Token::Ident(id!(let))) ?;
         let ident = self.expect_ident() ?;
-        let ty_expr = if self.accept_token(token_punct!(:)) {
+        let ty_expr = if self.accept_token(Token::Punct(id!(:))) {
             Some(self.expect_ty_expr() ?)
         } else {
             None
         };
-        let expr = if self.accept_token(token_punct!( =)) {
+        let expr = if self.accept_token(Token::Punct(id!( =))) {
             Some(self.expect_expr() ?)
         } else {
             None
         };
-        self.expect_token(token_punct!(;)) ?;
+        self.expect_token(Token::Punct(id!(;))) ?;
         Ok(span.end(self, | span | Stmt::Let {
             span,
             shadow: Cell::new(None),
@@ -728,10 +702,10 @@ impl<'a> ShaderParser<'a> {
     
     fn expect_return_stmt(&mut self) -> Result<Stmt, LiveError> {
         let span = self.begin_span();
-        self.expect_token(token_ident!(return)) ?;
-        let expr = if !self.accept_token(token_punct!(;)) {
+        self.expect_token(Token::Ident(id!(return))) ?;
+        let expr = if !self.accept_token(Token::Punct(id!(;))) {
             let expr = self.expect_expr() ?;
-            self.expect_token(token_punct!(;)) ?;
+            self.expect_token(Token::Punct(id!(;))) ?;
             Some(expr)
         } else {
             None
@@ -742,7 +716,7 @@ impl<'a> ShaderParser<'a> {
     fn expect_expr_stmt(&mut self) -> Result<Stmt, LiveError> {
         let span = self.begin_span();
         let expr = self.expect_expr() ?;
-        self.expect_token(token_punct!(;)) ?;
+        self.expect_token(Token::Punct(id!(;))) ?;
         Ok(span.end(self, | span | Stmt::Expr {span, expr}))
     }
     
@@ -778,10 +752,10 @@ impl<'a> ShaderParser<'a> {
     fn expect_cond_expr(&mut self) -> Result<Expr, LiveError> {
         let span = self.begin_span();
         let expr = self.expect_or_expr() ?;
-        Ok(if self.accept_token(token_punct!( ?)) {
+        Ok(if self.accept_token(Token::Punct(id!( ?))) {
             let expr = Box::new(expr);
             let expr_if_true = Box::new(self.expect_expr() ?);
-            self.expect_token(token_punct!(:)) ?;
+            self.expect_token(Token::Punct(id!(:))) ?;
             let expr_if_false = Box::new(self.expect_cond_expr() ?);
             span.end(self, | span | Expr {
                 span,
@@ -963,7 +937,7 @@ impl<'a> ShaderParser<'a> {
         let mut acc = self.expect_prim_expr() ?;
         loop {
             match self.peek_token() {
-                token_punct!(.) => {
+                Token::Punct(id!(.)) => {
                     self.skip_token();
                     let ident = self.expect_ident() ?;
                     acc = if self.accept_token(Token::OpenParen) {
@@ -971,7 +945,7 @@ impl<'a> ShaderParser<'a> {
                         if !self.accept_token(Token::CloseParen) {
                             loop {
                                 arg_exprs.push(self.expect_expr() ?);
-                                if !self.accept_token(token_punct!(,)) {
+                                if !self.accept_token(Token::Punct(id!(,))) {
                                     break;
                                 }
                             }
@@ -1039,7 +1013,7 @@ impl<'a> ShaderParser<'a> {
                     if !self.accept_token(Token::CloseParen) {
                         loop {
                             arg_exprs.push(self.expect_expr() ?);
-                            if !self.accept_token(token_punct!(,)) {
+                            if !self.accept_token(Token::Punct(id!(,))) {
                                 break;
                             }
                         }
@@ -1096,9 +1070,9 @@ impl<'a> ShaderParser<'a> {
                             let mut args = Vec::new();
                             loop {
                                 let name = self.expect_ident() ?;
-                                self.expect_token(token_punct!(:)) ?;
+                                self.expect_token(Token::Punct(id!(:))) ?;
                                 let expr = self.expect_expr() ?;
-                                self.accept_token(token_punct!(,));
+                                self.accept_token(Token::Punct(id!(,)));
                                 args.push((name, expr));
                                 // see if we have a } or a ,
                                 match self.peek_token() {
@@ -1294,11 +1268,11 @@ impl<'a> ShaderParser<'a> {
                     kind: ExprKind::Lit {span, lit: Lit::Color(v)},
                 }))
             }
-            token_punct!(|)=>{
+            Token::Punct(id!(|))=>{
                 // closure def
                 self.skip_token();
                 let mut params = Vec::new();
-                if !self.accept_token(token_punct!(|)) {
+                if !self.accept_token(Token::Punct(id!(|))) {
                     loop {
                         let span = self.begin_span();
                         params.push(ClosureParam{
@@ -1306,11 +1280,11 @@ impl<'a> ShaderParser<'a> {
                             span: span.end(self, |span| span),
                             shadow: Cell::new(None)
                         });
-                        if !self.accept_token(token_punct!(,)) {
+                        if !self.accept_token(Token::Punct(id!(,))) {
                             break;
                         }
                     }
-                    self.expect_token(token_punct!(|)) ?;
+                    self.expect_token(Token::Punct(id!(|))) ?;
                 }
                 if self.peek_token() == Token::OpenBrace{
                     let block = self.expect_block()?;
@@ -1365,7 +1339,7 @@ impl<'a> ShaderParser<'a> {
         if !self.accept_token(Token::CloseParen) {
             loop {
                 arg_exprs.push(self.expect_expr() ?);
-                if !self.accept_token(token_punct!(,)) {
+                if !self.accept_token(Token::Punct(id!(,))) {
                     break;
                 }
             }

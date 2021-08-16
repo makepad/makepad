@@ -82,7 +82,6 @@ impl<'a> DrawShaderGenerator<'a> {
             match field.kind {
                 DrawShaderFieldKind::Geometry {..} => {
                     self.write_var_decl(
-                        false,
                         &DisplayDsIdent(field.ident),
                         field.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
@@ -92,7 +91,6 @@ impl<'a> DrawShaderGenerator<'a> {
                 }
                 DrawShaderFieldKind::Instance {..} => {
                     self.write_var_decl(
-                        false,
                         &DisplayDsIdent(field.ident),
                         field.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
@@ -102,7 +100,6 @@ impl<'a> DrawShaderGenerator<'a> {
                 }
                 DrawShaderFieldKind::Varying {..} => {
                     self.write_var_decl(
-                        false,
                         &DisplayDsIdent(field.ident),
                         field.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
@@ -148,9 +145,9 @@ impl<'a> DrawShaderGenerator<'a> {
             }
         }
         
-        let vertex_decl = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(vertex))).unwrap();
+        let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(vertex))).unwrap();
         
-        writeln!(self.string, "    gl_Position = {}();", DisplayFnName(vertex_decl.fn_node_ptr, vertex_decl.ident)).unwrap();
+        writeln!(self.string, "    gl_Position = {}();", DisplayFnName(vertex_def.fn_node_ptr, vertex_def.ident)).unwrap();
         let mut varying_packer = VarPacker::new(
             "packed_varying",
             packed_varyings_size,
@@ -184,17 +181,17 @@ impl<'a> DrawShaderGenerator<'a> {
             let decl = self.shader_registry.all_fns.get(callee).unwrap();
             all_constructor_fns.extend(decl.constructor_fn_deps.borrow().as_ref().unwrap().iter().cloned());
             all_consts.extend(decl.const_refs.borrow().as_ref().unwrap().iter().cloned());
-            
-            for (live_ref, ty) in decl.live_refs.borrow().as_ref().unwrap().iter() {
-                // ok so its a nodeptr
-                self.generate_live_decl(*live_ref, ty);
-            }
+        }
+        
+        // all our live ref uniforms
+        for (live_ref, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
+            self.generate_live_decl(*live_ref, ty);
         }
         
         // we have all the structs already from analyse
         for struct_ptr in struct_deps.iter().rev() {
-            let struct_decl = self.shader_registry.structs.get(struct_ptr).unwrap();
-            self.generate_struct_decl(*struct_ptr, struct_decl);
+            let struct_def = self.shader_registry.structs.get(struct_ptr).unwrap();
+            self.generate_struct_def(*struct_ptr, struct_def);
         }
         
         for (ty_lit, param_tys) in all_constructor_fns
@@ -209,80 +206,34 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         
         for fn_iter in fn_deps.iter().rev() {
-            let offset = self.final_const_table.offsets.get(fn_iter).cloned();
+            let const_table_offset = self.final_const_table.offsets.get(fn_iter).cloned();
             let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
             if fn_def.has_closure_args() {
                 for call_iter in fn_deps.iter().rev() {
                     // any function that depends on us, will have the closures we need
                     let call_def = self.shader_registry.all_fns.get(call_iter).unwrap();
                     if call_def.callees.borrow().as_ref().unwrap().contains(&fn_iter) {
-                        self.generate_fn_def_with_closure_args(fn_def, call_def, self.backend_writer, offset);
+                        FnDefWithClosureArgsGenerator::generate_fn_def_with_all_closures(
+                            &mut self.string,
+                            self.shader_registry,
+                            fn_def,
+                            call_def,
+                            self.backend_writer,
+                            const_table_offset
+                        );
                     }
                 }
                 continue
             }
-            
-            self.generate_fn_def(fn_def, self.backend_writer, offset);
-        }
-    }
-    
-    
-    fn generate_fn_def_with_closure_args(
-        &mut self,
-        fn_def: &FnDef,
-        call_def: &FnDef,
-        backend_writer: &dyn BackendWriter,
-        const_table_offset: Option<usize>
-    ) {
-        // so first we are collecting the closures in defs that are actually used
-        for (closure_def_index, closure_def) in call_def.closure_defs.iter().enumerate() {
-            let closure_def_index = ClosureDefIndex(closure_def_index);
-            for site in call_def.closure_sites.borrow().as_ref().unwrap() {
-                if site.call_to == fn_def.fn_node_ptr { // alright this site calls the fn_def
-                    for closure_site_arg in &site.closure_args {
-                        if closure_site_arg.closure_def_index == closure_def_index {
-                            // alright lets generate this closure
-                            ClosureDefGenerator {
-                                closure_site_arg: *closure_site_arg,
-                                closure_def,
-                                fn_def,
-                                call_def,
-                                shader_registry: self.shader_registry,
-                                //env:self.env,
-                                const_table_offset,
-                                backend_writer,
-                                string: self.string,
-                            }
-                            .generate_fn_def()
-                        }
-                    }
-                }
+            FnDefGenerator {
+                fn_def,
+                const_table_offset,
+                shader_registry: self.shader_registry,
+                backend_writer: self.backend_writer,
+                string: self.string,
             }
+            .generate_fn_def()            
         }
-        
-        for (site_index, closure_site) in call_def.closure_sites.borrow().as_ref().unwrap().iter().enumerate() {
-            // for each site
-            if closure_site.call_to == fn_def.fn_node_ptr { // alright this site calls the fn_def
-                // alright we need a fn def for this site_index
-                FnDefWithClosureArgsGenerator {
-                    closure_site_info: ClosureSiteInfo {
-                        site_index,
-                        closure_site,
-                        call_ptr: call_def.fn_node_ptr,
-                    },
-                    fn_def,
-                    call_def,
-                    shader_registry: self.shader_registry,
-                    //env:self.env,
-                    const_table_offset,
-                    backend_writer,
-                    string: self.string,
-                }
-                .generate_fn_def_with_closure_args()
-                
-            }
-        }
-        
     }
     
     pub fn generate_pixel_shader(&mut self) {
@@ -292,7 +243,6 @@ impl<'a> DrawShaderGenerator<'a> {
             match &field.kind {
                 DrawShaderFieldKind::Geometry {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
                     self.write_var_decl(
-                        false,
                         &DisplayDsIdent(field.ident),
                         field.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
@@ -302,7 +252,6 @@ impl<'a> DrawShaderGenerator<'a> {
                 }
                 DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
                     self.write_var_decl(
-                        false,
                         &DisplayDsIdent(field.ident),
                         field.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
@@ -312,7 +261,6 @@ impl<'a> DrawShaderGenerator<'a> {
                 }
                 DrawShaderFieldKind::Varying {..} => {
                     self.write_var_decl(
-                        false,
                         &DisplayDsIdent(field.ident),
                         field.ty_expr.ty.borrow().as_ref().unwrap(),
                     );
@@ -370,6 +318,18 @@ impl<'a> DrawShaderGenerator<'a> {
             ).unwrap();
         }
         
+        for (ident, vec) in self.draw_shader_def.fields_as_uniform_blocks() {
+            writeln!(self.string, "// Uniform block {}", ident).unwrap();
+            for (index, _item) in vec {
+                let field = &self.draw_shader_def.fields[index];
+                if let DrawShaderFieldKind::Uniform {..} = &field.kind {
+                    self.generate_uniform_decl(field);
+                }
+                else {
+                    panic!()
+                }
+            }
+        }
         for decl in &self.draw_shader_def.fields {
             match decl.kind {
                 DrawShaderFieldKind::Uniform {..} => self.generate_uniform_decl(decl),
@@ -410,14 +370,13 @@ impl<'a> DrawShaderGenerator<'a> {
         self.generate_packed_var_decls("varying", "packed_varying", packed_varyings_size);
     }
     
-    fn generate_struct_decl(&mut self, struct_ptr: StructNodePtr, struct_def: &StructDef) {
+    fn generate_struct_def(&mut self, struct_ptr: StructNodePtr, struct_def: &StructDef) {
         write!(self.string, "struct {} {{", struct_ptr).unwrap();
         if !struct_def.fields.is_empty() {
             writeln!(self.string).unwrap();
             for field in &struct_def.fields {
                 write!(self.string, "    ").unwrap();
                 self.write_var_decl(
-                    false,
                     &field.ident,
                     field.ty_expr.ty.borrow().as_ref().unwrap(),
                 );
@@ -430,7 +389,6 @@ impl<'a> DrawShaderGenerator<'a> {
     fn generate_const_def(&mut self, ptr: ConstNodePtr, def: &ConstDef) {
         write!(self.string, "const ").unwrap();
         self.write_var_decl(
-            false,
             &ptr,
             def.ty_expr.ty.borrow().as_ref().unwrap(),
         );
@@ -442,7 +400,6 @@ impl<'a> DrawShaderGenerator<'a> {
     fn generate_uniform_decl(&mut self, decl: &DrawShaderFieldDef) {
         write!(self.string, "uniform ").unwrap();
         self.write_var_decl(
-            false,
             &DisplayDsIdent(decl.ident),
             decl.ty_expr.ty.borrow().as_ref().unwrap(),
         );
@@ -452,7 +409,6 @@ impl<'a> DrawShaderGenerator<'a> {
     fn generate_live_decl(&mut self, ptr: ValueNodePtr, ty: &Ty) {
         write!(self.string, "uniform ").unwrap();
         self.write_var_decl(
-            false,
             &ptr,
             ty,
         );
@@ -462,7 +418,6 @@ impl<'a> DrawShaderGenerator<'a> {
     fn generate_texture_decl(&mut self, decl: &DrawShaderFieldDef) {
         write!(self.string, "uniform ").unwrap();
         self.write_var_decl(
-            false,
             &DisplayDsIdent(decl.ident),
             decl.ty_expr.ty.borrow().as_ref().unwrap(),
         );
@@ -552,11 +507,11 @@ impl<'a> DrawShaderGenerator<'a> {
         write!(self.string, " {}(", cons_name).unwrap();
         let mut sep = "";
         if param_tys.len() == 1 {
-            self.write_var_decl(false, &id!(x), &param_tys[0])
+            self.write_var_decl(&id!(x), &param_tys[0])
         } else {
             for (index, param_ty) in param_tys.iter().enumerate() {
                 write!(self.string, "{}", sep).unwrap();
-                self.write_var_decl(false, &format!("x{}", index), param_ty);
+                self.write_var_decl(&DisplaConstructorArg(index), param_ty);
                 sep = ", ";
             }
         }
@@ -627,24 +582,11 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, "}}").unwrap();
     }
     
-    fn generate_fn_def(&mut self, fn_def: &FnDef, backend_writer: &dyn BackendWriter, const_table_offset: Option<usize>) {
-        FnDefGenerator {
-            fn_def,
-            shader_registry: self.shader_registry,
-            //env:self.env,
-            const_table_offset,
-            backend_writer,
-            string: self.string,
-        }
-        .generate_fn_def()
-    }
-    
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             fn_def: None,
             shader_registry: self.shader_registry,
             closure_site_info: None,
-            //env: self.env,
             const_table_offset: None,
             backend_writer: self.backend_writer,
             string: self.string,
@@ -652,18 +594,13 @@ impl<'a> DrawShaderGenerator<'a> {
         .generate_expr(expr)
     }
     
-    fn write_var_decl(&mut self, is_inout: bool, ident: &dyn fmt::Display, ty: &Ty) {
-        self.backend_writer.write_var_decl(&mut self.string, "", is_inout, false, ident, ty);
+    fn write_var_decl(&mut self, ident: &dyn fmt::Display, ty: &Ty) {
+        self.backend_writer.write_var_decl(&mut self.string, "", false, false, ident, ty);
     }
-    
-    //fn write_ident(&mut self, ident: Ident) {
-    //   self.backend_writer.write_ident(&mut self.string, ident);
-    //}
-    
-    fn write_ty_lit(&mut self, ty_lit: TyLit) {
+
+    fn write_ty_lit(&mut self, ty_lit: TyLit){
         self.backend_writer.write_ty_lit(&mut self.string, ty_lit);
     }
-    
 }
 
 struct VarPacker<'a> {
@@ -864,12 +801,16 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
         false
     }
     
+    
     fn const_table_is_vec4(&self) -> bool {
         false
     }
     
     fn use_cons_fn(&self, _what: &str) -> bool {
         false
+    }
+    
+    fn generate_draw_shader_prefix(&self, _string: &mut String, _expr: &Expr, _field_ident: Ident) {
     }
     
     fn write_var_decl(
@@ -881,7 +822,7 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
         ident: &dyn fmt::Display,
         ty: &Ty,
     ) -> bool {
-        fn prefix(string: &mut String, sep: &'static str, is_inout:bool){
+        fn prefix(string: &mut String, sep: &'static str, is_inout: bool) {
             write!(string, "{}", sep).unwrap();
             if is_inout {
                 write!(string, "inout ").unwrap();
@@ -1023,5 +964,5 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
     fn write_builtin_call_ident(&self, string: &mut String, ident: Ident, _arg_exprs: &[Expr]) {
         write!(string, "{}", ident).unwrap();
     }
-
+    
 }

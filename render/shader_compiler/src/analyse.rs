@@ -18,6 +18,8 @@ use makepad_live_parser::Span;
 
 use std::cell::RefCell;
 use std::cell::Cell;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy)]
@@ -46,7 +48,7 @@ impl<'a> StructAnalyser<'a> {
         self.struct_def.init_analysis();
         // we need to analyse the fields and put them somewhere.
         for field in &self.struct_def.fields {
-            self.analyse_field_decl(field) ?;
+            self.analyse_field_def(field) ?;
         }
         // first analyse decls
         for fn_node_ptr in &self.struct_def.methods {
@@ -70,10 +72,10 @@ impl<'a> StructAnalyser<'a> {
         Ok(())
     }
     
-    fn analyse_field_decl(&mut self, decl: &FieldDecl) -> Result<(), LiveError> {
-        self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
+    fn analyse_field_def(&mut self, field_def: &StructFieldDef) -> Result<(), LiveError> {
+        self.ty_checker().ty_check_ty_expr(&field_def.ty_expr) ?;
         // ok so. if this thing depends on structs, lets store them.
-        match decl.ty_expr.ty.borrow().as_ref().unwrap() {
+        match field_def.ty_expr.ty.borrow().as_ref().unwrap() {
             Ty::Struct(struct_ptr) => {
                 self.struct_def.struct_refs.borrow_mut().as_mut().unwrap().insert(*struct_ptr);
             }
@@ -194,7 +196,8 @@ impl<'a> DrawShaderAnalyser<'a> {
         let mut all_structs = Vec::new();
         let mut pixel_structs = Vec::new();
         let mut vertex_structs = Vec::new();
-        
+        let mut all_live_refs = BTreeMap::new();
+        let mut all_const_refs = BTreeSet::new();
         for pixel_fn in &pixel_fns {
             let fn_decl = self.shader_registry.all_fns.get(pixel_fn).unwrap();
             // lets collect all structs
@@ -211,6 +214,15 @@ impl<'a> DrawShaderAnalyser<'a> {
                 self.analyse_struct_tree(&mut Vec::new(), *struct_ptr, struct_decl, &mut vertex_structs, &mut all_structs) ?;
             }
         }
+
+        for any_fn in &all_fns{
+            let fn_decl = self.shader_registry.all_fns.get(any_fn).unwrap();
+            all_live_refs.extend(fn_decl.live_refs.borrow().as_ref().cloned().unwrap());
+            all_const_refs.extend(fn_decl.const_refs.borrow().as_ref().unwrap());
+        }
+
+        *self.draw_shader_def.all_live_refs.borrow_mut() = all_live_refs;
+        *self.draw_shader_def.all_const_refs.borrow_mut() = all_const_refs;
         
         *self.draw_shader_def.all_fns.borrow_mut() = all_fns;
         *self.draw_shader_def.vertex_fns.borrow_mut() = vertex_fns;
@@ -567,6 +579,9 @@ impl<'a> FnDefAnalyser<'a> {
         // lets move the closures from env to
         // then analyse it
         self.analyse_closures() ?;
+        
+        // lets build up our fn_args_hidden and combine it
+        // with our callees
         
         if let Some(ty_expr) = &self.fn_def.return_ty_expr{
             if let Ty::Void = ty_expr.ty.borrow().as_ref().unwrap(){

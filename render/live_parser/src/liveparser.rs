@@ -9,7 +9,6 @@ use crate::liveerror::LiveError;
 use crate::liveerror::LiveErrorOrigin;
 use crate::id::Id;
 use crate::id::IdPack;
-use crate::id::IdUnpack;
 use crate::livedocument::LiveDocument;
 use crate::livenode::{LiveNode, LiveValue};
 
@@ -121,7 +120,7 @@ impl<'a> LiveParser<'a> {
     fn expect_class_id_wildcard(&mut self, ld: &mut LiveDocument) -> Result<IdPack, LiveError> {
         
         let base = match self.peek_token() {
-            token_punct!(*) => {
+            Token::Punct(id!(*)) => {
                 self.skip_token();
                 Id(0)
             }
@@ -134,14 +133,14 @@ impl<'a> LiveParser<'a> {
             }
         };
         
-        if self.peek_token() == token_punct!(::) {
+        if self.peek_token() == Token::Punct(id!(::)) {
             self.skip_token();
             // start a multi_id
             let multi_index = ld.multi_ids.len();
             ld.multi_ids.push(base);
             loop {
                 match self.peek_token() {
-                    token_punct!(*) => {
+                    Token::Punct(id!(*)) => {
                         self.skip_token();
                         ld.multi_ids.push(Id::empty());
                         break
@@ -149,7 +148,7 @@ impl<'a> LiveParser<'a> {
                     Token::Ident(id) => {
                         self.skip_token();
                         ld.multi_ids.push(id);
-                        if !self.accept_token(token_punct!(::)) {
+                        if !self.accept_token(Token::Punct(id!(::))) {
                             break;
                         }
                     },
@@ -170,7 +169,7 @@ impl<'a> LiveParser<'a> {
         
         let base = self.expect_ident() ?;
         
-        if self.peek_token() == token_punct!(::) {
+        if self.peek_token() == Token::Punct(id!(::)) {
             self.skip_token();
             // start a multi_id
             let multi_index = ld.multi_ids.len();
@@ -180,7 +179,7 @@ impl<'a> LiveParser<'a> {
                     Token::Ident(id) => {
                         self.skip_token();
                         ld.multi_ids.push(id);
-                        if !self.accept_token(token_punct!(::)) {
+                        if !self.accept_token(Token::Punct(id!(::))) {
                             break;
                         }
                     },
@@ -198,7 +197,7 @@ impl<'a> LiveParser<'a> {
     
     fn expect_prop_id(&mut self, ld: &mut LiveDocument) -> Result<IdPack, LiveError> {
         let base = self.expect_ident() ?;
-        if self.peek_token() == token_punct!(.) {
+        if self.peek_token() == Token::Punct(id!(.)) {
             self.skip_token();
             // start a multi_id
             let multi_index = ld.multi_ids.len();
@@ -208,7 +207,7 @@ impl<'a> LiveParser<'a> {
                     Token::Ident(id) => {
                         self.skip_token();
                         ld.multi_ids.push(id);
-                        if !self.accept_token(token_punct!(.)) {
+                        if !self.accept_token(Token::Punct(id!(.))) {
                             break;
                         }
                     },
@@ -234,11 +233,11 @@ impl<'a> LiveParser<'a> {
             }
             //let span = self.begin_span();
             self.expect_live_value(IdPack::empty(), level, ld) ?;
-            self.expect_token(token_punct!(:)) ?;
+            self.expect_token(Token::Punct(id!(:))) ?;
             //let span = self.begin_span();
             self.expect_live_value(IdPack::empty(), level, ld) ?;
-            if !self.accept_token(token_punct!(,)) {
-                self.accept_token(token_punct!(;));
+            if !self.accept_token(Token::Punct(id!(,))) {
+                self.accept_token(Token::Punct(id!(;)));
             }
         }
         return Err(self.error(format!("Eof in object body")))
@@ -254,7 +253,7 @@ impl<'a> LiveParser<'a> {
             }
             //let span = self.begin_span();
             self.expect_live_value(IdPack::empty(), level, ld) ?;
-            self.accept_token(token_punct!(,));
+            self.accept_token(Token::Punct(id!(,)));
         }
         return Err(self.error(format!("Eof in object body")))
     }
@@ -269,7 +268,7 @@ impl<'a> LiveParser<'a> {
             }
             //let span = self.begin_span();
             self.expect_live_value(IdPack::empty(), level, ld) ?;
-            self.accept_token(token_punct!(,));
+            self.accept_token(Token::Punct(id!(,)));
         }
         return Err(self.error(format!("Eof in object body")))
     }
@@ -350,9 +349,9 @@ impl<'a> LiveParser<'a> {
                     value: LiveValue::String {string_start: index, string_count: len}
                 });
             },
-            token_ident!(vec2) => { todo!()
+            Token::Ident(id!(vec2)) => { todo!()
             },
-            token_ident!(vec3) => { todo!()
+            Token::Ident(id!(vec3)) => { todo!()
             },
             Token::Ident(_) => { // we're gonna parse a class.
                 // we also support vec2/vec3 values directly.
@@ -430,8 +429,8 @@ impl<'a> LiveParser<'a> {
                 self.skip_token();
                 return Ok(())
             }
-            token_ident!(vec2)=>{todo!()}
-            token_ident!(vec3)=>{todo!()}
+            Token::Ident(id!(vec2))=>{todo!()}
+            Token::Ident(id!(vec3))=>{todo!()}
             _=>()
         }
         Err(self.error(format!("Expected value literal")))
@@ -474,9 +473,9 @@ impl<'a> LiveParser<'a> {
                             }
                             id_pack!(use) => {
                                 let crate_name = self.expect_ident() ?;
-                                self.expect_token(token_punct!(::)) ?;
+                                self.expect_token(Token::Punct(id!(::))) ?;
                                 let module_name = self.expect_ident() ?;
-                                self.expect_token(token_punct!(::)) ?;
+                                self.expect_token(Token::Punct(id!(::))) ?;
                                 // then we have a chain of idents with a possible *
                                 let token_id = self.get_token_id();
                                 let id = self.expect_class_id_wildcard(ld) ?;
@@ -488,21 +487,21 @@ impl<'a> LiveParser<'a> {
                                     id_pack: id,
                                     value: LiveValue::Use {crate_module}
                                 });
-                                if !self.accept_token(token_punct!(,)) {
-                                    self.accept_token(token_punct!(;));
+                                if !self.accept_token(Token::Punct(id!(,))) {
+                                    self.accept_token(Token::Punct(id!(;)));
                                 }
                             }
                             _ => {
                                 // ok so we get an ident.
                                 let token_id = self.get_token_id();
                                 let ty = self.expect_class_id(ld) ?;
-                                if self.accept_token(token_punct!(:)) { // its a vardef
+                                if self.accept_token(Token::Punct(id!(:))) { // its a vardef
                                     self.expect_var_def_type() ?;
                                     // now an assignment might follow.
 
                                     // we should parse full expressions here
                                     // consts can only depend on other consts, not on live values
-                                    if self.accept_token(token_punct!(=)){
+                                    if self.accept_token(Token::Punct(id!(=))){
                                         self.expect_value_literal()?;
                                     }
                                     
@@ -526,18 +525,18 @@ impl<'a> LiveParser<'a> {
                                         }
                                     });
                                 }
-                                if !self.accept_token(token_punct!(,)) {
-                                    self.accept_token(token_punct!(;));
+                                if !self.accept_token(Token::Punct(id!(,))) {
+                                    self.accept_token(Token::Punct(id!(;)));
                                 }
                             }
                         }
                     }
                     else {
-                        self.expect_token(token_punct!(:)) ?;
+                        self.expect_token(Token::Punct(id!(:))) ?;
                         // ok now we get a value to parse
                         self.expect_live_value(prop_id, level, ld) ?;
-                        if !self.accept_token(token_punct!(,)) {
-                            self.accept_token(token_punct!(;));
+                        if !self.accept_token(Token::Punct(id!(,))) {
+                            self.accept_token(Token::Punct(id!(;)));
                         }
                     }
                 },
