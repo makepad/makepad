@@ -1,7 +1,6 @@
 use makepad_live_parser::Span;
 use makepad_live_parser::Token;
 use makepad_live_parser::Id;
-use makepad_live_parser::token_punct;
 use makepad_live_parser::FullNodePtr;
 use makepad_live_parser::Vec4;
 use std::fmt::Write;
@@ -40,12 +39,6 @@ pub struct VarDefNodePtr(pub FullNodePtr);
 //impl FnNodePtr {pub fn to_scope_ptr(self) -> ScopeNodePtr {ScopeNodePtr(self.0)}}
 //impl VarDefNodePtr {pub fn to_scope_ptr(self) -> ScopeNodePtr {ScopeNodePtr(self.0)}}
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum InputNodePtr {
-    VarDef(FullNodePtr),
-    ShaderResourceId(ShaderResourceId)
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct DrawShaderDef {
     pub debug: bool,
@@ -53,16 +46,53 @@ pub struct DrawShaderDef {
     pub fields: Vec<DrawShaderFieldDef>,
     pub methods: Vec<FnNodePtr>,
     
-    //pub structs: RefCell<Vec<StructNodePtr>>,
-    pub all_fns: RefCell<Vec<FnNodePtr>>,
-    pub vertex_fns: RefCell<Vec<FnNodePtr>>,
-    pub pixel_fns: RefCell<Vec<FnNodePtr>>,
+    // analysis results:
+    pub all_const_refs: RefCell<BTreeSet<ConstNodePtr>>,
+    pub all_live_refs: RefCell<BTreeMap<ValueNodePtr, Ty >>,
+    pub all_fns: RefCell<Vec<FnNodePtr >>,
+    pub vertex_fns: RefCell<Vec<FnNodePtr >>,
+    pub pixel_fns: RefCell<Vec<FnNodePtr >>,
+    pub all_structs: RefCell<Vec<StructNodePtr >>,
+    pub vertex_structs: RefCell<Vec<StructNodePtr >>,
+    pub pixel_structs: RefCell<Vec<StructNodePtr >>,
+    
+}
 
-    // we have a vertex_structs
-    pub all_structs: RefCell<Vec<StructNodePtr>>,
-    pub vertex_structs: RefCell<Vec<StructNodePtr>>,
-    pub pixel_structs: RefCell<Vec<StructNodePtr>>,
+#[derive(Clone, Debug)]
+pub struct DrawShaderFieldDef {
+    pub span: Span,
+    pub ident: Ident,
+    pub ty_expr: TyExpr,
+    pub kind: DrawShaderFieldKind
+}
 
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DrawShaderInputType {
+    VarDef(FullNodePtr),
+    ShaderResourceId(ShaderResourceId)
+}
+
+#[derive(Clone, Debug)]
+pub enum DrawShaderFieldKind {
+    Geometry {
+        is_used_in_pixel_shader: Cell<bool >,
+        var_def_node_ptr: VarDefNodePtr,
+    },
+    Instance {
+        is_used_in_pixel_shader: Cell<bool >,
+        input_type: DrawShaderInputType,
+    },
+    Texture {
+        input_type: DrawShaderInputType,
+    },
+    Uniform {
+        input_type: DrawShaderInputType,
+        block_ident: Ident,
+    },
+    Varying {
+        var_def_node_ptr: VarDefNodePtr,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -100,6 +130,15 @@ impl FnSelfKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub enum FnArgHidden {
+    Geometries,
+    Instances,
+    Varyings,
+    Uniform(Ident),
+    LiveUniforms,
+}
+
 #[derive(Clone, Debug)]
 pub struct FnDef {
     pub fn_node_ptr: FnNodePtr,
@@ -111,21 +150,22 @@ pub struct FnDef {
     
     pub callees: RefCell<Option<BTreeSet<FnNodePtr >> >,
     pub builtin_deps: RefCell<Option<BTreeSet<Ident >> >,
-   // pub closure_deps: RefCell<Option<BTreeSet<Ident >> >,
-
+    // pub closure_deps: RefCell<Option<BTreeSet<Ident >> >,
+    
     // the const table (per function)
     pub const_table: RefCell<Option<Vec<f32 >> >,
     pub const_table_spans: RefCell<Option<Vec<(usize, Span) >> >,
     
-    // which props we reffed on self
+    pub fn_args_hidden: RefCell<Option<BTreeSet<FnArgHidden >> >,
     pub draw_shader_refs: RefCell<Option<BTreeSet<Ident >> >,
     pub const_refs: RefCell<Option<BTreeSet<ConstNodePtr >> >,
-    pub live_refs: RefCell<Option<BTreeMap<ValueNodePtr, Ty>> >,
+    pub live_refs: RefCell<Option<BTreeMap<ValueNodePtr, Ty >> >,
+    
     pub struct_refs: RefCell<Option<BTreeSet<StructNodePtr >> >,
     pub constructor_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>) >> >,
     
     pub closure_defs: Vec<ClosureDef>,
-    pub closure_sites: RefCell<Option<Vec<ClosureSite>>>,
+    pub closure_sites: RefCell<Option<Vec<ClosureSite >> >,
     
     // base
     pub span: Span,
@@ -135,39 +175,40 @@ pub struct FnDef {
     pub block: Block,
 }
 
-#[derive(Clone, Copy, Debug,Eq, Hash, PartialEq, Ord, PartialOrd)]
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct ClosureDefIndex(pub usize);
 
 #[derive(Clone, Debug)]
-pub struct ClosureParam{
+pub struct ClosureParam {
     pub span: Span,
     pub ident: Ident,
-    pub shadow: Cell<Option<ScopeSymShadow>>
+    pub shadow: Cell<Option<ScopeSymShadow >>
 }
 
 #[derive(Clone, Debug)]
-pub struct ClosureDef{
-    pub span:Span,
-    pub closed_over_syms: RefCell<Option<Vec<Sym>>>,
+pub struct ClosureDef {
+    pub span: Span,
+    pub closed_over_syms: RefCell<Option<Vec<Sym >> >,
     pub params: Vec<ClosureParam>,
-    pub kind:ClosureDefKind
+    pub kind: ClosureDefKind
 }
 
 #[derive(Clone, Debug)]
-pub enum ClosureDefKind{
+pub enum ClosureDefKind {
     Expr(Expr),
     Block(Block)
 }
 
 #[derive(Clone, Debug)]
-pub struct ClosureSite{ // 
+pub struct ClosureSite { //
     pub call_to: FnNodePtr,
     pub all_closed_over: BTreeSet<Sym>,
     pub closure_args: Vec<ClosureSiteArg>
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct ClosureSiteArg{
+pub struct ClosureSiteArg {
     pub param_index: usize,
     pub closure_def_index: ClosureDefIndex
 }
@@ -177,12 +218,12 @@ pub struct StructDef {
     pub span: Span,
     //pub ident: Ident,
     pub struct_refs: RefCell<Option<BTreeSet<StructNodePtr >> >,
-    pub fields: Vec<FieldDecl>,
+    pub fields: Vec<StructFieldDef>,
     pub methods: Vec<FnNodePtr>,
 }
 
 #[derive(Clone, Debug)]
-pub struct FieldDecl {
+pub struct StructFieldDef {
     pub var_def_node_ptr: VarDefNodePtr,
     pub span: Span,
     pub ident: Ident,
@@ -190,48 +231,19 @@ pub struct FieldDecl {
 }
 
 impl StructDef {
-    pub fn find_field(&self, ident: Ident) -> Option<&FieldDecl> {
+    pub fn find_field(&self, ident: Ident) -> Option<&StructFieldDef> {
         self.fields.iter().find( | field | field.ident == ident)
     }
-
+    
 }
 
-#[derive(Clone, Debug)]
-pub struct DrawShaderFieldDef {
-    pub span: Span,
-    pub ident: Ident,
-    pub ty_expr: TyExpr,
-    pub kind: DrawShaderFieldKind
-}
-
-#[derive(Clone, Debug)]
-pub enum DrawShaderFieldKind {
-    Geometry {
-        is_used_in_pixel_shader: Cell<bool >,
-        var_def_node_ptr: VarDefNodePtr,
-    },
-    Instance {
-        is_used_in_pixel_shader: Cell<bool >,
-        input_node_ptr: InputNodePtr,
-    },
-    Texture {
-        input_node_ptr: InputNodePtr,
-    },
-    Uniform {
-        input_node_ptr: InputNodePtr,
-        block_ident: Ident,
-    },
-    Varying {
-        var_def_node_ptr: VarDefNodePtr,
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct Param {
     pub span: Span,
     pub is_inout: bool,
     pub ident: Ident,
-    pub shadow: Cell<Option<ScopeSymShadow>>,
+    pub shadow: Cell<Option<ScopeSymShadow >>,
     pub ty_expr: TyExpr,
 }
 
@@ -265,7 +277,7 @@ pub enum Stmt {
     Let {
         span: Span,
         ty: RefCell<Option<Ty >>,
-        shadow: Cell<Option<ScopeSymShadow>>,
+        shadow: Cell<Option<ScopeSymShadow >>,
         ident: Ident,
         ty_expr: Option<TyExpr>,
         expr: Option<Expr>,
@@ -325,7 +337,7 @@ pub enum ExprKind {
     MethodCall {
         span: Span,
         ident: Ident,
-        closure_site_index: Cell<Option<usize>>,
+        closure_site_index: Cell<Option<usize >>,
         arg_exprs: Vec<Expr>,
     },
     PlainCall { // not very pretty but otherwise closures cannot override a normal fn
@@ -333,8 +345,8 @@ pub enum ExprKind {
         span: Span,
         fn_node_ptr: Option<FnNodePtr>,
         ident: Option<Ident>,
-        param_index: Cell<Option<usize>>, // used by the closure case
-        closure_site_index: Cell<Option<usize>>, // used by the plain fn case
+        param_index: Cell<Option<usize >>, // used by the closure case
+        closure_site_index: Cell<Option<usize >>, // used by the plain fn case
         arg_exprs: Vec<Expr>,
     },
     BuiltinCall {
@@ -366,10 +378,10 @@ pub enum ExprKind {
     },
 }
 
-pub enum PlainCallType{
-    Plain{
+pub enum PlainCallType {
+    Plain {
         
-    }    
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -382,8 +394,8 @@ pub enum VarResolve {
 
 #[derive(Clone, Copy, Debug)]
 pub enum VarKind {
-    Local{ident:Ident, shadow:ScopeSymShadow},
-    MutLocal{ident:Ident, shadow:ScopeSymShadow},
+    Local {ident: Ident, shadow: ScopeSymShadow},
+    MutLocal {ident: Ident, shadow: ScopeSymShadow},
     Const(ConstNodePtr),
     LiveValue(ValueNodePtr)
 }
@@ -406,9 +418,9 @@ pub enum TyExprKind {
     Lit {
         ty_lit: TyLit,
     },
-    ClosureDecl{
+    ClosureDecl {
         return_ty: RefCell<Option<Ty >>,
-        return_ty_expr: Box<Option<TyExpr>>,
+        return_ty_expr: Box<Option<TyExpr >>,
         params: Vec<Param>
     },
 }
@@ -512,11 +524,11 @@ pub enum Val {
 
 pub type Scope = HashMap<Ident, ScopeSym>;
 
-#[derive(Clone, Debug)] 
+#[derive(Clone, Debug)]
 pub struct Scopes {
     pub scopes: Vec<Scope>,
-    pub closure_scopes: RefCell<HashMap<ClosureDefIndex, Vec<Scope>>>,
-    pub closure_sites: RefCell<Vec<ClosureSite>>,
+    pub closure_scopes: RefCell<HashMap<ClosureDefIndex, Vec<Scope >> >,
+    pub closure_sites: RefCell<Vec<ClosureSite >>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -541,7 +553,7 @@ pub struct ScopeSym {
 pub enum ScopeSymKind {
     Local,
     MutLocal,
-    Closure{
+    Closure {
         return_ty: Ty,
         param_index: usize,
         params: Vec<Param>
@@ -565,31 +577,31 @@ impl Scopes {
         return None
     }
     
-    pub fn capture_closure_scope(&self, index:ClosureDefIndex){
+    pub fn capture_closure_scope(&self, index: ClosureDefIndex) {
         self.closure_scopes.borrow_mut().insert(index, self.scopes.clone());
     }
     
     pub fn push_scope(&mut self) {
-       self.scopes.push(Scope::new())
+        self.scopes.push(Scope::new())
     }
     
     pub fn pop_scope(&mut self) {
         self.scopes.pop().unwrap();
     }
     
-    pub fn clear_referenced_syms(&self){
-        for scope in self.scopes.iter().rev(){
-            for (_, sym) in scope{
+    pub fn clear_referenced_syms(&self) {
+        for scope in self.scopes.iter().rev() {
+            for (_, sym) in scope {
                 sym.referenced.set(false);
             }
         }
     }
     
-    pub fn all_referenced_syms(&self)->Vec<Sym>{
+    pub fn all_referenced_syms(&self) -> Vec<Sym> {
         let mut ret = Vec::new();
-        for scope in self.scopes.iter().rev(){
-            for (_, sym) in scope{
-                if sym.referenced.get(){
+        for scope in self.scopes.iter().rev() {
+            for (_, sym) in scope {
+                if sym.referenced.get() {
                     ret.push(sym.sym.clone());
                 }
             }
@@ -597,23 +609,23 @@ impl Scopes {
         ret
     }
     
-    pub fn insert_sym(&mut self, span: Span, ident: Ident, ty: Ty, sym_kind: ScopeSymKind)->ScopeSymShadow {
+    pub fn insert_sym(&mut self, span: Span, ident: Ident, ty: Ty, sym_kind: ScopeSymKind) -> ScopeSymShadow {
         
-        if let Some(item) = self.scopes.last_mut().unwrap().get_mut(&ident){
-            item.sym.shadow = ScopeSymShadow(item.sym.shadow.0+1);
+        if let Some(item) = self.scopes.last_mut().unwrap().get_mut(&ident) {
+            item.sym.shadow = ScopeSymShadow(item.sym.shadow.0 + 1);
             item.kind = sym_kind;
             item.sym.shadow
         }
-        else{
+        else {
             // find it anyway
-            let shadow = if let Some(ret) = self.scopes.iter().rev().find_map( | scope | scope.get(&ident)){
-                ScopeSymShadow(ret.sym.shadow.0+1)
+            let shadow = if let Some(ret) = self.scopes.iter().rev().find_map( | scope | scope.get(&ident)) {
+                ScopeSymShadow(ret.sym.shadow.0 + 1)
             }
-            else{
+            else {
                 ScopeSymShadow(0)
             };
-            self.scopes.last_mut().unwrap().insert(ident,ScopeSym{
-                sym: Sym{
+            self.scopes.last_mut().unwrap().insert(ident, ScopeSym {
+                sym: Sym {
                     ty,
                     ident,
                     shadow,
@@ -639,6 +651,42 @@ impl StructDef {
 
 
 impl FnDef {
+
+    pub fn new(
+        fn_node_ptr: FnNodePtr,
+        span: Span,
+        ident: Ident,
+        self_kind: Option<FnSelfKind>,
+        params: Vec<Param>,
+        return_ty_expr: Option<TyExpr>,
+        block:Block,
+        closure_defs:Vec<ClosureDef>
+    )->Self{
+        FnDef {
+            fn_node_ptr,
+            span,
+            ident,
+            self_kind,
+            params,
+            return_ty_expr,
+            block,
+            closure_defs,
+            has_return: Cell::new(false),
+            fn_args_hidden:RefCell::new(None),
+            closure_sites: RefCell::new(None),
+            const_refs: RefCell::new(None),
+            live_refs: RefCell::new(None),
+            struct_refs: RefCell::new(None),
+            draw_shader_refs: RefCell::new(None),
+            return_ty: RefCell::new(None),
+            callees: RefCell::new(None),
+            builtin_deps: RefCell::new(None),
+            constructor_fn_deps: RefCell::new(None),
+            const_table: RefCell::new(None),
+            const_table_spans: RefCell::new(None),
+        }
+    }
+
     pub fn init_analysis(&self) {
         *self.struct_refs.borrow_mut() = Some(BTreeSet::new());
         *self.callees.borrow_mut() = Some(BTreeSet::new());
@@ -652,7 +700,7 @@ impl FnDef {
         *self.const_table_spans.borrow_mut() = Some(Vec::new());
     }
     
-    pub fn has_closure_args(&self)->bool{
+    pub fn has_closure_args(&self) -> bool {
         for param in &self.params {
             if let TyExprKind::ClosureDecl {..} = &param.ty_expr.kind {
                 return true
@@ -662,71 +710,92 @@ impl FnDef {
     }
 }
 
-impl DrawShaderDef{
+impl DrawShaderDef {
     
     pub fn find_field(&self, ident: Ident) -> Option<&DrawShaderFieldDef> {
         self.fields.iter().find( | decl | {
             decl.ident == ident
         })
     }
+    
+    pub fn fields_as_uniform_blocks(&self)->BTreeMap<Ident,Vec<(usize,Ident)>>{
+        let mut uniform_blocks = BTreeMap::new();
+        for (field_index, field) in self.fields.iter().enumerate() {
+            match &field.kind {
+                DrawShaderFieldKind::Uniform{
+                    block_ident,
+                    ..
+                } => {
+                    let uniform_block = uniform_blocks
+                        .entry(*block_ident)
+                        .or_insert(Vec::new());
+                    uniform_block.push((field_index, field.ident));
+                }
+                _ => {}
+            }
+        }
+        uniform_blocks
+    }
+    
+    
 }
 
 impl BinOp {
     pub fn from_assign_op(token: Token) -> Option<BinOp> {
         match token {
-            token_punct!( =) => Some(BinOp::Assign),
-            token_punct!( +=) => Some(BinOp::AddAssign),
-            token_punct!( -=) => Some(BinOp::SubAssign),
-            token_punct!( *=) => Some(BinOp::MulAssign),
-            token_punct!( /=) => Some(BinOp::DivAssign),
+            Token::Punct(id!( =)) => Some(BinOp::Assign),
+            Token::Punct(id!( +=)) => Some(BinOp::AddAssign),
+            Token::Punct(id!( -=)) => Some(BinOp::SubAssign),
+            Token::Punct(id!( *=)) => Some(BinOp::MulAssign),
+            Token::Punct(id!( /=)) => Some(BinOp::DivAssign),
             _ => None,
         }
     }
     
     pub fn from_or_op(token: Token) -> Option<BinOp> {
         match token {
-            token_punct!( ||) => Some(BinOp::Or),
+            Token::Punct(id!( ||)) => Some(BinOp::Or),
             _ => None,
         }
     }
     
     pub fn from_and_op(token: Token) -> Option<BinOp> {
         match token {
-            token_punct!( &&) => Some(BinOp::And),
+            Token::Punct(id!( &&)) => Some(BinOp::And),
             _ => None,
         }
     }
     
     pub fn from_eq_op(token: Token) -> Option<BinOp> {
         match token {
-            token_punct!( ==) => Some(BinOp::Eq),
-            token_punct!( !=) => Some(BinOp::Ne),
+            Token::Punct(id!( ==)) => Some(BinOp::Eq),
+            Token::Punct(id!( !=)) => Some(BinOp::Ne),
             _ => None,
         }
     }
     
     pub fn from_rel_op(token: Token) -> Option<BinOp> {
         match token {
-            token_punct!(<) => Some(BinOp::Lt),
-            token_punct!( <=) => Some(BinOp::Le),
-            token_punct!(>) => Some(BinOp::Gt),
-            token_punct!( >=) => Some(BinOp::Ge),
+            Token::Punct(id!(<)) => Some(BinOp::Lt),
+            Token::Punct(id!( <=)) => Some(BinOp::Le),
+            Token::Punct(id!(>)) => Some(BinOp::Gt),
+            Token::Punct(id!( >=)) => Some(BinOp::Ge),
             _ => None,
         }
     }
     
     pub fn from_add_op(token: Token) -> Option<BinOp> {
         match token {
-            token_punct!( +) => Some(BinOp::Add),
-            token_punct!(-) => Some(BinOp::Sub),
+            Token::Punct(id!( +)) => Some(BinOp::Add),
+            Token::Punct(id!(-)) => Some(BinOp::Sub),
             _ => None,
         }
     }
     
     pub fn from_mul_op(token: Token) -> Option<BinOp> {
         match token {
-            token_punct!(*) => Some(BinOp::Mul),
-            token_punct!( /) => Some(BinOp::Div),
+            Token::Punct(id!(*)) => Some(BinOp::Mul),
+            Token::Punct(id!( /)) => Some(BinOp::Div),
             _ => None,
         }
     }
@@ -764,8 +833,8 @@ impl fmt::Display for BinOp {
 impl UnOp {
     pub fn from_un_op(token: Token) -> Option<UnOp> {
         match token {
-            token_punct!(!) => Some(UnOp::Not),
-            token_punct!(-) => Some(UnOp::Neg),
+            Token::Punct(id!(!)) => Some(UnOp::Not),
+            Token::Punct(id!(-)) => Some(UnOp::Neg),
             _ => None,
         }
     }
@@ -810,7 +879,7 @@ impl Ty {
             Ty::Struct(_) => None,
             Ty::DrawShader(_) => None,
             Ty::ClosureDecl => None,
-            Ty::ClosureDef{..} => None
+            Ty::ClosureDef {..} => None
         }
     }
     
@@ -857,7 +926,7 @@ impl Ty {
             Ty::Struct(_) => panic!(),
             Ty::DrawShader(_) => panic!(),
             Ty::ClosureDecl => panic!(),
-            Ty::ClosureDef{..}  => panic!(),
+            Ty::ClosureDef {..} => panic!(),
         }
     }
 }
@@ -886,7 +955,7 @@ impl fmt::Display for Ty {
             Ty::Struct(struct_ptr) => write!(f, "Struct:{:?}", struct_ptr),
             Ty::DrawShader(shader_ptr) => write!(f, "DrawShader:{:?}", shader_ptr),
             Ty::ClosureDecl => write!(f, "ClosureDecl"),
-            Ty::ClosureDef{..}  => write!(f, "ClosureDef"),
+            Ty::ClosureDef {..} => write!(f, "ClosureDef"),
         }
     }
 }
