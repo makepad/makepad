@@ -15,3 +15,4 @@ pub mod swizzle;
 pub mod util;
 pub mod generate;
 pub mod generate_glsl;
+pub mod generate_metal;

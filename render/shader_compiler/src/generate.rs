@@ -13,55 +13,6 @@ pub struct ClosureSiteInfo<'a> {
     pub call_ptr: FnNodePtr
 }
 
-pub struct DisplayDsIdent(pub Ident);
-
-impl fmt::Display for DisplayDsIdent {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ds_{}", self.0)
-    }
-}
-
-pub struct DisplayFnName(pub FnNodePtr, pub Ident);
-
-impl fmt::Display for DisplayFnName {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}_{}", self.0, self.1)
-    }
-}
-
-pub struct DisplayFnNameWithClosureArgs(pub usize, pub FnNodePtr, pub Ident);
-
-impl fmt::Display for DisplayFnNameWithClosureArgs {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "site_{}_of_{}_{}", self.0, self.1, self.2)
-    }
-}
-
-pub struct DisplayClosureName(pub FnNodePtr, pub ClosureDefIndex);
-
-impl fmt::Display for DisplayClosureName {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "closure_{}_in_{}", self.1.0, self.0)
-    }
-}
-
-pub struct DisplayVarName(pub Ident, pub ScopeSymShadow);
-
-impl fmt::Display for DisplayVarName {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "var_{}_{}", self.0, self.1.0)
-    }
-}
-
-
-pub struct DisplayClosedOverArg(pub Ident, pub ScopeSymShadow);
-
-impl fmt::Display for DisplayClosedOverArg {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "pass_{}_{}", self.0, self.1.0)
-    }
-}
-
 pub trait BackendWriter {
     fn write_var_decl(
         &self,
@@ -74,8 +25,9 @@ pub trait BackendWriter {
     ) -> bool;
     
     // fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, fn_node_ptr: FnNodePtr, shader: &DrawShaderDecl, sep: &str);
-    
     // fn generate_var_expr(&self, string: &mut String, span:Span, ident_path: IdentPath, kind: &Cell<Option<VarKind>>, shader: &DrawShaderDecl, decl: &FnDecl, ty:&Option<Ty>);
+    
+    fn generate_draw_shader_prefix(&self, string: &mut String, expr: &Expr, field_ident: Ident);
     
     fn needs_bare_struct_cons(&self) -> bool {
         true
@@ -646,6 +598,7 @@ impl<'a> ExprGenerator<'a> {
     fn generate_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident) {
         match expr.ty.borrow().as_ref() {
             Some(Ty::DrawShader(_)) => {
+                self.backend_writer.generate_draw_shader_prefix(&mut self.string, expr, field_ident);
                 write!(self.string, "{}", &DisplayDsIdent(field_ident)).unwrap();
             }
             _ => {
@@ -789,13 +742,14 @@ impl<'a> ExprGenerator<'a> {
                 //self.backend_writer.write_ident(self.string, ident);
             }
             VarKind::Const(const_node_ptr) => {
-                // we have a const
+                // we have a const. we need to generate some kind of prefix for this
                 write!(self.string, "{}", const_node_ptr).unwrap();
+                todo!();
             }
             VarKind::LiveValue(value_node_ptr) => {
-                // this is a live value..
+                // this is a live value.. also prefix needed
                 write!(self.string, "{}", value_node_ptr).unwrap();
-                
+                todo!();
             }
         }
         //self.backend_write.generate_var_expr(&mut self.string, span, kind, &self.shader, decl)
@@ -873,7 +827,6 @@ impl<'a> FnDefGenerator<'a> {
     }
 }
 
-
 pub struct FnDefWithClosureArgsGenerator<'a> {
     pub closure_site_info: ClosureSiteInfo<'a>,
     pub fn_def: &'a FnDef,
@@ -884,7 +837,65 @@ pub struct FnDefWithClosureArgsGenerator<'a> {
     pub backend_writer: &'a dyn BackendWriter
 }
 
+
 impl<'a> FnDefWithClosureArgsGenerator<'a> {
+    pub fn generate_fn_def_with_all_closures(
+        string:&mut String,
+        shader_registry: &ShaderRegistry,
+        fn_def: &FnDef,
+        call_def: &FnDef,
+        backend_writer: &dyn BackendWriter,
+        const_table_offset: Option<usize>
+    ) {
+        // so first we are collecting the closures in defs that are actually used
+        for (closure_def_index, closure_def) in call_def.closure_defs.iter().enumerate() {
+            let closure_def_index = ClosureDefIndex(closure_def_index);
+            for site in call_def.closure_sites.borrow().as_ref().unwrap() {
+                if site.call_to == fn_def.fn_node_ptr { // alright this site calls the fn_def
+                    for closure_site_arg in &site.closure_args {
+                        if closure_site_arg.closure_def_index == closure_def_index {
+                            // alright lets generate this closure
+                            ClosureDefGenerator {
+                                closure_site_arg: *closure_site_arg,
+                                closure_def,
+                                fn_def,
+                                call_def,
+                                shader_registry: shader_registry,
+                                //env:self.env,
+                                const_table_offset,
+                                backend_writer,
+                                string: string,
+                            }
+                            .generate_fn_def()
+                        }
+                    }
+                }
+            }
+        }
+        
+        for (site_index, closure_site) in call_def.closure_sites.borrow().as_ref().unwrap().iter().enumerate() {
+            // for each site
+            if closure_site.call_to == fn_def.fn_node_ptr { // alright this site calls the fn_def
+                // alright we need a fn def for this site_index
+                FnDefWithClosureArgsGenerator {
+                    closure_site_info: ClosureSiteInfo {
+                        site_index,
+                        closure_site,
+                        call_ptr: call_def.fn_node_ptr,
+                    },
+                    fn_def,
+                    call_def,
+                    shader_registry,
+                    //env:self.env,
+                    const_table_offset,
+                    backend_writer,
+                    string,
+                }
+                .generate_fn_def_with_closure_args()
+            }
+        }
+    }
+    
     pub fn generate_fn_def_with_closure_args(&mut self) {
         
         self.backend_writer.write_var_decl(
@@ -1064,3 +1075,66 @@ impl<'a> ClosureDefGenerator<'a> {
     }
 }
 
+pub struct DisplayDsIdent(pub Ident);
+
+impl fmt::Display for DisplayDsIdent {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "ds_{}", self.0)
+    }
+}
+
+pub struct DisplayStructField(pub Ident);
+
+impl fmt::Display for DisplayStructField {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "f_{}", self.0)
+    }
+}
+
+pub struct DisplayFnName(pub FnNodePtr, pub Ident);
+
+impl fmt::Display for DisplayFnName {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}_{}", self.0, self.1)
+    }
+}
+
+pub struct DisplayFnNameWithClosureArgs(pub usize, pub FnNodePtr, pub Ident);
+
+impl fmt::Display for DisplayFnNameWithClosureArgs {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "site_{}_of_{}_{}", self.0, self.1, self.2)
+    }
+}
+
+pub struct DisplayClosureName(pub FnNodePtr, pub ClosureDefIndex);
+
+impl fmt::Display for DisplayClosureName {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "closure_{}_in_{}", self.1.0, self.0)
+    }
+}
+
+pub struct DisplayVarName(pub Ident, pub ScopeSymShadow);
+
+impl fmt::Display for DisplayVarName {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "var_{}_{}", self.0, self.1.0)
+    }
+}
+
+pub struct DisplayClosedOverArg(pub Ident, pub ScopeSymShadow);
+
+impl fmt::Display for DisplayClosedOverArg {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "pass_{}_{}", self.0, self.1.0)
+    }
+}
+
+pub struct DisplaConstructorArg(pub usize);
+
+impl fmt::Display for DisplaConstructorArg {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "x{}", self.0)
+    }
+}

@@ -62,19 +62,3 @@ pub fn live_error_origin(_item: TokenStream) -> TokenStream {
     tb.end()
 }
 
-
-#[proc_macro]
-pub fn token_ident(item: TokenStream) -> TokenStream {
-    let mut tb = TokenBuilder::new(); 
-    let id = Id::from_str(&item.to_string());
-    tb.add("Token :: Ident ( Id (").suf_u64(id.0).add(") )");
-    tb.end()
-}
-
-#[proc_macro]
-pub fn token_punct(item: TokenStream) -> TokenStream {
-    let mut tb = TokenBuilder::new(); 
-    let id = Id::from_str(&item.to_string());
-    tb.add("Token :: Punct ( Id (").suf_u64(id.0).add(") )");
-    tb.end()
-}
