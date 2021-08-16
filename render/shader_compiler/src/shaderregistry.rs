@@ -4,8 +4,6 @@ use makepad_live_parser::*;
 use crate::shaderast::*;
 use crate::analyse::*;
 
-//use crate::generate::*;
-
 use crate::shaderparser::ShaderParser;
 use crate::shaderparser::ShaderParserDep;
 use std::collections::BTreeMap;
@@ -16,6 +14,7 @@ use crate::builtin::Builtin;
 use crate::builtin::generate_builtins;
 use crate::shaderast::Scopes;
 use crate::generate_glsl;
+use crate::generate_metal;
 
 #[derive(Clone, Debug, Copy, Hash, Eq, PartialEq)]
 pub struct ShaderResourceId(CrateModule, Id);
@@ -71,6 +70,7 @@ pub struct DrawShaderInputItem {
 
 impl DrawShaderInput {
     pub fn add_uniform(&mut self, name: &str, ty_expr: TyExpr) {
+        Id::from_str(name).panic_collision(name);
         if let TyExprKind::Lit {ty_lit, ..} = ty_expr.kind {
             if ty_lit == TyLit::Texture2D {
                 self.textures.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr});
@@ -81,6 +81,7 @@ impl DrawShaderInput {
     }
     
     pub fn add_instance(&mut self, name: &str, ty_expr: TyExpr) {
+        Id::from_str(name).panic_collision(name);
         self.instances.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr});
     }
 }
@@ -648,7 +649,7 @@ impl ShaderRegistry {
                                     DrawShaderFieldDef {
                                         kind: DrawShaderFieldKind::Instance {
                                             is_used_in_pixel_shader: Cell::new(false),
-                                            input_node_ptr: InputNodePtr::ShaderResourceId(draw_input_srid),
+                                            input_type: DrawShaderInputType::ShaderResourceId(draw_input_srid),
                                         },
                                         span,
                                         ident: instance.ident,
@@ -662,7 +663,7 @@ impl ShaderRegistry {
                                     DrawShaderFieldDef {
                                         kind: DrawShaderFieldKind::Uniform {
                                             block_ident: Ident(id!(default)),
-                                            input_node_ptr: InputNodePtr::ShaderResourceId(draw_input_srid),
+                                            input_type: DrawShaderInputType::ShaderResourceId(draw_input_srid),
                                         },
                                         span,
                                         ident: uniform.ident,
@@ -675,7 +676,7 @@ impl ShaderRegistry {
                                 draw_shader_def.fields.push(
                                     DrawShaderFieldDef {
                                         kind: DrawShaderFieldKind::Texture {
-                                            input_node_ptr: InputNodePtr::ShaderResourceId(draw_input_srid),
+                                            input_type: DrawShaderInputType::ShaderResourceId(draw_input_srid),
                                         },
                                         span,
                                         ident: texture.ident,
@@ -737,12 +738,9 @@ impl ShaderRegistry {
     pub fn generate_glsl_shader(&mut self, crate_id: Id, module_id: Id, ids: &[Id], const_file_id: Option<FileId>) -> Result<(String, String), LiveError> {
         // lets find the FullPointer
         if let Some(shader_ptr) = self.live_registry.find_full_node_ptr_from_ids(crate_id, module_id, ids) {
-            // lets generate a vertex shader
-            
             if let Some(draw_shader_decl) = self.draw_shaders.get(&DrawShaderNodePtr(shader_ptr)) {
                 // TODO this env needs its const table transferred
                 let final_const_table = self.compute_final_const_table(draw_shader_decl, const_file_id);
-                
                 let vertex = generate_glsl::generate_vertex_shader(draw_shader_decl, &final_const_table, self);
                 let pixel = generate_glsl::generate_pixel_shader(draw_shader_decl, &final_const_table, self);
                 return Ok((vertex, pixel))
@@ -756,5 +754,21 @@ impl ShaderRegistry {
         })
     }
     
+    pub fn generate_metal_shader(&mut self, crate_id: Id, module_id: Id, ids: &[Id], const_file_id: Option<FileId>) -> Result<String, LiveError> {
+        // lets find the FullPointer
+        if let Some(shader_ptr) = self.live_registry.find_full_node_ptr_from_ids(crate_id, module_id, ids) {
+            if let Some(draw_shader_decl) = self.draw_shaders.get(&DrawShaderNodePtr(shader_ptr)) {
+                // TODO this env needs its const table transferred
+                let final_const_table = self.compute_final_const_table(draw_shader_decl, const_file_id);
+                let shader = generate_metal::generate_shader(draw_shader_decl, &final_const_table, self);
+                return Ok(shader)
+            }
+        }
+        return Err(LiveError {
+            origin: live_error_origin!(),
+            span: Span::default(),
+            message: format!("generate_glsl_shader could not find {} {} {} ", crate_id, module_id, ids[0])
+        })
+    }
     
 }
