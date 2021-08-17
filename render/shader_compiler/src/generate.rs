@@ -36,7 +36,7 @@ pub trait BackendWriter {
     fn write_fn_def_hidden_params(&self, string: &mut String, hidden_args:&BTreeSet<HiddenArgKind >, sep: &str);
     
     fn generate_live_value_prefix(&self, string: &mut String);
-    fn generate_draw_shader_prefix(&self, string: &mut String, expr: &Expr, field_ident: Ident);
+    fn generate_draw_shader_field_expr(&self, string: &mut String, expr: &Expr, field_ident: Ident);
     
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
     fn write_builtin_call_ident(&self, string: &mut String, ident: Ident, arg_exprs: &[Expr]);
@@ -689,8 +689,8 @@ impl<'a> ExprGenerator<'a> {
     fn generate_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident) {
         match expr.ty.borrow().as_ref() {
             Some(Ty::DrawShader(_)) => {
-                self.backend_writer.generate_draw_shader_prefix(&mut self.string, expr, field_ident);
-                write!(self.string, "{}", &DisplayDsIdent(field_ident)).unwrap();
+                self.backend_writer.generate_draw_shader_field_expr(&mut self.string, expr, field_ident);
+                //write!(self.string, "{}", &DisplayDsIdent(field_ident)).unwrap();
             }
             _ => {
                 self.generate_expr(expr);

@@ -72,20 +72,19 @@ pub struct DrawShaderInputItem {
 }
 
 impl DrawShaderInput {
-    pub fn add_uniform(&mut self, name: &str, ty_expr: TyExpr) {
+    pub fn add_uniform(&mut self, name: &str, ty: Ty) {
         Id::from_str(name).panic_collision(name);
-        if let TyExprKind::Lit {ty_lit, ..} = ty_expr.kind {
-            if ty_lit == TyLit::Texture2D {
-                self.textures.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr});
-                return
-            }
+        if let Ty::Texture2D = ty{
+            self.textures.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr:ty.to_ty_expr()});
         }
-        self.uniforms.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr});
+        else{
+            self.uniforms.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr:ty.to_ty_expr()});
+        }
     }
     
-    pub fn add_instance(&mut self, name: &str, ty_expr: TyExpr) {
+    pub fn add_instance(&mut self, name: &str, ty: Ty) {
         Id::from_str(name).panic_collision(name);
-        self.instances.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr});
+        self.instances.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr:ty.to_ty_expr()});
     }
 }
 
