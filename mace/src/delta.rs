@@ -46,7 +46,7 @@ impl Delta {
                         Ordering::Less => {
                             builder.delete(count_0);
                             operation_slot_0 = operation_iter_0.next();
-                            operation_slot_1 = Some(Operation::Retain(count_1 - count_0));
+                            operation_slot_1 = Some(Operation::Delete(count_1 - count_0));
                         }
                         Ordering::Equal => {
                             builder.delete(count_0);
@@ -55,7 +55,7 @@ impl Delta {
                         }
                         Ordering::Greater => {
                             builder.delete(count_1);
-                            operation_slot_0 = Some(Operation::Delete(count_0 - count_1));
+                            operation_slot_0 = Some(Operation::Retain(count_0 - count_1));
                             operation_slot_1 = operation_iter_1.next();
                         }
                     }
@@ -100,7 +100,7 @@ impl Delta {
                 (Some(Operation::Insert(text)), None) => {
                     builder.insert(text);
                     operation_slot_0 = operation_iter_0.next();
-                    operation_slot_1 = operation_iter_1.next();
+                    operation_slot_1 = None;
                 }
                 (Some(Operation::Retain(count)), None) => {
                     builder.retain(count);
