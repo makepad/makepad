@@ -3,6 +3,7 @@ use makepad_live_parser::*;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::fmt::Write;
+use std::collections::BTreeSet;
 use std::fmt;
 use crate::shaderregistry::ShaderRegistry;
 
@@ -24,18 +25,15 @@ pub trait BackendWriter {
         ty: &Ty,
     ) -> bool;
     
-    fn write_call_expr_hidden_args(&self, string: &mut String, fn_def:&FnDef, sep: &str);
-    fn write_fn_def_hidden_params(&self, string: &mut String, fn_def:&FnDef, sep: &str);
+    fn write_call_expr_hidden_args(&self, string: &mut String, hidden_args:&BTreeSet<HiddenArgKind >, sep: &str);
+    fn write_fn_def_hidden_params(&self, string: &mut String, hidden_args:&BTreeSet<HiddenArgKind >, sep: &str);
     
-    // fn generate_var_expr(&self, string: &mut String, span:Span, ident_path: IdentPath, kind: &Cell<Option<VarKind>>, shader: &DrawShaderDecl, decl: &FnDecl, ty:&Option<Ty>);
-    
+    fn generate_live_value_prefix(&self, string: &mut String);
     fn generate_draw_shader_prefix(&self, string: &mut String, expr: &Expr, field_ident: Ident);
     
     fn needs_bare_struct_cons(&self) -> bool {
         true
     }
-    
-    //fn write_ident(&self, string: &mut String, ident: Ident);
     
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
     
@@ -541,8 +539,8 @@ impl<'a> ExprGenerator<'a> {
         // lets create a fn name for this thing.
         if let Some(closure_site_index) = closure_site_index.get() {
             // ok so.. we have closure args. this means we have a callsite
-            let call_fn = self.fn_def.unwrap();
-            let closure_sites = &call_fn.closure_sites.borrow();
+            let call_def = self.fn_def.unwrap();
+            let closure_sites = &call_def.closure_sites.borrow();
 
             let closure_site = &closure_sites.as_ref().unwrap()[closure_site_index];
             // ok our function name is different now:
@@ -550,7 +548,7 @@ impl<'a> ExprGenerator<'a> {
             // and then our args
             write!(self.string, "{} (", DisplayFnNameWithClosureArgs(
                 closure_site_index,
-                call_fn.fn_node_ptr,
+                call_def.fn_node_ptr,
                 fn_def.ident
             )).unwrap();
             
@@ -582,7 +580,10 @@ impl<'a> ExprGenerator<'a> {
                 sep = ", ";
             }
 
-            self.backend_writer.write_call_expr_hidden_args(self.string, fn_def, sep);
+            let mut merged_hidden_args = BTreeSet::new();
+            merged_hidden_args.extend(fn_def.hidden_args.borrow().as_ref().unwrap().iter().cloned());
+            merged_hidden_args.extend(call_def.hidden_args.borrow().as_ref().unwrap().iter().cloned());
+            self.backend_writer.write_call_expr_hidden_args(self.string, &merged_hidden_args, sep);
 
             write!(self.string, ")").unwrap();
         }
@@ -595,7 +596,7 @@ impl<'a> ExprGenerator<'a> {
                 sep = ", ";
             }
 
-            self.backend_writer.write_call_expr_hidden_args(self.string, fn_def, sep);
+            self.backend_writer.write_call_expr_hidden_args(self.string, fn_def.hidden_args.borrow().as_ref().unwrap(), sep);
 
             write!(self.string, ")").unwrap();
         }
@@ -609,7 +610,7 @@ impl<'a> ExprGenerator<'a> {
             }
             _ => {
                 self.generate_expr(expr);
-                write!(self.string, ".{}", field_ident).unwrap();
+                write!(self.string, ".{}", &DisplayStructField(field_ident)).unwrap();
             }
         }
     }
@@ -680,7 +681,8 @@ impl<'a> ExprGenerator<'a> {
         let closure_site_info = self.closure_site_info.as_ref().unwrap();
         // find our closure def
         let closure_def_index = closure_site_info.closure_site.closure_args.iter().find( | arg | arg.param_index == param_index).unwrap().closure_def_index;
-        let closure_def = &self.shader_registry.all_fns.get(&closure_site_info.call_ptr).unwrap().closure_defs[closure_def_index.0];
+        let call_def = self.shader_registry.all_fns.get(&closure_site_info.call_ptr).unwrap();
+        let closure_def = &call_def.closure_defs[closure_def_index.0];
         
         write!(self.string, "{}", DisplayClosureName(closure_site_info.call_ptr, closure_def_index)).unwrap();
         
@@ -700,6 +702,12 @@ impl<'a> ExprGenerator<'a> {
             write!(self.string, "{}", DisplayClosedOverArg(sym.ident, sym.shadow)).unwrap();
             sep = ", ";
         }
+        
+        // we need to merge both the fn_def as well as the call_ptr
+        let mut merged_hidden_args = BTreeSet::new();
+        merged_hidden_args.extend(self.fn_def.unwrap().hidden_args.borrow().as_ref().unwrap().iter().cloned());
+        merged_hidden_args.extend(call_def.hidden_args.borrow().as_ref().unwrap().iter().cloned());
+        self.backend_writer.write_call_expr_hidden_args(self.string, &merged_hidden_args, sep);
         
         write!(self.string, ")").unwrap();
         
@@ -741,27 +749,19 @@ impl<'a> ExprGenerator<'a> {
         match kind.get().unwrap() {
             VarKind::Local {ident, shadow} => {
                 write!(self.string, "{}", DisplayVarName(ident, shadow)).unwrap();
-                //self.backend_writer.write_ident(self.string, ident);
             }
             VarKind::MutLocal {ident, shadow} => {
                 write!(self.string, "{}", DisplayVarName(ident, shadow)).unwrap();
-                //self.backend_writer.write_ident(self.string, ident);
             }
             VarKind::Const(const_node_ptr) => {
-                // we have a const. we need to generate some kind of prefix for this
                 write!(self.string, "{}", const_node_ptr).unwrap();
-                todo!();
             }
             VarKind::LiveValue(value_node_ptr) => {
                 // this is a live value.. also prefix needed
+                self.backend_writer.generate_live_value_prefix(self.string);
                 write!(self.string, "{}", value_node_ptr).unwrap();
-                todo!();
             }
         }
-        //self.backend_write.generate_var_expr(&mut self.string, span, kind, &self.shader, decl)
-        //if let Some(decl) = self.decl {
-        //    self.backend_writer.generate_var_expr(&mut self.string, span, ident_path, kind, &self.shader, decl, ty)
-        //}
     }
     
     fn generate_lit_expr(&mut self, _span: Span, lit: Lit) {
@@ -812,7 +812,7 @@ impl<'a> FnDefGenerator<'a> {
                 }
             }
         }
-        self.backend_writer.write_fn_def_hidden_params(self.string, self.fn_def, sep);
+        self.backend_writer.write_fn_def_hidden_params(self.string, self.fn_def.hidden_args.borrow().as_ref().unwrap(), sep);
         write!(self.string, ") ").unwrap();
         self.generate_block(&self.fn_def.block);
         writeln!(self.string).unwrap();
@@ -947,6 +947,11 @@ impl<'a> FnDefWithClosureArgsGenerator<'a> {
                 sep = ", ";
             }
         }
+        // we need the union of the call def and the fn def
+        let mut merged_hidden_args = BTreeSet::new();
+        merged_hidden_args.extend(self.fn_def.hidden_args.borrow().as_ref().unwrap().iter().cloned());
+        merged_hidden_args.extend(self.call_def.hidden_args.borrow().as_ref().unwrap().iter().cloned());
+        self.backend_writer.write_fn_def_hidden_params(self.string, &merged_hidden_args, sep);
         
         write!(self.string, ") ").unwrap();
         // alright so here the block is generated.. however
@@ -1035,7 +1040,13 @@ impl<'a> ClosureDefGenerator<'a> {
             ) {
                 sep = ", ";
             }
-        }
+        } 
+
+        let mut merged_hidden_args = BTreeSet::new();
+        merged_hidden_args.extend(self.fn_def.hidden_args.borrow().as_ref().unwrap().iter().cloned());
+        merged_hidden_args.extend(self.call_def.hidden_args.borrow().as_ref().unwrap().iter().cloned());
+        self.backend_writer.write_fn_def_hidden_params(self.string, &merged_hidden_args, sep);
+        
         writeln!(self.string, ") {{").unwrap();
         
         match &self.closure_def.kind {
@@ -1083,7 +1094,6 @@ impl<'a> ClosureDefGenerator<'a> {
 }
 
 pub struct DisplayDsIdent(pub Ident);
-
 impl fmt::Display for DisplayDsIdent {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "ds_{}", self.0)
@@ -1091,7 +1101,6 @@ impl fmt::Display for DisplayDsIdent {
 }
 
 pub struct DisplayStructField(pub Ident);
-
 impl fmt::Display for DisplayStructField {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "f_{}", self.0)
@@ -1099,7 +1108,6 @@ impl fmt::Display for DisplayStructField {
 }
 
 pub struct DisplayFnName(pub FnNodePtr, pub Ident);
-
 impl fmt::Display for DisplayFnName {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}_{}", self.0, self.1)
@@ -1107,7 +1115,6 @@ impl fmt::Display for DisplayFnName {
 }
 
 pub struct DisplayFnNameWithClosureArgs(pub usize, pub FnNodePtr, pub Ident);
-
 impl fmt::Display for DisplayFnNameWithClosureArgs {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "site_{}_of_{}_{}", self.0, self.1, self.2)
@@ -1115,7 +1122,6 @@ impl fmt::Display for DisplayFnNameWithClosureArgs {
 }
 
 pub struct DisplayClosureName(pub FnNodePtr, pub ClosureDefIndex);
-
 impl fmt::Display for DisplayClosureName {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "closure_{}_in_{}", self.1.0, self.0)
@@ -1123,7 +1129,6 @@ impl fmt::Display for DisplayClosureName {
 }
 
 pub struct DisplayVarName(pub Ident, pub ScopeSymShadow);
-
 impl fmt::Display for DisplayVarName {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "var_{}_{}", self.0, self.1.0)
@@ -1131,7 +1136,6 @@ impl fmt::Display for DisplayVarName {
 }
 
 pub struct DisplayClosedOverArg(pub Ident, pub ScopeSymShadow);
-
 impl fmt::Display for DisplayClosedOverArg {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "pass_{}_{}", self.0, self.1.0)
@@ -1139,7 +1143,6 @@ impl fmt::Display for DisplayClosedOverArg {
 }
 
 pub struct DisplaConstructorArg(pub usize);
-
 impl fmt::Display for DisplaConstructorArg {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "x{}", self.0)
