@@ -35,8 +35,16 @@ struct DrawShaderGenerator<'a> {
 
 impl<'a> DrawShaderGenerator<'a> {
     fn generate_shader(&mut self) {
-        writeln!(self.string, "SamplerState default_texture_sampler{{Filter=MIN_MAX_MIP_LINEAR;AddressU = Wrap;AddressV=Wrap;}};").unwrap();
-        writeln!(self.string, "float4 sample2d(Texture2D tex, float2 pos){{return tex.Sample(default_texture_sampler,pos);}}").unwrap();
+
+        for fn_iter in self.draw_shader_def.all_fns.borrow().iter(){
+            let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
+            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(id!(sample2d))){
+                writeln!(self.string, "SamplerState default_texture_sampler{{Filter=MIN_MAX_MIP_LINEAR;AddressU = Wrap;AddressV=Wrap;}};").unwrap();
+                writeln!(self.string, "float4 sample2d(Texture2D tex, float2 pos){{return tex.Sample(default_texture_sampler,pos);}}").unwrap();
+                break;
+            }
+        };
+
         self.generate_struct_decls();
         let fields_as_uniform_blocks = self.draw_shader_def.fields_as_uniform_blocks();
         self.generate_uniform_structs(&fields_as_uniform_blocks);
@@ -291,7 +299,7 @@ impl<'a> DrawShaderGenerator<'a> {
     
     fn generate_vertex_main(&mut self) {
         
-        write!(self.string, "Varyings vertex_main(").unwrap();
+        write!(self.string, "Varyings vertex_main(").unwrap(); 
         write!(self.string, "Geometries geometries").unwrap();
         write!(self.string, ", Instances instances").unwrap();
         write!(self.string, ", uint inst_id: SV_InstanceID").unwrap();
