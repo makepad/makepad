@@ -707,17 +707,16 @@ impl<'a> ExprGenerator<'a> {
     ) {
         let struct_decl = self.shader_registry.structs.get(&struct_node_ptr).unwrap();
         let (sep1, sep2) = if self.backend_writer.needs_cstyle_struct_cons() { ("(",")")}else{("{","}")};
-        if self.backend_writer.needs_cstyle_struct_cons() {
-            write!(self.string, "{}{}", struct_node_ptr, sep1).unwrap();
-            for (index, field) in struct_decl.fields.iter().enumerate() {
-                if index != 0 {
-                    write!(self.string, ",").unwrap();
-                }
-                let arg = args.iter().find( | (ident, _) | field.ident == *ident).unwrap();
-                self.generate_expr(&arg.1);
+
+        write!(self.string, "{}{}", struct_node_ptr, sep1).unwrap();
+        for (index, field) in struct_decl.fields.iter().enumerate() {
+            if index != 0 {
+                write!(self.string, ",").unwrap();
             }
-            write!(self.string, "{}", sep2).unwrap();
+            let arg = args.iter().find( | (ident, _) | field.ident == *ident).unwrap();
+            self.generate_expr(&arg.1);
         }
+        write!(self.string, "{}", sep2).unwrap();
     }
     
     fn generate_index_expr(&mut self, _span: Span, expr: &Expr, index_expr: &Expr) {
