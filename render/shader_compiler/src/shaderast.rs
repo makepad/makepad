@@ -131,10 +131,11 @@ impl FnSelfKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub enum FnArgHidden {
+pub enum HiddenArgKind {
     Geometries,
     Instances,
     Varyings,
+    Textures,
     Uniform(Ident),
     LiveUniforms,
 }
@@ -156,7 +157,7 @@ pub struct FnDef {
     pub const_table: RefCell<Option<Vec<f32 >> >,
     pub const_table_spans: RefCell<Option<Vec<(usize, Span) >> >,
     
-    pub fn_args_hidden: RefCell<Option<BTreeSet<FnArgHidden >> >,
+    pub hidden_args: RefCell<Option<BTreeSet<HiddenArgKind >> >,
     pub draw_shader_refs: RefCell<Option<BTreeSet<Ident >> >,
     pub const_refs: RefCell<Option<BTreeSet<ConstNodePtr >> >,
     pub live_refs: RefCell<Option<BTreeMap<ValueNodePtr, Ty >> >,
@@ -672,7 +673,7 @@ impl FnDef {
             block,
             closure_defs,
             has_return: Cell::new(false),
-            fn_args_hidden:RefCell::new(None),
+            hidden_args:RefCell::new(None),
             closure_sites: RefCell::new(None),
             const_refs: RefCell::new(None),
             live_refs: RefCell::new(None),
