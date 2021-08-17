@@ -138,8 +138,8 @@ impl Session {
             }
         }
         let delta_1 = builder.build();
-        let (_, delta_1) = delta_0.clone().transform(delta_1);
-        self.apply_local_delta(document, delta_0.compose(delta_1), post_apply_delta_request);
+        let (_, new_delta_1) = delta_0.clone().transform(delta_1);
+        self.apply_local_delta(document, delta_0.compose(new_delta_1), post_apply_delta_request);
     }
 
     pub fn insert_backspace(
@@ -180,8 +180,8 @@ impl Session {
             }
         }
         let delta_1 = builder.build();
-        let (_, delta_1) = delta_0.clone().transform(delta_1);
-        self.apply_local_delta(document, delta_0.compose(delta_1), post_apply_delta_request);
+        let (_, new_delta_1) = delta_0.clone().transform(delta_1);
+        self.apply_local_delta(document, delta_0.compose(new_delta_1), post_apply_delta_request);
     }
 
     pub fn set_path(&mut self, documents_by_path: &mut HashMap<PathBuf, Document>, path: PathBuf) {
