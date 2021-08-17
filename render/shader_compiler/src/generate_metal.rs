@@ -33,7 +33,15 @@ impl<'a> DrawShaderGenerator<'a> {
     fn generate_shader(&mut self) {
         writeln!(self.string, "#include <metal_stdlib>").unwrap();
         writeln!(self.string, "using namespace metal;").unwrap();
-        writeln!(self.string, "float4 sample2d(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::linear,min_filter::linear),pos);}}").unwrap();
+        
+        for fn_iter in self.draw_shader_def.all_fns.borrow().iter(){
+            let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
+            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(id!(sample2d))){
+                writeln!(self.string, "float4 sample2d(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::linear,min_filter::linear),pos);}}").unwrap();
+                break;
+            }
+        };
+        
         self.generate_struct_defs();
         let fields_as_uniform_blocks = self.draw_shader_def.fields_as_uniform_blocks();
         self.generate_uniform_structs(&fields_as_uniform_blocks);
