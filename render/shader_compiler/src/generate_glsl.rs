@@ -838,7 +838,8 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
     fn generate_live_value_prefix(&self, _string: &mut String) {
     }
 
-    fn generate_draw_shader_prefix(&self, _string: &mut String, _expr: &Expr, _field_ident: Ident) {
+    fn generate_draw_shader_field_expr(&self, string: &mut String, _expr: &Expr, field_ident: Ident) {
+        write!(string, "{}", &DisplayDsIdent(field_ident)).unwrap();
     }
     
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit) {

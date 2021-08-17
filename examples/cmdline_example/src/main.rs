@@ -22,6 +22,7 @@ const SOURCE: &'static str = r#"
         fn pixel(self) -> vec4 {
             let x = Struct1 {a: 1.0, b: Struct2 {c: 1.0 + self.dinst}};
             x.struct_1_set();
+            let t = self.dmat;
             return #f;
         }
         
@@ -43,7 +44,7 @@ const SOURCE: &'static str = r#"
 use makepad_live_parser::*;
 use makepad_shader_compiler::shaderregistry::ShaderRegistry;
 use makepad_shader_compiler::shaderregistry::DrawShaderInput;
-use makepad_shader_compiler::shaderast::TyLit;
+use makepad_shader_compiler::shaderast::Ty;
 
 fn main() {
     let mut sr = ShaderRegistry::new();
@@ -63,8 +64,9 @@ fn main() {
     }
     
     let mut di = DrawShaderInput::default();
-    di.add_uniform("duni", TyLit::Float.to_ty_expr());
-    di.add_instance("dinst", TyLit::Float.to_ty_expr());
+    di.add_uniform("duni", Ty::Float);
+    di.add_instance("dinst", Ty::Float);
+    di.add_instance("dmat", Ty::Mat4);
     sr.register_draw_input("main::test", "DrawQuad", di);
     
     // lets just call the shader compiler on this thing

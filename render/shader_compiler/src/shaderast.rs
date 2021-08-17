@@ -486,6 +486,49 @@ pub enum Ty {
     ClosureDecl
 }
 
+impl Ty{
+    
+    pub fn to_ty_expr(&self) -> TyExpr {
+        TyExpr {
+            ty: RefCell::new(None),
+            span: Span::default(),
+            kind: match self{
+                Ty::Void=> panic!(),
+                Ty::Bool=> TyExprKind::Lit{ty_lit:TyLit::Bool},
+                Ty::Int=> TyExprKind::Lit{ty_lit:TyLit::Int},
+                Ty::Float=> TyExprKind::Lit{ty_lit:TyLit::Float},
+                Ty::Bvec2=> TyExprKind::Lit{ty_lit:TyLit::Bvec2},
+                Ty::Bvec3=> TyExprKind::Lit{ty_lit:TyLit::Bvec3},
+                Ty::Bvec4=> TyExprKind::Lit{ty_lit:TyLit::Bvec4},
+                Ty::Ivec2=> TyExprKind::Lit{ty_lit:TyLit::Ivec2},
+                Ty::Ivec3=> TyExprKind::Lit{ty_lit:TyLit::Ivec3},
+                Ty::Ivec4=> TyExprKind::Lit{ty_lit:TyLit::Ivec4},
+                Ty::Vec2=> TyExprKind::Lit{ty_lit:TyLit::Vec2},
+                Ty::Vec3=> TyExprKind::Lit{ty_lit:TyLit::Vec3},
+                Ty::Vec4=> TyExprKind::Lit{ty_lit:TyLit::Vec4},
+                Ty::Mat2=> TyExprKind::Lit{ty_lit:TyLit::Mat2},
+                Ty::Mat3=> TyExprKind::Lit{ty_lit:TyLit::Mat3},
+                Ty::Mat4=> TyExprKind::Lit{ty_lit:TyLit::Mat4},
+                Ty::Texture2D=> TyExprKind::Lit{ty_lit:TyLit::Texture2D},
+                Ty::Array{elem_ty, len}=>{
+                    TyExprKind::Array{
+                        elem_ty_expr: Box::new(elem_ty.to_ty_expr()),
+                        len:*len as u32
+                    }
+                }
+                Ty::Struct(struct_node_ptr)=>{
+                    TyExprKind::Struct(*struct_node_ptr)
+                }
+                Ty::DrawShader(draw_shader_node_ptr)=>{
+                    TyExprKind::DrawShader(*draw_shader_node_ptr)
+                },
+                Ty::ClosureDef(_)=>panic!(),
+                Ty::ClosureDecl=>panic!()
+            }
+        }
+    }    
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum TyLit {
     Bool,
@@ -981,16 +1024,6 @@ impl TyLit {
             id!(ivec4) => Some(TyLit::Ivec4),
             id!(texture2D) => Some(TyLit::Texture2D),
             _ => None
-        }
-    }
-    
-    pub fn to_ty_expr(self) -> TyExpr {
-        TyExpr {
-            ty: RefCell::new(None),
-            span: Span::default(),
-            kind: TyExprKind::Lit {
-                ty_lit: self
-            }
         }
     }
     
