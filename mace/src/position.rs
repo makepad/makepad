@@ -29,11 +29,13 @@ impl Position {
         let mut distance = *self - Position::origin();
         let mut operation_span_iter = delta.iter().map(|operation| operation.span());
         let mut operation_span_slot = operation_span_iter.next();
-        loop {
+        let new_position = loop {
             match operation_span_slot {
-                Some(OperationSpan::Retain(count)) => match distance.cmp(&count) {
+                Some(OperationSpan::Retain(count)) => match count.cmp(&distance) {
                     Ordering::Less => {
-                        break position + distance;
+                        position += count;
+                        distance -= count;
+                        operation_span_slot = operation_span_iter.next();
                     }
                     Ordering::Equal => {
                         position += distance;
@@ -41,32 +43,31 @@ impl Position {
                         operation_span_slot = operation_span_iter.next();
                     }
                     Ordering::Greater => {
-                        position += count;
-                        distance -= count;
-                        operation_span_slot = operation_span_iter.next();
+                        break position + distance;
                     }
                 },
                 Some(OperationSpan::Insert(count)) => {
                     position += count;
                     operation_span_slot = operation_span_iter.next();
                 }
-                Some(OperationSpan::Delete(count)) => match distance.cmp(&count) {
+                Some(OperationSpan::Delete(count)) => match count.cmp(&distance) {
                     Ordering::Less => {
-                        break position + distance;
-                    }
-                    Ordering::Equal => {
-                        break position;
-                    }
-                    Ordering::Greater => {
                         distance -= count;
                         operation_span_slot = operation_span_iter.next();
+                    }
+                    Ordering::Equal => {
+                        distance = Size::zero();
+                    }
+                    Ordering::Greater => {
+                        break position;
                     }
                 },
                 None => {
                     break position + distance;
                 }
             }
-        }
+        };
+        new_position
     }
 }
 
