@@ -132,10 +132,11 @@ impl CursorSet {
     pub fn apply_remote_delta(&mut self, delta: &Delta) {
         for cursor in &mut self.cursors {
             let new_head = cursor.head.apply_delta(&delta);
+            let new_tail = cursor.tail.apply_delta(&delta);
             *cursor = Cursor {
                 head: new_head,
-                tail: cursor.tail.apply_delta(&delta),
-                max_column: new_head.column,
+                tail: new_tail,
+                max_column: new_head.column.max(new_tail.column),
             };
         }
     }
