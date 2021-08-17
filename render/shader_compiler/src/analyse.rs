@@ -98,6 +98,7 @@ impl<'a> StructAnalyser<'a> {
             .transpose() ?
         .unwrap_or(Ty::Void);
         *decl.return_ty.borrow_mut() = Some(return_ty);
+        *decl.hidden_args.borrow_mut() = Some(BTreeSet::new());
         Ok(())
     }
     
@@ -170,10 +171,10 @@ impl<'a> DrawShaderAnalyser<'a> {
         // mark all the draw_shader_refs we reference in pixelshaders.
         for pixel_fn in &pixel_fns {
             // if we run into a DrawShaderMethod mark it as
-            if let Some(fn_decl) = self.shader_registry.all_fns.get(pixel_fn) {
-                if let Some(FnSelfKind::DrawShader(_)) = fn_decl.self_kind {
+            if let Some(fn_def) = self.shader_registry.all_fns.get(pixel_fn) {
+                if let Some(FnSelfKind::DrawShader(_)) = fn_def.self_kind {
                     // lets iterate all
-                    for dsr in fn_decl.draw_shader_refs.borrow().as_ref().unwrap() {
+                    for dsr in fn_def.draw_shader_refs.borrow().as_ref().unwrap() {
                         // ok we have a draw shader ident we use, now mark it on our draw_shader_decl.
                         for field in &self.draw_shader_def.fields {
                             if field.ident == *dsr { // we found it
@@ -219,10 +220,10 @@ impl<'a> DrawShaderAnalyser<'a> {
             let fn_def = self.shader_registry.all_fns.get(any_fn).unwrap();
             all_live_refs.extend(fn_def.live_refs.borrow().as_ref().cloned().unwrap());
             all_const_refs.extend(fn_def.const_refs.borrow().as_ref().unwrap());
-            // ok so. we need to fn_def our hidden-args set
-            // and we'll pass that on.
-            self.analyse_hidden_args(fn_def);
-            
+            // technically we should only be allowed to do this on our own fn_defs
+            if let Some(FnSelfKind::DrawShader(_)) = fn_def.self_kind {
+                self.analyse_hidden_args(fn_def);
+            }
         }
 
         *self.draw_shader_def.all_live_refs.borrow_mut() = all_live_refs;
