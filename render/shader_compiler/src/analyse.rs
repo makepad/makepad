@@ -202,23 +202,27 @@ impl<'a> DrawShaderAnalyser<'a> {
             let fn_decl = self.shader_registry.all_fns.get(pixel_fn).unwrap();
             // lets collect all structs
             for struct_ptr in fn_decl.struct_refs.borrow().as_ref().unwrap().iter() {
-                let struct_decl = self.shader_registry.structs.get(struct_ptr).unwrap();
-                self.analyse_struct_tree(&mut Vec::new(), *struct_ptr, struct_decl, &mut pixel_structs, &mut all_structs) ?;
+                let struct_def = self.shader_registry.structs.get(struct_ptr).unwrap();
+                self.analyse_struct_tree(&mut Vec::new(), *struct_ptr, struct_def, &mut pixel_structs, &mut all_structs) ?;
             }
         }
         for vertex_fn in &vertex_fns {
             let fn_decl = self.shader_registry.all_fns.get(vertex_fn).unwrap();
             // lets collect all structs
             for struct_ptr in fn_decl.struct_refs.borrow().as_ref().unwrap().iter() {
-                let struct_decl = self.shader_registry.structs.get(struct_ptr).unwrap();
-                self.analyse_struct_tree(&mut Vec::new(), *struct_ptr, struct_decl, &mut vertex_structs, &mut all_structs) ?;
+                let struct_def = self.shader_registry.structs.get(struct_ptr).unwrap();
+                self.analyse_struct_tree(&mut Vec::new(), *struct_ptr, struct_def, &mut vertex_structs, &mut all_structs) ?;
             }
         }
 
-        for any_fn in &all_fns{
-            let fn_decl = self.shader_registry.all_fns.get(any_fn).unwrap();
-            all_live_refs.extend(fn_decl.live_refs.borrow().as_ref().cloned().unwrap());
-            all_const_refs.extend(fn_decl.const_refs.borrow().as_ref().unwrap());
+        for any_fn in all_fns.iter().rev(){
+            let fn_def = self.shader_registry.all_fns.get(any_fn).unwrap();
+            all_live_refs.extend(fn_def.live_refs.borrow().as_ref().cloned().unwrap());
+            all_const_refs.extend(fn_def.const_refs.borrow().as_ref().unwrap());
+            // ok so. we need to fn_def our hidden-args set
+            // and we'll pass that on.
+            self.analyse_hidden_args(fn_def);
+            
         }
 
         *self.draw_shader_def.all_live_refs.borrow_mut() = all_live_refs;
@@ -234,6 +238,51 @@ impl<'a> DrawShaderAnalyser<'a> {
         
         Ok(())
     }
+    
+    fn analyse_hidden_args(&mut self, fn_def: &FnDef){
+        // ok so.. lets build it up
+        let mut hidden_args = BTreeSet::new();
+        for ident in fn_def.draw_shader_refs.borrow().as_ref().unwrap(){
+            let field_def = self.draw_shader_def.fields.iter().find(|field| field.ident == *ident).unwrap();
+            match &field_def.kind{
+                DrawShaderFieldKind::Geometry{is_used_in_pixel_shader, ..}=>{
+                    if is_used_in_pixel_shader.get(){
+                        hidden_args.insert(HiddenArgKind::Varyings);
+                    }
+                    else{
+                        hidden_args.insert(HiddenArgKind::Geometries);
+                    }
+                }
+                DrawShaderFieldKind::Instance{is_used_in_pixel_shader, ..}=>{
+                    if is_used_in_pixel_shader.get(){
+                        hidden_args.insert(HiddenArgKind::Varyings);
+                    }
+                    else{
+                        hidden_args.insert(HiddenArgKind::Instances);
+                    }
+                }
+                DrawShaderFieldKind::Texture{..}=>{
+                    hidden_args.insert(HiddenArgKind::Textures);
+                }
+                DrawShaderFieldKind::Uniform{block_ident, ..}=>{
+                    hidden_args.insert(HiddenArgKind::Uniform(*block_ident));
+                }
+                DrawShaderFieldKind::Varying{..}=>{
+                    hidden_args.insert(HiddenArgKind::Varyings);
+                }
+            }
+        }
+        if fn_def.live_refs.borrow().as_ref().unwrap().len() > 0{
+            hidden_args.insert(HiddenArgKind::LiveUniforms);
+        }
+        // merge in the others
+        for callee in fn_def.callees.borrow().as_ref().unwrap().iter(){
+            let other_fn_def = self.shader_registry.all_fns.get(callee).unwrap();
+            hidden_args.extend(other_fn_def.hidden_args.borrow().as_ref().unwrap().iter().cloned());
+        }
+        *fn_def.hidden_args.borrow_mut() = Some(hidden_args);
+    }
+    
     
     fn analyse_field_decl(&mut self, decl: &DrawShaderFieldDef) -> Result<(), LiveError> {
         let ty = match decl.kind {

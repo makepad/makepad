@@ -59,7 +59,7 @@ impl LiveRegistry {
     }
     
     pub fn is_baseclass(id: IdPack) -> bool {
-        id == id_pack!(Component) || id == id_pack!(Enum) || id == id_pack!(Struct) || id == id_pack!(Shader) || id == id_pack!(Variant)
+        id == id_pack!(Component) || id == id_pack!(Enum) || id == id_pack!(Struct) || id == id_pack!(DrawShader)
     }
     
     pub fn find_enum_origin(&self, start: IdPack, lhs: IdPack) -> IdPack {

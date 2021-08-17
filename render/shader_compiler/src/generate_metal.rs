@@ -168,7 +168,7 @@ impl<'a> DrawShaderGenerator<'a> {
                     );
                     writeln!(self.string, ";").unwrap();
                 }
-                _=>()
+                _ => ()
             }
         }
         writeln!(self.string, "}};").unwrap();
@@ -186,7 +186,7 @@ impl<'a> DrawShaderGenerator<'a> {
                     );
                     writeln!(self.string, ";").unwrap();
                 }
-                _=>()
+                _ => ()
             }
         }
         writeln!(self.string, "}};").unwrap();
@@ -392,7 +392,6 @@ impl<'a> DrawShaderGenerator<'a> {
         let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(vertex))).unwrap();
         write!(self.string, "    varyings.position = {}", DisplayFnName(vertex_def.fn_node_ptr, vertex_def.ident)).unwrap();
         
-        
         write!(self.string, "(").unwrap();
         //let mut sep = "";
         write!(self.string, "const_table").unwrap();
@@ -447,7 +446,7 @@ impl<'a> DrawShaderGenerator<'a> {
         //let mut sep = "";
         write!(self.string, "const_table").unwrap();
         //sep = ", ";
-
+        
         writeln!(self.string, ");").unwrap();
         
         writeln!(self.string, "}}").unwrap();
@@ -486,6 +485,62 @@ struct MetalBackendWriter<'a> {
 }
 
 impl<'a> BackendWriter for MetalBackendWriter<'a> {
+
+    fn write_call_expr_hidden_args(&self, string: &mut String, fn_def:&FnDef, sep: &str){
+        let mut sep = sep;
+        for hidden_arg in fn_def.hidden_args.borrow().as_ref().unwrap().iter(){
+            write!(string, "{}", sep).unwrap();
+            match hidden_arg{
+                HiddenArgKind::Geometries=>{
+                    write!(string, "geometry").unwrap();
+                }
+                HiddenArgKind::Instances=>{
+                    write!(string, "instances").unwrap();
+                }
+                HiddenArgKind::Varyings=>{
+                    write!(string, "varyings").unwrap();
+                }
+                HiddenArgKind::Textures=>{
+                    write!(string, "textures").unwrap();
+                }
+                HiddenArgKind::Uniform(ident)=>{
+                    write!(string, "uniforms_{}", ident).unwrap();
+                }
+                HiddenArgKind::LiveUniforms=>{
+                    write!(string, "live_uniforms").unwrap();
+                }
+            }
+            sep = ", ";
+        }
+    }
+    
+    fn write_fn_def_hidden_params(&self, string: &mut String, fn_def:&FnDef, sep: &str){
+        let mut sep = sep;
+        for hidden_arg in fn_def.hidden_args.borrow().as_ref().unwrap().iter(){
+            write!(string, "{}", sep).unwrap();
+            match hidden_arg{
+                HiddenArgKind::Geometries=>{
+                    write!(string, "thread Geometry &geometry").unwrap();
+                }
+                HiddenArgKind::Instances=>{
+                    write!(string, "thread Instances &instances").unwrap();
+                }
+                HiddenArgKind::Varyings=>{
+                    write!(string, "thread Varyings &varyings").unwrap();
+                }
+                HiddenArgKind::Textures=>{
+                    write!(string, "Textures textures").unwrap();
+                }
+                HiddenArgKind::Uniform(ident)=>{
+                    write!(string, "constant Uniforms_{0} uniforms_{0}", ident).unwrap();
+                }
+                HiddenArgKind::LiveUniforms=>{
+                    write!(string, "constan LiveUniforms live_uniforms").unwrap();
+                }
+            }
+            sep = ", ";
+        }
+    }
     
     fn generate_draw_shader_prefix(&self, string: &mut String, _expr: &Expr, field_ident: Ident) {
         let field_def = self.draw_shader_def.find_field(field_ident).unwrap();
@@ -496,7 +551,7 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
                     write!(string, "varyings.").unwrap()
                 }
                 else {
-                    write!(string, "geometry.").unwrap()
+                    write!(string, "geometries.").unwrap()
                 }
             }
             DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} => {

@@ -24,7 +24,9 @@ pub trait BackendWriter {
         ty: &Ty,
     ) -> bool;
     
-    // fn write_call_expr_hidden_args(&self, string: &mut String, use_const_table: bool, fn_node_ptr: FnNodePtr, shader: &DrawShaderDecl, sep: &str);
+    fn write_call_expr_hidden_args(&self, string: &mut String, fn_def:&FnDef, sep: &str);
+    fn write_fn_def_hidden_params(&self, string: &mut String, fn_def:&FnDef, sep: &str);
+    
     // fn generate_var_expr(&self, string: &mut String, span:Span, ident_path: IdentPath, kind: &Cell<Option<VarKind>>, shader: &DrawShaderDecl, decl: &FnDecl, ty:&Option<Ty>);
     
     fn generate_draw_shader_prefix(&self, string: &mut String, expr: &Expr, field_ident: Ident);
@@ -236,7 +238,6 @@ impl<'a> BlockGenerator<'a> {
     
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
-            // env: self.env,
             closure_site_info: self.closure_site_info.clone(),
             fn_def: Some(self.fn_def),
             shader_registry: self.shader_registry,
@@ -580,6 +581,9 @@ impl<'a> ExprGenerator<'a> {
                 write!(self.string, "{}", DisplayVarName(sym.ident, sym.shadow)).unwrap();
                 sep = ", ";
             }
+
+            self.backend_writer.write_call_expr_hidden_args(self.string, fn_def, sep);
+
             write!(self.string, ")").unwrap();
         }
         else {
@@ -588,9 +592,11 @@ impl<'a> ExprGenerator<'a> {
             for arg_expr in arg_exprs {
                 write!(self.string, "{}", sep).unwrap();
                 self.generate_expr(arg_expr);
-                
                 sep = ", ";
             }
+
+            self.backend_writer.write_call_expr_hidden_args(self.string, fn_def, sep);
+
             write!(self.string, ")").unwrap();
         }
     }
@@ -806,6 +812,7 @@ impl<'a> FnDefGenerator<'a> {
                 }
             }
         }
+        self.backend_writer.write_fn_def_hidden_params(self.string, self.fn_def, sep);
         write!(self.string, ") ").unwrap();
         self.generate_block(&self.fn_def.block);
         writeln!(self.string).unwrap();
