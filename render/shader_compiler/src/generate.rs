@@ -15,6 +15,13 @@ pub struct ClosureSiteInfo<'a> {
 }
 
 pub trait BackendWriter {
+    fn needs_cstyle_struct_cons(&self)->bool;
+    fn needs_mul_fn_for_matrix_multiplication(&self) -> bool;
+    fn needs_unpack_for_matrix_multiplication(&self) -> bool;
+    fn const_table_is_vec4(&self) -> bool;
+
+    fn use_cons_fn(&self, what: &str) -> bool;
+
     fn write_var_decl(
         &self,
         string: &mut String,
@@ -31,21 +38,9 @@ pub trait BackendWriter {
     fn generate_live_value_prefix(&self, string: &mut String);
     fn generate_draw_shader_prefix(&self, string: &mut String, expr: &Expr, field_ident: Ident);
     
-    fn needs_bare_struct_cons(&self) -> bool {
-        true
-    }
-    
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
-    
     fn write_builtin_call_ident(&self, string: &mut String, ident: Ident, arg_exprs: &[Expr]);
     
-    fn needs_mul_fn_for_matrix_multiplication(&self) -> bool;
-    
-    fn needs_unpack_for_matrix_multiplication(&self) -> bool;
-    
-    fn const_table_is_vec4(&self) -> bool;
-    
-    fn use_cons_fn(&self, what: &str) -> bool;
 }
 
 pub struct BlockGenerator<'a> {
@@ -58,6 +53,95 @@ pub struct BlockGenerator<'a> {
     //pub use_generated_cons_fns: bool,
     pub indent_level: usize,
     pub string: &'a mut String,
+}
+
+    
+pub fn generate_cons_fn(backend_writer:&dyn BackendWriter, string: &mut String, ty_lit: TyLit, param_tys: &[Ty]) {
+    let mut cons_name = format!("consfn_{}", ty_lit);
+    for param_ty in param_tys {
+        write!(cons_name, "_{}", param_ty).unwrap();
+    }
+    if !backend_writer.use_cons_fn(&cons_name) {
+        return
+    }
+    
+    backend_writer.write_ty_lit(string, ty_lit);
+    write!(string, " {}(", cons_name).unwrap();
+    let mut sep = "";
+    if param_tys.len() == 1 {
+        backend_writer.write_var_decl(string, sep, false, false, &Ident(id!(x)), &param_tys[0]);
+    } else {
+        for (index, param_ty) in param_tys.iter().enumerate() {
+            write!(string, "{}", sep).unwrap();
+            backend_writer.write_var_decl(string, sep, false, false,&DisplaConstructorArg(index), param_ty);
+            sep = ", ";
+        }
+    }
+    writeln!(string, ") {{").unwrap();
+    write!(string, "    return ").unwrap();
+    backend_writer.write_ty_lit(string, ty_lit);
+    write!(string, "(").unwrap();
+    let ty = ty_lit.to_ty();
+    if param_tys.len() == 1 {
+        let param_ty = &param_tys[0];
+        match param_ty {
+            Ty::Bool | Ty::Int | Ty::Float => {
+                let mut sep = "";
+                for _ in 0..ty.size() {
+                    write!(string, "{}x", sep).unwrap();
+                    sep = ", ";
+                }
+            }
+            Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => {
+                let dst_size = match ty {
+                    Ty::Mat2 => 2,
+                    Ty::Mat3 => 3,
+                    Ty::Mat4 => 4,
+                    _ => panic!(),
+                };
+                let src_size = match param_ty {
+                    Ty::Mat2 => 2,
+                    Ty::Mat3 => 3,
+                    Ty::Mat4 => 4,
+                    _ => panic!(),
+                };
+                let mut sep = "";
+                for col_index in 0..dst_size {
+                    for row_index in 0..dst_size {
+                        if row_index < src_size && col_index < src_size {
+                            write!(string, "{}x[{}][{}]", sep, col_index, row_index)
+                                .unwrap();
+                        } else {
+                            write!(
+                                string,
+                                "{}{}",
+                                sep,
+                                if col_index == row_index {1.0} else {0.0}
+                            )
+                                .unwrap();
+                        }
+                        sep = ", ";
+                    }
+                }
+            }
+            _ => panic!(),
+        }
+    } else {
+        let mut sep = "";
+        for (index_0, param_ty) in param_tys.iter().enumerate() {
+            if param_ty.size() == 1 {
+                write!(string, "{}x{}", sep, index_0).unwrap();
+                sep = ", ";
+            } else {
+                for index_1 in 0..param_ty.size() {
+                    write!(string, "{}x{}[{}]", sep, index_0, index_1).unwrap();
+                    sep = ", ";
+                }
+            }
+        }
+    }
+    writeln!(string, ");").unwrap();
+    writeln!(string, "}}").unwrap();
 }
 
 impl<'a> BlockGenerator<'a> {
@@ -622,8 +706,9 @@ impl<'a> ExprGenerator<'a> {
         args: &Vec<(Ident, Expr)>,
     ) {
         let struct_decl = self.shader_registry.structs.get(&struct_node_ptr).unwrap();
-        if self.backend_writer.needs_bare_struct_cons() {
-            write!(self.string, "{}(", struct_node_ptr).unwrap();
+        let (sep1, sep2) = if self.backend_writer.needs_cstyle_struct_cons() { ("(",")")}else{("{","}")};
+        if self.backend_writer.needs_cstyle_struct_cons() {
+            write!(self.string, "{}{}", struct_node_ptr, sep1).unwrap();
             for (index, field) in struct_decl.fields.iter().enumerate() {
                 if index != 0 {
                     write!(self.string, ",").unwrap();
@@ -631,7 +716,7 @@ impl<'a> ExprGenerator<'a> {
                 let arg = args.iter().find( | (ident, _) | field.ident == *ident).unwrap();
                 self.generate_expr(&arg.1);
             }
-            write!(self.string, ")").unwrap();
+            write!(self.string, "{}", sep2).unwrap();
         }
     }
     
@@ -725,7 +810,7 @@ impl<'a> ExprGenerator<'a> {
     
     fn generate_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {
         // lets build the constructor name
-        let mut cons_name = format!("cons_{}", ty_lit);
+        let mut cons_name = format!("consfn_{}", ty_lit);
         for arg_expr in arg_exprs {
             write!(cons_name, "_{}", arg_expr.ty.borrow().as_ref().unwrap()).unwrap();
         }

@@ -15,6 +15,7 @@ use crate::builtin::generate_builtins;
 use crate::shaderast::Scopes;
 use crate::generate_glsl;
 use crate::generate_metal;
+use crate::generate_hlsl;
 
 #[derive(Clone, Debug, Copy, Hash, Eq, PartialEq)]
 pub struct ShaderResourceId(CrateModule, Id);
@@ -120,6 +121,11 @@ impl ShaderRegistry {
                     offset += sub_table.as_ref().unwrap().len();
                 }
             }
+            let size = table.len();
+            let align_gap = 4 - (size - ((size >> 2) << 2));
+            for _ in 0..align_gap {
+                table.push(0.0);
+            }
             FinalConstTable {table, offsets}
         }
         else {
@@ -132,40 +138,40 @@ impl ShaderRegistry {
         Ident(node.id_pack.unwrap_single())
     }
     
-    pub fn draw_shader_method_ptr_from_ident(&self, draw_shader_def:&DrawShaderDef, ident: Ident) -> Option<FnNodePtr> {
-        for fn_node_ptr in &draw_shader_def.methods{
+    pub fn draw_shader_method_ptr_from_ident(&self, draw_shader_def: &DrawShaderDef, ident: Ident) -> Option<FnNodePtr> {
+        for fn_node_ptr in &draw_shader_def.methods {
             let fn_decl = self.all_fns.get(fn_node_ptr).unwrap();
-            if fn_decl.ident == ident{
+            if fn_decl.ident == ident {
                 return Some(*fn_node_ptr);
             }
         }
         None
     }
     
-     pub fn struct_method_ptr_from_ident(&self, struct_def:&StructDef, ident: Ident) -> Option<FnNodePtr> {
-        for fn_node_ptr in &struct_def.methods{
+    pub fn struct_method_ptr_from_ident(&self, struct_def: &StructDef, ident: Ident) -> Option<FnNodePtr> {
+        for fn_node_ptr in &struct_def.methods {
             let fn_decl = self.all_fns.get(fn_node_ptr).unwrap();
-            if fn_decl.ident == ident{
+            if fn_decl.ident == ident {
                 return Some(*fn_node_ptr);
             }
         }
         None
     }
     
-    pub fn draw_shader_method_decl_from_ident(&self, draw_shader_def:&DrawShaderDef, ident: Ident) -> Option<&FnDef> {
-        for fn_node_ptr in &draw_shader_def.methods{
+    pub fn draw_shader_method_decl_from_ident(&self, draw_shader_def: &DrawShaderDef, ident: Ident) -> Option<&FnDef> {
+        for fn_node_ptr in &draw_shader_def.methods {
             let fn_decl = self.all_fns.get(fn_node_ptr).unwrap();
-            if fn_decl.ident == ident{
+            if fn_decl.ident == ident {
                 return Some(fn_decl)
             }
         }
         None
     }
     
-     pub fn struct_method_decl_from_ident(&self, struct_def:&StructDef, ident: Ident) -> Option<&FnDef> {
-        for fn_node_ptr in &struct_def.methods{
+    pub fn struct_method_decl_from_ident(&self, struct_def: &StructDef, ident: Ident) -> Option<&FnDef> {
+        for fn_node_ptr in &struct_def.methods {
             let fn_decl = self.all_fns.get(fn_node_ptr).unwrap();
-            if fn_decl.ident == ident{
+            if fn_decl.ident == ident {
                 return Some(fn_decl)
             }
         }
@@ -476,7 +482,7 @@ impl ShaderRegistry {
                             );
                             // we only allow a field def
                             let def = parser.expect_field(Ident(id), VarDefNodePtr(prop_ptr)) ?;
-                            if let Some(def) = def{
+                            if let Some(def) = def {
                                 struct_def.fields.push(def);
                             }
                         },
@@ -696,14 +702,14 @@ impl ShaderRegistry {
                         }
                     }
                     // lets check for duplicate fields
-                    for i in 0..draw_shader_def.fields.len(){
-                        for j in (i+1)..draw_shader_def.fields.len(){
-                            let field_a = &draw_shader_def.fields[i]; 
-                            let field_b = &draw_shader_def.fields[j]; 
-                            if field_a.ident == field_b.ident{
-                               return Err(LiveError {
+                    for i in 0..draw_shader_def.fields.len() {
+                        for j in (i + 1)..draw_shader_def.fields.len() {
+                            let field_a = &draw_shader_def.fields[i];
+                            let field_b = &draw_shader_def.fields[j];
+                            if field_a.ident == field_b.ident {
+                                return Err(LiveError {
                                     origin: live_error_origin!(),
-                                    span:field_a.span,
+                                    span: field_a.span,
                                     message: format!("Field double declaration {}", field_b.ident)
                                 })
                             }
@@ -769,8 +775,25 @@ impl ShaderRegistry {
         return Err(LiveError {
             origin: live_error_origin!(),
             span: Span::default(),
-            message: format!("generate_glsl_shader could not find {} {} {} ", crate_id, module_id, ids[0])
+            message: format!("generate_metal_shader could not find {} {} {} ", crate_id, module_id, ids[0])
         })
     }
     
+    
+    pub fn generate_hlsl_shader(&mut self, crate_id: Id, module_id: Id, ids: &[Id], const_file_id: Option<FileId>) -> Result<String, LiveError> {
+        // lets find the FullPointer
+        if let Some(shader_ptr) = self.live_registry.find_full_node_ptr_from_ids(crate_id, module_id, ids) {
+            if let Some(draw_shader_decl) = self.draw_shaders.get(&DrawShaderNodePtr(shader_ptr)) {
+                // TODO this env needs its const table transferred
+                let final_const_table = self.compute_final_const_table(draw_shader_decl, const_file_id);
+                let shader = generate_hlsl::generate_shader(draw_shader_decl, &final_const_table, self);
+                return Ok(shader)
+            }
+        }
+        return Err(LiveError {
+            origin: live_error_origin!(),
+            span: Span::default(),
+            message: format!("generate_hlsl_shader could not find {} {} {} ", crate_id, module_id, ids[0])
+        })
+    }
 }

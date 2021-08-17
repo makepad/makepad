@@ -196,7 +196,7 @@ impl<'a> DrawShaderGenerator<'a> {
         
         for (ty_lit, param_tys) in all_constructor_fns
         {
-            self.generate_cons_fn(ty_lit, &param_tys);
+            generate_cons_fn(self.backend_writer, self.string, ty_lit, &param_tys);
         }
         
         for const_node_ptr in all_consts
@@ -481,95 +481,6 @@ impl<'a> DrawShaderGenerator<'a> {
         }
     }
     
-    
-    fn generate_cons_fn(&mut self, ty_lit: TyLit, param_tys: &[Ty]) {
-        let mut cons_name = format!("cons_{}", ty_lit);
-        for param_ty in param_tys {
-            write!(cons_name, "_{}", param_ty).unwrap();
-        }
-        if !self.backend_writer.use_cons_fn(&cons_name) {
-            return
-        }
-        
-        self.write_ty_lit(ty_lit);
-        write!(self.string, " {}(", cons_name).unwrap();
-        let mut sep = "";
-        if param_tys.len() == 1 {
-            self.write_var_decl(&id!(x), &param_tys[0])
-        } else {
-            for (index, param_ty) in param_tys.iter().enumerate() {
-                write!(self.string, "{}", sep).unwrap();
-                self.write_var_decl(&DisplaConstructorArg(index), param_ty);
-                sep = ", ";
-            }
-        }
-        writeln!(self.string, ") {{").unwrap();
-        write!(self.string, "    return ").unwrap();
-        self.write_ty_lit(ty_lit);
-        write!(self.string, "(").unwrap();
-        let ty = ty_lit.to_ty();
-        if param_tys.len() == 1 {
-            let param_ty = &param_tys[0];
-            match param_ty {
-                Ty::Bool | Ty::Int | Ty::Float => {
-                    let mut sep = "";
-                    for _ in 0..ty.size() {
-                        write!(self.string, "{}x", sep).unwrap();
-                        sep = ", ";
-                    }
-                }
-                Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => {
-                    let dst_size = match ty {
-                        Ty::Mat2 => 2,
-                        Ty::Mat3 => 3,
-                        Ty::Mat4 => 4,
-                        _ => panic!(),
-                    };
-                    let src_size = match param_ty {
-                        Ty::Mat2 => 2,
-                        Ty::Mat3 => 3,
-                        Ty::Mat4 => 4,
-                        _ => panic!(),
-                    };
-                    let mut sep = "";
-                    for col_index in 0..dst_size {
-                        for row_index in 0..dst_size {
-                            if row_index < src_size && col_index < src_size {
-                                write!(self.string, "{}x[{}][{}]", sep, col_index, row_index)
-                                    .unwrap();
-                            } else {
-                                write!(
-                                    self.string,
-                                    "{}{}",
-                                    sep,
-                                    if col_index == row_index {1.0} else {0.0}
-                                )
-                                    .unwrap();
-                            }
-                            sep = ", ";
-                        }
-                    }
-                }
-                _ => panic!(),
-            }
-        } else {
-            let mut sep = "";
-            for (index_0, param_ty) in param_tys.iter().enumerate() {
-                if param_ty.size() == 1 {
-                    write!(self.string, "{}x{}", sep, index_0).unwrap();
-                    sep = ", ";
-                } else {
-                    for index_1 in 0..param_ty.size() {
-                        write!(self.string, "{}x{}[{}]", sep, index_0, index_1).unwrap();
-                        sep = ", ";
-                    }
-                }
-            }
-        }
-        writeln!(self.string, ");").unwrap();
-        writeln!(self.string, "}}").unwrap();
-    }
-    
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             fn_def: None,
@@ -776,18 +687,8 @@ struct GlslBackendWriter<'a> {
 }
 
 impl<'a> BackendWriter for GlslBackendWriter<'a> {
-    
 
-    fn write_call_expr_hidden_args(&self, _string: &mut String, _hidden_args:&BTreeSet<HiddenArgKind >, _sep: &str){
-    }
-    
-    fn write_fn_def_hidden_params(&self, _string: &mut String, _hidden_args:&BTreeSet<HiddenArgKind >, _sep: &str){
-    }
-
-    fn generate_live_value_prefix(&self, string: &mut String) {
-    }
-
-    fn needs_bare_struct_cons(&self) -> bool {
+    fn needs_cstyle_struct_cons(&self) -> bool {
         true
     }
     
@@ -805,9 +706,6 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
     
     fn use_cons_fn(&self, _what: &str) -> bool {
         false
-    }
-    
-    fn generate_draw_shader_prefix(&self, _string: &mut String, _expr: &Expr, _field_ident: Ident) {
     }
     
     fn write_var_decl(
@@ -910,8 +808,7 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
                 write!(string, " {}", ident).unwrap();
             }
             Ty::Array {ref elem_ty, len} => {
-                prefix(string, sep, is_inout);
-                self.write_var_decl(string, "", is_inout, is_packed, ident, elem_ty);
+                self.write_var_decl(string, sep, is_inout, is_packed, ident, elem_ty);
                 write!(string, "[{}]", len).unwrap();
             }
             Ty::DrawShader(_) => {
@@ -930,6 +827,18 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
             }
         }
         true
+    }
+    
+    fn write_call_expr_hidden_args(&self, _string: &mut String, _hidden_args:&BTreeSet<HiddenArgKind >, _sep: &str){
+    }
+    
+    fn write_fn_def_hidden_params(&self, _string: &mut String, _hidden_args:&BTreeSet<HiddenArgKind >, _sep: &str){
+    }
+
+    fn generate_live_value_prefix(&self, _string: &mut String) {
+    }
+
+    fn generate_draw_shader_prefix(&self, _string: &mut String, _expr: &Expr, _field_ident: Ident) {
     }
     
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit) {
