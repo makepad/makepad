@@ -385,9 +385,9 @@ impl<'a> DrawShaderGenerator<'a> {
             Ty::Vec2 => write!(self.string, "float2(0.0,0.0)").unwrap(),
             Ty::Vec3 => write!(self.string, "float3(0.0,0.0,0.0)").unwrap(),
             Ty::Vec4 => write!(self.string, "float4(0.0,0.0,0.0,0.0)").unwrap(),
-            Ty::Mat2 => write!(self.string, "float2x2(0.0,0.0,0.0,0.0)").unwrap(),
-            Ty::Mat3 => write!(self.string, "float3x3(0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0").unwrap(),
-            Ty::Mat4 => write!(self.string, "float4x4(0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0").unwrap(),
+            Ty::Mat2 => write!(self.string, "float2x2(0.0,0.0, 0.0,0.0)").unwrap(),
+            Ty::Mat3 => write!(self.string, "float3x3(0.0,0.0,0.0, 0.0,0.0,0.0, 0.0,0.0,0.0)").unwrap(),
+            Ty::Mat4 => write!(self.string, "float4x4(0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0)").unwrap(),
             _ => panic!("Implement init for type")
         }
     }
@@ -606,7 +606,7 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
     
     // TODO: fix up the inline unpacks for HLSL
     // do this for Metal as well for the mat2/3/4's because they don't align
-    fn generate_draw_shader_prefix(&self, string: &mut String, _expr: &Expr, field_ident: Ident) {
+    fn generate_draw_shader_field_expr(&self, string: &mut String, expr: &Expr, field_ident: Ident) {
         let field_def = self.draw_shader_def.find_field(field_ident).unwrap();
         
         match &field_def.kind {
@@ -619,18 +619,68 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
                 }
             }
             DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} => {
-                if is_used_in_pixel_shader.get() {
-                    write!(string, "varyings.").unwrap()
+                let prefix = if is_used_in_pixel_shader.get() {
+                    "varyings"
                 }
-                else {
-                    write!(string, "instances.").unwrap()
+                else{
+                    "instances"
+                };
+
+                match expr.ty.borrow().as_ref().unwrap(){
+                    Ty::Mat4 => {
+                        write!(string, "float4x4(").unwrap();
+                        for i in 0..4 {
+                            for j in 0..4 {
+                                if i != 0 || j != 0 {
+                                    write!(string, ",").unwrap();
+                                }
+                                write!(string, "{}.", prefix).unwrap();
+                                write!(string, "{}{}", DisplayDsIdent(field_ident), j).unwrap();
+                                match i {
+                                    0 => write!(string, ".x").unwrap(),
+                                    1 => write!(string, ".y").unwrap(),
+                                    2 => write!(string, ".z").unwrap(),
+                                    _ => write!(string, ".w").unwrap()
+                                }
+                            }
+                        }
+                        write!(string, ")").unwrap();
+                        return
+                    },
+                    Ty::Mat3 => {
+                        write!(string, "float3x3(").unwrap();
+                        for i in 0..3 {
+                            for j in 0..3 {
+                                if i != 0 || j != 0 {
+                                    write!(string, ",").unwrap();
+                                }
+                                write!(string, "{}.", prefix).unwrap();
+                                write!(string, "{}{}", DisplayDsIdent(field_ident), j).unwrap();
+                                match i {
+                                    0 => write!(string, ".x").unwrap(),
+                                    1 => write!(string, ".y").unwrap(),
+                                    _ => write!(string, ".z").unwrap(),
+                                }
+                            }
+                            write!(string, ")").unwrap();
+                        }
+                        return
+                    },
+                    Ty::Mat2 => {
+                        write!(string, "float2x2({0}.{1}.x, {0}.{1}.y, {0}.{1}.z, {0}.{1}.w)", prefix, DisplayDsIdent(field_ident)).unwrap();
+                        return
+                    },
+                    _ => {
+                        write!(string, "instances.").unwrap();
+                    }
                 }
             }
             DrawShaderFieldKind::Varying {..} => {
                 write!(string, "varyings.").unwrap()
             }
-            _ => ()
+            _=>()
         }
+        write!(string, "{}", &DisplayDsIdent(field_ident)).unwrap();
     }
     
     /*
