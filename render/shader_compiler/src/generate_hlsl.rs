@@ -296,7 +296,7 @@ impl<'a> DrawShaderGenerator<'a> {
         write!(self.string, ", Instances instances").unwrap();
         write!(self.string, ", uint inst_id: SV_InstanceID").unwrap();
         writeln!(self.string, ") {{").unwrap();
-        writeln!(self.string, "    Varyings varyings = ").unwrap();
+        write!(self.string, "    Varyings varyings = ").unwrap();
         self.generate_varying_init();
         
         for decl in &self.draw_shader_def.fields {
