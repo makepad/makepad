@@ -5,7 +5,7 @@ use {
         text::Text,
         tokenizer::{Tokenizer, TokensByLine},
     },
-    std::collections::{HashMap, HashSet, VecDeque},
+    std::collections::{HashMap, HashSet},
 };
 
 pub struct Document {
@@ -13,7 +13,8 @@ pub struct Document {
     revision: usize,
     text: Text,
     tokenizer: Tokenizer,
-    outstanding_deltas: VecDeque<Delta>,
+    outstanding_delta: Option<Delta>,
+    queued_delta: Option<Delta>,
 }
 
 impl Document {
@@ -24,7 +25,8 @@ impl Document {
             revision,
             text,
             tokenizer,
-            outstanding_deltas: VecDeque::new(),
+            outstanding_delta: None,
+            queued_delta: None,
         }
     }
 
@@ -56,13 +58,16 @@ impl Document {
         self.tokenizer.invalidate_cache(&delta);
         self.text.apply_delta(delta.clone());
         self.tokenizer.refresh_cache(&self.text);
-        if self.outstanding_deltas.len() == 2 {
-            let last_outstanding_delta = self.outstanding_deltas.pop_back().unwrap();
-            self.outstanding_deltas.push_back(last_outstanding_delta.compose(delta));
-        } else {
-            self.outstanding_deltas.push_back(delta);
-            if self.outstanding_deltas.len() == 1 {
-                post_apply_delta_request(self.revision, self.outstanding_deltas[0].clone())
+        match self.outstanding_delta {
+            Some(_) => {
+                match self.queued_delta.take() {
+                    Some(queued_delta) => self.queued_delta = Some(queued_delta.compose(delta)),
+                    None => self.queued_delta = Some(delta),
+                }
+            }
+            None => {
+                self.outstanding_delta = Some(delta.clone());
+                post_apply_delta_request(self.revision, delta);
             }
         }
     }
@@ -72,8 +77,8 @@ impl Document {
         post_apply_delta_request: &mut dyn FnMut(usize, Delta),
     ) {
         self.revision += 1;
-        self.outstanding_deltas.pop_front();
-        if let Some(outstanding_delta) = self.outstanding_deltas.front() {
+        self.outstanding_delta = self.queued_delta.take();
+        if let Some(outstanding_delta) = &self.outstanding_delta {
             post_apply_delta_request(self.revision, outstanding_delta.clone())
         }
     }
@@ -83,7 +88,17 @@ impl Document {
         sessions_by_session_id: &mut HashMap<SessionId, Session>,
         delta: Delta,
     ) {
-        // TODO: Transform delta against outstanding deltas
+        let mut delta = delta;
+        if let Some(outstanding_delta) = self.outstanding_delta.take() {
+            let (new_outstanding_delta, new_delta) = outstanding_delta.transform(delta);
+            self.outstanding_delta = Some(new_outstanding_delta);
+            delta = new_delta;
+            if let Some(queued_delta) = self.queued_delta.take() {
+                let (new_queued_delta, new_delta) = queued_delta.transform(delta);
+                self.queued_delta = Some(new_queued_delta);
+                delta = new_delta;
+            }
+        }
         for session_id in &self.session_ids {
             let session = sessions_by_session_id.get_mut(&session_id).unwrap();
             session.apply_remote_delta(&delta);
