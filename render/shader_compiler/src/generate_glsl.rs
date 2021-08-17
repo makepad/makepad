@@ -789,6 +789,12 @@ struct GlslBackendWriter<'a> {
 
 impl<'a> BackendWriter for GlslBackendWriter<'a> {
     
+    fn write_call_expr_hidden_args(&self, _string: &mut String, _fn_def:&FnDef, _sep: &str){
+        // not needed
+    }
+    fn write_fn_def_hidden_params(&self, _string: &mut String, _fn_def:&FnDef, _sep: &str){
+    }
+    
     fn needs_bare_struct_cons(&self) -> bool {
         true
     }
@@ -800,7 +806,6 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
     fn needs_unpack_for_matrix_multiplication(&self) -> bool {
         false
     }
-    
     
     fn const_table_is_vec4(&self) -> bool {
         false

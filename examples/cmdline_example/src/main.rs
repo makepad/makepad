@@ -1,14 +1,21 @@
 const SOURCE: &'static str = r#"
 
-    DrawQuad: Shader {
+    DrawQuad: DrawShader {
         uniform uni1: float
+        instance inst1: float
+        instance inst2: float
+        fn shared(self)->vec4{
+            return self.uni1 + self.inst1 + vec4(1.0);
+        }
         
         fn pixel(self) -> vec4 {
+            self.shared() ;
             return #f00;
         }
         
         fn vertex(self) -> vec4 {
-            return vec4(1.0);
+            self.shared();
+            return vec4(1.0+ self.inst2);
         }
     }
 "#;
@@ -69,7 +76,7 @@ fn main() {
         Err(e) => {
             println!("Error {}", e.to_live_file_error("", SOURCE));
         }
-        Ok((shader)) => {
+        Ok(shader) => {
             //println!("Vertex shader:\n{}\n\nPixel shader:\n{}", vertex,pixel);
             println!("{}", shader);
         }
