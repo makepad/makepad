@@ -56,9 +56,14 @@ impl Document {
         self.tokenizer.invalidate_cache(&delta);
         self.text.apply_delta(delta.clone());
         self.tokenizer.refresh_cache(&self.text);
-        self.outstanding_deltas.push_back(delta);
-        if self.outstanding_deltas.len() == 1 {
-            post_apply_delta_request(self.revision, self.outstanding_deltas[0].clone())
+        if self.outstanding_deltas.len() == 2 {
+            let last_outstanding_delta = self.outstanding_deltas.pop_back().unwrap();
+            self.outstanding_deltas.push_back(last_outstanding_delta.compose(delta));
+        } else {
+            self.outstanding_deltas.push_back(delta);
+            if self.outstanding_deltas.len() == 1 {
+                post_apply_delta_request(self.revision, self.outstanding_deltas[0].clone())
+            }
         }
     }
 
