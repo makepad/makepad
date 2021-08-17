@@ -330,12 +330,6 @@ impl<'a> DrawShaderGenerator<'a> {
                 }
             }
         }
-        for decl in &self.draw_shader_def.fields {
-            match decl.kind {
-                DrawShaderFieldKind::Uniform {..} => self.generate_uniform_decl(decl),
-                _ => {}
-            }
-        }
         
         for decl in &self.draw_shader_def.fields {
             match decl.kind {
@@ -343,13 +337,7 @@ impl<'a> DrawShaderGenerator<'a> {
                 _ => {}
             }
         }
-        /*
-        for live_ref in &self.draw_shader_def.live_refs.borrow().as_ref().unwrap() {
-            match decl.kind {
-                DrawShaderFieldKind::Uniform {..} => self.generate_uniform_decl(decl),
-                _ => {}
-            }
-        }*/
+ 
         
         if let Some(packed_attributes_size) = packed_attributes_size {
             self.generate_packed_var_decls(
@@ -377,7 +365,7 @@ impl<'a> DrawShaderGenerator<'a> {
             for field in &struct_def.fields {
                 write!(self.string, "    ").unwrap();
                 self.write_var_decl(
-                    &field.ident,
+                    &DisplayStructField(field.ident),
                     field.ty_expr.ty.borrow().as_ref().unwrap(),
                 );
                 writeln!(self.string, ";").unwrap();
@@ -789,12 +777,16 @@ struct GlslBackendWriter<'a> {
 
 impl<'a> BackendWriter for GlslBackendWriter<'a> {
     
-    fn write_call_expr_hidden_args(&self, _string: &mut String, _fn_def:&FnDef, _sep: &str){
-        // not needed
-    }
-    fn write_fn_def_hidden_params(&self, _string: &mut String, _fn_def:&FnDef, _sep: &str){
+
+    fn write_call_expr_hidden_args(&self, _string: &mut String, _hidden_args:&BTreeSet<HiddenArgKind >, _sep: &str){
     }
     
+    fn write_fn_def_hidden_params(&self, _string: &mut String, _hidden_args:&BTreeSet<HiddenArgKind >, _sep: &str){
+    }
+
+    fn generate_live_value_prefix(&self, string: &mut String) {
+    }
+
     fn needs_bare_struct_cons(&self) -> bool {
         true
     }

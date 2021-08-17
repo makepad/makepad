@@ -4,6 +4,7 @@ use crate::generate::*;
 use std::fmt::Write;
 use std::fmt;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use crate::shaderregistry::ShaderRegistry;
 use crate::shaderregistry::FinalConstTable;
 
@@ -14,7 +15,7 @@ pub fn generate_shader(draw_shader_def: &DrawShaderDef, final_const_table: &Fina
         shader_registry,
         final_const_table,
         string: &mut string,
-        backend_writer: &MetalBackendWriter {shader_registry, draw_shader_def}
+        backend_writer: &MetalBackendWriter {shader_registry, draw_shader_def, final_const_table}
     }
     .generate_shader();
     string
@@ -228,12 +229,12 @@ impl<'a> DrawShaderGenerator<'a> {
     }
     
     fn generate_const_decls(&mut self) {
-        for const_ref_ptr in self.draw_shader_def.all_const_refs.borrow().iter() {
-            let const_def = self.shader_registry.consts.get(const_ref_ptr).unwrap();
+        for const_node_ptr in self.draw_shader_def.all_const_refs.borrow().iter() {
+            let const_def = self.shader_registry.consts.get(const_node_ptr).unwrap();
             
             write!(self.string, "constant ").unwrap();
             self.write_var_decl(
-                &const_ref_ptr,
+                &const_node_ptr,
                 const_def.ty_expr.ty.borrow().as_ref().unwrap(),
             );
             write!(self.string, " = ").unwrap();
@@ -372,7 +373,7 @@ impl<'a> DrawShaderGenerator<'a> {
                 DrawShaderFieldKind::Geometry {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
                     writeln!(
                         self.string,
-                        "    mpsc_varyings.{0} = mpsc_geometries.{0};",
+                        "    varyings.{0} = geometries.{0};",
                         decl.ident
                     )
                         .unwrap();
@@ -380,7 +381,7 @@ impl<'a> DrawShaderGenerator<'a> {
                 DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
                     writeln!(
                         self.string,
-                        "    mpsc_varyings.{0} = mpsc_instances.{0};",
+                        "    varyings.{0} = instances.{0};",
                         decl.ident
                     )
                         .unwrap();
@@ -393,32 +394,16 @@ impl<'a> DrawShaderGenerator<'a> {
         write!(self.string, "    varyings.position = {}", DisplayFnName(vertex_def.fn_node_ptr, vertex_def.ident)).unwrap();
         
         write!(self.string, "(").unwrap();
-        //let mut sep = "";
-        write!(self.string, "const_table").unwrap();
-        //sep = ", ";
-        /*
-        for &ident in decl.uniform_block_deps.borrow().as_ref().unwrap() {
-            write!(self.string, "{}mpsc_{}_uniforms", sep, ident).unwrap();
-            sep = ", ";
+        let mut sep = "";
+        if self.final_const_table.table.len()>0{
+            write!(self.string, "const_table").unwrap();
+            sep = ", "
         }
-        if decl.has_texture_deps.get().unwrap() {
-            write!(self.string, "{}mpsc_textures", sep).unwrap();
-            sep = ", ";
-        }
-        if !decl.geometry_deps.borrow().as_ref().unwrap().is_empty() {
-            write!(self.string, "{}mpsc_geometries", sep).unwrap();
-            sep = ", ";
-        }
-        if !decl.instance_deps.borrow().as_ref().unwrap().is_empty() {
-            write!(self.string, "{}mpsc_instances", sep).unwrap();
-            sep = ", ";
-        }
-        if decl.has_varying_deps.get().unwrap() {
-            write!(self.string, "{}mpsc_varyings", sep).unwrap();
-        }*/
+        self.backend_writer.write_call_expr_hidden_args(self.string, vertex_def.hidden_args.borrow().as_ref().unwrap(), sep);
+
         writeln!(self.string, ");").unwrap();
         
-        writeln!(self.string, "    return mpsc_varyings;").unwrap();
+        writeln!(self.string, "    return varyings;").unwrap();
         writeln!(self.string, "}}").unwrap();
     }
     
@@ -443,9 +428,12 @@ impl<'a> DrawShaderGenerator<'a> {
         write!(self.string, "    {}", DisplayFnName(pixel_def.fn_node_ptr, pixel_def.ident)).unwrap();
         
         write!(self.string, "(").unwrap();
-        //let mut sep = "";
-        write!(self.string, "const_table").unwrap();
-        //sep = ", ";
+        let mut sep = "";
+        if self.final_const_table.table.len()>0{
+            write!(self.string, "const_table").unwrap();
+            sep = ", "
+        }
+        self.backend_writer.write_call_expr_hidden_args(self.string, pixel_def.hidden_args.borrow().as_ref().unwrap(), sep);
         
         writeln!(self.string, ");").unwrap();
         
@@ -481,14 +469,21 @@ impl<'a> DrawShaderGenerator<'a> {
 
 struct MetalBackendWriter<'a> {
     pub shader_registry: &'a ShaderRegistry,
-    pub draw_shader_def: &'a DrawShaderDef
+    pub draw_shader_def: &'a DrawShaderDef,
+    pub final_const_table: &'a FinalConstTable
 }
 
 impl<'a> BackendWriter for MetalBackendWriter<'a> {
 
-    fn write_call_expr_hidden_args(&self, string: &mut String, fn_def:&FnDef, sep: &str){
+    fn write_call_expr_hidden_args(&self, string: &mut String, hidden_args:&BTreeSet<HiddenArgKind >, sep: &str){
         let mut sep = sep;
-        for hidden_arg in fn_def.hidden_args.borrow().as_ref().unwrap().iter(){
+        if self.final_const_table.table.len()>0{
+            write!(string, "{}", sep).unwrap();
+            sep = ", ";
+            write!(string, "const_table").unwrap();
+        }
+        
+        for hidden_arg in hidden_args{
             write!(string, "{}", sep).unwrap();
             match hidden_arg{
                 HiddenArgKind::Geometries=>{
@@ -514,9 +509,15 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
         }
     }
     
-    fn write_fn_def_hidden_params(&self, string: &mut String, fn_def:&FnDef, sep: &str){
+    fn write_fn_def_hidden_params(&self, string: &mut String, hidden_args:&BTreeSet<HiddenArgKind >, sep: &str){
         let mut sep = sep;
-        for hidden_arg in fn_def.hidden_args.borrow().as_ref().unwrap().iter(){
+        if self.final_const_table.table.len()>0{
+            write!(string, "{}", sep).unwrap();
+            sep = ", ";
+            write!(string, "constant const float *const_table").unwrap();
+        }
+
+        for hidden_arg in hidden_args{
             write!(string, "{}", sep).unwrap();
             match hidden_arg{
                 HiddenArgKind::Geometries=>{
@@ -540,6 +541,10 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
             }
             sep = ", ";
         }
+    }
+    
+    fn generate_live_value_prefix(&self, string: &mut String) {
+        write!(string, "live_uniforms.").unwrap();
     }
     
     fn generate_draw_shader_prefix(&self, string: &mut String, _expr: &Expr, field_ident: Ident) {
