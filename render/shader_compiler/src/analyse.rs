@@ -306,7 +306,7 @@ impl<'a> DrawShaderAnalyser<'a> {
             DrawShaderFieldKind::Instance {..} => {
                 let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
                 match ty {
-                    Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 | Ty::Mat4 => {}
+                    Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 | Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => {}
                     _ => {
                         return Err(LiveError {
                             origin: live_error_origin!(),
