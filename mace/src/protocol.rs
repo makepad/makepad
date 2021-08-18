@@ -36,7 +36,7 @@ pub struct DirectoryEntry {
     pub node: FileNode,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Notification {
     DeltaWasApplied(PathBuf, Delta),
 }
