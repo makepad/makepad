@@ -1,5 +1,5 @@
 use crate::cx::*; 
-use makepad_live_compiler::ty::Ty;
+//use makepad_shader_compiler::Ty;
 
 #[derive(Clone, Default, Hash, Ord, PartialOrd, Eq,Debug, PartialEq, Copy)]
 pub struct InstanceArea{
@@ -255,7 +255,7 @@ impl Area{
             _=>()
          }
     }
-    
+    /*
     pub fn get_read_ref<'a>(&self, cx:&'a Cx, live_item_id:LiveItemId, ty:Ty)->Option<DrawReadRef<'a>>{
         match self{
             Area::Instance(inst)=>{
@@ -370,7 +370,7 @@ impl Area{
             _=>(),
         }
         panic!("Cannot find texture2D prop {}", name)
-    }
+    }*/
 }
 
 impl Into<Area> for InstanceArea{

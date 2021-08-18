@@ -1,17 +1,23 @@
-use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet};
+use std::collections::{HashMap, HashSet, BTreeSet};
 use std::fmt::Write;
 use std::time::{Instant};
 
 pub use makepad_draw_derive::*;
+pub use crate::layouttypes::*;
+pub use makepad_live_parser::math::*;
+use makepad_shader_compiler::ShaderRegistry;
+
+/*
 pub use makepad_live_compiler::livetypes::*;
 pub use makepad_live_compiler::livestyles::*;
 pub use makepad_live_compiler::span::LiveBodyId;
 pub use makepad_live_compiler::math::*;
 pub use makepad_live_compiler::colors::*;
 pub use makepad_live_compiler::ty::{Ty, TyLit, TyExpr};
+*/
 pub use makepad_live_body::*;
 
-pub use crate::fonts::*;
+//pub use crate::fonts::*;
 pub use crate::turtle::*;
 pub use crate::cursor::*;
 pub use crate::window::*;
@@ -19,13 +25,12 @@ pub use crate::view::*;
 pub use crate::pass::*;
 pub use crate::geometry::*;
 pub use crate::texture::*;
-pub use crate::livemacros::*;
+//pub use crate::livemacros::*;
 pub use crate::events::*;
-pub use crate::animator::*;
+//pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::menu::*;
 pub use crate::shader::*;
-pub use crate::livemacros::*;
 pub use crate::geometrygen::*;
 pub use crate::gpuinfo::*;
 pub use crate::uid;
@@ -99,13 +104,12 @@ pub struct Cx {
     pub views: Vec<CxView>,
     pub views_free: Vec<usize>,
     
-    pub fonts: Vec<CxFont>,
-    pub fonts_atlas: CxFontsAtlas,
+    //pub fonts: Vec<CxFont>,
+    //pub fonts_atlas: CxFontsAtlas,
     pub textures: Vec<CxTexture>,
     pub textures_free: Vec<usize>,
     
     pub geometries: Vec<CxGeometry>,
-    
     pub shaders: Vec<CxShader>,
     
     pub in_redraw_cycle: bool,
@@ -143,7 +147,7 @@ pub struct Cx {
     pub hover_mouse_cursor: Option<MouseCursor>,
     pub fingers: Vec<CxPerFinger>,
     
-    pub playing_animator_ids: BTreeMap<AnimatorId, AnimInfo>,
+    //pub playing_animator_ids: BTreeMap<AnimatorId, AnimInfo>,
     
     pub next_frames: HashSet<NextFrame>,
     pub _next_frames: HashSet<NextFrame>,
@@ -153,7 +157,8 @@ pub struct Cx {
 
     pub profiles: HashMap<u64, Instant>,
     
-    pub live_styles: LiveStyles,
+    pub shader_registry: ShaderRegistry,
+    //pub live_styles: LiveStyles,
     
     pub command_settings: HashMap<CommandId, CxCommandSetting>,
     
@@ -217,8 +222,8 @@ impl Default for Cx {
             passes_free: Vec::new(),
             views: vec![CxView {..Default::default()}],
             views_free: Vec::new(),
-            fonts: Vec::new(),
-            fonts_atlas: CxFontsAtlas::default(),
+            //fonts: Vec::new(),
+            //fonts_atlas: CxFontsAtlas::default(),
             textures: textures,
             textures_free: Vec::new(),
             shaders: Vec::new(),
@@ -261,11 +266,11 @@ impl Default for Cx {
             hover_mouse_cursor: None,
             fingers: fingers, 
             
-            live_styles: LiveStyles::new(),
+            shader_registry: ShaderRegistry::new(),
             
             command_settings: HashMap::new(),
             
-            playing_animator_ids: BTreeMap::new(),
+           //playing_animator_ids: BTreeMap::new(),
             
             next_frames: HashSet::new(),
             _next_frames: HashSet::new(),
@@ -595,7 +600,7 @@ impl Cx {
         
         false
     }
-    
+    /*
     pub fn check_ended_animator_ids(&mut self, time: f64) {
         let mut ended_animator_ids = BTreeSet::new();
         //self.ended_animator_ids.clear();
@@ -607,7 +612,7 @@ impl Cx {
         for anim_id in &ended_animator_ids{
             self.playing_animator_ids.remove(anim_id);
         }
-    }
+    }*/
     
     pub fn update_area_refs(&mut self, old_area: Area, new_area: Area) -> Area {
         if old_area == Area::Empty || old_area == Area::All {
@@ -708,9 +713,10 @@ impl Cx {
         self.redraw_parent_areas.truncate(0);
         self.call_event_handler(&mut Event::Draw);
         self.in_redraw_cycle = false;
+        /*
         if self.live_styles.style_stack.len()>0 {
             panic!("Style stack disaligned, forgot a cx.end_style()");
-        }
+        }*/
         if self.view_stack.len()>0 {
             panic!("View stack disaligned, forgot an end_view(cx)");
         }
@@ -725,12 +731,12 @@ impl Cx {
         }
         //self.profile();
     }
-    
+    /*
     pub fn call_animate_event(&mut self, time: f64)
     {
         self.call_event_handler(&mut Event::Animate(AnimateEvent {time: time, frame: self.repaint_id}));
         self.check_ended_animator_ids(time);
-    }
+    }*/
     
     pub fn call_next_frame_event(&mut self, time: f64)
     {
@@ -815,14 +821,14 @@ impl Cx {
         }
 
     }
-    
+    /*
     pub fn call_live_recompile_event(&mut self, changed_live_bodies: BTreeSet<LiveBodyId>, errors: Vec<LiveBodyError>)
     {
         self.call_event_handler(&mut Event::LiveRecompile(LiveRecompileEvent {
             changed_live_bodies,
             errors
         }));
-    }
+    }*/
     
     pub fn status_http_send_ok() -> StatusId {uid!()}
     pub fn status_http_send_fail() -> StatusId {uid!()}
@@ -888,13 +894,13 @@ macro_rules!main_app {
         let mut cx = Cx::default();
         cx.style();
         $ app::style(&mut cx);
-        cx.init_live_styles();
+        //cx.init_live_styles();
         let mut app = $ app::new(&mut cx);
-        let mut cxafterdraw = CxAfterDraw::new(&mut cx);
+        //let mut cxafterdraw = CxAfterDraw::new(&mut cx);
         cx.event_loop( | cx, mut event | {
             if let Event::Draw = event {
                 app.draw_app(cx);
-                cxafterdraw.after_draw(cx);
+                //cxafterdraw.after_draw(cx);
                 return
             }
             app.handle_app(cx, &mut event);
@@ -910,19 +916,19 @@ macro_rules!wasm_app {
             let mut cx = Box::new(Cx::default());
             cx.style();
             $ app::style(&mut cx);
-            cx.init_live_styles();
+            //cx.init_live_styles();
             let app = Box::new( $ app::new(&mut cx));
-            let cxafterdraw = Box::new(CxAfterDraw::new(&mut cx));
-            Box::into_raw(Box::new((Box::into_raw(app), Box::into_raw(cx), Box::into_raw(cxafterdraw)))) as u32
+            //let cxafterdraw = Box::new(CxAfterDraw::new(&mut cx));
+            Box::into_raw(Box::new((Box::into_raw(app), Box::into_raw(cx)/*, Box::into_raw(cxafterdraw)*/))) as u32
         }
         
         #[export_name = "process_to_wasm"]
         pub unsafe extern "C" fn process_to_wasm(appcx: u32, msg_bytes: u32) -> u32 {
-            let appcx = &*(appcx as *mut (*mut $ app, *mut Cx, *mut CxAfterDraw));
+            let appcx = &*(appcx as *mut (*mut $ app, *mut Cx/*, *mut CxAfterDraw*/));
             (*appcx.1).process_to_wasm(msg_bytes, | cx, mut event | {
                 if let Event::Draw = event {
                     (*appcx.0).draw_app(cx);
-                    (*appcx.2).after_draw(cx);
+                    //(*appcx.2).after_draw(cx);
                     return;
                 };
                 (*appcx.0).handle_app(cx, &mut event);
