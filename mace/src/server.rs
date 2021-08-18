@@ -5,7 +5,7 @@ use {
         text::Text,
     },
     std::{
-        collections::HashMap,
+        collections::{HashMap, VecDeque},
         fmt, fs,
         path::{Path, PathBuf},
         sync::{
@@ -91,18 +91,18 @@ impl Connection {
         match documents_by_path_guard.get(&path) {
             Some(document) => {
                 let mut document_guard = document.lock().unwrap();
-                let revision = document_guard.revision;
+                let their_revision = document_guard.our_revision;
                 let text = document_guard.text.clone();
-                document_guard.sessions_by_connection_id.insert(
+                document_guard.participants_by_connection_id.insert(
                     self.connection_id,
-                    Session {
-                        revision,
+                    Participant {
+                        their_revision,
                         notification_sender: self.notification_sender.clone(),
                     },
                 );
                 drop(document_guard);
                 drop(documents_by_path_guard);
-                Ok((revision, text))
+                Ok((their_revision, text))
             }
             None => {
                 let bytes = fs::read(&path).map_err(|error| Error::Unknown(error.to_string()))?;
@@ -111,20 +111,21 @@ impl Connection {
                     .map(|line| line.chars().collect::<Vec<_>>())
                     .collect::<Vec<_>>()
                     .into();
-                let mut sessions_by_connection_id = HashMap::new();
-                sessions_by_connection_id.insert(
+                let mut participants_by_connection_id = HashMap::new();
+                participants_by_connection_id.insert(
                     self.connection_id,
-                    Session {
-                        revision: 0,
+                    Participant {
+                        their_revision: 0,
                         notification_sender: self.notification_sender.clone(),
                     },
                 );
                 documents_by_path_guard.insert(
                     path,
                     Mutex::new(Document {
-                        revision: 0,
+                        our_revision: 0,
                         text: text.clone(),
-                        sessions_by_connection_id,
+                        outstanding_deltas: VecDeque::new(),
+                        participants_by_connection_id,
                     }),
                 );
                 drop(documents_by_path_guard);
@@ -133,19 +134,41 @@ impl Connection {
         }
     }
 
-    fn apply_delta(&self, path: PathBuf, _revision: usize, delta: Delta) -> Result<(), Error> {
-        let mut documents_by_path_guard = self.shared.documents_by_path.write().unwrap();
-        let document = documents_by_path_guard.get_mut(&path).unwrap();
-        let document_guard = document.lock().unwrap();
-        // TODO: Transform delta against outstanding deltas
-        for (connection_id, session) in &document_guard.sessions_by_connection_id {
-            if *connection_id == self.connection_id {
-                continue;
-            }
-            session
-                .notification_sender
-                .send_notification(Notification::DeltaWasApplied(path.clone(), delta.clone()))
+    fn apply_delta(&self, path: PathBuf, their_revision: usize, delta: Delta) -> Result<(), Error> {
+        let documents_by_path_guard = self.shared.documents_by_path.read().unwrap();
+        let document = documents_by_path_guard.get(&path).unwrap();
+        let mut document_guard = document.lock().unwrap();
+        let unseen_delta_count = document_guard.our_revision - their_revision;
+        let seen_delta_count = document_guard.outstanding_deltas.len() - unseen_delta_count;
+        let mut delta = delta;
+        for unseen_delta in document_guard
+            .outstanding_deltas
+            .iter()
+            .skip(seen_delta_count)
+        {
+            delta = delta.transform(unseen_delta.clone()).0;
         }
+        document_guard.our_revision += 1;
+        document_guard.text.apply_delta(delta.clone());
+        document_guard.outstanding_deltas.push_back(delta.clone());
+        let participant = document_guard
+            .participants_by_connection_id
+            .get_mut(&self.connection_id)
+            .unwrap();
+        participant.their_revision = their_revision;
+        let their_revision = document_guard
+            .participants_by_connection_id
+            .values()
+            .map(|participant| participant.their_revision)
+            .min()
+            .unwrap();
+        let unseen_delta_count = document_guard.our_revision - their_revision;
+        let seen_delta_count = document_guard.outstanding_deltas.len() - unseen_delta_count;
+        document_guard.outstanding_deltas.drain(..seen_delta_count);
+        document_guard.notify_other_participants(
+            self.connection_id,
+            Notification::DeltaWasApplied(path, delta),
+        );
         drop(document_guard);
         drop(documents_by_path_guard);
         Ok(())
@@ -192,13 +215,31 @@ struct ConnectionId(usize);
 
 #[derive(Debug)]
 struct Document {
-    revision: usize,
+    our_revision: usize,
     text: Text,
-    sessions_by_connection_id: HashMap<ConnectionId, Session>,
+    outstanding_deltas: VecDeque<Delta>,
+    participants_by_connection_id: HashMap<ConnectionId, Participant>,
+}
+
+impl Document {
+    fn notify_other_participants(
+        &self,
+        self_connection_id: ConnectionId,
+        notification: Notification,
+    ) {
+        for (connection_id, participant) in &self.participants_by_connection_id {
+            if *connection_id == self_connection_id {
+                continue;
+            }
+            participant
+                .notification_sender
+                .send_notification(notification.clone())
+        }
+    }
 }
 
 #[derive(Debug)]
-struct Session {
-    revision: usize,
+struct Participant {
+    their_revision: usize,
     notification_sender: Box<dyn NotificationSender>,
 }

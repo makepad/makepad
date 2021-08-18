@@ -352,7 +352,11 @@ impl AppInner {
                                 apply_delta_requests.push((revision, delta));
                             });
                             for (revision, delta) in apply_delta_requests {
-                                self.send_request(Request::ApplyDelta(path.clone(), revision, delta));
+                                self.send_request(Request::ApplyDelta(
+                                    path.clone(),
+                                    revision,
+                                    delta,
+                                ));
                             }
                         }
                         _ => panic!(),

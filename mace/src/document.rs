@@ -59,12 +59,10 @@ impl Document {
         self.text.apply_delta(delta.clone());
         self.tokenizer.refresh_cache(&self.text);
         match self.outstanding_delta {
-            Some(_) => {
-                match self.queued_delta.take() {
-                    Some(queued_delta) => self.queued_delta = Some(queued_delta.compose(delta)),
-                    None => self.queued_delta = Some(delta),
-                }
-            }
+            Some(_) => match self.queued_delta.take() {
+                Some(queued_delta) => self.queued_delta = Some(queued_delta.compose(delta)),
+                None => self.queued_delta = Some(delta),
+            },
             None => {
                 self.outstanding_delta = Some(delta.clone());
                 post_apply_delta_request(self.revision, delta);
