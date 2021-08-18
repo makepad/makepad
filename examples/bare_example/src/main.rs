@@ -26,7 +26,7 @@ pub struct BareExampleApp {
     color_texture: Texture,
     main_view: View,
     //quad: ButtonQuad,
-    count: f32
+    //count: f32
 }
 
 impl BareExampleApp {
@@ -37,11 +37,11 @@ impl BareExampleApp {
             color_texture: Texture::new(cx),
             //quad: ButtonQuad::new(cx, default_shader!()),
             main_view: View::new(),
-            count: 0.
+            //count: 0.
         }
     }
     
-    pub fn style(cx: &mut Cx) {
+    pub fn style(_cx: &mut Cx) { 
         /*
         ButtonQuad::register_draw_input(cx);
         ButtonText::register_draw_input(cx);
@@ -71,8 +71,8 @@ impl BareExampleApp {
             Event::Construct => {
                 
             },
-            Event::FingerMove(fm) => {
-                self.count = fm.abs.x * 0.01;
+            Event::FingerMove(_fm) => {
+                //self.count = fm.abs.x * 0.01;
             },
             _ => ()
         }
