@@ -21,6 +21,7 @@ const SOURCE: &'static str = r#"
         
         fn pixel(self) -> vec4 {
             let x = Struct1 {a: 1.0, b: Struct2 {c: 1.0 + self.dinst}};
+            let x = vec3(1.0) * self.dmat;
             x.struct_1_set();
             return #f;
         }
@@ -30,7 +31,7 @@ const SOURCE: &'static str = r#"
         fn vertex(self) -> vec4 {
             let x = Struct2 {c: self.uni1 + cnst1 + live};
             x.struct_2_set(3.0);
-            let x = vec4(1.0) * self.dmat;
+            let x = vec3(1.0) * self.dmat;
             self.override();
             return #f;
         }
@@ -47,12 +48,12 @@ uniform float ds_uni1;
 uniform float ds_duni;
 attribute vec4 packed_instance_0;
 attribute vec4 packed_instance_1;
-attribute vec4 packed_instance_2;
-attribute vec4 packed_instance_3;
-attribute float packed_instance_4;
-varying float packed_varying_0;
+attribute vec2 packed_instance_2;
+varying vec4 packed_varying_0;
+varying vec4 packed_varying_1;
+varying vec2 packed_varying_2;
 float ds_dinst=0.0;
-mat4 ds_dmat=mat4(0.0);
+mat3 ds_dmat=mat3(0.0);
 uniform float live_0_1_3;
 struct struct_0_1_4 {
     float f_c;
@@ -67,7 +68,7 @@ void fn_0_1_16_override() {
 vec4 fn_0_1_17_vertex() {
     struct_0_1_4 var_x_0 = struct_0_1_4(((ds_uni1 + const_0_1_2) + live_0_1_3));
     fn_0_2_1_struct_2_set (var_x_0, 3.0);
-    vec4 var_x_1 = (vec4(1.0) * ds_dmat);
+    vec3 var_x_1 = (vec3(1.0) * ds_dmat);
     fn_0_1_16_override ();
     return vec4(1.0, 1.0, 1.0, 1.0);
 }
@@ -82,22 +83,27 @@ void main() {
     ds_dmat[1][2] = packed_instance_1.w;
     ds_dmat[1][3] = packed_instance_2.x;
     ds_dmat[2][0] = packed_instance_2.y;
-    ds_dmat[2][1] = packed_instance_2.z;
-    ds_dmat[2][2] = packed_instance_2.w;
-    ds_dmat[2][3] = packed_instance_3.x;
-    ds_dmat[3][0] = packed_instance_3.y;
-    ds_dmat[3][1] = packed_instance_3.z;
-    ds_dmat[3][2] = packed_instance_3.w;
-    ds_dmat[3][3] = packed_instance_4;
     gl_Position = fn_0_1_17_vertex();
-    packed_varying_0 = dinst;
+    packed_varying_0.x = dinst;
+    packed_varying_0.y = dmat[0][0];
+    packed_varying_0.z = dmat[0][1];
+    packed_varying_0.w = dmat[0][2];
+    packed_varying_1.x = dmat[0][3];
+    packed_varying_1.y = dmat[1][0];
+    packed_varying_1.z = dmat[1][1];
+    packed_varying_1.w = dmat[1][2];
+    packed_varying_2.x = dmat[1][3];
+    packed_varying_2.y = dmat[2][0];
 }
 PIXELSHADER
 // Uniform block default
 uniform float ds_uni1;
 uniform float ds_duni;
-varying float packed_varying_0;
+varying vec4 packed_varying_0;
+varying vec4 packed_varying_1;
+varying vec2 packed_varying_2;
 float ds_dinst=0.0;
+mat3 ds_dmat=mat3(0.0);
 uniform float live_0_1_3;
 struct struct_0_1_4 {
     float f_c;
@@ -121,11 +127,21 @@ void fn_0_2_5_struct_1_set(inout struct_0_1_5 var_self_0) {
 }
 vec4 fn_0_1_15_pixel() {
     struct_0_1_5 var_x_0 = struct_0_1_5(1.0,struct_0_1_4((1.0 + ds_dinst)));
-    fn_0_2_5_struct_1_set (var_x_0);
+    vec3 var_x_1 = (vec3(1.0) * ds_dmat);
+    fn_0_2_5_struct_1_set (var_x_1);
     return vec4(1.0, 1.0, 1.0, 1.0);
 }
 void main() {
-    ds_dinst = packed_varying_0;
+    ds_dinst = packed_varying_0.x;
+    ds_dmat[0][0] = packed_varying_0.y;
+    ds_dmat[0][1] = packed_varying_0.z;
+    ds_dmat[0][2] = packed_varying_0.w;
+    ds_dmat[0][3] = packed_varying_1.x;
+    ds_dmat[1][0] = packed_varying_1.y;
+    ds_dmat[1][1] = packed_varying_1.z;
+    ds_dmat[1][2] = packed_varying_1.w;
+    ds_dmat[1][3] = packed_varying_2.x;
+    ds_dmat[2][0] = packed_varying_2.y;
     gl_FragColor = fn_0_1_15_pixel();
 }
 "#;
@@ -153,14 +169,16 @@ struct Geometries {
 };
 struct Instances {
     float ds_dinst;
-    float4 ds_dmat0;
-    float4 ds_dmat1;
-    float4 ds_dmat2;
-    float4 ds_dmat3;
+    float3 ds_dmat0;
+    float3 ds_dmat1;
+    float3 ds_dmat2;
 };
 struct Varyings {
     float4 position [[position]];
     float ds_dinst;
+    float3 ds_dmat0;
+    float3 ds_dmat1;
+    float3 ds_dmat2;
 };
 constant float const_0_1_2 = 1.0;
 float closure_0_in_fn_0_2_5(float var_x_0) {
@@ -178,16 +196,17 @@ void fn_0_2_5_struct_1_set(thread & struct_0_1_5) {
 }
 float4 fn_0_1_15_pixel(thread Varyings &varyings) {
      struct_0_1_5 = struct_0_1_5(1.0,struct_0_1_4((1.0 + instances.ds_dinst)));
-    fn_0_2_5_struct_1_set (var_x_0);
+    float3 var_x_1 = (float3(float3(1.0)) * float3x3(varyings.ds_dmat0.x,varyings.ds_dmat1.x,varyings.ds_dmat2.x),varyings.ds_dmat0.y,varyings.ds_dmat1.y,varyings.ds_dmat2.y),varyings.ds_dmat0.z,varyings.ds_dmat1.z,varyings.ds_dmat2.z));
+    fn_0_2_5_struct_1_set (var_x_1);
     return float4(1.0, 1.0, 1.0, 1.0);
 }
 void fn_0_1_16_override() {
     (1 + 1);
 }
-float4 fn_0_1_17_vertex(thread Instances &instances, constant Uniforms_default uniforms_default, constant LiveUniforms live_uniforms) {
+float4 fn_0_1_17_vertex(thread Varyings &varyings, constant Uniforms_default uniforms_default, constant LiveUniforms live_uniforms) {
      struct_0_1_4 = struct_0_1_4(((uniforms_default.ds_uni1 + const_0_1_2) + live_uniforms.live_0_1_3));
     fn_0_2_1_struct_2_set (var_x_0, 3.0);
-    float4 var_x_1 = (float4(float4(1.0)) * float4x4(instances.ds_dmat0.x,instances.ds_dmat1.x,instances.ds_dmat2.x,instances.ds_dmat3.x,instances.ds_dmat0.y,instances.ds_dmat1.y,instances.ds_dmat2.y,instances.ds_dmat3.y,instances.ds_dmat0.z,instances.ds_dmat1.z,instances.ds_dmat2.z,instances.ds_dmat3.z,instances.ds_dmat0.w,instances.ds_dmat1.w,instances.ds_dmat2.w,instances.ds_dmat3.w));
+    float3 var_x_1 = (float3(float3(1.0)) * float3x3(varyings.ds_dmat0.x,varyings.ds_dmat1.x,varyings.ds_dmat2.x),varyings.ds_dmat0.y,varyings.ds_dmat1.y,varyings.ds_dmat2.y),varyings.ds_dmat0.z,varyings.ds_dmat1.z,varyings.ds_dmat2.z));
     fn_0_1_16_override ();
     return float4(1.0, 1.0, 1.0, 1.0);
 }
@@ -204,7 +223,10 @@ vertex Varyings vertex_main(Textures textures
     Instances instances = in_instances[inst_id];
     Varyings varyings;
     varyings.dinst = instances.dinst;
-    varyings.position = fn_0_1_17_vertex(instances, uniforms_default, live_uniforms);
+    varyings.dmat0 = instances.dmat0;
+    varyings.dmat1 = instances.dmat1;
+    varyings.dmat2 = instances.dmat2;
+    varyings.position = fn_0_1_17_vertex(varyings, uniforms_default, live_uniforms);
     return varyings;
 }
 fragment float4 fragment_main(Varyings varyings[[stage_in]]
@@ -237,18 +259,20 @@ struct Geometries {
 };
 struct Instances {
     float ds_dinst: INSTA;
-    float4 ds_dmat0: INSTB;
-    float4 ds_dmat1: INSTC;
-    float4 ds_dmat2: INSTD;
-    float4 ds_dmat3: INSTE;
+    float3 ds_dmat0: INSTB;
+    float3 ds_dmat1: INSTC;
+    float3 ds_dmat2: INSTD;
 };
 struct Varyings {
     float4 position: SV_POSITION;
     float ds_dinst: VARYA;
+    float3 ds_dmat0: VARYB;
+    float3 ds_dmat1: VARYC;
+    float3 ds_dmat2: VARYD;
 };
 static const float const_0_1_2 = 1.0;
-float4 consfn_vec4_float(float x) {
-    return float4(x, x, x, x);
+float3 consfn_vec3_float(float x) {
+    return float3(x, x, x);
 }
 float closure_0_in_fn_0_2_5(float var_x_0) {
     return (var_x_0 + 1.0);
@@ -265,23 +289,27 @@ void fn_0_2_5_struct_1_set(inout struct_0_1_5 var_self_0) {
 }
 float4 fn_0_1_15_pixel(inout Varyings varyings) {
     struct_0_1_5 var_x_0 = struct_0_1_5{1.0,struct_0_1_4{(1.0 + instances.ds_dinst)}};
-    fn_0_2_5_struct_1_set (var_x_0);
+    float3 var_x_1 = mul(consfn_vec3_float(1.0), float3x3(varyings.ds_dmat0.x,varyings.ds_dmat1.x,varyings.ds_dmat2.x),varyings.ds_dmat0.y,varyings.ds_dmat1.y,varyings.ds_dmat2.y),varyings.ds_dmat0.z,varyings.ds_dmat1.z,varyings.ds_dmat2.z));
+    fn_0_2_5_struct_1_set (var_x_1);
     return float4(1.0, 1.0, 1.0, 1.0);
 }
 void fn_0_1_16_override() {
     (1 + 1);
 }
-float4 fn_0_1_17_vertex(in Instances instances, , ) {
+float4 fn_0_1_17_vertex(inout Varyings varyings, , ) {
     struct_0_1_4 var_x_0 = struct_0_1_4{((ds_uni1 + const_0_1_2) + live_0_1_3)};
     fn_0_2_1_struct_2_set (var_x_0, 3.0);
-    float4 var_x_1 = mul(consfn_vec4_float(1.0), float4x4(instances.ds_dmat0.x,instances.ds_dmat1.x,instances.ds_dmat2.x,instances.ds_dmat3.x,instances.ds_dmat0.y,instances.ds_dmat1.y,instances.ds_dmat2.y,instances.ds_dmat3.y,instances.ds_dmat0.z,instances.ds_dmat1.z,instances.ds_dmat2.z,instances.ds_dmat3.z,instances.ds_dmat0.w,instances.ds_dmat1.w,instances.ds_dmat2.w,instances.ds_dmat3.w));
+    float3 var_x_1 = mul(consfn_vec3_float(1.0), float3x3(varyings.ds_dmat0.x,varyings.ds_dmat1.x,varyings.ds_dmat2.x),varyings.ds_dmat0.y,varyings.ds_dmat1.y,varyings.ds_dmat2.y),varyings.ds_dmat0.z,varyings.ds_dmat1.z,varyings.ds_dmat2.z));
     fn_0_1_16_override ();
     return float4(1.0, 1.0, 1.0, 1.0);
 }
 Varyings vertex_main(Geometries geometries, Instances instances, uint inst_id: SV_InstanceID) {
-    Varyings varyings = {float4(0.0,0.0,0.0,0.0), 0.0};
+    Varyings varyings = {float4(0.0,0.0,0.0,0.0), 0.0, float3(0.0,0.0,0.0), float3(0.0,0.0,0.0), float3(0.0,0.0,0.0)};
     varyings.dinst = instances.dinst;
-    varyings.position = fn_0_1_17_vertex(instances, , );
+    varyings.dmat0 = instances.dmat0;
+    varyings.dmat1 = instances.dmat1;
+    varyings.dmat2 = instances.dmat2;
+    varyings.position = fn_0_1_17_vertex(varyings, , );
     return varyings;
 }
 float4 pixel_main(Varyings varyings) : SV_TARGET{
@@ -358,7 +386,7 @@ fn main() {
     let mut di = DrawShaderInput::default();
     di.add_uniform("duni", Ty::Float);
     di.add_instance("dinst", Ty::Float);
-    di.add_instance("dmat", Ty::Mat4);
+    di.add_instance("dmat", Ty::Mat3);
     sr.register_draw_input("main::test", "DrawQuad", di);
     
     // lets just call the shader compiler on this thing

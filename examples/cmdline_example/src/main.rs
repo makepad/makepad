@@ -81,7 +81,7 @@ fn main() {
     }
     // ok the shader is analysed.
     // now we will generate the glsl shader.
-    /*
+    
     let result = sr.generate_glsl_shader(id!(main), id!(test), &[id!(DrawQuad)], None); //Some(FileId(0)));
     match result {
         Err(e) => {
@@ -91,8 +91,8 @@ fn main() {
             //println!("Vertex shader:\n{}\n\nPixel shader:\n{}", vertex,pixel);
             println!("{}", pixel);
         }
-    }*/
-
+    }
+/*
     let result = sr.generate_metal_shader(id!(main), id!(test), &[id!(DrawQuad)], None); //Some(FileId(0)));
     match result {
         Err(e) => {
@@ -102,7 +102,7 @@ fn main() {
             //println!("Vertex shader:\n{}\n\nPixel shader:\n{}", vertex,pixel);
             println!("{}", shader);
         }
-    }
+    }*/
     
     /*
     lr.register_component(id!(main), id!(test), id!(DrawQuad), Box::new(MyShaderFactory {}));
