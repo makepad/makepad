@@ -770,7 +770,7 @@ pub struct SlErr {
 
 impl Cx {
     
-    pub fn mtl_compile_all_shaders(&mut self, metal_cx: &MetalCx) {
+    pub fn mtl_compile_all_shaders(&mut self, _metal_cx: &MetalCx) {
         /*
         let options = ShaderCompileOptions {
             gather_all: false,
@@ -802,7 +802,7 @@ impl Cx {
         self.live_styles.changed_shaders.clear();*/
     }
     
-    pub fn mtl_update_all_shaders(&mut self, metal_cx: &MetalCx, errors:&mut Vec<LiveError>)  {
+    pub fn mtl_update_all_shaders(&mut self, _metal_cx: &MetalCx, _errors:&mut Vec<LiveError>)  {
       
         // recompile shaders, and update values
         /*
