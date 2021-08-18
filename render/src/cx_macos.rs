@@ -240,6 +240,7 @@ impl Cx {
                 }
             }
             
+            /*
             if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0 {
                 let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
                 let mut errors = self.process_live_styles_changes();
@@ -247,10 +248,9 @@ impl Cx {
                 self.call_live_recompile_event(changed_live_bodies, errors);
             }
             
-            self.process_live_style_errors();
+            self.process_live_style_errors();*/
             
-            if self.playing_animator_ids.len() != 0
-                || self.redraw_parent_areas.len() != 0
+            if  self.redraw_parent_areas.len() != 0
                 || self.redraw_child_areas.len() != 0
                 || self.next_frames.len() != 0 {
                 false

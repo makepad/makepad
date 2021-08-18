@@ -1,8 +1,5 @@
 use crate::cx::*;
-use makepad_live_compiler::ty::Ty;
-use makepad_live_compiler::ident::Ident;
-use makepad_live_compiler::shaderast::{ShaderAst, Decl};
-use makepad_live_compiler::analyse::ShaderCompileOptions;
+use makepad_shader_compiler::Ty;
 use std::collections::HashMap;
 
 pub enum ShaderCompileResult{
@@ -200,6 +197,7 @@ pub struct CxShaderMapping {
 }
 
 impl CxShaderMapping {
+    /*
     pub fn from_shader_ast(shader_ast: ShaderAst, options: ShaderCompileOptions, metal_uniform_packing:bool) -> Self {
         
         let mut instances = Vec::new();
@@ -323,7 +321,7 @@ impl CxShaderMapping {
                 _=>()
             }
         }
-    }
+    }*/
 }
 
 #[derive(Default, Clone)]
