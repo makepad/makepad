@@ -17,3 +17,6 @@ pub mod generate;
 pub mod generate_glsl;
 pub mod generate_metal;
 pub mod generate_hlsl;
+
+pub use crate::shaderregistry::ShaderRegistry;
+pub use crate::shaderast::Ty;
