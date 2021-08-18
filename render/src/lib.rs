@@ -2,8 +2,7 @@
 
 #[macro_use]
 mod cx;
-#[macro_use]
-mod livemacros;
+
 
 #[cfg(all(not(feature="ipc"),target_os = "linux"))]
 mod cx_opengl;
@@ -41,36 +40,37 @@ mod cx_desktop;
 mod cx_style;
 
 mod turtle;
-mod fonts;
+//mod fonts;
 mod cursor;
 mod window;
 mod view;
 mod pass;
 mod texture;
-mod animator;
-mod elements;
+mod layouttypes;
+//mod animator;
+//mod elements;
 mod area;
 mod geometrygen;
 
 mod drawquad;
-mod drawtext;
-mod drawcolor;
-mod drawcube;
-mod drawimage;
+//mod drawtext;
+//mod drawcolor;
+//mod drawcube;
+//mod drawimage;
 mod events;
 mod menu; 
 mod geometry;
 mod shader;
-mod shader_std;
+//mod shader_std;
 mod gpuinfo;
 
 pub use crate::cx::*;
 pub use crate::drawquad::*;
-pub use crate::drawtext::*;
-pub use crate::drawcolor::*;
-pub use crate::drawcube::*;
-pub use crate::drawimage::*;
-pub use crate::elements::*;
+//pub use crate::drawtext::*;
+//pub use crate::drawcolor::*;
+//pub use crate::drawcube::*;
+//pub use crate::drawimage::*;
+//pub use crate::elements::*;
 
 use std::time::{Instant};
 
@@ -85,4 +85,12 @@ impl Cx{
         }
         
     }
+}
+
+#[macro_export]
+macro_rules!uid {
+    () => {{
+        struct Unique {}
+        std::any::TypeId::of::<Unique>().into()
+    }};
 }

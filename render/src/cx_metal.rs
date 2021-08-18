@@ -5,10 +5,9 @@
 //use core_graphics::color::CGColor;
 use makepad_objc_sys::{msg_send};
 use makepad_objc_sys::runtime::YES;
+use makepad_live_parser::LiveError;
 
-use makepad_live_compiler::generate_metal;
-use makepad_live_compiler::analyse::ShaderCompileOptions;
-use makepad_live_compiler::shaderast::ShaderAst;
+//use makepad_shader_compiler::generate_metal;
 
 //use metal::*;
 use crate::cx_apple::*;
@@ -772,7 +771,7 @@ pub struct SlErr {
 impl Cx {
     
     pub fn mtl_compile_all_shaders(&mut self, metal_cx: &MetalCx) {
-        
+        /*
         let options = ShaderCompileOptions {
             gather_all: false,
             create_const_table: false,
@@ -800,13 +799,13 @@ impl Cx {
                 }
             }
         };
-        self.live_styles.changed_shaders.clear();
+        self.live_styles.changed_shaders.clear();*/
     }
     
-    pub fn mtl_update_all_shaders(&mut self, metal_cx: &MetalCx, errors:&mut Vec<LiveBodyError>)  {
+    pub fn mtl_update_all_shaders(&mut self, metal_cx: &MetalCx, errors:&mut Vec<LiveError>)  {
       
         // recompile shaders, and update values
-        
+        /*
         let options = ShaderCompileOptions {
             gather_all: true,
             create_const_table: true,
@@ -841,9 +840,9 @@ impl Cx {
                 }
             }
         }
-        self.live_styles.changed_shaders.clear();
+        self.live_styles.changed_shaders.clear();*/
     }
-    
+    /*
     pub fn mtl_compile_shader(
         shader_id: usize,
         name: String,
@@ -937,5 +936,5 @@ impl Cx {
             library: library,
         });
         return ShaderCompileResult::Ok
-    }
+    }*/
 }

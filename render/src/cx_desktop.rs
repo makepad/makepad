@@ -125,9 +125,9 @@ impl Cx {
     
     pub fn process_desktop_paint_callbacks(&mut self, time: f64) -> bool
     {
-        if self.playing_animator_ids.len() != 0 {
+        /*if self.playing_animator_ids.len() != 0 {
             self.call_animate_event(time);
-        }
+        }*/
         
         let mut vsync = false; //self.platform.desktop.repaint_via_scroll_event;
         self.platform.desktop.repaint_via_scroll_event = false;
@@ -202,7 +202,7 @@ impl Cx {
     }
     
     pub fn load_all_fonts(&mut self) {
-        
+        /*
         self.fonts.resize(self.live_styles.font_index.len(), CxFont::default());
         // lets load all fonts that aren't loaded yet
         for (file, font) in &self.live_styles.font_index {
@@ -222,7 +222,7 @@ impl Cx {
             else {
                 println!("Error loading font {} ", file);
             }
-        }
+        }*/
     }
     
     /*pub fn log(&mut self, val:&str){

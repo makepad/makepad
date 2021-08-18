@@ -179,12 +179,12 @@ pub struct FileWriteEvent {
     id: u64,
     error: Option<String>
 }
-
+/*
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveRecompileEvent {
     pub changed_live_bodies: BTreeSet<LiveBodyId>,
     pub errors: Vec<LiveBodyError>
-}
+}*/
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyEvent {
@@ -318,7 +318,7 @@ pub enum Event {
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
     TextCopy(TextCopyEvent),
-    LiveRecompile(LiveRecompileEvent),
+    //LiveRecompile(LiveRecompileEvent),
     WebSocketMessage(WebSocketMessageEvent),
 }
 
@@ -352,7 +352,7 @@ impl Event {
         }
         None
     }
-
+/*
     pub fn is_animate(&self, cx:&mut Cx, animator: &Animator)->Option<AnimateEvent>{
          match self {
             Event::Animate(ae) => {
@@ -363,7 +363,7 @@ impl Event {
             _=>()
         }
         None
-    }
+    }*/
     
     pub fn hits(&mut self, cx: &mut Cx, area: Area, opt: HitOpt) -> Event {
         match self {
