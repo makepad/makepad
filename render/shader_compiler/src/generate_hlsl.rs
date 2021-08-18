@@ -35,16 +35,16 @@ struct DrawShaderGenerator<'a> {
 
 impl<'a> DrawShaderGenerator<'a> {
     fn generate_shader(&mut self) {
-
-        for fn_iter in self.draw_shader_def.all_fns.borrow().iter(){
+        
+        for fn_iter in self.draw_shader_def.all_fns.borrow().iter() {
             let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
-            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(id!(sample2d))){
+            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(id!(sample2d))) {
                 writeln!(self.string, "SamplerState default_texture_sampler{{Filter=MIN_MAX_MIP_LINEAR;AddressU = Wrap;AddressV=Wrap;}};").unwrap();
                 writeln!(self.string, "float4 sample2d(Texture2D tex, float2 pos){{return tex.Sample(default_texture_sampler,pos);}}").unwrap();
                 break;
             }
         };
-
+        
         self.generate_struct_decls();
         let fields_as_uniform_blocks = self.draw_shader_def.fields_as_uniform_blocks();
         self.generate_uniform_structs(&fields_as_uniform_blocks);
@@ -241,10 +241,40 @@ impl<'a> DrawShaderGenerator<'a> {
                     index += 1;
                 }
                 DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
-                    write!(self.string, "    ").unwrap();
-                    self.write_var_decl(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
-                    writeln!(self.string, ": VARY{};", index_to_char(index)).unwrap();
-                    index += 1;
+                    match field.ty_expr.ty.borrow().as_ref().unwrap() {
+                        Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {
+                            write!(self.string, "    ").unwrap();
+                            self.write_var_decl(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
+                            writeln!(self.string, ": VARY{};", index_to_char(index)).unwrap();
+                            index += 1;
+                        },
+                        Ty::Mat4 => {
+                            for i in 0..4 {
+                                write!(self.string, "    ").unwrap();
+                                self.write_ty_lit(TyLit::Vec4);
+                                write!(self.string, " {}{}", &DisplayDsIdent(field.ident), i).unwrap();
+                                writeln!(self.string, ": VARY{};", index_to_char(index)).unwrap();
+                                index += 1;
+                            }
+                        },
+                        Ty::Mat3 => {
+                            for i in 0..3 {
+                                write!(self.string, "    ").unwrap();
+                                self.write_ty_lit(TyLit::Vec3);
+                                write!(self.string, " {}{}", &DisplayDsIdent(field.ident), i).unwrap();
+                                writeln!(self.string, ": VARY{};", index_to_char(index)).unwrap();
+                                index += 1;
+                            }
+                        },
+                        Ty::Mat2 => {
+                            write!(self.string, "    ").unwrap();
+                            self.write_ty_lit(TyLit::Vec4);
+                            write!(self.string, " {}", &DisplayDsIdent(field.ident)).unwrap();
+                            writeln!(self.string, ": VARY{};", index_to_char(index)).unwrap();
+                            index += 1;
+                        },
+                        _ => panic!("unsupported type in generate_varying_struct")
+                    }
                 }
                 DrawShaderFieldKind::Varying {..} => {
                     write!(self.string, "    ").unwrap();
@@ -269,8 +299,28 @@ impl<'a> DrawShaderGenerator<'a> {
                     self.write_var_init(field.ty_expr.ty.borrow().as_ref().unwrap());
                 }
                 DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
-                    write!(self.string, "{}", sep).unwrap();
-                    self.write_var_init(field.ty_expr.ty.borrow().as_ref().unwrap());
+                    match field.ty_expr.ty.borrow().as_ref().unwrap() {
+                        Ty::Mat4 => {
+                            for _ in 0..4 {
+                                write!(self.string, "{}", sep).unwrap();
+                                self.write_var_init(&Ty::Vec4);
+                            }
+                        },
+                        Ty::Mat3 => {
+                            for _ in 0..3 {
+                                write!(self.string, "{}", sep).unwrap();
+                                self.write_var_init(&Ty::Vec3);
+                            }
+                        },
+                        Ty::Mat2 => {
+                            write!(self.string, "{}", sep).unwrap();
+                            self.write_var_init(&Ty::Vec4);
+                        },
+                        _ => {
+                            write!(self.string, "{}", sep).unwrap();
+                            self.write_var_init(field.ty_expr.ty.borrow().as_ref().unwrap());
+                        }
+                    }
                 }
                 DrawShaderFieldKind::Varying {..} => {
                     write!(self.string, "{}", sep).unwrap();
@@ -299,7 +349,7 @@ impl<'a> DrawShaderGenerator<'a> {
     
     fn generate_vertex_main(&mut self) {
         
-        write!(self.string, "Varyings vertex_main(").unwrap(); 
+        write!(self.string, "Varyings vertex_main(").unwrap();
         write!(self.string, "Geometries geometries").unwrap();
         write!(self.string, ", Instances instances").unwrap();
         write!(self.string, ", uint inst_id: SV_InstanceID").unwrap();
@@ -310,20 +360,24 @@ impl<'a> DrawShaderGenerator<'a> {
         for decl in &self.draw_shader_def.fields {
             match &decl.kind {
                 DrawShaderFieldKind::Geometry {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
-                    writeln!(
-                        self.string,
-                        "    varyings.{0} = geometries.{0};",
-                        decl.ident
-                    )
-                        .unwrap();
+                    writeln!(self.string, "    varyings.{0} = geometries.{0};", decl.ident).unwrap();
                 }
                 DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
-                    writeln!(
-                        self.string,
-                        "    varyings.{0} = instances.{0};",
-                        decl.ident
-                    )
-                        .unwrap();
+                    match decl.ty_expr.ty.borrow().as_ref().unwrap(){
+                        Ty::Mat4=>{
+                            for i in 0..4{
+                                writeln!(self.string, "    varyings.{0}{1} = instances.{0}{1};", decl.ident, i).unwrap();
+                            }
+                        }
+                        Ty::Mat3=>{
+                            for i in 0..3{
+                                writeln!(self.string, "    varyings.{0}{1} = instances.{0}{1};", decl.ident, i).unwrap();
+                            }
+                        }
+                        _=>{
+                           writeln!(self.string, "    varyings.{0} = instances.{0};", decl.ident).unwrap();
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -573,7 +627,7 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
                     write!(string, "varyings").unwrap();
                     sep = ", ";
                 }
-                _=>()
+                _ => ()
             }
         }
     }
@@ -604,9 +658,7 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
     fn generate_live_value_prefix(&self, _string: &mut String) {
     }
     
-    // TODO: fix up the inline unpacks for HLSL
-    // do this for Metal as well for the mat2/3/4's because they don't align
-    fn generate_draw_shader_field_expr(&self, string: &mut String, expr: &Expr, field_ident: Ident) {
+    fn generate_draw_shader_field_expr(&self, string: &mut String, field_ident: Ident, ty: &Ty) {
         let field_def = self.draw_shader_def.find_field(field_ident).unwrap();
         
         match &field_def.kind {
@@ -622,11 +674,11 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
                 let prefix = if is_used_in_pixel_shader.get() {
                     "varyings"
                 }
-                else{
+                else {
                     "instances"
                 };
-
-                match expr.ty.borrow().as_ref().unwrap(){
+                
+                match ty {
                     Ty::Mat4 => {
                         write!(string, "float4x4(").unwrap();
                         for i in 0..4 {
@@ -678,111 +730,10 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
             DrawShaderFieldKind::Varying {..} => {
                 write!(string, "varyings.").unwrap()
             }
-            _=>()
+            _ => ()
         }
         write!(string, "{}", &DisplayDsIdent(field_ident)).unwrap();
     }
-    
-    /*
-    fn generate_var_expr(&self, string: &mut String, span: Span, ident_path: IdentPath, kind: &Cell<Option<VarKind >>, _shader: &ShaderAst, decl: &FnDecl, ty: &Option<Ty>) {
-        
-        let is_used_in_vertex_shader = decl.is_used_in_vertex_shader.get().unwrap();
-        let is_used_in_fragment_shader = decl.is_used_in_fragment_shader.get().unwrap();
-        if is_used_in_vertex_shader {
-            match kind.get().unwrap() {
-                VarKind::Geometry => write!(string, "mpsc_geometries.").unwrap(),
-                VarKind::Instance => {
-                    match ty {
-                        Some(Ty::Mat4) => {
-                            write!(string, "float4x4(").unwrap();
-                            let ident = ident_path.get_single().expect("unexpected");
-                            for i in 0..4 {
-                                for j in 0..4 {
-                                    if i != 0 || j != 0 {
-                                        write!(string, ",").unwrap();
-                                    }
-                                    write!(string, "mpsc_instances.").unwrap();
-                                    write!(string, "{}{}", ident, j).unwrap();
-                                    match i {
-                                        0 => write!(string, ".x").unwrap(),
-                                        1 => write!(string, ".y").unwrap(),
-                                        2 => write!(string, ".z").unwrap(),
-                                        _ => write!(string, ".w").unwrap()
-                                    }
-                                }
-                            }
-                            write!(string, ")").unwrap();
-                            return
-                        },
-                        Some(Ty::Mat3) => {
-                            write!(string, "float3x3(").unwrap();
-                            let ident = ident_path.get_single().expect("unexpected");
-                            for i in 0..3 {
-                                for j in 0..3 {
-                                    if i != 0 || j != 0 {
-                                        write!(string, ",").unwrap();
-                                    }
-                                    write!(string, "mpsc_instances.").unwrap();
-                                    write!(string, "{}{}", ident, j).unwrap();
-                                    match i {
-                                        0 => write!(string, ".x").unwrap(),
-                                        1 => write!(string, ".y").unwrap(),
-                                        _ => write!(string, ".z").unwrap(),
-                                    }
-                                }
-                                write!(string, ")").unwrap();
-                            }
-                            return
-                        },
-                        Some(Ty::Mat2) => {
-                            write!(string, "float2x2(").unwrap();
-                            let ident = ident_path.get_single().expect("unexpected");
-                            for i in 0..2 {
-                                for j in 0..2 {
-                                    if i != 0 || j != 0 {
-                                        write!(string, ",").unwrap();
-                                    }
-                                    write!(string, "mpsc_instances.").unwrap();
-                                    write!(string, "{}{}", ident, j).unwrap();
-                                    match i {
-                                        0 => write!(string, ".x").unwrap(),
-                                        _ => write!(string, ".y").unwrap(),
-                                    }
-                                }
-                                write!(string, ")").unwrap();
-                            }
-                            return
-                        },
-                        _ => {
-                            write!(string, "mpsc_instances.").unwrap();
-                        }
-                    }
-                },
-                VarKind::Varying => write!(string, "mpsc_varyings.").unwrap(),
-                _ => {}
-            }
-        }
-        if is_used_in_fragment_shader {
-            match kind.get().unwrap() {
-                VarKind::Geometry | VarKind::Instance | VarKind::Varying => {
-                    write!(string, "mpsc_varyings.").unwrap()
-                }
-                _ => {}
-            }
-        }
-        match kind.get().unwrap() {
-            VarKind::LiveStyle => {
-                let qualified = self.env.qualify_ident_path(span.live_body_id, ident_path);
-                write!(string, "mpsc_live_").unwrap();
-                qualified.write_underscored_ident(string);
-                return
-            },
-            _ => {}
-        }
-        
-        self.write_ident(string, ident_path.get_single().expect("unexpected"));
-    }*/
-
     
     
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit) {
