@@ -36,7 +36,7 @@ pub trait BackendWriter {
     fn write_fn_def_hidden_params(&self, string: &mut String, hidden_args:&BTreeSet<HiddenArgKind >, sep: &str);
     
     fn generate_live_value_prefix(&self, string: &mut String);
-    fn generate_draw_shader_field_expr(&self, string: &mut String, expr: &Expr, field_ident: Ident);
+    fn generate_draw_shader_field_expr(&self, string: &mut String, field_ident: Ident, ty:&Ty);
     
     fn write_ty_lit(&self, string: &mut String, ty_lit: TyLit);
     fn write_builtin_call_ident(&self, string: &mut String, ident: Ident, arg_exprs: &[Expr]);
@@ -357,7 +357,7 @@ pub struct ExprGenerator<'a> {
 }
 
 impl<'a> ExprGenerator<'a> {
-    pub fn generate_expr(&mut self, expr: &Expr) {
+    pub fn generate_expr(&mut self, in_expr: &Expr) {
         fn const_table_index_to_vec4(string: &mut String, index: usize) {
             let base = index >> 2;
             let sub = index - (base << 2);
@@ -368,7 +368,7 @@ impl<'a> ExprGenerator<'a> {
                 _ => write!(string, "[{}].w", base).unwrap(),
             }
         }
-        match (expr.const_val.borrow().as_ref(), expr.const_index.get()) {
+        match (in_expr.const_val.borrow().as_ref(), in_expr.const_index.get()) {
             (Some(Some(Val::Vec4(_))), Some(mut index)) if self.const_table_offset.is_some() => {
                 let const_table_offset = self.const_table_offset.unwrap();
                 self.write_ty_lit(TyLit::Vec4);
@@ -415,7 +415,7 @@ impl<'a> ExprGenerator<'a> {
             (Some(Some(val)), _) => {
                 write!(self.string, "{}", val).unwrap();
             },
-            _ => match expr.kind {
+            _ => match in_expr.kind {
                 ExprKind::Cond {
                     span,
                     ref expr,
@@ -433,7 +433,7 @@ impl<'a> ExprGenerator<'a> {
                     span,
                     ref expr,
                     field_ident,
-                } => self.generate_field_expr(span, expr, field_ident),
+                } => self.generate_field_expr(span, expr, field_ident, in_expr.ty.borrow().as_ref().unwrap()),
                 ExprKind::Index {
                     span,
                     ref expr,
@@ -479,7 +479,7 @@ impl<'a> ExprGenerator<'a> {
                     span,
                     ref kind,
                     ..
-                } => self.generate_var_expr(span, kind, &expr.ty.borrow()),
+                } => self.generate_var_expr(span, kind, &in_expr.ty.borrow()),
                 ExprKind::Lit {span, lit} => self.generate_lit_expr(span, lit),
             },
         }
@@ -686,10 +686,10 @@ impl<'a> ExprGenerator<'a> {
         }
     }
     
-    fn generate_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident) {
+    fn generate_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident, ty:&Ty) {
         match expr.ty.borrow().as_ref() {
             Some(Ty::DrawShader(_)) => {
-                self.backend_writer.generate_draw_shader_field_expr(&mut self.string, expr, field_ident);
+                self.backend_writer.generate_draw_shader_field_expr(&mut self.string, field_ident, ty);
                 //write!(self.string, "{}", &DisplayDsIdent(field_ident)).unwrap();
             }
             _ => {

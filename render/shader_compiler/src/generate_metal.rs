@@ -34,9 +34,9 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, "#include <metal_stdlib>").unwrap();
         writeln!(self.string, "using namespace metal;").unwrap();
         
-        for fn_iter in self.draw_shader_def.all_fns.borrow().iter(){
+        for fn_iter in self.draw_shader_def.all_fns.borrow().iter() {
             let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
-            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(id!(sample2d))){
+            if fn_def.builtin_deps.borrow().as_ref().unwrap().contains(&Ident(id!(sample2d))) {
                 writeln!(self.string, "float4 sample2d(texture2d<float> tex, float2 pos){{return tex.sample(sampler(mag_filter::linear,min_filter::linear),pos);}}").unwrap();
                 break;
             }
@@ -182,30 +182,31 @@ impl<'a> DrawShaderGenerator<'a> {
                         Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {
                             write!(self.string, "    ").unwrap();
                             self.write_var_decl(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
+                            writeln!(self.string, ";").unwrap();
                         },
                         Ty::Mat4 => {
                             for i in 0..4 {
                                 write!(self.string, "    ").unwrap();
                                 self.write_ty_lit(TyLit::Vec4);
-                                write!(self.string, " {}{}", &DisplayDsIdent(field.ident), i).unwrap();
+                                writeln!(self.string, " {}{};", &DisplayDsIdent(field.ident), i).unwrap();
                             }
                         },
                         Ty::Mat3 => {
                             for i in 0..3 {
                                 write!(self.string, "    ").unwrap();
                                 self.write_ty_lit(TyLit::Vec3);
-                                write!(self.string, " {}{}", &DisplayDsIdent(field.ident), i).unwrap();
+                                writeln!(self.string, " {}{};", &DisplayDsIdent(field.ident), i).unwrap();
                             }
                         },
                         Ty::Mat2 => {
                             write!(self.string, "    ").unwrap();
                             self.write_ty_lit(TyLit::Vec4);
-                            write!(self.string, " {}", &DisplayDsIdent(field.ident)).unwrap();
+                            writeln!(self.string, " {};", &DisplayDsIdent(field.ident)).unwrap();
                         },
                         _ => panic!("unsupported type in generate_instance_struct")
                     }
                 }
-/*                
+                /*                
                 DrawShaderFieldKind::Instance {..} => {
                     write!(self.string, "    ").unwrap();
                     self.write_var_decl_packed(
@@ -231,9 +232,33 @@ impl<'a> DrawShaderGenerator<'a> {
                     writeln!(self.string, ";").unwrap();
                 }
                 DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
-                    write!(self.string, "    ").unwrap();
-                    self.write_var_decl(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
-                    writeln!(self.string, ";").unwrap();
+                    match field.ty_expr.ty.borrow().as_ref().unwrap() {
+                        Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {
+                            write!(self.string, "    ").unwrap();
+                            self.write_var_decl(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
+                            writeln!(self.string, ";").unwrap();
+                        },
+                        Ty::Mat4 => {
+                            for i in 0..4 {
+                                write!(self.string, "    ").unwrap();
+                                self.write_ty_lit(TyLit::Vec4);
+                                writeln!(self.string, " {}{};", &DisplayDsIdent(field.ident), i).unwrap();
+                            }
+                        },
+                        Ty::Mat3 => {
+                            for i in 0..3 {
+                                write!(self.string, "    ").unwrap();
+                                self.write_ty_lit(TyLit::Vec3);
+                                writeln!(self.string, " {}{};", &DisplayDsIdent(field.ident), i).unwrap();
+                            }
+                        },
+                        Ty::Mat2 => {
+                            write!(self.string, "    ").unwrap();
+                            self.write_ty_lit(TyLit::Vec4);
+                            writeln!(self.string, " {};", &DisplayDsIdent(field.ident)).unwrap();
+                        },
+                        _ => panic!("unsupported type in generate_varying_struct")
+                    }
                 }
                 DrawShaderFieldKind::Varying {..} => {
                     write!(self.string, "    ").unwrap();
@@ -301,20 +326,24 @@ impl<'a> DrawShaderGenerator<'a> {
         for decl in &self.draw_shader_def.fields {
             match &decl.kind {
                 DrawShaderFieldKind::Geometry {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
-                    writeln!(
-                        self.string,
-                        "    varyings.{0} = geometries.{0};",
-                        decl.ident
-                    )
-                        .unwrap();
+                    writeln!(self.string, "    varyings.{0} = geometries.{0};", decl.ident).unwrap();
                 }
                 DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
-                    writeln!(
-                        self.string,
-                        "    varyings.{0} = instances.{0};",
-                        decl.ident
-                    )
-                        .unwrap();
+                    match decl.ty_expr.ty.borrow().as_ref().unwrap() {
+                        Ty::Mat4 => {
+                            for i in 0..4 {
+                                writeln!(self.string, "    varyings.{0}{1} = instances.{0}{1};", decl.ident, i).unwrap();
+                            }
+                        }
+                        Ty::Mat3 => {
+                            for i in 0..3 {
+                                writeln!(self.string, "    varyings.{0}{1} = instances.{0}{1};", decl.ident, i).unwrap();
+                            }
+                        }
+                        _ => {
+                            writeln!(self.string, "    varyings.{0} = instances.{0};", decl.ident).unwrap();
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -398,7 +427,7 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
     fn needs_cstyle_struct_cons(&self) -> bool {
         true
     }
-
+    
     fn needs_mul_fn_for_matrix_multiplication(&self) -> bool {
         false
     }
@@ -626,7 +655,7 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
         write!(string, "live_uniforms.").unwrap();
     }
     
-    fn generate_draw_shader_field_expr(&self, string: &mut String, expr: &Expr, field_ident: Ident) {
+    fn generate_draw_shader_field_expr(&self, string: &mut String, field_ident: Ident, ty: &Ty) {
         let field_def = self.draw_shader_def.find_field(field_ident).unwrap();
         
         match &field_def.kind {
@@ -642,11 +671,11 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
                 let prefix = if is_used_in_pixel_shader.get() {
                     "varyings"
                 }
-                else{
+                else {
                     "instances"
                 };
-
-                match expr.ty.borrow().as_ref().unwrap(){
+                
+                match ty {
                     Ty::Mat4 => {
                         write!(string, "float4x4(").unwrap();
                         for i in 0..4 {

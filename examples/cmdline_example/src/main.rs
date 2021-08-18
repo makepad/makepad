@@ -93,7 +93,7 @@ fn main() {
         }
     }*/
 
-    let result = sr.generate_hlsl_shader(id!(main), id!(test), &[id!(DrawQuad)], None); //Some(FileId(0)));
+    let result = sr.generate_metal_shader(id!(main), id!(test), &[id!(DrawQuad)], None); //Some(FileId(0)));
     match result {
         Err(e) => {
             println!("Error {}", e.to_live_file_error("", SOURCE));
