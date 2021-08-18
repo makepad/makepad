@@ -30,6 +30,7 @@ const SOURCE: &'static str = r#"
         fn vertex(self) -> vec4 {
             let x = Struct2 {c: self.uni1 + cnst1 + live};
             x.struct_2_set(3.0);
+            let x = vec4(1.0) * self.dmat;
             self.override();
             return #f;
         }
@@ -44,9 +45,14 @@ VERTEXSHADER
 // Uniform block default
 uniform float ds_uni1;
 uniform float ds_duni;
-attribute float packed_instance_0;
+attribute vec4 packed_instance_0;
+attribute vec4 packed_instance_1;
+attribute vec4 packed_instance_2;
+attribute vec4 packed_instance_3;
+attribute float packed_instance_4;
 varying float packed_varying_0;
 float ds_dinst=0.0;
+mat4 ds_dmat=mat4(0.0);
 uniform float live_0_1_3;
 struct struct_0_1_4 {
     float f_c;
@@ -61,11 +67,28 @@ void fn_0_1_16_override() {
 vec4 fn_0_1_17_vertex() {
     struct_0_1_4 var_x_0 = struct_0_1_4(((ds_uni1 + const_0_1_2) + live_0_1_3));
     fn_0_2_1_struct_2_set (var_x_0, 3.0);
+    vec4 var_x_1 = (vec4(1.0) * ds_dmat);
     fn_0_1_16_override ();
     return vec4(1.0, 1.0, 1.0, 1.0);
 }
 void main() {
-    ds_dinst = packed_instance_0;
+    ds_dinst = packed_instance_0.x;
+    ds_dmat[0][0] = packed_instance_0.y;
+    ds_dmat[0][1] = packed_instance_0.z;
+    ds_dmat[0][2] = packed_instance_0.w;
+    ds_dmat[0][3] = packed_instance_1.x;
+    ds_dmat[1][0] = packed_instance_1.y;
+    ds_dmat[1][1] = packed_instance_1.z;
+    ds_dmat[1][2] = packed_instance_1.w;
+    ds_dmat[1][3] = packed_instance_2.x;
+    ds_dmat[2][0] = packed_instance_2.y;
+    ds_dmat[2][1] = packed_instance_2.z;
+    ds_dmat[2][2] = packed_instance_2.w;
+    ds_dmat[2][3] = packed_instance_3.x;
+    ds_dmat[3][0] = packed_instance_3.y;
+    ds_dmat[3][1] = packed_instance_3.z;
+    ds_dmat[3][2] = packed_instance_3.w;
+    ds_dmat[3][3] = packed_instance_4;
     gl_Position = fn_0_1_17_vertex();
     packed_varying_0 = dinst;
 }
@@ -110,7 +133,6 @@ void main() {
 const METAL_OUTPUT: &'static str = r#"
 #include <metal_stdlib>
 using namespace metal;
-float4 sample2d(texture2d<float> tex, float2 pos){return tex.sample(sampler(mag_filter::linear,min_filter::linear),pos);}
 struct struct_0_1_4 {
     float f_c;
 };
@@ -118,12 +140,12 @@ struct struct_0_1_5 {
     float f_a;
      struct_0_1_4;
 };
+struct LiveUniforms {
+    float live_0_1_3;
+};
 struct Uniforms_default {
     float ds_uni1;
     float ds_duni;
-};
-struct LiveUniforms {
-    float live_0_1_3;
 };
 struct Textures {
 };
@@ -131,6 +153,10 @@ struct Geometries {
 };
 struct Instances {
     float ds_dinst;
+    float4 ds_dmat0;
+    float4 ds_dmat1;
+    float4 ds_dmat2;
+    float4 ds_dmat3;
 };
 struct Varyings {
     float4 position [[position]];
@@ -151,16 +177,17 @@ void fn_0_2_5_struct_1_set(thread & struct_0_1_5) {
     fn_0_2_1_struct_2_set (var_self_0.f_b, site_0_of_fn_0_2_5_struct_1_closure (var_self_0));
 }
 float4 fn_0_1_15_pixel(thread Varyings &varyings) {
-     struct_0_1_5 = struct_0_1_5(1.0,struct_0_1_4((1.0 + varyings.ds_dinst)));
+     struct_0_1_5 = struct_0_1_5(1.0,struct_0_1_4((1.0 + instances.ds_dinst)));
     fn_0_2_5_struct_1_set (var_x_0);
     return float4(1.0, 1.0, 1.0, 1.0);
 }
 void fn_0_1_16_override() {
     (1 + 1);
 }
-float4 fn_0_1_17_vertex(constant Uniforms_default uniforms_default, constan LiveUniforms live_uniforms) {
+float4 fn_0_1_17_vertex(thread Instances &instances, constant Uniforms_default uniforms_default, constant LiveUniforms live_uniforms) {
      struct_0_1_4 = struct_0_1_4(((uniforms_default.ds_uni1 + const_0_1_2) + live_uniforms.live_0_1_3));
     fn_0_2_1_struct_2_set (var_x_0, 3.0);
+    float4 var_x_1 = (float4(float4(1.0)) * float4x4(instances.ds_dmat0.x,instances.ds_dmat1.x,instances.ds_dmat2.x,instances.ds_dmat3.x,instances.ds_dmat0.y,instances.ds_dmat1.y,instances.ds_dmat2.y,instances.ds_dmat3.y,instances.ds_dmat0.z,instances.ds_dmat1.z,instances.ds_dmat2.z,instances.ds_dmat3.z,instances.ds_dmat0.w,instances.ds_dmat1.w,instances.ds_dmat2.w,instances.ds_dmat3.w));
     fn_0_1_16_override ();
     return float4(1.0, 1.0, 1.0, 1.0);
 }
@@ -177,7 +204,7 @@ vertex Varyings vertex_main(Textures textures
     Instances instances = in_instances[inst_id];
     Varyings varyings;
     varyings.dinst = instances.dinst;
-    varyings.position = fn_0_1_17_vertex(uniforms_default, live_uniforms);
+    varyings.position = fn_0_1_17_vertex(instances, uniforms_default, live_uniforms);
     return varyings;
 }
 fragment float4 fragment_main(Varyings varyings[[stage_in]]
@@ -190,15 +217,87 @@ fragment float4 fragment_main(Varyings varyings[[stage_in]]
 }
 "#;
 
+const HLSL_OUTPUT: &'static str = r#"
+struct struct_0_1_4 {
+    float f_c;
+};
+struct struct_0_1_5 {
+    float f_a;
+    struct_0_1_4 f_b;
+};
+cbuffer LiveUniforms : register(b0) {
+    float live_0_1_3;
+};
+cbuffer ConstTable : register(b1){float4 const_table[0];};
+cbuffer Uniforms_default : register(b2) {
+    float ds_uni1;
+    float ds_duni;
+};
+struct Geometries {
+};
+struct Instances {
+    float ds_dinst: INSTA;
+    float4 ds_dmat0: INSTB;
+    float4 ds_dmat1: INSTC;
+    float4 ds_dmat2: INSTD;
+    float4 ds_dmat3: INSTE;
+};
+struct Varyings {
+    float4 position: SV_POSITION;
+    float ds_dinst: VARYA;
+};
+static const float const_0_1_2 = 1.0;
+float4 consfn_vec4_float(float x) {
+    return float4(x, x, x, x);
+}
+float closure_0_in_fn_0_2_5(float var_x_0) {
+    return (var_x_0 + 1.0);
+}
+float site_0_of_fn_0_2_5_struct_1_closure(inout struct_0_1_5 var_self_0) {
+    return closure_0_in_fn_0_2_5(var_self_0.f_a);
+}
+void fn_0_2_1_struct_2_set(inout struct_0_1_4 var_self_0, float var_x_0) {
+    (var_self_0.f_c = var_x_0);
+}
+void fn_0_2_5_struct_1_set(inout struct_0_1_5 var_self_0) {
+    (var_self_0.f_a = 2.0);
+    fn_0_2_1_struct_2_set (var_self_0.f_b, site_0_of_fn_0_2_5_struct_1_closure (var_self_0));
+}
+float4 fn_0_1_15_pixel(inout Varyings varyings) {
+    struct_0_1_5 var_x_0 = struct_0_1_5{1.0,struct_0_1_4{(1.0 + instances.ds_dinst)}};
+    fn_0_2_5_struct_1_set (var_x_0);
+    return float4(1.0, 1.0, 1.0, 1.0);
+}
+void fn_0_1_16_override() {
+    (1 + 1);
+}
+float4 fn_0_1_17_vertex(in Instances instances, , ) {
+    struct_0_1_4 var_x_0 = struct_0_1_4{((ds_uni1 + const_0_1_2) + live_0_1_3)};
+    fn_0_2_1_struct_2_set (var_x_0, 3.0);
+    float4 var_x_1 = mul(consfn_vec4_float(1.0), float4x4(instances.ds_dmat0.x,instances.ds_dmat1.x,instances.ds_dmat2.x,instances.ds_dmat3.x,instances.ds_dmat0.y,instances.ds_dmat1.y,instances.ds_dmat2.y,instances.ds_dmat3.y,instances.ds_dmat0.z,instances.ds_dmat1.z,instances.ds_dmat2.z,instances.ds_dmat3.z,instances.ds_dmat0.w,instances.ds_dmat1.w,instances.ds_dmat2.w,instances.ds_dmat3.w));
+    fn_0_1_16_override ();
+    return float4(1.0, 1.0, 1.0, 1.0);
+}
+Varyings vertex_main(Geometries geometries, Instances instances, uint inst_id: SV_InstanceID) {
+    Varyings varyings = {float4(0.0,0.0,0.0,0.0), 0.0};
+    varyings.dinst = instances.dinst;
+    varyings.position = fn_0_1_17_vertex(instances, , );
+    return varyings;
+}
+float4 pixel_main(Varyings varyings) : SV_TARGET{
+    return     fn_0_1_15_pixel(varyings);
+}
+"#;
+
 use makepad_live_parser::*;
 use makepad_shader_compiler::shaderregistry::ShaderRegistry;
 use makepad_shader_compiler::shaderregistry::DrawShaderInput;
-use makepad_shader_compiler::shaderast::TyLit;
+use makepad_shader_compiler::shaderast::Ty;
 // lets just test most features in one go.
 
 fn compare_no_ws(a: &str, b: &str) -> Option<String> {
-    let mut b = b.as_bytes();
-    let mut a = a.as_bytes();
+    let b = b.as_bytes();
+    let a = a.as_bytes();
     
     let mut start = 0;
     let mut changed = false;
@@ -212,9 +311,9 @@ fn compare_no_ws(a: &str, b: &str) -> Option<String> {
     }
     // now go from the back to i
     let mut end = 0;
-    for i in 0..len {
-        end = i;
-        if a[a.len() - i - 1] != b[b.len() - i - 1] {
+    for i in 2..len {
+        end = i-2;
+        if a[a.len() - i] != b[b.len() - i] {
             changed = true;
             break
         }
@@ -257,8 +356,9 @@ fn main() {
     id_check!(duni);
     id_check!(dinst);
     let mut di = DrawShaderInput::default();
-    di.add_uniform("duni", TyLit::Float.to_ty_expr());
-    di.add_instance("dinst", TyLit::Float.to_ty_expr());
+    di.add_uniform("duni", Ty::Float);
+    di.add_instance("dinst", Ty::Float);
+    di.add_instance("dmat", Ty::Mat4);
     sr.register_draw_input("main::test", "DrawQuad", di);
     
     // lets just call the shader compiler on this thing
@@ -284,7 +384,7 @@ fn main() {
             if let Some(change) = compare_no_ws(GLSL_OUTPUT, &compare) {
                 println!("GLSL OUTPUT CHANGED\n{}", change);
                 println!("########## ALL ##########\n{}\n########## END ##########", compare);
-                //assert_eq!(true, false);
+                assert_eq!(true, false);
             }
         }
     }
@@ -300,7 +400,23 @@ fn main() {
             if let Some(change) = compare_no_ws(METAL_OUTPUT, &compare) {
                 println!("METAL OUTPUT CHANGED\n{}", change);
                 println!("########## ALL ##########\n{}\n########## END ##########", compare);
-                //assert_eq!(true, false);
+                assert_eq!(true, false);
+            }
+        }
+    }
+
+    let result = sr.generate_hlsl_shader(id!(main), id!(test), &[id!(DrawQuad2)], None); //Some(FileId(0)));
+    match result {
+        Err(e) => {
+            println!("Error {}", e.to_live_file_error("", SOURCE));
+            assert_eq!(true, false);
+        }
+        Ok(shader) => {
+            let compare = format!("\n{}", shader);
+            if let Some(change) = compare_no_ws(HLSL_OUTPUT, &compare) {
+                println!("HLSL OUTPUT CHANGED\n{}", change);
+                println!("########## ALL ##########\n{}\n########## END ##########", compare);
+                assert_eq!(true, false);
             }
         }
     }

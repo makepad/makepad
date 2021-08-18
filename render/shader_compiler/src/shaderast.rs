@@ -34,11 +34,6 @@ pub struct ValueNodePtr(pub FullNodePtr);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct VarDefNodePtr(pub FullNodePtr);
 
-
-
-//impl FnNodePtr {pub fn to_scope_ptr(self) -> ScopeNodePtr {ScopeNodePtr(self.0)}}
-//impl VarDefNodePtr {pub fn to_scope_ptr(self) -> ScopeNodePtr {ScopeNodePtr(self.0)}}
-
 #[derive(Clone, Debug, Default)]
 pub struct DrawShaderDef {
     pub debug: bool,
