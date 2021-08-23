@@ -348,7 +348,7 @@ impl AppInner {
                             let _ = response.unwrap();
                             let document = state.documents_by_path.get_mut(&path).unwrap();
                             let mut apply_delta_requests = Vec::new();
-                            document.finish_applying_local_delta(&mut |revision, delta| {
+                            document.handle_apply_delta_response(&mut |revision, delta| {
                                 apply_delta_requests.push((revision, delta));
                             });
                             for (revision, delta) in apply_delta_requests {
@@ -366,7 +366,7 @@ impl AppInner {
             ResponseOrNotification::Notification(notification) => match notification {
                 Notification::DeltaWasApplied(path, delta) => {
                     let document = state.documents_by_path.get_mut(&path).unwrap();
-                    document.apply_remote_delta(&mut state.sessions_by_session_id, delta);
+                    document.handle_delta_was_applied_notification(&mut state.sessions_by_session_id, delta);
                     for code_editor in self.code_editors_by_panel_id.values_mut() {
                         // TODO: Only redraw code editor if necessary
                         code_editor.redraw(cx);

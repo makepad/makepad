@@ -207,15 +207,15 @@ impl Session {
         post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
     ) {
         self.cursors.apply_local_delta(&delta);
-        document.start_applying_local_delta(delta, {
+        document.apply_local_delta(delta, {
             let path = &self.path;
             &mut move |revision, delta| post_apply_delta_request(path.clone(), revision, delta)
         });
         self.update_selections_and_carets();
     }
 
-    pub fn apply_remote_delta(&mut self, delta: &Delta) {
-        self.cursors.apply_remote_delta(delta);
+    pub fn handle_delta_was_applied_notification(&mut self, delta: &Delta) {
+        self.cursors.handle_delta_was_applied_notification(delta);
         self.update_selections_and_carets();
     }
 
