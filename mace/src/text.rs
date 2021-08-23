@@ -2,6 +2,7 @@ use {
     crate::{
         delta::{Delta, Operation},
         position::Position,
+        range::Range,
         size::Size,
     },
     serde::{Deserialize, Serialize},
@@ -31,6 +32,35 @@ impl Text {
 
     pub fn as_lines(&self) -> &[Vec<char>] {
         &self.lines
+    }
+
+    pub fn copy(&self, range: Range) -> Text {
+        Text {
+            lines: if range.start.line == range.end.line {
+                vec![
+                    self.lines[range.start.line][range.start.column..range.end.column]
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                ]
+            } else {
+                let mut lines = Vec::with_capacity(range.end.line - range.start.line + 1);
+                lines.push(
+                    self.lines[range.start.line][range.start.column..]
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                );
+                lines.extend(self.lines[range.start.line + 1..range.end.line].iter().cloned());
+                lines.push(
+                    self.lines[range.end.line][..range.end.column]
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                );
+                lines
+            },
+        }
     }
 
     pub fn take(&mut self, len: Size) -> Text {
