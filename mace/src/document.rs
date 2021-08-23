@@ -50,7 +50,7 @@ impl Document {
         self.session_ids.remove(&session_id);
     }
 
-    pub fn start_applying_local_delta(
+    pub fn apply_local_delta(
         &mut self,
         delta: Delta,
         post_apply_delta_request: &mut dyn FnMut(usize, Delta),
@@ -70,7 +70,7 @@ impl Document {
         }
     }
 
-    pub fn finish_applying_local_delta(
+    pub fn handle_apply_delta_response(
         &mut self,
         post_apply_delta_request: &mut dyn FnMut(usize, Delta),
     ) {
@@ -81,7 +81,7 @@ impl Document {
         }
     }
 
-    pub fn apply_remote_delta(
+    pub fn handle_delta_was_applied_notification(
         &mut self,
         sessions_by_session_id: &mut HashMap<SessionId, Session>,
         delta: Delta,
@@ -99,7 +99,7 @@ impl Document {
         }
         for session_id in &self.session_ids {
             let session = sessions_by_session_id.get_mut(&session_id).unwrap();
-            session.apply_remote_delta(&delta);
+            session.handle_delta_was_applied_notification(&delta);
         }
         self.tokenizer.invalidate_cache(&delta);
         self.text.apply_delta(delta.clone());
