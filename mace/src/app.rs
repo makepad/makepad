@@ -1,13 +1,11 @@
 use {
     crate::{
-        code_editor::{self, CodeEditor},
+        code_editor::{self, CodeEditor, SessionId},
         dock::{self, Dock, PanelId},
-        document::Document,
         file_tree::{self, FileTree},
         list_logic::ItemId,
         protocol::{self, Notification, Request, Response, ResponseOrNotification},
         server::{Connection, Server},
-        session::{Session, SessionId},
         splitter::Splitter,
         tab_bar::TabBar,
         tree_logic::NodeId,
@@ -167,7 +165,7 @@ impl AppInner {
                         code_editor.set_session_id(cx, session_id);
                         code_editor
                     });
-                code_editor.draw(cx, &state.sessions_by_session_id, &state.documents_by_path)
+                code_editor.draw(cx, &state.code_editor_state)
             }
         }
     }
@@ -240,9 +238,7 @@ impl AppInner {
                     let node = &state.file_nodes_by_node_id[&node_id];
                     if node.is_file() {
                         let path = state.file_node_path(node_id);
-                        if !state.documents_by_path.contains_key(&path) {
-                            self.send_request(Request::OpenFile(path));
-                        }
+                        self.send_request(Request::OpenFile(path));
                     }
                 }
             }
@@ -252,8 +248,7 @@ impl AppInner {
             code_editor.handle_event(
                 cx,
                 event,
-                &mut state.sessions_by_session_id,
-                &mut state.documents_by_path,
+                &mut state.code_editor_state,
                 &mut |action| actions.push(action),
             );
         }
@@ -305,20 +300,13 @@ impl AppInner {
                     Response::OpenFile(response) => {
                         match request {
                             Request::OpenFile(path) => {
+                                let (revision, text) = response.unwrap();
+                                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                                state.code_editor_state.create_document(path.clone(), revision, text);
+                                let session_id = state.code_editor_state.create_session(path);
                                 let panel_id = PanelId(2); // TODO;
                                 let item_id = ItemId(state.next_item_id);
                                 state.next_item_id += 1;
-                                let session_id = SessionId(state.next_session_id);
-                                state.next_session_id += 1;
-                                let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                                let (revision, text) = response.unwrap();
-                                state
-                                    .documents_by_path
-                                    .insert(path.clone(), Document::new(revision, text));
-                                state.sessions_by_session_id.insert(
-                                    session_id,
-                                    Session::new(&mut state.documents_by_path, session_id, path),
-                                );
                                 state.tabs_by_item_id.insert(
                                     item_id,
                                     Tab {
@@ -346,9 +334,8 @@ impl AppInner {
                     Response::ApplyDelta(response) => match request {
                         Request::ApplyDelta(path, _, _) => {
                             let _ = response.unwrap();
-                            let document = state.documents_by_path.get_mut(&path).unwrap();
                             let mut apply_delta_requests = Vec::new();
-                            document.handle_apply_delta_response(&mut |revision, delta| {
+                            state.code_editor_state.handle_apply_delta_response(&path, &mut |revision, delta| {
                                 apply_delta_requests.push((revision, delta));
                             });
                             for (revision, delta) in apply_delta_requests {
@@ -365,10 +352,8 @@ impl AppInner {
             }
             ResponseOrNotification::Notification(notification) => match notification {
                 Notification::DeltaWasApplied(path, delta) => {
-                    let document = state.documents_by_path.get_mut(&path).unwrap();
-                    document.handle_delta_was_applied_notification(&mut state.sessions_by_session_id, delta);
+                    state.code_editor_state.handle_delta_was_applied_notification(&path, delta);
                     for code_editor in self.code_editors_by_panel_id.values_mut() {
-                        // TODO: Only redraw code editor if necessary
                         code_editor.redraw(cx);
                     }
                 }
@@ -380,12 +365,10 @@ impl AppInner {
 struct State {
     next_node_id: usize,
     next_item_id: usize,
-    next_session_id: usize,
     panels_by_panel_id: HashMap<PanelId, Panel>,
     tabs_by_item_id: HashMap<ItemId, Tab>,
     file_nodes_by_node_id: HashMap<NodeId, FileNode>,
-    sessions_by_session_id: HashMap<SessionId, Session>,
-    documents_by_path: HashMap<PathBuf, Document>,
+    code_editor_state: code_editor::State,
 }
 
 impl State {
@@ -425,12 +408,10 @@ impl State {
         State {
             next_node_id: 1,
             next_item_id: 1,
-            next_session_id: 0,
             panels_by_panel_id,
             tabs_by_item_id,
             file_nodes_by_node_id,
-            sessions_by_session_id: HashMap::new(),
-            documents_by_path: HashMap::new(),
+            code_editor_state: code_editor::State::new(),
         }
     }
 
