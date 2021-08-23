@@ -1,19 +1,18 @@
 use {
     crate::{
-        delta::Delta,
-        document::Document,
+        cursor_set::CursorSet,
+        delta::{Delta, DeltaBuilder},
         position::Position,
         position_set::PositionSet,
         range_set::{RangeSet, Span},
-        session::{Session, SessionId},
         size::Size,
         text::Text,
         token::{Keyword, Punctuator, TokenKind},
-        tokenizer::TokensByLine,
+        tokenizer::{TokensByLine, Tokenizer},
     },
     makepad_render::*,
     makepad_widget::*,
-    std::{collections::HashMap, path::PathBuf},
+    std::{collections::{HashMap, HashSet}, path::{Path, PathBuf}},
 };
 
 pub struct CodeEditor {
@@ -80,26 +79,22 @@ impl CodeEditor {
         }
     }
 
-    pub fn draw(
-        &mut self,
-        cx: &mut Cx,
-        sessions_by_session_id: &HashMap<SessionId, Session>,
-        documents_by_path: &HashMap<PathBuf, Document>,
-    ) {
+    pub fn draw(&mut self, cx: &mut Cx, state: &State) {
         if self.view.begin_view(cx, Layout::default()).is_ok() {
-            let session = &sessions_by_session_id[&self.session_id.unwrap()];
-            let document = &documents_by_path[session.path()];
+            let session_id = self.session_id.unwrap();
+            let session = &state.sessions_by_session_id[&session_id];
+            let document = &state.documents_by_path[&session.path];
             self.apply_style(cx);
-            let visible_lines = self.visible_lines(cx, document.text().as_lines().len());
-            self.draw_selections(cx, session.selections(), document.text(), visible_lines);
+            let visible_lines = self.visible_lines(cx, document.text.as_lines().len());
+            self.draw_selections(cx, &session.selections, &document.text, visible_lines);
             self.draw_text(
                 cx,
-                document.text(),
-                document.tokens_by_line(),
+                &document.text,
+                document.tokenizer.tokens_by_line(),
                 visible_lines,
             );
-            self.draw_carets(cx, session.selections(), session.carets(), visible_lines);
-            self.set_turtle_bounds(cx, document.text());
+            self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
+            self.set_turtle_bounds(cx, &document.text);
             self.view.end_view(cx);
         }
     }
@@ -370,34 +365,36 @@ impl CodeEditor {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        sessions_by_session_id: &mut HashMap<SessionId, Session>,
-        documents_by_path: &mut HashMap<PathBuf, Document>,
+        state: &mut State,
         dispatch_action: &mut dyn FnMut(Action),
     ) {
-        let session = sessions_by_session_id
-            .get_mut(&self.session_id.unwrap())
-            .unwrap();
-        let document = documents_by_path.get_mut(session.path()).unwrap();
+        let session_id = self.session_id.unwrap();
         if self.view.handle_scroll_view(cx, event) {
             self.view.redraw_view(cx);
         }
         match event.hits(cx, self.view.area(), HitOpt::default()) {
             Event::FingerDown(FingerDownEvent { rel, modifiers, .. }) => {
+                let session = state.sessions_by_session_id.get_mut(&session_id).unwrap();
+                let document = &state.documents_by_path[&session.path];
+                let position = self.position(&document.text, rel);
                 // TODO: How to handle key focus?
                 cx.set_key_focus(self.view.area());
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
                 match modifiers {
                     KeyModifiers { control: true, .. } => {
-                        session.add_cursor(self.position(document.text(), rel));
+                        state.add_cursor(session_id, position);
                     }
                     KeyModifiers { shift, .. } => {
-                        session.move_cursors_to(self.position(document.text(), rel), shift);
+                        state.move_cursors_to(session_id, position, shift);
                     }
                 }
                 self.view.redraw_view(cx);
             }
             Event::FingerMove(FingerMoveEvent { rel, .. }) => {
-                session.move_cursors_to(self.position(document.text(), rel), true);
+                let session = state.sessions_by_session_id.get_mut(&session_id).unwrap();
+                let document = &state.documents_by_path[&session.path];
+                let position = self.position(&document.text, rel);
+                state.move_cursors_to(session_id, position, true);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -405,7 +402,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_left(documents_by_path, shift);
+                state.move_cursors_left(session_id, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -413,7 +410,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_right(documents_by_path, shift);
+                state.move_cursors_right(session_id, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -421,7 +418,7 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_up(documents_by_path, shift);
+                state.move_cursors_up(session_id, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
@@ -429,15 +426,15 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                session.move_cursors_down(documents_by_path, shift);
+                state.move_cursors_down(session_id, shift);
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Return,
                 ..
             }) => {
-                session.insert_text(
-                    documents_by_path,
+                state.insert_text(
+                    session_id,
                     Text::from(vec![vec![], vec![]]),
                     &mut |path, revision, delta| {
                         dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
@@ -449,14 +446,14 @@ impl CodeEditor {
                 key_code: KeyCode::Backspace,
                 ..
             }) => {
-                session.insert_backspace(documents_by_path, &mut |path, revision, delta| {
+                state.insert_backspace(session_id, &mut |path, revision, delta| {
                     dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
                 });
                 self.view.redraw_view(cx);
             }
             Event::TextInput(TextInputEvent { input, .. }) => {
-                session.insert_text(
-                    documents_by_path,
+                state.insert_text(
+                    session_id,
                     input
                         .lines()
                         .map(|line| line.chars().collect::<Vec<_>>())
@@ -480,6 +477,259 @@ impl CodeEditor {
                 .min(text.as_lines()[line].len()),
         }
     }
+}
+
+#[derive(Default)]
+pub struct State {
+    next_session_id: usize,
+    sessions_by_session_id: HashMap<SessionId, Session>,
+    documents_by_path: HashMap<PathBuf, Document>,
+}
+
+impl State {
+    pub fn new() -> State {
+        State::default()
+    }
+
+    pub fn create_session(&mut self, path: PathBuf) -> SessionId {
+        let document = self.documents_by_path.get_mut(&path).unwrap();
+        let session_id = SessionId(self.next_session_id);
+        self.next_session_id += 1;
+        let mut session = Session {
+            cursors: CursorSet::new(),
+            selections: RangeSet::new(),
+            carets: PositionSet::new(),
+            path
+        };
+        session.update_selections_and_carets();
+        self.sessions_by_session_id.insert(session_id, session);
+        document.session_ids.insert(session_id);
+        session_id
+    }
+
+    pub fn create_document(&mut self, path: PathBuf, revision: usize, text: Text) {
+        let tokenizer = Tokenizer::new(&text);
+        self.documents_by_path.insert(path, Document {
+            session_ids: HashSet::new(),
+            revision,
+            text,
+            tokenizer,
+            outstanding_delta: None,
+            queued_delta: None
+        });
+    }
+
+    fn add_cursor(&mut self, session_id: SessionId, position: Position) {
+        let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
+        session.cursors.add(position);
+        session.update_selections_and_carets();
+    }
+
+    fn move_cursors_left(&mut self, session_id: SessionId, select: bool) {
+        let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
+        let document = &self.documents_by_path[&session.path];
+        session.cursors.move_left(&document.text, select);
+        session.update_selections_and_carets();
+    }
+
+    fn move_cursors_right(&mut self, session_id: SessionId, select: bool) {
+        let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
+        let document = &self.documents_by_path[&session.path];
+        session.cursors.move_right(&document.text, select);
+        session.update_selections_and_carets();
+    }
+
+    fn move_cursors_up(&mut self, session_id: SessionId, select: bool) {
+        let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
+        let document = &self.documents_by_path[&session.path];
+        session.cursors.move_up(&document.text, select);
+        session.update_selections_and_carets();
+    }
+
+    fn move_cursors_down(&mut self, session_id: SessionId, select: bool) {
+        let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
+        let document = &self.documents_by_path[&session.path];
+        session.cursors.move_down(&document.text, select);
+        session.update_selections_and_carets();
+    }
+
+    fn move_cursors_to(&mut self, session_id: SessionId, position: Position, select: bool) {
+        let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
+        session.cursors.move_to(position, select);
+        session.update_selections_and_carets();
+    }
+
+    fn insert_text(
+        &mut self,
+        session_id: SessionId,
+        text: Text,
+        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta)
+    ) {
+        let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
+        let mut builder = DeltaBuilder::new();
+        for span in session.selections.spans() {
+            if span.is_included {
+                builder.delete(span.len);
+            } else {
+                builder.retain(span.len);
+            }
+        }
+        let delta_0 = builder.build();
+        let mut builder = DeltaBuilder::new();
+        let mut position = Position::origin();
+        for distance in session.carets.distances() {
+            position += distance;
+            builder.retain(distance);
+            if !session.selections.contains_position(position) {
+                builder.insert(text.clone());
+                position += text.len();
+            }
+        }
+        let delta_1 = builder.build();
+        let (_, new_delta_1) = delta_0.clone().transform(delta_1);
+        self.apply_delta(session_id, delta_0.compose(new_delta_1), post_apply_delta_request);
+    }
+
+    fn insert_backspace(
+        &mut self,
+        session_id: SessionId,
+        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta)
+    ) {
+        let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
+        let document = self.documents_by_path.get_mut(&session.path).unwrap();
+        let mut builder = DeltaBuilder::new();
+        for span in session.selections.spans() {
+            if span.is_included {
+                builder.delete(span.len);
+            } else {
+                builder.retain(span.len);
+            }
+        }
+        let delta_0 = builder.build();
+        let mut builder = DeltaBuilder::new();
+        let mut position = Position::origin();
+        for distance in session.carets.distances() {
+            position += distance;
+            if !session.selections.contains_position(position) {
+                if distance.column == 0 {
+                    builder.retain(Size {
+                        line: distance.line - 1,
+                        column: document.text.as_lines()[position.line - 1].len(),
+                    });
+                    builder.delete(Size { line: 1, column: 0 })
+                } else {
+                    builder.retain(Size {
+                        line: distance.line,
+                        column: distance.column - 1,
+                    });
+                    builder.delete(Size { line: 0, column: 1 });
+                }
+            } else {
+                builder.retain(distance);
+            }
+        }
+        let delta_1 = builder.build();
+        let (_, new_delta_1) = delta_0.clone().transform(delta_1);
+        self.apply_delta(session_id, delta_0.compose(new_delta_1), post_apply_delta_request);
+    }
+
+    fn apply_delta(
+        &mut self,
+        session_id: SessionId,
+        delta: Delta,
+        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta)
+    ) {
+        let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
+        let document = self.documents_by_path.get_mut(&session.path).unwrap();
+        session.cursors.apply_local_delta(&delta);
+        session.update_selections_and_carets();
+        for other_session_id in &document.session_ids {
+            if *other_session_id == session_id {
+                continue;
+            }
+            session.cursors.apply_remote_delta(&delta);
+            session.update_selections_and_carets();
+        }
+        document.tokenizer.invalidate_cache(&delta);
+        document.text.apply_delta(delta.clone());
+        document.tokenizer.refresh_cache(&document.text);
+        match document.outstanding_delta {
+            Some(_) => match document.queued_delta.take() {
+                Some(queued_delta) => document.queued_delta = Some(queued_delta.compose(delta)),
+                None => document.queued_delta = Some(delta),
+            },
+            None => {
+                document.outstanding_delta = Some(delta.clone());
+                post_apply_delta_request(session.path.clone(), document.revision, delta);
+            }
+        }
+    }
+
+    pub fn handle_apply_delta_response(
+        &mut self,
+        path: &Path,
+        post_apply_delta_request: &mut dyn FnMut(usize, Delta),
+    ) {
+        let document = self.documents_by_path.get_mut(path).unwrap();
+        document.revision += 1;
+        document.outstanding_delta = document.queued_delta.take();
+        if let Some(outstanding_delta) = &document.outstanding_delta {
+            post_apply_delta_request(document.revision, outstanding_delta.clone())
+        }
+    }
+
+    pub fn handle_delta_was_applied_notification(
+        &mut self,
+        path: &Path,
+        delta: Delta,
+    ) {
+        let document = self.documents_by_path.get_mut(path).unwrap();
+        let mut delta = delta;
+        if let Some(outstanding_delta) = document.outstanding_delta.take() {
+            let (new_outstanding_delta, new_delta) = outstanding_delta.transform(delta);
+            document.outstanding_delta = Some(new_outstanding_delta);
+            delta = new_delta;
+            if let Some(queued_delta) = document.queued_delta.take() {
+                let (new_queued_delta, new_delta) = queued_delta.transform(delta);
+                document.queued_delta = Some(new_queued_delta);
+                delta = new_delta;
+            }
+        }
+        for session_id in &document.session_ids {
+            let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
+            session.cursors.apply_remote_delta(&delta);
+            session.update_selections_and_carets();
+        }
+        document.tokenizer.invalidate_cache(&delta);
+        document.text.apply_delta(delta.clone());
+        document.tokenizer.refresh_cache(&document.text);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SessionId(pub usize);
+
+pub struct Session {
+    cursors: CursorSet,
+    selections: RangeSet,
+    carets: PositionSet,
+    path: PathBuf,
+}
+
+impl Session {
+    fn update_selections_and_carets(&mut self) {
+        self.selections = self.cursors.selections();
+        self.carets = self.cursors.carets();
+    }
+}
+
+pub struct Document {
+    session_ids: HashSet<SessionId>,
+    revision: usize,
+    text: Text,
+    tokenizer: Tokenizer,
+    outstanding_delta: Option<Delta>,
+    queued_delta: Option<Delta>,
 }
 
 pub enum Action {
