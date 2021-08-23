@@ -129,7 +129,7 @@ impl CursorSet {
         }
     }
 
-    pub fn handle_delta_was_applied_notification(&mut self, delta: &Delta) {
+    pub fn apply_remote_delta(&mut self, delta: &Delta) {
         for cursor in &mut self.cursors {
             let new_head = cursor.head.apply_delta(&delta);
             let new_tail = cursor.tail.apply_delta(&delta);

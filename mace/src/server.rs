@@ -224,11 +224,11 @@ struct Document {
 impl Document {
     fn notify_other_participants(
         &self,
-        self_connection_id: ConnectionId,
+        connection_id: ConnectionId,
         notification: Notification,
     ) {
-        for (connection_id, participant) in &self.participants_by_connection_id {
-            if *connection_id == self_connection_id {
+        for (other_connection_id, participant) in &self.participants_by_connection_id {
+            if *other_connection_id == connection_id {
                 continue;
             }
             participant
