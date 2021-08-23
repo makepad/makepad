@@ -647,9 +647,11 @@ impl State {
             if *other_session_id == session_id {
                 continue;
             }
-            session.cursors.apply_remote_delta(&delta);
-            session.update_selections_and_carets();
+            let other_session = self.sessions_by_session_id.get_mut(&other_session_id).unwrap();
+            other_session.cursors.apply_remote_delta(&delta);
+            other_session.update_selections_and_carets();
         }
+        let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
         document.tokenizer.invalidate_cache(&delta);
         document.text.apply_delta(delta.clone());
         document.tokenizer.refresh_cache(&document.text);
