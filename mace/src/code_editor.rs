@@ -430,6 +430,15 @@ impl CodeEditor {
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Backspace,
+                ..
+            }) => {
+                state.insert_backspace(session_id, &mut |path, revision, delta| {
+                    dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
+                });
+                self.view.redraw_view(cx);
+            }
+            Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Return,
                 ..
             }) => {
@@ -443,10 +452,11 @@ impl CodeEditor {
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
-                key_code: KeyCode::Backspace,
+                key_code: KeyCode::KeyZ,
+                modifiers,
                 ..
-            }) => {
-                state.insert_backspace(session_id, &mut |path, revision, delta| {
+            }) if modifiers.control || modifiers.logo => {
+                state.undo(session_id, &mut |path, revision, delta| {
                     dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
                 });
                 self.view.redraw_view(cx);
@@ -514,6 +524,7 @@ impl State {
             revision,
             text,
             tokenizer,
+            undo_stack: Vec::new(),
             outstanding_delta: None,
             queued_delta: None
         });
@@ -587,7 +598,7 @@ impl State {
         }
         let delta_1 = builder.build();
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
-        self.apply_delta(session_id, delta_0.compose(new_delta_1), post_apply_delta_request);
+        self.apply_delta(session_id, delta_0.compose(new_delta_1), false, post_apply_delta_request);
     }
 
     fn insert_backspace(
@@ -630,13 +641,22 @@ impl State {
         }
         let delta_1 = builder.build();
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
-        self.apply_delta(session_id, delta_0.compose(new_delta_1), post_apply_delta_request);
+        self.apply_delta(session_id, delta_0.compose(new_delta_1), false, post_apply_delta_request);
+    }
+
+    fn undo(&mut self, session_id: SessionId, post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta)) {
+        let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
+        let document = self.documents_by_path.get_mut(&session.path).unwrap();
+        if let Some(delta) = document.undo_stack.pop() {
+            self.apply_delta(session_id, delta, true, post_apply_delta_request);
+        }
     }
 
     fn apply_delta(
         &mut self,
         session_id: SessionId,
         delta: Delta,
+        is_undo: bool,
         post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta)
     ) {
         let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
@@ -652,6 +672,9 @@ impl State {
             other_session.update_selections_and_carets();
         }
         let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
+        if !is_undo {
+            document.undo_stack.push(delta.clone().invert(&document.text));
+        }
         document.tokenizer.invalidate_cache(&delta);
         document.text.apply_delta(delta.clone());
         document.tokenizer.refresh_cache(&document.text);
@@ -730,6 +753,7 @@ pub struct Document {
     revision: usize,
     text: Text,
     tokenizer: Tokenizer,
+    undo_stack: Vec<Delta>,
     outstanding_delta: Option<Delta>,
     queued_delta: Option<Delta>,
 }
