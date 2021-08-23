@@ -1,5 +1,5 @@
 use {
-    crate::{size::Size, text::Text},
+    crate::{position::Position, range::Range, size::Size, text::Text},
     serde::{Deserialize, Serialize},
     std::{cmp::Ordering, mem, ops::Deref, slice::Iter, vec::IntoIter},
 };
@@ -12,6 +12,31 @@ pub struct Delta {
 impl Delta {
     pub fn identity() -> Delta {
         Delta::default()
+    }
+
+    pub fn invert(self, text: &Text) -> Delta {
+        let mut builder = DeltaBuilder::new();
+        let mut position = Position::origin();
+        for operation in self.operations {
+            match operation {
+                Operation::Retain(count) => {
+                    builder.retain(count);
+                    position += count;
+                }
+                Operation::Insert(text) => {
+                    builder.delete(text.len());
+                }
+                Operation::Delete(count) => {
+                    let new_position = position + count;
+                    builder.insert(text.copy(Range {
+                        start: position,
+                        end: new_position,
+                    }));
+                    position = new_position;
+                }
+            }
+        }
+        builder.build()
     }
 
     pub fn compose(self, other: Delta) -> Delta {
