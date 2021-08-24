@@ -245,12 +245,9 @@ impl AppInner {
         }
         let mut actions = Vec::new();
         for code_editor in self.code_editors_by_panel_id.values_mut() {
-            code_editor.handle_event(
-                cx,
-                event,
-                &mut state.code_editor_state,
-                &mut |action| actions.push(action),
-            );
+            code_editor.handle_event(cx, event, &mut state.code_editor_state, &mut |action| {
+                actions.push(action)
+            });
         }
         for action in actions {
             match action {
@@ -302,7 +299,11 @@ impl AppInner {
                             Request::OpenFile(path) => {
                                 let (revision, text) = response.unwrap();
                                 let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                                state.code_editor_state.create_document(path.clone(), revision, text);
+                                state.code_editor_state.create_document(
+                                    path.clone(),
+                                    revision,
+                                    text,
+                                );
                                 let session_id = state.code_editor_state.create_session(path);
                                 let panel_id = PanelId(2); // TODO;
                                 let item_id = ItemId(state.next_item_id);
@@ -335,9 +336,12 @@ impl AppInner {
                         Request::ApplyDelta(path, _, _) => {
                             let _ = response.unwrap();
                             let mut apply_delta_requests = Vec::new();
-                            state.code_editor_state.handle_apply_delta_response(&path, &mut |revision, delta| {
-                                apply_delta_requests.push((revision, delta));
-                            });
+                            state.code_editor_state.handle_apply_delta_response(
+                                &path,
+                                &mut |revision, delta| {
+                                    apply_delta_requests.push((revision, delta));
+                                },
+                            );
                             for (revision, delta) in apply_delta_requests {
                                 self.send_request(Request::ApplyDelta(
                                     path.clone(),
@@ -352,7 +356,9 @@ impl AppInner {
             }
             ResponseOrNotification::Notification(notification) => match notification {
                 Notification::DeltaWasApplied(path, delta) => {
-                    state.code_editor_state.handle_delta_was_applied_notification(&path, delta);
+                    state
+                        .code_editor_state
+                        .handle_delta_was_applied_notification(&path, delta);
                     for code_editor in self.code_editors_by_panel_id.values_mut() {
                         code_editor.redraw(cx);
                     }
