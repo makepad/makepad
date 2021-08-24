@@ -8,11 +8,14 @@ use {
         size::Size,
         text::Text,
         token::{Keyword, Punctuator, TokenKind},
-        tokenizer::{TokensByLine, Tokenizer},
+        tokenizer::{Tokenizer, TokensByLine},
     },
     makepad_render::*,
     makepad_widget::*,
-    std::{collections::{HashMap, HashSet}, path::{Path, PathBuf}},
+    std::{
+        collections::{HashMap, HashSet},
+        path::{Path, PathBuf},
+    },
 };
 
 pub struct CodeEditor {
@@ -509,7 +512,7 @@ impl State {
             cursors: CursorSet::new(),
             selections: RangeSet::new(),
             carets: PositionSet::new(),
-            path
+            path,
         };
         session.update_selections_and_carets();
         self.sessions_by_session_id.insert(session_id, session);
@@ -519,15 +522,18 @@ impl State {
 
     pub fn create_document(&mut self, path: PathBuf, revision: usize, text: Text) {
         let tokenizer = Tokenizer::new(&text);
-        self.documents_by_path.insert(path, Document {
-            session_ids: HashSet::new(),
-            revision,
-            text,
-            tokenizer,
-            undo_stack: Vec::new(),
-            outstanding_delta: None,
-            queued_delta: None
-        });
+        self.documents_by_path.insert(
+            path,
+            Document {
+                session_ids: HashSet::new(),
+                revision,
+                text,
+                tokenizer,
+                undo_stack: Vec::new(),
+                outstanding_delta: None,
+                queued_delta: None,
+            },
+        );
     }
 
     fn add_cursor(&mut self, session_id: SessionId, position: Position) {
@@ -574,7 +580,7 @@ impl State {
         &mut self,
         session_id: SessionId,
         text: Text,
-        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta)
+        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
     ) {
         let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
         let mut builder = DeltaBuilder::new();
@@ -598,13 +604,13 @@ impl State {
         }
         let delta_1 = builder.build();
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
-        self.apply_delta(session_id, delta_0.compose(new_delta_1), false, post_apply_delta_request);
+        self.edit(session_id, delta_0.compose(new_delta_1), post_apply_delta_request);
     }
 
     fn insert_backspace(
         &mut self,
         session_id: SessionId,
-        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta)
+        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
     ) {
         let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
         let document = self.documents_by_path.get_mut(&session.path).unwrap();
@@ -641,14 +647,37 @@ impl State {
         }
         let delta_1 = builder.build();
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
-        self.apply_delta(session_id, delta_0.compose(new_delta_1), false, post_apply_delta_request);
+        self.edit(session_id, delta_0.compose(new_delta_1), post_apply_delta_request);
     }
 
-    fn undo(&mut self, session_id: SessionId, post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta)) {
+    fn edit(
+        &mut self,
+        session_id: SessionId,
+        delta: Delta,
+        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
+    ) {
         let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
         let document = self.documents_by_path.get_mut(&session.path).unwrap();
-        if let Some(delta) = document.undo_stack.pop() {
-            self.apply_delta(session_id, delta, true, post_apply_delta_request);
+        session.apply_local_delta(&delta);
+        document.undo_stack.push((
+            session.cursors.clone(),
+            delta.clone().invert(&document.text),
+        ));
+        self.apply_delta(session_id, delta, post_apply_delta_request);
+    }
+
+    fn undo(
+        &mut self,
+        session_id: SessionId,
+        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
+    ) {
+        let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
+        let document = self.documents_by_path.get_mut(&session.path).unwrap();
+        if let Some((cursors, delta)) = document.undo_stack.pop() {
+            let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
+            session.cursors = cursors;
+            session.update_selections_and_carets();
+            self.apply_delta(session_id, delta, post_apply_delta_request);
         }
     }
 
@@ -656,38 +685,27 @@ impl State {
         &mut self,
         session_id: SessionId,
         delta: Delta,
-        is_undo: bool,
-        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta)
+        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
     ) {
         let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
         let document = self.documents_by_path.get_mut(&session.path).unwrap();
-        session.cursors.apply_local_delta(&delta);
-        session.update_selections_and_carets();
         for other_session_id in &document.session_ids {
             if *other_session_id == session_id {
                 continue;
             }
-            let other_session = self.sessions_by_session_id.get_mut(&other_session_id).unwrap();
-            other_session.cursors.apply_remote_delta(&delta);
-            other_session.update_selections_and_carets();
+            let other_session = self
+                .sessions_by_session_id
+                .get_mut(&other_session_id)
+                .unwrap();
+            other_session.apply_remote_delta(&delta);
         }
         let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
-        if !is_undo {
-            document.undo_stack.push(delta.clone().invert(&document.text));
-        }
-        document.tokenizer.invalidate_cache(&delta);
-        document.text.apply_delta(delta.clone());
-        document.tokenizer.refresh_cache(&document.text);
-        match document.outstanding_delta {
-            Some(_) => match document.queued_delta.take() {
-                Some(queued_delta) => document.queued_delta = Some(queued_delta.compose(delta)),
-                None => document.queued_delta = Some(delta),
-            },
-            None => {
-                document.outstanding_delta = Some(delta.clone());
-                post_apply_delta_request(session.path.clone(), document.revision, delta);
-            }
-        }
+        document.apply_local_delta(delta.clone());
+        document.schedule_apply_delta_request(
+            session.path.clone(),
+            delta,
+            post_apply_delta_request,
+        );
     }
 
     pub fn handle_apply_delta_response(
@@ -703,31 +721,14 @@ impl State {
         }
     }
 
-    pub fn handle_delta_was_applied_notification(
-        &mut self,
-        path: &Path,
-        delta: Delta,
-    ) {
+    pub fn handle_delta_was_applied_notification(&mut self, path: &Path, delta: Delta) {
         let document = self.documents_by_path.get_mut(path).unwrap();
-        let mut delta = delta;
-        if let Some(outstanding_delta) = document.outstanding_delta.take() {
-            let (new_outstanding_delta, new_delta) = outstanding_delta.transform(delta);
-            document.outstanding_delta = Some(new_outstanding_delta);
-            delta = new_delta;
-            if let Some(queued_delta) = document.queued_delta.take() {
-                let (new_queued_delta, new_delta) = queued_delta.transform(delta);
-                document.queued_delta = Some(new_queued_delta);
-                delta = new_delta;
-            }
-        }
         for session_id in &document.session_ids {
             let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
             session.cursors.apply_remote_delta(&delta);
             session.update_selections_and_carets();
         }
-        document.tokenizer.invalidate_cache(&delta);
-        document.text.apply_delta(delta.clone());
-        document.tokenizer.refresh_cache(&document.text);
+        document.apply_remote_delta(delta);
     }
 }
 
@@ -742,6 +743,16 @@ pub struct Session {
 }
 
 impl Session {
+    fn apply_local_delta(&mut self, delta: &Delta) {
+        self.cursors.apply_local_delta(&delta);
+        self.update_selections_and_carets();
+    }
+
+    fn apply_remote_delta(&mut self, delta: &Delta) {
+        self.cursors.apply_remote_delta(&delta);
+        self.update_selections_and_carets();
+    }
+
     fn update_selections_and_carets(&mut self) {
         self.selections = self.cursors.selections();
         self.carets = self.cursors.carets();
@@ -753,9 +764,50 @@ pub struct Document {
     revision: usize,
     text: Text,
     tokenizer: Tokenizer,
-    undo_stack: Vec<Delta>,
+    undo_stack: Vec<(CursorSet, Delta)>,
     outstanding_delta: Option<Delta>,
     queued_delta: Option<Delta>,
+}
+
+impl Document {
+    fn apply_local_delta(&mut self, delta: Delta) {
+        self.tokenizer.invalidate_cache(&delta);
+        self.text.apply_delta(delta);
+        self.tokenizer.refresh_cache(&self.text);
+    }
+
+    fn apply_remote_delta(&mut self, delta: Delta) {
+        let mut delta = delta;
+        if let Some(outstanding_delta) = self.outstanding_delta.take() {
+            let (new_outstanding_delta, new_delta) = outstanding_delta.transform(delta);
+            self.outstanding_delta = Some(new_outstanding_delta);
+            delta = new_delta;
+            if let Some(queued_delta) = self.queued_delta.take() {
+                let (new_queued_delta, new_delta) = queued_delta.transform(delta);
+                self.queued_delta = Some(new_queued_delta);
+                delta = new_delta;
+            }
+        }
+        self.apply_local_delta(delta);
+    }
+
+    fn schedule_apply_delta_request(
+        &mut self,
+        path: PathBuf,
+        delta: Delta,
+        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
+    ) {
+        match self.outstanding_delta {
+            Some(_) => match self.queued_delta.take() {
+                Some(queued_delta) => self.queued_delta = Some(queued_delta.compose(delta)),
+                None => self.queued_delta = Some(delta),
+            },
+            None => {
+                self.outstanding_delta = Some(delta.clone());
+                post_apply_delta_request(path, self.revision, delta);
+            }
+        }
+    }
 }
 
 pub enum Action {
