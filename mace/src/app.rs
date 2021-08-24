@@ -299,12 +299,12 @@ impl AppInner {
                             Request::OpenFile(path) => {
                                 let (revision, text) = response.unwrap();
                                 let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                                state.code_editor_state.create_document(
-                                    path.clone(),
+                                let document_id = state.code_editor_state.create_document(
+                                    path,
                                     revision,
                                     text,
                                 );
-                                let session_id = state.code_editor_state.create_session(path);
+                                let session_id = state.code_editor_state.create_session(document_id);
                                 let panel_id = PanelId(2); // TODO;
                                 let item_id = ItemId(state.next_item_id);
                                 state.next_item_id += 1;
