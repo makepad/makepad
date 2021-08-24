@@ -436,7 +436,7 @@ impl CodeEditor {
                 key_code: KeyCode::Backspace,
                 ..
             }) => {
-                state.insert_backspace(session_id, &mut |path, revision, delta| {
+                state.backspace(session_id, &mut |path, revision, delta| {
                     dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
                 });
                 self.view.redraw_view(cx);
@@ -604,10 +604,14 @@ impl State {
         }
         let delta_1 = builder.build();
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
-        self.edit(session_id, delta_0.compose(new_delta_1), post_apply_delta_request);
+        self.edit(
+            session_id,
+            delta_0.compose(new_delta_1),
+            post_apply_delta_request,
+        );
     }
 
-    fn insert_backspace(
+    fn backspace(
         &mut self,
         session_id: SessionId,
         post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
@@ -647,7 +651,11 @@ impl State {
         }
         let delta_1 = builder.build();
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
-        self.edit(session_id, delta_0.compose(new_delta_1), post_apply_delta_request);
+        self.edit(
+            session_id,
+            delta_0.compose(new_delta_1),
+            post_apply_delta_request,
+        );
     }
 
     fn edit(
@@ -657,12 +665,12 @@ impl State {
         post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
     ) {
         let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
-        let document = self.documents_by_path.get_mut(&session.path).unwrap();
         session.apply_local_delta(&delta);
-        document.undo_stack.push((
-            session.cursors.clone(),
-            delta.clone().invert(&document.text),
-        ));
+        let document = self.documents_by_path.get_mut(&session.path).unwrap();
+        document.undo_stack.push(Edit {
+            cursors: session.cursors.clone(),
+            delta: delta.clone().invert(&document.text),
+        });
         self.apply_delta(session_id, delta, post_apply_delta_request);
     }
 
@@ -673,11 +681,11 @@ impl State {
     ) {
         let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
         let document = self.documents_by_path.get_mut(&session.path).unwrap();
-        if let Some((cursors, delta)) = document.undo_stack.pop() {
+        if let Some(edit) = document.undo_stack.pop() {
             let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
-            session.cursors = cursors;
+            session.cursors = edit.cursors;
             session.update_selections_and_carets();
-            self.apply_delta(session_id, delta, post_apply_delta_request);
+            self.apply_delta(session_id, edit.delta, post_apply_delta_request);
         }
     }
 
@@ -688,7 +696,8 @@ impl State {
         post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
     ) {
         let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
-        let document = self.documents_by_path.get_mut(&session.path).unwrap();
+        let path = session.path.clone();
+        let document = self.documents_by_path.get_mut(&path).unwrap();
         for other_session_id in &document.session_ids {
             if *other_session_id == session_id {
                 continue;
@@ -699,10 +708,9 @@ impl State {
                 .unwrap();
             other_session.apply_remote_delta(&delta);
         }
-        let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
-        document.apply_local_delta(delta.clone());
+        document.apply_delta(delta.clone());
         document.schedule_apply_delta_request(
-            session.path.clone(),
+            path,
             delta,
             post_apply_delta_request,
         );
@@ -714,28 +722,24 @@ impl State {
         post_apply_delta_request: &mut dyn FnMut(usize, Delta),
     ) {
         let document = self.documents_by_path.get_mut(path).unwrap();
-        document.revision += 1;
-        document.outstanding_delta = document.queued_delta.take();
-        if let Some(outstanding_delta) = &document.outstanding_delta {
-            post_apply_delta_request(document.revision, outstanding_delta.clone())
-        }
+        document.handle_apply_delta_response(post_apply_delta_request);
     }
 
     pub fn handle_delta_was_applied_notification(&mut self, path: &Path, delta: Delta) {
         let document = self.documents_by_path.get_mut(path).unwrap();
+        let delta = document.handle_delta_was_applied_notification(delta);
         for session_id in &document.session_ids {
             let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
-            session.cursors.apply_remote_delta(&delta);
-            session.update_selections_and_carets();
+            session.apply_remote_delta(&delta);
         }
-        document.apply_remote_delta(delta);
+        document.apply_delta(delta);
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SessionId(pub usize);
 
-pub struct Session {
+struct Session {
     cursors: CursorSet,
     selections: RangeSet,
     carets: PositionSet,
@@ -759,36 +763,21 @@ impl Session {
     }
 }
 
-pub struct Document {
+struct Document {
     session_ids: HashSet<SessionId>,
     revision: usize,
     text: Text,
     tokenizer: Tokenizer,
-    undo_stack: Vec<(CursorSet, Delta)>,
+    undo_stack: Vec<Edit>,
     outstanding_delta: Option<Delta>,
     queued_delta: Option<Delta>,
 }
 
 impl Document {
-    fn apply_local_delta(&mut self, delta: Delta) {
+    fn apply_delta(&mut self, delta: Delta) {
         self.tokenizer.invalidate_cache(&delta);
         self.text.apply_delta(delta);
         self.tokenizer.refresh_cache(&self.text);
-    }
-
-    fn apply_remote_delta(&mut self, delta: Delta) {
-        let mut delta = delta;
-        if let Some(outstanding_delta) = self.outstanding_delta.take() {
-            let (new_outstanding_delta, new_delta) = outstanding_delta.transform(delta);
-            self.outstanding_delta = Some(new_outstanding_delta);
-            delta = new_delta;
-            if let Some(queued_delta) = self.queued_delta.take() {
-                let (new_queued_delta, new_delta) = queued_delta.transform(delta);
-                self.queued_delta = Some(new_queued_delta);
-                delta = new_delta;
-            }
-        }
-        self.apply_local_delta(delta);
     }
 
     fn schedule_apply_delta_request(
@@ -808,10 +797,37 @@ impl Document {
             }
         }
     }
+
+    fn handle_apply_delta_response(
+        &mut self,
+        post_apply_delta_request: &mut dyn FnMut(usize, Delta),
+    ) {
+        self.revision += 1;
+        self.outstanding_delta = self.queued_delta.take();
+        if let Some(outstanding_delta) = &self.outstanding_delta {
+            post_apply_delta_request(self.revision, outstanding_delta.clone())
+        }
+    }
+
+    fn handle_delta_was_applied_notification(&mut self, delta: Delta) -> Delta {
+        let mut delta = delta;
+        if let Some(outstanding_delta) = self.outstanding_delta.take() {
+            let (new_outstanding_delta, new_delta) = outstanding_delta.transform(delta);
+            self.outstanding_delta = Some(new_outstanding_delta);
+            delta = new_delta;
+            if let Some(queued_delta) = self.queued_delta.take() {
+                let (new_queued_delta, new_delta) = queued_delta.transform(delta);
+                self.queued_delta = Some(new_queued_delta);
+                delta = new_delta;
+            }
+        }
+        delta
+    }
 }
 
-pub enum Action {
-    ApplyDeltaRequestWasPosted(PathBuf, usize, Delta),
+struct Edit {
+    cursors: CursorSet,
+    delta: Delta,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -819,4 +835,8 @@ struct VisibleLines {
     start: usize,
     end: usize,
     start_y: f32,
+}
+
+pub enum Action {
+    ApplyDeltaRequestWasPosted(PathBuf, usize, Delta),
 }

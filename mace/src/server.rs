@@ -223,11 +223,11 @@ struct Document {
 
 impl Document {
     fn notify_other_participants(&self, connection_id: ConnectionId, notification: Notification) {
-        for (other_connection_id, participant) in &self.participants_by_connection_id {
+        for (other_connection_id, other_participant) in &self.participants_by_connection_id {
             if *other_connection_id == connection_id {
                 continue;
             }
-            participant
+            other_participant
                 .notification_sender
                 .send_notification(notification.clone())
         }
