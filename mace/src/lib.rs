@@ -5,6 +5,7 @@ pub mod cursor_set;
 pub mod delta;
 pub mod dock;
 pub mod file_tree;
+pub mod generational;
 pub mod list_logic;
 pub mod position;
 pub mod position_set;
