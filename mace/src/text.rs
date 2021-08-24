@@ -51,7 +51,11 @@ impl Text {
                         .cloned()
                         .collect::<Vec<_>>(),
                 );
-                lines.extend(self.lines[range.start.line + 1..range.end.line].iter().cloned());
+                lines.extend(
+                    self.lines[range.start.line + 1..range.end.line]
+                        .iter()
+                        .cloned(),
+                );
                 lines.push(
                     self.lines[range.end.line][..range.end.column]
                         .iter()
