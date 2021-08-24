@@ -14,6 +14,7 @@ use {
     makepad_widget::*,
     std::{
         collections::{HashMap, HashSet},
+        mem,
         path::{Path, PathBuf},
     },
 };
@@ -583,6 +584,7 @@ impl State {
         post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
     ) {
         let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
+        println!("Inserting text with cursors {:?}", session.cursors);
         let mut builder = DeltaBuilder::new();
         for span in session.selections.spans() {
             if span.is_included {
@@ -665,12 +667,12 @@ impl State {
         post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
     ) {
         let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
-        session.apply_local_delta(&delta);
         let document = self.documents_by_path.get_mut(&session.path).unwrap();
         document.undo_stack.push(Edit {
             cursors: session.cursors.clone(),
             delta: delta.clone().invert(&document.text),
         });
+        session.apply_local_delta(&delta);
         self.apply_delta(session_id, delta, post_apply_delta_request);
     }
 
@@ -683,8 +685,7 @@ impl State {
         let document = self.documents_by_path.get_mut(&session.path).unwrap();
         if let Some(edit) = document.undo_stack.pop() {
             let session = self.sessions_by_session_id.get_mut(&session_id).unwrap();
-            session.cursors = edit.cursors;
-            session.update_selections_and_carets();
+            session.set_cursors(edit.cursors);
             self.apply_delta(session_id, edit.delta, post_apply_delta_request);
         }
     }
@@ -747,6 +748,11 @@ struct Session {
 }
 
 impl Session {
+    fn set_cursors(&mut self, cursors: CursorSet) {
+        self.cursors = cursors;
+        self.update_selections_and_carets();
+    }
+
     fn apply_local_delta(&mut self, delta: &Delta) {
         self.cursors.apply_local_delta(&delta);
         self.update_selections_and_carets();
@@ -810,6 +816,7 @@ impl Document {
     }
 
     fn handle_delta_was_applied_notification(&mut self, delta: Delta) -> Delta {
+        self.revision += 1;
         let mut delta = delta;
         if let Some(outstanding_delta) = self.outstanding_delta.take() {
             let (new_outstanding_delta, new_delta) = outstanding_delta.transform(delta);
@@ -821,7 +828,14 @@ impl Document {
                 delta = new_delta;
             }
         }
-        delta
+        let delta_clone = delta.clone();
+        for edit in &mut self.undo_stack {
+            let (new_delta, new_edit_delta) = delta.transform(mem::replace(&mut edit.delta, Delta::identity()));
+            delta = new_delta;
+            edit.cursors.apply_remote_delta(&delta);
+            edit.delta = new_edit_delta;
+        }
+        delta_clone
     }
 }
 
