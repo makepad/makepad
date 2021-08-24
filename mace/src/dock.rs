@@ -135,10 +135,6 @@ impl Dock {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PanelId(pub usize);
 
-pub enum Action {
-    TabWasPressed(ItemId),
-}
-
 enum Panel {
     Splitter(Splitter),
     TabBar(TabBar),
@@ -158,4 +154,8 @@ impl Panel {
             _ => panic!(),
         }
     }
+}
+
+pub enum Action {
+    TabWasPressed(ItemId),
 }
