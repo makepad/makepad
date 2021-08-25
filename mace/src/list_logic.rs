@@ -1,5 +1,6 @@
-use {makepad_render::*, std::collections::HashMap};
+use {crate::generational::Id, makepad_render::*, std::collections::HashMap};
 
+#[derive(Default)]
 pub struct ListLogic {
     item_ids_by_area: HashMap<Area, ItemId>,
     selected_item_id: Option<ItemId>,
@@ -7,10 +8,7 @@ pub struct ListLogic {
 
 impl ListLogic {
     pub fn new() -> ListLogic {
-        ListLogic {
-            item_ids_by_area: HashMap::new(),
-            selected_item_id: None,
-        }
+        ListLogic::default()
     }
 
     pub fn begin(&mut self) {
@@ -62,8 +60,7 @@ impl ListLogic {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ItemId(pub usize);
+pub type ItemId = Id;
 
 #[derive(Clone, Copy, Debug)]
 pub struct TabInfo {

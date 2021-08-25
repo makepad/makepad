@@ -18,9 +18,16 @@ impl<T> Arena<T> {
         Arena::default()
     }
 
-    pub fn get(&self, index: Id) -> Option<&T> {
-        match self.entries.get(index.index) {
-            Some(Some(entry)) if entry.generation == index.generation => Some(&entry.value),
+    pub fn contains(&self, id: Id) -> bool {
+        match self.entries.get(id.index) {
+            Some(Some(entry)) if entry.generation == id.generation => true,
+            _ => false,
+        }
+    }
+
+    pub fn get(&self, id: Id) -> Option<&T> {
+        match self.entries.get(id.index) {
+            Some(Some(entry)) if entry.generation == id.generation => Some(&entry.value),
             _ => None,
         }
     }
@@ -31,9 +38,9 @@ impl<T> Arena<T> {
         }
     }
 
-    pub fn get_mut(&mut self, index: Id) -> Option<&mut T> {
-        match self.entries.get_mut(index.index) {
-            Some(Some(entry)) if entry.generation == index.generation => Some(&mut entry.value),
+    pub fn get_mut(&mut self, id: Id) -> Option<&mut T> {
+        match self.entries.get_mut(id.index) {
+            Some(Some(entry)) if entry.generation == id.generation => Some(&mut entry.value),
             _ => None,
         }
     }
@@ -44,19 +51,19 @@ impl<T> Arena<T> {
         }
     }
 
-    pub fn insert(&mut self, index: Id, value: T) -> Option<T> {
-        if self.entries.len() < index.index + 1 {
-            self.entries.resize_with(index.index + 1, || None);
+    pub fn insert(&mut self, id: Id, value: T) -> Option<T> {
+        if self.entries.len() < id.index + 1 {
+            self.entries.resize_with(id.index + 1, || None);
         }
-        match self.entries.get_mut(index.index) {
-            Some(Some(entry)) if entry.generation <= index.generation => {
-                entry.generation = index.generation;
+        match self.entries.get_mut(id.index) {
+            Some(Some(entry)) if entry.generation <= id.generation => {
+                entry.generation = id.generation;
                 Some(mem::replace(&mut entry.value, value))
             }
             Some(entry @ None) => {
                 *entry = Some(Entry {
                     value,
-                    generation: index.generation,
+                    generation: id.generation,
                 });
                 None
             }
@@ -72,6 +79,10 @@ impl<T> Arena<T> {
             }
             _ => None,
         }
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear()
     }
 }
 
