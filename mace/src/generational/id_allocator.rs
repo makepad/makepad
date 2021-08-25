@@ -42,6 +42,10 @@ impl IdAllocator {
         entry.is_used = false;
         self.free_entry_indices.push(index.index);
     }
+
+    pub fn clear(&mut self) {
+        self.entries.clear()
+    }
 }
 
 #[derive(Clone, Debug)]

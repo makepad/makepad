@@ -2,18 +2,18 @@ use {
     crate::{
         code_editor::{self, CodeEditor, SessionId},
         dock::{self, Dock, PanelId},
-        file_tree::{self, FileTree},
-        list_logic::ItemId,
+        generational::{Arena, IdAllocator},
+        file_tree::{self, FileNodeId, FileTree},
         protocol::{self, Notification, Request, Response, ResponseOrNotification},
         server::{Connection, Server},
         splitter::Splitter,
-        tab_bar::TabBar,
+        tab_bar::{TabBar, TabId},
         tree_logic::NodeId,
     },
     makepad_render::*,
     makepad_widget::*,
     std::{
-        collections::{HashMap, VecDeque},
+        collections::VecDeque,
         env,
         ffi::OsString,
         io::{Read, Write},
@@ -62,7 +62,7 @@ struct AppInner {
     window: DesktopWindow,
     dock: Dock,
     file_tree: FileTree,
-    code_editors_by_panel_id: HashMap<PanelId, CodeEditor>,
+    code_editors: Arena<CodeEditor>,
     outstanding_requests: VecDeque<Request>,
     request_sender: Sender<Request>,
     response_or_notification_signal: Signal,
@@ -108,7 +108,7 @@ impl AppInner {
             window: DesktopWindow::new(cx),
             dock: Dock::new(cx),
             file_tree: FileTree::new(cx),
-            code_editors_by_panel_id: HashMap::new(),
+            code_editors: Arena::new(),
             outstanding_requests: VecDeque::new(),
             request_sender,
             response_or_notification_signal,
@@ -120,13 +120,13 @@ impl AppInner {
 
     fn draw(&mut self, cx: &mut Cx, state: &State) {
         if self.window.begin_desktop_window(cx, None).is_ok() {
-            self.draw_panel(cx, state, PanelId(0));
+            self.draw_panel(cx, state, state.root_panel_id);
             self.window.end_desktop_window(cx);
         }
     }
 
     fn draw_panel(&mut self, cx: &mut Cx, state: &State, panel_id: PanelId) {
-        let panel = &state.panels_by_panel_id[&panel_id];
+        let panel = &state.panels[panel_id];
         match panel {
             Panel::Splitter { panel_ids } => {
                 if self.dock.begin_splitter(cx, panel_id).is_ok() {
@@ -136,15 +136,15 @@ impl AppInner {
                     self.dock.end_splitter(cx);
                 }
             }
-            Panel::TabBar { item_ids } => {
+            Panel::TabBar { tab_ids } => {
                 if self.dock.begin_tab_bar(cx, panel_id).is_ok() {
-                    for item_id in item_ids {
-                        let tab = &state.tabs_by_item_id[&item_id];
-                        self.dock.tab(cx, *item_id, &tab.name);
+                    for tab_id in tab_ids {
+                        let tab = &state.tabs[*tab_id];
+                        self.dock.tab(cx, *tab_id, &tab.name);
                     }
                     self.dock.end_tab_bar(cx);
                 }
-                if let Some(item_id) = self.dock.tab_bar_mut(cx, panel_id).selected_item_id() {
+                if let Some(item_id) = self.dock.get_or_create_tab_bar(cx, panel_id).selected_item_id() {
                     cx.turtle_new_line();
                     self.draw_tab(cx, state, item_id);
                 }
@@ -152,19 +152,13 @@ impl AppInner {
         }
     }
 
-    fn draw_tab(&mut self, cx: &mut Cx, state: &State, item_id: ItemId) {
-        let tab = &state.tabs_by_item_id[&item_id];
+    fn draw_tab(&mut self, cx: &mut Cx, state: &State, tab_id: TabId) {
+        let tab = &state.tabs[tab_id];
         match tab.kind {
             TabKind::FileTree => self.draw_file_tree(cx, state),
             TabKind::CodeEditor { session_id } => {
-                let code_editor = self
-                    .code_editors_by_panel_id
-                    .entry(tab.panel_id)
-                    .or_insert_with(|| {
-                        let mut code_editor = CodeEditor::new(cx);
-                        code_editor.set_session_id(cx, session_id);
-                        code_editor
-                    });
+                let code_editor = self.get_or_create_code_editor(cx, tab.panel_id);
+                code_editor.set_session_id(cx,session_id);
                 code_editor.draw(cx, &state.code_editor_state)
             }
         }
@@ -172,24 +166,24 @@ impl AppInner {
 
     fn draw_file_tree(&mut self, cx: &mut Cx, state: &State) {
         if self.file_tree.begin(cx).is_ok() {
-            self.draw_file_node(cx, state, NodeId(0));
+            self.draw_file_node(cx, state, state.root_file_node_id);
             self.file_tree.end(cx);
         }
     }
 
-    fn draw_file_node(&mut self, cx: &mut Cx, state: &State, node_id: NodeId) {
-        let node = &state.file_nodes_by_node_id[&node_id];
-        match &node.child_edges {
+    fn draw_file_node(&mut self, cx: &mut Cx, state: &State, file_node_id: FileNodeId) {
+        let file_node = &state.file_nodes[file_node_id];
+        match &file_node.child_edges {
             Some(child_edges) => {
-                if self.file_tree.begin_folder(cx, node_id, &node.name).is_ok() {
+                if self.file_tree.begin_folder(cx, file_node_id, &file_node.name).is_ok() {
                     for child_edge in child_edges {
-                        self.draw_file_node(cx, state, child_edge.node_id);
+                        self.draw_file_node(cx, state, child_edge.file_node_id);
                     }
                     self.file_tree.end_folder();
                 }
             }
             None => {
-                self.file_tree.file(cx, node_id, &node.name);
+                self.file_tree.file(cx, file_node_id, &file_node.name);
             }
         }
     }
@@ -198,7 +192,7 @@ impl AppInner {
         self.file_tree.forget();
         state.set_file_tree(root);
         self.file_tree
-            .set_node_is_expanded(cx, NodeId(0), true, true);
+            .set_file_node_is_expanded(cx, state.root_file_node_id, true, true);
         self.file_tree.redraw(cx);
     }
 
@@ -214,15 +208,12 @@ impl AppInner {
             .handle_event(cx, event, &mut |action| actions.push(action));
         for action in actions {
             match action {
-                dock::Action::TabWasPressed(item_id) => {
-                    let tab = &state.tabs_by_item_id[&item_id];
+                dock::Action::TabWasPressed(tab_id) => {
+                    let tab = &state.tabs[tab_id];
                     match tab.kind {
                         TabKind::FileTree => {}
                         TabKind::CodeEditor { session_id } => {
-                            let code_editor = self
-                                .code_editors_by_panel_id
-                                .entry(tab.panel_id)
-                                .or_insert_with(|| CodeEditor::new(cx));
+                            let code_editor = self.get_or_create_code_editor(cx, state.panel_id);
                             code_editor.set_session_id(cx, session_id);
                         }
                     }
@@ -234,17 +225,17 @@ impl AppInner {
             .handle_event(cx, event, &mut |action| actions.push(action));
         for action in actions {
             match action {
-                file_tree::Action::FileWasPressed(node_id) => {
-                    let node = &state.file_nodes_by_node_id[&node_id];
-                    if node.is_file() {
-                        let path = state.file_node_path(node_id);
+                file_tree::Action::FileNodeWasPressed(file_node_id) => {
+                    let file_node = &state.file_nodes[file_node_id];
+                    if file_node.is_file() {
+                        let path = state.file_node_path(file_node_id);
                         self.send_request(Request::OpenFile(path));
                     }
                 }
             }
         }
         let mut actions = Vec::new();
-        for code_editor in self.code_editors_by_panel_id.values_mut() {
+        for (_, code_editor) in &mut self.code_editors {
             code_editor.handle_event(cx, event, &mut state.code_editor_state, &mut |action| {
                 actions.push(action)
             });
@@ -290,9 +281,10 @@ impl AppInner {
                 match response {
                     Response::GetFileTree(response) => {
                         self.set_file_tree(cx, state, response.unwrap());
+                        let tab = &state.tabs[state.file_tree_tab_id];
                         self.dock
-                            .tab_bar_mut(cx, PanelId(1))
-                            .set_selected_item_id(cx, Some(ItemId(0)));
+                            .get_or_create_tab_bar(cx, tab.panel_id)
+                            .set_selected_item_id(cx, Some(state.file_tree_tab_id));
                     }
                     Response::OpenFile(response) => {
                         match request {
@@ -305,29 +297,24 @@ impl AppInner {
                                     text,
                                 );
                                 let session_id = state.code_editor_state.create_session(document_id);
-                                let panel_id = PanelId(2); // TODO;
-                                let item_id = ItemId(state.next_item_id);
-                                state.next_item_id += 1;
-                                state.tabs_by_item_id.insert(
-                                    item_id,
+                                let tab_id = state.tab_id_allocator.allocate();
+                                match &mut state.panels[state.panel_id] {
+                                    Panel::TabBar { tab_ids } => tab_ids.push(tab_id),
+                                    _ => panic!(),
+                                }
+                                state.tabs.insert(
+                                    tab_id,
                                     Tab {
-                                        panel_id,
+                                        panel_id: state.panel_id,
                                         name,
                                         kind: TabKind::CodeEditor { session_id },
                                     },
                                 );
-                                match state.panels_by_panel_id.get_mut(&panel_id).unwrap() {
-                                    Panel::TabBar { item_ids } => item_ids.push(item_id),
-                                    _ => panic!(),
-                                }
-                                let code_editor = self
-                                    .code_editors_by_panel_id
-                                    .entry(panel_id)
-                                    .or_insert_with(|| CodeEditor::new(cx));
+                                let code_editor = self.get_or_create_code_editor(cx, state.panel_id);
                                 code_editor.set_session_id(cx, session_id);
                                 self.dock
-                                    .tab_bar_mut(cx, panel_id)
-                                    .set_selected_item_id(cx, Some(item_id));
+                                    .get_or_create_tab_bar(cx, state.panel_id)
+                                    .set_selected_item_id(cx, Some(tab_id));
                             }
                             _ => panic!(),
                         }
@@ -359,82 +346,116 @@ impl AppInner {
                     state
                         .code_editor_state
                         .handle_delta_was_applied_notification(&path, delta);
-                    for code_editor in self.code_editors_by_panel_id.values_mut() {
+                    for (_, code_editor) in &mut self.code_editors {
                         code_editor.redraw(cx);
                     }
                 }
             },
         }
     }
+
+    fn get_or_create_code_editor(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut CodeEditor {
+        if !self.code_editors.contains(panel_id) {
+            self.code_editors.insert(panel_id, CodeEditor::new(cx));
+        }
+        &mut self.code_editors[panel_id]
+    }
 }
 
 struct State {
-    next_node_id: usize,
-    next_item_id: usize,
-    panels_by_panel_id: HashMap<PanelId, Panel>,
-    tabs_by_item_id: HashMap<ItemId, Tab>,
-    file_nodes_by_node_id: HashMap<NodeId, FileNode>,
+    panel_id_allocator: IdAllocator,
+    panels: Arena<Panel>,
+    root_panel_id: PanelId,
+    panel_id: PanelId,
+    tab_id_allocator: IdAllocator,
+    tabs: Arena<Tab>,
+    file_tree_tab_id: TabId,
+    file_node_id_allocator: IdAllocator,
+    file_nodes: Arena<FileNode>,
+    root_file_node_id: FileNodeId,
     code_editor_state: code_editor::State,
 }
 
 impl State {
     fn new() -> State {
-        let mut panels_by_panel_id = HashMap::new();
-        panels_by_panel_id.insert(
-            PanelId(0),
-            Panel::Splitter {
-                panel_ids: (PanelId(1), PanelId(2)),
-            },
-        );
-        panels_by_panel_id.insert(
-            PanelId(1),
-            Panel::TabBar {
-                item_ids: vec![ItemId(0)],
-            },
-        );
-        panels_by_panel_id.insert(PanelId(2), Panel::TabBar { item_ids: vec![] });
-        let mut tabs_by_item_id = HashMap::new();
-        tabs_by_item_id.insert(
-            ItemId(0),
-            Tab {
-                panel_id: PanelId(1),
-                name: String::from("File Tree"),
-                kind: TabKind::FileTree,
-            },
-        );
-        let mut file_nodes_by_node_id = HashMap::new();
-        file_nodes_by_node_id.insert(
-            NodeId(0),
+        let mut file_node_id_allocator = IdAllocator::new();
+        let mut file_nodes = Arena::new();
+        let root_file_node_id = file_node_id_allocator.allocate();
+        file_nodes.insert(
+            root_file_node_id,
             FileNode {
                 parent_edge: None,
                 name: String::from("root"),
                 child_edges: Some(Vec::new()),
             },
         );
+
+        let mut panel_id_allocator = IdAllocator::new();
+        let mut panels = Arena::new();
+        let mut tab_id_allocator = IdAllocator::new();
+        let mut tabs = Arena::new();
+
+        let panel_id_0 = panel_id_allocator.allocate();
+        let file_tree_tab_id = tab_id_allocator.allocate();
+        panels.insert(
+            panel_id_0,
+            Panel::TabBar {
+                tab_ids: vec![file_tree_tab_id],
+            },
+        );
+        tabs.insert(
+            file_tree_tab_id,
+            Tab {
+                panel_id: panel_id_0,
+                name: String::from("File Tree"),
+                kind: TabKind::FileTree,
+            },
+        );
+
+        let panel_id_1 = panel_id_allocator.allocate();
+        panels.insert(
+            panel_id_1,
+            Panel::TabBar {
+                tab_ids: vec![]
+            }
+        );
+
+        let root_panel_id = panel_id_allocator.allocate();
+        panels.insert(
+            root_panel_id,
+            Panel::Splitter {
+                panel_ids: (panel_id_0, panel_id_1),
+            },
+        );
+
         State {
-            next_node_id: 1,
-            next_item_id: 1,
-            panels_by_panel_id,
-            tabs_by_item_id,
-            file_nodes_by_node_id,
+            panel_id_allocator,
+            panels,
+            root_panel_id,
+            panel_id: panel_id_1,
+            tab_id_allocator,
+            tabs,
+            file_tree_tab_id,
+            file_node_id_allocator,
+            file_nodes,
+            root_file_node_id,
             code_editor_state: code_editor::State::new(),
         }
     }
 
     fn set_file_tree(&mut self, root: protocol::FileNode) {
         fn create_file_node(
-            next_node_id: &mut usize,
-            file_nodes_by_node_id: &mut HashMap<NodeId, FileNode>,
+            file_node_id_allocator: &mut IdAllocator,
+            file_nodes: &mut Arena<FileNode>,
             parent_edge: Option<FileEdge>,
             node: protocol::FileNode,
         ) -> NodeId {
-            let node_id = NodeId(*next_node_id);
-            *next_node_id += 1;
+            let file_node_id = file_node_id_allocator.allocate();
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),
                 |edge| edge.name.to_string_lossy().into_owned(),
             );
-            let node = FileNode {
+            let file_node = FileNode {
                 parent_edge,
                 name,
                 child_edges: match node {
@@ -443,12 +464,12 @@ impl State {
                             .into_iter()
                             .map(|entry| FileEdge {
                                 name: entry.name.clone(),
-                                node_id: create_file_node(
-                                    next_node_id,
-                                    file_nodes_by_node_id,
+                                file_node_id: create_file_node(
+                                    file_node_id_allocator,
+                                    file_nodes,
                                     Some(FileEdge {
                                         name: entry.name,
-                                        node_id,
+                                        file_node_id,
                                     }),
                                     entry.node,
                                 ),
@@ -458,26 +479,26 @@ impl State {
                     protocol::FileNode::File => None,
                 },
             };
-            file_nodes_by_node_id.insert(node_id, node);
-            node_id
+            file_nodes.insert(file_node_id, file_node);
+            file_node_id
         }
 
-        self.next_node_id = 0;
-        self.file_nodes_by_node_id.clear();
-        create_file_node(
-            &mut self.next_node_id,
-            &mut self.file_nodes_by_node_id,
+        self.file_node_id_allocator.clear();
+        self.file_nodes.clear();
+        self.root_file_node_id = create_file_node(
+            &mut self.file_node_id_allocator,
+            &mut self.file_nodes,
             None,
             root,
         );
     }
 
-    fn file_node_path(&self, node_id: NodeId) -> PathBuf {
+    fn file_node_path(&self, file_node_id: FileNodeId) -> PathBuf {
         let mut components = Vec::new();
-        let mut node = &self.file_nodes_by_node_id[&node_id];
+        let mut node = &self.file_nodes[file_node_id];
         while let Some(edge) = &node.parent_edge {
             components.push(&edge.name);
-            node = &self.file_nodes_by_node_id[&edge.node_id];
+            node = &self.file_nodes[edge.file_node_id];
         }
         components.into_iter().rev().collect::<PathBuf>()
     }
@@ -485,7 +506,7 @@ impl State {
 
 enum Panel {
     Splitter { panel_ids: (PanelId, PanelId) },
-    TabBar { item_ids: Vec<ItemId> },
+    TabBar { tab_ids: Vec<TabId> },
 }
 
 struct Tab {
@@ -515,7 +536,7 @@ impl FileNode {
 #[derive(Debug)]
 struct FileEdge {
     name: OsString,
-    node_id: NodeId,
+    file_node_id: FileNodeId,
 }
 
 fn spawn_connection_listener(listener: TcpListener, server: Server) {
