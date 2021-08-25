@@ -1,7 +1,7 @@
 use {
     crate::{
         cursor_set::CursorSet,
-        delta::{Delta, DeltaBuilder},
+        delta::{self, Delta},
         generational::{Arena, Id, IdAllocator},
         position::Position,
         position_set::PositionSet,
@@ -626,7 +626,7 @@ impl State {
     ) {
         let session = &self.sessions[session_id];
 
-        let mut builder_0 = DeltaBuilder::new();
+        let mut builder_0 = delta::Builder::new();
         for span in session.selections.spans() {
             if span.is_included {
                 builder_0.delete(span.len);
@@ -636,7 +636,7 @@ impl State {
         }
         let delta_0 = builder_0.build();
 
-        let mut builder_1 = DeltaBuilder::new();
+        let mut builder_1 = delta::Builder::new();
         let mut position = Position::origin();
         for distance in session.carets.distances() {
             position += distance;
@@ -662,7 +662,7 @@ impl State {
         let session = &self.sessions[session_id];
         let document = &self.documents[session.document_id];
 
-        let mut builder_0 = DeltaBuilder::new();
+        let mut builder_0 = delta::Builder::new();
         for span in session.selections.spans() {
             if span.is_included {
                 builder_0.delete(span.len);
@@ -672,7 +672,7 @@ impl State {
         }
         let delta_0 = builder_0.build();
 
-        let mut builder_1 = DeltaBuilder::new();
+        let mut builder_1 = delta::Builder::new();
         let mut position = Position::origin();
         for distance in session.carets.distances() {
             position += distance;
