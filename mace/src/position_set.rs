@@ -39,13 +39,13 @@ impl<'a> IntoIterator for &'a PositionSet {
 }
 
 #[derive(Default, Debug)]
-pub struct PositionSetBuilder {
+pub struct Builder {
     positions: Vec<Position>,
 }
 
-impl PositionSetBuilder {
-    pub fn new() -> PositionSetBuilder {
-        PositionSetBuilder::default()
+impl Builder {
+    pub fn new() -> Builder {
+        Builder::default()
     }
 
     pub fn insert(&mut self, position: Position) {

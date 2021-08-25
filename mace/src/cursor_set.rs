@@ -2,8 +2,8 @@ use crate::{
     cursor::Cursor,
     delta::Delta,
     position::Position,
-    position_set::{PositionSet, PositionSetBuilder},
-    range_set::{RangeSet, RangeSetBuilder},
+    position_set::{self, PositionSet},
+    range_set::{self, RangeSet},
     text::Text,
 };
 
@@ -18,7 +18,7 @@ impl CursorSet {
     }
 
     pub fn selections(&self) -> RangeSet {
-        let mut builder = RangeSetBuilder::new();
+        let mut builder = range_set::Builder::new();
         for cursor in &self.cursors {
             builder.include(cursor.range());
         }
@@ -26,7 +26,7 @@ impl CursorSet {
     }
 
     pub fn carets(&self) -> PositionSet {
-        let mut builder = PositionSetBuilder::new();
+        let mut builder = position_set::Builder::new();
         for cursor in &self.cursors {
             builder.insert(cursor.head);
         }
