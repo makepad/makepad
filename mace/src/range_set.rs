@@ -61,13 +61,13 @@ pub struct Span {
 }
 
 #[derive(Debug, Default)]
-pub struct RangeSetBuilder {
+pub struct Builder {
     deltas_by_position: BTreeMap<Position, i32>,
 }
 
-impl RangeSetBuilder {
-    pub fn new() -> RangeSetBuilder {
-        RangeSetBuilder::default()
+impl Builder {
+    pub fn new() -> Builder {
+        Builder::default()
     }
 
     pub fn include(&mut self, range: Range) {
