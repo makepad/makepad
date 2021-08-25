@@ -654,7 +654,6 @@ impl State {
         document.new_undo = true;
     }
 
-
     fn insert_text(
         &mut self,
         session_id: SessionId,
@@ -747,8 +746,6 @@ impl State {
         let session = &self.sessions[session_id];
         let document = &mut self.documents[session.document_id];
         if let Some(undo) = document.undo_stack.pop() {
-            println!("UNDO {:?}", undo);
-
             let session = &mut self.sessions[session_id];
             session.cursors = undo.cursors;
             session.selections = session.cursors.selections();
@@ -800,7 +797,6 @@ impl State {
         let document = &mut self.documents[session.document_id];
         let inverse_delta = delta.clone().invert(&document.text);
         if document.new_undo {
-            println!("NEW {:?}", inverse_delta);
             document.undo_stack.push(Edit {
                 cursors: session.cursors.clone(),
                 delta: inverse_delta,
@@ -808,10 +804,7 @@ impl State {
             document.new_undo = false;
         } else {
             let undo = document.undo_stack.pop().unwrap();
-            println!("COMPOSE {:?}", undo.delta);
-            println!("WITH {:?}", inverse_delta);
-            let delta = undo.delta.compose(inverse_delta);
-            println!("RESULT {:?}", delta);
+            let delta = inverse_delta.compose(undo.delta);
             document.undo_stack.push(Edit {
                 cursors: undo.cursors,
                 delta,
