@@ -444,6 +444,16 @@ impl CodeEditor {
                 self.view.redraw_view(cx);
             }
             Event::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyZ,
+                modifiers,
+                ..
+            }) if modifiers.control || modifiers.logo => {
+                state.undo(session_id, &mut |path, revision, delta| {
+                    dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
+                });
+                self.view.redraw_view(cx);
+            }
+            Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Return,
                 ..
             }) => {
@@ -518,8 +528,10 @@ impl State {
         self.documents.insert(
             document_id,
             Document {
-                path: path.clone(),
                 session_ids: HashSet::new(),
+                new_undo: true,
+                undo_stack: Vec::new(),
+                path: path.clone(),
                 revision,
                 text,
                 tokenizer,
@@ -575,48 +587,73 @@ impl State {
     fn add_cursor(&mut self, session_id: SessionId, position: Position) {
         let session = &mut self.sessions[session_id];
         session.cursors.add(position);
-        self.update_selections_and_carets(session_id);
+        session.selections = session.cursors.selections();
+        session.carets = session.cursors.carets();
+
+        let session = &self.sessions[session_id];
+        let document = &mut self.documents[session.document_id];
+        document.new_undo = true;
     }
 
     fn move_cursors_left(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions[session_id];
         let document = &self.documents[session.document_id];
         session.cursors.move_left(&document.text, select);
-        self.update_selections_and_carets(session_id);
+        session.selections = session.cursors.selections();
+        session.carets = session.cursors.carets();
+
+        let session = &self.sessions[session_id];
+        let document = &mut self.documents[session.document_id];
+        document.new_undo = true;
     }
 
     fn move_cursors_right(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions[session_id];
         let document = &self.documents[session.document_id];
         session.cursors.move_right(&document.text, select);
-        self.update_selections_and_carets(session_id);
+        session.selections = session.cursors.selections();
+        session.carets = session.cursors.carets();
+
+        let session = &self.sessions[session_id];
+        let document = &mut self.documents[session.document_id];
+        document.new_undo = true;
     }
 
     fn move_cursors_up(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions[session_id];
         let document = &self.documents[session.document_id];
         session.cursors.move_up(&document.text, select);
-        self.update_selections_and_carets(session_id);
+        session.selections = session.cursors.selections();
+        session.carets = session.cursors.carets();
+
+        let session = &self.sessions[session_id];
+        let document = &mut self.documents[session.document_id];
+        document.new_undo = true;
     }
 
     fn move_cursors_down(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions[session_id];
         let document = &self.documents[session.document_id];
         session.cursors.move_down(&document.text, select);
-        self.update_selections_and_carets(session_id);
+        session.selections = session.cursors.selections();
+        session.carets = session.cursors.carets();
+
+        let session = &self.sessions[session_id];
+        let document = &mut self.documents[session.document_id];
+        document.new_undo = true;
     }
 
     fn move_cursors_to(&mut self, session_id: SessionId, position: Position, select: bool) {
         let session = &mut self.sessions[session_id];
         session.cursors.move_to(position, select);
-        self.update_selections_and_carets(session_id);
-    }
-
-    fn update_selections_and_carets(&mut self, session_id: SessionId) {
-        let session = &mut self.sessions[session_id];
         session.selections = session.cursors.selections();
         session.carets = session.cursors.carets();
+
+        let session = &self.sessions[session_id];
+        let document = &mut self.documents[session.document_id];
+        document.new_undo = true;
     }
+
 
     fn insert_text(
         &mut self,
@@ -702,6 +739,57 @@ impl State {
         self.apply_delta(session_id, delta, post_apply_delta_request);
     }
 
+    fn undo(
+        &mut self,
+        session_id: SessionId, 
+        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta)
+    ) {
+        let session = &self.sessions[session_id];
+        let document = &mut self.documents[session.document_id];
+        if let Some(undo) = document.undo_stack.pop() {
+            println!("UNDO {:?}", undo);
+
+            let session = &mut self.sessions[session_id];
+            session.cursors = undo.cursors;
+            session.selections = session.cursors.selections();
+            session.carets = session.cursors.carets();
+
+            let document = &self.documents[session.document_id];
+            for other_session_id in document.session_ids.iter().cloned() {
+                if other_session_id == session_id {
+                    continue;
+                }
+
+                let other_session = &mut self.sessions[other_session_id];
+                other_session.cursors.apply_remote_delta(&undo.delta);
+                other_session.selections = other_session.cursors.selections();
+                other_session.carets = other_session.cursors.carets();
+            }
+
+            let session = &mut self.sessions[session_id];
+            let document = &mut self.documents[session.document_id];
+            document.tokenizer.invalidate_cache(&undo.delta);
+            document.text.apply_delta(undo.delta.clone());
+            document.tokenizer.refresh_cache(&document.text);
+            
+            if document.outstanding_deltas.len() == 2 {
+                let outstanding_delta = document.outstanding_deltas.pop_back().unwrap();
+                document
+                    .outstanding_deltas
+                    .push_back(outstanding_delta.compose(undo.delta));
+            } else {
+                document.outstanding_deltas.push_back(undo.delta.clone());
+                if document.outstanding_deltas.len() == 1 {
+                    post_apply_delta_request(
+                        document.path.clone(),
+                        document.revision,
+                        document.outstanding_deltas.front().unwrap().clone(),
+                    );
+                }
+            }
+        }
+    }
+
     fn apply_delta(
         &mut self,
         session_id: SessionId,
@@ -709,14 +797,33 @@ impl State {
         post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
     ) {
         let session = &self.sessions[session_id];
-        let document_id = session.document_id;
+        let document = &mut self.documents[session.document_id];
+        let inverse_delta = delta.clone().invert(&document.text);
+        if document.new_undo {
+            println!("NEW {:?}", inverse_delta);
+            document.undo_stack.push(Edit {
+                cursors: session.cursors.clone(),
+                delta: inverse_delta,
+            });
+            document.new_undo = false;
+        } else {
+            let undo = document.undo_stack.pop().unwrap();
+            println!("COMPOSE {:?}", undo.delta);
+            println!("WITH {:?}", inverse_delta);
+            let delta = undo.delta.compose(inverse_delta);
+            println!("RESULT {:?}", delta);
+            document.undo_stack.push(Edit {
+                cursors: undo.cursors,
+                delta,
+            });
+        }
 
         let session = &mut self.sessions[session_id];
         session.cursors.apply_local_delta(&delta);
         session.selections = session.cursors.selections();
         session.carets = session.cursors.carets();
 
-        let document = &self.documents[document_id];
+        let document = &self.documents[session.document_id];
         for other_session_id in document.session_ids.iter().cloned() {
             if other_session_id == session_id {
                 continue;
@@ -728,10 +835,12 @@ impl State {
             other_session.carets = other_session.cursors.carets();
         }
 
-        let document = &mut self.documents[document_id];
+        let session = &mut self.sessions[session_id];
+        let document = &mut self.documents[session.document_id];
         document.tokenizer.invalidate_cache(&delta);
         document.text.apply_delta(delta.clone());
         document.tokenizer.refresh_cache(&document.text);
+
         if document.outstanding_deltas.len() == 2 {
             let outstanding_delta = document.outstanding_deltas.pop_back().unwrap();
             document
@@ -743,7 +852,7 @@ impl State {
                 post_apply_delta_request(
                     document.path.clone(),
                     document.revision,
-                    document.outstanding_deltas[0].clone(),
+                    document.outstanding_deltas.front().unwrap().clone(),
                 );
             }
         }
@@ -763,11 +872,19 @@ pub type DocumentId = Id;
 
 struct Document {
     session_ids: HashSet<SessionId>,
+    new_undo: bool,
+    undo_stack: Vec<Edit>,
     path: PathBuf,
     revision: usize,
     text: Text,
     tokenizer: Tokenizer,
     outstanding_deltas: VecDeque<Delta>,
+}
+
+#[derive(Debug)]
+struct Edit {
+    cursors: CursorSet,
+    delta: Delta,
 }
 
 #[derive(Clone, Copy, Debug)]
