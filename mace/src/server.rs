@@ -146,7 +146,7 @@ impl Connection {
             .iter()
             .skip(seen_delta_count)
         {
-            delta = delta.transform(unseen_delta.clone()).0;
+            delta = unseen_delta.clone().transform(delta).1;
         }
         document_guard.our_revision += 1;
         document_guard.text.apply_delta(delta.clone());
