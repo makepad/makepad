@@ -2,8 +2,8 @@ use {
     crate::{
         code_editor::{self, CodeEditor, SessionId},
         dock::{self, Dock, PanelId},
-        generational::{Arena, IdAllocator},
         file_tree::{self, FileNodeId, FileTree},
+        generational::{Arena, IdAllocator},
         protocol::{self, Notification, Request, Response, ResponseOrNotification},
         server::{Connection, Server},
         splitter::Splitter,
@@ -144,7 +144,11 @@ impl AppInner {
                     }
                     self.dock.end_tab_bar(cx);
                 }
-                if let Some(item_id) = self.dock.get_or_create_tab_bar(cx, panel_id).selected_item_id() {
+                if let Some(item_id) = self
+                    .dock
+                    .get_or_create_tab_bar(cx, panel_id)
+                    .selected_item_id()
+                {
                     cx.turtle_new_line();
                     self.draw_tab(cx, state, item_id);
                 }
@@ -158,7 +162,7 @@ impl AppInner {
             TabKind::FileTree => self.draw_file_tree(cx, state),
             TabKind::CodeEditor { session_id } => {
                 let code_editor = self.get_or_create_code_editor(cx, tab.panel_id);
-                code_editor.set_session_id(cx,session_id);
+                code_editor.set_session_id(cx, session_id);
                 code_editor.draw(cx, &state.code_editor_state)
             }
         }
@@ -175,7 +179,11 @@ impl AppInner {
         let file_node = &state.file_nodes[file_node_id];
         match &file_node.child_edges {
             Some(child_edges) => {
-                if self.file_tree.begin_folder(cx, file_node_id, &file_node.name).is_ok() {
+                if self
+                    .file_tree
+                    .begin_folder(cx, file_node_id, &file_node.name)
+                    .is_ok()
+                {
                     for child_edge in child_edges {
                         self.draw_file_node(cx, state, child_edge.file_node_id);
                     }
@@ -286,39 +294,35 @@ impl AppInner {
                             .get_or_create_tab_bar(cx, tab.panel_id)
                             .set_selected_item_id(cx, Some(state.file_tree_tab_id));
                     }
-                    Response::OpenFile(response) => {
-                        match request {
-                            Request::OpenFile(path) => {
-                                let (revision, text) = response.unwrap();
-                                let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                                let document_id = state.code_editor_state.create_document(
-                                    path,
-                                    revision,
-                                    text,
-                                );
-                                let session_id = state.code_editor_state.create_session(document_id);
-                                let tab_id = state.tab_id_allocator.allocate();
-                                match &mut state.panels[state.panel_id] {
-                                    Panel::TabBar { tab_ids } => tab_ids.push(tab_id),
-                                    _ => panic!(),
-                                }
-                                state.tabs.insert(
-                                    tab_id,
-                                    Tab {
-                                        panel_id: state.panel_id,
-                                        name,
-                                        kind: TabKind::CodeEditor { session_id },
-                                    },
-                                );
-                                let code_editor = self.get_or_create_code_editor(cx, state.panel_id);
-                                code_editor.set_session_id(cx, session_id);
-                                self.dock
-                                    .get_or_create_tab_bar(cx, state.panel_id)
-                                    .set_selected_item_id(cx, Some(tab_id));
+                    Response::OpenFile(response) => match request {
+                        Request::OpenFile(path) => {
+                            let (revision, text) = response.unwrap();
+                            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                            let document_id = state
+                                .code_editor_state
+                                .create_document(path, revision, text);
+                            let session_id = state.code_editor_state.create_session(document_id);
+                            let tab_id = state.tab_id_allocator.allocate();
+                            match &mut state.panels[state.panel_id] {
+                                Panel::TabBar { tab_ids } => tab_ids.push(tab_id),
+                                _ => panic!(),
                             }
-                            _ => panic!(),
+                            state.tabs.insert(
+                                tab_id,
+                                Tab {
+                                    panel_id: state.panel_id,
+                                    name,
+                                    kind: TabKind::CodeEditor { session_id },
+                                },
+                            );
+                            let code_editor = self.get_or_create_code_editor(cx, state.panel_id);
+                            code_editor.set_session_id(cx, session_id);
+                            self.dock
+                                .get_or_create_tab_bar(cx, state.panel_id)
+                                .set_selected_item_id(cx, Some(tab_id));
                         }
-                    }
+                        _ => panic!(),
+                    },
                     Response::ApplyDelta(response) => match request {
                         Request::ApplyDelta(path, _, _) => {
                             let _ = response.unwrap();
@@ -413,12 +417,7 @@ impl State {
         );
 
         let panel_id_1 = panel_id_allocator.allocate();
-        panels.insert(
-            panel_id_1,
-            Panel::TabBar {
-                tab_ids: vec![]
-            }
-        );
+        panels.insert(panel_id_1, Panel::TabBar { tab_ids: vec![] });
 
         let root_panel_id = panel_id_allocator.allocate();
         panels.insert(

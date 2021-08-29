@@ -23,7 +23,8 @@ impl Dock {
 
     pub fn begin_splitter(&mut self, cx: &mut Cx, panel_id: PanelId) -> Result<(), ()> {
         if !self.panels.contains(panel_id) {
-            self.panels.insert(panel_id, Panel::Splitter(Splitter::new(cx)));
+            self.panels
+                .insert(panel_id, Panel::Splitter(Splitter::new(cx)));
         }
         let splitter = self.panels[panel_id].as_splitter_mut();
         splitter.begin(cx)?;
@@ -67,7 +68,8 @@ impl Dock {
 
     pub fn get_or_create_splitter(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut Splitter {
         if !self.panels.contains(panel_id) {
-            self.panels.insert(panel_id, Panel::Splitter(Splitter::new(cx)));
+            self.panels
+                .insert(panel_id, Panel::Splitter(Splitter::new(cx)));
         }
         self.panels[panel_id].as_splitter_mut()
     }
