@@ -99,7 +99,12 @@ impl FileTree {
         self.view.end_view(cx);
     }
 
-    pub fn begin_folder(&mut self, cx: &mut Cx, file_node_id: NodeId, name: &str) -> Result<(), ()> {
+    pub fn begin_folder(
+        &mut self,
+        cx: &mut Cx,
+        file_node_id: NodeId,
+        name: &str,
+    ) -> Result<(), ()> {
         let info = self.logic.begin_node(file_node_id);
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let count = self.count;
@@ -113,7 +118,8 @@ impl FileTree {
         self.file_node_name.font_scale = self.stack.last().cloned().unwrap_or(1.0);
         self.file_node_name.draw_text_walk(cx, name);
         self.file_node.end_quad(cx);
-        self.logic.set_node_area(file_node_id, self.file_node.area());
+        self.logic
+            .set_node_area(file_node_id, self.file_node.area());
         cx.turtle_new_line();
         self.stack.push(scale * info.is_expanded_fraction);
         if info.is_fully_collapsed() {
@@ -141,7 +147,8 @@ impl FileTree {
         self.file_node_name.font_scale = scale;
         self.file_node_name.draw_text_walk(cx, name);
         self.file_node.end_quad(cx);
-        self.logic.set_node_area(file_node_id, self.file_node.area());
+        self.logic
+            .set_node_area(file_node_id, self.file_node.area());
         cx.turtle_new_line();
         self.logic.end_node();
     }
@@ -153,7 +160,8 @@ impl FileTree {
         self.file_node_color_selected = live_vec4!(cx, self::file_node_color_selected);
         self.file_node_color_hovered_even = live_vec4!(cx, self::file_node_color_hovered_even);
         self.file_node_color_hovered_odd = live_vec4!(cx, self::file_node_color_hovered_odd);
-        self.file_node_color_hovered_selected = live_vec4!(cx, self::file_node_color_hovered_selected);
+        self.file_node_color_hovered_selected =
+            live_vec4!(cx, self::file_node_color_hovered_selected);
         self.indent_width = live_float!(cx, self::indent_width);
         self.folder_icon_walk = Walk {
             width: Width::Fix(live_float!(cx, self::folder_icon_width)),
@@ -245,7 +253,12 @@ impl FileTree {
         }
     }
 
-    pub fn toggle_file_node_is_expanded(&mut self, cx: &mut Cx, file_node_id: NodeId, should_animate: bool) {
+    pub fn toggle_file_node_is_expanded(
+        &mut self,
+        cx: &mut Cx,
+        file_node_id: NodeId,
+        should_animate: bool,
+    ) {
         if self
             .logic
             .toggle_node_is_expanded(cx, file_node_id, should_animate)

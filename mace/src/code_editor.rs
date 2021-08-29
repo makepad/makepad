@@ -21,23 +21,9 @@ use {
 };
 
 pub struct CodeEditor {
-    view: ScrollView,
-    selection: DrawColor,
-    text: DrawText,
-    text_glyph_size: Vec2,
-    text_color_comment: Vec4,
-    text_color_identifier: Vec4,
-    text_color_function_identifier: Vec4,
-    text_color_branch_keyword: Vec4,
-    text_color_loop_keyword: Vec4,
-    text_color_other_keyword: Vec4,
-    text_color_number: Vec4,
-    text_color_punctuator: Vec4,
-    text_color_string: Vec4,
-    text_color_whitespace: Vec4,
-    text_color_unknown: Vec4,
-    caret: DrawColor,
-    session_id: Option<SessionId>,
+    shared: Shared,
+    view_id_allocator: IdAllocator,
+    views: Arena<View>,
 }
 
 impl CodeEditor {
@@ -64,33 +50,107 @@ impl CodeEditor {
 
     pub fn new(cx: &mut Cx) -> CodeEditor {
         CodeEditor {
-            view: ScrollView::new_standard_hv(cx),
-            selection: DrawColor::new(cx, default_shader!()).with_draw_depth(1.0),
-            text: DrawText::new(cx, default_shader!()).with_draw_depth(2.0),
-            text_glyph_size: Vec2::default(),
-            text_color_comment: Vec4::default(),
-            text_color_identifier: Vec4::default(),
-            text_color_function_identifier: Vec4::default(),
-            text_color_number: Vec4::default(),
-            text_color_punctuator: Vec4::default(),
-            text_color_branch_keyword: Vec4::default(),
-            text_color_loop_keyword: Vec4::default(),
-            text_color_other_keyword: Vec4::default(),
-            text_color_string: Vec4::default(),
-            text_color_whitespace: Vec4::default(),
-            text_color_unknown: Vec4::default(),
-            caret: DrawColor::new(cx, default_shader!()).with_draw_depth(3.0),
-            session_id: None,
+            view_id_allocator: IdAllocator::new(),
+            views: Arena::new(),
+            shared: Shared {
+                selection: DrawColor::new(cx, default_shader!()).with_draw_depth(1.0),
+                text: DrawText::new(cx, default_shader!()).with_draw_depth(2.0),
+                text_glyph_size: Vec2::default(),
+                text_color_comment: Vec4::default(),
+                text_color_identifier: Vec4::default(),
+                text_color_function_identifier: Vec4::default(),
+                text_color_number: Vec4::default(),
+                text_color_punctuator: Vec4::default(),
+                text_color_branch_keyword: Vec4::default(),
+                text_color_loop_keyword: Vec4::default(),
+                text_color_other_keyword: Vec4::default(),
+                text_color_string: Vec4::default(),
+                text_color_whitespace: Vec4::default(),
+                text_color_unknown: Vec4::default(),
+                caret: DrawColor::new(cx, default_shader!()).with_draw_depth(3.0),
+                session_id: None,
+            },
         }
     }
 
     pub fn draw(&mut self, cx: &mut Cx, state: &State) {
-        if self.view.begin_view(cx, Layout::default()).is_ok() {
-            let session_id = self.session_id.unwrap();
-            let session = &state.sessions[session_id];
+        for (_, view) in &mut self.views {
+            self.shared.draw(cx, view, state);
+        }
+    }
+
+    pub fn create_view(&mut self, cx: &mut Cx, state: &mut State, session_id: SessionId) -> ViewId {
+        let view_id = self.view_id_allocator.allocate();
+        self.views.insert(
+            view_id,
+            View {
+                view: ScrollView::new_standard_hv(cx),
+                session_id,
+            },
+        );
+        let session = &mut state.sessions[session_id];
+        session.view_id = Some(view_id);
+        view_id
+    }
+
+    pub fn view_session_id(&self, view_id: ViewId) -> SessionId {
+        let view = &self.views[view_id];
+        view.session_id
+    }
+
+    pub fn set_view_session_id(
+        &mut self,
+        cx: &mut Cx,
+        view_id: ViewId,
+        state: &mut State,
+        session_id: SessionId,
+    ) {
+        let view = &mut self.views[view_id];
+        let session = &mut state.sessions[view.session_id];
+        session.view_id = None;
+        view.session_id = session_id;
+        let session = &mut state.sessions[view.session_id];
+        session.view_id = Some(view_id);
+    }
+
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        state: &mut State,
+        event: &mut Event,
+        dispatch_action: &mut dyn FnMut(Action),
+    ) {
+        self.shared
+            .handle_event(cx, &mut self.views, state, event, dispatch_action)
+    }
+}
+
+struct Shared {
+    selection: DrawColor,
+    text: DrawText,
+    text_glyph_size: Vec2,
+    text_color_comment: Vec4,
+    text_color_identifier: Vec4,
+    text_color_function_identifier: Vec4,
+    text_color_branch_keyword: Vec4,
+    text_color_loop_keyword: Vec4,
+    text_color_other_keyword: Vec4,
+    text_color_number: Vec4,
+    text_color_punctuator: Vec4,
+    text_color_string: Vec4,
+    text_color_whitespace: Vec4,
+    text_color_unknown: Vec4,
+    caret: DrawColor,
+    session_id: Option<SessionId>,
+}
+
+impl Shared {
+    fn draw(&mut self, cx: &mut Cx, view: &mut View, state: &State) {
+        if view.view.begin_view(cx, Layout::default()).is_ok() {
+            let session = &state.sessions[view.session_id];
             let document = &state.documents[session.document_id];
             self.apply_style(cx);
-            let visible_lines = self.visible_lines(cx, document.text.as_lines().len());
+            let visible_lines = self.visible_lines(cx, view, document.text.as_lines().len());
             self.draw_selections(cx, &session.selections, &document.text, visible_lines);
             self.draw_text(
                 cx,
@@ -100,7 +160,7 @@ impl CodeEditor {
             );
             self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
             self.set_turtle_bounds(cx, &document.text);
-            self.view.end_view(cx);
+            view.view.end_view(cx);
         }
     }
 
@@ -122,12 +182,12 @@ impl CodeEditor {
         self.caret.color = live_vec4!(cx, self::caret_color);
     }
 
-    fn visible_lines(&mut self, cx: &mut Cx, line_count: usize) -> VisibleLines {
+    fn visible_lines(&mut self, cx: &mut Cx, view: &View, line_count: usize) -> VisibleLines {
         let Rect {
             pos: origin,
             size: viewport_size,
         } = cx.get_turtle_rect();
-        let viewport_start = self.view.get_scroll_pos(cx);
+        let viewport_start = view.view.get_scroll_pos(cx);
         let viewport_end = viewport_start + viewport_size;
         let mut start_y = origin.y;
         let mut line_iter = 0..line_count;
@@ -322,6 +382,19 @@ impl CodeEditor {
         self.caret.end_many(cx);
     }
 
+    fn set_turtle_bounds(&mut self, cx: &mut Cx, text: &Text) {
+        cx.set_turtle_bounds(Vec2 {
+            x: text
+                .as_lines()
+                .iter()
+                .map(|line| line.len() as f32 * self.text_glyph_size.x)
+                .fold(0.0, |max_line_width, line_width| {
+                    max_line_width.max(line_width)
+                }),
+            y: text.as_lines().iter().map(|_| self.text_glyph_size.y).sum(),
+        });
+    }
+
     fn text_color(&self, kind: TokenKind, next_kind: Option<TokenKind>) -> Vec4 {
         match (kind, next_kind) {
             (TokenKind::Comment, _) => self.text_color_comment,
@@ -340,156 +413,6 @@ impl CodeEditor {
         }
     }
 
-    fn set_turtle_bounds(&mut self, cx: &mut Cx, text: &Text) {
-        cx.set_turtle_bounds(Vec2 {
-            x: text
-                .as_lines()
-                .iter()
-                .map(|line| line.len() as f32 * self.text_glyph_size.x)
-                .fold(0.0, |max_line_width, line_width| {
-                    max_line_width.max(line_width)
-                }),
-            y: text.as_lines().iter().map(|_| self.text_glyph_size.y).sum(),
-        });
-    }
-
-    pub fn session_id(&self) -> Option<SessionId> {
-        self.session_id
-    }
-
-    pub fn set_session_id(&mut self, cx: &mut Cx, session_id: SessionId) {
-        self.session_id = Some(session_id);
-        self.view.redraw_view(cx);
-    }
-
-    pub fn redraw(&mut self, cx: &mut Cx) {
-        self.view.redraw_view(cx);
-    }
-
-    pub fn handle_event(
-        &mut self,
-        cx: &mut Cx,
-        event: &mut Event,
-        state: &mut State,
-        dispatch_action: &mut dyn FnMut(Action),
-    ) {
-        let session_id = self.session_id.unwrap();
-        if self.view.handle_scroll_view(cx, event) {
-            self.view.redraw_view(cx);
-        }
-        match event.hits(cx, self.view.area(), HitOpt::default()) {
-            Event::FingerDown(FingerDownEvent { rel, modifiers, .. }) => {
-                // TODO: How to handle key focus?
-                cx.set_key_focus(self.view.area());
-                cx.set_hover_mouse_cursor(MouseCursor::Text);
-                let session = &state.sessions[session_id];
-                let document = &state.documents[session.document_id];
-                let position = self.position(&document.text, rel);
-                match modifiers {
-                    KeyModifiers { control: true, .. } => {
-                        state.add_cursor(session_id, position);
-                    }
-                    KeyModifiers { shift, .. } => {
-                        state.move_cursors_to(session_id, position, shift);
-                    }
-                }
-                self.view.redraw_view(cx);
-            }
-            Event::FingerMove(FingerMoveEvent { rel, .. }) => {
-                let session = &state.sessions[session_id];
-                let document = &state.documents[session.document_id];
-                let position = self.position(&document.text, rel);
-                state.move_cursors_to(session_id, position, true);
-                self.view.redraw_view(cx);
-            }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::ArrowLeft,
-                modifiers: KeyModifiers { shift, .. },
-                ..
-            }) => {
-                state.move_cursors_left(session_id, shift);
-                self.view.redraw_view(cx);
-            }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::ArrowRight,
-                modifiers: KeyModifiers { shift, .. },
-                ..
-            }) => {
-                state.move_cursors_right(session_id, shift);
-                self.view.redraw_view(cx);
-            }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::ArrowUp,
-                modifiers: KeyModifiers { shift, .. },
-                ..
-            }) => {
-                state.move_cursors_up(session_id, shift);
-                self.view.redraw_view(cx);
-            }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::ArrowDown,
-                modifiers: KeyModifiers { shift, .. },
-                ..
-            }) => {
-                state.move_cursors_down(session_id, shift);
-                self.view.redraw_view(cx);
-            }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::Backspace,
-                ..
-            }) => {
-                state.insert_backspace(session_id, &mut |path, revision, delta| {
-                    dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
-                });
-                self.view.redraw_view(cx);
-            }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::KeyZ,
-                modifiers,
-                ..
-            }) if modifiers.control || modifiers.logo => {
-                if modifiers.shift {
-                    state.redo(session_id, &mut |path, revision, delta| {
-                        dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
-                    });
-                } else {
-                    state.undo(session_id, &mut |path, revision, delta| {
-                        dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
-                    });
-                }
-                self.view.redraw_view(cx);
-            }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::Return,
-                ..
-            }) => {
-                state.insert_text(
-                    session_id,
-                    Text::from(vec![vec![], vec![]]),
-                    &mut |path, revision, delta| {
-                        dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
-                    },
-                );
-                self.view.redraw_view(cx);
-            }
-            Event::TextInput(TextInputEvent { input, .. }) => {
-                state.insert_text(
-                    session_id,
-                    input
-                        .lines()
-                        .map(|line| line.chars().collect::<Vec<_>>())
-                        .collect::<Vec<_>>()
-                        .into(),
-                    &mut |path, revision, delta| {
-                        dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
-                    },
-                );
-                self.view.redraw_view(cx);
-            }
-            _ => {}
-        }
-    }
-
     fn position(&self, text: &Text, position: Vec2) -> Position {
         let line = (position.y / self.text_glyph_size.y) as usize;
         Position {
@@ -498,6 +421,179 @@ impl CodeEditor {
                 .min(text.as_lines()[line].len()),
         }
     }
+
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        views: &mut Arena<View>,
+        state: &mut State,
+        event: &mut Event,
+        dispatch_action: &mut dyn FnMut(Action),
+    ) {
+        for (_, view) in views {
+            if view.view.handle_scroll_view(cx, event) {
+                view.view.redraw_view(cx);
+            }
+            match event.hits(cx, view.view.area(), HitOpt::default()) {
+                Event::FingerDown(FingerDownEvent { rel, modifiers, .. }) => {
+                    // TODO: How to handle key focus?
+                    cx.set_key_focus(view.view.area());
+                    cx.set_hover_mouse_cursor(MouseCursor::Text);
+                    let session = &state.sessions[view.session_id];
+                    let document = &state.documents[session.document_id];
+                    let position = self.position(&document.text, rel);
+                    match modifiers {
+                        KeyModifiers { control: true, .. } => {
+                            state.add_cursor(view.session_id, position);
+                        }
+                        KeyModifiers { shift, .. } => {
+                            state.move_cursors_to(view.session_id, position, shift);
+                        }
+                    }
+                    view.view.redraw_view(cx);
+                }
+                Event::FingerMove(FingerMoveEvent { rel, .. }) => {
+                    let session = &state.sessions[view.session_id];
+                    let document = &state.documents[session.document_id];
+                    let position = self.position(&document.text, rel);
+                    state.move_cursors_to(view.session_id, position, true);
+                    view.view.redraw_view(cx);
+                }
+                Event::KeyDown(KeyEvent {
+                    key_code: KeyCode::ArrowLeft,
+                    modifiers: KeyModifiers { shift, .. },
+                    ..
+                }) => {
+                    state.move_cursors_left(view.session_id, shift);
+                    view.view.redraw_view(cx);
+                }
+                Event::KeyDown(KeyEvent {
+                    key_code: KeyCode::ArrowRight,
+                    modifiers: KeyModifiers { shift, .. },
+                    ..
+                }) => {
+                    state.move_cursors_right(view.session_id, shift);
+                    view.view.redraw_view(cx);
+                }
+                Event::KeyDown(KeyEvent {
+                    key_code: KeyCode::ArrowUp,
+                    modifiers: KeyModifiers { shift, .. },
+                    ..
+                }) => {
+                    state.move_cursors_up(view.session_id, shift);
+                    view.view.redraw_view(cx);
+                }
+                Event::KeyDown(KeyEvent {
+                    key_code: KeyCode::ArrowDown,
+                    modifiers: KeyModifiers { shift, .. },
+                    ..
+                }) => {
+                    state.move_cursors_down(view.session_id, shift);
+                    view.view.redraw_view(cx);
+                }
+                Event::KeyDown(KeyEvent {
+                    key_code: KeyCode::Backspace,
+                    ..
+                }) => {
+                    state.insert_backspace(view.session_id, &mut |path, revision, delta| {
+                        dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
+                    });
+                    let session = &state.sessions[view.session_id];
+                    let document = &state.documents[session.document_id];
+                    for session_id in &document.session_ids {
+                        let session = &state.sessions[*session_id];
+                        if let Some(view_id) = session.view_id {
+                            let view = &mut views[view_id];
+                            view.view.redraw_view(cx);
+                        }
+                    }
+                }
+                Event::KeyDown(KeyEvent {
+                    key_code: KeyCode::KeyZ,
+                    modifiers,
+                    ..
+                }) if modifiers.control || modifiers.logo => {
+                    if modifiers.shift {
+                        state.redo(view.session_id, &mut |path, revision, delta| {
+                            dispatch_action(Action::ApplyDeltaRequestWasPosted(
+                                path, revision, delta,
+                            ));
+                        });
+                    } else {
+                        state.undo(view.session_id, &mut |path, revision, delta| {
+                            dispatch_action(Action::ApplyDeltaRequestWasPosted(
+                                path, revision, delta,
+                            ));
+                        });
+                    }
+                    let session = &state.sessions[view.session_id];
+                    let document = &state.documents[session.document_id];
+                    for session_id in &document.session_ids {
+                        let session = &state.sessions[*session_id];
+                        if let Some(view_id) = session.view_id {
+                            let view = &mut views[view_id];
+                            view.view.redraw_view(cx);
+                        }
+                    }
+                }
+                Event::KeyDown(KeyEvent {
+                    key_code: KeyCode::Return,
+                    ..
+                }) => {
+                    state.insert_text(
+                        view.session_id,
+                        Text::from(vec![vec![], vec![]]),
+                        &mut |path, revision, delta| {
+                            dispatch_action(Action::ApplyDeltaRequestWasPosted(
+                                path, revision, delta,
+                            ));
+                        },
+                    );
+                    let session = &state.sessions[view.session_id];
+                    let document = &state.documents[session.document_id];
+                    for session_id in &document.session_ids {
+                        let session = &state.sessions[*session_id];
+                        if let Some(view_id) = session.view_id {
+                            let view = &mut views[view_id];
+                            view.view.redraw_view(cx);
+                        }
+                    }
+                }
+                Event::TextInput(TextInputEvent { input, .. }) => {
+                    state.insert_text(
+                        view.session_id,
+                        input
+                            .lines()
+                            .map(|line| line.chars().collect::<Vec<_>>())
+                            .collect::<Vec<_>>()
+                            .into(),
+                        &mut |path, revision, delta| {
+                            dispatch_action(Action::ApplyDeltaRequestWasPosted(
+                                path, revision, delta,
+                            ));
+                        },
+                    );
+                    let session = &state.sessions[view.session_id];
+                    let document = &state.documents[session.document_id];
+                    for session_id in &document.session_ids {
+                        let session = &state.sessions[*session_id];
+                        if let Some(view_id) = session.view_id {
+                            let view = &mut views[view_id];
+                            view.view.redraw_view(cx);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+pub type ViewId = Id;
+
+struct View {
+    view: ScrollView,
+    session_id: SessionId,
 }
 
 #[derive(Default)]
@@ -517,6 +613,7 @@ impl State {
     pub fn create_session(&mut self, document_id: DocumentId) -> SessionId {
         let session_id = self.session_id_allocator.allocate();
         let session = Session {
+            view_id: None,
             cursors: CursorSet::new(),
             selections: RangeSet::new(),
             carets: PositionSet::new(),
@@ -725,8 +822,8 @@ impl State {
 
     fn undo(
         &mut self,
-        session_id: SessionId, 
-        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta)
+        session_id: SessionId,
+        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
     ) {
         let session = &self.sessions[session_id];
         let document = &mut self.documents[session.document_id];
@@ -736,7 +833,7 @@ impl State {
             let inverse_delta = undo.delta.clone().invert(&document.text);
             document.redo_stack.push(Edit {
                 cursors: session.cursors.clone(),
-                delta: inverse_delta
+                delta: inverse_delta,
             });
 
             let session = &mut self.sessions[session_id];
@@ -761,7 +858,7 @@ impl State {
             document.tokenizer.invalidate_cache(&undo.delta);
             document.text.apply_delta(undo.delta.clone());
             document.tokenizer.refresh_cache(&document.text);
-            
+
             if document.outstanding_deltas.len() == 2 {
                 let outstanding_delta = document.outstanding_deltas.pop_back().unwrap();
                 document
@@ -782,8 +879,8 @@ impl State {
 
     fn redo(
         &mut self,
-        session_id: SessionId, 
-        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta)
+        session_id: SessionId,
+        post_apply_delta_request: &mut dyn FnMut(PathBuf, usize, Delta),
     ) {
         let session = &self.sessions[session_id];
         let document = &mut self.documents[session.document_id];
@@ -793,7 +890,7 @@ impl State {
             let inverse_delta = redo.delta.clone().invert(&document.text);
             document.undo_stack.push(Edit {
                 cursors: session.cursors.clone(),
-                delta: inverse_delta
+                delta: inverse_delta,
             });
 
             let session = &mut self.sessions[session_id];
@@ -818,7 +915,7 @@ impl State {
             document.tokenizer.invalidate_cache(&redo.delta);
             document.text.apply_delta(redo.delta.clone());
             document.tokenizer.refresh_cache(&document.text);
-            
+
             if document.outstanding_deltas.len() == 2 {
                 let outstanding_delta = document.outstanding_deltas.pop_back().unwrap();
                 document
@@ -850,7 +947,7 @@ impl State {
             cursors: session.cursors.clone(),
             delta: inverse_delta,
         });
-        
+
         let session = &mut self.sessions[session_id];
         session.cursors.apply_local_delta(&delta);
         session.selections = session.cursors.selections();
@@ -895,6 +992,7 @@ impl State {
 pub type SessionId = Id;
 
 struct Session {
+    view_id: Option<ViewId>,
     cursors: CursorSet,
     selections: RangeSet,
     carets: PositionSet,
