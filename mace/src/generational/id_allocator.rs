@@ -1,4 +1,4 @@
-use super::Id;
+use {std::{iter::Enumerate, slice}, super::Id};
 
 #[derive(Clone, Debug, Default)]
 pub struct IdAllocator {
@@ -43,8 +43,45 @@ impl IdAllocator {
         self.free_entry_indices.push(index.index);
     }
 
+    pub fn iter(&self) -> Iter<'_> {
+        Iter {
+            iter: self.entries.iter().enumerate(),
+        }
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear()
+    }
+}
+
+impl<'a> IntoIterator for &'a IdAllocator {
+    type Item = Id;
+    type IntoIter = Iter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+pub struct Iter<'a> {
+    iter: Enumerate<slice::Iter<'a, Entry>>,
+}
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = Id;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.iter.next()? {
+                (index, entry) if entry.is_used => {
+                    break Some(Id {
+                        index,
+                        generation: entry.generation,
+                    });
+                }
+                _ => continue,
+            }
+        }
     }
 }
 
