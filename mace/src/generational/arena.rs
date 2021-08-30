@@ -179,7 +179,7 @@ pub struct IntoIter<T> {
 
 impl<T> Iterator for IntoIter<T> {
     type Item = T;
-    
+
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self.iter.next()? {

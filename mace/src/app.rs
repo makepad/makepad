@@ -164,7 +164,8 @@ impl AppInner {
                 let panel = &state.panels[tab.panel_id];
                 match panel {
                     Panel::TabBar { view_id, .. } => {
-                        self.code_editor.draw(cx, &state.code_editor_state, view_id.unwrap());
+                        self.code_editor
+                            .draw(cx, &state.code_editor_state, view_id.unwrap());
                     }
                     _ => panic!(),
                 }
@@ -229,7 +230,7 @@ impl AppInner {
                         }
                         _ => {}
                     }
-                },
+                }
             }
         }
 
@@ -249,9 +250,10 @@ impl AppInner {
         }
 
         let mut actions = Vec::new();
-        self.code_editor.handle_event(cx, &mut state.code_editor_state, event, &mut |action| {
-            actions.push(action)
-        });
+        self.code_editor
+            .handle_event(cx, &mut state.code_editor_state, event, &mut |action| {
+                actions.push(action)
+            });
         for action in actions {
             match action {
                 code_editor::Action::ApplyDeltaRequestWasPosted(path, revision, delta) => {
@@ -359,19 +361,33 @@ impl AppInner {
         }
     }
 
-    fn create_or_update_view(&mut self, cx: &mut Cx, state: &mut State, panel_id: PanelId, session_id: SessionId) {
+    fn create_or_update_view(
+        &mut self,
+        cx: &mut Cx,
+        state: &mut State,
+        panel_id: PanelId,
+        session_id: SessionId,
+    ) {
         let panel = &mut state.panels[panel_id];
         match panel {
-            Panel::TabBar { view_id, .. } => {
-                match view_id {
-                    Some(view_id) => {
-                        self.code_editor.set_view_session_id(&mut state.code_editor_state, *view_id, session_id);
-                    }
-                    None => {
-                        *view_id = Some(self.code_editor.create_view(cx, &mut state.code_editor_state, session_id));
-                    }
+            Panel::TabBar { view_id, .. } => match view_id {
+                Some(view_id) => {
+                    self.code_editor.set_view_session_id(
+                        &mut state.code_editor_state,
+                        *view_id,
+                        session_id,
+                    );
+                    self.code_editor.redraw_view(cx, *view_id);
                 }
-            }
+                None => {
+                    *view_id = Some(self.code_editor.create_view(
+                        cx,
+                        &mut state.code_editor_state,
+                        session_id,
+                    ));
+                    self.code_editor.redraw_view(cx, view_id.unwrap());
+                }
+            },
             _ => panic!(),
         }
     }
@@ -429,10 +445,13 @@ impl State {
         );
 
         let panel_id_1 = panel_id_allocator.allocate();
-        panels.insert(panel_id_1, Panel::TabBar {
-            tab_ids: vec![],
-            view_id: None,
-        });
+        panels.insert(
+            panel_id_1,
+            Panel::TabBar {
+                tab_ids: vec![],
+                view_id: None,
+            },
+        );
 
         let root_panel_id = panel_id_allocator.allocate();
         panels.insert(
@@ -525,7 +544,7 @@ enum Panel {
     TabBar {
         tab_ids: Vec<TabId>,
         view_id: Option<ViewId>,
-    }
+    },
 }
 
 struct Tab {
