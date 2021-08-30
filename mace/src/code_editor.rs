@@ -21,9 +21,23 @@ use {
 };
 
 pub struct CodeEditor {
-    shared: Shared,
     view_id_allocator: IdAllocator,
     views: Arena<View>,
+    selection: DrawColor,
+    text: DrawText,
+    text_glyph_size: Vec2,
+    text_color_comment: Vec4,
+    text_color_identifier: Vec4,
+    text_color_function_identifier: Vec4,
+    text_color_branch_keyword: Vec4,
+    text_color_loop_keyword: Vec4,
+    text_color_other_keyword: Vec4,
+    text_color_number: Vec4,
+    text_color_punctuator: Vec4,
+    text_color_string: Vec4,
+    text_color_whitespace: Vec4,
+    text_color_unknown: Vec4,
+    caret: DrawColor,
 }
 
 impl CodeEditor {
@@ -52,105 +66,31 @@ impl CodeEditor {
         CodeEditor {
             view_id_allocator: IdAllocator::new(),
             views: Arena::new(),
-            shared: Shared {
-                selection: DrawColor::new(cx, default_shader!()).with_draw_depth(1.0),
-                text: DrawText::new(cx, default_shader!()).with_draw_depth(2.0),
-                text_glyph_size: Vec2::default(),
-                text_color_comment: Vec4::default(),
-                text_color_identifier: Vec4::default(),
-                text_color_function_identifier: Vec4::default(),
-                text_color_number: Vec4::default(),
-                text_color_punctuator: Vec4::default(),
-                text_color_branch_keyword: Vec4::default(),
-                text_color_loop_keyword: Vec4::default(),
-                text_color_other_keyword: Vec4::default(),
-                text_color_string: Vec4::default(),
-                text_color_whitespace: Vec4::default(),
-                text_color_unknown: Vec4::default(),
-                caret: DrawColor::new(cx, default_shader!()).with_draw_depth(3.0),
-                session_id: None,
-            },
+            selection: DrawColor::new(cx, default_shader!()).with_draw_depth(1.0),
+            text: DrawText::new(cx, default_shader!()).with_draw_depth(2.0),
+            text_glyph_size: Vec2::default(),
+            text_color_comment: Vec4::default(),
+            text_color_identifier: Vec4::default(),
+            text_color_function_identifier: Vec4::default(),
+            text_color_number: Vec4::default(),
+            text_color_punctuator: Vec4::default(),
+            text_color_branch_keyword: Vec4::default(),
+            text_color_loop_keyword: Vec4::default(),
+            text_color_other_keyword: Vec4::default(),
+            text_color_string: Vec4::default(),
+            text_color_whitespace: Vec4::default(),
+            text_color_unknown: Vec4::default(),
+            caret: DrawColor::new(cx, default_shader!()).with_draw_depth(3.0),
         }
     }
 
-    pub fn draw(&mut self, cx: &mut Cx, state: &State) {
-        for (_, view) in &mut self.views {
-            self.shared.draw(cx, view, state);
-        }
-    }
-
-    pub fn create_view(&mut self, cx: &mut Cx, state: &mut State, session_id: SessionId) -> ViewId {
-        let view_id = self.view_id_allocator.allocate();
-        self.views.insert(
-            view_id,
-            View {
-                view: ScrollView::new_standard_hv(cx),
-                session_id,
-            },
-        );
-        let session = &mut state.sessions[session_id];
-        session.view_id = Some(view_id);
-        view_id
-    }
-
-    pub fn view_session_id(&self, view_id: ViewId) -> SessionId {
-        let view = &self.views[view_id];
-        view.session_id
-    }
-
-    pub fn set_view_session_id(
-        &mut self,
-        cx: &mut Cx,
-        view_id: ViewId,
-        state: &mut State,
-        session_id: SessionId,
-    ) {
+    pub fn draw(&mut self, cx: &mut Cx, state: &State, view_id: ViewId) {
         let view = &mut self.views[view_id];
-        let session = &mut state.sessions[view.session_id];
-        session.view_id = None;
-        view.session_id = session_id;
-        let session = &mut state.sessions[view.session_id];
-        session.view_id = Some(view_id);
-    }
-
-    pub fn handle_event(
-        &mut self,
-        cx: &mut Cx,
-        state: &mut State,
-        event: &mut Event,
-        dispatch_action: &mut dyn FnMut(Action),
-    ) {
-        self.shared
-            .handle_event(cx, &mut self.views, state, event, dispatch_action)
-    }
-}
-
-struct Shared {
-    selection: DrawColor,
-    text: DrawText,
-    text_glyph_size: Vec2,
-    text_color_comment: Vec4,
-    text_color_identifier: Vec4,
-    text_color_function_identifier: Vec4,
-    text_color_branch_keyword: Vec4,
-    text_color_loop_keyword: Vec4,
-    text_color_other_keyword: Vec4,
-    text_color_number: Vec4,
-    text_color_punctuator: Vec4,
-    text_color_string: Vec4,
-    text_color_whitespace: Vec4,
-    text_color_unknown: Vec4,
-    caret: DrawColor,
-    session_id: Option<SessionId>,
-}
-
-impl Shared {
-    fn draw(&mut self, cx: &mut Cx, view: &mut View, state: &State) {
         if view.view.begin_view(cx, Layout::default()).is_ok() {
             let session = &state.sessions[view.session_id];
             let document = &state.documents[session.document_id];
             self.apply_style(cx);
-            let visible_lines = self.visible_lines(cx, view, document.text.as_lines().len());
+            let visible_lines = self.visible_lines(cx, view_id, document.text.as_lines().len());
             self.draw_selections(cx, &session.selections, &document.text, visible_lines);
             self.draw_text(
                 cx,
@@ -160,6 +100,7 @@ impl Shared {
             );
             self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
             self.set_turtle_bounds(cx, &document.text);
+            let view = &mut self.views[view_id];
             view.view.end_view(cx);
         }
     }
@@ -182,11 +123,12 @@ impl Shared {
         self.caret.color = live_vec4!(cx, self::caret_color);
     }
 
-    fn visible_lines(&mut self, cx: &mut Cx, view: &View, line_count: usize) -> VisibleLines {
+    fn visible_lines(&mut self, cx: &mut Cx, view_id: ViewId, line_count: usize) -> VisibleLines {
         let Rect {
             pos: origin,
             size: viewport_size,
         } = cx.get_turtle_rect();
+        let view = &self.views[view_id];
         let viewport_start = view.view.get_scroll_pos(cx);
         let viewport_end = viewport_start + viewport_size;
         let mut start_y = origin.y;
@@ -413,35 +355,62 @@ impl Shared {
         }
     }
 
-    fn position(&self, text: &Text, position: Vec2) -> Position {
-        let line = (position.y / self.text_glyph_size.y) as usize;
-        Position {
-            line,
-            column: ((position.x / self.text_glyph_size.x) as usize)
-                .min(text.as_lines()[line].len()),
-        }
+    pub fn create_view(&mut self, cx: &mut Cx, state: &mut State, session_id: SessionId) -> ViewId {
+        let view_id = self.view_id_allocator.allocate();
+        self.views.insert(
+            view_id,
+            View {
+                view: ScrollView::new_standard_hv(cx),
+                session_id,
+            },
+        );
+        let session = &mut state.sessions[session_id];
+        session.view_id = Some(view_id);
+        view_id
+    }
+
+    pub fn view_session_id(&self, view_id: ViewId) -> SessionId {
+        let view = &self.views[view_id];
+        view.session_id
+    }
+
+    pub fn set_view_session_id(
+        &mut self,
+        state: &mut State,
+        view_id: ViewId,
+        session_id: SessionId,
+    ) {
+        let view = &mut self.views[view_id];
+        let session = &mut state.sessions[view.session_id];
+        session.view_id = None;
+        view.session_id = session_id;
+        let session = &mut state.sessions[view.session_id];
+        session.view_id = Some(view_id);
     }
 
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
-        views: &mut Arena<View>,
         state: &mut State,
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(Action),
     ) {
-        for (_, view) in views {
+        for view_id in &self.view_id_allocator {
+            let view = &mut self.views[view_id];
             if view.view.handle_scroll_view(cx, event) {
                 view.view.redraw_view(cx);
             }
+            let view = &self.views[view_id];
             match event.hits(cx, view.view.area(), HitOpt::default()) {
                 Event::FingerDown(FingerDownEvent { rel, modifiers, .. }) => {
                     // TODO: How to handle key focus?
                     cx.set_key_focus(view.view.area());
                     cx.set_hover_mouse_cursor(MouseCursor::Text);
+                    let view = &self.views[view_id];
                     let session = &state.sessions[view.session_id];
                     let document = &state.documents[session.document_id];
                     let position = self.position(&document.text, rel);
+                    let view = &self.views[view_id];
                     match modifiers {
                         KeyModifiers { control: true, .. } => {
                             state.add_cursor(view.session_id, position);
@@ -450,13 +419,17 @@ impl Shared {
                             state.move_cursors_to(view.session_id, position, shift);
                         }
                     }
+                    let view = &mut self.views[view_id];
                     view.view.redraw_view(cx);
                 }
                 Event::FingerMove(FingerMoveEvent { rel, .. }) => {
+                    let view = &self.views[view_id];
                     let session = &state.sessions[view.session_id];
                     let document = &state.documents[session.document_id];
                     let position = self.position(&document.text, rel);
+                    let view = &self.views[view_id];
                     state.move_cursors_to(view.session_id, position, true);
+                    let view = &mut self.views[view_id];
                     view.view.redraw_view(cx);
                 }
                 Event::KeyDown(KeyEvent {
@@ -464,7 +437,9 @@ impl Shared {
                     modifiers: KeyModifiers { shift, .. },
                     ..
                 }) => {
+                    let view = &self.views[view_id];
                     state.move_cursors_left(view.session_id, shift);
+                    let view = &mut self.views[view_id];
                     view.view.redraw_view(cx);
                 }
                 Event::KeyDown(KeyEvent {
@@ -472,7 +447,9 @@ impl Shared {
                     modifiers: KeyModifiers { shift, .. },
                     ..
                 }) => {
+                    let view = &self.views[view_id];
                     state.move_cursors_right(view.session_id, shift);
+                    let view = &mut self.views[view_id];
                     view.view.redraw_view(cx);
                 }
                 Event::KeyDown(KeyEvent {
@@ -480,7 +457,9 @@ impl Shared {
                     modifiers: KeyModifiers { shift, .. },
                     ..
                 }) => {
+                    let view = &self.views[view_id];
                     state.move_cursors_up(view.session_id, shift);
+                    let view = &mut self.views[view_id];
                     view.view.redraw_view(cx);
                 }
                 Event::KeyDown(KeyEvent {
@@ -488,22 +467,26 @@ impl Shared {
                     modifiers: KeyModifiers { shift, .. },
                     ..
                 }) => {
+                    let view = &self.views[view_id];
                     state.move_cursors_down(view.session_id, shift);
+                    let view = &mut self.views[view_id];
                     view.view.redraw_view(cx);
                 }
                 Event::KeyDown(KeyEvent {
                     key_code: KeyCode::Backspace,
                     ..
                 }) => {
+                    let view = &self.views[view_id];
                     state.insert_backspace(view.session_id, &mut |path, revision, delta| {
                         dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
                     });
+                    let view = &self.views[view_id];
                     let session = &state.sessions[view.session_id];
                     let document = &state.documents[session.document_id];
                     for session_id in &document.session_ids {
                         let session = &state.sessions[*session_id];
                         if let Some(view_id) = session.view_id {
-                            let view = &mut views[view_id];
+                            let view = &mut self.views[view_id];
                             view.view.redraw_view(cx);
                         }
                     }
@@ -513,6 +496,7 @@ impl Shared {
                     modifiers,
                     ..
                 }) if modifiers.control || modifiers.logo => {
+                    let view = &self.views[view_id];
                     if modifiers.shift {
                         state.redo(view.session_id, &mut |path, revision, delta| {
                             dispatch_action(Action::ApplyDeltaRequestWasPosted(
@@ -526,12 +510,13 @@ impl Shared {
                             ));
                         });
                     }
+                    let view = &self.views[view_id];
                     let session = &state.sessions[view.session_id];
                     let document = &state.documents[session.document_id];
                     for session_id in &document.session_ids {
                         let session = &state.sessions[*session_id];
                         if let Some(view_id) = session.view_id {
-                            let view = &mut views[view_id];
+                            let view = &mut self.views[view_id];
                             view.view.redraw_view(cx);
                         }
                     }
@@ -540,6 +525,7 @@ impl Shared {
                     key_code: KeyCode::Return,
                     ..
                 }) => {
+                    let view = &self.views[view_id];
                     state.insert_text(
                         view.session_id,
                         Text::from(vec![vec![], vec![]]),
@@ -549,17 +535,19 @@ impl Shared {
                             ));
                         },
                     );
+                    let view = &self.views[view_id];
                     let session = &state.sessions[view.session_id];
                     let document = &state.documents[session.document_id];
                     for session_id in &document.session_ids {
                         let session = &state.sessions[*session_id];
                         if let Some(view_id) = session.view_id {
-                            let view = &mut views[view_id];
+                            let view = &mut self.views[view_id];
                             view.view.redraw_view(cx);
                         }
                     }
                 }
                 Event::TextInput(TextInputEvent { input, .. }) => {
+                    let view = &self.views[view_id];
                     state.insert_text(
                         view.session_id,
                         input
@@ -573,18 +561,28 @@ impl Shared {
                             ));
                         },
                     );
+                    let view = &self.views[view_id];
                     let session = &state.sessions[view.session_id];
                     let document = &state.documents[session.document_id];
                     for session_id in &document.session_ids {
                         let session = &state.sessions[*session_id];
                         if let Some(view_id) = session.view_id {
-                            let view = &mut views[view_id];
+                            let view = &mut self.views[view_id];
                             view.view.redraw_view(cx);
                         }
                     }
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn position(&self, text: &Text, position: Vec2) -> Position {
+        let line = (position.y / self.text_glyph_size.y) as usize;
+        Position {
+            line,
+            column: ((position.x / self.text_glyph_size.x) as usize)
+                .min(text.as_lines()[line].len()),
         }
     }
 }

@@ -1,7 +1,6 @@
 use {
     super::Id,
     std::{
-        iter::Enumerate,
         mem,
         ops::{Index, IndexMut},
         slice, vec,
@@ -34,7 +33,7 @@ impl<T> Arena<T> {
 
     pub fn iter(&self) -> Iter<'_, T> {
         Iter {
-            iter: self.entries.iter().enumerate(),
+            iter: self.entries.iter(),
         }
     }
 
@@ -47,7 +46,7 @@ impl<T> Arena<T> {
 
     pub fn iter_mut(&mut self) -> IterMut<'_, T> {
         IterMut {
-            iter: self.entries.iter_mut().enumerate(),
+            iter: self.entries.iter_mut(),
         }
     }
 
@@ -109,7 +108,7 @@ impl<T> IndexMut<Id> for Arena<T> {
 }
 
 impl<'a, T> IntoIterator for &'a Arena<T> {
-    type Item = (Id, &'a T);
+    type Item = &'a T;
     type IntoIter = Iter<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -118,7 +117,7 @@ impl<'a, T> IntoIterator for &'a Arena<T> {
 }
 
 impl<'a, T> IntoIterator for &'a mut Arena<T> {
-    type Item = (Id, &'a mut T);
+    type Item = &'a mut T;
     type IntoIter = IterMut<'a, T>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -127,38 +126,29 @@ impl<'a, T> IntoIterator for &'a mut Arena<T> {
 }
 
 impl<T> IntoIterator for Arena<T> {
-    type Item = (Id, T);
+    type Item = T;
     type IntoIter = IntoIter<T>;
 
     fn into_iter(self) -> Self::IntoIter {
         IntoIter {
-            iter: self.entries.into_iter().enumerate(),
+            iter: self.entries.into_iter(),
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Iter<'a, T> {
-    iter: Enumerate<slice::Iter<'a, Option<Entry<T>>>>,
+    iter: slice::Iter<'a, Option<Entry<T>>>,
 }
 
 impl<'a, T> Iterator for Iter<'a, T> {
-    type Item = (Id, &'a T);
+    type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            match self.iter.next() {
-                Some((index, Some(entry))) => {
-                    break Some((
-                        Id {
-                            index,
-                            generation: entry.generation,
-                        },
-                        &entry.value,
-                    ))
-                }
-                Some((_, None)) => continue,
-                None => break None,
+            match self.iter.next()? {
+                Some(entry) => break Some(&entry.value),
+                _ => continue,
             }
         }
     }
@@ -166,26 +156,17 @@ impl<'a, T> Iterator for Iter<'a, T> {
 
 #[derive(Debug)]
 pub struct IterMut<'a, T> {
-    iter: Enumerate<slice::IterMut<'a, Option<Entry<T>>>>,
+    iter: slice::IterMut<'a, Option<Entry<T>>>,
 }
 
 impl<'a, T> Iterator for IterMut<'a, T> {
-    type Item = (Id, &'a mut T);
+    type Item = &'a mut T;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            match self.iter.next() {
-                Some((index, Some(entry))) => {
-                    break Some((
-                        Id {
-                            index,
-                            generation: entry.generation,
-                        },
-                        &mut entry.value,
-                    ))
-                }
-                Some((_, None)) => continue,
-                None => break None,
+            match self.iter.next()? {
+                Some(entry) => break Some(&mut entry.value),
+                _ => continue,
             }
         }
     }
@@ -193,26 +174,17 @@ impl<'a, T> Iterator for IterMut<'a, T> {
 
 #[derive(Clone, Debug)]
 pub struct IntoIter<T> {
-    iter: Enumerate<vec::IntoIter<Option<Entry<T>>>>,
+    iter: vec::IntoIter<Option<Entry<T>>>,
 }
 
 impl<T> Iterator for IntoIter<T> {
-    type Item = (Id, T);
-
+    type Item = T;
+    
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            match self.iter.next() {
-                Some((index, Some(entry))) => {
-                    break Some((
-                        Id {
-                            index,
-                            generation: entry.generation,
-                        },
-                        entry.value,
-                    ))
-                }
-                Some((_, None)) => continue,
-                None => break None,
+            match self.iter.next()? {
+                Some(entry) => break Some(entry.value),
+                _ => continue,
             }
         }
     }
