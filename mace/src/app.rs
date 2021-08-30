@@ -1,6 +1,6 @@
 use {
     crate::{
-        code_editor::{self, CodeEditor, SessionId},
+        code_editor::{self, CodeEditor, SessionId, ViewId},
         dock::{self, Dock, PanelId},
         file_tree::{self, FileNodeId, FileTree},
         generational::{Arena, IdAllocator},
@@ -62,7 +62,7 @@ struct AppInner {
     window: DesktopWindow,
     dock: Dock,
     file_tree: FileTree,
-    code_editors: Arena<CodeEditor>,
+    code_editor: CodeEditor,
     outstanding_requests: VecDeque<Request>,
     request_sender: Sender<Request>,
     response_or_notification_signal: Signal,
@@ -108,7 +108,7 @@ impl AppInner {
             window: DesktopWindow::new(cx),
             dock: Dock::new(cx),
             file_tree: FileTree::new(cx),
-            code_editors: Arena::new(),
+            code_editor: CodeEditor::new(cx),
             outstanding_requests: VecDeque::new(),
             request_sender,
             response_or_notification_signal,
@@ -128,15 +128,15 @@ impl AppInner {
     fn draw_panel(&mut self, cx: &mut Cx, state: &State, panel_id: PanelId) {
         let panel = &state.panels[panel_id];
         match panel {
-            Panel::Splitter { panel_ids } => {
+            Panel::Splitter { child_ids } => {
                 if self.dock.begin_splitter(cx, panel_id).is_ok() {
-                    self.draw_panel(cx, state, panel_ids.0);
+                    self.draw_panel(cx, state, child_ids[0]);
                     self.dock.middle_splitter(cx);
-                    self.draw_panel(cx, state, panel_ids.1);
+                    self.draw_panel(cx, state, child_ids[01]);
                     self.dock.end_splitter(cx);
                 }
             }
-            Panel::TabBar { tab_ids } => {
+            Panel::TabBar { tab_ids, .. } => {
                 if self.dock.begin_tab_bar(cx, panel_id).is_ok() {
                     for tab_id in tab_ids {
                         let tab = &state.tabs[*tab_id];
@@ -160,10 +160,14 @@ impl AppInner {
         let tab = &state.tabs[tab_id];
         match tab.kind {
             TabKind::FileTree => self.draw_file_tree(cx, state),
-            TabKind::CodeEditor { session_id } => {
-                let code_editor = self.get_or_create_code_editor(cx, tab.panel_id);
-                code_editor.set_session_id(cx, session_id);
-                code_editor.draw(cx, &state.code_editor_state)
+            TabKind::CodeEditor { .. } => {
+                let panel = &state.panels[tab.panel_id];
+                match panel {
+                    Panel::TabBar { view_id, .. } => {
+                        self.code_editor.draw(cx, &state.code_editor_state, view_id.unwrap());
+                    }
+                    _ => panic!(),
+                }
             }
         }
     }
@@ -211,6 +215,7 @@ impl AppInner {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, state: &mut State) {
         self.window.handle_desktop_window(cx, event);
+
         let mut actions = Vec::new();
         self.dock
             .handle_event(cx, event, &mut |action| actions.push(action));
@@ -219,15 +224,15 @@ impl AppInner {
                 dock::Action::TabWasPressed(tab_id) => {
                     let tab = &state.tabs[tab_id];
                     match tab.kind {
-                        TabKind::FileTree => {}
                         TabKind::CodeEditor { session_id } => {
-                            let code_editor = self.get_or_create_code_editor(cx, state.panel_id);
-                            code_editor.set_session_id(cx, session_id);
+                            self.create_or_update_view(cx, state, state.panel_id, session_id);
                         }
+                        _ => {}
                     }
-                }
+                },
             }
         }
+
         let mut actions = Vec::new();
         self.file_tree
             .handle_event(cx, event, &mut |action| actions.push(action));
@@ -242,12 +247,11 @@ impl AppInner {
                 }
             }
         }
+
         let mut actions = Vec::new();
-        for (_, code_editor) in &mut self.code_editors {
-            code_editor.handle_event(cx, event, &mut state.code_editor_state, &mut |action| {
-                actions.push(action)
-            });
-        }
+        self.code_editor.handle_event(cx, &mut state.code_editor_state, event, &mut |action| {
+            actions.push(action)
+        });
         for action in actions {
             match action {
                 code_editor::Action::ApplyDeltaRequestWasPosted(path, revision, delta) => {
@@ -255,6 +259,7 @@ impl AppInner {
                 }
             }
         }
+
         match event {
             Event::Signal(event)
                 if event
@@ -304,7 +309,7 @@ impl AppInner {
                             let session_id = state.code_editor_state.create_session(document_id);
                             let tab_id = state.tab_id_allocator.allocate();
                             match &mut state.panels[state.panel_id] {
-                                Panel::TabBar { tab_ids } => tab_ids.push(tab_id),
+                                Panel::TabBar { tab_ids, .. } => tab_ids.push(tab_id),
                                 _ => panic!(),
                             }
                             state.tabs.insert(
@@ -315,8 +320,7 @@ impl AppInner {
                                     kind: TabKind::CodeEditor { session_id },
                                 },
                             );
-                            let code_editor = self.get_or_create_code_editor(cx, state.panel_id);
-                            code_editor.set_session_id(cx, session_id);
+                            self.create_or_update_view(cx, state, state.panel_id, session_id);
                             self.dock
                                 .get_or_create_tab_bar(cx, state.panel_id)
                                 .set_selected_item_id(cx, Some(tab_id));
@@ -350,19 +354,26 @@ impl AppInner {
                     state
                         .code_editor_state
                         .handle_delta_was_applied_notification(&path, delta);
-                    for (_, code_editor) in &mut self.code_editors {
-                        code_editor.redraw(cx);
-                    }
                 }
             },
         }
     }
 
-    fn get_or_create_code_editor(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut CodeEditor {
-        if !self.code_editors.contains(panel_id) {
-            self.code_editors.insert(panel_id, CodeEditor::new(cx));
+    fn create_or_update_view(&mut self, cx: &mut Cx, state: &mut State, panel_id: PanelId, session_id: SessionId) {
+        let panel = &mut state.panels[panel_id];
+        match panel {
+            Panel::TabBar { view_id, .. } => {
+                match view_id {
+                    Some(view_id) => {
+                        self.code_editor.set_view_session_id(&mut state.code_editor_state, *view_id, session_id);
+                    }
+                    None => {
+                        *view_id = Some(self.code_editor.create_view(cx, &mut state.code_editor_state, session_id));
+                    }
+                }
+            }
+            _ => panic!(),
         }
-        &mut self.code_editors[panel_id]
     }
 }
 
@@ -405,6 +416,7 @@ impl State {
             panel_id_0,
             Panel::TabBar {
                 tab_ids: vec![file_tree_tab_id],
+                view_id: None,
             },
         );
         tabs.insert(
@@ -417,13 +429,16 @@ impl State {
         );
 
         let panel_id_1 = panel_id_allocator.allocate();
-        panels.insert(panel_id_1, Panel::TabBar { tab_ids: vec![] });
+        panels.insert(panel_id_1, Panel::TabBar {
+            tab_ids: vec![],
+            view_id: None,
+        });
 
         let root_panel_id = panel_id_allocator.allocate();
         panels.insert(
             root_panel_id,
             Panel::Splitter {
-                panel_ids: (panel_id_0, panel_id_1),
+                child_ids: [panel_id_0, panel_id_1],
             },
         );
 
@@ -504,8 +519,13 @@ impl State {
 }
 
 enum Panel {
-    Splitter { panel_ids: (PanelId, PanelId) },
-    TabBar { tab_ids: Vec<TabId> },
+    Splitter {
+        child_ids: [PanelId; 2],
+    },
+    TabBar {
+        tab_ids: Vec<TabId>,
+        view_id: Option<ViewId>,
+    }
 }
 
 struct Tab {
