@@ -87,7 +87,7 @@ impl Dock {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(Action),
     ) {
-        for (_, panel) in &mut self.panels {
+        for panel in &mut self.panels {
             match panel {
                 Panel::Splitter(splitter) => {
                     let mut actions = Vec::new();
