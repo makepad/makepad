@@ -1,4 +1,7 @@
-use {std::{iter::Enumerate, slice}, super::Id};
+use {
+    super::Id,
+    std::{iter::Enumerate, slice},
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct IdAllocator {

@@ -388,6 +388,11 @@ impl CodeEditor {
         session.view_id = Some(view_id);
     }
 
+    pub fn redraw_view(&mut self, cx: &mut Cx, view_id: ViewId) {
+        let view = &mut self.views[view_id];
+        view.view.redraw_view(cx);
+    }
+
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
