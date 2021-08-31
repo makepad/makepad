@@ -8,8 +8,7 @@ use {
         range_set::{RangeSet, Span},
         size::Size,
         text::Text,
-        token::{Keyword, Punctuator, TokenKind},
-        tokenizer::{Tokenizer, TokensByLine},
+        tokenizer::{Keyword, LineInfos, Punctuator, TokenKind, Tokenizer},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -111,11 +110,11 @@ impl CodeEditor {
             self.apply_style(cx);
             let visible_lines = self.visible_lines(cx, view_id, document.text.as_lines().len());
             self.draw_selections(cx, &session.selections, &document.text, visible_lines);
-            self.draw_indent_guides(cx, document.tokenizer.tokens_by_line(), visible_lines);
+            self.draw_indent_guides(cx, document.tokenizer.line_infos(), visible_lines);
             self.draw_text(
                 cx,
                 &document.text,
-                document.tokenizer.tokens_by_line(),
+                document.tokenizer.line_infos(),
                 visible_lines,
             );
             self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
@@ -253,26 +252,22 @@ impl CodeEditor {
     fn draw_indent_guides(
         &mut self,
         cx: &mut Cx,
-        tokens_by_line: TokensByLine<'_>,
+        line_infos: LineInfos<'_>,
         visible_lines: VisibleLines,
     ) {
         let origin = cx.get_turtle_pos();
         let mut start_y = visible_lines.start_y;
-        for tokens in tokens_by_line {
-            let mut whitespace_len = 0;
-            for token in tokens {
-                if token.kind != TokenKind::Whitespace {
-                    break;
-                }
-                whitespace_len += token.len;
-            }
-            for column in 0..whitespace_len {
+        for line_info in line_infos
+            .skip(visible_lines.start)
+            .take(visible_lines.end - visible_lines.start)
+        {
+            for block in line_info.blocks {
                 self.indent_guide.base.color = vec4(1.0, 1.0, 1.0, 1.0);
                 self.indent_guide.draw_quad_abs(
                     cx,
                     Rect {
                         pos: Vec2 {
-                            x: origin.x + column as f32 * self.text_glyph_size.x,
+                            x: origin.x + block.column as f32 * self.text_glyph_size.x,
                             y: start_y,
                         },
                         size: self.text_glyph_size,
@@ -287,22 +282,22 @@ impl CodeEditor {
         &mut self,
         cx: &mut Cx,
         text: &Text,
-        tokens_by_line: TokensByLine<'_>,
+        line_infos: LineInfos<'_>,
         visible_lines: VisibleLines,
     ) {
         let origin = cx.get_turtle_pos();
         let mut start_y = visible_lines.start_y;
-        for (line, tokens) in text
+        for (line, line_info) in text
             .as_lines()
             .iter()
-            .zip(tokens_by_line)
+            .zip(line_infos)
             .skip(visible_lines.start)
             .take(visible_lines.end - visible_lines.start)
         {
             let end_y = start_y + self.text_glyph_size.y;
             let mut start_x = origin.x;
             let mut start = 0;
-            let mut token_iter = tokens.iter();
+            let mut token_iter = line_info.tokens.iter();
             let mut token_slot = token_iter.next();
             while let Some(token) = token_slot {
                 let next_token = token_iter.next();
