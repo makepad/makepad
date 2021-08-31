@@ -4,7 +4,7 @@ pub struct Token {
     pub kind: TokenKind,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TokenKind {
     Comment,
     Identifier,
@@ -16,14 +16,14 @@ pub enum TokenKind {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Keyword {
     Branch,
     Loop,
     Other,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Punctuator {
     LeftParen,
     RightParen,
