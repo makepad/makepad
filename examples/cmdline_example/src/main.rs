@@ -58,8 +58,16 @@ fn main() {
     lr.expand_all_documents(&mut errors);
     
     println!("{}", lr.expanded[0]);
-    
-    for msg in errors {
+   
+   for msg in errors {
+      {
+          bla { bla di bla }
+                
+            }
+                bla
+                    bla
+                    
+        }
         println!("{}\n", msg.to_live_file_error("", source));
     }
     
