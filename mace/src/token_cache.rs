@@ -6,16 +6,16 @@ use {
     std::slice::Iter,
 };
 
-pub struct Tokenizer {
+pub struct TokenCache {
     lines: Vec<Option<Line>>,
 }
 
-impl Tokenizer {
-    pub fn new(text: &Text) -> Tokenizer {
-        let mut tokenizer = Tokenizer {
+impl TokenCache {
+    pub fn new(text: &Text) -> TokenCache {
+        let mut tokenizer = TokenCache {
             lines: (0..text.as_lines().len()).map(|_| None).collect::<Vec<_>>(),
         };
-        tokenizer.refresh_cache(text);
+        tokenizer.refresh(text);
         tokenizer
     }
 
@@ -25,7 +25,7 @@ impl Tokenizer {
         }
     }
 
-    pub fn invalidate_cache(&mut self, delta: &Delta) {
+    pub fn invalidate(&mut self, delta: &Delta) {
         let mut line = 0;
         for operation in delta {
             match operation.span() {
@@ -52,11 +52,11 @@ impl Tokenizer {
         }
     }
 
-    pub fn refresh_cache(&mut self, text: &Text) {
+    pub fn refresh(&mut self, text: &Text) {
         let mut state = State::Initial(InitialState);
-        let mut blocks = Vec::new();
-        for (line_index, line) in self.lines.iter_mut().enumerate() {
-            match line {
+        let mut previous_cache_line: Option<&Line> = None;
+        for (line, cache_line) in self.lines.iter_mut().enumerate() {
+            match cache_line {
                 Some(Line {
                     start_state,
                     end_state,
@@ -67,7 +67,7 @@ impl Tokenizer {
                 _ => {
                     let start_state = state;
                     let mut tokens = Vec::new();
-                    let mut cursor = Cursor::new(&text.as_lines()[line_index]);
+                    let mut cursor = Cursor::new(&text.as_lines()[line]);
                     loop {
                         let (next_state, token) = state.next(&mut cursor);
                         state = next_state;
@@ -76,12 +76,41 @@ impl Tokenizer {
                             None => break,
                         }
                     }
-                    *line = Some(Line {
+                    let mut indent_infos = previous_cache_line.map_or_else(
+                        || Vec::new(),
+                        |previous_line| previous_line.indent_infos.clone(),
+                    );
+                    let mut column = 0;
+                    for token in &tokens {
+                        match token {
+                            Token {
+                                len,
+                                kind: TokenKind::Whitespace,
+                            } => {
+                                column += len;
+                            }
+                            Token { kind, .. } => {
+                                while let Some(indent_info) = indent_infos.last() {
+                                    if indent_info.column < column {
+                                        break;
+                                    }
+                                    indent_infos.pop();
+                                }
+                                indent_infos.push(IndentInfo {
+                                    column,
+                                    token_kind: *kind,
+                                });
+                                break;
+                            }
+                        }
+                    }
+                    *cache_line = Some(Line {
                         start_state,
                         end_state: state,
                         tokens,
-                        blocks: blocks.clone(),
+                        indent_infos,
                     });
+                    previous_cache_line = cache_line.as_ref();
                 }
             }
         }
@@ -99,14 +128,14 @@ impl<'a> Iterator for LineInfos<'a> {
         let line = self.iter.next()?.as_ref().unwrap();
         Some(LineInfo {
             tokens: &line.tokens,
-            blocks: &line.blocks,
+            indent_infos: &line.indent_infos,
         })
     }
 }
 
 pub struct LineInfo<'a> {
     pub tokens: &'a [Token],
-    pub blocks: &'a [Block],
+    pub indent_infos: &'a [IndentInfo],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -144,16 +173,16 @@ pub enum Punctuator {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct Block {
+pub struct IndentInfo {
     pub column: usize,
-    pub keyword: Keyword,
+    pub token_kind: TokenKind,
 }
 
 struct Line {
     start_state: State,
     end_state: State,
     tokens: Vec<Token>,
-    blocks: Vec<Block>,
+    indent_infos: Vec<IndentInfo>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
