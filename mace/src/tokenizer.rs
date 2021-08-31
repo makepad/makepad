@@ -2,7 +2,6 @@ use {
     crate::{
         delta::{Delta, OperationSpan},
         text::Text,
-        token::{Keyword, Punctuator, Token, TokenKind},
     },
     std::slice::Iter,
 };
@@ -20,8 +19,8 @@ impl Tokenizer {
         tokenizer
     }
 
-    pub fn tokens_by_line(&self) -> TokensByLine {
-        TokensByLine {
+    pub fn line_infos(&self) -> LineInfos<'_> {
+        LineInfos {
             iter: self.lines.iter(),
         }
     }
@@ -55,8 +54,9 @@ impl Tokenizer {
 
     pub fn refresh_cache(&mut self, text: &Text) {
         let mut state = State::Initial(InitialState);
-        for (line, line_data) in self.lines.iter_mut().enumerate() {
-            match line_data {
+        let mut blocks = Vec::new();
+        for (line_index, line) in self.lines.iter_mut().enumerate() {
+            match line {
                 Some(Line {
                     start_state,
                     end_state,
@@ -67,7 +67,7 @@ impl Tokenizer {
                 _ => {
                     let start_state = state;
                     let mut tokens = Vec::new();
-                    let mut cursor = Cursor::new(&text.as_lines()[line]);
+                    let mut cursor = Cursor::new(&text.as_lines()[line_index]);
                     loop {
                         let (next_state, token) = state.next(&mut cursor);
                         state = next_state;
@@ -76,10 +76,11 @@ impl Tokenizer {
                             None => break,
                         }
                     }
-                    *line_data = Some(Line {
+                    *line = Some(Line {
                         start_state,
                         end_state: state,
                         tokens,
+                        blocks: blocks.clone(),
                     });
                 }
             }
@@ -87,22 +88,72 @@ impl Tokenizer {
     }
 }
 
-pub struct TokensByLine<'a> {
+pub struct LineInfos<'a> {
     iter: Iter<'a, Option<Line>>,
 }
 
-impl<'a> Iterator for TokensByLine<'a> {
-    type Item = &'a Vec<Token>;
+impl<'a> Iterator for LineInfos<'a> {
+    type Item = LineInfo<'a>;
 
-    fn next(&mut self) -> Option<&'a Vec<Token>> {
-        Some(&self.iter.next()?.as_ref().unwrap().tokens)
+    fn next(&mut self) -> Option<LineInfo<'a>> {
+        let line = self.iter.next()?.as_ref().unwrap();
+        Some(LineInfo {
+            tokens: &line.tokens,
+            blocks: &line.blocks,
+        })
     }
+}
+
+pub struct LineInfo<'a> {
+    pub tokens: &'a [Token],
+    pub blocks: &'a [Block],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Token {
+    pub len: usize,
+    pub kind: TokenKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TokenKind {
+    Comment,
+    Identifier,
+    Keyword(Keyword),
+    Number,
+    Punctuator(Punctuator),
+    String,
+    Whitespace,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Keyword {
+    Branch,
+    Loop,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Punctuator {
+    LeftParen,
+    RightParen,
+    LeftBrace,
+    RightBrace,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Block {
+    pub column: usize,
+    pub keyword: Keyword,
 }
 
 struct Line {
     start_state: State,
     end_state: State,
     tokens: Vec<Token>,
+    blocks: Vec<Block>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -204,6 +255,20 @@ impl InitialState {
                     TokenKind::Punctuator(Punctuator::RightParen),
                 )
             }
+            ('{', _, _) => {
+                cursor.skip(1);
+                (
+                    State::Initial(InitialState),
+                    TokenKind::Punctuator(Punctuator::LeftBrace),
+                )
+            }
+            ('}', _, _) => {
+                cursor.skip(1);
+                (
+                    State::Initial(InitialState),
+                    TokenKind::Punctuator(Punctuator::RightBrace),
+                )
+            }
             ('!', _, _)
             | ('#', _, _)
             | ('$', _, _)
@@ -226,9 +291,7 @@ impl InitialState {
             | (']', _, _)
             | ('^', _, _)
             | ('_', _, _)
-            | ('{', _, _)
-            | ('|', _, _)
-            | ('}', _, _) => {
+            | ('|', _, _) => {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
