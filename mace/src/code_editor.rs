@@ -24,6 +24,7 @@ pub struct CodeEditor {
     view_id_allocator: IdAllocator,
     views: Arena<View>,
     selection: DrawColor,
+    indent_guide: DrawIndentGuide,
     text: DrawText,
     text_glyph_size: Vec2,
     text_color_comment: Vec4,
@@ -42,7 +43,24 @@ pub struct CodeEditor {
 
 impl CodeEditor {
     pub fn style(cx: &mut Cx) {
+        DrawIndentGuide::register_draw_input(cx);
+
         live_body!(cx, {
+            self::indent_guide_shader: Shader {
+                use makepad_render::drawcolor::shader::*;
+
+                draw_input: self::DrawIndentGuide;
+
+                fn pixel() -> vec4 {
+                    let df = Df::viewport(pos * rect_size);
+                    let w = rect_size.x;
+                    let h = rect_size.y;
+                    df.move_to(0.5 * w, 0.0);
+                    df.line_to(0.5 * w, h);
+                    return df.stroke(color, 1.0);
+                }
+            }
+
             self::selection_color: #294e75;
             self::text_text_style: TextStyle {
                 ..makepad_widget::widgetstyle::text_style_fixed
@@ -67,7 +85,8 @@ impl CodeEditor {
             view_id_allocator: IdAllocator::new(),
             views: Arena::new(),
             selection: DrawColor::new(cx, default_shader!()).with_draw_depth(1.0),
-            text: DrawText::new(cx, default_shader!()).with_draw_depth(2.0),
+            indent_guide: DrawIndentGuide::new(cx, default_shader!()).with_draw_depth(2.0),
+            text: DrawText::new(cx, default_shader!()).with_draw_depth(3.0),
             text_glyph_size: Vec2::default(),
             text_color_comment: Vec4::default(),
             text_color_identifier: Vec4::default(),
@@ -80,7 +99,7 @@ impl CodeEditor {
             text_color_string: Vec4::default(),
             text_color_whitespace: Vec4::default(),
             text_color_unknown: Vec4::default(),
-            caret: DrawColor::new(cx, default_shader!()).with_draw_depth(3.0),
+            caret: DrawColor::new(cx, default_shader!()).with_draw_depth(4.0),
         }
     }
 
@@ -92,6 +111,7 @@ impl CodeEditor {
             self.apply_style(cx);
             let visible_lines = self.visible_lines(cx, view_id, document.text.as_lines().len());
             self.draw_selections(cx, &session.selections, &document.text, visible_lines);
+            self.draw_indent_guides(cx, document.tokenizer.tokens_by_line(), visible_lines);
             self.draw_text(
                 cx,
                 &document.text,
@@ -228,6 +248,39 @@ impl CodeEditor {
             start_y += self.text_glyph_size.y;
         }
         self.selection.end_many(cx);
+    }
+
+    fn draw_indent_guides(
+        &mut self,
+        cx: &mut Cx,
+        tokens_by_line: TokensByLine<'_>,
+        visible_lines: VisibleLines,
+    ) {
+        let origin = cx.get_turtle_pos();
+        let mut start_y = visible_lines.start_y;
+        for tokens in tokens_by_line {
+            let mut whitespace_len = 0;
+            for token in tokens {
+                if token.kind != TokenKind::Whitespace {
+                    break;
+                }
+                whitespace_len += token.len;
+            }
+            for column in 0..whitespace_len {
+                self.indent_guide.base.color = vec4(1.0, 1.0, 1.0, 1.0);
+                self.indent_guide.draw_quad_abs(
+                    cx,
+                    Rect {
+                        pos: Vec2 {
+                            x: origin.x + column as f32 * self.text_glyph_size.x,
+                            y: start_y,
+                        },
+                        size: self.text_glyph_size,
+                    },
+                );
+            }
+            start_y += self.text_glyph_size.y;
+        }
     }
 
     fn draw_text(
@@ -597,6 +650,13 @@ pub type ViewId = Id;
 struct View {
     view: ScrollView,
     session_id: SessionId,
+}
+
+#[derive(Clone, DrawQuad)]
+#[repr(C)]
+pub struct DrawIndentGuide {
+    #[default_shader(self::indent_guide_shader)]
+    base: DrawColor,
 }
 
 #[derive(Default)]
