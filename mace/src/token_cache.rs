@@ -54,63 +54,55 @@ impl TokenCache {
 
     pub fn refresh(&mut self, text: &Text) {
         let mut previous_line: Option<&Line> = None;
-        let mut state = State::Initial(InitialState);
+        let mut previous_line_did_change = false;
         for (index, line) in self.lines.iter_mut().enumerate() {
-            match line {
-                Some(Line {
-                    start_state,
-                    end_state,
-                    ..
-                }) if state == *start_state => {
-                    state = *end_state;
-                }
-                _ => {
-                    let start_state = state;
-                    let mut tokens = Vec::new();
-                    let mut cursor = Cursor::new(&text.as_lines()[index]);
-                    loop {
-                        let (next_state, token) = state.next(&mut cursor);
-                        state = next_state;
-                        match token {
-                            Some(token) => tokens.push(token),
-                            None => break,
-                        }
-                    }
-                    let end_state = state;
-
-                    let indent_count = if tokens
-                        .iter()
-                        .any(|token| token.kind != TokenKind::Whitespace)
-                    {
-                        let leading_whitespace_len = match tokens.first().unwrap() {
-                            Token {
-                                kind: TokenKind::Whitespace,
-                                len,
-                            } => *len,
-                            _ => 0,
-                        };
-                        leading_whitespace_len / 4
-                    } else if let Some(previous_line) = previous_line {
-                        match previous_line.tokens.last() {
-                            Some(Token {
-                                kind: TokenKind::Punctuator(punctuator),
-                                ..
-                            }) if punctuator.is_left_delimiter() => previous_line.indent_count + 1,
-                            _ => previous_line.indent_count,
-                        }
-                    } else {
-                        0
-                    };
-
-                    *line = Some(Line {
-                        start_state,
-                        end_state,
-                        tokens,
-                        indent_count,
+            if line.is_none() || previous_line_did_change {
+                let mut state = previous_line
+                    .map_or(State::Initial(InitialState), |previous_line| {
+                        previous_line.end_state
                     });
-                    previous_line = Some(line.as_ref().unwrap());
+                let mut tokens = Vec::new();
+                let mut cursor = Cursor::new(&text.as_lines()[index]);
+                loop {
+                    let (next_state, token) = state.next(&mut cursor);
+                    state = next_state;
+                    match token {
+                        Some(token) => tokens.push(token),
+                        None => break,
+                    }
                 }
+
+                let indent_count = if tokens
+                    .iter()
+                    .any(|token| token.kind != TokenKind::Whitespace)
+                {
+                    let column = match tokens.first().unwrap() {
+                        Token {
+                            kind: TokenKind::Whitespace,
+                            len,
+                        } => *len,
+                        _ => 0,
+                    };
+                    (column + 3) / 4
+                } else {
+                    previous_line.map_or(0, |previous_line| match previous_line.tokens.last() {
+                        Some(Token {
+                            kind: TokenKind::Punctuator(punctuator),
+                            ..
+                        }) if punctuator.is_left_delimiter() => previous_line.indent_count + 1,
+                        _ => previous_line.indent_count,
+                    })
+                };
+
+                let new_line = Line {
+                    tokens,
+                    end_state: state,
+                    indent_count,
+                };
+                previous_line_did_change = line.as_ref() != Some(&new_line);
+                *line = Some(new_line);
             }
+            previous_line = Some(line.as_ref().unwrap());
         }
     }
 }
@@ -136,7 +128,7 @@ pub struct LineInfo<'a> {
     pub indent_count: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Token {
     pub len: usize,
     pub kind: TokenKind,
@@ -188,8 +180,8 @@ impl Punctuator {
     }
 }
 
+#[derive(PartialEq)]
 struct Line {
-    start_state: State,
     end_state: State,
     tokens: Vec<Token>,
     indent_count: usize,
