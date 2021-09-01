@@ -53,10 +53,10 @@ impl TokenCache {
     }
 
     pub fn refresh(&mut self, text: &Text) {
+        let mut previous_line: Option<&Line> = None;
         let mut state = State::Initial(InitialState);
-        let mut previous_cache_line: Option<&Line> = None;
-        for (line, cache_line) in self.lines.iter_mut().enumerate() {
-            match cache_line {
+        for (index, line) in self.lines.iter_mut().enumerate() {
+            match line {
                 Some(Line {
                     start_state,
                     end_state,
@@ -67,7 +67,7 @@ impl TokenCache {
                 _ => {
                     let start_state = state;
                     let mut tokens = Vec::new();
-                    let mut cursor = Cursor::new(&text.as_lines()[line]);
+                    let mut cursor = Cursor::new(&text.as_lines()[index]);
                     loop {
                         let (next_state, token) = state.next(&mut cursor);
                         state = next_state;
@@ -76,41 +76,39 @@ impl TokenCache {
                             None => break,
                         }
                     }
-                    let mut indent_infos = previous_cache_line.map_or_else(
-                        || Vec::new(),
-                        |previous_line| previous_line.indent_infos.clone(),
-                    );
-                    let mut column = 0;
-                    for token in &tokens {
-                        match token {
+                    let end_state = state;
+
+                    let indent_count = if tokens
+                        .iter()
+                        .any(|token| token.kind != TokenKind::Whitespace)
+                    {
+                        let leading_whitespace_len = match tokens.first().unwrap() {
                             Token {
-                                len,
                                 kind: TokenKind::Whitespace,
-                            } => {
-                                column += len;
-                            }
-                            Token { kind, .. } => {
-                                while let Some(indent_info) = indent_infos.last() {
-                                    if indent_info.column < column {
-                                        break;
-                                    }
-                                    indent_infos.pop();
-                                }
-                                indent_infos.push(IndentInfo {
-                                    column,
-                                    token_kind: *kind,
-                                });
-                                break;
-                            }
+                                len,
+                            } => *len,
+                            _ => 0,
+                        };
+                        leading_whitespace_len / 4
+                    } else if let Some(previous_line) = previous_line {
+                        match previous_line.tokens.last() {
+                            Some(Token {
+                                kind: TokenKind::Punctuator(punctuator),
+                                ..
+                            }) if punctuator.is_left_delimiter() => previous_line.indent_count + 1,
+                            _ => previous_line.indent_count,
                         }
-                    }
-                    *cache_line = Some(Line {
+                    } else {
+                        0
+                    };
+
+                    *line = Some(Line {
                         start_state,
-                        end_state: state,
+                        end_state,
                         tokens,
-                        indent_infos,
+                        indent_count,
                     });
-                    previous_cache_line = cache_line.as_ref();
+                    previous_line = Some(line.as_ref().unwrap());
                 }
             }
         }
@@ -128,14 +126,14 @@ impl<'a> Iterator for LineInfos<'a> {
         let line = self.iter.next()?.as_ref().unwrap();
         Some(LineInfo {
             tokens: &line.tokens,
-            indent_infos: &line.indent_infos,
+            indent_count: line.indent_count,
         })
     }
 }
 
 pub struct LineInfo<'a> {
     pub tokens: &'a [Token],
-    pub indent_infos: &'a [IndentInfo],
+    pub indent_count: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -172,17 +170,29 @@ pub enum Punctuator {
     Other,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct IndentInfo {
-    pub column: usize,
-    pub token_kind: TokenKind,
+impl Punctuator {
+    pub fn is_left_delimiter(self) -> bool {
+        match self {
+            Punctuator::LeftParen => true,
+            Punctuator::LeftBrace => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_right_delimiter(self) -> bool {
+        match self {
+            Punctuator::RightParen => true,
+            Punctuator::RightBrace => true,
+            _ => false,
+        }
+    }
 }
 
 struct Line {
     start_state: State,
     end_state: State,
     tokens: Vec<Token>,
-    indent_infos: Vec<IndentInfo>,
+    indent_count: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
