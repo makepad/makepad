@@ -8,7 +8,7 @@ use {
         range_set::{RangeSet, Span},
         size::Size,
         text::Text,
-        token_cache::{Keyword, LineInfos, Punctuator, Token, TokenCache, TokenKind},
+        token_cache::{Keyword, LineInfos, Punctuator, TokenCache, TokenKind},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -52,10 +52,8 @@ impl CodeEditor {
 
                 fn pixel() -> vec4 {
                     let df = Df::viewport(pos * rect_size);
-                    let w = rect_size.x;
-                    let h = rect_size.y;
-                    df.move_to(0.5 * w, 0.0);
-                    df.line_to(0.5 * w, h);
+                    df.move_to(0.0, 0.0);
+                    df.line_to(0.0, rect_size.y);
                     return df.stroke(color, 1.0);
                 }
             }
@@ -261,28 +259,14 @@ impl CodeEditor {
             .skip(visible_lines.start)
             .take(visible_lines.end - visible_lines.start)
         {
-            let max_column = match line_info.tokens.first() {
-                Some(Token {
-                    len,
-                    kind: TokenKind::Whitespace,
-                }) => *len,
-                _ => 0,
-            };
-            let mut indent_info_iter = line_info.indent_infos.iter().peekable();
-            for column in (0..max_column).step_by(4) {
-                self.indent_guide.base.color =
-                    self.indent_guide_color(match indent_info_iter.peek() {
-                        Some(indent_info) if indent_info.column == column => {
-                            let indent_info = indent_info_iter.next().unwrap();
-                            Some(indent_info.token_kind)
-                        }
-                        _ => None,
-                    });
+            for indent in 0..line_info.indent_count {
+                let indent_guide_column = indent * 4;
+                self.indent_guide.base.color = self.indent_guide_color(TokenKind::Unknown);
                 self.indent_guide.draw_quad_abs(
                     cx,
                     Rect {
                         pos: Vec2 {
-                            x: origin.x + column as f32 * self.text_glyph_size.x,
+                            x: origin.x + indent_guide_column as f32 * self.text_glyph_size.x,
                             y: start_y,
                         },
                         size: self.text_glyph_size,
@@ -398,10 +382,10 @@ impl CodeEditor {
         });
     }
 
-    fn indent_guide_color(&self, kind: Option<TokenKind>) -> Vec4 {
+    fn indent_guide_color(&self, kind: TokenKind) -> Vec4 {
         match kind {
-            Some(TokenKind::Keyword(Keyword::Branch)) => self.text_color_branch_keyword,
-            Some(TokenKind::Keyword(Keyword::Loop)) => self.text_color_loop_keyword,
+            TokenKind::Keyword(Keyword::Branch) => self.text_color_branch_keyword,
+            TokenKind::Keyword(Keyword::Loop) => self.text_color_loop_keyword,
             _ => self.text_color_unknown,
         }
     }
