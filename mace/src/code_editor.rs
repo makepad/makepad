@@ -259,9 +259,19 @@ impl CodeEditor {
             .skip(visible_lines.start)
             .take(visible_lines.end - visible_lines.start)
         {
+            let mut token_kind_by_column_iter = line_info.token_kinds_by_column.iter().peekable();
             for indent in 0..line_info.indent_count {
                 let indent_guide_column = indent * 4;
-                self.indent_guide.base.color = self.indent_guide_color(TokenKind::Unknown);
+                while let Some((column, ..)) = token_kind_by_column_iter.peek() {
+                    if *column >= indent_guide_column {
+                        break;
+                    }
+                    token_kind_by_column_iter.next();
+                }
+                self.indent_guide.base.color = self.indent_guide_color(match token_kind_by_column_iter.peek() {
+                    Some((column, token_kind)) if *column == indent_guide_column => *token_kind,
+                    _ => TokenKind::Unknown
+                });
                 self.indent_guide.draw_quad_abs(
                     cx,
                     Rect {
