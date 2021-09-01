@@ -663,7 +663,7 @@ impl<'a> FnDeclGenerator<'a> {
             backend_writer: self.backend_writer,
             create_const_table: self.create_const_table,
             // use_generated_cons_fns: false,
-            indent_level: 0,
+            indent: 0,
             string: self.string,
         }
         .generate_block(block)

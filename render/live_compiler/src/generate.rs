@@ -51,7 +51,7 @@ pub struct BlockGenerator<'a> {
     pub backend_writer: &'a dyn BackendWriter,
     pub create_const_table: bool,
     //pub use_generated_cons_fns: bool,
-    pub indent_level: usize,
+    pub indent: usize,
     pub string: &'a mut String,
 }
 
@@ -60,11 +60,11 @@ impl<'a> BlockGenerator<'a> {
         write!(self.string, "{{").unwrap();
         if !block.stmts.is_empty() {
             writeln!(self.string).unwrap();
-            self.indent_level += 1;
+            self.indent += 1;
             for stmt in &block.stmts {
                 self.generate_stmt(stmt);
             }
-            self.indent_level -= 1;
+            self.indent -= 1;
             self.write_indent();
         }
         write!(self.string, "}}").unwrap()
@@ -234,7 +234,7 @@ impl<'a> BlockGenerator<'a> {
     }
     
     fn write_indent(&mut self) {
-        for _ in 0..self.indent_level {
+        for _ in 0..self.indent {
             write!(self.string, "    ").unwrap();
         }
     }
