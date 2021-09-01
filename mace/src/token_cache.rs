@@ -94,10 +94,34 @@ impl TokenCache {
                     })
                 };
 
+                let mut token_kinds_by_column = previous_line.map_or_else(
+                    || Vec::new(),
+                    |previous_line| previous_line.token_kinds_by_column.clone(),
+                );
+                if let Some((column, kind)) = tokens.iter().find_map({
+                    let mut column = 0;
+                    move |token| {
+                        if token.kind != TokenKind::Whitespace {
+                            return Some((column, token.kind));
+                        }
+                        column += token.len;
+                        None
+                    }
+                }) {
+                    while let Some((last_column, _)) = token_kinds_by_column.last() {
+                        if *last_column < column {
+                            break;
+                        }
+                        token_kinds_by_column.pop();
+                    }
+                    token_kinds_by_column.push((column, kind));
+                }
+
                 let new_line = Line {
                     tokens,
                     end_state: state,
                     indent_count,
+                    token_kinds_by_column,
                 };
                 previous_line_did_change = line.as_ref() != Some(&new_line);
                 *line = Some(new_line);
@@ -119,6 +143,7 @@ impl<'a> Iterator for LineInfos<'a> {
         Some(LineInfo {
             tokens: &line.tokens,
             indent_count: line.indent_count,
+            token_kinds_by_column: &line.token_kinds_by_column,
         })
     }
 }
@@ -126,6 +151,7 @@ impl<'a> Iterator for LineInfos<'a> {
 pub struct LineInfo<'a> {
     pub tokens: &'a [Token],
     pub indent_count: usize,
+    pub token_kinds_by_column: &'a [(usize, TokenKind)],
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -185,6 +211,7 @@ struct Line {
     end_state: State,
     tokens: Vec<Token>,
     indent_count: usize,
+    token_kinds_by_column: Vec<(usize, TokenKind)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
