@@ -1,7 +1,7 @@
 use {
     crate::{
         cursor_set::CursorSet,
-        delta::{self, Delta},
+        delta::{self, Delta, Whose},
         generational::{Arena, Id, IdAllocator},
         position::Position,
         position_set::PositionSet,
@@ -268,10 +268,11 @@ impl CodeEditor {
                     }
                     token_kind_by_column_iter.next();
                 }
-                self.indent_guide.base.color = self.indent_guide_color(match token_kind_by_column_iter.peek() {
-                    Some((column, token_kind)) if *column == indent_guide_column => *token_kind,
-                    _ => TokenKind::Unknown
-                });
+                self.indent_guide.base.color =
+                    self.indent_guide_color(match token_kind_by_column_iter.peek() {
+                        Some((column, token_kind)) if *column == indent_guide_column => *token_kind,
+                        _ => TokenKind::Unknown,
+                    });
                 self.indent_guide.draw_quad_abs(
                     cx,
                     Rect {
@@ -751,7 +752,7 @@ impl State {
         let document = &self.documents[document_id];
         for session_id in document.session_ids.iter().cloned() {
             let session = &mut self.sessions[session_id];
-            session.apply_remote_delta(&delta);
+            session.apply_delta(&delta, Whose::Theirs);
         }
 
         let document = &mut self.documents[document_id];
@@ -910,7 +911,7 @@ impl State {
                 }
 
                 let other_session = &mut self.sessions[other_session_id];
-                other_session.apply_remote_delta(&undo.delta);
+                other_session.apply_delta(&undo.delta, Whose::Theirs);
             }
 
             let session = &mut self.sessions[session_id];
@@ -947,7 +948,7 @@ impl State {
                 }
 
                 let other_session = &mut self.sessions[other_session_id];
-                other_session.apply_remote_delta(&redo.delta);
+                other_session.apply_delta(&redo.delta, Whose::Theirs);
             }
 
             let session = &mut self.sessions[session_id];
@@ -972,7 +973,7 @@ impl State {
         });
 
         let session = &mut self.sessions[session_id];
-        session.apply_local_delta(&delta);
+        session.apply_delta(&delta, Whose::Ours);
 
         let document = &self.documents[session.document_id];
         for other_session_id in document.session_ids.iter().cloned() {
@@ -981,7 +982,7 @@ impl State {
             }
 
             let other_session = &mut self.sessions[other_session_id];
-            other_session.apply_remote_delta(&delta);
+            other_session.apply_delta(&delta, Whose::Theirs);
         }
 
         let session = &mut self.sessions[session_id];
@@ -1002,13 +1003,8 @@ struct Session {
 }
 
 impl Session {
-    fn apply_local_delta(&mut self, delta: &Delta) {
-        self.cursors.apply_local_delta(&delta);
-        self.update_selections_and_carets();
-    }
-
-    fn apply_remote_delta(&mut self, delta: &Delta) {
-        self.cursors.apply_remote_delta(&delta);
+    fn apply_delta(&mut self, delta: &Delta, whose: Whose) {
+        self.cursors.apply_delta(&delta, whose);
         self.update_selections_and_carets();
     }
 
@@ -1081,7 +1077,7 @@ fn transform_edit_stack(edit_stack: &mut Vec<Edit>, delta: Delta) {
     let mut delta = delta;
     for edit in edit_stack {
         let edit_delta = mem::replace(&mut edit.delta, Delta::identity());
-        edit.cursors.apply_remote_delta(&delta);
+        edit.cursors.apply_delta(&delta, Whose::Theirs);
         let (new_delta, new_edit_delta) = delta.transform(edit_delta);
         delta = new_delta;
         edit.delta = new_edit_delta;

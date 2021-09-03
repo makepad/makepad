@@ -397,3 +397,9 @@ pub enum OperationSpan {
     Insert(Size),
     Delete(Size),
 }
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Whose {
+    Ours,
+    Theirs,
+}
