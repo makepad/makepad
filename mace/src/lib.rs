@@ -18,5 +18,6 @@ pub mod splitter;
 pub mod tab_bar;
 pub mod text;
 pub mod token;
+pub mod tokenizer;
 pub mod token_cache;
 pub mod tree_logic;
