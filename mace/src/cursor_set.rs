@@ -1,6 +1,6 @@
 use crate::{
     cursor::Cursor,
-    delta::Delta,
+    delta::{Delta, Whose},
     position::Position,
     position_set::{self, PositionSet},
     range_set::{self, RangeSet},
@@ -118,21 +118,13 @@ impl CursorSet {
         cursor.max_column = position.column;
     }
 
-    pub fn apply_local_delta(&mut self, delta: &Delta) {
+    pub fn apply_delta(&mut self, delta: &Delta, whose: Whose) {
         for cursor in &mut self.cursors {
             let new_head = cursor.head.apply_delta(&delta);
-            *cursor = Cursor {
-                head: new_head,
-                tail: new_head,
-                max_column: new_head.column,
+            let new_tail = match whose {
+                Whose::Ours => new_head,
+                Whose::Theirs => cursor.tail.apply_delta(&delta),
             };
-        }
-    }
-
-    pub fn apply_remote_delta(&mut self, delta: &Delta) {
-        for cursor in &mut self.cursors {
-            let new_head = cursor.head.apply_delta(&delta);
-            let new_tail = cursor.tail.apply_delta(&delta);
             *cursor = Cursor {
                 head: new_head,
                 tail: new_tail,
