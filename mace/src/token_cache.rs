@@ -119,9 +119,9 @@ impl TokenCache {
 
                 let new_line = Line {
                     tokens,
-                    end_state: state,
                     indent_count,
                     token_kinds_by_column,
+                    end_state: state,
                 };
                 previous_line_did_change = line.as_ref() != Some(&new_line);
                 *line = Some(new_line);
@@ -208,10 +208,10 @@ impl Punctuator {
 
 #[derive(PartialEq)]
 struct Line {
-    end_state: State,
     tokens: Vec<Token>,
     indent_count: usize,
     token_kinds_by_column: Vec<(usize, TokenKind)>,
+    end_state: State,
 }
 
 #[derive(Clone, Copy, PartialEq)]
