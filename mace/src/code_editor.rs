@@ -9,7 +9,7 @@ use {
         size::Size,
         text::Text,
         token::{Keyword, Punctuator, TokenKind},
-        token_cache::{LineInfos, TokenCache},
+        line_info_cache::{LineInfoCache, LineInfo},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -109,13 +109,8 @@ impl CodeEditor {
             self.apply_style(cx);
             let visible_lines = self.visible_lines(cx, view_id, document.text.as_lines().len());
             self.draw_selections(cx, &session.selections, &document.text, visible_lines);
-            self.draw_indent_guides(cx, document.token_cache.line_infos(), visible_lines);
-            self.draw_text(
-                cx,
-                &document.text,
-                document.token_cache.line_infos(),
-                visible_lines,
-            );
+            self.draw_indent_guides(cx, document.line_info_cache.line_infos(), visible_lines);
+            self.draw_text(cx, &document.text, document.line_info_cache.line_infos(), visible_lines);
             self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
             self.set_turtle_bounds(cx, &document.text);
             let view = &mut self.views[view_id];
@@ -251,29 +246,16 @@ impl CodeEditor {
     fn draw_indent_guides(
         &mut self,
         cx: &mut Cx,
-        line_infos: LineInfos<'_>,
+        line_infos: &[LineInfo],
         visible_lines: VisibleLines,
     ) {
         let origin = cx.get_turtle_pos();
         let mut start_y = visible_lines.start_y;
-        for line_info in line_infos
-            .skip(visible_lines.start)
-            .take(visible_lines.end - visible_lines.start)
-        {
-            let mut token_kind_by_column_iter = line_info.token_kinds_by_column.iter().peekable();
-            for indent in 0..line_info.indent_count {
+        for line_info in &line_infos[visible_lines.start..visible_lines.end] {
+            let indent_count = (line_info.leading_whitespace() + 3) / 4; // TODO
+            for indent in 0..indent_count {
                 let indent_guide_column = indent * 4;
-                while let Some((column, ..)) = token_kind_by_column_iter.peek() {
-                    if *column >= indent_guide_column {
-                        break;
-                    }
-                    token_kind_by_column_iter.next();
-                }
-                self.indent_guide.base.color =
-                    self.indent_guide_color(match token_kind_by_column_iter.peek() {
-                        Some((column, token_kind)) if *column == indent_guide_column => *token_kind,
-                        _ => TokenKind::Unknown,
-                    });
+                self.indent_guide.base.color = self.text_color_unknown; // TODO
                 self.indent_guide.draw_quad_abs(
                     cx,
                     Rect {
@@ -293,7 +275,7 @@ impl CodeEditor {
         &mut self,
         cx: &mut Cx,
         text: &Text,
-        line_infos: LineInfos<'_>,
+        line_infos: &[LineInfo],
         visible_lines: VisibleLines,
     ) {
         let origin = cx.get_turtle_pos();
@@ -308,7 +290,7 @@ impl CodeEditor {
             let end_y = start_y + self.text_glyph_size.y;
             let mut start_x = origin.x;
             let mut start = 0;
-            let mut token_iter = line_info.tokens.iter().peekable();
+            let mut token_iter = line_info.tokens().iter().peekable();
             while let Some(token) = token_iter.next() {
                 let next_token = token_iter.peek();
                 let end_x = start_x + token.len as f32 * self.text_glyph_size.x;
@@ -392,14 +374,6 @@ impl CodeEditor {
                 }),
             y: text.as_lines().iter().map(|_| self.text_glyph_size.y).sum(),
         });
-    }
-
-    fn indent_guide_color(&self, kind: TokenKind) -> Vec4 {
-        match kind {
-            TokenKind::Keyword(Keyword::Branch) => self.text_color_branch_keyword,
-            TokenKind::Keyword(Keyword::Loop) => self.text_color_loop_keyword,
-            _ => self.text_color_unknown,
-        }
     }
 
     fn text_color(&self, kind: TokenKind, next_kind: Option<TokenKind>) -> Vec4 {
@@ -702,7 +676,7 @@ impl State {
 
     pub fn create_document(&mut self, path: PathBuf, revision: usize, text: Text) -> DocumentId {
         let document_id = self.document_id_allocator.allocate();
-        let token_cache = TokenCache::new(&text);
+        let line_info_cache = LineInfoCache::new(&text);
         self.documents.insert(
             document_id,
             Document {
@@ -712,7 +686,7 @@ impl State {
                 path: path.clone(),
                 revision,
                 text,
-                token_cache,
+                line_info_cache,
                 outstanding_deltas: VecDeque::new(),
             },
         );
@@ -1024,15 +998,15 @@ struct Document {
     path: PathBuf,
     revision: usize,
     text: Text,
-    token_cache: TokenCache,
+    line_info_cache: LineInfoCache,
     outstanding_deltas: VecDeque<Delta>,
 }
 
 impl Document {
     fn apply_delta(&mut self, delta: Delta) {
-        self.token_cache.invalidate(&delta);
+        self.line_info_cache.invalidate(&delta);
         self.text.apply_delta(delta);
-        self.token_cache.refresh(&self.text);
+        self.line_info_cache.refresh(&self.text);
     }
 
     fn schedule_apply_delta_request(
