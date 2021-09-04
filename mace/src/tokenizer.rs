@@ -1,6 +1,6 @@
 use crate::token::{Keyword, Punctuator, Token, TokenKind};
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum State {
     Initial(InitialState),
     BlockCommentTail(BlockCommentTailState),
@@ -38,7 +38,7 @@ impl State {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct InitialState;
 
 impl InitialState {
@@ -705,7 +705,7 @@ impl InitialState {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct BlockCommentTailState {
     depth: usize,
 }
@@ -735,7 +735,7 @@ impl BlockCommentTailState {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DoubleQuotedStringTailState;
 
 impl DoubleQuotedStringTailState {
@@ -760,7 +760,7 @@ impl DoubleQuotedStringTailState {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RawDoubleQuotedStringTailState {
     start_hash_count: usize,
 }
