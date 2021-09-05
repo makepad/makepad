@@ -3,13 +3,13 @@ use {
         cursor_set::CursorSet,
         delta::{self, Delta, Whose},
         generational::{Arena, Id, IdAllocator},
+        line_info_cache::{LineInfo, LineInfoCache},
         position::Position,
         position_set::PositionSet,
         range_set::{RangeSet, Span},
         size::Size,
         text::Text,
         token::{Keyword, Punctuator, TokenKind},
-        line_info_cache::{LineInfoCache, LineInfo},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -110,7 +110,12 @@ impl CodeEditor {
             let visible_lines = self.visible_lines(cx, view_id, document.text.as_lines().len());
             self.draw_selections(cx, &session.selections, &document.text, visible_lines);
             self.draw_indent_guides(cx, document.line_info_cache.line_infos(), visible_lines);
-            self.draw_text(cx, &document.text, document.line_info_cache.line_infos(), visible_lines);
+            self.draw_text(
+                cx,
+                &document.text,
+                document.line_info_cache.line_infos(),
+                visible_lines,
+            );
             self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
             self.set_turtle_bounds(cx, &document.text);
             let view = &mut self.views[view_id];

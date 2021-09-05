@@ -1,10 +1,8 @@
-use {
-    crate::{
-        delta::{Delta, OperationSpan},
-        text::Text,
-        token::{Token, TokenKind},
-        tokenizer::{Cursor, State},
-    },
+use crate::{
+    delta::{Delta, OperationRange},
+    text::Text,
+    token::{Token, TokenKind},
+    tokenizer::{Cursor, State},
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -28,29 +26,18 @@ impl LineInfoCache {
     }
 
     pub fn invalidate(&mut self, delta: &Delta) {
-        let mut line = 0;
-        for operation in delta {
-            match operation.span() {
-                OperationSpan::Retain(count) => {
-                    line += count.line;
-                }
-                OperationSpan::Insert(count) => {
-                    self.line_infos[line] = LineInfo::default();
+        for operation_range in delta.operation_ranges() {
+            match operation_range {
+                OperationRange::Insert(range) => {
+                    self.line_infos[range.start.line] = LineInfo::default();
                     self.line_infos.splice(
-                        line + 1..line + 1,
-                        (0..count.line).map(|_| LineInfo::default()),
+                        range.start.line + 1..range.start.line + 1,
+                        (0..range.end.line - range.start.line).map(|_| LineInfo::default()),
                     );
-                    line += count.line;
-                    if count.column > 0 {
-                        self.line_infos[line] = LineInfo::default();
-                    }
                 }
-                OperationSpan::Delete(count) => {
-                    self.line_infos[line] = LineInfo::default();
-                    self.line_infos.drain(line + 1..line + 1 + count.line);
-                    if count.column > 0 {
-                        self.line_infos[line] = LineInfo::default();
-                    }
+                OperationRange::Delete(range) => {
+                    self.line_infos.drain(range.start.line..range.end.line);
+                    self.line_infos[range.start.line] = LineInfo::default();
                 }
             }
         }
