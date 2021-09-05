@@ -14,6 +14,13 @@ impl Delta {
         Delta::default()
     }
 
+    pub fn operation_ranges(&self) -> OperationRanges<'_> {
+        OperationRanges {
+            position: Position::origin(),
+            iter: self.operations.iter(),
+        }
+    }
+
     pub fn invert(self, text: &Text) -> Delta {
         let mut builder = Builder::new();
         let mut position = Position::origin();
@@ -309,6 +316,45 @@ impl IntoIterator for Delta {
     fn into_iter(self) -> Self::IntoIter {
         self.operations.into_iter()
     }
+}
+
+pub struct OperationRanges<'a> {
+    position: Position,
+    iter: Iter<'a, Operation>,
+}
+
+impl<'a> Iterator for OperationRanges<'a> {
+    type Item = OperationRange;
+
+    fn next(&mut self) -> Option<OperationRange> {
+        loop {
+            match self.iter.next()?.span() {
+                OperationSpan::Retain(count) => {
+                    self.position += count;
+                }
+                OperationSpan::Insert(count) => {
+                    let start = self.position;
+                    self.position += count;
+                    break Some(OperationRange::Insert(Range {
+                        start,
+                        end: self.position,
+                    }));
+                }
+                OperationSpan::Delete(count) => {
+                    break Some(OperationRange::Delete(Range {
+                        start: self.position,
+                        end: self.position + count,
+                    }));
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum OperationRange {
+    Insert(Range),
+    Delete(Range),
 }
 
 #[derive(Debug, Default)]
