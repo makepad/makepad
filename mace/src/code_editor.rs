@@ -257,7 +257,7 @@ impl CodeEditor {
         let origin = cx.get_turtle_pos();
         let mut start_y = visible_lines.start_y;
         for line_info in &line_infos[visible_lines.start..visible_lines.end] {
-            let indent_count = (line_info.leading_whitespace() + 3) / 4; // TODO
+            let indent_count = (line_info.virtual_leading_whitespace() + 3) / 4; // TODO
             for indent in 0..indent_count {
                 let indent_guide_column = indent * 4;
                 self.indent_guide.base.color = self.text_color_unknown; // TODO
