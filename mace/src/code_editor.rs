@@ -149,9 +149,8 @@ impl CodeEditor {
         let view = &self.views[view_id];
         let viewport_start = view.view.get_scroll_pos(cx);
         let viewport_end = viewport_start + viewport_size;
-        let mut start_y = origin.y;
-        let mut line_iter = 0..line_count;
-        let start = line_iter
+        let mut start_y = 0.0;
+        let start = (0..line_count)
             .find_map(|line| {
                 let end_y = start_y + self.text_glyph_size.y;
                 if end_y >= viewport_start.y {
@@ -162,7 +161,7 @@ impl CodeEditor {
             })
             .unwrap_or(line_count);
         let visible_start_y = start_y;
-        let end = line_iter
+        let end = (start..line_count)
             .find_map(|line| {
                 if start_y >= viewport_end.y {
                     return Some(line);
