@@ -282,10 +282,10 @@ impl CodeEditor {
             x: char_width,
             y: line_height,
         } = live_text_style!(cx, self::text_style).font_size * self.text.get_monospace_base(cx);
-        let line = (position.y / line_height) as usize;
+        let line_index = (position.y / line_height) as usize;
         Position {
-            line,
-            column: ((position.x / char_width) as usize).min(lines[line].len()),
+            line: index,
+            column: ((position.x / char_width) as usize).min(lines[index].len()),
         }
     }
 }
