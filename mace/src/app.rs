@@ -250,10 +250,28 @@ impl AppInner {
         }
 
         let mut actions = Vec::new();
-        self.code_editor
-            .handle_event(cx, &mut state.code_editor_state, event, &mut |action| {
-                actions.push(action)
-            });
+        let mut panel_id_stack = vec![state.root_panel_id];
+        while let Some(panel_id) = panel_id_stack.pop() {
+            let panel = &state.panels[panel_id];
+            match panel {
+                Panel::Splitter { child_ids } => {
+                    for child_id in child_ids {
+                        panel_id_stack.push(*child_id);
+                    }
+                }
+                Panel::TabBar { view_id, .. } => {
+                    if let Some(view_id) = view_id {
+                        self.code_editor.handle_event(
+                            cx,
+                            &mut state.code_editor_state,
+                            *view_id,
+                            event,
+                            &mut |action| actions.push(action),
+                        );
+                    }
+                }
+            }
+        }
         for action in actions {
             match action {
                 code_editor::Action::ApplyDeltaRequestWasPosted(path, revision, delta) => {

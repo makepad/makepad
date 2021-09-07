@@ -160,7 +160,7 @@ impl CodeEditor {
                 None
             })
             .unwrap_or(line_count);
-        let visible_start_y = start_y;
+        let visible_start_y = origin.y + start_y;
         let end = (start..line_count)
             .find_map(|line| {
                 if start_y >= viewport_end.y {
@@ -440,188 +440,179 @@ impl CodeEditor {
         &mut self,
         cx: &mut Cx,
         state: &mut State,
+        view_id: ViewId,
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(Action),
     ) {
-        for view_id in &self.view_id_allocator {
-            let view = &mut self.views[view_id];
-            if view.view.handle_scroll_view(cx, event) {
+        let view = &mut self.views[view_id];
+        if view.view.handle_scroll_view(cx, event) {
+            view.view.redraw_view(cx);
+        }
+        let view = &self.views[view_id];
+        match event.hits(cx, view.view.area(), HitOpt::default()) {
+            Event::FingerDown(FingerDownEvent { rel, modifiers, .. }) => {
+                // TODO: How to handle key focus?
+                cx.set_key_focus(view.view.area());
+                cx.set_hover_mouse_cursor(MouseCursor::Text);
+                let view = &self.views[view_id];
+                let session = &state.sessions[view.session_id];
+                let document = &state.documents[session.document_id];
+                let position = self.position(&document.text, rel);
+                let view = &self.views[view_id];
+                match modifiers {
+                    KeyModifiers { control: true, .. } => {
+                        state.add_cursor(view.session_id, position);
+                    }
+                    KeyModifiers { shift, .. } => {
+                        state.move_cursors_to(view.session_id, position, shift);
+                    }
+                }
+                let view = &mut self.views[view_id];
                 view.view.redraw_view(cx);
             }
-            let view = &self.views[view_id];
-            match event.hits(cx, view.view.area(), HitOpt::default()) {
-                Event::FingerDown(FingerDownEvent { rel, modifiers, .. }) => {
-                    // TODO: How to handle key focus?
-                    cx.set_key_focus(view.view.area());
-                    cx.set_hover_mouse_cursor(MouseCursor::Text);
-                    let view = &self.views[view_id];
-                    let session = &state.sessions[view.session_id];
-                    let document = &state.documents[session.document_id];
-                    let position = self.position(&document.text, rel);
-                    let view = &self.views[view_id];
-                    match modifiers {
-                        KeyModifiers { control: true, .. } => {
-                            state.add_cursor(view.session_id, position);
-                        }
-                        KeyModifiers { shift, .. } => {
-                            state.move_cursors_to(view.session_id, position, shift);
-                        }
+            Event::FingerMove(FingerMoveEvent { rel, .. }) => {
+                let view = &self.views[view_id];
+                let session = &state.sessions[view.session_id];
+                let document = &state.documents[session.document_id];
+                let position = self.position(&document.text, rel);
+                let view = &self.views[view_id];
+                state.move_cursors_to(view.session_id, position, true);
+                let view = &mut self.views[view_id];
+                view.view.redraw_view(cx);
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowLeft,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                let view = &self.views[view_id];
+                state.move_cursors_left(view.session_id, shift);
+                let view = &mut self.views[view_id];
+                view.view.redraw_view(cx);
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowRight,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                let view = &self.views[view_id];
+                state.move_cursors_right(view.session_id, shift);
+                let view = &mut self.views[view_id];
+                view.view.redraw_view(cx);
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowUp,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                let view = &self.views[view_id];
+                state.move_cursors_up(view.session_id, shift);
+                let view = &mut self.views[view_id];
+                view.view.redraw_view(cx);
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowDown,
+                modifiers: KeyModifiers { shift, .. },
+                ..
+            }) => {
+                let view = &self.views[view_id];
+                state.move_cursors_down(view.session_id, shift);
+                let view = &mut self.views[view_id];
+                view.view.redraw_view(cx);
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Backspace,
+                ..
+            }) => {
+                let view = &self.views[view_id];
+                state.insert_backspace(view.session_id, &mut |path, revision, delta| {
+                    dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
+                });
+                let view = &self.views[view_id];
+                let session = &state.sessions[view.session_id];
+                let document = &state.documents[session.document_id];
+                for session_id in &document.session_ids {
+                    let session = &state.sessions[*session_id];
+                    if let Some(view_id) = session.view_id {
+                        let view = &mut self.views[view_id];
+                        view.view.redraw_view(cx);
                     }
-                    let view = &mut self.views[view_id];
-                    view.view.redraw_view(cx);
                 }
-                Event::FingerMove(FingerMoveEvent { rel, .. }) => {
-                    let view = &self.views[view_id];
-                    let session = &state.sessions[view.session_id];
-                    let document = &state.documents[session.document_id];
-                    let position = self.position(&document.text, rel);
-                    let view = &self.views[view_id];
-                    state.move_cursors_to(view.session_id, position, true);
-                    let view = &mut self.views[view_id];
-                    view.view.redraw_view(cx);
-                }
-                Event::KeyDown(KeyEvent {
-                    key_code: KeyCode::ArrowLeft,
-                    modifiers: KeyModifiers { shift, .. },
-                    ..
-                }) => {
-                    let view = &self.views[view_id];
-                    state.move_cursors_left(view.session_id, shift);
-                    let view = &mut self.views[view_id];
-                    view.view.redraw_view(cx);
-                }
-                Event::KeyDown(KeyEvent {
-                    key_code: KeyCode::ArrowRight,
-                    modifiers: KeyModifiers { shift, .. },
-                    ..
-                }) => {
-                    let view = &self.views[view_id];
-                    state.move_cursors_right(view.session_id, shift);
-                    let view = &mut self.views[view_id];
-                    view.view.redraw_view(cx);
-                }
-                Event::KeyDown(KeyEvent {
-                    key_code: KeyCode::ArrowUp,
-                    modifiers: KeyModifiers { shift, .. },
-                    ..
-                }) => {
-                    let view = &self.views[view_id];
-                    state.move_cursors_up(view.session_id, shift);
-                    let view = &mut self.views[view_id];
-                    view.view.redraw_view(cx);
-                }
-                Event::KeyDown(KeyEvent {
-                    key_code: KeyCode::ArrowDown,
-                    modifiers: KeyModifiers { shift, .. },
-                    ..
-                }) => {
-                    let view = &self.views[view_id];
-                    state.move_cursors_down(view.session_id, shift);
-                    let view = &mut self.views[view_id];
-                    view.view.redraw_view(cx);
-                }
-                Event::KeyDown(KeyEvent {
-                    key_code: KeyCode::Backspace,
-                    ..
-                }) => {
-                    let view = &self.views[view_id];
-                    state.insert_backspace(view.session_id, &mut |path, revision, delta| {
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::KeyZ,
+                modifiers,
+                ..
+            }) if modifiers.control || modifiers.logo => {
+                let view = &self.views[view_id];
+                if modifiers.shift {
+                    state.redo(view.session_id, &mut |path, revision, delta| {
                         dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
                     });
-                    let view = &self.views[view_id];
-                    let session = &state.sessions[view.session_id];
-                    let document = &state.documents[session.document_id];
-                    for session_id in &document.session_ids {
-                        let session = &state.sessions[*session_id];
-                        if let Some(view_id) = session.view_id {
-                            let view = &mut self.views[view_id];
-                            view.view.redraw_view(cx);
-                        }
+                } else {
+                    state.undo(view.session_id, &mut |path, revision, delta| {
+                        dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
+                    });
+                }
+                let view = &self.views[view_id];
+                let session = &state.sessions[view.session_id];
+                let document = &state.documents[session.document_id];
+                for session_id in &document.session_ids {
+                    let session = &state.sessions[*session_id];
+                    if let Some(view_id) = session.view_id {
+                        let view = &mut self.views[view_id];
+                        view.view.redraw_view(cx);
                     }
                 }
-                Event::KeyDown(KeyEvent {
-                    key_code: KeyCode::KeyZ,
-                    modifiers,
-                    ..
-                }) if modifiers.control || modifiers.logo => {
-                    let view = &self.views[view_id];
-                    if modifiers.shift {
-                        state.redo(view.session_id, &mut |path, revision, delta| {
-                            dispatch_action(Action::ApplyDeltaRequestWasPosted(
-                                path, revision, delta,
-                            ));
-                        });
-                    } else {
-                        state.undo(view.session_id, &mut |path, revision, delta| {
-                            dispatch_action(Action::ApplyDeltaRequestWasPosted(
-                                path, revision, delta,
-                            ));
-                        });
-                    }
-                    let view = &self.views[view_id];
-                    let session = &state.sessions[view.session_id];
-                    let document = &state.documents[session.document_id];
-                    for session_id in &document.session_ids {
-                        let session = &state.sessions[*session_id];
-                        if let Some(view_id) = session.view_id {
-                            let view = &mut self.views[view_id];
-                            view.view.redraw_view(cx);
-                        }
-                    }
-                }
-                Event::KeyDown(KeyEvent {
-                    key_code: KeyCode::Return,
-                    ..
-                }) => {
-                    let view = &self.views[view_id];
-                    state.insert_text(
-                        view.session_id,
-                        Text::from(vec![vec![], vec![]]),
-                        &mut |path, revision, delta| {
-                            dispatch_action(Action::ApplyDeltaRequestWasPosted(
-                                path, revision, delta,
-                            ));
-                        },
-                    );
-                    let view = &self.views[view_id];
-                    let session = &state.sessions[view.session_id];
-                    let document = &state.documents[session.document_id];
-                    for session_id in &document.session_ids {
-                        let session = &state.sessions[*session_id];
-                        if let Some(view_id) = session.view_id {
-                            let view = &mut self.views[view_id];
-                            view.view.redraw_view(cx);
-                        }
-                    }
-                }
-                Event::TextInput(TextInputEvent { input, .. }) => {
-                    let view = &self.views[view_id];
-                    state.insert_text(
-                        view.session_id,
-                        input
-                            .lines()
-                            .map(|line| line.chars().collect::<Vec<_>>())
-                            .collect::<Vec<_>>()
-                            .into(),
-                        &mut |path, revision, delta| {
-                            dispatch_action(Action::ApplyDeltaRequestWasPosted(
-                                path, revision, delta,
-                            ));
-                        },
-                    );
-                    let view = &self.views[view_id];
-                    let session = &state.sessions[view.session_id];
-                    let document = &state.documents[session.document_id];
-                    for session_id in &document.session_ids {
-                        let session = &state.sessions[*session_id];
-                        if let Some(view_id) = session.view_id {
-                            let view = &mut self.views[view_id];
-                            view.view.redraw_view(cx);
-                        }
-                    }
-                }
-                _ => {}
             }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Return,
+                ..
+            }) => {
+                let view = &self.views[view_id];
+                state.insert_text(
+                    view.session_id,
+                    Text::from(vec![vec![], vec![]]),
+                    &mut |path, revision, delta| {
+                        dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
+                    },
+                );
+                let view = &self.views[view_id];
+                let session = &state.sessions[view.session_id];
+                let document = &state.documents[session.document_id];
+                for session_id in &document.session_ids {
+                    let session = &state.sessions[*session_id];
+                    if let Some(view_id) = session.view_id {
+                        let view = &mut self.views[view_id];
+                        view.view.redraw_view(cx);
+                    }
+                }
+            }
+            Event::TextInput(TextInputEvent { input, .. }) => {
+                let view = &self.views[view_id];
+                state.insert_text(
+                    view.session_id,
+                    input
+                        .lines()
+                        .map(|line| line.chars().collect::<Vec<_>>())
+                        .collect::<Vec<_>>()
+                        .into(),
+                    &mut |path, revision, delta| {
+                        dispatch_action(Action::ApplyDeltaRequestWasPosted(path, revision, delta));
+                    },
+                );
+                let view = &self.views[view_id];
+                let session = &state.sessions[view.session_id];
+                let document = &state.documents[session.document_id];
+                for session_id in &document.session_ids {
+                    let session = &state.sessions[*session_id];
+                    if let Some(view_id) = session.view_id {
+                        let view = &mut self.views[view_id];
+                        view.view.redraw_view(cx);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
