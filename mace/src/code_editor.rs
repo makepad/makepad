@@ -840,12 +840,14 @@ impl State {
         for distance in session.carets.distances() {
             position += distance;
             if !session.selections.contains_position(position) {
-                if distance.column == 0 {
-                    builder_1.retain(Size {
-                        line: distance.line - 1,
-                        column: document.text.as_lines()[position.line - 1].len(),
-                    });
-                    builder_1.delete(Size { line: 1, column: 0 })
+                if position.column == 0 {
+                    if position.line != 0 {
+                        builder_1.retain(Size {
+                            line: distance.line - 1,
+                            column: document.text.as_lines()[position.line - 1].len(),
+                        });
+                        builder_1.delete(Size { line: 1, column: 0 })
+                    }
                 } else {
                     builder_1.retain(Size {
                         line: distance.line,
