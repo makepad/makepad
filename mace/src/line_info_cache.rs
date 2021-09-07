@@ -118,7 +118,9 @@ impl LineInfo {
     }
 
     pub fn virtual_leading_whitespace(&self) -> usize {
-        self.leading_whitespace_above.unwrap().min(self.leading_whitespace_below.unwrap())
+        self.leading_whitespace_above
+            .unwrap()
+            .min(self.leading_whitespace_below.unwrap())
     }
 }
 
