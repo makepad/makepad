@@ -4,7 +4,7 @@ use {
         dock::{self, Dock, PanelId},
         file_tree::{self, FileNodeId, FileTree},
         generational::{Arena, IdAllocator},
-        protocol::{self, Notification, Request, Response, ResponseOrNotification},
+        protocol::{self, Request, Response, ResponseOrNotification},
         server::{Connection, Server},
         splitter::Splitter,
         tab_bar::{TabBar, TabId},
@@ -249,7 +249,6 @@ impl AppInner {
             }
         }
 
-        let mut actions = Vec::new();
         let mut panel_id_stack = vec![state.root_panel_id];
         while let Some(panel_id) = panel_id_stack.pop() {
             let panel = &state.panels[panel_id];
@@ -266,16 +265,12 @@ impl AppInner {
                             &mut state.code_editor_state,
                             *view_id,
                             event,
-                            &mut |action| actions.push(action),
+                            &mut {
+                                let request_sender = &self.request_sender;
+                                move |request| request_sender.send(request).unwrap()
+                            },
                         );
                     }
-                }
-            }
-        }
-        for action in actions {
-            match action {
-                code_editor::Action::ApplyDeltaRequestWasPosted(path, revision, delta) => {
-                    self.send_request(Request::ApplyDelta(path, revision, delta));
                 }
             }
         }
@@ -308,18 +303,22 @@ impl AppInner {
         state: &mut State,
         response_or_notification: ResponseOrNotification,
     ) {
-        match response_or_notification {
-            ResponseOrNotification::Response(response) => {
-                let request = self.outstanding_requests.pop_front().unwrap();
-                match response {
-                    Response::GetFileTree(response) => {
-                        self.set_file_tree(cx, state, response.unwrap());
-                        let tab = &state.tabs[state.file_tree_tab_id];
-                        self.dock
-                            .get_or_create_tab_bar(cx, tab.panel_id)
-                            .set_selected_item_id(cx, Some(state.file_tree_tab_id));
+        match response_or_notification.clone() {
+            ResponseOrNotification::Response(response) => match response {
+                Response::GetFileTree(response) => {
+                    match self.outstanding_requests.pop_front().unwrap() {
+                        Request::GetFileTree() => {
+                            self.set_file_tree(cx, state, response.unwrap());
+                            let tab = &state.tabs[state.file_tree_tab_id];
+                            self.dock
+                                .get_or_create_tab_bar(cx, tab.panel_id)
+                                .set_selected_item_id(cx, Some(state.file_tree_tab_id));
+                        }
+                        _ => panic!(),
                     }
-                    Response::OpenFile(response) => match request {
+                }
+                Response::OpenFile(response) => {
+                    match self.outstanding_requests.pop_front().unwrap() {
                         Request::OpenFile(path) => {
                             let (revision, text) = response.unwrap();
                             let name = path.file_name().unwrap().to_string_lossy().into_owned();
@@ -346,37 +345,21 @@ impl AppInner {
                                 .set_selected_item_id(cx, Some(tab_id));
                         }
                         _ => panic!(),
-                    },
-                    Response::ApplyDelta(response) => match request {
-                        Request::ApplyDelta(path, _, _) => {
-                            let _ = response.unwrap();
-                            let mut apply_delta_requests = Vec::new();
-                            state.code_editor_state.handle_apply_delta_response(
-                                &path,
-                                &mut |revision, delta| {
-                                    apply_delta_requests.push((revision, delta));
-                                },
-                            );
-                            for (revision, delta) in apply_delta_requests {
-                                self.send_request(Request::ApplyDelta(
-                                    path.clone(),
-                                    revision,
-                                    delta,
-                                ));
-                            }
-                        }
-                        _ => panic!(),
-                    },
+                    }
                 }
-            }
-            ResponseOrNotification::Notification(notification) => match notification {
-                Notification::DeltaWasApplied(path, delta) => {
-                    state
-                        .code_editor_state
-                        .handle_delta_was_applied_notification(&path, delta);
-                }
+                _ => {}
             },
+            _ => {}
         }
+        self.code_editor.handle_response_or_notification(
+            cx,
+            &mut state.code_editor_state,
+            response_or_notification,
+            &mut {
+                let request_sender = &self.request_sender;
+                move |request| request_sender.send(request).unwrap()
+            },
+        );
     }
 
     fn create_or_update_view(
