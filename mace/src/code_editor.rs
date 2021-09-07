@@ -1046,7 +1046,7 @@ struct VisibleLines {
 
 fn transform_edit_stack(edit_stack: &mut Vec<Edit>, delta: Delta) {
     let mut delta = delta;
-    for edit in edit_stack {
+    for edit in edit_stack.iter_mut().rev() {
         let edit_delta = mem::replace(&mut edit.delta, Delta::identity());
         edit.cursors.apply_delta(&delta, Whose::Theirs);
         let (new_delta, new_edit_delta) = delta.transform(edit_delta);
