@@ -11,26 +11,26 @@ pub enum Request {
     ApplyDelta(PathBuf, usize, Delta),
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum ResponseOrNotification {
     Response(Response),
     Notification(Notification),
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Response {
     GetFileTree(Result<FileNode, Error>),
     OpenFile(Result<(usize, Text), Error>),
     ApplyDelta(Result<(), Error>),
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum FileNode {
     Directory { entries: Vec<DirectoryEntry> },
     File,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DirectoryEntry {
     pub name: OsString,
     pub node: FileNode,
@@ -41,7 +41,7 @@ pub enum Notification {
     DeltaWasApplied(PathBuf, Delta),
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Error {
     Unknown(String),
 }
