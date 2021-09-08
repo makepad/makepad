@@ -9,6 +9,7 @@ pub enum Request {
     GetFileTree(),
     OpenFile(PathBuf),
     ApplyDelta(PathBuf, usize, Delta),
+    CloseFile(PathBuf),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -22,6 +23,7 @@ pub enum Response {
     GetFileTree(Result<FileNode, Error>),
     OpenFile(Result<(usize, Text), Error>),
     ApplyDelta(Result<(), Error>),
+    CloseFile(Result<(), Error>),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

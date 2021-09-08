@@ -58,6 +58,7 @@ impl Connection {
             Request::ApplyDelta(path, revision, delta) => {
                 Response::ApplyDelta(self.apply_delta(path, revision, delta))
             }
+            Request::CloseFile(path) => Response::CloseFile(self.close_file(path)),
         }
     }
 
@@ -91,8 +92,8 @@ impl Connection {
         match documents_by_path_guard.get(&path) {
             Some(document) => {
                 let mut document_guard = document.lock().unwrap();
+
                 let their_revision = document_guard.our_revision;
-                let text = document_guard.text.clone();
                 document_guard.participants_by_connection_id.insert(
                     self.connection_id,
                     Participant {
@@ -100,8 +101,12 @@ impl Connection {
                         notification_sender: self.notification_sender.clone(),
                     },
                 );
+
+                let text = document_guard.text.clone();
                 drop(document_guard);
+
                 drop(documents_by_path_guard);
+
                 Ok((their_revision, text))
             }
             None => {
@@ -111,6 +116,7 @@ impl Connection {
                     .map(|line| line.chars().collect::<Vec<_>>())
                     .collect::<Vec<_>>()
                     .into();
+
                 let mut participants_by_connection_id = HashMap::new();
                 participants_by_connection_id.insert(
                     self.connection_id,
@@ -119,6 +125,7 @@ impl Connection {
                         notification_sender: self.notification_sender.clone(),
                     },
                 );
+
                 documents_by_path_guard.insert(
                     path,
                     Mutex::new(Document {
@@ -128,7 +135,9 @@ impl Connection {
                         participants_by_connection_id,
                     }),
                 );
+
                 drop(documents_by_path_guard);
+
                 Ok((0, text))
             }
         }
@@ -136,8 +145,10 @@ impl Connection {
 
     fn apply_delta(&self, path: PathBuf, their_revision: usize, delta: Delta) -> Result<(), Error> {
         let documents_by_path_guard = self.shared.documents_by_path.read().unwrap();
+
         let document = documents_by_path_guard.get(&path).unwrap();
         let mut document_guard = document.lock().unwrap();
+
         let unseen_delta_count = document_guard.our_revision - their_revision;
         let seen_delta_count = document_guard.outstanding_deltas.len() - unseen_delta_count;
         let mut delta = delta;
@@ -148,29 +159,56 @@ impl Connection {
         {
             delta = unseen_delta.clone().transform(delta).1;
         }
+
         document_guard.our_revision += 1;
         document_guard.text.apply_delta(delta.clone());
         document_guard.outstanding_deltas.push_back(delta.clone());
+
         let participant = document_guard
             .participants_by_connection_id
             .get_mut(&self.connection_id)
             .unwrap();
         participant.their_revision = their_revision;
-        let their_revision = document_guard
+
+        let settled_revision = document_guard
             .participants_by_connection_id
             .values()
             .map(|participant| participant.their_revision)
             .min()
             .unwrap();
-        let unseen_delta_count = document_guard.our_revision - their_revision;
-        let seen_delta_count = document_guard.outstanding_deltas.len() - unseen_delta_count;
-        document_guard.outstanding_deltas.drain(..seen_delta_count);
+        let unsettled_delta_count = document_guard.our_revision - settled_revision;
+        let settled_delta_count = document_guard.outstanding_deltas.len() - unsettled_delta_count;
+        document_guard.outstanding_deltas.drain(..settled_delta_count);
+
         document_guard.notify_other_participants(
             self.connection_id,
             Notification::DeltaWasApplied(path, delta),
         );
+
         drop(document_guard);
+
         drop(documents_by_path_guard);
+
+        Ok(())
+    }
+
+    fn close_file(&self, path: PathBuf) -> Result<(), Error> {
+        let mut documents_by_path_guard = self.shared.documents_by_path.write().unwrap();
+
+        let document = documents_by_path_guard.get(&path).unwrap();
+        let mut document_guard = document.lock().unwrap();
+
+        document_guard.participants_by_connection_id.remove(&self.connection_id);
+
+        let is_empty = document_guard.participants_by_connection_id.is_empty();
+        drop(document_guard);
+
+        if is_empty {
+            documents_by_path_guard.remove(&path);
+        }
+
+        drop(documents_by_path_guard);
+
         Ok(())
     }
 }
