@@ -17,7 +17,7 @@ use {
     std::{
         collections::{HashMap, HashSet, VecDeque},
         mem,
-        path::PathBuf,
+        path::{Path, PathBuf},
     },
 };
 
@@ -734,6 +734,10 @@ impl State {
         );
         self.document_ids_by_path.insert(path, document_id);
         document_id
+    }
+
+    pub fn document_id_by_path(&self, path: &Path) -> Option<DocumentId> {
+        self.document_ids_by_path.get(path).cloned()
     }
 
     fn add_cursor(&mut self, session_id: SessionId, position: Position) {

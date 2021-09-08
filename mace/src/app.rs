@@ -1,6 +1,6 @@
 use {
     crate::{
-        code_editor::{self, CodeEditor, SessionId, ViewId},
+        code_editor::{self, CodeEditor, DocumentId, SessionId, ViewId},
         dock::{self, Dock, PanelId},
         file_tree::{self, FileNodeId, FileTree},
         generational::{Arena, IdAllocator},
@@ -209,6 +209,27 @@ impl AppInner {
         self.file_tree.redraw(cx);
     }
 
+    fn create_code_editor_tab(&mut self, cx: &mut Cx, state: &mut State, name: String, document_id: DocumentId) {
+        let session_id = state.code_editor_state.create_session(document_id);
+        let tab_id = state.tab_id_allocator.allocate();
+        match &mut state.panels[state.panel_id] {
+            Panel::TabBar { tab_ids, .. } => tab_ids.push(tab_id),
+            _ => panic!(),
+        }
+        state.tabs.insert(
+            tab_id,
+            Tab {
+                panel_id: state.panel_id,
+                name,
+                kind: TabKind::CodeEditor { session_id },
+            },
+        );
+        self.create_or_update_view(cx, state, state.panel_id, session_id);
+        self.dock
+            .get_or_create_tab_bar(cx, state.panel_id)
+            .set_selected_item_id(cx, Some(tab_id));
+    }
+
     fn send_request(&mut self, request: Request) {
         self.outstanding_requests.push_back(request.clone());
         self.request_sender.send(request).unwrap();
@@ -243,7 +264,13 @@ impl AppInner {
                     let file_node = &state.file_nodes[file_node_id];
                     if file_node.is_file() {
                         let path = state.file_node_path(file_node_id);
-                        self.send_request(Request::OpenFile(path));
+                        match state.code_editor_state.document_id_by_path(&path) {
+                            Some(document_id) => {
+                                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                                self.create_code_editor_tab(cx, state, name, document_id);
+                            },
+                            None => self.send_request(Request::OpenFile(path)),
+                        }
                     }
                 }
             }
@@ -338,24 +365,7 @@ impl AppInner {
                         let document_id = state
                             .code_editor_state
                             .create_document(path, revision, text);
-                        let session_id = state.code_editor_state.create_session(document_id);
-                        let tab_id = state.tab_id_allocator.allocate();
-                        match &mut state.panels[state.panel_id] {
-                            Panel::TabBar { tab_ids, .. } => tab_ids.push(tab_id),
-                            _ => panic!(),
-                        }
-                        state.tabs.insert(
-                            tab_id,
-                            Tab {
-                                panel_id: state.panel_id,
-                                name,
-                                kind: TabKind::CodeEditor { session_id },
-                            },
-                        );
-                        self.create_or_update_view(cx, state, state.panel_id, session_id);
-                        self.dock
-                            .get_or_create_tab_bar(cx, state.panel_id)
-                            .set_selected_item_id(cx, Some(tab_id));
+                        self.create_code_editor_tab(cx, state, name, document_id);
                     }
                     _ => panic!(),
                 }
