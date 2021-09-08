@@ -4,7 +4,7 @@ use {
         dock::{self, Dock, PanelId},
         file_tree::{self, FileNodeId, FileTree},
         generational::{Arena, IdAllocator},
-        protocol::{self, Request, Response, ResponseOrNotification},
+        protocol::{self, Notification, Request, Response, ResponseOrNotification},
         server::{Connection, Server},
         splitter::Splitter,
         tab_bar::{TabBar, TabId},
@@ -266,8 +266,12 @@ impl AppInner {
                             *view_id,
                             event,
                             &mut {
+                                let outstanding_requests = &mut self.outstanding_requests;
                                 let request_sender = &self.request_sender;
-                                move |request| request_sender.send(request).unwrap()
+                                move |request| {
+                                    outstanding_requests.push_back(request.clone());
+                                    request_sender.send(request).unwrap()
+                                }
                             },
                         );
                     }
@@ -283,10 +287,19 @@ impl AppInner {
             {
                 loop {
                     match self.response_or_notification_receiver.try_recv() {
-                        Ok(response_or_notification) => self.handle_response_or_notification(
+                        Ok(ResponseOrNotification::Response(response)) => {
+                            let request = self.outstanding_requests.pop_front().unwrap();
+                            self.handle_response(
+                                cx,
+                                state,
+                                request,
+                                response,
+                            )
+                        },
+                        Ok(ResponseOrNotification::Notification(notification)) => self.handle_notification(
                             cx,
                             state,
-                            response_or_notification,
+                            notification,
                         ),
                         Err(TryRecvError::Empty) => break,
                         _ => panic!(),
@@ -297,69 +310,86 @@ impl AppInner {
         }
     }
 
-    fn handle_response_or_notification(
+    fn handle_response(
         &mut self,
         cx: &mut Cx,
         state: &mut State,
-        response_or_notification: ResponseOrNotification,
+        request: Request,
+        response: Response,
     ) {
-        match response_or_notification.clone() {
-            ResponseOrNotification::Response(response) => match response {
-                Response::GetFileTree(response) => {
-                    match self.outstanding_requests.pop_front().unwrap() {
-                        Request::GetFileTree() => {
-                            self.set_file_tree(cx, state, response.unwrap());
-                            let tab = &state.tabs[state.file_tree_tab_id];
-                            self.dock
-                                .get_or_create_tab_bar(cx, tab.panel_id)
-                                .set_selected_item_id(cx, Some(state.file_tree_tab_id));
-                        }
-                        _ => panic!(),
+        match response {
+            Response::GetFileTree(response) => {
+                match request {
+                    Request::GetFileTree() => {
+                        self.set_file_tree(cx, state, response.unwrap());
+                        let tab = &state.tabs[state.file_tree_tab_id];
+                        self.dock
+                            .get_or_create_tab_bar(cx, tab.panel_id)
+                            .set_selected_item_id(cx, Some(state.file_tree_tab_id));
                     }
+                    _ => panic!(),
                 }
-                Response::OpenFile(response) => {
-                    match self.outstanding_requests.pop_front().unwrap() {
-                        Request::OpenFile(path) => {
-                            let (revision, text) = response.unwrap();
-                            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                            let document_id = state
-                                .code_editor_state
-                                .create_document(path, revision, text);
-                            let session_id = state.code_editor_state.create_session(document_id);
-                            let tab_id = state.tab_id_allocator.allocate();
-                            match &mut state.panels[state.panel_id] {
-                                Panel::TabBar { tab_ids, .. } => tab_ids.push(tab_id),
-                                _ => panic!(),
-                            }
-                            state.tabs.insert(
-                                tab_id,
-                                Tab {
-                                    panel_id: state.panel_id,
-                                    name,
-                                    kind: TabKind::CodeEditor { session_id },
-                                },
-                            );
-                            self.create_or_update_view(cx, state, state.panel_id, session_id);
-                            self.dock
-                                .get_or_create_tab_bar(cx, state.panel_id)
-                                .set_selected_item_id(cx, Some(tab_id));
+            }
+            Response::OpenFile(response) => {
+                match request {
+                    Request::OpenFile(path) => {
+                        let (revision, text) = response.unwrap();
+                        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                        let document_id = state
+                            .code_editor_state
+                            .create_document(path, revision, text);
+                        let session_id = state.code_editor_state.create_session(document_id);
+                        let tab_id = state.tab_id_allocator.allocate();
+                        match &mut state.panels[state.panel_id] {
+                            Panel::TabBar { tab_ids, .. } => tab_ids.push(tab_id),
+                            _ => panic!(),
                         }
-                        _ => panic!(),
+                        state.tabs.insert(
+                            tab_id,
+                            Tab {
+                                panel_id: state.panel_id,
+                                name,
+                                kind: TabKind::CodeEditor { session_id },
+                            },
+                        );
+                        self.create_or_update_view(cx, state, state.panel_id, session_id);
+                        self.dock
+                            .get_or_create_tab_bar(cx, state.panel_id)
+                            .set_selected_item_id(cx, Some(tab_id));
                     }
+                    _ => panic!(),
                 }
-                _ => {}
-            },
-            _ => {}
+            }
+            response => self.code_editor.handle_response(
+                &mut state.code_editor_state,
+                request,
+                response,
+                &mut {
+                    let outstanding_requests = &mut self.outstanding_requests;
+                    let request_sender = &self.request_sender;
+                    move |request| {
+                        outstanding_requests.push_back(request.clone());
+                        request_sender.send(request).unwrap()
+                    }
+                },
+            )
         }
-        self.code_editor.handle_response_or_notification(
-            cx,
-            &mut state.code_editor_state,
-            response_or_notification,
-            &mut {
-                let request_sender = &self.request_sender;
-                move |request| request_sender.send(request).unwrap()
-            },
-        );
+;
+    }
+
+    fn handle_notification(
+        &mut self,
+        cx: &mut Cx,
+        state: &mut State,
+        notification: Notification,
+    ) {
+        match notification {
+            notification => self.code_editor.handle_notification(
+                cx,
+                &mut state.code_editor_state,
+                notification,
+            )
+        }
     }
 
     fn create_or_update_view(
