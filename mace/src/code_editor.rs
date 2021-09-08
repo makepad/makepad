@@ -6,7 +6,7 @@ use {
         line_info_cache::{LineInfo, LineInfoCache},
         position::Position,
         position_set::PositionSet,
-        protocol::{Notification, Request, Response, ResponseOrNotification},
+        protocol::{Notification, Request, Response},
         range_set::{RangeSet, Span},
         size::Size,
         text::Text,
@@ -40,7 +40,6 @@ pub struct CodeEditor {
     text_color_whitespace: Vec4,
     text_color_unknown: Vec4,
     caret: DrawColor,
-    outstanding_requests: VecDeque<Request>,
 }
 
 impl CodeEditor {
@@ -100,7 +99,6 @@ impl CodeEditor {
             text_color_whitespace: Vec4::default(),
             text_color_unknown: Vec4::default(),
             caret: DrawColor::new(cx, default_shader!()).with_draw_depth(4.0),
-            outstanding_requests: VecDeque::new(),
         }
     }
 
@@ -463,13 +461,6 @@ impl CodeEditor {
             view.view.redraw_view(cx);
         }
         let view = &self.views[view_id];
-        let mut send_request = {
-            let outstanding_requests = &mut self.outstanding_requests;
-            move |request: Request| {
-                outstanding_requests.push_back(request.clone());
-                send_request(request);
-            }
-        };
         match event.hits(cx, view.view.area(), HitOpt::default()) {
             Event::FingerDown(FingerDownEvent { rel, modifiers, .. }) => {
                 // TODO: How to handle key focus?
@@ -546,7 +537,7 @@ impl CodeEditor {
                 ..
             }) => {
                 let view = &self.views[view_id];
-                state.insert_backspace(view.session_id, &mut send_request);
+                state.insert_backspace(view.session_id, send_request);
                 let view = &self.views[view_id];
                 let session = &state.sessions[view.session_id];
                 self.redraw_document_views(cx, state, session.document_id);
@@ -558,9 +549,9 @@ impl CodeEditor {
             }) if modifiers.control || modifiers.logo => {
                 let view = &self.views[view_id];
                 if modifiers.shift {
-                    state.redo(view.session_id, &mut send_request);
+                    state.redo(view.session_id, send_request);
                 } else {
-                    state.undo(view.session_id, &mut send_request);
+                    state.undo(view.session_id, send_request);
                 }
                 let view = &self.views[view_id];
                 let session = &state.sessions[view.session_id];
@@ -574,7 +565,7 @@ impl CodeEditor {
                 state.insert_text(
                     view.session_id,
                     Text::from(vec![vec![], vec![]]),
-                    &mut send_request,
+                    send_request,
                 );
                 let view = &self.views[view_id];
                 let session = &state.sessions[view.session_id];
@@ -589,7 +580,7 @@ impl CodeEditor {
                         .map(|line| line.chars().collect::<Vec<_>>())
                         .collect::<Vec<_>>()
                         .into(),
-                    &mut send_request,
+                    send_request,
                 );
                 let view = &self.views[view_id];
                 let session = &state.sessions[view.session_id];
@@ -599,76 +590,76 @@ impl CodeEditor {
         }
     }
 
-    fn send_request(&mut self, request: Request, send_request: &mut dyn FnMut(Request)) {
-        self.outstanding_requests.push_back(request.clone());
-        send_request(request);
+    pub fn handle_response(
+        &mut self,
+        state: &mut State,
+        request: Request,
+        response: Response,
+        send_request: &mut dyn FnMut(Request),
+    ) {
+        match response {
+            Response::ApplyDelta(response) => {
+                match request {
+                    Request::ApplyDelta(path, _, _) => {
+                        let _ = response.as_ref().unwrap();
+
+                        let document_id = state.document_ids_by_path[&path];
+
+                        let document = &mut state.documents[document_id];
+                        document.outstanding_deltas.pop_front();
+                        document.revision += 1;
+                        if let Some(outstanding_delta) = document.outstanding_deltas.front() {
+                            send_request(
+                                Request::ApplyDelta(
+                                    path.clone(),
+                                    document.revision,
+                                    outstanding_delta.clone(),
+                                ),
+                            );
+                        }
+                    }
+                    _ => panic!(),
+                }
+            }
+            _ => {}
+        }
     }
 
-    pub fn handle_response_or_notification(
+    pub fn handle_notification(
         &mut self,
         cx: &mut Cx,
         state: &mut State,
-        response_or_notification: ResponseOrNotification,
-        send_request: &mut dyn FnMut(Request),
+        notification: Notification,
     ) {
-        match response_or_notification {
-            ResponseOrNotification::Response(response) => match response {
-                Response::ApplyDelta(response) => {
-                    match self.outstanding_requests.pop_front().unwrap() {
-                        Request::ApplyDelta(path, _, _) => {
-                            let _ = response.unwrap();
+        match notification {
+            Notification::DeltaWasApplied(path, delta) => {
+                let document_id = state.document_ids_by_path[&path];
 
-                            let document_id = state.document_ids_by_path[&path];
-
-                            let document = &mut state.documents[document_id];
-                            document.outstanding_deltas.pop_front();
-                            document.revision += 1;
-                            if let Some(outstanding_delta) = document.outstanding_deltas.front() {
-                                self.send_request(
-                                    Request::ApplyDelta(
-                                        path,
-                                        document.revision,
-                                        outstanding_delta.clone(),
-                                    ),
-                                    send_request,
-                                );
-                            }
-                        }
-                        _ => panic!(),
-                    }
+                let document = &mut state.documents[document_id];
+                let mut delta = delta;
+                for outstanding_delta_ref in &mut document.outstanding_deltas {
+                    let outstanding_delta =
+                        mem::replace(outstanding_delta_ref, Delta::identity());
+                    let (new_delta, new_outstanding_delta) = delta.transform(outstanding_delta);
+                    delta = new_delta;
+                    *outstanding_delta_ref = new_outstanding_delta;
                 }
-                _ => {}
-            },
-            ResponseOrNotification::Notification(notification) => match notification {
-                Notification::DeltaWasApplied(path, delta) => {
-                    let document_id = state.document_ids_by_path[&path];
 
-                    let document = &mut state.documents[document_id];
-                    let mut delta = delta;
-                    for outstanding_delta_ref in &mut document.outstanding_deltas {
-                        let outstanding_delta =
-                            mem::replace(outstanding_delta_ref, Delta::identity());
-                        let (new_delta, new_outstanding_delta) = delta.transform(outstanding_delta);
-                        delta = new_delta;
-                        *outstanding_delta_ref = new_outstanding_delta;
-                    }
+                transform_edit_stack(&mut document.undo_stack, delta.clone());
+                transform_edit_stack(&mut document.redo_stack, delta.clone());
 
-                    transform_edit_stack(&mut document.undo_stack, delta.clone());
-                    transform_edit_stack(&mut document.redo_stack, delta.clone());
-
-                    let document = &state.documents[document_id];
-                    for session_id in document.session_ids.iter().cloned() {
-                        let session = &mut state.sessions[session_id];
-                        session.apply_delta(&delta, Whose::Theirs);
-                    }
-
-                    let document = &mut state.documents[document_id];
-                    document.revision += 1;
-                    document.apply_delta(delta);
-
-                    self.redraw_document_views(cx, state, document_id);
+                let document = &state.documents[document_id];
+                for session_id in document.session_ids.iter().cloned() {
+                    let session = &mut state.sessions[session_id];
+                    session.apply_delta(&delta, Whose::Theirs);
                 }
-            },
+
+                let document = &mut state.documents[document_id];
+                document.revision += 1;
+                document.apply_delta(delta);
+
+                self.redraw_document_views(cx, state, document_id);
+            }
         }
     }
 
