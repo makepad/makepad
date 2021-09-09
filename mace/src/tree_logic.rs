@@ -38,6 +38,13 @@ impl TreeLogic {
 
     pub fn end_node(&mut self) {}
 
+    fn get_or_create_node(&mut self, node_id: NodeId) -> &mut Node {
+        if !self.nodes.contains(node_id) {
+            self.nodes.insert(node_id, Node::default());
+        }
+        &mut self.nodes[node_id]
+    }
+
     pub fn forget(&mut self) {
         self.nodes.clear();
         self.animating_node_ids.clear();
@@ -86,13 +93,6 @@ impl TreeLogic {
     ) -> bool {
         let is_expanded = self.node_is_expanded(node_id);
         self.set_node_is_expanded(cx, node_id, !is_expanded, should_animate)
-    }
-
-    fn get_or_create_node(&mut self, node_id: NodeId) -> &mut Node {
-        if !self.nodes.contains(node_id) {
-            self.nodes.insert(node_id, Node::default());
-        }
-        &mut self.nodes[node_id]
     }
 
     fn update_animating_nodes(&mut self, cx: &mut Cx, node_id: NodeId, is_animating: bool) {

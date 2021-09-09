@@ -16,6 +16,7 @@ pub mod range_set;
 pub mod server;
 pub mod size;
 pub mod splitter;
+pub mod tab;
 pub mod tab_bar;
 pub mod text;
 pub mod token;
