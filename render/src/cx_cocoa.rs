@@ -21,11 +21,11 @@ use crate::cx::*;
 #[derive(Clone)]
 pub struct CocoaWindow {
     pub window_id: usize,
-    pub window_delegate: id,
+    pub window_delegate: objc_id,
     //pub layer_delegate: id,
-    pub view: id,
-    pub window: id,
-    pub live_resize_timer: id,
+    pub view: objc_id,
+    pub window: objc_id,
+    pub live_resize_timer: objc_id,
     pub cocoa_app: *mut CocoaApp,
     pub last_window_geom: Option<WindowGeom>,
     pub ime_spot: Vec2,
@@ -38,7 +38,7 @@ pub struct CocoaWindow {
 #[derive(Clone)]
 pub struct CocoaTimer {
     timer_id: u64,
-    nstimer: id,
+    nstimer: objc_id,
     repeats: bool
 }
 
@@ -51,22 +51,22 @@ pub struct CocoaApp {
     pub app_delegate_class: *const Class,
     pub menu_target_class: *const Class,
     pub view_class: *const Class,
-    pub menu_delegate_instance: id,
-    pub app_delegate_instance: id,
-    pub const_attributes_for_marked_text: id,
-    pub const_empty_string: id,
+    pub menu_delegate_instance: objc_id,
+    pub app_delegate_instance: objc_id,
+    pub const_attributes_for_marked_text: objc_id,
+    pub const_empty_string: objc_id,
     pub time_start: Instant,
-    pub timer_delegate_instance: id,
+    pub timer_delegate_instance: objc_id,
     pub timers: Vec<CocoaTimer>,
-    pub cocoa_windows: Vec<(id, id)>,
+    pub cocoa_windows: Vec<(objc_id, objc_id)>,
     pub last_key_mod: KeyModifiers,
-    pub pasteboard: id,
+    pub pasteboard: objc_id,
     pub startup_focus_hack_ran: bool,
     pub event_callback: Option<*mut dyn FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool>,
     pub event_recur_block: bool,
     pub event_loop_running: bool,
     pub loop_block: bool,
-    pub cursors: HashMap<MouseCursor, id>,
+    pub cursors: HashMap<MouseCursor, objc_id>,
     pub current_cursor: MouseCursor,
     pub status_map: Mutex<CocoaStatusMap>
 }
@@ -85,11 +85,11 @@ impl CocoaApp {
         unsafe {
             
             let timer_delegate_class = define_cocoa_timer_delegate();
-            let timer_delegate_instance: id = msg_send![timer_delegate_class, new];
+            let timer_delegate_instance: objc_id = msg_send![timer_delegate_class, new];
             let menu_delegate_class = define_menu_delegate();
-            let menu_delegate_instance: id = msg_send![menu_delegate_class, new];
+            let menu_delegate_instance: objc_id = msg_send![menu_delegate_class, new];
             let app_delegate_class = define_app_delegate();
-            let app_delegate_instance: id = msg_send![app_delegate_class, new];
+            let app_delegate_instance: objc_id = msg_send![app_delegate_class, new];
             
             let const_attributes = vec![
                 str_to_nsstring("NSMarkedClauseSegment"),
@@ -134,8 +134,8 @@ impl CocoaApp {
     
     pub fn update_app_menu(&mut self, menu: &Menu, command_settings: &HashMap<CommandId, CxCommandSetting>,) {
         unsafe fn make_menu(
-            parent_menu: id,
-            delegate: id,
+            parent_menu: objc_id,
+            delegate: objc_id,
             menu_target_class: *const Class,
             menu: &Menu,
             status_map: &Mutex<CocoaStatusMap>,
@@ -143,7 +143,7 @@ impl CocoaApp {
         ) {
             match menu {
                 Menu::Main {items} => {
-                    let main_menu: id = msg_send![class!(NSMenu), new];
+                    let main_menu: objc_id = msg_send![class!(NSMenu), new];
                     let () = msg_send![main_menu, setTitle: str_to_nsstring("MainMenu")];
                     let () = msg_send![main_menu, setAutoenablesItems: NO];
                     let () = msg_send![main_menu, setDelegate: delegate];
@@ -151,19 +151,19 @@ impl CocoaApp {
                     for item in items {
                         make_menu(main_menu, delegate, menu_target_class, item, status_map, command_settings);
                     }
-                    let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+                    let ns_app: objc_id = msg_send![class!(NSApplication), sharedApplication];
                     let () = msg_send![
                         ns_app,
                         setMainMenu: main_menu
                     ];
                 },
                 Menu::Sub {name, items} => {
-                    let sub_menu: id = msg_send![class!(NSMenu), new];
+                    let sub_menu: objc_id = msg_send![class!(NSMenu), new];
                     let () = msg_send![sub_menu, setTitle: str_to_nsstring(name)];
                     let () = msg_send![sub_menu, setAutoenablesItems: NO];
                     let () = msg_send![sub_menu, setDelegate: delegate];
                     // append item to parebt
-                    let sub_item: id = msg_send![
+                    let sub_item: objc_id = msg_send![
                         parent_menu,
                         addItemWithTitle: str_to_nsstring(name)
                         action: nil
@@ -182,13 +182,13 @@ impl CocoaApp {
                     else {
                         CxCommandSetting::default()
                     };
-                    let sub_item: id = msg_send![
+                    let sub_item: objc_id = msg_send![
                         parent_menu,
                         addItemWithTitle: str_to_nsstring(name)
                         action: sel!(menuAction:)
                         keyEquivalent: str_to_nsstring(keycode_to_menu_key(settings.key_code, settings.shift))
                     ];
-                    let target: id = msg_send![menu_target_class, new];
+                    let target: objc_id = msg_send![menu_target_class, new];
                     let () = msg_send![sub_item, setTarget: target];
                     let () = msg_send![sub_item, setEnabled: if settings.enabled {YES}else {NO}];
                     
@@ -210,7 +210,7 @@ impl CocoaApp {
                     (*target).set_ivar("command_usize", command_usize);
                 },
                 Menu::Line => {
-                    let sep_item: id = msg_send![class!(NSMenuItem), separatorItem];
+                    let sep_item: objc_id = msg_send![class!(NSMenuItem), separatorItem];
                     let () = msg_send![
                         parent_menu,
                         addItem: sep_item
@@ -227,11 +227,11 @@ impl CocoaApp {
         unsafe{
             if !self.startup_focus_hack_ran {
                 self.startup_focus_hack_ran = true;
-                let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+                let ns_app: objc_id = msg_send![class!(NSApplication), sharedApplication];
                 let active: bool = msg_send![ns_app, isActive];
                 if !active {
-                    let dock_bundle_id: id = str_to_nsstring("com.apple.dock");
-                    let dock_array: id = msg_send![
+                    let dock_bundle_id: objc_id = str_to_nsstring("com.apple.dock");
+                    let dock_array: objc_id = msg_send![
                         class!(NSRunningApplication),
                         runningApplicationsWithBundleIdentifier: dock_bundle_id
                     ];
@@ -239,12 +239,12 @@ impl CocoaApp {
                     if dock_array_len == 0 {
                         panic!("Dock not running");
                     } else {
-                        let dock: id = msg_send![dock_array, objectAtIndex: 0];
+                        let dock: objc_id = msg_send![dock_array, objectAtIndex: 0];
                         let _status: BOOL = msg_send![
                             dock,
                             activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps
                         ];
-                        let ns_running_app: id = msg_send![class!(NSRunningApplication), currentApplication];
+                        let ns_running_app: objc_id = msg_send![class!(NSRunningApplication), currentApplication];
                         let () = msg_send![
                             ns_running_app,
                             activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps
@@ -275,7 +275,7 @@ impl CocoaApp {
     pub fn init(&mut self) {
         unsafe {
             GLOBAL_COCOA_APP = self;
-            let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+            let ns_app: objc_id = msg_send![class!(NSApplication), sharedApplication];
             (*self.timer_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
             (*self.menu_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
             (*self.app_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
@@ -292,10 +292,10 @@ impl CocoaApp {
         (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
     }
     
-    unsafe fn process_ns_event(&mut self, ns_event: id) {
+    unsafe fn process_ns_event(&mut self, ns_event: objc_id) {
         let ev_type: NSEventType = msg_send![ns_event, type];
         
-        let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+        let ns_app: objc_id = msg_send![class!(NSApplication), sharedApplication];
         let () = msg_send![ns_app, sendEvent: ns_event];
         
         if ev_type as u64 == 21 { // some missing event from cocoa-rs crate
@@ -332,7 +332,7 @@ impl CocoaApp {
                     match key_code {
                         KeyCode::KeyV => if modifiers.logo || modifiers.control {
                             // was a paste
-                            let nsstring: id = msg_send![self.pasteboard, stringForType: NSStringPboardType];
+                            let nsstring: objc_id = msg_send![self.pasteboard, stringForType: NSStringPboardType];
                             let string = nsstring_to_string(nsstring);
                             self.do_callback(&mut vec![
                                 Event::TextInput(TextInputEvent {
@@ -353,8 +353,8 @@ impl CocoaApp {
                             match &events[0] {
                                 Event::TextCopy(req) => if let Some(response) = &req.response {
                                     // plug it into the apple clipboard
-                                    let nsstring: id = str_to_nsstring(&response);
-                                    let array: id = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
+                                    let nsstring: objc_id = str_to_nsstring(&response);
+                                    let array: objc_id = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
                                     let () = msg_send![self.pasteboard, declareTypes: array owner: nil];
                                     let () = msg_send![self.pasteboard, setString: nsstring forType: NSStringPboardType];
                                 },
@@ -445,11 +445,11 @@ impl CocoaApp {
                 cocoa_window.send_finger_hover_and_move(mouse_pos, get_event_key_modifier(ns_event));
             },*/
             NSEventType::NSScrollWheel => {
-                let window: id = msg_send![ns_event, window];
+                let window: objc_id = msg_send![ns_event, window];
                 if window == nil {
                     return
                 }
-                let window_delegate: id = msg_send![window, delegate];
+                let window_delegate: objc_id = msg_send![window, delegate];
                 if window_delegate == nil {
                     return
                 }
@@ -505,20 +505,20 @@ impl CocoaApp {
     where F: FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool,
     {
         unsafe {
-            let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+            let ns_app: objc_id = msg_send![class!(NSApplication), sharedApplication];
             let () = msg_send![ns_app, finishLaunching];
             
             self.event_callback = Some(&mut event_handler as *const dyn FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool as *mut dyn FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool);
             
             while self.event_loop_running {
-                let pool: id = msg_send![class!(NSAutoreleasePool), new];
+                let pool: objc_id = msg_send![class!(NSAutoreleasePool), new];
                 
-                let ns_until: id = if self.loop_block {
+                let ns_until: objc_id = if self.loop_block {
                     msg_send![class!(NSDate), distantFuture]
                 }else {
                     msg_send![class!(NSDate), distantPast]
                 };
-                let ns_event: id = msg_send![
+                let ns_event: objc_id = msg_send![
                     ns_app,
                     nextEventMatchingMask: NSEventMask::NSAnyEventMask as u64 | NSEventMask::NSEventMaskPressure as u64
                     untilDate: ns_until
@@ -554,10 +554,10 @@ impl CocoaApp {
     
     pub fn post_signal(signal_id: usize, status: StatusId) {
         unsafe {
-            let pool: id = msg_send![class!(NSAutoreleasePool), new];
+            let pool: objc_id = msg_send![class!(NSAutoreleasePool), new];
             
             let cocoa_app = &mut (*GLOBAL_COCOA_APP);
-            let post_delegate_instance: id = msg_send![cocoa_app.post_delegate_class, new];
+            let post_delegate_instance: objc_id = msg_send![cocoa_app.post_delegate_class, new];
             
             // lock it
             let status_id = if let Ok(mut status_map) = cocoa_app.status_map.lock() {
@@ -578,7 +578,7 @@ impl CocoaApp {
             (*post_delegate_instance).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
             (*post_delegate_instance).set_ivar("signal_id", signal_id);
             (*post_delegate_instance).set_ivar("status", status_id);
-            let nstimer: id = msg_send![
+            let nstimer: objc_id = msg_send![
                 class!(NSTimer),
                 timerWithTimeInterval: 0.
                 target: post_delegate_instance
@@ -586,7 +586,7 @@ impl CocoaApp {
                 userInfo: nil
                 repeats: false
             ];
-            let nsrunloop: id = msg_send![class!(NSRunLoop), mainRunLoop];
+            let nsrunloop: objc_id = msg_send![class!(NSRunLoop), mainRunLoop];
             let () = msg_send![nsrunloop, addTimer: nstimer forMode: NSRunLoopCommonModes];
             
             let () = msg_send![pool, release];
@@ -610,9 +610,9 @@ impl CocoaApp {
     
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
         unsafe {
-            let pool: id = msg_send![class!(NSAutoreleasePool), new];
+            let pool: objc_id = msg_send![class!(NSAutoreleasePool), new];
             
-            let nstimer: id = msg_send![
+            let nstimer: objc_id = msg_send![
                 class!(NSTimer),
                 timerWithTimeInterval: interval
                 target: self.timer_delegate_instance
@@ -620,7 +620,7 @@ impl CocoaApp {
                 userInfo: nil
                 repeats: repeats
             ];
-            let nsrunloop: id = msg_send![class!(NSRunLoop), mainRunLoop];
+            let nsrunloop: objc_id = msg_send![class!(NSRunLoop), mainRunLoop];
             let () = msg_send![nsrunloop, addTimer: nstimer forMode: NSRunLoopCommonModes];
             
             self.timers.push(CocoaTimer {
@@ -644,7 +644,7 @@ impl CocoaApp {
         }
     }
     
-    pub fn send_timer_received(&mut self, nstimer: id) {
+    pub fn send_timer_received(&mut self, nstimer: objc_id) {
         for i in 0..self.timers.len() {
             if self.timers[i].nstimer == nstimer {
                 let timer_id = self.timers[i].timer_id;
@@ -654,8 +654,8 @@ impl CocoaApp {
                 self.do_callback(&mut vec![Event::Timer(TimerEvent {timer_id: timer_id})]);
                 // break the eventloop if its in blocked mode
                 unsafe {
-                    let pool: id = msg_send![class!(NSAutoreleasePool), new];
-                    let nsevent: id = msg_send![
+                    let pool: objc_id = msg_send![class!(NSAutoreleasePool), new];
+                    let nsevent: objc_id = msg_send![
                         class!(NSEvent),
                         otherEventWithType: NSEventType::NSApplicationDefined
                         location: NSPoint {x: 0., y: 0.}
@@ -667,7 +667,7 @@ impl CocoaApp {
                         data1: 0u64
                         data2: 0u64
                     ];
-                    let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+                    let ns_app: objc_id = msg_send![class!(NSApplication), sharedApplication];
                     let () = msg_send![ns_app, postEvent: nsevent atStart: 0];
                     let () = msg_send![pool, release];
                 }
@@ -708,11 +708,11 @@ impl CocoaWindow {
     
     pub fn new(cocoa_app: &mut CocoaApp, window_id: usize) -> CocoaWindow {
         unsafe {
-            let pool: id = msg_send![class!(NSAutoreleasePool), new];
+            let pool: objc_id = msg_send![class!(NSAutoreleasePool), new];
             
-            let window: id = msg_send![cocoa_app.window_class, alloc];
-            let window_delegate: id = msg_send![cocoa_app.window_delegate_class, new];
-            let view: id = msg_send![cocoa_app.view_class, alloc];
+            let window: objc_id = msg_send![cocoa_app.window_class, alloc];
+            let window_delegate: objc_id = msg_send![cocoa_app.window_delegate_class, new];
+            let view: objc_id = msg_send![cocoa_app.view_class, alloc];
             
             let () = msg_send![pool, drain];
             cocoa_app.cocoa_windows.push((window, view));
@@ -740,7 +740,7 @@ impl CocoaWindow {
             //(*self.cocoa_app).init_app_after_first_window();
             self.fingers_down.resize(NUM_FINGERS, false);
             
-            let pool: id = msg_send![class!(NSAutoreleasePool), new];
+            let pool: objc_id = msg_send![class!(NSAutoreleasePool), new];
             
             // set the backpointeers
             (*self.window_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
@@ -790,7 +790,7 @@ impl CocoaWindow {
             if position.is_none() {
                 let () = msg_send![self.window, center];
             }
-            let input_context: id = msg_send![self.view, inputContext];
+            let input_context: objc_id = msg_send![self.view, inputContext];
             let () = msg_send![input_context, invalidateCharacterCoordinates];
             
             let () = msg_send![pool, drain];
@@ -811,7 +811,7 @@ impl CocoaWindow {
     
     pub fn start_live_resize(&mut self) {
         unsafe {
-            let pool: id = msg_send![class!(NSAutoreleasePool), new];
+            let pool: objc_id = msg_send![class!(NSAutoreleasePool), new];
             let cocoa_app = &(*self.cocoa_app);
             self.live_resize_timer = msg_send![
                 class!(NSTimer),
@@ -821,7 +821,7 @@ impl CocoaWindow {
                 userInfo: nil
                 repeats: YES
             ];
-            let nsrunloop: id = msg_send![class!(NSRunLoop), mainRunLoop];
+            let nsrunloop: objc_id = msg_send![class!(NSRunLoop), mainRunLoop];
             let () = msg_send![nsrunloop, addTimer: self.live_resize_timer forMode: NSRunLoopCommonModes];
             
             let () = msg_send![pool, release];
@@ -1084,9 +1084,9 @@ impl CocoaWindow {
     }
 }
 
-fn get_event_char(event: id) -> char {
+fn get_event_char(event: objc_id) -> char {
     unsafe {
-        let characters: id = msg_send![event, characters];
+        let characters: objc_id = msg_send![event, characters];
         if characters == nil {
             return '\0'
         }
@@ -1099,7 +1099,7 @@ fn get_event_char(event: id) -> char {
     }
 }
 
-fn get_event_key_modifier(event: id) -> KeyModifiers {
+fn get_event_key_modifier(event: objc_id) -> KeyModifiers {
     let flags: u64 = unsafe {msg_send![event, modifierFlags]};
     KeyModifiers {
         shift: flags & NSEventModifierFlags::NSShiftKeyMask as u64 != 0,
@@ -1109,7 +1109,7 @@ fn get_event_key_modifier(event: id) -> KeyModifiers {
     }
 }
 
-fn get_event_keycode(event: id) -> Option<KeyCode> {
+fn get_event_keycode(event: objc_id) -> Option<KeyCode> {
     let scan_code: std::os::raw::c_ushort = unsafe {
         msg_send![event, keyCode]
     };
@@ -1378,12 +1378,12 @@ fn get_cocoa_app(this: &Object) -> &mut CocoaApp {
 
 pub fn define_cocoa_timer_delegate() -> *const Class {
     
-    extern fn received_timer(this: &Object, _: Sel, nstimer: id) {
+    extern fn received_timer(this: &Object, _: Sel, nstimer: objc_id) {
         let ca = get_cocoa_app(this);
         ca.send_timer_received(nstimer);
     }
     
-    extern fn received_live_resize(this: &Object, _: Sel, _nstimer: id) {
+    extern fn received_live_resize(this: &Object, _: Sel, _nstimer: objc_id) {
         let ca = get_cocoa_app(this);
         ca.send_paint_event();
     }
@@ -1393,8 +1393,8 @@ pub fn define_cocoa_timer_delegate() -> *const Class {
     
     // Add callback methods
     unsafe {
-        decl.add_method(sel!(receivedTimer:), received_timer as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(receivedLiveResize:), received_live_resize as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(receivedTimer:), received_timer as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(receivedLiveResize:), received_live_resize as extern fn(&Object, Sel, objc_id));
     }
     // Store internal state as user data
     decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
@@ -1412,7 +1412,7 @@ pub fn define_app_delegate() -> *const Class {
 
 pub fn define_menu_target_class() -> *const Class {
     
-    extern fn menu_action(this: &Object, _sel: Sel, _item: id) {
+    extern fn menu_action(this: &Object, _sel: Sel, _item: objc_id) {
         //println!("markedRange");
         let ca = get_cocoa_app(this);
         unsafe {
@@ -1430,7 +1430,7 @@ pub fn define_menu_target_class() -> *const Class {
     let superclass = class!(NSObject);
     let mut decl = ClassDecl::new("MenuTarget", superclass).unwrap();
     unsafe {
-        decl.add_method(sel!(menuAction:), menu_action as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(menuAction:), menu_action as extern fn(&Object, Sel, objc_id));
     }
     decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
     decl.add_ivar::<usize>("command_usize");
@@ -1439,7 +1439,7 @@ pub fn define_menu_target_class() -> *const Class {
 
 pub fn define_menu_delegate() -> *const Class {
     // NSMenuDelegate protocol
-    extern fn menu_will_open(this: &Object, _sel: Sel, _item: id) {
+    extern fn menu_will_open(this: &Object, _sel: Sel, _item: objc_id) {
         //println!("markedRange");
         let _ca = get_cocoa_app(this);
     }
@@ -1447,7 +1447,7 @@ pub fn define_menu_delegate() -> *const Class {
     let superclass = class!(NSObject);
     let mut decl = ClassDecl::new("MenuDelegate", superclass).unwrap();
     unsafe {
-        decl.add_method(sel!(menuWillOpen:), menu_will_open as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(menuWillOpen:), menu_will_open as extern fn(&Object, Sel, objc_id));
     }
     decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
     decl.add_protocol(&Protocol::get("NSMenuDelegate").unwrap());
@@ -1463,7 +1463,7 @@ struct CocoaPostInit {
 
 pub fn define_cocoa_post_delegate() -> *const Class {
     
-    extern fn received_post(this: &Object, _: Sel, _nstimer: id) {
+    extern fn received_post(this: &Object, _: Sel, _nstimer: objc_id) {
         let ca = get_cocoa_app(this);
         unsafe {
             let signal_id: usize = *this.get_ivar("signal_id");
@@ -1474,7 +1474,7 @@ pub fn define_cocoa_post_delegate() -> *const Class {
             else {
                 panic!("cannot lock cmd_map")
             };
-            ca.send_signal_event(Signal {signal_id: signal_id}, status);
+            ca.send_signal_event(Signal(signal_id), status);
         }
     }
     
@@ -1483,7 +1483,7 @@ pub fn define_cocoa_post_delegate() -> *const Class {
     
     // Add callback methods
     unsafe {
-        decl.add_method(sel!(receivedPost:), received_post as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(receivedPost:), received_post as extern fn(&Object, Sel, objc_id));
     }
     // Store internal state as user data
     decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
@@ -1495,7 +1495,7 @@ pub fn define_cocoa_post_delegate() -> *const Class {
 
 pub fn define_cocoa_window_delegate() -> *const Class {
     
-    extern fn window_should_close(this: &Object, _: Sel, _: id) -> BOOL {
+    extern fn window_should_close(this: &Object, _: Sel, _: objc_id) -> BOOL {
         let cw = get_cocoa_window(this);
         if cw.send_window_close_requested_event() {
             YES
@@ -1505,97 +1505,97 @@ pub fn define_cocoa_window_delegate() -> *const Class {
         }
     }
     
-    extern fn window_will_close(this: &Object, _: Sel, _: id) {
+    extern fn window_will_close(this: &Object, _: Sel, _: objc_id) {
         let cw = get_cocoa_window(this);
         cw.send_window_closed_event();
     }
     
-    extern fn window_did_resize(this: &Object, _: Sel, _: id) {
+    extern fn window_did_resize(this: &Object, _: Sel, _: objc_id) {
         let _cw = get_cocoa_window(this);
         //cw.send_change_event();
     }
     
-    extern fn window_will_start_live_resize(this: &Object, _: Sel, _: id) {
+    extern fn window_will_start_live_resize(this: &Object, _: Sel, _: objc_id) {
         let cw = get_cocoa_window(this);
         cw.start_live_resize();
     }
     
-    extern fn window_did_end_live_resize(this: &Object, _: Sel, _: id) {
+    extern fn window_did_end_live_resize(this: &Object, _: Sel, _: objc_id) {
         let cw = get_cocoa_window(this);
         cw.end_live_resize();
     }
     
     // This won't be triggered if the move was part of a resize.
-    extern fn window_did_move(this: &Object, _: Sel, _: id) {
+    extern fn window_did_move(this: &Object, _: Sel, _: objc_id) {
         let cw = get_cocoa_window(this);
         cw.send_change_event();
     }
     
-    extern fn window_did_change_screen(this: &Object, _: Sel, _: id) {
+    extern fn window_did_change_screen(this: &Object, _: Sel, _: objc_id) {
         let cw = get_cocoa_window(this);
         cw.send_change_event();
     }
     
     // This will always be called before `window_did_change_screen`.
-    extern fn window_did_change_backing_properties(this: &Object, _: Sel, _: id) {
+    extern fn window_did_change_backing_properties(this: &Object, _: Sel, _: objc_id) {
         let cw = get_cocoa_window(this);
         cw.send_change_event();
     }
     
-    extern fn window_did_become_key(this: &Object, _: Sel, _: id) {
+    extern fn window_did_become_key(this: &Object, _: Sel, _: objc_id) {
         let cw = get_cocoa_window(this);
         cw.send_focus_event();
     }
     
-    extern fn window_did_resign_key(this: &Object, _: Sel, _: id) {
+    extern fn window_did_resign_key(this: &Object, _: Sel, _: objc_id) {
         let cw = get_cocoa_window(this);
         cw.send_focus_lost_event();
     }
     
     // Invoked when the dragged image enters destination bounds or frame
-    extern fn dragging_entered(_this: &Object, _: Sel, _sender: id) -> BOOL {
+    extern fn dragging_entered(_this: &Object, _: Sel, _sender: objc_id) -> BOOL {
         YES
     }
     
     // Invoked when the image is released
-    extern fn prepare_for_drag_operation(_: &Object, _: Sel, _: id) -> BOOL {
+    extern fn prepare_for_drag_operation(_: &Object, _: Sel, _: objc_id) -> BOOL {
         YES
     }
     
     // Invoked after the released image has been removed from the screen
-    extern fn perform_drag_operation(_this: &Object, _: Sel, _sender: id) -> BOOL {
+    extern fn perform_drag_operation(_this: &Object, _: Sel, _sender: objc_id) -> BOOL {
         YES
     }
     
     // Invoked when the dragging operation is complete
-    extern fn conclude_drag_operation(_: &Object, _: Sel, _: id) {}
+    extern fn conclude_drag_operation(_: &Object, _: Sel, _: objc_id) {}
     
     // Invoked when the dragging operation is cancelled
-    extern fn dragging_exited(this: &Object, _: Sel, _: id) {
+    extern fn dragging_exited(this: &Object, _: Sel, _: objc_id) {
         let _cw = get_cocoa_window(this);
         //WindowDelegate::emit_event(state, WindowEvent::HoveredFileCancelled);
     }
     
     // Invoked when entered fullscreen
-    extern fn window_did_enter_fullscreen(this: &Object, _: Sel, _: id) {
+    extern fn window_did_enter_fullscreen(this: &Object, _: Sel, _: objc_id) {
         let cw = get_cocoa_window(this);
         cw.is_fullscreen = true;
         cw.send_change_event();
     }
     
     // Invoked when before enter fullscreen
-    extern fn window_will_enter_fullscreen(this: &Object, _: Sel, _: id) {
+    extern fn window_will_enter_fullscreen(this: &Object, _: Sel, _: objc_id) {
         let _cw = get_cocoa_window(this);
     }
     
     // Invoked when exited fullscreen
-    extern fn window_did_exit_fullscreen(this: &Object, _: Sel, _: id) {
+    extern fn window_did_exit_fullscreen(this: &Object, _: Sel, _: objc_id) {
         let cw = get_cocoa_window(this);
         cw.is_fullscreen = false;
         cw.send_change_event();
     }
     
-    extern fn window_did_fail_to_enter_fullscreen(_this: &Object, _: Sel, _: id) {
+    extern fn window_did_fail_to_enter_fullscreen(_this: &Object, _: Sel, _: objc_id) {
     }
     
     let superclass = class!(NSObject);
@@ -1603,30 +1603,30 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     
     // Add callback methods
     unsafe {
-        decl.add_method(sel!(windowShouldClose:), window_should_close as extern fn(&Object, Sel, id) -> BOOL);
-        decl.add_method(sel!(windowWillClose:), window_will_close as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(windowDidResize:), window_did_resize as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(windowWillStartLiveResize:), window_will_start_live_resize as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(windowDidEndLiveResize:), window_did_end_live_resize as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(windowShouldClose:), window_should_close as extern fn(&Object, Sel, objc_id) -> BOOL);
+        decl.add_method(sel!(windowWillClose:), window_will_close as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(windowDidResize:), window_did_resize as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(windowWillStartLiveResize:), window_will_start_live_resize as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(windowDidEndLiveResize:), window_did_end_live_resize as extern fn(&Object, Sel, objc_id));
         
-        decl.add_method(sel!(windowDidMove:), window_did_move as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(windowDidChangeScreen:), window_did_change_screen as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(windowDidChangeBackingProperties:), window_did_change_backing_properties as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(windowDidBecomeKey:), window_did_become_key as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(windowDidResignKey:), window_did_resign_key as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(windowDidMove:), window_did_move as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(windowDidChangeScreen:), window_did_change_screen as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(windowDidChangeBackingProperties:), window_did_change_backing_properties as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(windowDidBecomeKey:), window_did_become_key as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(windowDidResignKey:), window_did_resign_key as extern fn(&Object, Sel, objc_id));
         
         // callbacks for drag and drop events
-        decl.add_method(sel!(draggingEntered:), dragging_entered as extern fn(&Object, Sel, id) -> BOOL);
-        decl.add_method(sel!(prepareForDragOperation:), prepare_for_drag_operation as extern fn(&Object, Sel, id) -> BOOL);
-        decl.add_method(sel!(performDragOperation:), perform_drag_operation as extern fn(&Object, Sel, id) -> BOOL);
-        decl.add_method(sel!(concludeDragOperation:), conclude_drag_operation as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(draggingExited:), dragging_exited as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(draggingEntered:), dragging_entered as extern fn(&Object, Sel, objc_id) -> BOOL);
+        decl.add_method(sel!(prepareForDragOperation:), prepare_for_drag_operation as extern fn(&Object, Sel, objc_id) -> BOOL);
+        decl.add_method(sel!(performDragOperation:), perform_drag_operation as extern fn(&Object, Sel, objc_id) -> BOOL);
+        decl.add_method(sel!(concludeDragOperation:), conclude_drag_operation as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(draggingExited:), dragging_exited as extern fn(&Object, Sel, objc_id));
         
         // callbacks for fullscreen events
-        decl.add_method(sel!(windowDidEnterFullScreen:), window_did_enter_fullscreen as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(windowWillEnterFullScreen:), window_will_enter_fullscreen as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(windowDidExitFullScreen:), window_did_exit_fullscreen as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(windowDidFailToEnterFullScreen:), window_did_fail_to_enter_fullscreen as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(windowDidEnterFullScreen:), window_did_enter_fullscreen as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(windowWillEnterFullScreen:), window_will_enter_fullscreen as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(windowDidExitFullScreen:), window_did_exit_fullscreen as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(windowDidFailToEnterFullScreen:), window_did_fail_to_enter_fullscreen as extern fn(&Object, Sel, objc_id));
         // custom timer fn
         //decl.add_method(sel!(windowReceivedTimer:), window_received_timer as extern fn(&Object, Sel, id));
         
@@ -1659,17 +1659,17 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     extern fn dealloc(this: &Object, _sel: Sel) {
         unsafe {
-            let marked_text: id = *this.get_ivar("markedText");
+            let marked_text: objc_id = *this.get_ivar("markedText");
             let _: () = msg_send![marked_text, release];
         }
     }
     
-    extern fn init_with_ptr(this: &Object, _sel: Sel, cx: *mut c_void) -> id {
+    extern fn init_with_ptr(this: &Object, _sel: Sel, cx: *mut c_void) -> objc_id {
         unsafe {
-            let this: id = msg_send![this, init];
+            let this: objc_id = msg_send![this, init];
             if this != nil {
                 (*this).set_ivar("cocoa_window_ptr", cx);
-                let marked_text = <id as NSMutableAttributedString>::init(
+                let marked_text = <objc_id as NSMutableAttributedString>::init(
                     NSMutableAttributedString::alloc(nil),
                 );
                 (*this).set_ivar("markedText", marked_text);
@@ -1678,7 +1678,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         }
     }
     
-    extern fn mouse_down(this: &Object, _sel: Sel, event: id) {
+    extern fn mouse_down(this: &Object, _sel: Sel, event: objc_id) {
         
         let cw = get_cocoa_window(this);
         unsafe {
@@ -1691,40 +1691,40 @@ pub fn define_cocoa_view_class() -> *const Class {
         cw.send_finger_down(0, modifiers);
     }
     
-    extern fn mouse_up(this: &Object, _sel: Sel, event: id) {
+    extern fn mouse_up(this: &Object, _sel: Sel, event: objc_id) {
         let cw = get_cocoa_window(this);
         let modifiers = get_event_key_modifier(event);
         cw.send_finger_up(0, modifiers);
     }
     
-    extern fn right_mouse_down(this: &Object, _sel: Sel, event: id) {
+    extern fn right_mouse_down(this: &Object, _sel: Sel, event: objc_id) {
         let cw = get_cocoa_window(this);
         let modifiers = get_event_key_modifier(event);
         cw.send_finger_down(1, modifiers);
     }
     
-    extern fn right_mouse_up(this: &Object, _sel: Sel, event: id) {
+    extern fn right_mouse_up(this: &Object, _sel: Sel, event: objc_id) {
         let cw = get_cocoa_window(this);
         let modifiers = get_event_key_modifier(event);
         cw.send_finger_up(1, modifiers);
     }
     
-    extern fn other_mouse_down(this: &Object, _sel: Sel, event: id) {
+    extern fn other_mouse_down(this: &Object, _sel: Sel, event: objc_id) {
         let cw = get_cocoa_window(this);
         let modifiers = get_event_key_modifier(event);
         cw.send_finger_down(2, modifiers);
     }
     
-    extern fn other_mouse_up(this: &Object, _sel: Sel, event: id) {
+    extern fn other_mouse_up(this: &Object, _sel: Sel, event: objc_id) {
         let cw = get_cocoa_window(this);
         let modifiers = get_event_key_modifier(event);
         cw.send_finger_up(2, modifiers);
     }
     
-    fn mouse_pos_from_event(this: &Object, event: id) -> Vec2 {
+    fn mouse_pos_from_event(this: &Object, event: objc_id) -> Vec2 {
         // We have to do this to have access to the `NSView` trait...
         unsafe {
-            let view: id = this as *const _ as *mut _;
+            let view: objc_id = this as *const _ as *mut _;
             let window_point: NSPoint = msg_send![event, locationInWindow]; //.locationInWindow();
             let view_point: NSPoint = msg_send![view, convertPoint: window_point fromView: nil]; // view.convertPoint_fromView_(window_point, nil);
             let view_rect: NSRect = msg_send![view, frame];
@@ -1732,26 +1732,26 @@ pub fn define_cocoa_view_class() -> *const Class {
         }
     }
     
-    fn mouse_motion(this: &Object, event: id) {
+    fn mouse_motion(this: &Object, event: objc_id) {
         let cw = get_cocoa_window(this);
         let pos = mouse_pos_from_event(this, event);
         let modifiers = get_event_key_modifier(event);
         cw.send_finger_hover_and_move(pos, modifiers);
     }
     
-    extern fn mouse_moved(this: &Object, _sel: Sel, event: id) {
+    extern fn mouse_moved(this: &Object, _sel: Sel, event: objc_id) {
         mouse_motion(this, event);
     }
     
-    extern fn mouse_dragged(this: &Object, _sel: Sel, event: id) {
+    extern fn mouse_dragged(this: &Object, _sel: Sel, event: objc_id) {
         mouse_motion(this, event);
     }
     
-    extern fn right_mouse_dragged(this: &Object, _sel: Sel, event: id) {
+    extern fn right_mouse_dragged(this: &Object, _sel: Sel, event: objc_id) {
         mouse_motion(this, event);
     }
     
-    extern fn other_mouse_dragged(this: &Object, _sel: Sel, event: id) {
+    extern fn other_mouse_dragged(this: &Object, _sel: Sel, event: objc_id) {
         mouse_motion(this, event);
     }
     
@@ -1784,7 +1784,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     extern fn marked_range(this: &Object, _sel: Sel) -> NSRange {
         //println!("markedRange");
         unsafe {
-            let marked_text: id = *this.get_ivar("markedText");
+            let marked_text: objc_id = *this.get_ivar("markedText");
             let length = marked_text.length();
             if length >0 {
                 NSRange {
@@ -1809,14 +1809,14 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     extern fn has_marked_text(this: &Object, _sel: Sel) -> BOOL {
         unsafe {
-            let marked_text: id = *this.get_ivar("markedText");
+            let marked_text: objc_id = *this.get_ivar("markedText");
             (marked_text.length() >0) as BOOL
         }
     }
     
-    extern fn set_marked_text(this: &mut Object, _sel: Sel, string: id, _selected_range: NSRange, _replacement_range: NSRange) {
+    extern fn set_marked_text(this: &mut Object, _sel: Sel, string: objc_id, _selected_range: NSRange, _replacement_range: NSRange) {
         unsafe {
-            let marked_text_ref: &mut id = this.get_mut_ivar("markedText");
+            let marked_text_ref: &mut objc_id = this.get_mut_ivar("markedText");
             let _: () = msg_send![(*marked_text_ref), release];
             let marked_text = NSMutableAttributedString::alloc(nil);
             let has_attr = msg_send![string, isKindOfClass: class!(NSAttributedString)];
@@ -1833,15 +1833,15 @@ pub fn define_cocoa_view_class() -> *const Class {
         let cw = get_cocoa_window(this);
         unsafe {
             let cocoa_app = &(*cw.cocoa_app);
-            let marked_text: id = *this.get_ivar("markedText");
+            let marked_text: objc_id = *this.get_ivar("markedText");
             let mutable_string = marked_text.mutable_string();
             let _: () = msg_send![mutable_string, setString: cocoa_app.const_empty_string];
-            let input_context: id = msg_send![this, inputContext];
+            let input_context: objc_id = msg_send![this, inputContext];
             let _: () = msg_send![input_context, discardMarkedText];
         }
     }
     
-    extern fn valid_attributes_for_marked_text(this: &Object, _sel: Sel) -> id {
+    extern fn valid_attributes_for_marked_text(this: &Object, _sel: Sel) -> objc_id {
         let cw = get_cocoa_window(this);
         unsafe {
             let cocoa_app = &(*cw.cocoa_app);
@@ -1849,7 +1849,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         }
     }
     
-    extern fn attributed_substring_for_proposed_range(_this: &Object, _sel: Sel, _range: NSRange, _actual_range: *mut c_void) -> id {
+    extern fn attributed_substring_for_proposed_range(_this: &Object, _sel: Sel, _range: NSRange, _actual_range: *mut c_void) -> objc_id {
         nil
     }
     
@@ -1861,7 +1861,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     extern fn first_rect_for_character_range(this: &Object, _sel: Sel, _range: NSRange, _actual_range: *mut c_void) -> NSRect {
         let cw = get_cocoa_window(this);
         
-        let view: id = this as *const _ as *mut _;
+        let view: objc_id = this as *const _ as *mut _;
         //let window_point = event.locationInWindow();
         //et view_point = view.convertPoint_fromView_(window_point, nil);
         let view_rect: NSRect = unsafe {msg_send![view, frame]};
@@ -1876,7 +1876,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         }
     }
     
-    extern fn insert_text(this: &Object, _sel: Sel, string: id, replacement_range: NSRange) {
+    extern fn insert_text(this: &Object, _sel: Sel, string: objc_id, replacement_range: NSRange) {
         let cw = get_cocoa_window(this);
         unsafe {
             let has_attr = msg_send![string, isKindOfClass: class!(NSAttributedString)];
@@ -1887,7 +1887,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             };
             let string = nsstring_to_string(characters);
             cw.send_text_input(string, replacement_range.length != 0);
-            let input_context: id = msg_send![this, inputContext];
+            let input_context: objc_id = msg_send![this, inputContext];
             let () = msg_send![input_context, invalidateCharacterCoordinates];
             let () = msg_send![cw.view, setNeedsDisplay: YES];
             unmark_text(this, _sel);
@@ -1898,21 +1898,21 @@ pub fn define_cocoa_view_class() -> *const Class {
         let _cw = get_cocoa_window(this);
     }
     
-    extern fn key_down(this: &Object, _sel: Sel, event: id) {
+    extern fn key_down(this: &Object, _sel: Sel, event: objc_id) {
         let _cw = get_cocoa_window(this);
         unsafe {
-            let input_context: id = msg_send![this, inputContext];
+            let input_context: objc_id = msg_send![this, inputContext];
             let () = msg_send![input_context, handleEvent: event];
         }
     }
     
-    extern fn key_up(_this: &Object, _sel: Sel, _event: id) {
+    extern fn key_up(_this: &Object, _sel: Sel, _event: objc_id) {
     }
     
-    extern fn insert_tab(this: &Object, _sel: Sel, _sender: id) {
+    extern fn insert_tab(this: &Object, _sel: Sel, _sender: objc_id) {
         unsafe {
-            let window: id = msg_send![this, window];
-            let first_responder: id = msg_send![window, firstResponder];
+            let window: objc_id = msg_send![this, window];
+            let first_responder: objc_id = msg_send![window, firstResponder];
             let this_ptr = this as *const _ as *mut _;
             if first_responder == this_ptr {
                 let (): _ = msg_send![window, selectNextKeyView: this];
@@ -1920,10 +1920,10 @@ pub fn define_cocoa_view_class() -> *const Class {
         }
     }
     
-    extern fn insert_back_tab(this: &Object, _sel: Sel, _sender: id) {
+    extern fn insert_back_tab(this: &Object, _sel: Sel, _sender: objc_id) {
         unsafe {
-            let window: id = msg_send![this, window];
-            let first_responder: id = msg_send![window, firstResponder];
+            let window: objc_id = msg_send![this, window];
+            let first_responder: objc_id = msg_send![window, firstResponder];
             let this_ptr = this as *const _ as *mut _;
             if first_responder == this_ptr {
                 let (): _ = msg_send![window, selectPreviousKeyView: this];
@@ -1931,11 +1931,11 @@ pub fn define_cocoa_view_class() -> *const Class {
         }
     }
     
-    extern fn yes_function(_this: &Object, _se: Sel, _event: id) -> BOOL {
+    extern fn yes_function(_this: &Object, _se: Sel, _event: objc_id) -> BOOL {
         YES
     }
     
-    extern fn display_layer(this: &Object, _: Sel, _calayer: id) {
+    extern fn display_layer(this: &Object, _: Sel, _calayer: objc_id) {
         let cw = get_cocoa_window(this);
         cw.send_change_event();
     }
@@ -1957,23 +1957,23 @@ pub fn define_cocoa_view_class() -> *const Class {
     let mut decl = ClassDecl::new("RenderViewClass", superclass).unwrap();
     unsafe {
         decl.add_method(sel!(dealloc), dealloc as extern fn(&Object, Sel));
-        decl.add_method(sel!(initWithPtr:), init_with_ptr as extern fn(&Object, Sel, *mut c_void) -> id);
+        decl.add_method(sel!(initWithPtr:), init_with_ptr as extern fn(&Object, Sel, *mut c_void) -> objc_id);
         decl.add_method(sel!(drawRect:), draw_rect as extern fn(&Object, Sel, NSRect));
         decl.add_method(sel!(resetCursorRects), reset_cursor_rects as extern fn(&Object, Sel));
         decl.add_method(sel!(hasMarkedText), has_marked_text as extern fn(&Object, Sel) -> BOOL);
         decl.add_method(sel!(markedRange), marked_range as extern fn(&Object, Sel) -> NSRange);
         decl.add_method(sel!(selectedRange), selected_range as extern fn(&Object, Sel) -> NSRange);
-        decl.add_method(sel!(setMarkedText: selectedRange: replacementRange:), set_marked_text as extern fn(&mut Object, Sel, id, NSRange, NSRange));
+        decl.add_method(sel!(setMarkedText: selectedRange: replacementRange:), set_marked_text as extern fn(&mut Object, Sel, objc_id, NSRange, NSRange));
         decl.add_method(sel!(unmarkText), unmark_text as extern fn(&Object, Sel));
-        decl.add_method(sel!(validAttributesForMarkedText), valid_attributes_for_marked_text as extern fn(&Object, Sel) -> id);
+        decl.add_method(sel!(validAttributesForMarkedText), valid_attributes_for_marked_text as extern fn(&Object, Sel) -> objc_id);
         decl.add_method(
             sel!(attributedSubstringForProposedRange: actualRange:),
             attributed_substring_for_proposed_range
-            as extern fn(&Object, Sel, NSRange, *mut c_void) -> id,
+            as extern fn(&Object, Sel, NSRange, *mut c_void) -> objc_id,
         );
         decl.add_method(
             sel!(insertText: replacementRange:),
-            insert_text as extern fn(&Object, Sel, id, NSRange),
+            insert_text as extern fn(&Object, Sel, objc_id, NSRange),
         );
         decl.add_method(
             sel!(characterIndexForPoint:),
@@ -1985,36 +1985,36 @@ pub fn define_cocoa_view_class() -> *const Class {
             as extern fn(&Object, Sel, NSRange, *mut c_void) -> NSRect,
         );
         decl.add_method(sel!(doCommandBySelector:), do_command_by_selector as extern fn(&Object, Sel, Sel));
-        decl.add_method(sel!(keyDown:), key_down as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(keyUp:), key_up as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(keyDown:), key_down as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(keyUp:), key_up as extern fn(&Object, Sel, objc_id));
         //decl.add_method(sel!(insertTab:), insert_tab as extern fn(&Object, Sel, id));
         //decl.add_method(sel!(insertBackTab:), insert_back_tab as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(mouseDown:), mouse_down as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(mouseUp:), mouse_up as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(rightMouseDown:), right_mouse_down as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(rightMouseUp:), right_mouse_up as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(otherMouseDown:), other_mouse_down as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(otherMouseUp:), other_mouse_up as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(mouseMoved:), mouse_moved as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(mouseDragged:), mouse_dragged as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(rightMouseDragged:), right_mouse_dragged as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(otherMouseDragged:), other_mouse_dragged as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(wantsKeyDownForEvent:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
-        decl.add_method(sel!(acceptsFirstResponder:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
-        decl.add_method(sel!(becomeFirstResponder:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
-        decl.add_method(sel!(resignFirstResponder:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
+        decl.add_method(sel!(mouseDown:), mouse_down as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(mouseUp:), mouse_up as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(rightMouseDown:), right_mouse_down as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(rightMouseUp:), right_mouse_up as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(otherMouseDown:), other_mouse_down as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(otherMouseUp:), other_mouse_up as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(mouseMoved:), mouse_moved as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(mouseDragged:), mouse_dragged as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(rightMouseDragged:), right_mouse_dragged as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(otherMouseDragged:), other_mouse_dragged as extern fn(&Object, Sel, objc_id));
+        decl.add_method(sel!(wantsKeyDownForEvent:), yes_function as extern fn(&Object, Sel, objc_id) -> BOOL);
+        decl.add_method(sel!(acceptsFirstResponder:), yes_function as extern fn(&Object, Sel, objc_id) -> BOOL);
+        decl.add_method(sel!(becomeFirstResponder:), yes_function as extern fn(&Object, Sel, objc_id) -> BOOL);
+        decl.add_method(sel!(resignFirstResponder:), yes_function as extern fn(&Object, Sel, objc_id) -> BOOL);
         
-        decl.add_method(sel!(displayLayer:), display_layer as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(displayLayer:), display_layer as extern fn(&Object, Sel, objc_id));
     }
     decl.add_ivar::<*mut c_void>("cocoa_window_ptr");
-    decl.add_ivar::<id>("markedText");
+    decl.add_ivar::<objc_id>("markedText");
     decl.add_protocol(&Protocol::get("NSTextInputClient").unwrap());
     decl.add_protocol(&Protocol::get("CALayerDelegate").unwrap());
     return decl.register();
 }
 
 pub unsafe fn superclass<'a>(this: &'a Object) -> &'a Class {
-    let superclass: id = msg_send![this, superclass];
+    let superclass: objc_id = msg_send![this, superclass];
     &*(superclass as *const _)
 }
 
@@ -2023,7 +2023,7 @@ pub fn bottom_left_to_top_left(rect: NSRect) -> f64 {
     height as f64 - (rect.origin.y + rect.size.height)
 }
 
-fn load_mouse_cursor(cursor: MouseCursor) -> id {
+fn load_mouse_cursor(cursor: MouseCursor) -> objc_id {
     match cursor {
         MouseCursor::Arrow | MouseCursor::Default | MouseCursor::Hidden => load_native_cursor("arrowCursor"),
         MouseCursor::Hand => load_native_cursor("pointingHandCursor"),

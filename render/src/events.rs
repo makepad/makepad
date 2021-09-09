@@ -533,22 +533,22 @@ impl Event {
         };
         return Event::None;
     }
+
 }
+#[derive(Clone, Debug, Default, Eq, PartialEq, Copy, Hash)]
+pub struct NextFrame(pub u64);
+
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Default)]
-pub struct Signal {
-    pub signal_id: usize
-}
+pub struct Signal(pub usize);
 
 impl Signal {
     pub fn empty() -> Signal {
-        Signal {
-            signal_id: 0
-        }
+        Signal(0)
     }
     
     pub fn is_empty(&self) -> bool {
-        self.signal_id == 0
+        self.0 == 0
     }
 }
 

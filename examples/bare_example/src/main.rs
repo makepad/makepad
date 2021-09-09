@@ -1,72 +1,97 @@
 use makepad_render::*;  
+
 fn main(){
     main_app!(BareExampleApp);
 }
+
 /*
-#[derive(Clone, DrawQuad)]
-#[repr(C)]
-struct ButtonQuad {
-    #[default_shader(self::shader_quad)]
-    some: f32,
-    base: DrawQuad,
-    counter: f32,
+trait LiveComponent{
+    fn new_live(cx:&mut Cx, id:&[Id])->Self;
+    fn new_default(cx:&mut Cx)->Self;
 }
 
-#[derive(Clone, DrawText)]
-#[repr(C)]
-struct ButtonText {
-    #[default_shader(self::shader_text)]
-    base: DrawText,
-    counter: f32,
+// this is a normal 'Rust' component
+impl LiveComponent for BareExampleApp{
+    fn new_live(cx:&mut Cx, base:LiveNode, id:&[Id]){
+    }
+    
+    fn live_update(&mut self, cx:&mut Cx, event:&mut Event){
+        // thise are all default impls
+    }
+
+    // these 3 are generated
+    fn new_default(cx: &mut Cx){
+    }
+    
+    fn new_from_node(cx:&mut Cx, node:FullNodePtr)->Self{
+    }
+    
+    // this updates self against a live structure. also can use animation
+    fn update_from_node(&mut self, cx:&mut Cx, node:FullNodePtr){
+    }
 }*/
 
+#[derive(Clone)]
 pub struct BareExampleApp {
+    //live: LiveNode, // for every component this always points to the node we deserialized from
     window: Window,
     pass: Pass,
     color_texture: Texture,
     main_view: View,
     //quad: ButtonQuad,
-    //count: f32
+    //buttons: Vec<Button>,
+    //design: Design
 }
 
+// what you want is putting down an indirection in the style-sheet for a codefile.
+
+register_live!{ // alrighty. we always map application structures to a live struct
+    design: render::Design{
+        button: widgets::Button{ // ok so how does this thing find 'Button
+        }
+        children:[button]
+    }
+}
+ 
 impl BareExampleApp {
-    pub fn new(cx: &mut Cx) -> Self {
-        Self {
-            window: Window::new(cx),
-            pass: Pass::default(),
-            color_texture: Texture::new(cx),
-            //quad: ButtonQuad::new(cx, default_shader!()),
-            main_view: View::new(),
-            //count: 0.
+    pub fn new(cx:&mut Cx)->Self{
+        Self{
+            window:Window::new(cx),
+            pass:Pass::default(),
+            color_texture:Texture::new(cx),
+            main_view:View::new(),
         }
     }
-    
     pub fn style(_cx: &mut Cx) { 
-        /*
-        ButtonQuad::register_draw_input(cx);
-        ButtonText::register_draw_input(cx);
-        
-        live_body!(cx, {
-            self::shader_quad: Shader {
-                use makepad_render::drawquad::shader::*;
-                draw_input: self::ButtonQuad;
-                fn pixel() -> vec4 {
-                    return mix(#f00, #0f0, abs(sin(counter + some)));
-                }
-            }
-            
-            self::shader_text: Shader {
-                use makepad_render::drawtext::shader::*;
-                draw_input: self::ButtonText;
-                fn get_color() -> vec4 {
-                    //return #f;
-                    return mix(#f00, #0f0, abs(sin(counter + char_offset * 0.2)));
-                }
-            }
-        });*/
+        // ok so our problem is targetting things.
+        //self::ButtonQuad::register(cx);
+    }
+    
+    pub fn myui_button_clicked(&mut self, _cx: &mut Cx){
     }
     
     pub fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
+        // this live updates an object
+        //self.live_update(cx, event);
+        
+        // ok so what if we return a UIComponent.
+        
+        //self.buttons.push(Button::new_live(cx, self.live, id!(self::button)));
+        // this deserialises SomeButton. okay great
+        // now these things have nested 'variants'. 
+        // so this button gets to run tweens on its own structure
+         
+        //let x = Bla::new(cx, id!(self::BlaThing));
+        
+        /*while let Some(action) = self.live.handle_live(cx, event){
+            match action.id(){
+                id!(self::MyUI::Button) => match action.cast::<ButtonAction>(){
+                    Some(ButtonAction::Clicked) => self.myui_button_clicked(cx);
+                }
+            }
+        }
+        */
+        
         match event {
             Event::Construct => {
                 
@@ -85,6 +110,11 @@ impl BareExampleApp {
         self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(Vec4::color("700")));
         if self.main_view.begin_view(cx, Layout::default()).is_ok() {
 /*
+        while let Some(custom) = self.live.draw_live(cx){
+            match custom.id_path{
+            }
+        }*/
+/*
             self.quad.counter = 0.;
             self.quad.begin_many(cx);
             
@@ -98,10 +128,8 @@ impl BareExampleApp {
                 let y = 400. + (v * 1.12 + self.count * 18.).cos() * 400.;
                 self.quad.draw_quad_abs(cx, Rect {pos: vec2(x, y), size: vec2(10., 10.0)});
             }
-
             self.quad.end_many(cx);
             self.count += 0.001;
-            
             self.main_view.redraw_view(cx);*/
             self.main_view.end_view(cx);
         }

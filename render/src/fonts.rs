@@ -4,6 +4,37 @@ use makepad_geometry::{AffineTransformation, Transform, Vector};
 use makepad_internal_iter::*;
 use makepad_path::PathIterator;
 
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct Font {
+    pub font_id: usize,
+}
+
+#[derive(Clone, Debug, Copy)]
+pub struct TextStyle {
+    pub font: Font,
+    pub font_size: f32,
+    pub brightness: f32,
+    pub curve: f32,
+    pub line_spacing: f32,
+    pub top_drop: f32,
+    pub height_factor: f32,
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        TextStyle {
+            font: Font {font_id: 0},
+            font_size: 8.0,
+            brightness: 1.0,
+            curve: 0.6,
+            line_spacing: 1.4,
+            top_drop: 1.1,
+            height_factor: 1.3,
+        }
+    }
+}
+
 impl Cx {
     /*
     pub fn load_font_style(&mut self, style: &str) -> Font {

@@ -2,7 +2,8 @@
 
 #[macro_use]
 mod cx;
-
+#[macro_use]
+mod livemacros;
 
 #[cfg(all(not(feature="ipc"),target_os = "linux"))]
 mod cx_opengl;
@@ -46,7 +47,7 @@ mod window;
 mod view;
 mod pass;
 mod texture;
-mod layouttypes;
+//mod layouttypes;
 //mod animator;
 //mod elements;
 mod area;
@@ -72,25 +73,3 @@ pub use crate::drawquad::*;
 //pub use crate::drawimage::*;
 //pub use crate::elements::*;
 
-use std::time::{Instant};
-
-impl Cx{
-    pub fn profile_start(&mut self, id:u64){
-        self.profiles.insert(id, Instant::now());
-    }
-    
-    pub fn profile_end(&self, id:u64){
-        if let Some(inst) = self.profiles.get(&id){
-            log!("Profile {} time {}", id, inst.elapsed().as_millis());
-        }
-        
-    }
-}
-
-#[macro_export]
-macro_rules!uid {
-    () => {{
-        struct Unique {}
-        std::any::TypeId::of::<Unique>().into()
-    }};
-}
