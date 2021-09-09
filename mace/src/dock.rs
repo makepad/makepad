@@ -1,7 +1,6 @@
 use {
     crate::{
         generational::{Arena, Id},
-        list_logic::ItemId,
         splitter::{self, Splitter},
         tab_bar::{self, TabBar, TabId},
     },
@@ -98,8 +97,11 @@ impl Dock {
                 }
                 Panel::TabBar(tab_bar) => {
                     tab_bar.handle_event(cx, event, &mut |cx, action| match action {
-                        tab_bar::Action::TabWasPressed(item_id) => {
-                            dispatch_action(cx, Action::TabWasPressed(item_id))
+                        tab_bar::Action::TabWasPressed(tab_id) => {
+                            dispatch_action(cx, Action::TabWasPressed(tab_id))
+                        }
+                        tab_bar::Action::TabCloseButtonWasPressed(tab_id) => {
+                            dispatch_action(cx, Action::TabCloseButtonWasPressed(tab_id))
                         }
                     });
                 }
@@ -132,5 +134,6 @@ impl Panel {
 }
 
 pub enum Action {
-    TabWasPressed(ItemId),
+    TabWasPressed(TabId),
+    TabCloseButtonWasPressed(TabId),
 }
