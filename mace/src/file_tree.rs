@@ -234,14 +234,14 @@ impl FileTree {
         self.logic.forget();
     }
 
-    pub fn file_node_is_expanded(&mut self, file_node_id: NodeId) -> bool {
+    pub fn file_node_is_expanded(&mut self, file_node_id: FileNodeId) -> bool {
         self.logic.node_is_expanded(file_node_id)
     }
 
     pub fn set_file_node_is_expanded(
         &mut self,
         cx: &mut Cx,
-        file_node_id: NodeId,
+        file_node_id: FileNodeId,
         is_open: bool,
         should_animate: bool,
     ) {
@@ -256,7 +256,7 @@ impl FileTree {
     pub fn toggle_file_node_is_expanded(
         &mut self,
         cx: &mut Cx,
-        file_node_id: NodeId,
+        file_node_id: FileNodeId,
         should_animate: bool,
     ) {
         if self
@@ -267,13 +267,13 @@ impl FileTree {
         }
     }
 
-    pub fn set_hovered_file_node_id(&mut self, cx: &mut Cx, file_node_id: Option<NodeId>) {
+    pub fn set_hovered_file_node_id(&mut self, cx: &mut Cx, file_node_id: Option<FileNodeId>) {
         if self.logic.set_hovered_node_id(file_node_id) {
             self.view.redraw_view(cx);
         }
     }
 
-    pub fn set_selected_file_node_id(&mut self, cx: &mut Cx, file_node_id: NodeId) {
+    pub fn set_selected_file_node_id(&mut self, cx: &mut Cx, file_node_id: FileNodeId) {
         if self.logic.set_selected_node_id(file_node_id) {
             self.view.redraw_view(cx);
         }

@@ -178,7 +178,9 @@ impl Connection {
             .unwrap();
         let unsettled_delta_count = document_guard.our_revision - settled_revision;
         let settled_delta_count = document_guard.outstanding_deltas.len() - unsettled_delta_count;
-        document_guard.outstanding_deltas.drain(..settled_delta_count);
+        document_guard
+            .outstanding_deltas
+            .drain(..settled_delta_count);
 
         document_guard.notify_other_participants(
             self.connection_id,
@@ -198,7 +200,9 @@ impl Connection {
         let document = documents_by_path_guard.get(&path).unwrap();
         let mut document_guard = document.lock().unwrap();
 
-        document_guard.participants_by_connection_id.remove(&self.connection_id);
+        document_guard
+            .participants_by_connection_id
+            .remove(&self.connection_id);
 
         let is_empty = document_guard.participants_by_connection_id.is_empty();
         drop(document_guard);

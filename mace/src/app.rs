@@ -1,13 +1,14 @@
 use {
     crate::{
-        code_editor::{self, CodeEditor, DocumentId, SessionId, ViewId},
+        code_editor::{self, CodeEditor, SessionId, ViewId},
         dock::{self, Dock, PanelId},
         file_tree::{self, FileNodeId, FileTree},
         generational::{Arena, IdAllocator},
         protocol::{self, Notification, Request, Response, ResponseOrNotification},
         server::{Connection, Server},
         splitter::Splitter,
-        tab_bar::{TabBar, TabId},
+        tab,
+        tab_bar::TabId,
         tree_logic::NodeId,
     },
     makepad_render::*,
@@ -39,7 +40,7 @@ impl App {
         CodeEditor::style(cx);
         FileTree::style(cx);
         Splitter::style(cx);
-        TabBar::style(cx);
+        tab::Tab::style(cx);
     }
 
     pub fn new(cx: &mut Cx) -> App {
@@ -147,7 +148,7 @@ impl AppInner {
                 if let Some(item_id) = self
                     .dock
                     .get_or_create_tab_bar(cx, panel_id)
-                    .selected_item_id()
+                    .selected_tab_id()
                 {
                     cx.turtle_new_line();
                     self.draw_tab(cx, state, item_id);
@@ -209,8 +210,13 @@ impl AppInner {
         self.file_tree.redraw(cx);
     }
 
-    fn create_code_editor_tab(&mut self, cx: &mut Cx, state: &mut State, name: String, document_id: DocumentId) {
-        let session_id = state.code_editor_state.create_session(document_id);
+    fn create_code_editor_tab(
+        &mut self,
+        cx: &mut Cx,
+        state: &mut State,
+        name: String,
+        session_id: SessionId,
+    ) {
         let tab_id = state.tab_id_allocator.allocate();
         match &mut state.panels[state.panel_id] {
             Panel::TabBar { tab_ids, .. } => tab_ids.push(tab_id),
@@ -227,7 +233,7 @@ impl AppInner {
         self.create_or_update_view(cx, state, state.panel_id, session_id);
         self.dock
             .get_or_create_tab_bar(cx, state.panel_id)
-            .set_selected_item_id(cx, Some(tab_id));
+            .set_selected_tab_id(cx, Some(tab_id));
     }
 
     fn send_request(&mut self, request: Request) {
@@ -247,7 +253,11 @@ impl AppInner {
                     let tab = &state.tabs[tab_id];
                     match tab.kind {
                         TabKind::CodeEditor { session_id } => {
-                            self.create_or_update_view(cx, state, state.panel_id, session_id);
+                            let panel_id = tab.panel_id;
+                            self.create_or_update_view(cx, state, panel_id, session_id);
+                            self.dock
+                                .get_or_create_tab_bar(cx, panel_id)
+                                .set_selected_tab_id(cx, Some(tab_id));
                         }
                         _ => {}
                     }
@@ -267,8 +277,10 @@ impl AppInner {
                         match state.code_editor_state.document_id_by_path(&path) {
                             Some(document_id) => {
                                 let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                                self.create_code_editor_tab(cx, state, name, document_id);
-                            },
+                                let session_id =
+                                    state.code_editor_state.create_session(document_id);
+                                self.create_code_editor_tab(cx, state, name, session_id);
+                            }
                             None => self.send_request(Request::OpenFile(path)),
                         }
                     }
@@ -316,18 +328,11 @@ impl AppInner {
                     match self.response_or_notification_receiver.try_recv() {
                         Ok(ResponseOrNotification::Response(response)) => {
                             let request = self.outstanding_requests.pop_front().unwrap();
-                            self.handle_response(
-                                cx,
-                                state,
-                                request,
-                                response,
-                            )
-                        },
-                        Ok(ResponseOrNotification::Notification(notification)) => self.handle_notification(
-                            cx,
-                            state,
-                            notification,
-                        ),
+                            self.handle_response(cx, state, request, response)
+                        }
+                        Ok(ResponseOrNotification::Notification(notification)) => {
+                            self.handle_notification(cx, state, notification)
+                        }
                         Err(TryRecvError::Empty) => break,
                         _ => panic!(),
                     }
@@ -345,31 +350,27 @@ impl AppInner {
         response: Response,
     ) {
         match response {
-            Response::GetFileTree(response) => {
-                match request {
-                    Request::GetFileTree() => {
-                        self.set_file_tree(cx, state, response.unwrap());
-                        let tab = &state.tabs[state.file_tree_tab_id];
-                        self.dock
-                            .get_or_create_tab_bar(cx, tab.panel_id)
-                            .set_selected_item_id(cx, Some(state.file_tree_tab_id));
-                    }
-                    _ => panic!(),
+            Response::GetFileTree(response) => match request {
+                Request::GetFileTree() => {
+                    self.set_file_tree(cx, state, response.unwrap());
+                    let tab = &state.tabs[state.file_tree_tab_id];
+                    self.dock
+                        .get_or_create_tab_bar(cx, tab.panel_id)
+                        .set_selected_tab_id(cx, Some(state.file_tree_tab_id));
                 }
-            }
-            Response::OpenFile(response) => {
-                match request {
-                    Request::OpenFile(path) => {
-                        let (revision, text) = response.unwrap();
-                        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                        let document_id = state
-                            .code_editor_state
-                            .create_document(path, revision, text);
-                        self.create_code_editor_tab(cx, state, name, document_id);
-                    }
-                    _ => panic!(),
+                _ => panic!(),
+            },
+            Response::OpenFile(response) => match request {
+                Request::OpenFile(path) => {
+                    let (revision, text) = response.unwrap();
+                    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                    let session_id = state
+                        .code_editor_state
+                        .create_document_and_session(path, revision, text);
+                    self.create_code_editor_tab(cx, state, name, session_id);
                 }
-            }
+                _ => panic!(),
+            },
             response => self.code_editor.handle_response(
                 &mut state.code_editor_state,
                 request,
@@ -382,23 +383,16 @@ impl AppInner {
                         request_sender.send(request).unwrap()
                     }
                 },
-            )
-        }
-;
+            ),
+        };
     }
 
-    fn handle_notification(
-        &mut self,
-        cx: &mut Cx,
-        state: &mut State,
-        notification: Notification,
-    ) {
+    fn handle_notification(&mut self, cx: &mut Cx, state: &mut State, notification: Notification) {
         match notification {
-            notification => self.code_editor.handle_notification(
-                cx,
-                &mut state.code_editor_state,
-                notification,
-            )
+            notification => {
+                self.code_editor
+                    .handle_notification(cx, &mut state.code_editor_state, notification)
+            }
         }
     }
 
@@ -414,11 +408,11 @@ impl AppInner {
             Panel::TabBar { view_id, .. } => match view_id {
                 Some(view_id) => {
                     self.code_editor.set_view_session_id(
+                        cx,
                         &mut state.code_editor_state,
                         *view_id,
                         session_id,
                     );
-                    self.code_editor.redraw_view(cx, *view_id);
                 }
                 None => {
                     *view_id = Some(self.code_editor.create_view(
@@ -426,7 +420,6 @@ impl AppInner {
                         &mut state.code_editor_state,
                         session_id,
                     ));
-                    self.code_editor.redraw_view(cx, view_id.unwrap());
                 }
             },
             _ => panic!(),

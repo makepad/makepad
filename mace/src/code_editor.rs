@@ -420,6 +420,7 @@ impl CodeEditor {
 
     pub fn set_view_session_id(
         &mut self,
+        cx: &mut Cx,
         state: &mut State,
         view_id: ViewId,
         session_id: SessionId,
@@ -430,6 +431,7 @@ impl CodeEditor {
         view.session_id = session_id;
         let session = &mut state.sessions[view.session_id];
         session.view_id = Some(view_id);
+        view.view.redraw_view(cx);
     }
 
     pub fn redraw_view(&mut self, cx: &mut Cx, view_id: ViewId) {
@@ -598,29 +600,25 @@ impl CodeEditor {
         send_request: &mut dyn FnMut(Request),
     ) {
         match response {
-            Response::ApplyDelta(response) => {
-                match request {
-                    Request::ApplyDelta(path, _, _) => {
-                        let _ = response.as_ref().unwrap();
+            Response::ApplyDelta(response) => match request {
+                Request::ApplyDelta(path, _, _) => {
+                    let _ = response.as_ref().unwrap();
 
-                        let document_id = state.document_ids_by_path[&path];
+                    let document_id = state.document_ids_by_path[&path];
 
-                        let document = &mut state.documents[document_id];
-                        document.outstanding_deltas.pop_front();
-                        document.revision += 1;
-                        if let Some(outstanding_delta) = document.outstanding_deltas.front() {
-                            send_request(
-                                Request::ApplyDelta(
-                                    path.clone(),
-                                    document.revision,
-                                    outstanding_delta.clone(),
-                                ),
-                            );
-                        }
+                    let document = &mut state.documents[document_id];
+                    document.outstanding_deltas.pop_front();
+                    document.revision += 1;
+                    if let Some(outstanding_delta) = document.outstanding_deltas.front() {
+                        send_request(Request::ApplyDelta(
+                            path.clone(),
+                            document.revision,
+                            outstanding_delta.clone(),
+                        ));
                     }
-                    _ => panic!(),
                 }
-            }
+                _ => panic!(),
+            },
             _ => {}
         }
     }
@@ -638,8 +636,7 @@ impl CodeEditor {
                 let document = &mut state.documents[document_id];
                 let mut delta = delta;
                 for outstanding_delta_ref in &mut document.outstanding_deltas {
-                    let outstanding_delta =
-                        mem::replace(outstanding_delta_ref, Delta::identity());
+                    let outstanding_delta = mem::replace(outstanding_delta_ref, Delta::identity());
                     let (new_delta, new_outstanding_delta) = delta.transform(outstanding_delta);
                     delta = new_delta;
                     *outstanding_delta_ref = new_outstanding_delta;
@@ -701,6 +698,16 @@ impl State {
         State::default()
     }
 
+    pub fn create_document_and_session(
+        &mut self,
+        path: PathBuf,
+        revision: usize,
+        text: Text,
+    ) -> SessionId {
+        let document_id = self.create_document(path, revision, text);
+        self.create_session(document_id)
+    }
+
     pub fn create_session(&mut self, document_id: DocumentId) -> SessionId {
         let session_id = self.session_id_allocator.allocate();
         let session = Session {
@@ -716,7 +723,23 @@ impl State {
         session_id
     }
 
-    pub fn create_document(&mut self, path: PathBuf, revision: usize, text: Text) -> DocumentId {
+    pub fn destroy_session(
+        &mut self,
+        session_id: SessionId,
+        send_request: &mut dyn FnMut(Request),
+    ) {
+        let session = &self.sessions[session_id];
+        let document_id = session.document_id;
+        let document = &mut self.documents[document_id];
+        document.session_ids.remove(&session_id);
+        if document.session_ids.is_empty() {
+            self.destroy_document(document_id, send_request);
+        }
+        self.sessions.remove(session_id);
+        self.session_id_allocator.deallocate(session_id);
+    }
+
+    fn create_document(&mut self, path: PathBuf, revision: usize, text: Text) -> DocumentId {
         let document_id = self.document_id_allocator.allocate();
         let line_info_cache = LineInfoCache::new(&text);
         self.documents.insert(
@@ -734,6 +757,13 @@ impl State {
         );
         self.document_ids_by_path.insert(path, document_id);
         document_id
+    }
+
+    fn destroy_document(&mut self, document_id: DocumentId, send_request: &mut dyn FnMut(Request)) {
+        let document = &self.documents[document_id];
+        send_request(Request::CloseFile(document.path.clone()));
+        self.documents.remove(document_id);
+        self.document_id_allocator.deallocate(document_id);
     }
 
     pub fn document_id_by_path(&self, path: &Path) -> Option<DocumentId> {

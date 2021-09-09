@@ -3,7 +3,7 @@ use {
         generational::{Arena, Id},
         list_logic::ItemId,
         splitter::{self, Splitter},
-        tab_bar::{self, TabBar},
+        tab_bar::{self, TabBar, TabId},
     },
     makepad_render::*,
 };
@@ -60,7 +60,7 @@ impl Dock {
         tab_bar.end(cx);
     }
 
-    pub fn tab(&mut self, cx: &mut Cx, tab_id: ItemId, name: &str) {
+    pub fn tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let tab_bar = self.panels[panel_id].as_tab_bar_mut();
         tab_bar.tab(cx, tab_id, name);
@@ -90,7 +90,7 @@ impl Dock {
         for panel in &mut self.panels {
             match panel {
                 Panel::Splitter(splitter) => {
-                    let mut actions = Vec::new();
+                    let mut actions= Vec::new();
                     splitter.handle_event(cx, event, &mut |action| actions.push(action));
                     for action in actions {
                         match action {
@@ -101,15 +101,11 @@ impl Dock {
                     }
                 }
                 Panel::TabBar(tab_bar) => {
-                    let mut actions = Vec::new();
-                    tab_bar.handle_event(cx, event, &mut |action| actions.push(action));
-                    for action in actions {
-                        match action {
-                            tab_bar::Action::TabWasPressed(item_id) => {
-                                dispatch_action(Action::TabWasPressed(item_id))
-                            }
-                        }
-                    }
+                    tab_bar.handle_event(cx, event, &mut |action| match action {
+                        tab_bar::Action::TabWasPressed(item_id) => {
+                            dispatch_action(Action::TabWasPressed(item_id))
+                        }                     
+                    });
                 }
             }
         }
