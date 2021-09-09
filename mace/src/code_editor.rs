@@ -401,7 +401,12 @@ impl CodeEditor {
         }
     }
 
-    pub fn create_view(&mut self, cx: &mut Cx, state: &mut State, session_id: Option<SessionId>) -> ViewId {
+    pub fn create_view(
+        &mut self,
+        cx: &mut Cx,
+        state: &mut State,
+        session_id: Option<SessionId>,
+    ) -> ViewId {
         let view_id = self.view_id_allocator.allocate();
         self.views.insert(
             view_id,
@@ -585,11 +590,7 @@ impl CodeEditor {
             }) => {
                 let view = &self.views[view_id];
                 if let Some(session_id) = view.session_id {
-                    state.insert_text(
-                        session_id,
-                        Text::from(vec![vec![], vec![]]),
-                        send_request,
-                    );
+                    state.insert_text(session_id, Text::from(vec![vec![], vec![]]), send_request);
                     let session = &state.sessions[session_id];
                     self.redraw_document_views(cx, state, session.document_id);
                 }
@@ -784,6 +785,7 @@ impl State {
     fn destroy_document(&mut self, document_id: DocumentId, send_request: &mut dyn FnMut(Request)) {
         let document = &self.documents[document_id];
         send_request(Request::CloseFile(document.path.clone()));
+        self.document_ids_by_path.remove(&document.path);
         self.documents.remove(document_id);
         self.document_id_allocator.deallocate(document_id);
     }
