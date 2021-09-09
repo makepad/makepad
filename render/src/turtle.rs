@@ -1,5 +1,260 @@
 use crate::cx::*;
 
+
+#[derive(Copy, Clone, Debug)]
+pub enum LineWrap {
+    None,
+    NewLine,
+    MaxSize(f32)
+}
+impl Default for LineWrap {
+    fn default() -> Self {
+        LineWrap::None
+    }
+}
+
+#[derive(Copy, Clone, Default, Debug)]
+pub struct Layout {
+    pub padding: Padding,
+    pub align: Align,
+    pub direction: Direction,
+    pub line_wrap: LineWrap,
+    pub new_line_padding: f32,
+    pub abs_origin: Option<Vec2>,
+    pub abs_size: Option<Vec2>,
+    pub walk: Walk,
+}
+
+#[derive(Copy, Clone, Default, Debug)]
+pub struct Walk {
+    pub margin: Margin,
+    pub width: Width,
+    pub height: Height,
+}
+
+impl Walk {
+    pub fn wh(w: Width, h: Height) -> Self {
+        Self {
+            width: w,
+            height: h,
+            margin: Margin::zero(),
+        }
+    }
+}
+
+impl Layout {
+    pub fn abs_origin_zero() -> Self {
+        Layout {
+            abs_origin: Some(Vec2::default()),
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Align {
+    pub fx: f32,
+    pub fy: f32
+}
+
+impl Align {
+    pub fn left_top() -> Align {Align {fx: 0., fy: 0.}}
+    pub fn center_top() -> Align {Align {fx: 0.5, fy: 0.0}}
+    pub fn right_top() -> Align {Align {fx: 1.0, fy: 0.0}}
+    pub fn left_center() -> Align {Align {fx: 0.0, fy: 0.5}}
+    pub fn center() -> Align {Align {fx: 0.5, fy: 0.5}}
+    pub fn right_center() -> Align {Align {fx: 1.0, fy: 0.5}}
+    pub fn left_bottom() -> Align {Align {fx: 0., fy: 1.0}}
+    pub fn center_bottom() -> Align {Align {fx: 0.5, fy: 1.0}}
+    pub fn right_bottom() -> Align {Align {fx: 1.0, fy: 1.0}}
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Margin {
+    pub l: f32,
+    pub t: f32,
+    pub r: f32,
+    pub b: f32
+}
+
+impl Margin {
+    pub fn zero() -> Margin {
+        Margin {l: 0.0, t: 0.0, r: 0.0, b: 0.0}
+    }
+    
+    pub fn all(v: f32) -> Margin {
+        Margin {l: v, t: v, r: v, b: v}
+    }
+    
+    pub fn left(v: f32) -> Margin {
+        Margin {l: v, t: 0.0, r: 0.0, b: 0.0}
+    }
+    
+    pub fn top(v: f32) -> Margin {
+        Margin {l: 0.0, t: v, r: 0.0, b: 0.0}
+    }
+    
+    pub fn right(v: f32) -> Margin {
+        Margin {l: 0.0, t: 0.0, r: v, b: 0.0}
+    }
+    
+    pub fn bottom(v: f32) -> Margin {
+        Margin {l: 0.0, t: 0.0, r: 0.0, b: v}
+    }
+    
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Padding {
+    pub l: f32,
+    pub t: f32,
+    pub r: f32,
+    pub b: f32
+}
+
+impl Padding {
+    pub fn zero() -> Padding {
+        Padding {l: 0.0, t: 0.0, r: 0.0, b: 0.0}
+    }
+    pub fn all(v: f32) -> Padding {
+        Padding {l: v, t: v, r: v, b: v}
+    }
+}
+
+
+#[derive(Copy, Clone, Debug)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down
+}
+
+impl Default for Direction {
+    fn default() -> Self {
+        Direction::Right
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum Axis {
+    Horizontal,
+    Vertical
+}
+
+impl Default for Axis {
+    fn default() -> Self {
+        Axis::Horizontal
+    }
+}
+
+
+#[derive(Copy, Clone, Debug)]
+pub enum Width {
+    Fill,
+    Fix(f32),
+    Compute,
+    ComputeFill,
+    FillPad(f32),
+    FillScale(f32),
+    FillScalePad(f32, f32),
+    Scale(f32),
+    ScalePad(f32, f32),
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum Height {
+    Fill,
+    Fix(f32),
+    Compute,
+    ComputeFill,
+    FillPad(f32),
+    FillScale(f32),
+    FillScalePad(f32, f32),
+    Scale(f32),
+    ScalePad(f32, f32),
+}
+
+impl Default for Width {
+    fn default() -> Self {
+        Width::Fill
+    }
+}
+
+
+impl Default for Height {
+    fn default() -> Self {
+        Height::Fill
+    }
+}
+
+
+impl Width {
+    pub fn fixed(&self) -> f32 {
+        match self {
+            Width::Fix(v) => *v,
+            _ => 0.
+        }
+    }
+    
+}
+
+impl Height {
+    pub fn fixed(&self) -> f32 {
+        match self {
+            Height::Fix(v) => *v,
+            _ => 0.
+        }
+    }
+}
+
+
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Rect {
+    pub pos: Vec2,
+    pub size: Vec2,
+}
+
+impl Rect {
+    
+    pub fn translate(self, pos: Vec2) -> Rect {
+        Rect {pos: self.pos + pos, size: self.size}
+    }
+    
+    pub fn contains(&self, pos: Vec2) -> bool {
+        return pos.x >= self.pos.x && pos.x <= self.pos.x + self.size.x &&
+        pos.y >= self.pos.y && pos.y <= self.pos.y + self.size.y;
+    }
+    pub fn intersects(&self, r: Rect) -> bool {
+        !(
+            r.pos.x > self.pos.x + self.size.x ||
+            r.pos.x + r.size.x < self.pos.x ||
+            r.pos.y > self.pos.y + self.size.y ||
+            r.pos.y + r.size.y < self.pos.y
+        )
+    }
+    
+    pub fn contains_with_margin(&self, pos: Vec2, margin: &Option<Margin>) -> bool {
+        if let Some(margin) = margin {
+            return
+            pos.x >= self.pos.x - margin.l
+                && pos.x <= self.pos.x + self.size.x + margin.r
+                && pos.y >= self.pos.y - margin.t
+                && pos.y <= self.pos.y + self.size.y + margin.b;
+        }
+        else {
+            return self.contains(pos);
+        }
+    }
+    
+    pub fn from_lerp(a: Rect, b: Rect, f: f32) -> Rect {
+        Rect {
+            pos: ( b.pos - a.pos ) * f + a.pos,
+            size: ( b.size - a.size ) * f + a.size
+        }
+    }
+}
+
 impl Cx {
     //pub fn debug_pt(&self, x:f32, y:f32, color:i32){
     //self.debug_pts.borrow_mut().push((x,y,color));

@@ -6,9 +6,7 @@
 use makepad_objc_sys::{msg_send};
 use makepad_objc_sys::runtime::YES;
 use makepad_live_parser::LiveError;
-
 //use makepad_shader_compiler::generate_metal;
-
 //use metal::*;
 use crate::cx_apple::*;
 use crate::cx_cocoa::*;
@@ -24,7 +22,7 @@ impl Cx {
         clip: (Vec2, Vec2),
         zbias: &mut f32,
         zbias_step: f32,
-        encoder: id,
+        encoder: objc_id,
         metal_cx: &MetalCx,
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
@@ -186,7 +184,7 @@ impl Cx {
         }
     }
     
-    pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: id, pass_id: usize, inherit_dpi_factor: f32, first_texture: Option<id>, metal_cx: &MetalCx) {
+    pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: objc_id, pass_id: usize, inherit_dpi_factor: f32, first_texture: Option<objc_id>, metal_cx: &MetalCx) {
         let pass_size = self.passes[pass_id].pass_size;
 
         self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
@@ -200,8 +198,8 @@ impl Cx {
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         
         for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
-            let color_attachments: id = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
-            let color_attachment: id = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: 0]};
+            let color_attachments: objc_id = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
+            let color_attachment: objc_id = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: 0]};
             // let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
             
             let is_initial;
@@ -264,7 +262,7 @@ impl Cx {
             let cxtexture = &mut self.textures[depth_texture_id as usize];
             let is_initial = metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, true);
             
-            let depth_attachment: id = unsafe {msg_send![render_pass_descriptor, depthAttachment]};
+            let depth_attachment: objc_id = unsafe {msg_send![render_pass_descriptor, depthAttachment]};
             
             if let Some(mtl_texture) = cxtexture.platform.mtl_texture {
                 unsafe {msg_send![depth_attachment, setTexture: mtl_texture]}
@@ -292,10 +290,10 @@ impl Cx {
             // create depth state
             if self.passes[pass_id].platform.mtl_depth_state.is_none() {
                 
-                let desc: id = unsafe {msg_send![class!(MTLDepthStencilDescriptor), new]};
+                let desc: objc_id = unsafe {msg_send![class!(MTLDepthStencilDescriptor), new]};
                 let () = unsafe {msg_send![desc, setDepthCompareFunction: MTLCompareFunction::LessEqual]};
                 let () = unsafe {msg_send![desc, setDepthWriteEnabled: true]};
-                let depth_stencil_state: id = unsafe {msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc]};
+                let depth_stencil_state: objc_id = unsafe {msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc]};
                 self.passes[pass_id].platform.mtl_depth_state = Some(depth_stencil_state);
             }
         }
@@ -305,26 +303,26 @@ impl Cx {
         &mut self,
         pass_id: usize,
         dpi_factor: f32,
-        layer: id,
+        layer: objc_id,
         metal_cx: &mut MetalCx,
     ) {
         self.platform.bytes_written = 0;
         self.platform.draw_calls_done = 0;
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
-        let pool: id = unsafe {msg_send![class!(NSAutoreleasePool), new]};
+        let pool: objc_id = unsafe {msg_send![class!(NSAutoreleasePool), new]};
         
         //let command_buffer = command_queue.new_command_buffer();
-        let drawable: id = unsafe {msg_send![layer, nextDrawable]};
+        let drawable: objc_id = unsafe {msg_send![layer, nextDrawable]};
         if drawable != nil {
-            let render_pass_descriptor: id = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
+            let render_pass_descriptor: objc_id = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
             
-            let texture: id = unsafe {msg_send![drawable, texture]};
+            let texture: objc_id = unsafe {msg_send![drawable, texture]};
             
             self.setup_render_pass_descriptor(render_pass_descriptor, pass_id, dpi_factor, Some(texture), metal_cx);
             
-            let command_buffer: id = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
-            let encoder: id = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
+            let command_buffer: objc_id = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
+            let encoder: objc_id = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
             
             unsafe {msg_send![encoder, textureBarrier]}
             
@@ -362,13 +360,13 @@ impl Cx {
     ) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
-        let pool: id = unsafe {msg_send![class!(NSAutoreleasePool), new]};
-        let render_pass_descriptor: id = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
+        let pool: objc_id = unsafe {msg_send![class!(NSAutoreleasePool), new]};
+        let render_pass_descriptor: objc_id = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
         
         self.setup_render_pass_descriptor(render_pass_descriptor, pass_id, dpi_factor, None, metal_cx);
         
-        let command_buffer: id = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
-        let encoder: id = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
+        let command_buffer: objc_id = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
+        let encoder: objc_id = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
         
         if let Some(depth_state) = self.passes[pass_id].platform.mtl_depth_state {
             let () = unsafe {msg_send![encoder, setDepthStencilState: depth_state]};
@@ -395,8 +393,8 @@ impl Cx {
 }
 
 pub struct MetalCx {
-    pub device: id,
-    pub command_queue: id
+    pub device: objc_id,
+    pub command_queue: objc_id
 }
 
 impl MetalCx {
@@ -431,7 +429,7 @@ impl MetalCx {
         }
         cxtexture.platform.mtl_texture = None;
         
-        let mdesc: id = unsafe {msg_send![class!(MTLTextureDescriptor), new]};
+        let mdesc: objc_id = unsafe {msg_send![class!(MTLTextureDescriptor), new]};
         if !is_depth {
             match cxtexture.desc.format {
                 TextureFormat::Default | TextureFormat::RenderBGRA => {
@@ -468,7 +466,7 @@ impl MetalCx {
         let () = unsafe {msg_send![mdesc, setHeight: height as u64]};
         let () = unsafe {msg_send![mdesc, setDepth: 1u64]};
         
-        let tex: id = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
+        let tex: objc_id = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
         
         cxtexture.platform.width = width;
         cxtexture.platform.height = height;
@@ -491,7 +489,7 @@ impl MetalCx {
         if cxtexture.platform.alloc_desc != cxtexture.desc {
             cxtexture.platform.mtl_texture = None;
             
-            let mdesc: id = unsafe {msg_send![class!(MTLTextureDescriptor), new]};
+            let mdesc: objc_id = unsafe {msg_send![class!(MTLTextureDescriptor), new]};
             unsafe {
                 let () = msg_send![mdesc, setTextureType: MTLTextureType::D2];
                 let () = msg_send![mdesc, setStorageMode: MTLStorageMode::Managed];
@@ -504,7 +502,7 @@ impl MetalCx {
                 TextureFormat::Default | TextureFormat::ImageBGRA => {
                     let () = unsafe {msg_send![mdesc, setPixelFormat: MTLPixelFormat::BGRA8Unorm]};
                     
-                    let tex: id = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
+                    let tex: objc_id = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
                     
                     cxtexture.platform.mtl_texture = Some(tex);
                     
@@ -547,14 +545,14 @@ pub struct MetalWindow {
     pub first_draw: bool,
     pub window_geom: WindowGeom,
     pub cal_size: Vec2,
-    pub ca_layer: id,
+    pub ca_layer: objc_id,
     pub cocoa_window: CocoaWindow,
 }
 
 impl MetalWindow {
     pub fn new(window_id: usize, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> MetalWindow {
         
-        let ca_layer: id = unsafe {msg_send![class!(CAMetalLayer), new]};
+        let ca_layer: objc_id = unsafe {msg_send![class!(CAMetalLayer), new]};
         
         let mut cocoa_window = CocoaWindow::new(cocoa_app, window_id);
         
@@ -633,17 +631,17 @@ pub struct CxPlatformTexture {
     pub alloc_desc: TextureDesc,
     pub width: u64,
     pub height: u64,
-    pub mtl_texture: Option<id>
+    pub mtl_texture: Option<objc_id>
 }
 
 #[derive(Default, Clone)]
 pub struct CxPlatformPass {
-    pub mtl_depth_state: Option<id>
+    pub mtl_depth_state: Option<objc_id>
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone)] 
 pub struct MultiMetalBuffer {
-    pub buffer: Option<id>,
+    pub buffer: Option<objc_id>,
     pub size: usize,
     pub used: usize
 }
@@ -686,7 +684,7 @@ impl MetalBuffer {
             elem.buffer = None;
         }
         if let None = elem.buffer {
-            let buffer: id = unsafe {msg_send![
+            let buffer: objc_id = unsafe {msg_send![
                 metal_cx.device,
                 newBufferWithLength: (data.len() * std::mem::size_of::<f32>()) as u64
                 options: MTLResourceOptions::StorageModeShared
@@ -717,7 +715,7 @@ impl MetalBuffer {
             elem.buffer = None;
         }
         if let None = elem.buffer {
-            let buffer: id = unsafe {msg_send![
+            let buffer: objc_id = unsafe {msg_send![
                 metal_cx.device,
                 newBufferWithLength: (data.len() * std::mem::size_of::<u32>()) as u64
                 options: MTLResourceOptions::StorageModeShared
@@ -750,9 +748,9 @@ pub struct CxPlatformGeometry {
 
 #[derive(Clone)]
 pub struct CxPlatformShader {
-    pub library: id,
+    pub library: objc_id,
     pub metal_shader: String,
-    pub pipeline_state: id,
+    pub pipeline_state: objc_id,
 }
 
 impl PartialEq for CxPlatformShader {

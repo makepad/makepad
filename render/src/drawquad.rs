@@ -1,7 +1,26 @@
-//use crate::cx::*;
+use crate::cx::*;
+
+const DRAW_QUAD_UNIFORMS:usize = 128;
+const DRAW_QUAD_INSTANCES:usize = 128;
+
+#[derive(Debug)]
+#[repr(C)]
+pub struct DrawQuad {
+    pub uniforms:[f32;DRAW_QUAD_UNIFORMS],
+    pub shader: Shader,
+    pub slots: u32,
+    pub instances:[f32;DRAW_QUAD_INSTANCES],
+    pub rect_pos: Vec2,
+    pub rect_size: Vec2,
+    pub draw_depth: f32
+}
+
+impl DrawQuad{
+}
+
 /*
 #[derive(Debug)]
-#[repr(C, packed)]
+#[repr(C)]
 pub struct DrawQuad {
     pub shader: Shader,
     pub area: Area,
@@ -17,10 +36,10 @@ pub struct DrawQuad {
 impl Clone for DrawQuad {
     fn clone(&self) -> Self {
         Self {
-            shader: unsafe {self.shader.clone()},
+            shader: self.shader.clone(),
             area: Area ::Empty,
             many: None,
-           // many_set_area: false,
+            // many_set_area: false,
             many_old_area: Area::Empty,
             slots: self.slots,
             rect_pos: self.rect_pos,
@@ -32,7 +51,7 @@ impl Clone for DrawQuad {
 
 impl DrawQuad {
     pub fn new(cx: &mut Cx, shader: Shader) -> Self {
-        Self::with_slots(cx, default_shader_overload!(cx, shader, self::shader), 0)
+        Self::with_slots(cx, default_shader!(), 0)
     }
     
     pub fn with_slots(_cx: &mut Cx, shader: Shader, slots: usize) -> Self {
@@ -100,35 +119,36 @@ impl DrawQuad {
     pub fn with_rect_pos(mut self, rect_pos: Vec2) -> Self {self.rect_pos = rect_pos;self}
     pub fn with_rect_size(mut self, rect_size: Vec2) -> Self {self.rect_size = rect_size;self}
     //    Self {rect_size, ..self}}
-    
+    /*
     pub fn set_draw_depth(&mut self, cx:&mut Cx, v: f32) {
         self.draw_depth = v;
-        write_draw_input!(cx, self.area(), self::DrawQuad::draw_depth, v);
+        write_draw_input!(cx, self.area(), draw_depth, v);
     }
 
     pub fn set_rect_pos(&mut self, cx:&mut Cx, v: Vec2) {
         self.rect_pos = v;
-        write_draw_input!(cx, self.area(), self::DrawQuad::rect_pos, v);
+        write_draw_input!(cx, self.area(), rect_pos, v);
     }
 
     pub fn set_rect_size(&mut self, cx:&mut Cx, v: Vec2) {
         self.rect_size = v;
-        write_draw_input!(cx, self.area(), self::DrawQuad::rect_size, v);
+        write_draw_input!(cx, self.area(), rect_size, v);
     }
     
     pub fn register_draw_input(cx: &mut Cx) {
-        cx.live_styles.register_draw_input(live_item_id!(self::DrawQuad), Self::live_draw_input())
+        cx.shader_registry.register_draw_input(live_id!(self::DrawQuad), Self::live_draw_input())
     }
     
-    pub fn live_draw_input() -> LiveDrawInput {
-        let mut def = LiveDrawInput::default();
+    pub fn live_draw_input() -> DrawShaderInput {
+        let mut def = DrawShaderInput::default();
         let mp = module_path!();
-        def.add_instance(mp, "DrawQuad", "rect_pos", Vec2::ty_expr());
-        def.add_instance(mp, "DrawQuad", "rect_size", Vec2::ty_expr());
-        def.add_instance(mp, "DrawQuad", "draw_depth", f32::ty_expr());
+        def.add_instance(mp, "DrawQuad", "rect_pos", Vec2::to_ty());
+        def.add_instance(mp, "DrawQuad", "rect_size", Vec2::to_ty());
+        def.add_instance(mp, "DrawQuad", "draw_depth", f32::to_ty());
+        def.end_level();
         return def
-    }
-
+    }*/
+/*
     pub fn last_animate(&mut self, animator:&Animator){
         if let Some(v) = Vec2::last_animate(animator, live_item_id!(self::DrawQuad::rect_pos)){
             self.rect_pos = v;
@@ -145,7 +165,7 @@ impl DrawQuad {
         if let Some(v) = Vec2::animate(cx, animator, time, live_item_id!(self::DrawQuad::rect_size)){
             self.set_rect_size(cx, v);
         }
-    }
+    }*/
     
     pub fn new_draw_call(&mut self, cx:&mut Cx){
         cx.new_draw_call(self.shader);

@@ -1,5 +1,5 @@
 #![allow(unused_variables)]
-use makepad_live_derive::*;
+use makepad_live_macros::*;
 use crate::id::{Id, IdPack, IdUnpack, IdFmt};
 use std::fmt;
 use crate::span::Span;
@@ -8,7 +8,7 @@ use crate::token::{TokenWithSpan, TokenId};
 use crate::liveerror::LiveError;
 use crate::liveerror::LiveErrorOrigin;
 use crate::livenode::{LiveNode, LiveValue};
-use crate::liveregistry::CrateModule;
+use crate::id::CrateModule;
 use crate::id::LocalNodePtr;
 use crate::id::FullNodePtr;
 use crate::id::FileId;

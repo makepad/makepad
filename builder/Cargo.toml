@@ -1,7 +1,0 @@
-[package]
-name = "builder"
-version = "0.1.0"
-edition = "2018"
-
-[dependencies.makepad-hub]
-path="../makepad/hub"
