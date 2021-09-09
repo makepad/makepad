@@ -289,8 +289,8 @@ impl Cx {
     }
     
     pub fn post_signal(signal: Signal, status: StatusId) {
-        if signal.signal_id != 0 {
-            CocoaApp::post_signal(signal.signal_id, status);
+        if signal.0 != 0 {
+            CocoaApp::post_signal(signal.0, status);
         }
     }
     

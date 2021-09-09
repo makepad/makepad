@@ -1,18 +1,9 @@
 [workspace]
 
 members = [
-    "makepad",
-    "makepad/wasm", 
     "examples/bare_example", 
-    "examples/bare_example/wasm",
-    "examples/widget_example",
-    "examples/widget_example/wasm",
-    "examples/editor_example",
-    "examples/editor_example/wasm",
     "examples/cmdline_example",
     "tools/webserver",
-    "tools/brotli_test",
-    "builder"
 ]
 
 [profile.release]

@@ -14,7 +14,7 @@ pub mod liveregistry;
 pub mod deserialize;
 pub mod id;
 
-pub use makepad_live_derive::*;
+pub use makepad_live_macros::*;
 pub use crate::math::*;
 pub use crate::id::Id;
 pub use crate::id::IdPack;
@@ -24,7 +24,7 @@ pub use crate::id::IdFmt;
 pub use crate::id::LocalNodePtr;
 pub use crate::id::FileId;
 pub use crate::liveregistry::LiveRegistry;
-pub use crate::liveregistry::CrateModule;
+pub use crate::id::CrateModule;
 pub use crate::deserialize::DeLive;
 pub use crate::deserialize::DeLiveErr;
 pub use crate::livenode::LiveValue;

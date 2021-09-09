@@ -2,6 +2,19 @@ use crate::cx::*;
 use makepad_shader_compiler::Ty;
 use std::collections::HashMap;
 
+#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug, PartialOrd, Ord)]
+pub struct LiveItemId(pub u64);
+
+impl LiveItemId {
+    fn as_index(&self) -> u64 {self.0}
+}
+
+#[derive(Copy, Clone, Default, PartialEq, Debug)]
+pub struct Shader {
+    pub shader_id: usize,
+    pub location_hash: u64
+}
+
 pub enum ShaderCompileResult{
     Nop,
     Ok
@@ -11,7 +24,7 @@ pub enum ShaderCompileResult{
 pub struct PropDef {
     pub name: String,
     pub ty: Ty,
-    pub live_item_id: LiveItemId,
+    pub id: Id,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -42,7 +55,7 @@ impl RectInstanceProps {
 #[derive(Debug, Clone)]
 pub struct InstanceProp {
     pub name: String,
-    pub live_item_id: LiveItemId,
+    pub id: Id,
     pub ty: Ty,
     pub offset: usize,
     pub slots: usize
@@ -50,7 +63,7 @@ pub struct InstanceProp {
 
 #[derive(Debug, Default, Clone)]
 pub struct InstanceProps {
-    pub prop_map: HashMap<LiveItemId, usize>,
+    pub prop_map: HashMap<Id, usize>,
     pub props: Vec<InstanceProp>,
     pub total_slots: usize,
 }
@@ -58,7 +71,7 @@ pub struct InstanceProps {
 #[derive(Debug, Clone)]
 pub struct UniformProp {
     pub name: String,
-    pub live_item_id: LiveItemId,
+    pub id: Id,
     pub ty: Ty,
     pub offset: usize,
     pub slots: usize
@@ -66,7 +79,7 @@ pub struct UniformProp {
 
 #[derive(Debug, Default, Clone)]
 pub struct UniformProps {
-    pub prop_map: HashMap<LiveItemId, usize>,
+    pub prop_map: HashMap<Id, usize>,
     pub props: Vec<UniformProp>,
     pub total_slots: usize,
 }
@@ -114,9 +127,9 @@ impl InstanceProps {
         let mut prop_map = HashMap::new();
         for prop in in_props {
             let slots = prop.ty.size();
-            prop_map.insert(prop.live_item_id, out_props.len());
+            prop_map.insert(prop.id, out_props.len());
             out_props.push(InstanceProp {
-                live_item_id: prop.live_item_id,
+                id: prop.id,
                 ty: prop.ty.clone(),
                 name: prop.name.clone(),
                 offset: offset,
@@ -147,9 +160,9 @@ impl UniformProps {
                 offset += 4 - (offset & 3); // make jump to new slot
             }
             
-            prop_map.insert(prop.live_item_id, out_props.len());
+            prop_map.insert(prop.id, out_props.len());
             out_props.push(UniformProp {
-                live_item_id: prop.live_item_id,
+                id: prop.id,
                 ty: prop.ty.clone(),
                 name: prop.name.clone(),
                 offset: offset,
