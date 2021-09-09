@@ -94,16 +94,16 @@ impl TabBar {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        dispatch_action: &mut dyn FnMut(Action),
+        dispatch_action: &mut dyn FnMut(&mut Cx, Action),
     ) {
         if self.view.handle_scroll_view(cx, event) {
             self.view.redraw_view(cx);
         }
         for tab_id in &self.tab_ids {
             let tab = &mut self.tabs[*tab_id];
-            tab.handle_event(cx, event, &mut |action| match action {
+            tab.handle_event(cx, event, &mut |cx, action| match action {
                 tab::Action::WasPressed => {
-                    dispatch_action(Action::TabWasPressed(*tab_id));
+                    dispatch_action(cx, Action::TabWasPressed(*tab_id));
                 }
             });
         }

@@ -114,7 +114,7 @@ impl Splitter {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        dispatch_action: &mut dyn FnMut(Action),
+        dispatch_action: &mut dyn FnMut(&mut Cx, Action),
     ) {
         match event.hits(
             cx,
@@ -165,7 +165,7 @@ impl Splitter {
                         }
                     };
                     cx.redraw_child_area(self.split_bar.area());
-                    dispatch_action(Action::Redraw);
+                    dispatch_action(cx, Action::Redraw);
                 }
             }
             _ => {}
