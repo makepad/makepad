@@ -1,5 +1,8 @@
 use {
-    crate::{generational::{Id, Arena}, tab::{self, Tab}},
+    crate::{
+        generational::{Arena, Id},
+        tab::{self, Tab},
+    },
     makepad_render::*,
     makepad_widget::*,
 };
@@ -41,7 +44,7 @@ impl TabBar {
     }
 
     fn apply_style(&mut self, cx: &mut Cx) {
-        self.tab_height = live_float!(cx, crate::tab::tab_height);
+        self.tab_height = live_float!(cx, crate::tab::height);
     }
 
     fn layout(&self) -> Layout {
@@ -105,6 +108,9 @@ impl TabBar {
                 tab::Action::WasPressed => {
                     dispatch_action(cx, Action::TabWasPressed(*tab_id));
                 }
+                tab::Action::CloseButtonWasPressed => {
+                    dispatch_action(cx, Action::TabCloseButtonWasPressed(*tab_id));
+                }
             });
         }
     }
@@ -114,6 +120,7 @@ pub type TabId = Id;
 
 pub enum Action {
     TabWasPressed(TabId),
+    TabCloseButtonWasPressed(TabId),
 }
 
 #[derive(Clone, DrawQuad)]

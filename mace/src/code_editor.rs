@@ -105,20 +105,22 @@ impl CodeEditor {
     pub fn draw(&mut self, cx: &mut Cx, state: &State, view_id: ViewId) {
         let view = &mut self.views[view_id];
         if view.view.begin_view(cx, Layout::default()).is_ok() {
-            let session = &state.sessions[view.session_id];
-            let document = &state.documents[session.document_id];
-            self.apply_style(cx);
-            let visible_lines = self.visible_lines(cx, view_id, document.text.as_lines().len());
-            self.draw_selections(cx, &session.selections, &document.text, visible_lines);
-            self.draw_indent_guides(cx, document.line_info_cache.line_infos(), visible_lines);
-            self.draw_text(
-                cx,
-                &document.text,
-                document.line_info_cache.line_infos(),
-                visible_lines,
-            );
-            self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
-            self.set_turtle_bounds(cx, &document.text);
+            if let Some(session_id) = view.session_id {
+                let session = &state.sessions[session_id];
+                let document = &state.documents[session.document_id];
+                self.apply_style(cx);
+                let visible_lines = self.visible_lines(cx, view_id, document.text.as_lines().len());
+                self.draw_selections(cx, &session.selections, &document.text, visible_lines);
+                self.draw_indent_guides(cx, document.line_info_cache.line_infos(), visible_lines);
+                self.draw_text(
+                    cx,
+                    &document.text,
+                    document.line_info_cache.line_infos(),
+                    visible_lines,
+                );
+                self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
+                self.set_turtle_bounds(cx, &document.text);
+            }
             let view = &mut self.views[view_id];
             view.view.end_view(cx);
         }
@@ -399,7 +401,7 @@ impl CodeEditor {
         }
     }
 
-    pub fn create_view(&mut self, cx: &mut Cx, state: &mut State, session_id: SessionId) -> ViewId {
+    pub fn create_view(&mut self, cx: &mut Cx, state: &mut State, session_id: Option<SessionId>) -> ViewId {
         let view_id = self.view_id_allocator.allocate();
         self.views.insert(
             view_id,
@@ -408,12 +410,14 @@ impl CodeEditor {
                 session_id,
             },
         );
-        let session = &mut state.sessions[session_id];
-        session.view_id = Some(view_id);
+        if let Some(session_id) = session_id {
+            let session = &mut state.sessions[session_id];
+            session.view_id = Some(view_id);
+        }
         view_id
     }
 
-    pub fn view_session_id(&self, view_id: ViewId) -> SessionId {
+    pub fn view_session_id(&self, view_id: ViewId) -> Option<SessionId> {
         let view = &self.views[view_id];
         view.session_id
     }
@@ -423,15 +427,19 @@ impl CodeEditor {
         cx: &mut Cx,
         state: &mut State,
         view_id: ViewId,
-        session_id: SessionId,
+        session_id: Option<SessionId>,
     ) {
         let view = &mut self.views[view_id];
-        let session = &mut state.sessions[view.session_id];
-        session.view_id = None;
+        if let Some(session_id) = view.session_id {
+            let session = &mut state.sessions[session_id];
+            session.view_id = None;
+        }
         view.session_id = session_id;
-        let session = &mut state.sessions[view.session_id];
-        session.view_id = Some(view_id);
-        view.view.redraw_view(cx);
+        if let Some(session_id) = view.session_id {
+            let session = &mut state.sessions[session_id];
+            session.view_id = Some(view_id);
+            view.view.redraw_view(cx);
+        }
     }
 
     pub fn redraw_view(&mut self, cx: &mut Cx, view_id: ViewId) {
@@ -469,30 +477,32 @@ impl CodeEditor {
                 cx.set_key_focus(view.view.area());
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
                 let view = &self.views[view_id];
-                let session = &state.sessions[view.session_id];
-                let document = &state.documents[session.document_id];
-                let position = self.position(&document.text, rel);
-                let view = &self.views[view_id];
-                match modifiers {
-                    KeyModifiers { control: true, .. } => {
-                        state.add_cursor(view.session_id, position);
+                if let Some(session_id) = view.session_id {
+                    let session = &state.sessions[session_id];
+                    let document = &state.documents[session.document_id];
+                    let position = self.position(&document.text, rel);
+                    match modifiers {
+                        KeyModifiers { control: true, .. } => {
+                            state.add_cursor(session_id, position);
+                        }
+                        KeyModifiers { shift, .. } => {
+                            state.move_cursors_to(session_id, position, shift);
+                        }
                     }
-                    KeyModifiers { shift, .. } => {
-                        state.move_cursors_to(view.session_id, position, shift);
-                    }
+                    let view = &mut self.views[view_id];
+                    view.view.redraw_view(cx);
                 }
-                let view = &mut self.views[view_id];
-                view.view.redraw_view(cx);
             }
             Event::FingerMove(FingerMoveEvent { rel, .. }) => {
                 let view = &self.views[view_id];
-                let session = &state.sessions[view.session_id];
-                let document = &state.documents[session.document_id];
-                let position = self.position(&document.text, rel);
-                let view = &self.views[view_id];
-                state.move_cursors_to(view.session_id, position, true);
-                let view = &mut self.views[view_id];
-                view.view.redraw_view(cx);
+                if let Some(session_id) = view.session_id {
+                    let session = &state.sessions[session_id];
+                    let document = &state.documents[session.document_id];
+                    let position = self.position(&document.text, rel);
+                    state.move_cursors_to(session_id, position, true);
+                    let view = &mut self.views[view_id];
+                    view.view.redraw_view(cx);
+                }
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
@@ -500,9 +510,11 @@ impl CodeEditor {
                 ..
             }) => {
                 let view = &self.views[view_id];
-                state.move_cursors_left(view.session_id, shift);
-                let view = &mut self.views[view_id];
-                view.view.redraw_view(cx);
+                if let Some(session_id) = view.session_id {
+                    state.move_cursors_left(session_id, shift);
+                    let view = &mut self.views[view_id];
+                    view.view.redraw_view(cx);
+                }
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowRight,
@@ -510,9 +522,11 @@ impl CodeEditor {
                 ..
             }) => {
                 let view = &self.views[view_id];
-                state.move_cursors_right(view.session_id, shift);
-                let view = &mut self.views[view_id];
-                view.view.redraw_view(cx);
+                if let Some(session_id) = view.session_id {
+                    state.move_cursors_right(session_id, shift);
+                    let view = &mut self.views[view_id];
+                    view.view.redraw_view(cx);
+                }
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowUp,
@@ -520,9 +534,11 @@ impl CodeEditor {
                 ..
             }) => {
                 let view = &self.views[view_id];
-                state.move_cursors_up(view.session_id, shift);
-                let view = &mut self.views[view_id];
-                view.view.redraw_view(cx);
+                if let Some(session_id) = view.session_id {
+                    state.move_cursors_up(session_id, shift);
+                    let view = &mut self.views[view_id];
+                    view.view.redraw_view(cx);
+                }
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowDown,
@@ -530,19 +546,22 @@ impl CodeEditor {
                 ..
             }) => {
                 let view = &self.views[view_id];
-                state.move_cursors_down(view.session_id, shift);
-                let view = &mut self.views[view_id];
-                view.view.redraw_view(cx);
+                if let Some(session_id) = view.session_id {
+                    state.move_cursors_down(session_id, shift);
+                    let view = &mut self.views[view_id];
+                    view.view.redraw_view(cx);
+                }
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
                 ..
             }) => {
                 let view = &self.views[view_id];
-                state.insert_backspace(view.session_id, send_request);
-                let view = &self.views[view_id];
-                let session = &state.sessions[view.session_id];
-                self.redraw_document_views(cx, state, session.document_id);
+                if let Some(session_id) = view.session_id {
+                    state.insert_backspace(session_id, send_request);
+                    let session = &state.sessions[session_id];
+                    self.redraw_document_views(cx, state, session.document_id);
+                }
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
@@ -550,43 +569,46 @@ impl CodeEditor {
                 ..
             }) if modifiers.control || modifiers.logo => {
                 let view = &self.views[view_id];
-                if modifiers.shift {
-                    state.redo(view.session_id, send_request);
-                } else {
-                    state.undo(view.session_id, send_request);
+                if let Some(session_id) = view.session_id {
+                    if modifiers.shift {
+                        state.redo(session_id, send_request);
+                    } else {
+                        state.undo(session_id, send_request);
+                    }
+                    let session = &state.sessions[session_id];
+                    self.redraw_document_views(cx, state, session.document_id);
                 }
-                let view = &self.views[view_id];
-                let session = &state.sessions[view.session_id];
-                self.redraw_document_views(cx, state, session.document_id);
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::Return,
                 ..
             }) => {
                 let view = &self.views[view_id];
-                state.insert_text(
-                    view.session_id,
-                    Text::from(vec![vec![], vec![]]),
-                    send_request,
-                );
-                let view = &self.views[view_id];
-                let session = &state.sessions[view.session_id];
-                self.redraw_document_views(cx, state, session.document_id);
+                if let Some(session_id) = view.session_id {
+                    state.insert_text(
+                        session_id,
+                        Text::from(vec![vec![], vec![]]),
+                        send_request,
+                    );
+                    let session = &state.sessions[session_id];
+                    self.redraw_document_views(cx, state, session.document_id);
+                }
             }
             Event::TextInput(TextInputEvent { input, .. }) => {
                 let view = &self.views[view_id];
-                state.insert_text(
-                    view.session_id,
-                    input
-                        .lines()
-                        .map(|line| line.chars().collect::<Vec<_>>())
-                        .collect::<Vec<_>>()
-                        .into(),
-                    send_request,
-                );
-                let view = &self.views[view_id];
-                let session = &state.sessions[view.session_id];
-                self.redraw_document_views(cx, state, session.document_id);
+                if let Some(session_id) = view.session_id {
+                    state.insert_text(
+                        session_id,
+                        input
+                            .lines()
+                            .map(|line| line.chars().collect::<Vec<_>>())
+                            .collect::<Vec<_>>()
+                            .into(),
+                        send_request,
+                    );
+                    let session = &state.sessions[session_id];
+                    self.redraw_document_views(cx, state, session.document_id);
+                }
             }
             _ => {}
         }
@@ -674,7 +696,7 @@ pub type ViewId = Id;
 
 struct View {
     view: ScrollView,
-    session_id: SessionId,
+    session_id: Option<SessionId>,
 }
 
 #[derive(Clone, DrawQuad)]
