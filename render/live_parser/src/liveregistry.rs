@@ -1,6 +1,6 @@
 use crate::id::{Id, IdPack, IdUnpack, IdFmt};
 use crate::liveerror::{LiveError, LiveFileError, LiveErrorOrigin};
-use makepad_live_derive::*;
+use makepad_live_macros::*;
 use crate::livedocument::LiveDocument;
 use crate::livedocument::LiveScopeTarget;
 use crate::livedocument::LiveScopeItem;
@@ -13,10 +13,11 @@ use crate::id::FullNodePtr;
 use crate::token::TokenId;
 use crate::token::Token;
 use crate::span::Span;
+use crate::id::CrateModule;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use crate::lex::lex;
-use std::fmt;
+//use std::fmt;
 
 #[derive(Debug)]
 pub struct LiveFile {
@@ -26,14 +27,6 @@ pub struct LiveFile {
     pub document: LiveDocument,
 }
 
-#[derive(Clone, Eq, Hash, Debug, Copy, PartialEq)]
-pub struct CrateModule(pub Id, pub Id);
-
-impl fmt::Display for CrateModule {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}::{}", self.0, self.1)
-    }
-}
 
 #[derive(Default, Debug)]
 pub struct LiveRegistry {
@@ -47,6 +40,38 @@ pub struct LiveRegistry {
 
 
 impl LiveRegistry {
+/*
+    pub fn parse_id_path_from_multi_id(crate_id: Id, module_id: Id, span: Span, target: IdPack, multi_ids: &[Id]) -> Result<IdPath, LiveError> {
+        match target.unpack() {
+            IdUnpack::Multi {index, count} => {
+                if count == 2 {
+                    let part1 = multi_ids[index + 0];
+                    let part2 = multi_ids[index + 1];
+                    if part1 != id!(self) {
+                        return Err(LiveError {
+                            origin: live_error_origin!(),
+                            span: span,
+                            message: format!("Unsupported target naming {}", IdFmt::col(multi_ids, target))
+                        });
+                    }
+                    // ok so we have to find crate_id, module_id, part2
+                    return Ok(ShaderResourceId(CrateModule(crate_id, module_id), part2))
+                }
+                if count == 3 {
+                    let part1 = multi_ids[index + 0];
+                    let part2 = multi_ids[index + 1];
+                    let part3 = multi_ids[index + 1];
+                    return Ok(ShaderResourceId(CrateModule(if part1 == id!(crate) {crate_id}else {part1}, part2), part3));
+                }
+            }
+            _ => ()
+        }
+        return Err(LiveError {
+            origin: live_error_origin!(),
+            span: span,
+            message: format!("Unsupported target naming {}", IdFmt::col(multi_ids, target))
+        });
+    }*/
 
      pub fn resolve_ptr(&self, full_ptr:FullNodePtr)->(&LiveDocument,&LiveNode){
         let doc = &self.expanded[full_ptr.file_id.to_index()];

@@ -225,7 +225,7 @@ fn expand() {
     //        assert_eq!(true, false);
     
     // deserializer test
-    
+    /*
     #[derive(Debug, PartialEq, Eq, DeLive)]
     struct MyComponent {
         x: u32,
@@ -306,5 +306,5 @@ fn expand() {
             assert_eq!(true, false);
             println!("No Value");
         }
-    }
+    }*/
 }

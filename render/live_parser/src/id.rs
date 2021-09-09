@@ -16,6 +16,96 @@ impl FileId{
 #[derive(Clone, Eq, Hash, Copy, PartialEq)]
 pub struct IdPack(pub u64);
 
+const IDPATH_MAX:usize = 8;
+pub struct IdPath([Id;IDPATH_MAX], usize);
+
+impl IdPath{
+    const fn new(inp:&[Id])->Self{
+        let mut id_set = [Id(0);IDPATH_MAX];
+        let mut i = 0;
+        while i < inp.len(){
+            id_set[i] = inp[i];
+            i += 1;
+        }
+        IdPath(id_set, inp.len())
+    }
+    fn slice(&self)->&[Id]{
+        &self.0[0..self.1]
+    }
+}
+
+#[derive(Clone, Eq, Hash, Debug, Copy, PartialEq)]
+pub struct CrateModule(pub Id, pub Id);
+/*
+impl IdPath{
+    const fn from_module_path_self(module_path: &str, path:&[Id;4])->Self{
+        // ok lets split off the first 2 things from module_path
+        let bytes = module_path.as_bytes();
+        let len = bytes.len();
+        // we have to find the first :
+        let mut crate_id = Id(0);
+        let mut i = 0;
+        while i < len {
+            if bytes[i] == ':' as u8{
+                crate_id = Id::from_bytes(bytes, 0, i);
+                i+=2;
+                break
+            }
+            i+=1;
+        }
+        if i == len{ // module_path is only one thing
+            return IdPath{
+                crate_module:CrateModule(Id::from_str("main"), Id::from_bytes(bytes, 0, len)),
+                path
+            }
+        }
+        let module_start = i;
+        while i < len {
+            if bytes[i] == ':' as u8{
+                break
+            }
+            i+=1;
+        }
+        return IdPath{
+            crate_module:CrateModule(crate_id, Id::from_bytes(bytes, module_start, i)),
+            path
+        }
+    }
+    
+    const fn from_module_path_crate(module_path: &str, module:Id, path:&[Id;4])->Self{
+        // ok lets split off the first 2 things from module_path
+        let bytes = module_path.as_bytes();
+        let len = bytes.len();
+        // we have to find the first :
+        let mut crate_id = Id(0);
+        let mut i = 0;
+        while i < len {
+            if bytes[i] == ':' as u8{
+                crate_id = Id::from_bytes(bytes, 0, i);
+                i+=2;
+                break
+            }
+            i+=1;
+        }
+        if i == len{ // module_path is only one thing
+            return IdPath{
+                crate_module:CrateModule(Id::from_str("main"), module)
+                path
+            }
+        }
+        return return IdPath{
+            crate_module:CrateModule(crate_id, module),
+            path
+        }
+    }
+}*/
+
+impl fmt::Display for CrateModule {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}::{}", self.0, self.1)
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialOrd, Copy, PartialEq)]
 pub struct LocalNodePtr {
     pub level: usize,
@@ -59,13 +149,17 @@ impl Id{
     
     // from https://nullprogram.com/blog/2018/07/31/
     // i have no idea what im doing with start value and finalisation.
-    pub const fn from_str(idstr: &str) -> Self {
-        let id = idstr.as_bytes();
-        let id_len = id.len();
-        let mut x = 0xd6e8_feb8_6659_fd9u64;
-        let mut i = 0;
-        while i < id_len {
-            x = x.overflowing_add(id[i] as u64).0;
+    pub const fn from_str(id_str: &str) -> Self {
+        let bytes = id_str.as_bytes();
+        Self::from_bytes(bytes, 0, bytes.len())
+    }
+    
+    pub const fn from_bytes(id_bytes: &[u8], start:usize, end:usize) -> Self {
+        //let id_len = id_bytes.len();
+        let mut x = 0xd6e8_feb8_6659_fd93u64;
+        let mut i = start;
+        while i < end {
+            x = x.overflowing_add(id_bytes[i] as u64).0;
             x ^= x >> 32;
             x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
             x ^= x >> 32;
@@ -75,7 +169,6 @@ impl Id{
         }
         return Self(x & 0x7fff_ffff_ffff_ffff) // leave the first bit
     }
-    
         
     pub fn panic_collision(self, val: &str) -> Id {
         if let Some(s) = self.check_collision(val) {

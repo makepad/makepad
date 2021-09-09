@@ -144,7 +144,7 @@ impl Area{
             },
             _=>(),
         }
-    }
+    } 
     
     // returns the final screen rect
     pub fn get_rect(&self, cx:&Cx)->Rect{
@@ -255,8 +255,8 @@ impl Area{
             _=>()
          }
     }
-    /*
-    pub fn get_read_ref<'a>(&self, cx:&'a Cx, live_item_id:LiveItemId, ty:Ty)->Option<DrawReadRef<'a>>{
+    
+    pub fn get_read_ref<'a>(&self, cx:&'a Cx, id:Id, ty:Ty)->Option<DrawReadRef<'a>>{
         match self{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
@@ -266,7 +266,7 @@ impl Area{
                     return None;
                 }
                 let sh = &cx.shaders[draw_call.shader.shader_id];
-                if let Some(prop_id) = sh.mapping.user_uniform_props.prop_map.get(&live_item_id){
+                if let Some(prop_id) = sh.mapping.user_uniform_props.prop_map.get(&id){
                     let prop = &sh.mapping.user_uniform_props.props[*prop_id];
                     if prop.ty != ty{
                         panic!("get_read_ref wrong uniform type, expected {:?} got: {:?}!",  prop.ty, ty);
@@ -279,7 +279,7 @@ impl Area{
                         }
                     )
                 }
-                if let Some(prop_id) = sh.mapping.instance_props.prop_map.get(&live_item_id){
+                if let Some(prop_id) = sh.mapping.instance_props.prop_map.get(&id){
                     let prop = &sh.mapping.instance_props.props[*prop_id];
                     if prop.ty != ty{
                         panic!("get_read_ref wrong instance type, expected {:?} got: {:?}!", prop.ty, ty);
@@ -302,7 +302,7 @@ impl Area{
         None
     } 
     
-    pub fn get_write_ref<'a>(&self, cx:&'a mut Cx, live_item_id:LiveItemId, ty:Ty, name:&str)->Option<DrawWriteRef<'a>>{
+    pub fn get_write_ref<'a>(&self, cx:&'a mut Cx, id:Id, ty:Ty, name:&str)->Option<DrawWriteRef<'a>>{
         match self{
             Area::Instance(inst)=>{
                 let cxview = &mut cx.views[inst.view_id];
@@ -311,7 +311,7 @@ impl Area{
                 }
                 let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
                 let sh = &cx.shaders[draw_call.shader.shader_id];
-                if let Some(prop_id) = sh.mapping.user_uniform_props.prop_map.get(&live_item_id){
+                if let Some(prop_id) = sh.mapping.user_uniform_props.prop_map.get(&id){
                     let prop = &sh.mapping.user_uniform_props.props[*prop_id];
                     if prop.ty != ty{
                         panic!("get_write_ref {} wrong uniform type, expected {:?} got: {:?}!", name, prop.ty, ty);
@@ -328,7 +328,7 @@ impl Area{
                         }                        
                     )
                 }
-                if let Some(prop_id) = sh.mapping.instance_props.prop_map.get(&live_item_id){
+                if let Some(prop_id) = sh.mapping.instance_props.prop_map.get(&id){
                     let prop = &sh.mapping.instance_props.props[*prop_id];
                     if prop.ty != ty{
                         panic!("get_write_ref {} wrong instance type, expected {:?} got: {:?}!", name, prop.ty, ty);
@@ -354,14 +354,14 @@ impl Area{
         None
     }
 
-    pub fn write_texture_2d_id(&self, cx:&mut Cx, live_item_id:LiveItemId, name:&str, texture_id: usize){
+    pub fn write_texture_2d_id(&self, cx:&mut Cx, id:Id, name:&str, texture_id: usize){
          match self{
             Area::Instance(inst)=>{
                 let cxview = &mut cx.views[inst.view_id];
                 let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
                 let sh = &cx.shaders[draw_call.shader.shader_id];
                 for (index, prop) in sh.mapping.textures.iter().enumerate(){
-                    if prop.live_item_id == live_item_id{
+                    if prop.id == id{
                         draw_call.textures_2d[index] = texture_id as u32;
                         return
                     }
@@ -370,7 +370,7 @@ impl Area{
             _=>(),
         }
         panic!("Cannot find texture2D prop {}", name)
-    }*/
+    }
 }
 
 impl Into<Area> for InstanceArea{

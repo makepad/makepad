@@ -9,36 +9,36 @@ pub use makepad_objc_sys::{msg_send, sel,  class, sel_impl};
 pub use makepad_objc_sys::{Encode, Encoding};
 //use bitflags::bitflags;
 
-pub type id = *mut makepad_objc_sys::runtime::Object;
-pub const nil: id = 0 as id;
+pub type objc_id = *mut makepad_objc_sys::runtime::Object;
+pub const nil: objc_id = 0 as objc_id;
 
 
 #[link(name = "Foundation", kind = "framework")]
 extern {
-    pub static NSRunLoopCommonModes: id;
-    pub static NSDefaultRunLoopMode: id;
+    pub static NSRunLoopCommonModes: objc_id;
+    pub static NSDefaultRunLoopMode: objc_id;
 }
 
 #[link(name = "AppKit", kind = "framework")]
 extern {
-    pub static NSStringPboardType: id;
+    pub static NSStringPboardType: objc_id;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     pub fn CGMainDisplayID() -> u32;
     pub fn CGDisplayPixelsHigh(display: u32) -> u64;
-    pub fn CGColorCreateGenericRGB(red: f64, green: f64, blue: f64, alpha: f64) -> id;
+    pub fn CGColorCreateGenericRGB(red: f64, green: f64, blue: f64, alpha: f64) -> objc_id;
 }
 
 #[link(name = "Metal", kind = "framework")]
 extern "C" {
-    fn MTLCreateSystemDefaultDevice() -> id;
+    fn MTLCreateSystemDefaultDevice() -> objc_id;
     #[cfg(not(target_os = "ios"))]
-    fn MTLCopyAllDevices() -> id; //TODO: Array
+    fn MTLCopyAllDevices() -> objc_id; //TODO: Array
 }
 
-pub fn get_default_metal_device() -> Option<id> {
+pub fn get_default_metal_device() -> Option<objc_id> {
     unsafe {
         let dev = MTLCreateSystemDefaultDevice();
         if dev == nil{None} else {Some(dev)}
@@ -49,7 +49,7 @@ pub fn get_default_metal_device() -> Option<id> {
 extern {
 }
 
-pub fn get_all_metal_devices() -> Vec<id> {
+pub fn get_all_metal_devices() -> Vec<objc_id> {
     #[cfg(target_os = "ios")]
     {
         MTLCreateSystemDefaultDevice().into_iter().collect()
@@ -71,7 +71,7 @@ pub fn get_all_metal_devices() -> Vec<id> {
 }
 
 
-pub fn nsstring_to_string(string: id) -> String {
+pub fn nsstring_to_string(string: objc_id) -> String {
     unsafe {
         let utf8_string: *const std::os::raw::c_uchar = msg_send![string, UTF8String];
         let utf8_len: usize = msg_send![string, lengthOfBytesUsingEncoding: UTF8_ENCODING];
@@ -83,36 +83,36 @@ pub fn nsstring_to_string(string: id) -> String {
     }
 }
 
-pub fn str_to_nsstring(val: &str) -> id {
+pub fn str_to_nsstring(val: &str) -> objc_id {
     unsafe {
-        let ns_string: id = msg_send![class!(NSString), alloc];
-        let ns_string: id = msg_send![
+        let ns_string: objc_id = msg_send![class!(NSString), alloc];
+        let ns_string: objc_id = msg_send![
             ns_string,
             initWithBytes: val.as_ptr()
             length: val.len()
-            encoding: UTF8_ENCODING as id
+            encoding: UTF8_ENCODING as objc_id
         ];
         ns_string
     }
 }
 
-pub fn load_native_cursor(cursor_name: &str) -> id {
+pub fn load_native_cursor(cursor_name: &str) -> objc_id {
     let sel = Sel::register(cursor_name);
-    let id: id = unsafe {msg_send![class!(NSCursor), performSelector: sel]};
+    let id: objc_id = unsafe {msg_send![class!(NSCursor), performSelector: sel]};
     id
 }
 
-pub fn load_undocumented_cursor(cursor_name: &str) -> id {
+pub fn load_undocumented_cursor(cursor_name: &str) -> objc_id {
     unsafe {
         let class = class!(NSCursor);
         let sel = Sel::register(cursor_name);
-        let sel: id = msg_send![class, respondsToSelector: sel];
-        let id: id = msg_send![class, performSelector: sel];
+        let sel: objc_id = msg_send![class, respondsToSelector: sel];
+        let id: objc_id = msg_send![class, performSelector: sel];
         id
     }
 }
 
-pub fn load_webkit_cursor(cursor_name_str: &str) -> id {
+pub fn load_webkit_cursor(cursor_name_str: &str) -> objc_id {
     unsafe {
         static CURSOR_ROOT: &'static str = "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/Resources/cursors";
         let cursor_root = str_to_nsstring(CURSOR_ROOT);
@@ -122,23 +122,23 @@ pub fn load_webkit_cursor(cursor_name_str: &str) -> id {
         let key_x = str_to_nsstring("hotx");
         let key_y = str_to_nsstring("hoty");
         
-        let cursor_path: id = msg_send![cursor_root, stringByAppendingPathComponent: cursor_name];
-        let pdf_path: id = msg_send![cursor_path, stringByAppendingPathComponent: cursor_pdf];
-        let info_path: id = msg_send![cursor_path, stringByAppendingPathComponent: cursor_plist];
+        let cursor_path: objc_id = msg_send![cursor_root, stringByAppendingPathComponent: cursor_name];
+        let pdf_path: objc_id = msg_send![cursor_path, stringByAppendingPathComponent: cursor_pdf];
+        let info_path: objc_id = msg_send![cursor_path, stringByAppendingPathComponent: cursor_plist];
         
-        let ns_image: id = msg_send![class!(NSImage), alloc];
+        let ns_image: objc_id = msg_send![class!(NSImage), alloc];
         let () = msg_send![ns_image, initByReferencingFile: pdf_path];
-        let info: id = msg_send![class!(NSDictionary), dictionaryWithContentsOfFile: info_path];
+        let info: objc_id = msg_send![class!(NSDictionary), dictionaryWithContentsOfFile: info_path];
         //let image = NSImage::alloc(nil).initByReferencingFile_(pdf_path);
         // let info = NSDictionary::dictionaryWithContentsOfFile_(nil, info_path);
         
-        let x: id = msg_send![info, valueForKey: key_x]; //info.valueForKey_(key_x);
-        let y: id = msg_send![info, valueForKey: key_y]; //info.valueForKey_(key_y);
+        let x: objc_id = msg_send![info, valueForKey: key_x]; //info.valueForKey_(key_x);
+        let y: objc_id = msg_send![info, valueForKey: key_y]; //info.valueForKey_(key_y);
         let point = NSPoint {
             x: msg_send![x, doubleValue],
             y: msg_send![y, doubleValue],
         };
-        let cursor: id = msg_send![class!(NSCursor), alloc];
+        let cursor: objc_id = msg_send![class!(NSCursor), alloc];
         msg_send![cursor, initWithImage: ns_image hotSpot: point]
     }
 }
@@ -346,40 +346,40 @@ unsafe impl Encode for NSRange {
 }
 
 pub trait NSMutableAttributedString: Sized {
-    unsafe fn alloc(_: Self) -> id {
+    unsafe fn alloc(_: Self) -> objc_id {
         msg_send![class!(NSMutableAttributedString), alloc]
     }
     
-    unsafe fn init(self) -> id;
+    unsafe fn init(self) -> objc_id;
     // *mut NSMutableAttributedString
-    unsafe fn init_with_string(self, string: id) -> id;
-    unsafe fn init_with_attributed_string(self, string: id) -> id;
+    unsafe fn init_with_string(self, string: objc_id) -> objc_id;
+    unsafe fn init_with_attributed_string(self, string: objc_id) -> objc_id;
     
-    unsafe fn string(self) -> id;
+    unsafe fn string(self) -> objc_id;
     // *mut NSString
-    unsafe fn mutable_string(self) -> id;
+    unsafe fn mutable_string(self) -> objc_id;
     // *mut NSMutableString
     unsafe fn length(self) -> u64;
 }
 
-impl NSMutableAttributedString for id {
-    unsafe fn init(self) -> id {
+impl NSMutableAttributedString for objc_id {
+    unsafe fn init(self) -> objc_id {
         msg_send![self, init]
     }
     
-    unsafe fn init_with_string(self, string: id) -> id {
+    unsafe fn init_with_string(self, string: objc_id) -> objc_id {
         msg_send![self, initWithString: string]
     }
     
-    unsafe fn init_with_attributed_string(self, string: id) -> id {
+    unsafe fn init_with_attributed_string(self, string: objc_id) -> objc_id {
         msg_send![self, initWithAttributedString: string]
     }
     
-    unsafe fn string(self) -> id {
+    unsafe fn string(self) -> objc_id {
         msg_send![self, string]
     }
     
-    unsafe fn mutable_string(self) -> id {
+    unsafe fn mutable_string(self) -> objc_id {
         msg_send![self, mutableString]
     }
     

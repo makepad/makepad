@@ -1,4 +1,4 @@
-use makepad_live_derive::*;
+use makepad_live_macros::*;
 use crate::id::{IdMap, Id};
 use crate::liveerror::LiveError;
 use crate::liveerror::LiveErrorOrigin;

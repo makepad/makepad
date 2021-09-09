@@ -1,5 +1,10 @@
 use crate::cx::*;
 
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct Geometry {
+    pub geometry_id: usize,
+}
+
 pub trait GeometryCx {
     fn from_geometry_gen(cx:&mut Cx, gen:GeometryGen)->Geometry;
 }

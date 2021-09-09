@@ -2,10 +2,13 @@ use std::collections::{HashMap, HashSet, BTreeSet};
 use std::fmt::Write;
 use std::time::{Instant};
 
-pub use makepad_draw_derive::*;
-pub use crate::layouttypes::*;
+pub use makepad_render_derive::*;
 pub use makepad_live_parser::math::*;
 use makepad_shader_compiler::ShaderRegistry;
+pub use makepad_shader_compiler::DrawShaderInput;
+pub use makepad_live_parser::Id;
+pub use makepad_live_parser::id;
+pub use makepad_shader_compiler::Ty;
 
 /*
 pub use makepad_live_compiler::livetypes::*;
@@ -15,7 +18,6 @@ pub use makepad_live_compiler::math::*;
 pub use makepad_live_compiler::colors::*;
 pub use makepad_live_compiler::ty::{Ty, TyLit, TyExpr};
 */
-pub use makepad_live_body::*;
 
 //pub use crate::fonts::*;
 pub use crate::turtle::*;
@@ -25,7 +27,7 @@ pub use crate::view::*;
 pub use crate::pass::*;
 pub use crate::geometry::*;
 pub use crate::texture::*;
-//pub use crate::livemacros::*;
+pub use crate::livemacros::*;
 pub use crate::events::*;
 //pub use crate::animator::*;
 pub use crate::area::*;
@@ -71,26 +73,7 @@ pub use crate::cx_ipc_posix::*;
 #[cfg(all(feature = "ipc", target_os = "windows"))]
 pub use crate::cx_ipc_win32::*;
 
-#[derive(Clone)]
-pub enum PlatformType {
-    Unknown,
-    Windows,
-    OSX,
-    Linux {custom_window_chrome: bool},
-    Web {protocol: String, hostname: String, port: u16, pathname: String, search: String, hash: String}
-}
-
-impl PlatformType {
-    pub fn is_desktop(&self) -> bool {
-        match self {
-            PlatformType::Unknown => true,
-            PlatformType::Windows => true,
-            PlatformType::OSX => true,
-            PlatformType::Linux{..} => true,
-            PlatformType::Web {..} => false
-        }
-    }
-}
+pub use crate::log;
 
 pub struct Cx {
     pub running: bool,
@@ -170,8 +153,28 @@ pub struct Cx {
     pub event_handler: Option<*mut dyn FnMut(&mut Cx, &mut Event)>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Copy, Hash)]
-pub struct NextFrame(u64);
+
+#[derive(Clone)]
+pub enum PlatformType {
+    Unknown,
+    Windows,
+    OSX,
+    Linux {custom_window_chrome: bool},
+    Web {protocol: String, hostname: String, port: u16, pathname: String, search: String, hash: String}
+}
+
+impl PlatformType {
+    pub fn is_desktop(&self) -> bool {
+        match self {
+            PlatformType::Unknown => true,
+            PlatformType::Windows => true,
+            PlatformType::OSX => true,
+            PlatformType::Linux{..} => true,
+            PlatformType::Web {..} => false
+        }
+    }
+}
+
 
 #[derive(Clone, Copy, Default)]
 pub struct CxCommandSetting {
@@ -754,11 +757,11 @@ impl Cx {
     
     pub fn new_signal(&mut self) -> Signal {
         self.signal_id += 1;
-        return Signal {signal_id: self.signal_id}
+        return Signal(self.signal_id);
     }
     
     pub fn send_signal(&mut self, signal: Signal, status: StatusId) {
-        if signal.signal_id == 0 {
+        if signal.0 == 0 {
             return
         }
         if let Some(statusses) = self.signals.get_mut(&signal) {
@@ -832,6 +835,17 @@ impl Cx {
     
     pub fn status_http_send_ok() -> StatusId {uid!()}
     pub fn status_http_send_fail() -> StatusId {uid!()}
+
+
+    pub fn profile_start(&mut self, id:u64){
+        self.profiles.insert(id, Instant::now());
+    }
+    
+    pub fn profile_end(&self, id:u64){
+        if let Some(inst) = self.profiles.get(&id){
+            log!("Profile {} time {}", id, inst.elapsed().as_millis());
+        }
+    }
     
     pub fn debug_draw_tree_recur(&mut self, dump_instances: bool, s: &mut String, view_id: usize, depth: usize) {
         if view_id >= self.views.len() {
