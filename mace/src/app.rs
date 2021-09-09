@@ -147,13 +147,13 @@ impl AppInner {
                     }
                     self.dock.end_tab_bar(cx);
                 }
-                if let Some(item_id) = self
+                if let Some(tab_id) = self
                     .dock
                     .get_or_create_tab_bar(cx, panel_id)
                     .selected_tab_id()
                 {
                     cx.turtle_new_line();
-                    self.draw_tab(cx, state, item_id);
+                    self.draw_tab(cx, state, tab_id);
                 }
             }
         }
@@ -264,12 +264,15 @@ impl AppInner {
                         _ => {}
                     }
                 }
+                dock::Action::TabCloseButtonWasPressed(_tab_id) => {
+                    // TODO: Actually close the tab
+                }
             }
         }
 
         let mut actions = Vec::new();
         self.file_tree
-            .handle_event(cx, event, &mut |cx, action| actions.push(action));
+            .handle_event(cx, event, &mut |_cx, action| actions.push(action));
         for action in actions {
             match action {
                 file_tree::Action::FileNodeWasPressed(file_node_id) => {
@@ -413,14 +416,14 @@ impl AppInner {
                         cx,
                         &mut state.code_editor_state,
                         *view_id,
-                        session_id,
+                        Some(session_id),
                     );
                 }
                 None => {
                     *view_id = Some(self.code_editor.create_view(
                         cx,
                         &mut state.code_editor_state,
-                        session_id,
+                        Some(session_id),
                     ));
                 }
             },
