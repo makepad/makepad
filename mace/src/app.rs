@@ -147,11 +147,8 @@ impl AppInner {
                     }
                     self.dock.end_tab_bar(cx);
                 }
-                if let Some(tab_id) = self
-                    .dock
-                    .get_or_create_tab_bar(cx, panel_id)
-                    .selected_tab_id()
-                {
+                let tab_bar = self.dock.get_or_create_tab_bar(cx, panel_id);
+                if let Some(tab_id) = tab_bar.selected_tab_id() {
                     cx.turtle_new_line();
                     self.draw_tab(cx, state, tab_id);
                 }
@@ -233,9 +230,8 @@ impl AppInner {
             },
         );
         self.create_or_update_view(cx, state, state.panel_id, session_id);
-        self.dock
-            .get_or_create_tab_bar(cx, state.panel_id)
-            .set_selected_tab_id(cx, Some(tab_id));
+        let tab_bar = self.dock.get_or_create_tab_bar(cx, state.panel_id);
+        tab_bar.set_selected_tab_id(cx, Some(tab_id));
     }
 
     fn send_request(&mut self, request: Request) {
@@ -257,15 +253,52 @@ impl AppInner {
                         TabKind::CodeEditor { session_id } => {
                             let panel_id = tab.panel_id;
                             self.create_or_update_view(cx, state, panel_id, session_id);
-                            self.dock
-                                .get_or_create_tab_bar(cx, panel_id)
-                                .set_selected_tab_id(cx, Some(tab_id));
+                            let tab_bar = self.dock.get_or_create_tab_bar(cx, panel_id);
+                            tab_bar.set_selected_tab_id(cx, Some(tab_id));
                         }
                         _ => {}
                     }
                 }
-                dock::Action::TabCloseButtonWasPressed(_tab_id) => {
-                    // TODO: Actually close the tab
+                dock::Action::TabCloseButtonWasPressed(tab_id) => {
+                    let tab = &state.tabs[tab_id];
+                    match tab.kind {
+                        TabKind::CodeEditor { session_id } => {
+                            let panel_id = tab.panel_id;
+                            match &mut state.panels[panel_id] {
+                                Panel::TabBar { tab_ids, view_id } => {
+                                    if let Some(view_id) = view_id {
+                                        self.code_editor.set_view_session_id(
+                                            cx,
+                                            &mut state.code_editor_state,
+                                            *view_id,
+                                            None,
+                                        );
+                                    }
+                                    state.code_editor_state.destroy_session(session_id, &mut {
+                                        let outstanding_requests = &mut self.outstanding_requests;
+                                        let request_sender = &self.request_sender;
+                                        move |request| {
+                                            outstanding_requests.push_back(request.clone());
+                                            request_sender.send(request).unwrap()
+                                        }
+                                    });
+                                    tab_ids.remove(
+                                        tab_ids
+                                            .iter()
+                                            .position(|existing_tab_id| *existing_tab_id == tab_id)
+                                            .unwrap(),
+                                    );
+                                    state.tabs.remove(tab_id);
+                                    state.tab_id_allocator.deallocate(tab_id);
+                                    let tab_bar = self.dock.get_or_create_tab_bar(cx, panel_id);
+                                    tab_bar.set_selected_tab_id(cx, None);
+                                    tab_bar.redraw(cx);
+                                }
+                                _ => panic!(),
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -359,9 +392,8 @@ impl AppInner {
                 Request::GetFileTree() => {
                     self.set_file_tree(cx, state, response.unwrap());
                     let tab = &state.tabs[state.file_tree_tab_id];
-                    self.dock
-                        .get_or_create_tab_bar(cx, tab.panel_id)
-                        .set_selected_tab_id(cx, Some(state.file_tree_tab_id));
+                    let tab_bar = self.dock.get_or_create_tab_bar(cx, tab.panel_id);
+                    tab_bar.set_selected_tab_id(cx, Some(state.file_tree_tab_id));
                 }
                 _ => panic!(),
             },
