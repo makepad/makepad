@@ -28,11 +28,17 @@ impl TabCloseButton {
     }
 
     pub fn draw(&mut self, cx: &mut Cx) {
-        self.tab_close_button.draw_quad_rel(
+        self.tab_close_button.draw_quad_walk(
             cx,
-            Rect {
-                pos: vec2(0.0, 0.0),
-                size: vec2(20.0, 20.0),
+            Walk {
+                height: Height::Fix(10.0),
+                width: Width::Fix(10.0),
+                margin: Margin {
+                    l: 10.0,
+                    t: 1.0,
+                    r: 0.0,
+                    b: 0.0,
+                },
             },
         );
     }
@@ -43,20 +49,8 @@ impl TabCloseButton {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, Action),
     ) {
-        match event.hits(
-            cx,
-            self.tab_close_button.area(),
-            HitOpt {
-                margin: Some(Margin {
-                    l: 5.0,
-                    t: 5.0,
-                    r: 5.0,
-                    b: 5.0,
-                }),
-                ..Default::default()
-            },
-        ) {
-            Event::FingerDown(_) => dispatch_action(cx, Action::WasClicked),
+        match event.hits(cx, self.tab_close_button.area(), HitOpt::default()) {
+            Event::FingerDown(_) => dispatch_action(cx, Action::WasPressed),
             _ => {}
         }
     }
@@ -70,5 +64,5 @@ struct DrawTabCloseButton {
 }
 
 pub enum Action {
-    WasClicked,
+    WasPressed,
 }

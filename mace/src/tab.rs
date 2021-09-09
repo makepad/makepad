@@ -1,15 +1,18 @@
-use {crate::tab_close_button::TabCloseButton, makepad_render::*};
+use {
+    crate::tab_close_button::{self, TabCloseButton},
+    makepad_render::*,
+};
 
 pub struct Tab {
     is_selected: bool,
     tab: DrawTab,
-    tab_close_button: TabCloseButton,
-    tab_height: f32,
-    tab_color: Vec4,
-    tab_color_selected: Vec4,
-    tab_name: DrawText,
-    tab_name_color: Vec4,
-    tab_name_color_selected: Vec4,
+    close_button: TabCloseButton,
+    height: f32,
+    color: Vec4,
+    color_selected: Vec4,
+    name: DrawText,
+    name_color: Vec4,
+    name_color_selected: Vec4,
 }
 
 impl Tab {
@@ -33,16 +36,16 @@ impl Tab {
                 }
             }
 
-            self::tab_height: 40.0;
-            self::tab_color: #34;
-            self::tab_color_selected: #28;
-            self::tab_border_width: 1.0;
-            self::tab_border_color: #28;
-            self::tab_name_text_style: TextStyle {
+            self::height: 40.0;
+            self::color: #34;
+            self::color_selected: #28;
+            self::border_width: 1.0;
+            self::border_color: #28;
+            self::name_text_style: TextStyle {
                 ..makepad_widget::widgetstyle::text_style_normal
             }
-            self::tab_name_color: #82;
-            self::tab_name_color_selected: #FF;
+            self::name_color: #82;
+            self::name_color_selected: #FF;
         })
     }
 
@@ -50,13 +53,13 @@ impl Tab {
         Tab {
             is_selected: false,
             tab: DrawTab::new(cx, default_shader!()),
-            tab_close_button: TabCloseButton::new(cx),
-            tab_height: 0.0,
-            tab_color: Vec4::default(),
-            tab_color_selected: Vec4::default(),
-            tab_name: DrawText::new(cx, default_shader!()),
-            tab_name_color: Vec4::default(),
-            tab_name_color_selected: Vec4::default(),
+            close_button: TabCloseButton::new(cx),
+            height: 0.0,
+            color: Vec4::default(),
+            color_selected: Vec4::default(),
+            name: DrawText::new(cx, default_shader!()),
+            name_color: Vec4::default(),
+            name_color_selected: Vec4::default(),
         }
     }
 
@@ -70,58 +73,57 @@ impl Tab {
 
     pub fn draw(&mut self, cx: &mut Cx, name: &str) {
         self.apply_style(cx);
-        self.tab.base.color = self.tab_color(self.is_selected);
-        self.tab.begin_quad(cx, self.tab_layout());
-        self.tab_name.color = self.tab_name_color(self.is_selected);
-        self.tab_name.draw_text_walk(cx, name);
-        cx.change_turtle_align_x_cab(1.0);
-        self.tab_close_button.draw(cx);
+        self.tab.base.color = self.color(self.is_selected);
+        self.tab.begin_quad(cx, self.layout());
+        self.name.color = self.name_color(self.is_selected);
+        self.name.draw_text_walk(cx, name);
+        self.close_button.draw(cx);
         cx.turtle_align_y();
         self.tab.end_quad(cx);
     }
 
     fn apply_style(&mut self, cx: &mut Cx) {
-        self.tab_height = live_float!(cx, self::tab_height);
-        self.tab_color = live_vec4!(cx, self::tab_color);
-        self.tab_color_selected = live_vec4!(cx, self::tab_color_selected);
-        self.tab.border_width = live_float!(cx, self::tab_border_width);
-        self.tab.border_color = live_vec4!(cx, self::tab_border_color);
-        self.tab_name.text_style = live_text_style!(cx, self::tab_name_text_style);
-        self.tab_name_color = live_vec4!(cx, self::tab_name_color);
-        self.tab_name_color_selected = live_vec4!(cx, self::tab_name_color_selected);
+        self.height = live_float!(cx, self::height);
+        self.color = live_vec4!(cx, self::color);
+        self.color_selected = live_vec4!(cx, self::color_selected);
+        self.tab.border_width = live_float!(cx, self::border_width);
+        self.tab.border_color = live_vec4!(cx, self::border_color);
+        self.name.text_style = live_text_style!(cx, self::name_text_style);
+        self.name_color = live_vec4!(cx, self::name_color);
+        self.name_color_selected = live_vec4!(cx, self::name_color_selected);
     }
 
-    fn tab_layout(&self) -> Layout {
+    fn layout(&self) -> Layout {
         Layout {
             align: Align { fx: 0.0, fy: 0.5 },
             walk: Walk {
                 width: Width::Compute,
-                height: Height::Fix(self.tab_height),
+                height: Height::Fix(self.height),
                 ..Walk::default()
             },
             padding: Padding {
-                l: 16.0,
-                t: 1.0,
-                r: 16.0,
+                l: 10.0,
+                t: 0.0,
+                r: 10.0,
                 b: 0.0,
             },
             ..Layout::default()
         }
     }
 
-    fn tab_color(&self, is_selected: bool) -> Vec4 {
+    fn color(&self, is_selected: bool) -> Vec4 {
         if is_selected {
-            self.tab_color_selected
+            self.color_selected
         } else {
-            self.tab_color
+            self.color
         }
     }
 
-    fn tab_name_color(&self, is_selected: bool) -> Vec4 {
+    fn name_color(&self, is_selected: bool) -> Vec4 {
         if is_selected {
-            self.tab_name_color_selected
+            self.name_color_selected
         } else {
-            self.tab_name_color
+            self.name_color
         }
     }
 
@@ -131,6 +133,12 @@ impl Tab {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, Action),
     ) {
+        self.close_button
+            .handle_event(cx, event, &mut |cx, action| match action {
+                tab_close_button::Action::WasPressed => {
+                    dispatch_action(cx, Action::CloseButtonWasPressed)
+                }
+            });
         match event.hits(cx, self.tab.area(), HitOpt::default()) {
             Event::FingerDown(_) => {
                 dispatch_action(cx, Action::WasPressed);
@@ -151,4 +159,5 @@ struct DrawTab {
 
 pub enum Action {
     WasPressed,
+    CloseButtonWasPressed,
 }
