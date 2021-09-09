@@ -9,6 +9,7 @@ use {
         splitter::Splitter,
         tab,
         tab_bar::TabId,
+        tab_close_button::TabCloseButton,
         tree_logic::NodeId,
     },
     makepad_render::*,
@@ -41,6 +42,7 @@ impl App {
         FileTree::style(cx);
         Splitter::style(cx);
         tab::Tab::style(cx);
+        TabCloseButton::style(cx);
     }
 
     pub fn new(cx: &mut Cx) -> App {
@@ -246,7 +248,7 @@ impl AppInner {
 
         let mut actions = Vec::new();
         self.dock
-            .handle_event(cx, event, &mut |action| actions.push(action));
+            .handle_event(cx, event, &mut |_, action| actions.push(action));
         for action in actions {
             match action {
                 dock::Action::TabWasPressed(tab_id) => {
@@ -267,7 +269,7 @@ impl AppInner {
 
         let mut actions = Vec::new();
         self.file_tree
-            .handle_event(cx, event, &mut |action| actions.push(action));
+            .handle_event(cx, event, &mut |cx, action| actions.push(action));
         for action in actions {
             match action {
                 file_tree::Action::FileNodeWasPressed(file_node_id) => {

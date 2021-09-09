@@ -1,8 +1,9 @@
-use makepad_render::*;
+use {crate::tab_close_button::TabCloseButton, makepad_render::*};
 
 pub struct Tab {
     is_selected: bool,
     tab: DrawTab,
+    tab_close_button: TabCloseButton,
     tab_height: f32,
     tab_color: Vec4,
     tab_color_selected: Vec4,
@@ -49,6 +50,7 @@ impl Tab {
         Tab {
             is_selected: false,
             tab: DrawTab::new(cx, default_shader!()),
+            tab_close_button: TabCloseButton::new(cx),
             tab_height: 0.0,
             tab_color: Vec4::default(),
             tab_color_selected: Vec4::default(),
@@ -72,6 +74,8 @@ impl Tab {
         self.tab.begin_quad(cx, self.tab_layout());
         self.tab_name.color = self.tab_name_color(self.is_selected);
         self.tab_name.draw_text_walk(cx, name);
+        cx.change_turtle_align_x_cab(1.0);
+        self.tab_close_button.draw(cx);
         cx.turtle_align_y();
         self.tab.end_quad(cx);
     }
@@ -125,11 +129,11 @@ impl Tab {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        dispatch_action: &mut dyn FnMut(Action),
+        dispatch_action: &mut dyn FnMut(&mut Cx, Action),
     ) {
         match event.hits(cx, self.tab.area(), HitOpt::default()) {
             Event::FingerDown(_) => {
-                dispatch_action(Action::WasPressed);
+                dispatch_action(cx, Action::WasPressed);
             }
             _ => {}
         }
@@ -146,5 +150,5 @@ struct DrawTab {
 }
 
 pub enum Action {
-    WasPressed
+    WasPressed,
 }

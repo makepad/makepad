@@ -18,6 +18,7 @@ pub mod size;
 pub mod splitter;
 pub mod tab;
 pub mod tab_bar;
+pub mod tab_close_button;
 pub mod text;
 pub mod token;
 pub mod tokenizer;

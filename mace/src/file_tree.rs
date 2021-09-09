@@ -287,7 +287,7 @@ impl FileTree {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        dispatch_action: &mut dyn FnMut(Action),
+        dispatch_action: &mut dyn FnMut(&mut Cx, Action),
     ) {
         if self.view.handle_scroll_view(cx, event) {
             self.view.redraw_view(cx);
@@ -303,7 +303,7 @@ impl FileTree {
                 tree_logic::Action::NodeWasPressed(file_node_id) => {
                     self.toggle_file_node_is_expanded(cx, file_node_id, true);
                     self.set_selected_file_node_id(cx, file_node_id);
-                    dispatch_action(Action::FileNodeWasPressed(file_node_id));
+                    dispatch_action(cx, Action::FileNodeWasPressed(file_node_id));
                 }
                 tree_logic::Action::NodeWasEntered(file_node_id) => {
                     self.set_hovered_file_node_id(cx, Some(file_node_id));
