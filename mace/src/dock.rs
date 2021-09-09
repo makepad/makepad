@@ -85,26 +85,22 @@ impl Dock {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        dispatch_action: &mut dyn FnMut(Action),
+        dispatch_action: &mut dyn FnMut(&mut Cx, Action),
     ) {
         for panel in &mut self.panels {
             match panel {
                 Panel::Splitter(splitter) => {
-                    let mut actions= Vec::new();
-                    splitter.handle_event(cx, event, &mut |action| actions.push(action));
-                    for action in actions {
-                        match action {
-                            splitter::Action::Redraw => {
-                                cx.redraw_child_area(Area::All);
-                            }
+                    splitter.handle_event(cx, event, &mut |cx, action| match action {
+                        splitter::Action::Redraw => {
+                            cx.redraw_child_area(Area::All);
                         }
-                    }
+                    });
                 }
                 Panel::TabBar(tab_bar) => {
-                    tab_bar.handle_event(cx, event, &mut |action| match action {
+                    tab_bar.handle_event(cx, event, &mut |cx, action| match action {
                         tab_bar::Action::TabWasPressed(item_id) => {
-                            dispatch_action(Action::TabWasPressed(item_id))
-                        }                     
+                            dispatch_action(cx, Action::TabWasPressed(item_id))
+                        }
                     });
                 }
             }
