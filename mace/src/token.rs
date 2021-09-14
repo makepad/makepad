@@ -33,7 +33,7 @@ pub enum Punctuator {
 }
 
 impl Punctuator {
-    pub fn is_left_delimiter(self) -> bool {
+    pub fn is_open_delimiter(self) -> bool {
         match self {
             Punctuator::LeftParen => true,
             Punctuator::LeftBrace => true,
@@ -41,7 +41,7 @@ impl Punctuator {
         }
     }
 
-    pub fn is_right_delimiter(self) -> bool {
+    pub fn is_close_delimiter(self) -> bool {
         match self {
             Punctuator::RightParen => true,
             Punctuator::RightBrace => true,
