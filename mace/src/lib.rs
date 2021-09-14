@@ -1,4 +1,5 @@
 pub mod app;
+pub mod char;
 pub mod code_editor;
 pub mod cursor;
 pub mod cursor_set;

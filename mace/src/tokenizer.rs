@@ -1,4 +1,7 @@
-use crate::token::{Keyword, Punctuator, Token, TokenKind};
+use crate::{
+    char::CharExt,
+    token::{Keyword, Punctuator, Token, TokenKind},
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum State {
@@ -850,28 +853,6 @@ impl<'a> Cursor<'a> {
         if self.peek(0).is_identifier_start() {
             self.skip(1);
             while self.skip_if(|ch| ch.is_identifier_continue()) {}
-        }
-    }
-}
-
-trait CharExt {
-    fn is_identifier_start(self) -> bool;
-
-    fn is_identifier_continue(self) -> bool;
-}
-
-impl CharExt for char {
-    fn is_identifier_start(self) -> bool {
-        match self {
-            'A'..='Z' | '_' | 'a'..='z' => true,
-            _ => false,
-        }
-    }
-
-    fn is_identifier_continue(self) -> bool {
-        match self {
-            '0'..='9' | 'A'..='Z' | '_' | 'a'..='z' => true,
-            _ => false,
         }
     }
 }

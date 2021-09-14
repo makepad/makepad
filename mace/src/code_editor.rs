@@ -857,10 +857,11 @@ impl State {
         for distance in session.carets.distances() {
             position += distance;
             builder_1.retain(distance);
-            if !session.selections.contains_position(position) {
-                builder_1.insert(text.clone());
-                position += text.len();
+            if session.selections.contains_position(position) {
+                continue;
             }
+            builder_1.insert(text.clone());
+            position += text.len();
         }
         let delta_1 = builder_1.build();
 
