@@ -76,28 +76,28 @@ impl LineInfoCache {
         }
 
         for (index, line_info) in self.line_infos.iter_mut().enumerate() {
-            if line_info.leading_whitespace.is_some() {
+            if line_info.non_whitespace_start.is_some() {
                 continue;
             }
-            line_info.leading_whitespace = Some(
+            line_info.non_whitespace_start = Some(
                 text.as_lines()[index]
                     .iter()
                     .position(|ch| !ch.is_whitespace()),
             );
         }
 
-        let mut leading_whitespace_above = None;
+        let mut leading_whitespace_above = 0;
         for line_info in self.line_infos.iter_mut() {
-            if let Some(leading_whitespace) = line_info.leading_whitespace.unwrap() {
-                leading_whitespace_above = Some(leading_whitespace);
+            if line_info.contains_non_whitespace() {
+                leading_whitespace_above = line_info.leading_whitespace();
             }
             line_info.leading_whitespace_above = Some(leading_whitespace_above);
         }
 
-        let mut leading_whitespace_below = None;
+        let mut leading_whitespace_below = 0;
         for line_info in self.line_infos.iter_mut().rev() {
-            if let Some(leading_whitespace) = line_info.leading_whitespace.unwrap() {
-                leading_whitespace_below = Some(leading_whitespace);
+            if line_info.contains_non_whitespace() {
+                leading_whitespace_below = line_info.leading_whitespace();
             }
             line_info.leading_whitespace_below = Some(leading_whitespace_below);
         }
@@ -107,9 +107,9 @@ impl LineInfoCache {
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct LineInfo {
     token_info: Option<TokenInfo>,
-    leading_whitespace: Option<Option<usize>>,
-    leading_whitespace_above: Option<Option<usize>>,
-    leading_whitespace_below: Option<Option<usize>>,
+    non_whitespace_start: Option<Option<usize>>,
+    leading_whitespace_above: Option<usize>,
+    leading_whitespace_below: Option<usize>,
 }
 
 impl LineInfo {
@@ -117,11 +117,29 @@ impl LineInfo {
         &self.token_info.as_ref().unwrap().tokens
     }
 
+    fn non_whitespace_start(&self) -> Option<usize> {
+        self.non_whitespace_start.unwrap()
+    }
+
+    fn contains_non_whitespace(&self) -> bool {
+        self.non_whitespace_start().is_some()
+    }
+
+    fn leading_whitespace(&self) -> usize {
+        self.non_whitespace_start().unwrap_or(0)
+    }
+
+    fn leading_whitespace_above(&self) -> usize {
+        self.leading_whitespace_above.unwrap()
+    }
+
+    fn leading_whitespace_below(&self) -> usize {
+        self.leading_whitespace_below.unwrap()
+    }
+
     pub fn virtual_leading_whitespace(&self) -> usize {
-        self.leading_whitespace_above
-            .unwrap()
-            .unwrap_or(0)
-            .min(self.leading_whitespace_below.unwrap().unwrap_or(0))
+        self.leading_whitespace_above()
+            .min(self.leading_whitespace_below())
     }
 }
 
