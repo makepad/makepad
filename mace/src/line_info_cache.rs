@@ -86,18 +86,18 @@ impl LineInfoCache {
             );
         }
 
-        let mut leading_whitespace_above = 0;
+        let mut leading_whitespace_above = None;
         for line_info in self.line_infos.iter_mut() {
             if let Some(leading_whitespace) = line_info.leading_whitespace.unwrap() {
-                leading_whitespace_above = leading_whitespace;
+                leading_whitespace_above = Some(leading_whitespace);
             }
             line_info.leading_whitespace_above = Some(leading_whitespace_above);
         }
 
-        let mut leading_whitespace_below = 0;
+        let mut leading_whitespace_below = None;
         for line_info in self.line_infos.iter_mut().rev() {
             if let Some(leading_whitespace) = line_info.leading_whitespace.unwrap() {
-                leading_whitespace_below = leading_whitespace;
+                leading_whitespace_below = Some(leading_whitespace);
             }
             line_info.leading_whitespace_below = Some(leading_whitespace_below);
         }
@@ -108,8 +108,8 @@ impl LineInfoCache {
 pub struct LineInfo {
     token_info: Option<TokenInfo>,
     leading_whitespace: Option<Option<usize>>,
-    leading_whitespace_above: Option<usize>,
-    leading_whitespace_below: Option<usize>,
+    leading_whitespace_above: Option<Option<usize>>,
+    leading_whitespace_below: Option<Option<usize>>,
 }
 
 impl LineInfo {
@@ -120,7 +120,8 @@ impl LineInfo {
     pub fn virtual_leading_whitespace(&self) -> usize {
         self.leading_whitespace_above
             .unwrap()
-            .min(self.leading_whitespace_below.unwrap())
+            .unwrap_or(0)
+            .min(self.leading_whitespace_below.unwrap().unwrap_or(0))
     }
 }
 
