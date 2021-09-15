@@ -7,7 +7,7 @@ use {
     },
 };
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Arena<T> {
     entries: Vec<Option<Entry<T>>>,
 }
@@ -17,14 +17,11 @@ impl<T> Arena<T> {
         Arena::default()
     }
 
-    pub fn contains(&self, id: Id) -> bool {
-        match self.entries.get(id.index) {
-            Some(Some(entry)) if entry.generation == id.generation => true,
-            _ => false,
-        }
+    pub fn contains(&self, id: Id<T>) -> bool {
+        self.get(id).is_some()
     }
 
-    pub fn get(&self, id: Id) -> Option<&T> {
+    pub fn get(&self, id: Id<T>) -> Option<&T> {
         match self.entries.get(id.index) {
             Some(Some(entry)) if entry.generation == id.generation => Some(&entry.value),
             _ => None,
@@ -37,7 +34,7 @@ impl<T> Arena<T> {
         }
     }
 
-    pub fn get_mut(&mut self, id: Id) -> Option<&mut T> {
+    pub fn get_mut(&mut self, id: Id<T>) -> Option<&mut T> {
         match self.entries.get_mut(id.index) {
             Some(Some(entry)) if entry.generation == id.generation => Some(&mut entry.value),
             _ => None,
@@ -50,7 +47,7 @@ impl<T> Arena<T> {
         }
     }
 
-    pub fn insert(&mut self, id: Id, value: T) -> Option<T> {
+    pub fn insert(&mut self, id: Id<T>, value: T) -> Option<T> {
         if self.entries.len() < id.index + 1 {
             self.entries.resize_with(id.index + 1, || None);
         }
@@ -70,7 +67,7 @@ impl<T> Arena<T> {
         }
     }
 
-    pub fn remove(&mut self, index: Id) -> Option<T> {
+    pub fn remove(&mut self, index: Id<T>) -> Option<T> {
         match self.entries.get(index.index) {
             Some(Some(entry)) if entry.generation == index.generation => {
                 let entry = mem::replace(&mut self.entries[index.index], None).unwrap();
@@ -93,16 +90,16 @@ impl<T> Default for Arena<T> {
     }
 }
 
-impl<T> Index<Id> for Arena<T> {
+impl<T> Index<Id<T>> for Arena<T> {
     type Output = T;
 
-    fn index(&self, index: Id) -> &Self::Output {
+    fn index(&self, index: Id<T>) -> &Self::Output {
         self.get(index).unwrap()
     }
 }
 
-impl<T> IndexMut<Id> for Arena<T> {
-    fn index_mut(&mut self, index: Id) -> &mut Self::Output {
+impl<T> IndexMut<Id<T>> for Arena<T> {
+    fn index_mut(&mut self, index: Id<T>) -> &mut Self::Output {
         self.get_mut(index).unwrap()
     }
 }
