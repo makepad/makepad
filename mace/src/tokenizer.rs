@@ -92,14 +92,14 @@ impl InitialState {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::OpenDelimiter(Delimiter::Paren)
+                    TokenKind::OpenDelimiter(Delimiter::Paren),
                 )
             }
             (')', _, _) => {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::CloseDelimiter(Delimiter::Paren)
+                    TokenKind::CloseDelimiter(Delimiter::Paren),
                 )
             }
             ('[', _, _) => {

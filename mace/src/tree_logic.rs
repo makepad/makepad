@@ -7,10 +7,10 @@ use {
 #[derive(Default)]
 pub struct TreeLogic {
     nodes: Arena<Node>,
-    node_ids_by_area: HashMap<Area, NodeId>,
-    animating_node_ids: HashSet<NodeId>,
-    hovered_node_id: Option<NodeId>,
-    selected_node_ids: HashSet<NodeId>,
+    node_ids_by_area: HashMap<Area, Id<Node>>,
+    animating_node_ids: HashSet<Id<Node>>,
+    hovered_node_id: Option<Id<Node>>,
+    selected_node_ids: HashSet<Id<Node>>,
     next_frame: NextFrame,
 }
 
@@ -25,7 +25,7 @@ impl TreeLogic {
 
     pub fn end(&mut self) {}
 
-    pub fn begin_node(&mut self, node_id: NodeId) -> NodeInfo {
+    pub fn begin_node(&mut self, node_id: Id<Node>) -> NodeInfo {
         let node = self.get_or_create_node(node_id);
         NodeInfo {
             is_expanded_fraction: node.is_expanded.fraction,
@@ -38,7 +38,7 @@ impl TreeLogic {
 
     pub fn end_node(&mut self) {}
 
-    fn get_or_create_node(&mut self, node_id: NodeId) -> &mut Node {
+    fn get_or_create_node(&mut self, node_id: Id<Node>) -> &mut Node {
         if !self.nodes.contains(node_id) {
             self.nodes.insert(node_id, Node::default());
         }
@@ -50,16 +50,16 @@ impl TreeLogic {
         self.animating_node_ids.clear();
     }
 
-    pub fn forget_node(&mut self, node_id: NodeId) {
+    pub fn forget_node(&mut self, node_id: Id<Node>) {
         self.nodes.remove(node_id).unwrap();
         self.animating_node_ids.remove(&node_id);
     }
 
-    pub fn set_node_area(&mut self, node_id: NodeId, area: Area) {
+    pub fn set_node_area(&mut self, node_id: Id<Node>, area: Area) {
         self.node_ids_by_area.insert(area, node_id);
     }
 
-    pub fn node_is_expanded(&mut self, node_id: NodeId) -> bool {
+    pub fn node_is_expanded(&mut self, node_id: Id<Node>) -> bool {
         let node = self.get_or_create_node(node_id);
         node.is_expanded.value
     }
@@ -67,7 +67,7 @@ impl TreeLogic {
     pub fn set_node_is_expanded(
         &mut self,
         cx: &mut Cx,
-        node_id: NodeId,
+        node_id: Id<Node>,
         is_expanded: bool,
         should_animate: bool,
     ) -> bool {
@@ -88,14 +88,14 @@ impl TreeLogic {
     pub fn toggle_node_is_expanded(
         &mut self,
         cx: &mut Cx,
-        node_id: NodeId,
+        node_id: Id<Node>,
         should_animate: bool,
     ) -> bool {
         let is_expanded = self.node_is_expanded(node_id);
         self.set_node_is_expanded(cx, node_id, !is_expanded, should_animate)
     }
 
-    fn update_animating_nodes(&mut self, cx: &mut Cx, node_id: NodeId, is_animating: bool) {
+    fn update_animating_nodes(&mut self, cx: &mut Cx, node_id: Id<Node>, is_animating: bool) {
         if is_animating {
             self.animating_node_ids.insert(node_id);
         } else {
@@ -112,7 +112,7 @@ impl TreeLogic {
         }
     }
 
-    pub fn set_hovered_node_id(&mut self, node_id: Option<NodeId>) -> bool {
+    pub fn set_hovered_node_id(&mut self, node_id: Option<Id<Node>>) -> bool {
         if self.hovered_node_id == node_id {
             return false;
         }
@@ -120,7 +120,7 @@ impl TreeLogic {
         true
     }
 
-    pub fn set_selected_node_id(&mut self, node_id: NodeId) -> bool {
+    pub fn set_selected_node_id(&mut self, node_id: Id<Node>) -> bool {
         if self.selected_node_ids.len() == 1 && self.selected_node_ids.contains(&node_id) {
             return false;
         }
@@ -176,8 +176,6 @@ impl TreeLogic {
     }
 }
 
-pub type NodeId = Id;
-
 #[derive(Clone, Copy, Debug)]
 pub struct NodeInfo {
     pub is_expanded_fraction: f32,
@@ -196,7 +194,7 @@ impl NodeInfo {
 }
 
 #[derive(Clone, Debug)]
-struct Node {
+pub struct Node {
     is_expanded: AnimatedBool,
 }
 
@@ -260,7 +258,7 @@ impl AnimatedBool {
 
 pub enum Action {
     TreeDidAnimate,
-    NodeWasEntered(NodeId),
-    NodeWasLeft(NodeId),
-    NodeWasPressed(NodeId),
+    NodeWasEntered(Id<Node>),
+    NodeWasLeft(Id<Node>),
+    NodeWasPressed(Id<Node>),
 }

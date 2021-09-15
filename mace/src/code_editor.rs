@@ -9,8 +9,8 @@ use {
         range_set::{RangeSet, Span},
         size::Size,
         text::Text,
-        token_cache::{TokenCache, TokensByLine},
         token::{Delimiter, Keyword, TokenKind},
+        token_cache::{TokenCache, TokensByLine},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -22,7 +22,7 @@ use {
 };
 
 pub struct CodeEditor {
-    view_id_allocator: IdAllocator,
+    view_id_allocator: IdAllocator<View>,
     views: Arena<View>,
     selection: DrawColor,
     text: DrawText,
@@ -344,7 +344,9 @@ impl CodeEditor {
     fn text_color(&self, kind: TokenKind, next_kind: Option<TokenKind>) -> Vec4 {
         match (kind, next_kind) {
             (TokenKind::Comment, _) => self.text_color_comment,
-            (TokenKind::OpenDelimiter(_), _) | (TokenKind::CloseDelimiter(_), _) => self.text_color_delimiter,
+            (TokenKind::OpenDelimiter(_), _) | (TokenKind::CloseDelimiter(_), _) => {
+                self.text_color_delimiter
+            }
             (TokenKind::Identifier, Some(TokenKind::OpenDelimiter(Delimiter::Paren))) => {
                 self.text_color_function_identifier
             }
@@ -652,18 +654,18 @@ impl CodeEditor {
     }
 }
 
-pub type ViewId = Id;
+pub type ViewId = Id<View>;
 
-struct View {
+pub struct View {
     view: ScrollView,
     session_id: Option<SessionId>,
 }
 
 #[derive(Default)]
 pub struct State {
-    session_id_allocator: IdAllocator,
+    session_id_allocator: IdAllocator<Session>,
     sessions: Arena<Session>,
-    document_id_allocator: IdAllocator,
+    document_id_allocator: IdAllocator<Document>,
     documents: Arena<Document>,
     document_ids_by_path: HashMap<PathBuf, DocumentId>,
 }
@@ -969,9 +971,9 @@ impl State {
     }
 }
 
-pub type SessionId = Id;
+pub type SessionId = Id<Session>;
 
-struct Session {
+pub struct Session {
     view_id: Option<ViewId>,
     cursors: CursorSet,
     selections: RangeSet,
@@ -991,9 +993,9 @@ impl Session {
     }
 }
 
-pub type DocumentId = Id;
+pub type DocumentId = Id<Document>;
 
-struct Document {
+pub struct Document {
     session_ids: HashSet<SessionId>,
     undo_stack: Vec<Edit>,
     redo_stack: Vec<Edit>,
