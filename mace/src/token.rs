@@ -7,6 +7,8 @@ pub struct Token {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TokenKind {
     Comment,
+    OpenDelimiter(Delimiter),
+    CloseDelimiter(Delimiter),
     Identifier,
     Keyword(Keyword),
     Number,
@@ -14,6 +16,13 @@ pub enum TokenKind {
     String,
     Whitespace,
     Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Delimiter {
+    Paren,
+    Bracket,
+    Brace,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -30,22 +39,4 @@ pub enum Punctuator {
     LeftBrace,
     RightBrace,
     Other,
-}
-
-impl Punctuator {
-    pub fn is_open_delimiter(self) -> bool {
-        match self {
-            Punctuator::LeftParen => true,
-            Punctuator::LeftBrace => true,
-            _ => false,
-        }
-    }
-
-    pub fn is_close_delimiter(self) -> bool {
-        match self {
-            Punctuator::RightParen => true,
-            Punctuator::RightBrace => true,
-            _ => false,
-        }
-    }
 }

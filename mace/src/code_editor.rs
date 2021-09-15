@@ -10,7 +10,7 @@ use {
         range_set::{RangeSet, Span},
         size::Size,
         text::Text,
-        token::{Keyword, Punctuator, TokenKind},
+        token::{Delimiter, Keyword, TokenKind},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -29,6 +29,7 @@ pub struct CodeEditor {
     text: DrawText,
     text_glyph_size: Vec2,
     text_color_comment: Vec4,
+    text_color_delimiter: Vec4,
     text_color_identifier: Vec4,
     text_color_function_identifier: Vec4,
     text_color_branch_keyword: Vec4,
@@ -65,6 +66,7 @@ impl CodeEditor {
                 ..makepad_widget::widgetstyle::text_style_fixed
             }
             self::text_color_comment: #638d54;
+            self::text_color_delimiter: #d4d4d4;
             self::text_color_identifier: #d4d4d4;
             self::text_color_function_identifier: #dcdcae;
             self::text_color_branch_keyword: #c485be;
@@ -88,6 +90,7 @@ impl CodeEditor {
             text: DrawText::new(cx, default_shader!()).with_draw_depth(3.0),
             text_glyph_size: Vec2::default(),
             text_color_comment: Vec4::default(),
+            text_color_delimiter: Vec4::default(),
             text_color_identifier: Vec4::default(),
             text_color_function_identifier: Vec4::default(),
             text_color_number: Vec4::default(),
@@ -131,6 +134,7 @@ impl CodeEditor {
         self.text.text_style = live_text_style!(cx, self::text_text_style);
         self.text_glyph_size = self.text.text_style.font_size * self.text.get_monospace_base(cx);
         self.text_color_comment = live_vec4!(cx, self::text_color_comment);
+        self.text_color_delimiter = live_vec4!(cx, self::text_color_delimiter);
         self.text_color_identifier = live_vec4!(cx, self::text_color_identifier);
         self.text_color_function_identifier = live_vec4!(cx, self::text_color_function_identifier);
         self.text_color_punctuator = live_vec4!(cx, self::text_color_punctuator);
@@ -386,7 +390,8 @@ impl CodeEditor {
     fn text_color(&self, kind: TokenKind, next_kind: Option<TokenKind>) -> Vec4 {
         match (kind, next_kind) {
             (TokenKind::Comment, _) => self.text_color_comment,
-            (TokenKind::Identifier, Some(TokenKind::Punctuator(Punctuator::LeftParen))) => {
+            (TokenKind::OpenDelimiter(_), _) | (TokenKind::CloseDelimiter(_), _) => self.text_color_delimiter,
+            (TokenKind::Identifier, Some(TokenKind::OpenDelimiter(Delimiter::Paren))) => {
                 self.text_color_function_identifier
             }
             (TokenKind::Identifier, _) => self.text_color_identifier,
