@@ -100,8 +100,8 @@ impl Dock {
                         tab_bar::Action::TabWasPressed(tab_id) => {
                             dispatch_action(cx, Action::TabWasPressed(tab_id))
                         }
-                        tab_bar::Action::TabCloseButtonWasPressed(tab_id) => {
-                            dispatch_action(cx, Action::TabCloseButtonWasPressed(tab_id))
+                        tab_bar::Action::TabButtonWasPressed(tab_id) => {
+                            dispatch_action(cx, Action::TabButtonWasPressed(tab_id))
                         }
                     });
                 }
@@ -135,5 +135,5 @@ impl Panel {
 
 pub enum Action {
     TabWasPressed(TabId),
-    TabCloseButtonWasPressed(TabId),
+    TabButtonWasPressed(TabId),
 }

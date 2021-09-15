@@ -1,18 +1,18 @@
 use makepad_render::*;
 
-pub struct TabCloseButton {
-    tab_close_button: DrawTabCloseButton,
+pub struct TabButton {
+    tab_close_button: DrawTabButton,
 }
 
-impl TabCloseButton {
+impl TabButton {
     pub fn style(cx: &mut Cx) {
-        DrawTabCloseButton::register_draw_input(cx);
+        DrawTabButton::register_draw_input(cx);
 
         live_body!(cx, {
             self::tab_close_button_shader: Shader {
                 use makepad_render::drawquad::shader::*;
 
-                draw_input: self::DrawTabCloseButton;
+                draw_input: self::DrawTabButton;
 
                 fn pixel() -> vec4 {
                     return vec4(1.0, 0.0, 0.0, 0.0);
@@ -21,9 +21,9 @@ impl TabCloseButton {
         })
     }
 
-    pub fn new(cx: &mut Cx) -> TabCloseButton {
-        TabCloseButton {
-            tab_close_button: DrawTabCloseButton::new(cx, default_shader!()),
+    pub fn new(cx: &mut Cx) -> TabButton {
+        TabButton {
+            tab_close_button: DrawTabButton::new(cx, default_shader!()),
         }
     }
 
@@ -58,7 +58,7 @@ impl TabCloseButton {
 
 #[derive(DrawQuad)]
 #[repr(C)]
-struct DrawTabCloseButton {
+struct DrawTabButton {
     #[default_shader(self::tab_close_button_shader)]
     base: DrawColor,
 }
