@@ -464,7 +464,6 @@ impl AppInner {
 }
 
 struct State {
-    panel_id_allocator: IdAllocator<dock::Panel>,
     panels_by_panel_id: HashMap<Id<dock::Panel>, Panel>,
     root_panel_id: Id<dock::Panel>,
     panel_id: Id<dock::Panel>,
@@ -532,7 +531,6 @@ impl State {
         );
 
         State {
-            panel_id_allocator,
             panels_by_panel_id,
             root_panel_id,
             panel_id: panel_id_1,

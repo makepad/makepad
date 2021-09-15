@@ -5,7 +5,7 @@ use {
         token::Token,
         tokenizer::{Cursor, State},
     },
-    std::{iter, slice::Iter},
+    std::{iter, slice},
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -22,8 +22,8 @@ impl TokenCache {
         cache
     }
 
-    pub fn tokens_by_line(&self) -> TokensByLine {
-        TokensByLine {
+    pub fn iter(&self) -> Iter {
+        Iter {
             iter: self.lines.iter(),
         }
     }
@@ -80,12 +80,21 @@ impl TokenCache {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct TokensByLine<'a> {
-    iter: Iter<'a, Option<Line>>,
+impl<'a> IntoIterator for &'a TokenCache {
+    type Item = &'a [Token];
+    type IntoIter = Iter<'a>;
+
+    fn into_iter(self) -> Iter<'a> {
+        self.iter()
+    }
 }
 
-impl<'a> Iterator for TokensByLine<'a> {
+#[derive(Clone, Debug)]
+pub struct Iter<'a> {
+    iter: slice::Iter<'a, Option<Line>>,
+}
+
+impl<'a> Iterator for Iter<'a> {
     type Item = &'a [Token];
 
     fn next(&mut self) -> Option<&'a [Token]> {
