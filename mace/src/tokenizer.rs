@@ -1,6 +1,6 @@
 use crate::{
     char::CharExt,
-    token::{Keyword, Punctuator, Token, TokenKind},
+    token::{Delimiter, Keyword, Punctuator, Token, TokenKind},
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -92,28 +92,42 @@ impl InitialState {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::Punctuator(Punctuator::LeftParen),
+                    TokenKind::OpenDelimiter(Delimiter::Paren)
                 )
             }
             (')', _, _) => {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::Punctuator(Punctuator::RightParen),
+                    TokenKind::CloseDelimiter(Delimiter::Paren)
+                )
+            }
+            ('[', _, _) => {
+                cursor.skip(1);
+                (
+                    State::Initial(InitialState),
+                    TokenKind::OpenDelimiter(Delimiter::Bracket),
+                )
+            }
+            (']', _, _) => {
+                cursor.skip(1);
+                (
+                    State::Initial(InitialState),
+                    TokenKind::CloseDelimiter(Delimiter::Bracket),
                 )
             }
             ('{', _, _) => {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::Punctuator(Punctuator::LeftBrace),
+                    TokenKind::OpenDelimiter(Delimiter::Brace),
                 )
             }
             ('}', _, _) => {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::Punctuator(Punctuator::RightBrace),
+                    TokenKind::CloseDelimiter(Delimiter::Brace),
                 )
             }
             ('!', _, _)
@@ -134,8 +148,6 @@ impl InitialState {
             | ('>', _, _)
             | ('?', _, _)
             | ('@', _, _)
-            | ('[', _, _)
-            | (']', _, _)
             | ('^', _, _)
             | ('_', _, _)
             | ('|', _, _) => {
