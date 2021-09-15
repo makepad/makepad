@@ -1,6 +1,6 @@
 use {
     crate::{
-        generational::{Arena, Id},
+        id::{Id, IdMap},
         tab::{self, Tab},
     },
     makepad_render::*,
@@ -9,9 +9,9 @@ use {
 
 pub struct TabBar {
     view: ScrollView,
-    tabs: Arena<Tab>,
-    tab_ids: Vec<Id<Tab>>,
-    selected_tab_id: Option<Id<Tab>>,
+    tabs_by_tab_id: IdMap<TabId, Tab>,
+    tab_ids: Vec<TabId>,
+    selected_tab_id: Option<TabId>,
     tab_height: f32,
 }
 
@@ -19,7 +19,7 @@ impl TabBar {
     pub fn new(cx: &mut Cx) -> TabBar {
         TabBar {
             view: ScrollView::new_standard_hv(cx),
-            tabs: Arena::new(),
+            tabs_by_tab_id: IdMap::new(),
             tab_ids: Vec::new(),
             selected_tab_id: None,
             tab_height: 0.0,
@@ -37,7 +37,7 @@ impl TabBar {
         self.view.end_view(cx);
     }
 
-    pub fn tab(&mut self, cx: &mut Cx, tab_id: Id<Tab>, name: &str) {
+    pub fn tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
         let tab = self.get_or_create_tab(cx, tab_id);
         tab.draw(cx, name);
         self.tab_ids.push(tab_id);
@@ -58,27 +58,27 @@ impl TabBar {
         }
     }
 
-    pub fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: Id<Tab>) -> &mut Tab {
-        if !self.tabs.contains(tab_id) {
-            self.tabs.insert(tab_id, Tab::new(cx));
+    pub fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: TabId) -> &mut Tab {
+        if !self.tabs_by_tab_id.contains(tab_id) {
+            self.tabs_by_tab_id.insert(tab_id, Tab::new(cx));
         }
-        &mut self.tabs[tab_id]
+        &mut self.tabs_by_tab_id[tab_id]
     }
 
-    pub fn forget_tab(&mut self, tab_id: Id<Tab>) {
-        self.tabs.remove(tab_id);
+    pub fn forget_tab(&mut self, tab_id: TabId) {
+        self.tabs_by_tab_id.remove(tab_id);
     }
 
-    pub fn selected_tab_id(&self) -> Option<Id<Tab>> {
+    pub fn selected_tab_id(&self) -> Option<TabId> {
         self.selected_tab_id
     }
 
-    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, tab_id: Option<Id<Tab>>) {
+    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, tab_id: Option<TabId>) {
         if self.selected_tab_id == tab_id {
             return;
         }
         if let Some(tab_id) = self.selected_tab_id {
-            let tab = &mut self.tabs[tab_id];
+            let tab = &mut self.tabs_by_tab_id[tab_id];
             tab.set_is_selected(false);
         }
         self.selected_tab_id = tab_id;
@@ -103,7 +103,7 @@ impl TabBar {
             self.view.redraw_view(cx);
         }
         for tab_id in &self.tab_ids {
-            let tab = &mut self.tabs[*tab_id];
+            let tab = &mut self.tabs_by_tab_id[*tab_id];
             tab.handle_event(cx, event, &mut |cx, action| match action {
                 tab::Action::WasPressed => {
                     dispatch_action(cx, Action::TabWasPressed(*tab_id));
@@ -116,9 +116,18 @@ impl TabBar {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TabId(pub Id);
+
+impl AsRef<Id> for TabId {
+    fn as_ref(&self) -> &Id {
+        &self.0
+    }
+}
+
 pub enum Action {
-    TabWasPressed(Id<Tab>),
-    TabButtonWasPressed(Id<Tab>),
+    TabWasPressed(TabId),
+    TabButtonWasPressed(TabId),
 }
 
 #[derive(Clone, DrawQuad)]

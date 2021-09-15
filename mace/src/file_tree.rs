@@ -1,7 +1,7 @@
 use {
     crate::{
-        generational::Id,
-        tree_logic::{self, Node, TreeLogic},
+        id::Id,
+        tree_logic::{self, NodeId, TreeLogic},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -10,20 +10,20 @@ use {
 pub struct FileTree {
     view: ScrollView,
     logic: TreeLogic,
-    node: DrawColor,
-    node_height: f32,
-    node_color_even: Vec4,
-    node_color_odd: Vec4,
-    node_color_selected: Vec4,
-    node_color_hovered_even: Vec4,
-    node_color_hovered_odd: Vec4,
-    node_color_hovered_selected: Vec4,
+    file_node: DrawColor,
+    file_node_height: f32,
+    file_node_color_even: Vec4,
+    file_node_color_odd: Vec4,
+    file_node_color_selected: Vec4,
+    file_node_color_hovered_even: Vec4,
+    file_node_color_hovered_odd: Vec4,
+    file_node_color_hovered_selected: Vec4,
     indent_width: f32,
     folder_icon: DrawColor,
     folder_icon_walk: Walk,
-    node_name: DrawText,
-    node_name_color_folder: Vec4,
-    node_name_color_file: Vec4,
+    file_node_name: DrawText,
+    file_node_name_color_folder: Vec4,
+    file_node_name_color_file: Vec4,
     count: usize,
     stack: Vec<f32>,
 }
@@ -47,22 +47,22 @@ impl FileTree {
                 }
             }
 
-            self::node_height: 20.0;
-            self::node_color_even: #25;
-            self::node_color_odd: #28;
-            self::node_color_selected: #x11466E;
-            self::node_color_hovered_even: #3D;
-            self::node_color_hovered_odd: #38;
-            self::node_color_hovered_selected: #x11466E;
+            self::file_node_height: 20.0;
+            self::file_node_color_even: #25;
+            self::file_node_color_odd: #28;
+            self::file_node_color_selected: #x11466E;
+            self::file_node_color_hovered_even: #3D;
+            self::file_node_color_hovered_odd: #38;
+            self::file_node_color_hovered_selected: #x11466E;
             self::indent_width: 10.0;
             self::folder_icon_width: 10.0;
             self::folder_icon_color: #80;
-            self::node_name_text_style: TextStyle {
+            self::file_node_name_text_style: TextStyle {
                 top_drop: 1.3,
                 ..makepad_widget::widgetstyle::text_style_normal
             }
-            self::node_name_color_folder: #FF;
-            self::node_name_color_file: #9D;
+            self::file_node_name_color_folder: #FF;
+            self::file_node_name_color_file: #9D;
         })
     }
 
@@ -70,20 +70,20 @@ impl FileTree {
         FileTree {
             view: ScrollView::new_standard_hv(cx),
             logic: TreeLogic::new(),
-            node: DrawColor::new(cx, default_shader!()),
-            node_height: 0.0,
-            node_color_even: Vec4::default(),
-            node_color_odd: Vec4::default(),
-            node_color_selected: Vec4::default(),
-            node_color_hovered_even: Vec4::default(),
-            node_color_hovered_odd: Vec4::default(),
-            node_color_hovered_selected: Vec4::default(),
+            file_node: DrawColor::new(cx, default_shader!()),
+            file_node_height: 0.0,
+            file_node_color_even: Vec4::default(),
+            file_node_color_odd: Vec4::default(),
+            file_node_color_selected: Vec4::default(),
+            file_node_color_hovered_even: Vec4::default(),
+            file_node_color_hovered_odd: Vec4::default(),
+            file_node_color_hovered_selected: Vec4::default(),
             indent_width: 0.0,
             folder_icon: DrawColor::new(cx, live_shader!(cx, self::folder_icon_shader)),
             folder_icon_walk: Walk::default(),
-            node_name: DrawText::new(cx, default_shader!()),
-            node_name_color_folder: Vec4::default(),
-            node_name_color_file: Vec4::default(),
+            file_node_name: DrawText::new(cx, default_shader!()),
+            file_node_name_color_folder: Vec4::default(),
+            file_node_name_color_file: Vec4::default(),
             count: 0,
             stack: Vec::new(),
         }
@@ -102,21 +102,21 @@ impl FileTree {
         self.view.end_view(cx);
     }
 
-    pub fn begin_folder(&mut self, cx: &mut Cx, node_id: Id<Node>, name: &str) -> Result<(), ()> {
-        let info = self.logic.begin_node(node_id);
+    pub fn begin_folder(&mut self, cx: &mut Cx, file_node_id: FileNodeId, name: &str) -> Result<(), ()> {
+        let info = self.logic.begin_node(file_node_id.0);
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let count = self.count;
         self.count += 1;
-        self.node.color = self.node_color(count, info.is_hovered, info.is_selected);
-        self.node.begin_quad(cx, self.node_layout(scale));
+        self.file_node.color = self.file_node_color(count, info.is_hovered, info.is_selected);
+        self.file_node.begin_quad(cx, self.file_node_layout(scale));
         cx.walk_turtle(self.indent_walk(self.stack.len()));
         self.folder_icon.draw_quad_walk(cx, self.folder_icon_walk);
         cx.turtle_align_y();
-        self.node_name.color = self.node_name_color_folder;
-        self.node_name.font_scale = self.stack.last().cloned().unwrap_or(1.0);
-        self.node_name.draw_text_walk(cx, name);
-        self.node.end_quad(cx);
-        self.logic.set_node_area(node_id, self.node.area());
+        self.file_node_name.color = self.file_node_name_color_folder;
+        self.file_node_name.font_scale = self.stack.last().cloned().unwrap_or(1.0);
+        self.file_node_name.draw_text_walk(cx, name);
+        self.file_node.end_quad(cx);
+        self.logic.set_node_area(file_node_id.0, self.file_node.area());
         cx.turtle_new_line();
         self.stack.push(scale * info.is_expanded_fraction);
         if info.is_fully_collapsed() {
@@ -131,32 +131,32 @@ impl FileTree {
         self.logic.end_node();
     }
 
-    pub fn file(&mut self, cx: &mut Cx, node_id: Id<Node>, name: &str) {
-        let info = self.logic.begin_node(node_id);
+    pub fn file(&mut self, cx: &mut Cx, file_node_id: FileNodeId, name: &str) {
+        let info = self.logic.begin_node(file_node_id.0);
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let count = self.count;
         self.count += 1;
-        self.node.color = self.node_color(count, info.is_hovered, info.is_selected);
-        self.node.begin_quad(cx, self.node_layout(scale));
+        self.file_node.color = self.file_node_color(count, info.is_hovered, info.is_selected);
+        self.file_node.begin_quad(cx, self.file_node_layout(scale));
         cx.walk_turtle(self.indent_walk(self.stack.len()));
         cx.turtle_align_y();
-        self.node_name.color = self.node_name_color_file;
-        self.node_name.font_scale = scale;
-        self.node_name.draw_text_walk(cx, name);
-        self.node.end_quad(cx);
-        self.logic.set_node_area(node_id, self.node.area());
+        self.file_node_name.color = self.file_node_name_color_file;
+        self.file_node_name.font_scale = scale;
+        self.file_node_name.draw_text_walk(cx, name);
+        self.file_node.end_quad(cx);
+        self.logic.set_node_area(file_node_id.0, self.file_node.area());
         cx.turtle_new_line();
         self.logic.end_node();
     }
 
     fn apply_style(&mut self, cx: &mut Cx) {
-        self.node_height = live_float!(cx, self::node_height);
-        self.node_color_even = live_vec4!(cx, self::node_color_even);
-        self.node_color_odd = live_vec4!(cx, self::node_color_odd);
-        self.node_color_selected = live_vec4!(cx, self::node_color_selected);
-        self.node_color_hovered_even = live_vec4!(cx, self::node_color_hovered_even);
-        self.node_color_hovered_odd = live_vec4!(cx, self::node_color_hovered_odd);
-        self.node_color_hovered_selected = live_vec4!(cx, self::node_color_hovered_selected);
+        self.file_node_height = live_float!(cx, self::file_node_height);
+        self.file_node_color_even = live_vec4!(cx, self::file_node_color_even);
+        self.file_node_color_odd = live_vec4!(cx, self::file_node_color_odd);
+        self.file_node_color_selected = live_vec4!(cx, self::file_node_color_selected);
+        self.file_node_color_hovered_even = live_vec4!(cx, self::file_node_color_hovered_even);
+        self.file_node_color_hovered_odd = live_vec4!(cx, self::file_node_color_hovered_odd);
+        self.file_node_color_hovered_selected = live_vec4!(cx, self::file_node_color_hovered_selected);
         self.indent_width = live_float!(cx, self::indent_width);
         self.folder_icon_walk = Walk {
             width: Width::Fix(live_float!(cx, self::folder_icon_width)),
@@ -169,36 +169,36 @@ impl FileTree {
             },
         };
         self.folder_icon.color = live_vec4!(cx, self::folder_icon_color);
-        self.node_name.text_style = live_text_style!(cx, self::node_name_text_style);
-        self.node_name_color_folder = live_vec4!(cx, self::node_name_color_folder);
-        self.node_name_color_file = live_vec4!(cx, self::node_name_color_file);
+        self.file_node_name.text_style = live_text_style!(cx, self::file_node_name_text_style);
+        self.file_node_name_color_folder = live_vec4!(cx, self::file_node_name_color_folder);
+        self.file_node_name_color_file = live_vec4!(cx, self::file_node_name_color_file);
     }
 
-    fn node_color(&self, count: usize, is_hovered: bool, is_selected: bool) -> Vec4 {
+    fn file_node_color(&self, count: usize, is_hovered: bool, is_selected: bool) -> Vec4 {
         if is_hovered {
             if is_selected {
-                self.node_color_hovered_selected
+                self.file_node_color_hovered_selected
             } else if count % 2 == 0 {
-                self.node_color_hovered_even
+                self.file_node_color_hovered_even
             } else {
-                self.node_color_hovered_odd
+                self.file_node_color_hovered_odd
             }
         } else {
             if is_selected {
-                self.node_color_selected
+                self.file_node_color_selected
             } else if count % 2 == 0 {
-                self.node_color_even
+                self.file_node_color_even
             } else {
-                self.node_color_odd
+                self.file_node_color_odd
             }
         }
     }
 
-    fn node_layout(&self, scale: f32) -> Layout {
+    fn file_node_layout(&self, scale: f32) -> Layout {
         Layout {
             walk: Walk {
                 width: Width::Fill,
-                height: Height::Fix(scale * self.node_height),
+                height: Height::Fix(scale * self.file_node_height),
                 ..Walk::default()
             },
             align: Align { fx: 0.0, fy: 0.5 },
@@ -229,47 +229,47 @@ impl FileTree {
         self.logic.forget();
     }
 
-    pub fn node_is_expanded(&mut self, node_id: Id<Node>) -> bool {
-        self.logic.node_is_expanded(node_id)
+    pub fn file_node_is_expanded(&mut self, file_node_id: FileNodeId) -> bool {
+        self.logic.node_is_expanded(file_node_id.0)
     }
 
-    pub fn set_node_is_expanded(
+    pub fn set_file_node_is_expanded(
         &mut self,
         cx: &mut Cx,
-        node_id: Id<Node>,
+        file_node_id: FileNodeId,
         is_open: bool,
         should_animate: bool,
     ) {
         if self
             .logic
-            .set_node_is_expanded(cx, node_id, is_open, should_animate)
+            .set_node_is_expanded(cx, file_node_id.0, is_open, should_animate)
         {
             self.view.redraw_view(cx);
         }
     }
 
-    pub fn toggle_node_is_expanded(
+    pub fn toggle_file_node_is_expanded(
         &mut self,
         cx: &mut Cx,
-        node_id: Id<Node>,
+        file_node_id: FileNodeId,
         should_animate: bool,
     ) {
         if self
             .logic
-            .toggle_node_is_expanded(cx, node_id, should_animate)
+            .toggle_node_is_expanded(cx, file_node_id.0, should_animate)
         {
             self.view.redraw_view(cx);
         }
     }
 
-    pub fn set_hovered_node_id(&mut self, cx: &mut Cx, node_id: Option<Id<Node>>) {
-        if self.logic.set_hovered_node_id(node_id) {
+    pub fn set_hovered_file_node_id(&mut self, cx: &mut Cx, file_node_id: Option<FileNodeId>) {
+        if self.logic.set_hovered_node_id(file_node_id.map(|file_node_id| file_node_id.0)) {
             self.view.redraw_view(cx);
         }
     }
 
-    pub fn set_selected_node_id(&mut self, cx: &mut Cx, node_id: Id<Node>) {
-        if self.logic.set_selected_node_id(node_id) {
+    pub fn set_selected_file_node_id(&mut self, cx: &mut Cx, file_node_id: FileNodeId) {
+        if self.logic.set_selected_node_id(file_node_id.0) {
             self.view.redraw_view(cx);
         }
     }
@@ -296,21 +296,32 @@ impl FileTree {
                     self.redraw(cx);
                 }
                 tree_logic::Action::NodeWasPressed(node_id) => {
-                    self.toggle_node_is_expanded(cx, node_id, true);
-                    self.set_selected_node_id(cx, node_id);
-                    dispatch_action(cx, Action::NodeWasPressed(node_id));
+                    let file_node_id = FileNodeId(node_id);
+                    self.toggle_file_node_is_expanded(cx, file_node_id, true);
+                    self.set_selected_file_node_id(cx, file_node_id);
+                    dispatch_action(cx, Action::NodeWasPressed(file_node_id));
                 }
                 tree_logic::Action::NodeWasEntered(node_id) => {
-                    self.set_hovered_node_id(cx, Some(node_id));
+                    let file_node_id = FileNodeId(node_id);
+                    self.set_hovered_file_node_id(cx, Some(file_node_id));
                 }
                 tree_logic::Action::NodeWasLeft(_) => {
-                    self.set_hovered_node_id(cx, None);
+                    self.set_hovered_file_node_id(cx, None);
                 }
             }
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FileNodeId(pub NodeId);
+
+impl AsRef<Id> for FileNodeId {
+    fn as_ref(&self) -> &Id {
+        self.0.as_ref()
+    }
+}
+
 pub enum Action {
-    NodeWasPressed(Id<Node>),
+    NodeWasPressed(FileNodeId),
 }
