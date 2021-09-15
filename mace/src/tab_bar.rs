@@ -108,8 +108,8 @@ impl TabBar {
                 tab::Action::WasPressed => {
                     dispatch_action(cx, Action::TabWasPressed(*tab_id));
                 }
-                tab::Action::CloseButtonWasPressed => {
-                    dispatch_action(cx, Action::TabCloseButtonWasPressed(*tab_id));
+                tab::Action::ButtonWasPressed => {
+                    dispatch_action(cx, Action::TabButtonWasPressed(*tab_id));
                 }
             });
         }
@@ -120,7 +120,7 @@ pub type TabId = Id;
 
 pub enum Action {
     TabWasPressed(TabId),
-    TabCloseButtonWasPressed(TabId),
+    TabButtonWasPressed(TabId),
 }
 
 #[derive(Clone, DrawQuad)]
