@@ -9,7 +9,7 @@ use {
         splitter::Splitter,
         tab,
         tab_bar::TabId,
-        tab_close_button::TabCloseButton,
+        tab_button::TabButton,
         tree_logic::NodeId,
     },
     makepad_render::*,
@@ -42,7 +42,7 @@ impl App {
         FileTree::style(cx);
         Splitter::style(cx);
         tab::Tab::style(cx);
-        TabCloseButton::style(cx);
+        TabButton::style(cx);
     }
 
     pub fn new(cx: &mut Cx) -> App {
@@ -259,7 +259,7 @@ impl AppInner {
                         _ => {}
                     }
                 }
-                dock::Action::TabCloseButtonWasPressed(tab_id) => {
+                dock::Action::TabButtonWasPressed(tab_id) => {
                     let tab = &state.tabs[tab_id];
                     match tab.kind {
                         TabKind::CodeEditor { session_id } => {

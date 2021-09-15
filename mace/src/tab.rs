@@ -1,12 +1,12 @@
 use {
-    crate::tab_close_button::{self, TabCloseButton},
+    crate::tab_button::{self, TabButton},
     makepad_render::*,
 };
 
 pub struct Tab {
     is_selected: bool,
     tab: DrawTab,
-    close_button: TabCloseButton,
+    close_button: TabButton,
     height: f32,
     color: Vec4,
     color_selected: Vec4,
@@ -53,7 +53,7 @@ impl Tab {
         Tab {
             is_selected: false,
             tab: DrawTab::new(cx, default_shader!()),
-            close_button: TabCloseButton::new(cx),
+            close_button: TabButton::new(cx),
             height: 0.0,
             color: Vec4::default(),
             color_selected: Vec4::default(),
@@ -135,8 +135,8 @@ impl Tab {
     ) {
         self.close_button
             .handle_event(cx, event, &mut |cx, action| match action {
-                tab_close_button::Action::WasPressed => {
-                    dispatch_action(cx, Action::CloseButtonWasPressed)
+                tab_button::Action::WasPressed => {
+                    dispatch_action(cx, Action::ButtonWasPressed)
                 }
             });
         match event.hits(cx, self.tab.area(), HitOpt::default()) {
@@ -159,5 +159,5 @@ struct DrawTab {
 
 pub enum Action {
     WasPressed,
-    CloseButtonWasPressed,
+    ButtonWasPressed,
 }

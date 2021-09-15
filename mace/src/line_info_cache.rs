@@ -88,16 +88,16 @@ impl LineInfoCache {
 
         let mut leading_whitespace_above = 0;
         for line_info in self.line_infos.iter_mut() {
-            if line_info.contains_non_whitespace() {
-                leading_whitespace_above = line_info.leading_whitespace();
+            if let Some(non_whitespace_start) = line_info.non_whitespace_start() {
+                leading_whitespace_above = non_whitespace_start;
             }
             line_info.leading_whitespace_above = Some(leading_whitespace_above);
         }
 
         let mut leading_whitespace_below = 0;
         for line_info in self.line_infos.iter_mut().rev() {
-            if line_info.contains_non_whitespace() {
-                leading_whitespace_below = line_info.leading_whitespace();
+            if let Some(non_whitespace_start) = line_info.non_whitespace_start() {
+                leading_whitespace_below = non_whitespace_start
             }
             line_info.leading_whitespace_below = Some(leading_whitespace_below);
         }
@@ -121,14 +121,6 @@ impl LineInfo {
         self.non_whitespace_start.unwrap()
     }
 
-    fn contains_non_whitespace(&self) -> bool {
-        self.non_whitespace_start().is_some()
-    }
-
-    fn leading_whitespace(&self) -> usize {
-        self.non_whitespace_start().unwrap_or(0)
-    }
-
     fn leading_whitespace_above(&self) -> usize {
         self.leading_whitespace_above.unwrap()
     }
@@ -138,8 +130,7 @@ impl LineInfo {
     }
 
     pub fn virtual_leading_whitespace(&self) -> usize {
-        self.leading_whitespace_above()
-            .min(self.leading_whitespace_below())
+        self.leading_whitespace_above().min(self.leading_whitespace_below())
     }
 }
 
