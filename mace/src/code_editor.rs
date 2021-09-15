@@ -3,13 +3,13 @@ use {
         cursor_set::CursorSet,
         delta::{self, Delta, Whose},
         generational::{Arena, Id, IdAllocator},
-        line_info_cache::{LineInfo, LineInfoCache},
         position::Position,
         position_set::PositionSet,
         protocol::{Notification, Request, Response},
         range_set::{RangeSet, Span},
         size::Size,
         text::Text,
+        token_cache::{TokenCache, TokensByLine},
         token::{Delimiter, Keyword, TokenKind},
     },
     makepad_render::*,
@@ -25,7 +25,6 @@ pub struct CodeEditor {
     view_id_allocator: IdAllocator,
     views: Arena<View>,
     selection: DrawColor,
-    indent_guide: DrawIndentGuide,
     text: DrawText,
     text_glyph_size: Vec2,
     text_color_comment: Vec4,
@@ -45,22 +44,7 @@ pub struct CodeEditor {
 
 impl CodeEditor {
     pub fn style(cx: &mut Cx) {
-        DrawIndentGuide::register_draw_input(cx);
-
         live_body!(cx, {
-            self::indent_guide_shader: Shader {
-                use makepad_render::drawcolor::shader::*;
-
-                draw_input: self::DrawIndentGuide;
-
-                fn pixel() -> vec4 {
-                    let df = Df::viewport(pos * rect_size);
-                    df.move_to(0.0, 0.0);
-                    df.line_to(0.0, rect_size.y);
-                    return df.stroke(color, 1.0);
-                }
-            }
-
             self::selection_color: #294e75;
             self::text_text_style: TextStyle {
                 ..makepad_widget::widgetstyle::text_style_fixed
@@ -86,7 +70,6 @@ impl CodeEditor {
             view_id_allocator: IdAllocator::new(),
             views: Arena::new(),
             selection: DrawColor::new(cx, default_shader!()).with_draw_depth(1.0),
-            indent_guide: DrawIndentGuide::new(cx, default_shader!()).with_draw_depth(2.0),
             text: DrawText::new(cx, default_shader!()).with_draw_depth(3.0),
             text_glyph_size: Vec2::default(),
             text_color_comment: Vec4::default(),
@@ -114,11 +97,10 @@ impl CodeEditor {
                 self.apply_style(cx);
                 let visible_lines = self.visible_lines(cx, view_id, document.text.as_lines().len());
                 self.draw_selections(cx, &session.selections, &document.text, visible_lines);
-                self.draw_indent_guides(cx, document.line_info_cache.line_infos(), visible_lines);
                 self.draw_text(
                     cx,
                     &document.text,
-                    document.line_info_cache.line_infos(),
+                    document.token_cache.tokens_by_line(),
                     visible_lines,
                 );
                 self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
@@ -254,54 +236,26 @@ impl CodeEditor {
         self.selection.end_many(cx);
     }
 
-    fn draw_indent_guides(
-        &mut self,
-        cx: &mut Cx,
-        line_infos: &[LineInfo],
-        visible_lines: VisibleLines,
-    ) {
-        let origin = cx.get_turtle_pos();
-        let mut start_y = visible_lines.start_y;
-        for line_info in &line_infos[visible_lines.start..visible_lines.end] {
-            let indent_count = (line_info.virtual_leading_whitespace() + 3) / 4; // TODO
-            for indent in 0..indent_count {
-                let indent_guide_column = indent * 4;
-                self.indent_guide.base.color = self.text_color_unknown; // TODO
-                self.indent_guide.draw_quad_abs(
-                    cx,
-                    Rect {
-                        pos: Vec2 {
-                            x: origin.x + indent_guide_column as f32 * self.text_glyph_size.x,
-                            y: start_y,
-                        },
-                        size: self.text_glyph_size,
-                    },
-                );
-            }
-            start_y += self.text_glyph_size.y;
-        }
-    }
-
     fn draw_text(
         &mut self,
         cx: &mut Cx,
         text: &Text,
-        line_infos: &[LineInfo],
+        tokens_by_line: TokensByLine<'_>,
         visible_lines: VisibleLines,
     ) {
         let origin = cx.get_turtle_pos();
         let mut start_y = visible_lines.start_y;
-        for (line, line_info) in text
+        for (line, tokens) in text
             .as_lines()
             .iter()
-            .zip(line_infos)
+            .zip(tokens_by_line)
             .skip(visible_lines.start)
             .take(visible_lines.end - visible_lines.start)
         {
             let end_y = start_y + self.text_glyph_size.y;
             let mut start_x = origin.x;
             let mut start = 0;
-            let mut token_iter = line_info.tokens().iter().peekable();
+            let mut token_iter = tokens.iter().peekable();
             while let Some(token) = token_iter.next() {
                 let next_token = token_iter.peek();
                 let end_x = start_x + token.len as f32 * self.text_glyph_size.x;
@@ -705,13 +659,6 @@ struct View {
     session_id: Option<SessionId>,
 }
 
-#[derive(Clone, DrawQuad)]
-#[repr(C)]
-pub struct DrawIndentGuide {
-    #[default_shader(self::indent_guide_shader)]
-    base: DrawColor,
-}
-
 #[derive(Default)]
 pub struct State {
     session_id_allocator: IdAllocator,
@@ -769,7 +716,7 @@ impl State {
 
     fn create_document(&mut self, path: PathBuf, revision: usize, text: Text) -> DocumentId {
         let document_id = self.document_id_allocator.allocate();
-        let line_info_cache = LineInfoCache::new(&text);
+        let token_cache = TokenCache::new(&text);
         self.documents.insert(
             document_id,
             Document {
@@ -779,7 +726,7 @@ impl State {
                 path: path.clone(),
                 revision,
                 text,
-                line_info_cache,
+                token_cache,
                 outstanding_deltas: VecDeque::new(),
             },
         );
@@ -1053,15 +1000,15 @@ struct Document {
     path: PathBuf,
     revision: usize,
     text: Text,
-    line_info_cache: LineInfoCache,
+    token_cache: TokenCache,
     outstanding_deltas: VecDeque<Delta>,
 }
 
 impl Document {
     fn apply_delta(&mut self, delta: Delta) {
-        self.line_info_cache.invalidate(&delta);
+        self.token_cache.invalidate(&delta);
         self.text.apply_delta(delta);
-        self.line_info_cache.refresh(&self.text);
+        self.token_cache.refresh(&self.text);
     }
 
     fn schedule_apply_delta_request(
