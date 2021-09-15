@@ -2,7 +2,7 @@ use {
     crate::{
         cursor_set::CursorSet,
         delta::{self, Delta, Whose},
-        generational::{Arena, Id, IdAllocator},
+        id::{Id, IdAllocator, IdMap},
         position::Position,
         position_set::PositionSet,
         protocol::{Notification, Request, Response},
@@ -22,8 +22,8 @@ use {
 };
 
 pub struct CodeEditor {
-    view_id_allocator: IdAllocator<View>,
-    views: Arena<View>,
+    view_id_allocator: IdAllocator,
+    views_by_view_id: IdMap<ViewId, View>,
     selection: DrawColor,
     text: DrawText,
     text_glyph_size: Vec2,
@@ -68,7 +68,7 @@ impl CodeEditor {
     pub fn new(cx: &mut Cx) -> CodeEditor {
         CodeEditor {
             view_id_allocator: IdAllocator::new(),
-            views: Arena::new(),
+            views_by_view_id: IdMap::new(),
             selection: DrawColor::new(cx, default_shader!()).with_draw_depth(1.0),
             text: DrawText::new(cx, default_shader!()).with_draw_depth(3.0),
             text_glyph_size: Vec2::default(),
@@ -89,11 +89,11 @@ impl CodeEditor {
     }
 
     pub fn draw(&mut self, cx: &mut Cx, state: &State, view_id: ViewId) {
-        let view = &mut self.views[view_id];
+        let view = &mut self.views_by_view_id[view_id];
         if view.view.begin_view(cx, Layout::default()).is_ok() {
             if let Some(session_id) = view.session_id {
-                let session = &state.sessions[session_id];
-                let document = &state.documents[session.document_id];
+                let session = &state.sessions_by_session_id[session_id];
+                let document = &state.documents_by_document_id[session.document_id];
                 self.apply_style(cx);
                 let visible_lines = self.visible_lines(cx, view_id, document.text.as_lines().len());
                 self.draw_selections(cx, &session.selections, &document.text, visible_lines);
@@ -106,7 +106,7 @@ impl CodeEditor {
                 self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
                 self.set_turtle_bounds(cx, &document.text);
             }
-            let view = &mut self.views[view_id];
+            let view = &mut self.views_by_view_id[view_id];
             view.view.end_view(cx);
         }
     }
@@ -135,7 +135,7 @@ impl CodeEditor {
             pos: origin,
             size: viewport_size,
         } = cx.get_turtle_rect();
-        let view = &self.views[view_id];
+        let view = &self.views_by_view_id[view_id];
         let viewport_start = view.view.get_scroll_pos(cx);
         let viewport_end = viewport_start + viewport_size;
         let mut start_y = 0.0;
@@ -368,8 +368,8 @@ impl CodeEditor {
         state: &mut State,
         session_id: Option<SessionId>,
     ) -> ViewId {
-        let view_id = self.view_id_allocator.allocate();
-        self.views.insert(
+        let view_id = ViewId(self.view_id_allocator.allocate());
+        self.views_by_view_id.insert(
             view_id,
             View {
                 view: ScrollView::new_standard_hv(cx),
@@ -377,14 +377,14 @@ impl CodeEditor {
             },
         );
         if let Some(session_id) = session_id {
-            let session = &mut state.sessions[session_id];
+            let session = &mut state.sessions_by_session_id[session_id];
             session.view_id = Some(view_id);
         }
         view_id
     }
 
     pub fn view_session_id(&self, view_id: ViewId) -> Option<SessionId> {
-        let view = &self.views[view_id];
+        let view = &self.views_by_view_id[view_id];
         view.session_id
     }
 
@@ -395,30 +395,30 @@ impl CodeEditor {
         view_id: ViewId,
         session_id: Option<SessionId>,
     ) {
-        let view = &mut self.views[view_id];
+        let view = &mut self.views_by_view_id[view_id];
         if let Some(session_id) = view.session_id {
-            let session = &mut state.sessions[session_id];
+            let session = &mut state.sessions_by_session_id[session_id];
             session.view_id = None;
         }
         view.session_id = session_id;
         if let Some(session_id) = view.session_id {
-            let session = &mut state.sessions[session_id];
+            let session = &mut state.sessions_by_session_id[session_id];
             session.view_id = Some(view_id);
             view.view.redraw_view(cx);
         }
     }
 
     pub fn redraw_view(&mut self, cx: &mut Cx, view_id: ViewId) {
-        let view = &mut self.views[view_id];
+        let view = &mut self.views_by_view_id[view_id];
         view.view.redraw_view(cx);
     }
 
     pub fn redraw_document_views(&mut self, cx: &mut Cx, state: &State, document_id: DocumentId) {
-        let document = &state.documents[document_id];
+        let document = &state.documents_by_document_id[document_id];
         for session_id in &document.session_ids {
-            let session = &state.sessions[*session_id];
+            let session = &state.sessions_by_session_id[*session_id];
             if let Some(view_id) = session.view_id {
-                let view = &mut self.views[view_id];
+                let view = &mut self.views_by_view_id[view_id];
                 view.view.redraw_view(cx);
             }
         }
@@ -432,20 +432,20 @@ impl CodeEditor {
         event: &mut Event,
         send_request: &mut dyn FnMut(Request),
     ) {
-        let view = &mut self.views[view_id];
+        let view = &mut self.views_by_view_id[view_id];
         if view.view.handle_scroll_view(cx, event) {
             view.view.redraw_view(cx);
         }
-        let view = &self.views[view_id];
+        let view = &self.views_by_view_id[view_id];
         match event.hits(cx, view.view.area(), HitOpt::default()) {
             Event::FingerDown(FingerDownEvent { rel, modifiers, .. }) => {
                 // TODO: How to handle key focus?
                 cx.set_key_focus(view.view.area());
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
-                let view = &self.views[view_id];
+                let view = &self.views_by_view_id[view_id];
                 if let Some(session_id) = view.session_id {
-                    let session = &state.sessions[session_id];
-                    let document = &state.documents[session.document_id];
+                    let session = &state.sessions_by_session_id[session_id];
+                    let document = &state.documents_by_document_id[session.document_id];
                     let position = self.position(&document.text, rel);
                     match modifiers {
                         KeyModifiers { control: true, .. } => {
@@ -455,18 +455,18 @@ impl CodeEditor {
                             state.move_cursors_to(session_id, position, shift);
                         }
                     }
-                    let view = &mut self.views[view_id];
+                    let view = &mut self.views_by_view_id[view_id];
                     view.view.redraw_view(cx);
                 }
             }
             Event::FingerMove(FingerMoveEvent { rel, .. }) => {
-                let view = &self.views[view_id];
+                let view = &self.views_by_view_id[view_id];
                 if let Some(session_id) = view.session_id {
-                    let session = &state.sessions[session_id];
-                    let document = &state.documents[session.document_id];
+                    let session = &state.sessions_by_session_id[session_id];
+                    let document = &state.documents_by_document_id[session.document_id];
                     let position = self.position(&document.text, rel);
                     state.move_cursors_to(session_id, position, true);
-                    let view = &mut self.views[view_id];
+                    let view = &mut self.views_by_view_id[view_id];
                     view.view.redraw_view(cx);
                 }
             }
@@ -475,10 +475,10 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                let view = &self.views[view_id];
+                let view = &self.views_by_view_id[view_id];
                 if let Some(session_id) = view.session_id {
                     state.move_cursors_left(session_id, shift);
-                    let view = &mut self.views[view_id];
+                    let view = &mut self.views_by_view_id[view_id];
                     view.view.redraw_view(cx);
                 }
             }
@@ -487,10 +487,10 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                let view = &self.views[view_id];
+                let view = &self.views_by_view_id[view_id];
                 if let Some(session_id) = view.session_id {
                     state.move_cursors_right(session_id, shift);
-                    let view = &mut self.views[view_id];
+                    let view = &mut self.views_by_view_id[view_id];
                     view.view.redraw_view(cx);
                 }
             }
@@ -499,10 +499,10 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                let view = &self.views[view_id];
+                let view = &self.views_by_view_id[view_id];
                 if let Some(session_id) = view.session_id {
                     state.move_cursors_up(session_id, shift);
-                    let view = &mut self.views[view_id];
+                    let view = &mut self.views_by_view_id[view_id];
                     view.view.redraw_view(cx);
                 }
             }
@@ -511,10 +511,10 @@ impl CodeEditor {
                 modifiers: KeyModifiers { shift, .. },
                 ..
             }) => {
-                let view = &self.views[view_id];
+                let view = &self.views_by_view_id[view_id];
                 if let Some(session_id) = view.session_id {
                     state.move_cursors_down(session_id, shift);
-                    let view = &mut self.views[view_id];
+                    let view = &mut self.views_by_view_id[view_id];
                     view.view.redraw_view(cx);
                 }
             }
@@ -522,10 +522,10 @@ impl CodeEditor {
                 key_code: KeyCode::Backspace,
                 ..
             }) => {
-                let view = &self.views[view_id];
+                let view = &self.views_by_view_id[view_id];
                 if let Some(session_id) = view.session_id {
                     state.insert_backspace(session_id, send_request);
-                    let session = &state.sessions[session_id];
+                    let session = &state.sessions_by_session_id[session_id];
                     self.redraw_document_views(cx, state, session.document_id);
                 }
             }
@@ -534,14 +534,14 @@ impl CodeEditor {
                 modifiers,
                 ..
             }) if modifiers.control || modifiers.logo => {
-                let view = &self.views[view_id];
+                let view = &self.views_by_view_id[view_id];
                 if let Some(session_id) = view.session_id {
                     if modifiers.shift {
                         state.redo(session_id, send_request);
                     } else {
                         state.undo(session_id, send_request);
                     }
-                    let session = &state.sessions[session_id];
+                    let session = &state.sessions_by_session_id[session_id];
                     self.redraw_document_views(cx, state, session.document_id);
                 }
             }
@@ -549,15 +549,15 @@ impl CodeEditor {
                 key_code: KeyCode::Return,
                 ..
             }) => {
-                let view = &self.views[view_id];
+                let view = &self.views_by_view_id[view_id];
                 if let Some(session_id) = view.session_id {
                     state.insert_text(session_id, Text::from(vec![vec![], vec![]]), send_request);
-                    let session = &state.sessions[session_id];
+                    let session = &state.sessions_by_session_id[session_id];
                     self.redraw_document_views(cx, state, session.document_id);
                 }
             }
             Event::TextInput(TextInputEvent { input, .. }) => {
-                let view = &self.views[view_id];
+                let view = &self.views_by_view_id[view_id];
                 if let Some(session_id) = view.session_id {
                     state.insert_text(
                         session_id,
@@ -568,7 +568,7 @@ impl CodeEditor {
                             .into(),
                         send_request,
                     );
-                    let session = &state.sessions[session_id];
+                    let session = &state.sessions_by_session_id[session_id];
                     self.redraw_document_views(cx, state, session.document_id);
                 }
             }
@@ -590,7 +590,7 @@ impl CodeEditor {
 
                     let document_id = state.document_ids_by_path[&path];
 
-                    let document = &mut state.documents[document_id];
+                    let document = &mut state.documents_by_document_id[document_id];
                     document.outstanding_deltas.pop_front();
                     document.revision += 1;
                     if let Some(outstanding_delta) = document.outstanding_deltas.front() {
@@ -617,7 +617,7 @@ impl CodeEditor {
             Notification::DeltaWasApplied(path, delta) => {
                 let document_id = state.document_ids_by_path[&path];
 
-                let document = &mut state.documents[document_id];
+                let document = &mut state.documents_by_document_id[document_id];
                 let mut delta = delta;
                 for outstanding_delta_ref in &mut document.outstanding_deltas {
                     let outstanding_delta = mem::replace(outstanding_delta_ref, Delta::identity());
@@ -629,13 +629,13 @@ impl CodeEditor {
                 transform_edit_stack(&mut document.undo_stack, delta.clone());
                 transform_edit_stack(&mut document.redo_stack, delta.clone());
 
-                let document = &state.documents[document_id];
+                let document = &state.documents_by_document_id[document_id];
                 for session_id in document.session_ids.iter().cloned() {
-                    let session = &mut state.sessions[session_id];
+                    let session = &mut state.sessions_by_session_id[session_id];
                     session.apply_delta(&delta, Whose::Theirs);
                 }
 
-                let document = &mut state.documents[document_id];
+                let document = &mut state.documents_by_document_id[document_id];
                 document.revision += 1;
                 document.apply_delta(delta);
 
@@ -654,7 +654,14 @@ impl CodeEditor {
     }
 }
 
-pub type ViewId = Id<View>;
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ViewId(pub Id);
+
+impl AsRef<Id> for ViewId {
+    fn as_ref(&self) -> &Id {
+        &self.0
+    }
+}
 
 pub struct View {
     view: ScrollView,
@@ -663,10 +670,10 @@ pub struct View {
 
 #[derive(Default)]
 pub struct State {
-    session_id_allocator: IdAllocator<Session>,
-    sessions: Arena<Session>,
-    document_id_allocator: IdAllocator<Document>,
-    documents: Arena<Document>,
+    session_id_allocator: IdAllocator,
+    sessions_by_session_id: IdMap<SessionId, Session>,
+    document_id_allocator: IdAllocator,
+    documents_by_document_id: IdMap<DocumentId, Document>,
     document_ids_by_path: HashMap<PathBuf, DocumentId>,
 }
 
@@ -686,7 +693,7 @@ impl State {
     }
 
     pub fn create_session(&mut self, document_id: DocumentId) -> SessionId {
-        let session_id = self.session_id_allocator.allocate();
+        let session_id = SessionId(self.session_id_allocator.allocate());
         let session = Session {
             view_id: None,
             cursors: CursorSet::new(),
@@ -694,8 +701,8 @@ impl State {
             carets: PositionSet::new(),
             document_id,
         };
-        self.sessions.insert(session_id, session);
-        let document = &mut self.documents[document_id];
+        self.sessions_by_session_id.insert(session_id, session);
+        let document = &mut self.documents_by_document_id[document_id];
         document.session_ids.insert(session_id);
         session_id
     }
@@ -705,21 +712,21 @@ impl State {
         session_id: SessionId,
         send_request: &mut dyn FnMut(Request),
     ) {
-        let session = &self.sessions[session_id];
+        let session = &self.sessions_by_session_id[session_id];
         let document_id = session.document_id;
-        let document = &mut self.documents[document_id];
+        let document = &mut self.documents_by_document_id[document_id];
         document.session_ids.remove(&session_id);
         if document.session_ids.is_empty() {
             self.destroy_document(document_id, send_request);
         }
-        self.sessions.remove(session_id);
-        self.session_id_allocator.deallocate(session_id);
+        self.sessions_by_session_id.remove(session_id);
+        self.session_id_allocator.deallocate(session_id.0);
     }
 
     fn create_document(&mut self, path: PathBuf, revision: usize, text: Text) -> DocumentId {
-        let document_id = self.document_id_allocator.allocate();
+        let document_id = DocumentId(self.document_id_allocator.allocate());
         let token_cache = TokenCache::new(&text);
-        self.documents.insert(
+        self.documents_by_document_id.insert(
             document_id,
             Document {
                 session_ids: HashSet::new(),
@@ -737,11 +744,11 @@ impl State {
     }
 
     fn destroy_document(&mut self, document_id: DocumentId, send_request: &mut dyn FnMut(Request)) {
-        let document = &self.documents[document_id];
+        let document = &self.documents_by_document_id[document_id];
         send_request(Request::CloseFile(document.path.clone()));
         self.document_ids_by_path.remove(&document.path);
-        self.documents.remove(document_id);
-        self.document_id_allocator.deallocate(document_id);
+        self.documents_by_document_id.remove(document_id);
+        self.document_id_allocator.deallocate(document_id.0);
     }
 
     pub fn document_id_by_path(&self, path: &Path) -> Option<DocumentId> {
@@ -749,41 +756,41 @@ impl State {
     }
 
     fn add_cursor(&mut self, session_id: SessionId, position: Position) {
-        let session = &mut self.sessions[session_id];
+        let session = &mut self.sessions_by_session_id[session_id];
         session.cursors.add(position);
         session.update_selections_and_carets();
     }
 
     fn move_cursors_left(&mut self, session_id: SessionId, select: bool) {
-        let session = &mut self.sessions[session_id];
-        let document = &self.documents[session.document_id];
+        let session = &mut self.sessions_by_session_id[session_id];
+        let document = &self.documents_by_document_id[session.document_id];
         session.cursors.move_left(&document.text, select);
         session.update_selections_and_carets();
     }
 
     fn move_cursors_right(&mut self, session_id: SessionId, select: bool) {
-        let session = &mut self.sessions[session_id];
-        let document = &self.documents[session.document_id];
+        let session = &mut self.sessions_by_session_id[session_id];
+        let document = &self.documents_by_document_id[session.document_id];
         session.cursors.move_right(&document.text, select);
         session.update_selections_and_carets();
     }
 
     fn move_cursors_up(&mut self, session_id: SessionId, select: bool) {
-        let session = &mut self.sessions[session_id];
-        let document = &self.documents[session.document_id];
+        let session = &mut self.sessions_by_session_id[session_id];
+        let document = &self.documents_by_document_id[session.document_id];
         session.cursors.move_up(&document.text, select);
         session.update_selections_and_carets();
     }
 
     fn move_cursors_down(&mut self, session_id: SessionId, select: bool) {
-        let session = &mut self.sessions[session_id];
-        let document = &self.documents[session.document_id];
+        let session = &mut self.sessions_by_session_id[session_id];
+        let document = &self.documents_by_document_id[session.document_id];
         session.cursors.move_down(&document.text, select);
         session.update_selections_and_carets();
     }
 
     fn move_cursors_to(&mut self, session_id: SessionId, position: Position, select: bool) {
-        let session = &mut self.sessions[session_id];
+        let session = &mut self.sessions_by_session_id[session_id];
         session.cursors.move_to(position, select);
         session.update_selections_and_carets();
     }
@@ -794,7 +801,7 @@ impl State {
         text: Text,
         send_request: &mut dyn FnMut(Request),
     ) {
-        let session = &self.sessions[session_id];
+        let session = &self.sessions_by_session_id[session_id];
 
         let mut builder_0 = delta::Builder::new();
         for span in session.selections.spans() {
@@ -826,8 +833,8 @@ impl State {
     }
 
     fn insert_backspace(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(Request)) {
-        let session = &self.sessions[session_id];
-        let document = &self.documents[session.document_id];
+        let session = &self.sessions_by_session_id[session_id];
+        let document = &self.documents_by_document_id[session.document_id];
 
         let mut builder_0 = delta::Builder::new();
         for span in session.selections.spans() {
@@ -872,66 +879,66 @@ impl State {
     }
 
     fn undo(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(Request)) {
-        let session = &self.sessions[session_id];
-        let document = &mut self.documents[session.document_id];
+        let session = &self.sessions_by_session_id[session_id];
+        let document = &mut self.documents_by_document_id[session.document_id];
         if let Some(undo) = document.undo_stack.pop() {
-            let session = &self.sessions[session_id];
-            let document = &mut self.documents[session.document_id];
+            let session = &self.sessions_by_session_id[session_id];
+            let document = &mut self.documents_by_document_id[session.document_id];
             let inverse_delta = undo.delta.clone().invert(&document.text);
             document.redo_stack.push(Edit {
                 cursors: session.cursors.clone(),
                 delta: inverse_delta,
             });
 
-            let session = &mut self.sessions[session_id];
+            let session = &mut self.sessions_by_session_id[session_id];
             session.cursors = undo.cursors;
             session.update_selections_and_carets();
 
-            let document = &self.documents[session.document_id];
+            let document = &self.documents_by_document_id[session.document_id];
             for other_session_id in document.session_ids.iter().cloned() {
                 if other_session_id == session_id {
                     continue;
                 }
 
-                let other_session = &mut self.sessions[other_session_id];
+                let other_session = &mut self.sessions_by_session_id[other_session_id];
                 other_session.apply_delta(&undo.delta, Whose::Theirs);
             }
 
-            let session = &mut self.sessions[session_id];
-            let document = &mut self.documents[session.document_id];
+            let session = &mut self.sessions_by_session_id[session_id];
+            let document = &mut self.documents_by_document_id[session.document_id];
             document.apply_delta(undo.delta.clone());
             document.schedule_apply_delta_request(undo.delta, send_request);
         }
     }
 
     fn redo(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(Request)) {
-        let session = &self.sessions[session_id];
-        let document = &mut self.documents[session.document_id];
+        let session = &self.sessions_by_session_id[session_id];
+        let document = &mut self.documents_by_document_id[session.document_id];
         if let Some(redo) = document.redo_stack.pop() {
-            let session = &self.sessions[session_id];
-            let document = &mut self.documents[session.document_id];
+            let session = &self.sessions_by_session_id[session_id];
+            let document = &mut self.documents_by_document_id[session.document_id];
             let inverse_delta = redo.delta.clone().invert(&document.text);
             document.undo_stack.push(Edit {
                 cursors: session.cursors.clone(),
                 delta: inverse_delta,
             });
 
-            let session = &mut self.sessions[session_id];
+            let session = &mut self.sessions_by_session_id[session_id];
             session.cursors = redo.cursors;
             session.update_selections_and_carets();
 
-            let document = &self.documents[session.document_id];
+            let document = &self.documents_by_document_id[session.document_id];
             for other_session_id in document.session_ids.iter().cloned() {
                 if other_session_id == session_id {
                     continue;
                 }
 
-                let other_session = &mut self.sessions[other_session_id];
+                let other_session = &mut self.sessions_by_session_id[other_session_id];
                 other_session.apply_delta(&redo.delta, Whose::Theirs);
             }
 
-            let session = &mut self.sessions[session_id];
-            let document = &mut self.documents[session.document_id];
+            let session = &mut self.sessions_by_session_id[session_id];
+            let document = &mut self.documents_by_document_id[session.document_id];
             document.apply_delta(redo.delta.clone());
             document.schedule_apply_delta_request(redo.delta, send_request);
         }
@@ -943,37 +950,44 @@ impl State {
         delta: Delta,
         send_request: &mut dyn FnMut(Request),
     ) {
-        let session = &self.sessions[session_id];
-        let document = &mut self.documents[session.document_id];
+        let session = &self.sessions_by_session_id[session_id];
+        let document = &mut self.documents_by_document_id[session.document_id];
         let inverse_delta = delta.clone().invert(&document.text);
         document.undo_stack.push(Edit {
             cursors: session.cursors.clone(),
             delta: inverse_delta,
         });
 
-        let session = &mut self.sessions[session_id];
+        let session = &mut self.sessions_by_session_id[session_id];
         session.apply_delta(&delta, Whose::Ours);
 
-        let document = &self.documents[session.document_id];
+        let document = &self.documents_by_document_id[session.document_id];
         for other_session_id in document.session_ids.iter().cloned() {
             if other_session_id == session_id {
                 continue;
             }
 
-            let other_session = &mut self.sessions[other_session_id];
+            let other_session = &mut self.sessions_by_session_id[other_session_id];
             other_session.apply_delta(&delta, Whose::Theirs);
         }
 
-        let session = &mut self.sessions[session_id];
-        let document = &mut self.documents[session.document_id];
+        let session = &mut self.sessions_by_session_id[session_id];
+        let document = &mut self.documents_by_document_id[session.document_id];
         document.apply_delta(delta.clone());
         document.schedule_apply_delta_request(delta, send_request);
     }
 }
 
-pub type SessionId = Id<Session>;
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SessionId(pub Id);
 
-pub struct Session {
+impl AsRef<Id> for SessionId {
+    fn as_ref(&self) -> &Id {
+        &self.0
+    }
+}
+
+struct Session {
     view_id: Option<ViewId>,
     cursors: CursorSet,
     selections: RangeSet,
@@ -993,9 +1007,16 @@ impl Session {
     }
 }
 
-pub type DocumentId = Id<Document>;
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DocumentId(pub Id);
 
-pub struct Document {
+impl AsRef<Id> for DocumentId {
+    fn as_ref(&self) -> &Id {
+        &self.0
+    }
+}
+
+struct Document {
     session_ids: HashSet<SessionId>,
     undo_stack: Vec<Edit>,
     redo_stack: Vec<Edit>,

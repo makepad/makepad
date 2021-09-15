@@ -1,6 +1,7 @@
 use {
     super::Id,
     std::{
+        marker::PhantomData,
         mem,
         ops::{Index, IndexMut},
         slice, vec,
@@ -8,46 +9,50 @@ use {
 };
 
 #[derive(Debug)]
-pub struct Arena<T> {
-    entries: Vec<Option<Entry<T>>>,
+pub struct IdMap<K: AsRef<Id>, V> {
+    entries: Vec<Option<Entry<V>>>,
+    phantom: PhantomData<K>,
 }
 
-impl<T> Arena<T> {
-    pub fn new() -> Arena<T> {
-        Arena::default()
+impl<K: AsRef<Id>, V> IdMap<K, V> {
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn contains(&self, id: Id<T>) -> bool {
+    pub fn contains(&self, id: K) -> bool {
         self.get(id).is_some()
     }
 
-    pub fn get(&self, id: Id<T>) -> Option<&T> {
+    pub fn get(&self, id: K) -> Option<&V> {
+        let id = id.as_ref();
         match self.entries.get(id.index) {
             Some(Some(entry)) if entry.generation == id.generation => Some(&entry.value),
             _ => None,
         }
     }
 
-    pub fn iter(&self) -> Iter<'_, T> {
+    pub fn iter(&self) -> Iter<'_, V> {
         Iter {
             iter: self.entries.iter(),
         }
     }
 
-    pub fn get_mut(&mut self, id: Id<T>) -> Option<&mut T> {
+    pub fn get_mut(&mut self, id: K) -> Option<&mut V> {
+        let id = id.as_ref();
         match self.entries.get_mut(id.index) {
             Some(Some(entry)) if entry.generation == id.generation => Some(&mut entry.value),
             _ => None,
         }
     }
 
-    pub fn iter_mut(&mut self) -> IterMut<'_, T> {
+    pub fn iter_mut(&mut self) -> IterMut<'_, V> {
         IterMut {
             iter: self.entries.iter_mut(),
         }
     }
 
-    pub fn insert(&mut self, id: Id<T>, value: T) -> Option<T> {
+    pub fn insert(&mut self, id: K, value: V) -> Option<V> {
+        let id = id.as_ref();
         if self.entries.len() < id.index + 1 {
             self.entries.resize_with(id.index + 1, || None);
         }
@@ -67,10 +72,11 @@ impl<T> Arena<T> {
         }
     }
 
-    pub fn remove(&mut self, index: Id<T>) -> Option<T> {
-        match self.entries.get(index.index) {
-            Some(Some(entry)) if entry.generation == index.generation => {
-                let entry = mem::replace(&mut self.entries[index.index], None).unwrap();
+    pub fn remove(&mut self, id: K) -> Option<V> {
+        let id = id.as_ref();
+        match self.entries.get(id.index) {
+            Some(Some(entry)) if entry.generation == id.generation => {
+                let entry = mem::replace(&mut self.entries[id.index], None).unwrap();
                 Some(entry.value)
             }
             _ => None,
@@ -82,49 +88,50 @@ impl<T> Arena<T> {
     }
 }
 
-impl<T> Default for Arena<T> {
-    fn default() -> Arena<T> {
-        Arena {
+impl<K: AsRef<Id>, V> Default for IdMap<K, V> {
+    fn default() -> Self {
+        Self {
             entries: Vec::default(),
+            phantom: PhantomData,
         }
     }
 }
 
-impl<T> Index<Id<T>> for Arena<T> {
-    type Output = T;
+impl<K: AsRef<Id>, V> Index<K> for IdMap<K, V> {
+    type Output = V;
 
-    fn index(&self, index: Id<T>) -> &Self::Output {
+    fn index(&self, index: K) -> &Self::Output {
         self.get(index).unwrap()
     }
 }
 
-impl<T> IndexMut<Id<T>> for Arena<T> {
-    fn index_mut(&mut self, index: Id<T>) -> &mut Self::Output {
+impl<K: AsRef<Id>, V> IndexMut<K> for IdMap<K, V> {
+    fn index_mut(&mut self, index: K) -> &mut Self::Output {
         self.get_mut(index).unwrap()
     }
 }
 
-impl<'a, T> IntoIterator for &'a Arena<T> {
-    type Item = &'a T;
-    type IntoIter = Iter<'a, T>;
+impl<'a, K: AsRef<Id>, V> IntoIterator for &'a IdMap<K, V> {
+    type Item = &'a V;
+    type IntoIter = Iter<'a, V>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
 
-impl<'a, T> IntoIterator for &'a mut Arena<T> {
-    type Item = &'a mut T;
-    type IntoIter = IterMut<'a, T>;
+impl<'a, K: AsRef<Id>, V> IntoIterator for &'a mut IdMap<K, V> {
+    type Item = &'a mut V;
+    type IntoIter = IterMut<'a, V>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter_mut()
     }
 }
 
-impl<T> IntoIterator for Arena<T> {
-    type Item = T;
-    type IntoIter = IntoIter<T>;
+impl<K: AsRef<Id>, V> IntoIterator for IdMap<K, V> {
+    type Item = V;
+    type IntoIter = IntoIter<V>;
 
     fn into_iter(self) -> Self::IntoIter {
         IntoIter {
