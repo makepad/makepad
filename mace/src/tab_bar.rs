@@ -10,8 +10,8 @@ use {
 pub struct TabBar {
     view: ScrollView,
     tabs: Arena<Tab>,
-    tab_ids: Vec<TabId>,
-    selected_tab_id: Option<TabId>,
+    tab_ids: Vec<Id<Tab>>,
+    selected_tab_id: Option<Id<Tab>>,
     tab_height: f32,
 }
 
@@ -37,7 +37,7 @@ impl TabBar {
         self.view.end_view(cx);
     }
 
-    pub fn tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
+    pub fn tab(&mut self, cx: &mut Cx, tab_id: Id<Tab>, name: &str) {
         let tab = self.get_or_create_tab(cx, tab_id);
         tab.draw(cx, name);
         self.tab_ids.push(tab_id);
@@ -58,22 +58,22 @@ impl TabBar {
         }
     }
 
-    pub fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: TabId) -> &mut Tab {
+    pub fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: Id<Tab>) -> &mut Tab {
         if !self.tabs.contains(tab_id) {
             self.tabs.insert(tab_id, Tab::new(cx));
         }
         &mut self.tabs[tab_id]
     }
 
-    pub fn forget_tab(&mut self, tab_id: TabId) {
+    pub fn forget_tab(&mut self, tab_id: Id<Tab>) {
         self.tabs.remove(tab_id);
     }
 
-    pub fn selected_tab_id(&self) -> Option<TabId> {
+    pub fn selected_tab_id(&self) -> Option<Id<Tab>> {
         self.selected_tab_id
     }
 
-    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, tab_id: Option<TabId>) {
+    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, tab_id: Option<Id<Tab>>) {
         if self.selected_tab_id == tab_id {
             return;
         }
@@ -116,11 +116,9 @@ impl TabBar {
     }
 }
 
-pub type TabId = Id;
-
 pub enum Action {
-    TabWasPressed(TabId),
-    TabButtonWasPressed(TabId),
+    TabWasPressed(Id<Tab>),
+    TabButtonWasPressed(Id<Tab>),
 }
 
 #[derive(Clone, DrawQuad)]

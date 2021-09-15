@@ -2,14 +2,15 @@ use {
     crate::{
         generational::{Arena, Id},
         splitter::{self, Splitter},
-        tab_bar::{self, TabBar, TabId},
+        tab::Tab,
+        tab_bar::{self, TabBar},
     },
     makepad_render::*,
 };
 
 pub struct Dock {
     panels: Arena<Panel>,
-    panel_id_stack: Vec<PanelId>,
+    panel_id_stack: Vec<Id<Panel>>,
 }
 
 impl Dock {
@@ -20,7 +21,7 @@ impl Dock {
         }
     }
 
-    pub fn begin_splitter(&mut self, cx: &mut Cx, panel_id: PanelId) -> Result<(), ()> {
+    pub fn begin_splitter(&mut self, cx: &mut Cx, panel_id: Id<Panel>) -> Result<(), ()> {
         if !self.panels.contains(panel_id) {
             self.panels
                 .insert(panel_id, Panel::Splitter(Splitter::new(cx)));
@@ -43,7 +44,7 @@ impl Dock {
         splitter.end(cx);
     }
 
-    pub fn begin_tab_bar(&mut self, cx: &mut Cx, panel_id: PanelId) -> Result<(), ()> {
+    pub fn begin_tab_bar(&mut self, cx: &mut Cx, panel_id: Id<Panel>) -> Result<(), ()> {
         if !self.panels.contains(panel_id) {
             self.panels.insert(panel_id, Panel::TabBar(TabBar::new(cx)));
         }
@@ -59,13 +60,13 @@ impl Dock {
         tab_bar.end(cx);
     }
 
-    pub fn tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
+    pub fn tab(&mut self, cx: &mut Cx, tab_id: Id<Tab>, name: &str) {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let tab_bar = self.panels[panel_id].as_tab_bar_mut();
         tab_bar.tab(cx, tab_id, name);
     }
 
-    pub fn get_or_create_splitter(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut Splitter {
+    pub fn get_or_create_splitter(&mut self, cx: &mut Cx, panel_id: Id<Panel>) -> &mut Splitter {
         if !self.panels.contains(panel_id) {
             self.panels
                 .insert(panel_id, Panel::Splitter(Splitter::new(cx)));
@@ -73,7 +74,7 @@ impl Dock {
         self.panels[panel_id].as_splitter_mut()
     }
 
-    pub fn get_or_create_tab_bar(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut TabBar {
+    pub fn get_or_create_tab_bar(&mut self, cx: &mut Cx, panel_id: Id<Panel>) -> &mut TabBar {
         if !self.panels.contains(panel_id) {
             self.panels.insert(panel_id, Panel::TabBar(TabBar::new(cx)));
         }
@@ -110,9 +111,7 @@ impl Dock {
     }
 }
 
-pub type PanelId = Id;
-
-enum Panel {
+pub enum Panel {
     Splitter(Splitter),
     TabBar(TabBar),
 }
@@ -134,6 +133,6 @@ impl Panel {
 }
 
 pub enum Action {
-    TabWasPressed(TabId),
-    TabButtonWasPressed(TabId),
+    TabWasPressed(Id<Tab>),
+    TabButtonWasPressed(Id<Tab>),
 }

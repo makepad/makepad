@@ -16,9 +16,7 @@ pub struct TokenCache {
 impl TokenCache {
     pub fn new(text: &Text) -> TokenCache {
         let mut cache = TokenCache {
-            lines: (0..text.as_lines().len())
-                .map(|_| None)
-                .collect::<Vec<_>>(),
+            lines: (0..text.as_lines().len()).map(|_| None).collect::<Vec<_>>(),
         };
         cache.refresh(text);
         cache
@@ -26,7 +24,7 @@ impl TokenCache {
 
     pub fn tokens_by_line(&self) -> TokensByLine {
         TokensByLine {
-            iter: self.lines.iter()
+            iter: self.lines.iter(),
         }
     }
 
@@ -37,7 +35,7 @@ impl TokenCache {
                     self.lines[range.start.line] = None;
                     self.lines.splice(
                         range.start.line + 1..range.start.line + 1,
-                        iter::repeat(None).take(range.end.line - range.start.line - 1)
+                        iter::repeat(None).take(range.end.line - range.start.line),
                     );
                 }
                 OperationRange::Delete(range) => {

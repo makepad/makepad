@@ -135,9 +135,7 @@ impl Tab {
     ) {
         self.close_button
             .handle_event(cx, event, &mut |cx, action| match action {
-                tab_button::Action::WasPressed => {
-                    dispatch_action(cx, Action::ButtonWasPressed)
-                }
+                tab_button::Action::WasPressed => dispatch_action(cx, Action::ButtonWasPressed),
             });
         match event.hits(cx, self.tab.area(), HitOpt::default()) {
             Event::FingerDown(_) => {

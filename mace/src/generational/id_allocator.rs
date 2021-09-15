@@ -1,17 +1,20 @@
-use super::Id;
+use {
+    super::Id,
+    std::{fmt, marker::PhantomData},
+};
 
-#[derive(Clone, Debug, Default)]
-pub struct IdAllocator {
+pub struct IdAllocator<T> {
     entries: Vec<Entry>,
     free_entry_indices: Vec<usize>,
+    phantom: PhantomData<T>,
 }
 
-impl IdAllocator {
-    pub fn new() -> IdAllocator {
+impl<T> IdAllocator<T> {
+    pub fn new() -> Self {
         IdAllocator::default()
     }
 
-    pub fn allocate(&mut self) -> Id {
+    pub fn allocate(&mut self) -> Id<T> {
         match self.free_entry_indices.pop() {
             Some(index) => {
                 let entry = &mut self.entries[index];
@@ -21,6 +24,7 @@ impl IdAllocator {
                 Id {
                     index,
                     generation: entry.generation,
+                    phantom: PhantomData,
                 }
             }
             None => {
@@ -31,12 +35,13 @@ impl IdAllocator {
                 Id {
                     index: self.entries.len() - 1,
                     generation: 0,
+                    phantom: PhantomData,
                 }
             }
         }
     }
 
-    pub fn deallocate(&mut self, index: Id) {
+    pub fn deallocate(&mut self, index: Id<T>) {
         let entry = &mut self.entries[index.index];
         assert!(entry.is_used && entry.generation == index.generation);
         entry.is_used = false;
@@ -45,6 +50,25 @@ impl IdAllocator {
 
     pub fn clear(&mut self) {
         self.entries.clear()
+    }
+}
+
+impl<T> fmt::Debug for IdAllocator<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IdAllocator")
+            .field("entries", &self.entries)
+            .field("free_entry_indices", &self.free_entry_indices)
+            .finish()
+    }
+}
+
+impl<T> Default for IdAllocator<T> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::default(),
+            free_entry_indices: Vec::default(),
+            phantom: PhantomData,
+        }
     }
 }
 
