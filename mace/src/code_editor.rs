@@ -10,7 +10,7 @@ use {
         size::Size,
         text::Text,
         token::{Delimiter, Keyword, TokenKind},
-        token_cache::{TokenCache, TokensByLine},
+        token_cache::TokenCache,
     },
     makepad_render::*,
     makepad_widget::*,
@@ -100,7 +100,7 @@ impl CodeEditor {
                 self.draw_text(
                     cx,
                     &document.text,
-                    document.token_cache.tokens_by_line(),
+                    &document.token_cache,
                     visible_lines,
                 );
                 self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
@@ -240,7 +240,7 @@ impl CodeEditor {
         &mut self,
         cx: &mut Cx,
         text: &Text,
-        tokens_by_line: TokensByLine<'_>,
+        token_cache: &TokenCache,
         visible_lines: VisibleLines,
     ) {
         let origin = cx.get_turtle_pos();
@@ -248,7 +248,7 @@ impl CodeEditor {
         for (line, tokens) in text
             .as_lines()
             .iter()
-            .zip(tokens_by_line)
+            .zip(token_cache.iter())
             .skip(visible_lines.start)
             .take(visible_lines.end - visible_lines.start)
         {
