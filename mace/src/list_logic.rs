@@ -1,9 +1,9 @@
-use {crate::generational::Id, makepad_render::*, std::collections::HashMap};
+use {crate::id::Id, makepad_render::*, std::collections::HashMap};
 
 #[derive(Default)]
 pub struct ListLogic {
-    item_ids_by_area: HashMap<Area, Id<Item>>,
-    selected_item_id: Option<Id<Item>>,
+    item_ids_by_area: HashMap<Area, ItemId>,
+    selected_item_id: Option<ItemId>,
 }
 
 impl ListLogic {
@@ -17,7 +17,7 @@ impl ListLogic {
 
     pub fn end(&mut self) {}
 
-    pub fn begin_item(&mut self, item_id: Id<Item>) -> ItemInfo {
+    pub fn begin_item(&mut self, item_id: ItemId) -> ItemInfo {
         ItemInfo {
             is_selected: self
                 .selected_item_id
@@ -27,15 +27,15 @@ impl ListLogic {
 
     pub fn end_item(&mut self) {}
 
-    pub fn set_item_area(&mut self, item_id: Id<Item>, area: Area) {
+    pub fn set_item_area(&mut self, item_id: ItemId, area: Area) {
         self.item_ids_by_area.insert(area, item_id);
     }
 
-    pub fn selected_item_id(&self) -> Option<Id<Item>> {
+    pub fn selected_item_id(&self) -> Option<ItemId> {
         self.selected_item_id
     }
 
-    pub fn set_selected_item_id(&mut self, item_id: Option<Id<Item>>) -> bool {
+    pub fn set_selected_item_id(&mut self, item_id: Option<ItemId>) -> bool {
         if self.selected_item_id == item_id {
             return false;
         }
@@ -60,6 +60,15 @@ impl ListLogic {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ItemId(Id);
+
+impl AsRef<Id> for ItemId {
+    fn as_ref(&self) -> &Id {
+        &self.0
+    }
+}
+
 pub struct Item;
 
 #[derive(Clone, Copy, Debug)]
@@ -68,5 +77,5 @@ pub struct ItemInfo {
 }
 
 pub enum Action {
-    ItemWasPressed(Id<Item>),
+    ItemWasPressed(ItemId),
 }
