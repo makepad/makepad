@@ -130,20 +130,6 @@ impl InitialState {
                     TokenKind::Punctuator(Punctuator::CloseDelimiter(Delimiter::Brace)),
                 )
             }
-            (',', _, _) => {
-                cursor.skip(1);
-                (
-                    State::Initial(InitialState),
-                    TokenKind::Punctuator(Punctuator::Separator),
-                )
-            }
-            (';', _, _) => {
-                cursor.skip(1);
-                (
-                    State::Initial(InitialState),
-                    TokenKind::Punctuator(Punctuator::Separator),
-                )
-            }
             ('!', _, _)
             | ('#', _, _)
             | ('$', _, _)
@@ -151,10 +137,12 @@ impl InitialState {
             | ('&', _, _)
             | ('*', _, _)
             | ('+', _, _)
+            | (',', _, _)
             | ('-', _, _)
             | ('.', _, _)
             | ('/', _, _)
             | (':', _, _)
+            | (';', _, _) 
             | ('<', _, _)
             | ('=', _, _)
             | ('>', _, _)
@@ -584,16 +572,14 @@ impl InitialState {
         keyword: Keyword,
         cursor: &mut Cursor,
     ) -> (State, TokenKind) {
-        for expected in string.chars() {
-            if !cursor.skip_if(|actual| actual == expected) {
-                return (State::Initial(InitialState), TokenKind::Identifier);
+        if string.chars().all(|expected| {
+            cursor.skip_if(|actual| actual == expected)
+        }) {
+            if !cursor.peek(0).is_identifier_continue() {
+                return (State::Initial(InitialState), TokenKind::Keyword(keyword));
             }
         }
-        if cursor.peek(0).is_identifier_continue() {
-            cursor.skip(1);
-            return self.identifier_tail(cursor);
-        }
-        (State::Initial(InitialState), TokenKind::Keyword(keyword))
+        self.identifier_tail(cursor)
     }
 
     fn identifier_tail(self, cursor: &mut Cursor) -> (State, TokenKind) {
