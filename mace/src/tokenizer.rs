@@ -92,42 +92,56 @@ impl InitialState {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::OpenDelimiter(Delimiter::Paren),
+                    TokenKind::Punctuator(Punctuator::OpenDelimiter(Delimiter::Paren)),
                 )
             }
             (')', _, _) => {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::CloseDelimiter(Delimiter::Paren),
+                    TokenKind::Punctuator(Punctuator::CloseDelimiter(Delimiter::Paren)),
                 )
             }
             ('[', _, _) => {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::OpenDelimiter(Delimiter::Bracket),
+                    TokenKind::Punctuator(Punctuator::OpenDelimiter(Delimiter::Bracket)),
                 )
             }
             (']', _, _) => {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::CloseDelimiter(Delimiter::Bracket),
+                    TokenKind::Punctuator(Punctuator::CloseDelimiter(Delimiter::Bracket)),
                 )
             }
             ('{', _, _) => {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::OpenDelimiter(Delimiter::Brace),
+                    TokenKind::Punctuator(Punctuator::OpenDelimiter(Delimiter::Brace)),
                 )
             }
             ('}', _, _) => {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::CloseDelimiter(Delimiter::Brace),
+                    TokenKind::Punctuator(Punctuator::CloseDelimiter(Delimiter::Brace)),
+                )
+            }
+            (',', _, _) => {
+                cursor.skip(1);
+                (
+                    State::Initial(InitialState),
+                    TokenKind::Punctuator(Punctuator::Separator),
+                )
+            }
+            (';', _, _) => {
+                cursor.skip(1);
+                (
+                    State::Initial(InitialState),
+                    TokenKind::Punctuator(Punctuator::Separator),
                 )
             }
             ('!', _, _)
@@ -137,12 +151,10 @@ impl InitialState {
             | ('&', _, _)
             | ('*', _, _)
             | ('+', _, _)
-            | (',', _, _)
             | ('-', _, _)
             | ('.', _, _)
             | ('/', _, _)
             | (':', _, _)
-            | (';', _, _)
             | ('<', _, _)
             | ('=', _, _)
             | ('>', _, _)

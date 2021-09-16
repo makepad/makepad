@@ -19,6 +19,10 @@ impl Text {
         Text::default()
     }
 
+    pub fn from_lines(lines: Vec<Vec<char>>) -> Text {
+        Text { lines }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len().is_zero()
     }
@@ -153,9 +157,7 @@ impl AddAssign for Text {
 
 impl Default for Text {
     fn default() -> Text {
-        Text {
-            lines: vec![Vec::default()],
-        }
+        Text::from_lines(vec![vec![]])
     }
 }
 
