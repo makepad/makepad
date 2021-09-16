@@ -45,7 +45,8 @@ impl Dock {
 
     pub fn begin_tab_bar(&mut self, cx: &mut Cx, panel_id: PanelId) -> Result<(), ()> {
         if !self.panels_by_panel_id.contains(panel_id) {
-            self.panels_by_panel_id.insert(panel_id, Panel::TabBar(TabBar::new(cx)));
+            self.panels_by_panel_id
+                .insert(panel_id, Panel::TabBar(TabBar::new(cx)));
         }
         let tab_bar = self.panels_by_panel_id[panel_id].as_tab_bar_mut();
         tab_bar.begin(cx)?;
@@ -75,7 +76,8 @@ impl Dock {
 
     pub fn get_or_create_tab_bar(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut TabBar {
         if !self.panels_by_panel_id.contains(panel_id) {
-            self.panels_by_panel_id.insert(panel_id, Panel::TabBar(TabBar::new(cx)));
+            self.panels_by_panel_id
+                .insert(panel_id, Panel::TabBar(TabBar::new(cx)));
         }
         self.panels_by_panel_id[panel_id].as_tab_bar_mut()
     }
@@ -118,7 +120,6 @@ impl AsRef<Id> for PanelId {
         &self.0
     }
 }
-
 
 pub enum Panel {
     Splitter(Splitter),
