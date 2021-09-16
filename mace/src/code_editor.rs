@@ -2,7 +2,6 @@ use {
     crate::{
         cursor_set::CursorSet,
         delta::{self, Delta, Whose},
-        formatter::Formatter,
         id::{Id, IdAllocator, IdMap},
         position::Position,
         position_set::PositionSet,
@@ -531,37 +530,6 @@ impl CodeEditor {
                     } else {
                         state.undo(session_id, send_request);
                     }
-                    let session = &state.sessions_by_session_id[session_id];
-                    self.redraw_document_views(cx, state, session.document_id);
-                }
-            }
-            Event::KeyDown(KeyEvent {
-                key_code: KeyCode::Return,
-                modifiers,
-                ..
-            }) if modifiers.alt => {
-                let view = &self.views_by_view_id[view_id];
-                if let Some(session_id) = view.session_id {
-                    let session = &state.sessions_by_session_id[session_id];
-                    let document = &state.documents_by_document_id[session.document_id];
-                    let mut formatter = Formatter::new();
-                    for (chars, tokens) in document
-                        .text
-                        .as_lines()
-                        .iter()
-                        .zip(document.token_cache.iter())
-                    {
-                        formatter.push_line(chars, tokens);
-                    }
-                    let text = formatter.format();
-                    let mut builder = delta::Builder::new();
-                    builder.delete(Size {
-                        line: document.text.as_lines().len() - 1,
-                        column: document.text.as_lines().last().unwrap().len(),
-                    });
-                    builder.insert(text);
-                    let delta = builder.build();
-                    state.apply_delta(session_id, delta, send_request);
                     let session = &state.sessions_by_session_id[session_id];
                     self.redraw_document_views(cx, state, session.document_id);
                 }

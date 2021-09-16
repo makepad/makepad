@@ -25,7 +25,6 @@ pub enum Keyword {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Punctuator {
-    Separator,
     OpenDelimiter(Delimiter),
     CloseDelimiter(Delimiter),
     Other,
