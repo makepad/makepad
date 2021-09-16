@@ -2,6 +2,7 @@ use {
     crate::{
         cursor_set::CursorSet,
         delta::{self, Delta, Whose},
+        formatter::Formatter,
         id::{Id, IdAllocator, IdMap},
         position::Position,
         position_set::PositionSet,
@@ -9,7 +10,7 @@ use {
         range_set::{RangeSet, Span},
         size::Size,
         text::Text,
-        token::{Delimiter, Keyword, TokenKind},
+        token::{Delimiter, Keyword, Punctuator, TokenKind},
         token_cache::TokenCache,
     },
     makepad_render::*,
@@ -28,7 +29,6 @@ pub struct CodeEditor {
     text: DrawText,
     text_glyph_size: Vec2,
     text_color_comment: Vec4,
-    text_color_delimiter: Vec4,
     text_color_identifier: Vec4,
     text_color_function_identifier: Vec4,
     text_color_branch_keyword: Vec4,
@@ -50,7 +50,6 @@ impl CodeEditor {
                 ..makepad_widget::widgetstyle::text_style_fixed
             }
             self::text_color_comment: #638d54;
-            self::text_color_delimiter: #d4d4d4;
             self::text_color_identifier: #d4d4d4;
             self::text_color_function_identifier: #dcdcae;
             self::text_color_branch_keyword: #c485be;
@@ -73,7 +72,6 @@ impl CodeEditor {
             text: DrawText::new(cx, default_shader!()).with_draw_depth(3.0),
             text_glyph_size: Vec2::default(),
             text_color_comment: Vec4::default(),
-            text_color_delimiter: Vec4::default(),
             text_color_identifier: Vec4::default(),
             text_color_function_identifier: Vec4::default(),
             text_color_number: Vec4::default(),
@@ -97,12 +95,7 @@ impl CodeEditor {
                 self.apply_style(cx);
                 let visible_lines = self.visible_lines(cx, view_id, document.text.as_lines().len());
                 self.draw_selections(cx, &session.selections, &document.text, visible_lines);
-                self.draw_text(
-                    cx,
-                    &document.text,
-                    &document.token_cache,
-                    visible_lines,
-                );
+                self.draw_text(cx, &document.text, &document.token_cache, visible_lines);
                 self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
                 self.set_turtle_bounds(cx, &document.text);
             }
@@ -116,7 +109,6 @@ impl CodeEditor {
         self.text.text_style = live_text_style!(cx, self::text_text_style);
         self.text_glyph_size = self.text.text_style.font_size * self.text.get_monospace_base(cx);
         self.text_color_comment = live_vec4!(cx, self::text_color_comment);
-        self.text_color_delimiter = live_vec4!(cx, self::text_color_delimiter);
         self.text_color_identifier = live_vec4!(cx, self::text_color_identifier);
         self.text_color_function_identifier = live_vec4!(cx, self::text_color_function_identifier);
         self.text_color_punctuator = live_vec4!(cx, self::text_color_punctuator);
@@ -245,7 +237,7 @@ impl CodeEditor {
     ) {
         let origin = cx.get_turtle_pos();
         let mut start_y = visible_lines.start_y;
-        for (line, tokens) in text
+        for (chars, tokens) in text
             .as_lines()
             .iter()
             .zip(token_cache.iter())
@@ -269,7 +261,7 @@ impl CodeEditor {
                         y: start_y,
                     },
                     0,
-                    &line[start..end],
+                    &chars[start..end],
                     |_, _, _, _| 0.0,
                 );
                 start = end;
@@ -298,10 +290,10 @@ impl CodeEditor {
         let origin = cx.get_turtle_pos();
         self.caret.begin_many(cx);
         let mut start_y = visible_lines.start_y;
-        for line in visible_lines.start..visible_lines.end {
+        for line_index in visible_lines.start..visible_lines.end {
             loop {
                 match caret_iter.peek() {
-                    Some(caret) if caret.line == line => {
+                    Some(caret) if caret.line == line_index => {
                         let caret = caret_iter.next().unwrap();
                         if selections.contains_position(*caret) {
                             continue;
@@ -344,12 +336,10 @@ impl CodeEditor {
     fn text_color(&self, kind: TokenKind, next_kind: Option<TokenKind>) -> Vec4 {
         match (kind, next_kind) {
             (TokenKind::Comment, _) => self.text_color_comment,
-            (TokenKind::OpenDelimiter(_), _) | (TokenKind::CloseDelimiter(_), _) => {
-                self.text_color_delimiter
-            }
-            (TokenKind::Identifier, Some(TokenKind::OpenDelimiter(Delimiter::Paren))) => {
-                self.text_color_function_identifier
-            }
+            (
+                TokenKind::Identifier,
+                Some(TokenKind::Punctuator(Punctuator::OpenDelimiter(Delimiter::Paren))),
+            ) => self.text_color_function_identifier,
             (TokenKind::Identifier, _) => self.text_color_identifier,
             (TokenKind::Keyword(Keyword::Branch), _) => self.text_color_branch_keyword,
             (TokenKind::Keyword(Keyword::Loop), _) => self.text_color_loop_keyword,
@@ -541,6 +531,37 @@ impl CodeEditor {
                     } else {
                         state.undo(session_id, send_request);
                     }
+                    let session = &state.sessions_by_session_id[session_id];
+                    self.redraw_document_views(cx, state, session.document_id);
+                }
+            }
+            Event::KeyDown(KeyEvent {
+                key_code: KeyCode::Return,
+                modifiers,
+                ..
+            }) if modifiers.alt => {
+                let view = &self.views_by_view_id[view_id];
+                if let Some(session_id) = view.session_id {
+                    let session = &state.sessions_by_session_id[session_id];
+                    let document = &state.documents_by_document_id[session.document_id];
+                    let mut formatter = Formatter::new();
+                    for (chars, tokens) in document
+                        .text
+                        .as_lines()
+                        .iter()
+                        .zip(document.token_cache.iter())
+                    {
+                        formatter.push_line(chars, tokens);
+                    }
+                    let text = formatter.format();
+                    let mut builder = delta::Builder::new();
+                    builder.delete(Size {
+                        line: document.text.as_lines().len() - 1,
+                        column: document.text.as_lines().last().unwrap().len(),
+                    });
+                    builder.insert(text);
+                    let delta = builder.build();
+                    state.apply_delta(session_id, delta, send_request);
                     let session = &state.sessions_by_session_id[session_id];
                     self.redraw_document_views(cx, state, session.document_id);
                 }

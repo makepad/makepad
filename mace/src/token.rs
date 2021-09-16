@@ -7,8 +7,6 @@ pub struct Token {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TokenKind {
     Comment,
-    OpenDelimiter(Delimiter),
-    CloseDelimiter(Delimiter),
     Identifier,
     Keyword(Keyword),
     Number,
@@ -16,13 +14,6 @@ pub enum TokenKind {
     String,
     Whitespace,
     Unknown,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Delimiter {
-    Paren,
-    Bracket,
-    Brace,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -34,9 +25,15 @@ pub enum Keyword {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Punctuator {
-    LeftParen,
-    RightParen,
-    LeftBrace,
-    RightBrace,
+    Separator,
+    OpenDelimiter(Delimiter),
+    CloseDelimiter(Delimiter),
     Other,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Delimiter {
+    Paren,
+    Bracket,
+    Brace,
 }
