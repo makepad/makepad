@@ -79,6 +79,7 @@ impl Connection {
                     },
                 });
             }
+            entries.sort_by(|entry_0, entry_1| entry_0.name.cmp(&entry_1.name));
             Ok(entries)
         }
 
