@@ -1674,6 +1674,13 @@ pub fn define_cocoa_view_class() -> *const Class {
                 );
                 (*this).set_ivar("markedText", marked_text);
             }
+            let types = [NSPasteboardTypeURL];
+            let types_nsarray: id = msg_send![
+                class!(NSArray),
+                arrayWithObjects: types.as_ptr()
+                count: types.len()
+            ];
+            let _: () = msg_send![this, registerForDraggedTypes: types_nsarray];
             this
         }
     }
@@ -1754,7 +1761,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     extern fn other_mouse_dragged(this: &Object, _sel: Sel, event: id) {
         mouse_motion(this, event);
     }
-    
+
     extern fn draw_rect(this: &Object, _sel: Sel, rect: NSRect) {
         let _cw = get_cocoa_window(this);
         unsafe {
@@ -1939,6 +1946,23 @@ pub fn define_cocoa_view_class() -> *const Class {
         let cw = get_cocoa_window(this);
         cw.send_change_event();
     }
+
+    extern fn dragging_entered(_this: &Object, _: Sel, _sender: id) {
+        println!("Dragging entered");
+    }
+
+    extern fn dragging_exited(_this: &Object, _: Sel, _sender: id) {
+        println!("Dragging exited");
+    }
+
+    extern fn dragging_updated(_this: &Object, _: Sel, sender: id) {
+        println!("Dragging updated");
+        unsafe {
+            let location: NSPoint = msg_send![sender, draggingLocation];
+            println!("Location {:?}", location);
+        }
+    }
+
     /*
     extern fn draw(this: &Object, _: Sel, _calayer: id, _cgcontext: id) {
         println!("draw");
@@ -2005,6 +2029,10 @@ pub fn define_cocoa_view_class() -> *const Class {
         decl.add_method(sel!(resignFirstResponder:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
         
         decl.add_method(sel!(displayLayer:), display_layer as extern fn(&Object, Sel, id));
+
+        decl.add_method(sel!(draggingEntered:), dragging_entered as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(draggingExited:), dragging_exited as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(draggingUpdated:), dragging_updated as extern fn(&Object, Sel, id));
     }
     decl.add_ivar::<*mut c_void>("cocoa_window_ptr");
     decl.add_ivar::<id>("markedText");
