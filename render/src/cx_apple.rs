@@ -22,6 +22,7 @@ extern {
 #[link(name = "AppKit", kind = "framework")]
 extern {
     pub static NSStringPboardType: id;
+    pub static NSPasteboardTypeURL: id;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -145,12 +146,11 @@ pub fn load_webkit_cursor(cursor_name_str: &str) -> id {
 
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct NSPoint {
     pub x: f64,
     pub y: f64,
 }
-
 
 unsafe impl Encode for NSPoint {
     fn encode() -> Encoding {
