@@ -1728,14 +1728,25 @@ pub fn define_cocoa_view_class() -> *const Class {
         cw.send_finger_up(2, modifiers);
     }
     
-    fn mouse_pos_from_event(this: &Object, event: id) -> Vec2 {
-        // We have to do this to have access to the `NSView` trait...
-        unsafe {
-            let view: id = this as *const _ as *mut _;
-            let window_point: NSPoint = msg_send![event, locationInWindow]; //.locationInWindow();
-            let view_point: NSPoint = msg_send![view, convertPoint: window_point fromView: nil]; // view.convertPoint_fromView_(window_point, nil);
-            let view_rect: NSRect = msg_send![view, frame];
-            Vec2 {x: view_point.x as f32, y: view_rect.size.height as f32 - view_point.y as f32}
+    fn mouse_pos_from_event(view: &Object, event: id) -> Vec2 {
+        let window_point: NSPoint = unsafe { msg_send![event, locationInWindow] }; 
+        let view_point = window_point_to_view_point(view, window_point);
+        nspoint_to_vec2(view_point)
+    }
+
+    fn window_point_to_view_point(view: &Object, window_point: NSPoint) -> NSPoint {
+        let view_point: NSPoint = unsafe { msg_send![view, convertPoint: window_point fromView: nil] };
+        let view_frame: NSRect = unsafe { msg_send![view, frame] };
+        NSPoint {
+            x: view_point.x,
+            y: view_frame.size.height - view_point.y
+        }
+    }
+
+    fn nspoint_to_vec2(point: NSPoint) -> Vec2 {
+        Vec2 {
+            x: point.x as f32,
+            y: point.y as f32,
         }
     }
     
@@ -1947,20 +1958,50 @@ pub fn define_cocoa_view_class() -> *const Class {
         cw.send_change_event();
     }
 
-    extern fn dragging_entered(_this: &Object, _: Sel, _sender: id) {
+    extern fn dragging_entered(this: &Object, _: Sel, sender: id) {
         println!("Dragging entered");
+        let cw = get_cocoa_window(this);
+        let abs = nspoint_to_vec2(window_point_to_view_point(this, unsafe {
+            msg_send![sender, draggingLocation]
+        }));
+        let mut events = vec![Event::DragEntered(DragEnteredEvent {
+            handled: false,
+            abs: abs,
+            rel: Vec2::default(),
+            action: DragAction::None,
+        })];
+        cw.do_callback(&mut events);
+        match &events[0] {
+            Event::DragEntered(event) => {
+                // TODO: Handle DragAction
+            },
+            _ => panic!()
+        };
     }
 
     extern fn dragging_exited(_this: &Object, _: Sel, _sender: id) {
         println!("Dragging exited");
     }
 
-    extern fn dragging_updated(_this: &Object, _: Sel, sender: id) {
+    extern fn dragging_updated(this: &Object, _: Sel, sender: id) {
         println!("Dragging updated");
-        unsafe {
-            let location: NSPoint = msg_send![sender, draggingLocation];
-            println!("Location {:?}", location);
-        }
+        let cw = get_cocoa_window(this);
+        let abs = nspoint_to_vec2(window_point_to_view_point(this, unsafe {
+            msg_send![sender, draggingLocation]
+        }));
+        let mut events = vec![Event::DragUpdated(DragUpdatedEvent {
+            handled: false,
+            abs: abs,
+            rel: Vec2::default(),
+            action: DragAction::None,
+        })];
+        cw.do_callback(&mut events);
+        match &events[0] {
+            Event::DragUpdated(event) => {
+                // TODO: Handle DragAction
+            },
+            _ => panic!()
+        };
     }
 
     /*
