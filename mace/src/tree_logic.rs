@@ -159,7 +159,7 @@ impl TreeLogic {
                                     dispatch_action(Action::NodeWasEntered(*node_id));
                                 }
                                 HoverState::Out => {
-                                    dispatch_action(Action::NodeWasLeft(*node_id));
+                                    dispatch_action(Action::NodeWasExited(*node_id));
                                 }
                                 _ => {}
                             }
@@ -268,6 +268,6 @@ impl AnimatedBool {
 pub enum Action {
     TreeDidAnimate,
     NodeWasEntered(NodeId),
-    NodeWasLeft(NodeId),
+    NodeWasExited(NodeId),
     NodeWasPressed(NodeId),
 }
