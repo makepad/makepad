@@ -281,6 +281,30 @@ pub struct WebSocketMessageEvent{
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct DragEnteredEvent {
+    pub handled: bool,
+    pub abs: Vec2,
+    pub rel: Vec2,
+    pub action: DragAction,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DragExitedEvent;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DragUpdatedEvent {
+    pub handled: bool,
+    pub abs: Vec2,
+    pub rel: Vec2,
+    pub action: DragAction,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum DragAction {
+    None
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     None,
     Construct,
@@ -320,6 +344,9 @@ pub enum Event {
     TextCopy(TextCopyEvent),
     LiveRecompile(LiveRecompileEvent),
     WebSocketMessage(WebSocketMessageEvent),
+    DragEntered(DragEnteredEvent),
+    DragExited(DragExitedEvent),
+    DragUpdated(DragUpdatedEvent),
 }
 
 impl Default for Event {

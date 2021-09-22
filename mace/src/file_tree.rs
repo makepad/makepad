@@ -316,7 +316,7 @@ impl FileTree {
                     let file_node_id = FileNodeId(node_id);
                     self.set_hovered_file_node_id(cx, Some(file_node_id));
                 }
-                tree_logic::Action::NodeWasLeft(_) => {
+                tree_logic::Action::NodeWasExited(_) => {
                     self.set_hovered_file_node_id(cx, None);
                 }
             }
