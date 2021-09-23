@@ -1731,7 +1731,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     fn mouse_pos_from_event(view: &Object, event: id) -> Vec2 {
         let window_point: NSPoint = unsafe { msg_send![event, locationInWindow] }; 
         let view_point = window_point_to_view_point(view, window_point);
-        nspoint_to_vec2(view_point)
+        ns_point_to_vec2(view_point)
     }
 
     fn window_point_to_view_point(view: &Object, window_point: NSPoint) -> NSPoint {
@@ -1743,7 +1743,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         }
     }
 
-    fn nspoint_to_vec2(point: NSPoint) -> Vec2 {
+    fn ns_point_to_vec2(point: NSPoint) -> Vec2 {
         Vec2 {
             x: point.x as f32,
             y: point.y as f32,
@@ -1958,50 +1958,63 @@ pub fn define_cocoa_view_class() -> *const Class {
         cw.send_change_event();
     }
 
-    extern fn dragging_entered(this: &Object, _: Sel, sender: id) {
-        println!("Dragging entered");
+    extern fn dragging_entered(this: &Object, _: Sel, sender: id) -> NSDragOperation {
         let cw = get_cocoa_window(this);
-        let abs = nspoint_to_vec2(window_point_to_view_point(this, unsafe {
+        let pos = ns_point_to_vec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
         }));
         let mut events = vec![Event::DragEntered(DragEnteredEvent {
             handled: false,
-            abs: abs,
-            rel: Vec2::default(),
+            abs: pos,
+            rel: pos,
+            rect: Rect::default(),
+            state: DragState::Over,
             action: DragAction::None,
         })];
         cw.do_callback(&mut events);
         match &events[0] {
             Event::DragEntered(event) => {
-                // TODO: Handle DragAction
+                drag_action_to_ns_drag_operation(event.action)
             },
             _ => panic!()
-        };
+        }
     }
 
-    extern fn dragging_exited(_this: &Object, _: Sel, _sender: id) {
-        println!("Dragging exited");
-    }
-
-    extern fn dragging_updated(this: &Object, _: Sel, sender: id) {
-        println!("Dragging updated");
+    extern fn dragging_exited(this: &Object, _: Sel, _sender: id) {
         let cw = get_cocoa_window(this);
-        let abs = nspoint_to_vec2(window_point_to_view_point(this, unsafe {
+        let mut events = vec![Event::DragExited];
+        cw.do_callback(&mut events);
+    }
+
+    extern fn dragging_updated(this: &Object, _: Sel, sender: id) -> NSDragOperation {
+        let cw = get_cocoa_window(this);
+        let pos = ns_point_to_vec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
         }));
         let mut events = vec![Event::DragUpdated(DragUpdatedEvent {
             handled: false,
-            abs: abs,
-            rel: Vec2::default(),
+            abs: pos,
+            rel: pos,
+            rect: Rect::default(),
+            state: DragState::Over,
             action: DragAction::None,
         })];
         cw.do_callback(&mut events);
         match &events[0] {
             Event::DragUpdated(event) => {
-                // TODO: Handle DragAction
+                drag_action_to_ns_drag_operation(event.action)
             },
             _ => panic!()
-        };
+        }
+    }
+
+    fn drag_action_to_ns_drag_operation(action: DragAction) -> NSDragOperation {
+        match action {
+            DragAction::None => NSDragOperation::None,
+            DragAction::Copy => NSDragOperation::Copy,
+            DragAction::Link => NSDragOperation::Link,
+            DragAction::Move => NSDragOperation::Move,
+        }
     }
 
     /*
@@ -2071,9 +2084,9 @@ pub fn define_cocoa_view_class() -> *const Class {
         
         decl.add_method(sel!(displayLayer:), display_layer as extern fn(&Object, Sel, id));
 
-        decl.add_method(sel!(draggingEntered:), dragging_entered as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(draggingEntered:), dragging_entered as extern fn(&Object, Sel, id) -> NSDragOperation);
         decl.add_method(sel!(draggingExited:), dragging_exited as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(draggingUpdated:), dragging_updated as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(draggingUpdated:), dragging_updated as extern fn(&Object, Sel, id) -> NSDragOperation);
     }
     decl.add_ivar::<*mut c_void>("cocoa_window_ptr");
     decl.add_ivar::<id>("markedText");

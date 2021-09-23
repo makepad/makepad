@@ -5,11 +5,13 @@ use {
 
 pub struct Tab {
     is_selected: bool,
+    is_drag_over: bool,
     tab: DrawTab,
     close_button: TabButton,
     height: f32,
     color: Vec4,
     color_selected: Vec4,
+    color_drag_over: Vec4,
     name: DrawText,
     name_color: Vec4,
     name_color_selected: Vec4,
@@ -39,6 +41,7 @@ impl Tab {
             self::height: 40.0;
             self::color: #34;
             self::color_selected: #28;
+            self::color_drag_over: #FF;
             self::border_width: 1.0;
             self::border_color: #28;
             self::name_text_style: TextStyle {
@@ -52,11 +55,13 @@ impl Tab {
     pub fn new(cx: &mut Cx) -> Tab {
         Tab {
             is_selected: false,
+            is_drag_over: false,
             tab: DrawTab::new(cx, default_shader!()),
             close_button: TabButton::new(cx),
             height: 0.0,
             color: Vec4::default(),
             color_selected: Vec4::default(),
+            color_drag_over: Vec4::default(),
             name: DrawText::new(cx, default_shader!()),
             name_color: Vec4::default(),
             name_color_selected: Vec4::default(),
@@ -86,6 +91,7 @@ impl Tab {
         self.height = live_float!(cx, self::height);
         self.color = live_vec4!(cx, self::color);
         self.color_selected = live_vec4!(cx, self::color_selected);
+        self.color_drag_over = live_vec4!(cx, self::color_drag_over);
         self.tab.border_width = live_float!(cx, self::border_width);
         self.tab.border_color = live_vec4!(cx, self::border_color);
         self.name.text_style = live_text_style!(cx, self::name_text_style);
@@ -112,10 +118,14 @@ impl Tab {
     }
 
     fn color(&self, is_selected: bool) -> Vec4 {
-        if is_selected {
-            self.color_selected
+        if self.is_drag_over {
+            self.color_drag_over
         } else {
-            self.color
+            if is_selected {
+                self.color_selected
+            } else {
+                self.color
+            }
         }
     }
 
@@ -138,6 +148,23 @@ impl Tab {
                 tab_button::Action::WasPressed => dispatch_action(cx, Action::ButtonWasPressed),
             });
         match event.hits(cx, self.tab.area(), HitOpt::default()) {
+            Event::DragEntered(DragEnteredEvent { state, .. }) | Event::DragUpdated(DragUpdatedEvent { state, .. }) => {
+                match state {
+                    DragState::In => {
+                        self.is_drag_over = true;
+                        cx.redraw_child_area(self.tab.area());
+                    }
+                    DragState::Out => {
+                        self.is_drag_over = false;
+                        cx.redraw_child_area(self.tab.area());
+                    }
+                    _ => {}
+                }
+            }
+            Event::DragExited => {
+                self.is_drag_over = false;
+                cx.redraw_child_area(self.tab.area());
+            }
             Event::FingerDown(_) => {
                 dispatch_action(cx, Action::WasPressed);
             }

@@ -587,3 +587,18 @@ pub enum MTLResourceOptions {
     StorageModePrivate = (MTLStorageMode::Private as u64) << MTLResourceStorageModeShift,
     StorageModeMemoryless = (MTLStorageMode::Memoryless as u64) << MTLResourceStorageModeShift,
 }
+
+#[repr(u64)]
+pub enum NSDragOperation {
+    None = 0,
+    Copy = 1,
+    Link = 2,
+    Move = 16,
+}
+
+unsafe impl Encode for NSDragOperation {
+    fn encode() -> Encoding {
+        let encoding = format!("Q");
+        unsafe { Encoding::from_str(&encoding) }
+    }
+}
