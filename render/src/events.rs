@@ -285,23 +285,34 @@ pub struct DragEnteredEvent {
     pub handled: bool,
     pub abs: Vec2,
     pub rel: Vec2,
+    pub rect: Rect,
+    pub state: DragState,
     pub action: DragAction,
 }
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct DragExitedEvent;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DragUpdatedEvent {
     pub handled: bool,
     pub abs: Vec2,
     pub rel: Vec2,
+    pub rect: Rect,
+    pub state: DragState,
     pub action: DragAction,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum DragState {
+    In,
+    Over,
+    Out,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DragAction {
-    None
+    None,
+    Copy,
+    Link,
+    Move,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -345,7 +356,7 @@ pub enum Event {
     LiveRecompile(LiveRecompileEvent),
     WebSocketMessage(WebSocketMessageEvent),
     DragEntered(DragEnteredEvent),
-    DragExited(DragExitedEvent),
+    DragExited,
     DragUpdated(DragUpdatedEvent),
 }
 
@@ -556,6 +567,72 @@ impl Event {
                     })
                 }
             },
+            Event::DragEntered(event) if !event.handled => {
+                let rect = area.get_rect(cx);
+                if area == cx.drag_area {
+                    if rect.contains_with_margin(event.abs, &opt.margin) {
+                        cx.new_drag_area = area;
+                        event.handled = true;
+                        return Event::DragEntered(DragEnteredEvent {
+                            rel: area.abs_to_rel(cx, event.abs),
+                            rect,
+                            ..event.clone()
+                        })
+                    } else {
+                        cx.new_drag_area = Area::default();
+                        return Event::DragEntered(DragEnteredEvent {
+                            rel: area.abs_to_rel(cx, event.abs),
+                            rect,
+                            state: DragState::Out,
+                            ..event.clone()
+                        })
+                    }
+                } else {
+                    if rect.contains_with_margin(event.abs, &opt.margin) {
+                        cx.new_drag_area = area;
+                        event.handled = true;
+                        return Event::DragEntered(DragEnteredEvent {
+                            rel: area.abs_to_rel(cx, event.abs),
+                            rect,
+                            state: DragState::In,
+                            ..event.clone()
+                        })
+                    }
+                }
+            }
+            Event::DragUpdated(event) if !event.handled => {
+                let rect = area.get_rect(cx);
+                if area == cx.drag_area {
+                    if rect.contains_with_margin(event.abs, &opt.margin) {
+                        cx.new_drag_area = area;
+                        event.handled = true;
+                        return Event::DragUpdated(DragUpdatedEvent {
+                            rel: area.abs_to_rel(cx, event.abs),
+                            rect,
+                            ..event.clone()
+                        })
+                    } else {
+                        cx.new_drag_area = Area::default();
+                        return Event::DragUpdated(DragUpdatedEvent {
+                            rel: area.abs_to_rel(cx, event.abs),
+                            rect,
+                            state: DragState::Out,
+                            ..event.clone()
+                        })
+                    }
+                } else {
+                    if rect.contains_with_margin(event.abs, &opt.margin) {
+                        cx.new_drag_area = area;
+                        event.handled = true;
+                        return Event::DragUpdated(DragUpdatedEvent {
+                            rel: area.abs_to_rel(cx, event.abs),
+                            rect,
+                            state: DragState::In,
+                            ..event.clone()
+                        })
+                    }
+                }
+            }
             _ => ()
         };
         return Event::None;

@@ -142,6 +142,8 @@ pub struct Cx {
     pub down_mouse_cursor: Option<MouseCursor>,
     pub hover_mouse_cursor: Option<MouseCursor>,
     pub fingers: Vec<CxPerFinger>,
+    pub drag_area: Area,
+    pub new_drag_area: Area,
     
     pub playing_animator_ids: BTreeMap<AnimatorId, AnimInfo>,
     
@@ -265,7 +267,9 @@ impl Default for Cx {
             
             down_mouse_cursor: None,
             hover_mouse_cursor: None,
-            fingers: fingers, 
+            fingers: fingers,
+            drag_area: Area::default(),
+            new_drag_area: Area::default(),
             
             live_styles: LiveStyles::new(),
             
@@ -629,6 +633,10 @@ impl Cx {
                 finger._over_last = new_area.clone();
             }
         }
+        if self.drag_area == old_area {
+            self.drag_area = new_area.clone();
+        }
+
         // update capture keyboard
         if self.key_focus == old_area {
             self.key_focus = new_area.clone()
