@@ -118,6 +118,9 @@ impl Cx {
                     self.platform.desktop.repaint_via_scroll_event = true;
                 }
             }
+            Event::DragEntered(_) | Event::DragUpdated(_) => {
+                self.drag_area = self.new_drag_area;
+            },
             _ => {}
         }
         false
