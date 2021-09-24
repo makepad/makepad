@@ -1959,7 +1959,8 @@ pub fn define_cocoa_view_class() -> *const Class {
     }
 
     extern fn dragging_entered(this: &Object, _: Sel, sender: id) -> NSDragOperation {
-        let cw = get_cocoa_window(this);
+        let window = get_cocoa_window(this);
+        window.start_live_resize();
         let pos = ns_point_to_vec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
         }));
@@ -1971,7 +1972,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             state: DragState::Over,
             action: DragAction::None,
         })];
-        cw.do_callback(&mut events);
+        window.do_callback(&mut events);
         match &events[0] {
             Event::DragEntered(event) => {
                 drag_action_to_ns_drag_operation(event.action)
@@ -1981,13 +1982,14 @@ pub fn define_cocoa_view_class() -> *const Class {
     }
 
     extern fn dragging_exited(this: &Object, _: Sel, _sender: id) {
-        let cw = get_cocoa_window(this);
+        let window = get_cocoa_window(this);
         let mut events = vec![Event::DragExited];
-        cw.do_callback(&mut events);
+        window.do_callback(&mut events);
+        window.end_live_resize();
     }
 
     extern fn dragging_updated(this: &Object, _: Sel, sender: id) -> NSDragOperation {
-        let cw = get_cocoa_window(this);
+        let window = get_cocoa_window(this);
         let pos = ns_point_to_vec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
         }));
@@ -1999,7 +2001,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             state: DragState::Over,
             action: DragAction::None,
         })];
-        cw.do_callback(&mut events);
+        window.do_callback(&mut events);
         match &events[0] {
             Event::DragUpdated(event) => {
                 drag_action_to_ns_drag_operation(event.action)
