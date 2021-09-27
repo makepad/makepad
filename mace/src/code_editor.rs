@@ -67,8 +67,8 @@ impl CodeEditor {
         CodeEditor {
             view_id_allocator: IdAllocator::new(),
             views_by_view_id: IdMap::new(),
-            selection: DrawColor::new(cx, default_shader!()).with_draw_depth(1.0),
-            text: DrawText::new(cx, default_shader!()).with_draw_depth(3.0),
+            selection: DrawColor::new(cx, default_shader!()).with_draw_depth(0.0),
+            text: DrawText::new(cx, default_shader!()).with_draw_depth(1.0),
             text_glyph_size: Vec2::default(),
             text_color_comment: Vec4::default(),
             text_color_identifier: Vec4::default(),
@@ -81,7 +81,7 @@ impl CodeEditor {
             text_color_string: Vec4::default(),
             text_color_whitespace: Vec4::default(),
             text_color_unknown: Vec4::default(),
-            caret: DrawColor::new(cx, default_shader!()).with_draw_depth(4.0),
+            caret: DrawColor::new(cx, default_shader!()).with_draw_depth(2.0),
         }
     }
 
