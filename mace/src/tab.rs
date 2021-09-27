@@ -5,16 +5,16 @@ use {
 
 pub struct Tab {
     is_selected: bool,
-    is_drag_over: bool,
+    is_dragged: bool,
     tab: DrawTab,
     close_button: TabButton,
     height: f32,
     color: Vec4,
     color_selected: Vec4,
-    color_drag_over: Vec4,
     name: DrawText,
     name_color: Vec4,
     name_color_selected: Vec4,
+    drag_overlay: DrawColor,
 }
 
 impl Tab {
@@ -41,7 +41,6 @@ impl Tab {
             self::height: 40.0;
             self::color: #34;
             self::color_selected: #28;
-            self::color_drag_over: #FF;
             self::border_width: 1.0;
             self::border_color: #28;
             self::name_text_style: TextStyle {
@@ -49,22 +48,23 @@ impl Tab {
             }
             self::name_color: #82;
             self::name_color_selected: #FF;
+            self::drag_overlay_color: #FFFFFF80;
         })
     }
 
     pub fn new(cx: &mut Cx) -> Tab {
         Tab {
             is_selected: false,
-            is_drag_over: false,
-            tab: DrawTab::new(cx, default_shader!()),
+            is_dragged: false,
+            tab: DrawTab::new(cx, default_shader!()).with_draw_depth(0.0),
             close_button: TabButton::new(cx),
             height: 0.0,
             color: Vec4::default(),
             color_selected: Vec4::default(),
-            color_drag_over: Vec4::default(),
             name: DrawText::new(cx, default_shader!()),
             name_color: Vec4::default(),
             name_color_selected: Vec4::default(),
+            drag_overlay: DrawColor::new(cx, default_shader!()).with_draw_depth(1.0),
         }
     }
 
@@ -85,18 +85,21 @@ impl Tab {
         self.close_button.draw(cx);
         cx.turtle_align_y();
         self.tab.end_quad(cx);
+        if self.is_dragged {
+            self.drag_overlay.draw_quad_abs(cx, self.tab.area().get_rect(cx));
+        }
     }
 
     fn apply_style(&mut self, cx: &mut Cx) {
         self.height = live_float!(cx, self::height);
         self.color = live_vec4!(cx, self::color);
         self.color_selected = live_vec4!(cx, self::color_selected);
-        self.color_drag_over = live_vec4!(cx, self::color_drag_over);
         self.tab.border_width = live_float!(cx, self::border_width);
         self.tab.border_color = live_vec4!(cx, self::border_color);
         self.name.text_style = live_text_style!(cx, self::name_text_style);
         self.name_color = live_vec4!(cx, self::name_color);
         self.name_color_selected = live_vec4!(cx, self::name_color_selected);
+        self.drag_overlay.color = live_vec4!(cx, self::drag_overlay_color);
     }
 
     fn layout(&self) -> Layout {
@@ -118,14 +121,10 @@ impl Tab {
     }
 
     fn color(&self, is_selected: bool) -> Vec4 {
-        if self.is_drag_over {
-            self.color_drag_over
+        if is_selected {
+            self.color_selected
         } else {
-            if is_selected {
-                self.color_selected
-            } else {
-                self.color
-            }
+            self.color
         }
     }
 
@@ -151,18 +150,18 @@ impl Tab {
             Event::DragEntered(DragEnteredEvent { state, .. }) | Event::DragUpdated(DragUpdatedEvent { state, .. }) => {
                 match state {
                     DragState::In => {
-                        self.is_drag_over = true;
+                        self.is_dragged = true;
                         cx.redraw_child_area(self.tab.area());
                     }
                     DragState::Out => {
-                        self.is_drag_over = false;
+                        self.is_dragged = false;
                         cx.redraw_child_area(self.tab.area());
                     }
                     _ => {}
                 }
             }
             Event::DragExited => {
-                self.is_drag_over = false;
+                self.is_dragged = false;
                 cx.redraw_child_area(self.tab.area());
             }
             Event::FingerDown(_) => {
