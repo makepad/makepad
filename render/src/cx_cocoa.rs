@@ -1961,39 +1961,25 @@ pub fn define_cocoa_view_class() -> *const Class {
     extern fn dragging_entered(this: &Object, _: Sel, sender: id) -> NSDragOperation {
         let window = get_cocoa_window(this);
         window.start_live_resize();
-        let pos = ns_point_to_vec2(window_point_to_view_point(this, unsafe {
-            msg_send![sender, draggingLocation]
-        }));
-        let mut events = vec![Event::DragEntered(DragEnteredEvent {
-            handled: false,
-            abs: pos,
-            rel: pos,
-            rect: Rect::default(),
-            state: DragState::Over,
-            action: DragAction::None,
-        })];
-        window.do_callback(&mut events);
-        match &events[0] {
-            Event::DragEntered(event) => {
-                drag_action_to_ns_drag_operation(event.action)
-            },
-            _ => panic!()
-        }
-    }
-
-    extern fn dragging_exited(this: &Object, _: Sel, _sender: id) {
-        let window = get_cocoa_window(this);
-        let mut events = vec![Event::DragExited];
-        window.do_callback(&mut events);
-        window.end_live_resize();
+        dragging(this, sender)
     }
 
     extern fn dragging_updated(this: &Object, _: Sel, sender: id) -> NSDragOperation {
+        dragging(this, sender)
+    }
+
+    extern fn dragging_exited(this: &Object, _: Sel, sender: id) {
+        dragging(this, sender);
+        let window = get_cocoa_window(this);
+        window.end_live_resize();
+    }
+
+    fn dragging(this: &Object, sender: id) -> NSDragOperation {
         let window = get_cocoa_window(this);
         let pos = ns_point_to_vec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
         }));
-        let mut events = vec![Event::DragUpdated(DragUpdatedEvent {
+        let mut events = vec![Event::FingerDrag(FingerDragEvent {
             handled: false,
             abs: pos,
             rel: pos,
@@ -2003,7 +1989,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         })];
         window.do_callback(&mut events);
         match &events[0] {
-            Event::DragUpdated(event) => {
+            Event::FingerDrag(event) => {
                 drag_action_to_ns_drag_operation(event.action)
             },
             _ => panic!()
