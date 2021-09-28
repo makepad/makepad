@@ -281,17 +281,7 @@ pub struct WebSocketMessageEvent{
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct DragEnteredEvent {
-    pub handled: bool,
-    pub abs: Vec2,
-    pub rel: Vec2,
-    pub rect: Rect,
-    pub state: DragState,
-    pub action: DragAction,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct DragUpdatedEvent {
+pub struct FingerDragEvent {
     pub handled: bool,
     pub abs: Vec2,
     pub rel: Vec2,
@@ -355,9 +345,7 @@ pub enum Event {
     TextCopy(TextCopyEvent),
     LiveRecompile(LiveRecompileEvent),
     WebSocketMessage(WebSocketMessageEvent),
-    DragEntered(DragEnteredEvent),
-    DragExited,
-    DragUpdated(DragUpdatedEvent),
+    FingerDrag(FingerDragEvent),
 }
 
 impl Default for Event {
@@ -567,20 +555,19 @@ impl Event {
                     })
                 }
             },
-            Event::DragEntered(event) if !event.handled => {
+            Event::FingerDrag(event) => {
                 let rect = area.get_rect(cx);
                 if area == cx.drag_area {
                     if rect.contains_with_margin(event.abs, &opt.margin) {
                         cx.new_drag_area = area;
-                        event.handled = true;
-                        return Event::DragEntered(DragEnteredEvent {
+                        return Event::FingerDrag(FingerDragEvent {
                             rel: area.abs_to_rel(cx, event.abs),
                             rect,
                             ..event.clone()
                         })
                     } else {
                         cx.new_drag_area = Area::default();
-                        return Event::DragEntered(DragEnteredEvent {
+                        return Event::FingerDrag(FingerDragEvent {
                             rel: area.abs_to_rel(cx, event.abs),
                             rect,
                             state: DragState::Out,
@@ -590,41 +577,7 @@ impl Event {
                 } else {
                     if rect.contains_with_margin(event.abs, &opt.margin) {
                         cx.new_drag_area = area;
-                        event.handled = true;
-                        return Event::DragEntered(DragEnteredEvent {
-                            rel: area.abs_to_rel(cx, event.abs),
-                            rect,
-                            state: DragState::In,
-                            ..event.clone()
-                        })
-                    }
-                }
-            }
-            Event::DragUpdated(event) if !event.handled => {
-                let rect = area.get_rect(cx);
-                if area == cx.drag_area {
-                    if rect.contains_with_margin(event.abs, &opt.margin) {
-                        cx.new_drag_area = area;
-                        event.handled = true;
-                        return Event::DragUpdated(DragUpdatedEvent {
-                            rel: area.abs_to_rel(cx, event.abs),
-                            rect,
-                            ..event.clone()
-                        })
-                    } else {
-                        cx.new_drag_area = Area::default();
-                        return Event::DragUpdated(DragUpdatedEvent {
-                            rel: area.abs_to_rel(cx, event.abs),
-                            rect,
-                            state: DragState::Out,
-                            ..event.clone()
-                        })
-                    }
-                } else {
-                    if rect.contains_with_margin(event.abs, &opt.margin) {
-                        cx.new_drag_area = area;
-                        event.handled = true;
-                        return Event::DragUpdated(DragUpdatedEvent {
+                        return Event::FingerDrag(FingerDragEvent {
                             rel: area.abs_to_rel(cx, event.abs),
                             rect,
                             state: DragState::In,
@@ -636,6 +589,45 @@ impl Event {
             _ => ()
         };
         return Event::None;
+    }
+
+    pub fn drag_hits(&mut self, cx: &mut Cx, area: Area, opt: HitOpt) -> Event {
+        match self {
+            Event::FingerDrag(event) => {
+                let rect = area.get_rect(cx);
+                if area == cx.drag_area {
+                    if rect.contains_with_margin(event.abs, &opt.margin) {
+                        cx.new_drag_area = area;
+                        Event::FingerDrag(FingerDragEvent {
+                            rel: area.abs_to_rel(cx, event.abs),
+                            rect,
+                            ..event.clone()
+                        })
+                    } else {
+                        cx.new_drag_area = Area::default();
+                        Event::FingerDrag(FingerDragEvent {
+                            rel: area.abs_to_rel(cx, event.abs),
+                            rect,
+                            state: DragState::Out,
+                            ..event.clone()
+                        })
+                    }
+                } else {
+                    if rect.contains_with_margin(event.abs, &opt.margin) {
+                        cx.new_drag_area = area;
+                        Event::FingerDrag(FingerDragEvent {
+                            rel: area.abs_to_rel(cx, event.abs),
+                            rect,
+                            state: DragState::In,
+                            ..event.clone()
+                        })
+                    } else {
+                        Event::None
+                    }
+                }
+            }
+            _ => Event::None,
+        }   
     }
 }
 

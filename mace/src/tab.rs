@@ -147,7 +147,13 @@ impl Tab {
                 tab_button::Action::WasPressed => dispatch_action(cx, Action::ButtonWasPressed),
             });
         match event.hits(cx, self.tab.area(), HitOpt::default()) {
-            Event::DragEntered(DragEnteredEvent { state, .. }) | Event::DragUpdated(DragUpdatedEvent { state, .. }) => {
+            Event::FingerDown(_) => {
+                dispatch_action(cx, Action::WasPressed);
+            }
+            _ => {}
+        }
+        match event.drag_hits(cx, self.tab.area(), HitOpt::default()) {
+            Event::FingerDrag(FingerDragEvent { state, .. }) => {
                 match state {
                     DragState::In => {
                         self.is_dragged = true;
@@ -159,13 +165,6 @@ impl Tab {
                     }
                     _ => {}
                 }
-            }
-            Event::DragExited => {
-                self.is_dragged = false;
-                cx.redraw_child_area(self.tab.area());
-            }
-            Event::FingerDown(_) => {
-                dispatch_action(cx, Action::WasPressed);
             }
             _ => {}
         }
