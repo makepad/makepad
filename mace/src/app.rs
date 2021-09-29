@@ -132,15 +132,16 @@ impl AppInner {
         let panel = &state.panels_by_panel_id[panel_id];
         match panel {
             Panel::Split(SplitPanel { child_ids }) => {
-                if self.dock.begin_splitter(cx, panel_id).is_ok() {
+                if self.dock.begin_split_panel(cx, panel_id).is_ok() {
                     self.draw_panel(cx, state, child_ids[0]);
-                    self.dock.middle_splitter(cx);
+                    self.dock.middle_split_panel(cx);
                     self.draw_panel(cx, state, child_ids[01]);
-                    self.dock.end_splitter(cx);
+                    self.dock.end_split_panel(cx);
                 }
             }
             Panel::Tab(TabPanel { tab_ids, .. }) => {
-                if self.dock.begin_tab_bar(cx, panel_id).is_ok() {
+                self.dock.begin_tab_panel(cx, panel_id);
+                if self.dock.begin_tab_bar(cx).is_ok() {
                     for tab_id in tab_ids {
                         let tab = &state.tabs_by_tab_id[*tab_id];
                         self.dock.tab(cx, *tab_id, &tab.name);
@@ -148,20 +149,16 @@ impl AppInner {
                     self.dock.end_tab_bar(cx);
                 }
                 if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
-                    cx.turtle_new_line();
-                    self.draw_tab(cx, state, tab_id);
+                    let tab = &state.tabs_by_tab_id[tab_id];
+                    match tab.kind {
+                        TabKind::FileTree => self.draw_file_tree(cx, state),
+                        TabKind::CodeEditor { .. } => {
+                            let panel = state.panels_by_panel_id[tab.panel_id].as_tab_panel();
+                            self.code_editor.draw(cx, &state.code_editor_state, panel.view_id.unwrap());
+                        }
+                    }
                 }
-            }
-        }
-    }
-
-    fn draw_tab(&mut self, cx: &mut Cx, state: &State, tab_id: TabId) {
-        let tab = &state.tabs_by_tab_id[tab_id];
-        match tab.kind {
-            TabKind::FileTree => self.draw_file_tree(cx, state),
-            TabKind::CodeEditor { .. } => {
-                let panel = state.panels_by_panel_id[tab.panel_id].as_tab_panel();
-                self.code_editor.draw(cx, &state.code_editor_state, panel.view_id.unwrap());
+                self.dock.end_tab_panel(cx);
             }
         }
     }
