@@ -21,65 +21,76 @@ impl Dock {
     }
 
     pub fn begin_splitter(&mut self, cx: &mut Cx, panel_id: PanelId) -> Result<(), ()> {
-        if !self.panels_by_panel_id.contains(panel_id) {
-            self.panels_by_panel_id
-                .insert(panel_id, Panel::Splitter(Splitter::new(cx)));
-        }
-        let splitter = self.panels_by_panel_id[panel_id].as_splitter_mut();
-        splitter.begin(cx)?;
+        let panel = self.get_or_create_split_panel(cx, panel_id);
+        panel.splitter.begin(cx)?;
         self.panel_id_stack.push(panel_id);
         Ok(())
     }
 
     pub fn middle_splitter(&mut self, cx: &mut Cx) {
         let panel_id = *self.panel_id_stack.last().unwrap();
-        let splitter = self.panels_by_panel_id[panel_id].as_splitter_mut();
-        splitter.middle(cx);
+        let panel = self.panels_by_panel_id[panel_id].as_split_panel_mut();
+        panel.splitter.middle(cx);
     }
 
     pub fn end_splitter(&mut self, cx: &mut Cx) {
         let panel_id = self.panel_id_stack.pop().unwrap();
-        let splitter = self.panels_by_panel_id[panel_id].as_splitter_mut();
-        splitter.end(cx);
+        let panel = self.panels_by_panel_id[panel_id].as_split_panel_mut();
+        panel.splitter.end(cx);
     }
 
     pub fn begin_tab_bar(&mut self, cx: &mut Cx, panel_id: PanelId) -> Result<(), ()> {
-        if !self.panels_by_panel_id.contains(panel_id) {
-            self.panels_by_panel_id
-                .insert(panel_id, Panel::TabBar(TabBar::new(cx)));
-        }
-        let tab_bar = self.panels_by_panel_id[panel_id].as_tab_bar_mut();
-        tab_bar.begin(cx)?;
+        let panel = self.get_or_create_tab_panel(cx, panel_id);
+        panel.tab_bar.begin(cx)?;
         self.panel_id_stack.push(panel_id);
         Ok(())
     }
 
     pub fn end_tab_bar(&mut self, cx: &mut Cx) {
         let panel_id = self.panel_id_stack.pop().unwrap();
-        let tab_bar = self.panels_by_panel_id[panel_id].as_tab_bar_mut();
-        tab_bar.end(cx);
+        let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
+        panel.tab_bar.end(cx);
     }
 
     pub fn tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
         let panel_id = *self.panel_id_stack.last().unwrap();
-        let tab_bar = self.panels_by_panel_id[panel_id].as_tab_bar_mut();
-        tab_bar.tab(cx, tab_id, name);
+        let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
+        panel.tab_bar.tab(cx, tab_id, name);
     }
 
-    pub fn get_or_create_splitter(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut Splitter {
+    fn get_or_create_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut SplitPanel {
         if !self.panels_by_panel_id.contains(panel_id) {
             self.panels_by_panel_id
-                .insert(panel_id, Panel::Splitter(Splitter::new(cx)));
+                .insert(panel_id, Panel::Split(SplitPanel {
+                    splitter: Splitter::new(cx)
+                }));
         }
-        self.panels_by_panel_id[panel_id].as_splitter_mut()
+        self.panels_by_panel_id[panel_id].as_split_panel_mut()
     }
 
-    pub fn get_or_create_tab_bar(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut TabBar {
+    fn get_or_create_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut TabPanel {
         if !self.panels_by_panel_id.contains(panel_id) {
             self.panels_by_panel_id
-                .insert(panel_id, Panel::TabBar(TabBar::new(cx)));
+                .insert(panel_id, Panel::Tab(TabPanel {
+                    tab_bar: TabBar::new(cx)
+                }));
         }
-        self.panels_by_panel_id[panel_id].as_tab_bar_mut()
+        self.panels_by_panel_id[panel_id].as_tab_panel_mut()
+    }
+
+    pub fn selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId) -> Option<TabId> {
+        let panel = self.get_or_create_tab_panel(cx, panel_id);
+        panel.tab_bar.selected_tab_id()
+    }
+
+    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: Option<TabId>) {
+        let panel = self.get_or_create_tab_panel(cx, panel_id);
+        panel.tab_bar.set_selected_tab_id(cx, tab_id);
+    }
+
+    pub fn redraw_tab_bar(&mut self, cx: &mut Cx, panel_id: PanelId) {
+        let panel = self.get_or_create_tab_panel(cx, panel_id);
+        panel.tab_bar.redraw(cx);
     }
 
     pub fn handle_event(
@@ -90,15 +101,15 @@ impl Dock {
     ) {
         for panel in &mut self.panels_by_panel_id {
             match panel {
-                Panel::Splitter(splitter) => {
-                    splitter.handle_event(cx, event, &mut |cx, action| match action {
+                Panel::Split(panel) => {
+                    panel.splitter.handle_event(cx, event, &mut |cx, action| match action {
                         splitter::Action::Redraw => {
                             cx.redraw_child_area(Area::All);
                         }
                     });
                 }
-                Panel::TabBar(tab_bar) => {
-                    tab_bar.handle_event(cx, event, &mut |cx, action| match action {
+                Panel::Tab(panel) => {
+                    panel.tab_bar.handle_event(cx, event, &mut |cx, action| match action {
                         tab_bar::Action::TabWasPressed(tab_id) => {
                             dispatch_action(cx, Action::TabWasPressed(tab_id))
                         }
@@ -121,25 +132,33 @@ impl AsRef<Id> for PanelId {
     }
 }
 
-pub enum Panel {
-    Splitter(Splitter),
-    TabBar(TabBar),
+enum Panel {
+    Split(SplitPanel),
+    Tab(TabPanel),
 }
 
 impl Panel {
-    fn as_splitter_mut(&mut self) -> &mut Splitter {
+    fn as_split_panel_mut(&mut self) -> &mut SplitPanel {
         match self {
-            Panel::Splitter(splitter) => splitter,
+            Panel::Split(panel) => panel,
             _ => panic!(),
         }
     }
 
-    fn as_tab_bar_mut(&mut self) -> &mut TabBar {
+    fn as_tab_panel_mut(&mut self) -> &mut TabPanel {
         match self {
-            Panel::TabBar(tab_bar) => tab_bar,
+            Panel::Tab(panel) => panel,
             _ => panic!(),
         }
     }
+}
+
+struct SplitPanel {
+    splitter: Splitter
+}
+
+struct TabPanel {
+    tab_bar: TabBar
 }
 
 pub enum Action {
