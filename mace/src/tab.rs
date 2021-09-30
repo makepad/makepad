@@ -14,7 +14,7 @@ pub struct Tab {
     name: DrawText,
     name_color: Vec4,
     name_color_selected: Vec4,
-    drag_overlay: DrawColor,
+    drag: DrawColor,
 }
 
 impl Tab {
@@ -48,7 +48,7 @@ impl Tab {
             }
             self::name_color: #82;
             self::name_color_selected: #FF;
-            self::drag_overlay_color: #FFFFFF80;
+            self::drag_color: #FFFFFF80;
         })
     }
 
@@ -64,7 +64,7 @@ impl Tab {
             name: DrawText::new(cx, default_shader!()),
             name_color: Vec4::default(),
             name_color_selected: Vec4::default(),
-            drag_overlay: DrawColor::new(cx, default_shader!()).with_draw_depth(1.0),
+            drag: DrawColor::new(cx, default_shader!()).with_draw_depth(1.0),
         }
     }
 
@@ -86,7 +86,7 @@ impl Tab {
         cx.turtle_align_y();
         self.tab.end_quad(cx);
         if self.is_dragged {
-            self.drag_overlay.draw_quad_abs(cx, self.tab.area().get_rect(cx));
+            self.drag.draw_quad_abs(cx, self.tab.area().get_rect(cx));
         }
     }
 
@@ -99,7 +99,7 @@ impl Tab {
         self.name.text_style = live_text_style!(cx, self::name_text_style);
         self.name_color = live_vec4!(cx, self::name_color);
         self.name_color_selected = live_vec4!(cx, self::name_color_selected);
-        self.drag_overlay.color = live_vec4!(cx, self::drag_overlay_color);
+        self.drag.color = live_vec4!(cx, self::drag_color);
     }
 
     fn layout(&self) -> Layout {
