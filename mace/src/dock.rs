@@ -10,6 +10,8 @@ use {
 pub struct Dock {
     panels_by_panel_id: IdMap<PanelId, Panel>,
     panel_id_stack: Vec<PanelId>,
+    drag_view: View,
+    drag_quad: DrawColor,
 }
 
 impl Dock {
@@ -17,6 +19,8 @@ impl Dock {
         Dock {
             panels_by_panel_id: IdMap::new(),
             panel_id_stack: Vec::new(),
+            drag_view: View::new(),
+            drag_quad: DrawColor::new(cx, default_shader!()).with_draw_depth(10.0),
         }
     }
 
@@ -47,7 +51,17 @@ impl Dock {
     pub fn end_tab_panel(&mut self, cx: &mut Cx) {
         let panel_id = self.panel_id_stack.pop().unwrap();
         let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
-        // TODO: Draw drag overlay view
+        
+        // If the panel has a drag state, it's currently being dragged over, so try to draw the drag quad:
+        if let Some(drag_state) = panel.drag_state {
+            if self.drag_view.begin_view(cx, Layout::default()).is_ok() {
+                self.drag_quad.color = vec4(1.0, 1.0, 1.0, 0.5);
+                // The drag rectangle is computed in the function contents, which is called either from
+                // begin_tab_bar (if the tab bar is not dirty), or end_tab_bar (if the tab bar is dirty).
+                self.drag_quad.draw_quad_abs(cx, panel.drag_rect);
+                self.drag_view.end_view(cx);
+            }
+        }
     }
 
     pub fn begin_tab_bar(&mut self, cx: &mut Cx) -> Result<(), ()> {
@@ -102,7 +116,7 @@ impl Dock {
                 .insert(panel_id, Panel::Tab(TabPanel {
                     tab_bar: TabBar::new(cx),
                     drag_rect: Rect::default(),
-                    drag_state: DragState::None,
+                    drag_state: None,
                 }));
         }
         self.panels_by_panel_id[panel_id].as_tab_panel_mut()
@@ -149,23 +163,26 @@ impl Dock {
                     });
                     match event {
                         Event::FingerDrag(event) => {
-                            panel.drag_state = if panel.drag_rect.contains(event.abs) {
-                                let top_left = panel.drag_rect.pos;
-                                let bottom_right = panel.drag_rect.pos + panel.drag_rect.size;
-                                if (event.abs.x - top_left.x) / panel.drag_rect.size.x < 0.1 {
+                            let rect = panel.drag_rect;
+                            let new_drag_state = if rect.contains(event.abs) {
+                                let top_left = rect.pos;
+                                let bottom_right = rect.pos + rect.size;
+                                Some(if (event.abs.x - top_left.x) / rect.size.x < 0.1 {
                                     DragState::Left
-                                } else if (bottom_right.x - event.abs.x) / panel.drag_rect.size.x < 0.1 {
+                                } else if (bottom_right.x - event.abs.x) / rect.size.x < 0.1 {
                                     DragState::Right
-                                } else if (event.abs.y - top_left.y) / panel.drag_rect.size.y < 0.1 {
+                                } else if (event.abs.y - top_left.y) / rect.size.y < 0.1 {
                                     DragState::Top
-                                } else if (bottom_right.y - event.abs.y) / panel.drag_rect.size.y < 0.1 {
+                                } else if (bottom_right.y - event.abs.y) / rect.size.y < 0.1 {
                                     DragState::Bottom
                                 } else {
                                     DragState::Center
-                                }
+                                })
                             } else {
-                                DragState::None
+                                None
                             };
+                            panel.drag_state = new_drag_state;
+                            self.drag_view.redraw_view(cx);
                         }
                         _ => {}
                     }
@@ -212,12 +229,11 @@ struct SplitPanel {
 struct TabPanel {
     tab_bar: TabBar,
     drag_rect: Rect,
-    drag_state: DragState,
+    drag_state: Option<DragState>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum DragState {
-    None,
     Left,
     Right,
     Top,
