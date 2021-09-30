@@ -10,7 +10,6 @@ use {
 pub struct Dock {
     panels_by_panel_id: IdMap<PanelId, Panel>,
     panel_id_stack: Vec<PanelId>,
-    drag_view: View,
     drag_quad: DrawColor,
 }
 
@@ -19,7 +18,6 @@ impl Dock {
         Dock {
             panels_by_panel_id: IdMap::new(),
             panel_id_stack: Vec::new(),
-            drag_view: View::new(),
             drag_quad: DrawColor::new(cx, default_shader!()).with_draw_depth(10.0),
         }
     }
@@ -43,25 +41,61 @@ impl Dock {
         panel.splitter.end(cx);
     }
 
-    pub fn begin_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) {
-        self.get_or_create_tab_panel(cx, panel_id);
+    pub fn begin_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> Result<(), ()>  {
+        let panel = self.get_or_create_tab_panel(cx, panel_id);
+        panel.view.begin_view(cx, Layout::default())?;
         self.panel_id_stack.push(panel_id);
+        Ok(())
     }
 
     pub fn end_tab_panel(&mut self, cx: &mut Cx) {
         let panel_id = self.panel_id_stack.pop().unwrap();
         let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
-        
-        // If the panel has a drag state, it's currently being dragged over, so try to draw the drag quad:
-        if let Some(drag_state) = panel.drag_state {
-            if self.drag_view.begin_view(cx, Layout::default()).is_ok() {
-                self.drag_quad.color = vec4(1.0, 1.0, 1.0, 0.5);
-                // The drag rectangle is computed in the function contents, which is called either from
-                // begin_tab_bar (if the tab bar is not dirty), or end_tab_bar (if the tab bar is dirty).
-                self.drag_quad.draw_quad_abs(cx, panel.drag_rect);
-                self.drag_view.end_view(cx);
+        self.drag_quad.color = vec4(1.0, 0.0, 0.0, 0.5);
+        match panel.drag_state {
+            Some(drag_state) => {
+                let Rect { pos, size } = panel.drag_rect;
+                self.drag_quad.draw_quad_abs(cx, match drag_state {
+                    DragState::Left => Rect {
+                        pos,
+                        size: Vec2 {
+                            x: size.x / 2.0,
+                            y: size.y
+                        }
+                    },
+                    DragState::Right => Rect {
+                        pos: Vec2 {
+                            x: pos.x + size.x / 2.0,
+                            y: pos.y
+                        },
+                        size: Vec2 {
+                            x: size.x / 2.0,
+                            y: size.y
+                        }
+                    },
+                    DragState::Top => Rect {
+                        pos,
+                        size: Vec2 {
+                            x: size.x,
+                            y: size.y / 2.0,
+                        }
+                    },
+                    DragState::Bottom => Rect {
+                        pos: Vec2 {
+                            x: pos.x,
+                            y: pos.y + size.y / 2.0,
+                        },
+                        size: Vec2 {
+                            x: size.x,
+                            y: size.y / 2.0,
+                        }
+                    },
+                    DragState::Center => panel.drag_rect,
+                });
             }
+            None => {},
         }
+        panel.view.end_view(cx);
     }
 
     pub fn begin_tab_bar(&mut self, cx: &mut Cx) -> Result<(), ()> {
@@ -114,6 +148,7 @@ impl Dock {
         if !self.panels_by_panel_id.contains(panel_id) {
             self.panels_by_panel_id
                 .insert(panel_id, Panel::Tab(TabPanel {
+                    view: View::new().with_is_overlay(true),
                     tab_bar: TabBar::new(cx),
                     drag_rect: Rect::default(),
                     drag_state: None,
@@ -181,8 +216,10 @@ impl Dock {
                             } else {
                                 None
                             };
+                            if panel.drag_state != new_drag_state {
+                                panel.view.redraw_view(cx);
+                            }
                             panel.drag_state = new_drag_state;
-                            self.drag_view.redraw_view(cx);
                         }
                         _ => {}
                     }
@@ -227,6 +264,7 @@ struct SplitPanel {
 }
 
 struct TabPanel {
+    view: View,
     tab_bar: TabBar,
     drag_rect: Rect,
     drag_state: Option<DragState>,
