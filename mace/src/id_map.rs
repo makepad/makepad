@@ -4,7 +4,8 @@ use {
         marker::PhantomData,
         mem,
         ops::{Index, IndexMut},
-        slice, vec,
+        slice::{Iter, IterMut},
+        vec::IntoIter,
     },
 };
 
@@ -31,8 +32,8 @@ impl<K: AsRef<Id>, V> IdMap<K, V> {
         }
     }
 
-    pub fn iter(&self) -> Iter<'_, V> {
-        Iter {
+    pub fn values(&self) -> Values<'_, V> {
+        Values {
             iter: self.entries.iter(),
         }
     }
@@ -45,8 +46,8 @@ impl<K: AsRef<Id>, V> IdMap<K, V> {
         }
     }
 
-    pub fn iter_mut(&mut self) -> IterMut<'_, V> {
-        IterMut {
+    pub fn values_mut(&mut self) -> ValuesMut<'_, V> {
+        ValuesMut {
             iter: self.entries.iter_mut(),
         }
     }
@@ -86,6 +87,12 @@ impl<K: AsRef<Id>, V> IdMap<K, V> {
     pub fn clear(&mut self) {
         self.entries.clear()
     }
+
+    pub fn into_values(self) -> IntoValues<V> {
+        IntoValues {
+            iter: self.entries.into_iter()
+        }
+    }
 }
 
 impl<K: AsRef<Id>, V> Default for IdMap<K, V> {
@@ -111,42 +118,13 @@ impl<K: AsRef<Id>, V> IndexMut<K> for IdMap<K, V> {
     }
 }
 
-impl<'a, K: AsRef<Id>, V> IntoIterator for &'a IdMap<K, V> {
-    type Item = &'a V;
-    type IntoIter = Iter<'a, V>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
-
-impl<'a, K: AsRef<Id>, V> IntoIterator for &'a mut IdMap<K, V> {
-    type Item = &'a mut V;
-    type IntoIter = IterMut<'a, V>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter_mut()
-    }
-}
-
-impl<K: AsRef<Id>, V> IntoIterator for IdMap<K, V> {
-    type Item = V;
-    type IntoIter = IntoIter<V>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        IntoIter {
-            iter: self.entries.into_iter(),
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
-pub struct Iter<'a, T> {
-    iter: slice::Iter<'a, Option<Entry<T>>>,
+pub struct Values<'a, V> {
+    iter: Iter<'a, Option<Entry<V>>>,
 }
 
-impl<'a, T> Iterator for Iter<'a, T> {
-    type Item = &'a T;
+impl<'a, V> Iterator for Values<'a, V> {
+    type Item = &'a V;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -159,12 +137,12 @@ impl<'a, T> Iterator for Iter<'a, T> {
 }
 
 #[derive(Debug)]
-pub struct IterMut<'a, T> {
-    iter: slice::IterMut<'a, Option<Entry<T>>>,
+pub struct ValuesMut<'a, V> {
+    iter: IterMut<'a, Option<Entry<V>>>,
 }
 
-impl<'a, T> Iterator for IterMut<'a, T> {
-    type Item = &'a mut T;
+impl<'a, V> Iterator for ValuesMut<'a, V> {
+    type Item = &'a mut V;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -177,12 +155,12 @@ impl<'a, T> Iterator for IterMut<'a, T> {
 }
 
 #[derive(Clone, Debug)]
-pub struct IntoIter<T> {
-    iter: vec::IntoIter<Option<Entry<T>>>,
+pub struct IntoValues<V> {
+    iter: IntoIter<Option<Entry<V>>>,
 }
 
-impl<T> Iterator for IntoIter<T> {
-    type Item = T;
+impl<V> Iterator for IntoValues<V> {
+    type Item = V;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
