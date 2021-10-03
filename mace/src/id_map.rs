@@ -1,5 +1,5 @@
 use {
-    super::Id,
+    crate::id::Id,
     std::{
         marker::PhantomData,
         mem,

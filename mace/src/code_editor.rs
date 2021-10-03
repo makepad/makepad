@@ -2,7 +2,9 @@ use {
     crate::{
         cursor_set::CursorSet,
         delta::{self, Delta, Whose},
-        id::{Id, IdAllocator, IdMap},
+        id::Id,
+        id_allocator::IdAllocator,
+        id_map::IdMap,
         position::Position,
         position_set::PositionSet,
         protocol::{Notification, Request, Response},

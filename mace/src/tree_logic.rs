@@ -1,5 +1,8 @@
 use {
-    crate::id::{Id, IdMap},
+    crate::{
+        id::Id,
+        id_map::IdMap
+    },
     makepad_render::*,
     std::collections::{HashMap, HashSet},
 };
