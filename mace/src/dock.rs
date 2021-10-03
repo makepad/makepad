@@ -57,48 +57,44 @@ impl Dock {
     pub fn end_tab_panel(&mut self, cx: &mut Cx) {
         let panel_id = self.panel_id_stack.pop().unwrap();
         let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
+        let Rect { pos, size } = panel.drag_rect;
         match panel.drag_state {
-            Some(drag_state) => {
-                let Rect { pos, size } = panel.drag_rect;
-                self.drag.draw_quad_abs(cx, match drag_state {
-                    DragState::Left => Rect {
-                        pos,
-                        size: Vec2 {
-                            x: size.x / 2.0,
-                            y: size.y
-                        }
-                    },
-                    DragState::Right => Rect {
-                        pos: Vec2 {
-                            x: pos.x + size.x / 2.0,
-                            y: pos.y
-                        },
-                        size: Vec2 {
-                            x: size.x / 2.0,
-                            y: size.y
-                        }
-                    },
-                    DragState::Top => Rect {
-                        pos,
-                        size: Vec2 {
-                            x: size.x,
-                            y: size.y / 2.0,
-                        }
-                    },
-                    DragState::Bottom => Rect {
-                        pos: Vec2 {
-                            x: pos.x,
-                            y: pos.y + size.y / 2.0,
-                        },
-                        size: Vec2 {
-                            x: size.x,
-                            y: size.y / 2.0,
-                        }
-                    },
-                    DragState::Center => panel.drag_rect,
-                });
-            }
-            None => {},
+            DragState::Left => self.drag.draw_quad_abs(cx, Rect {
+                pos,
+                size: Vec2 {
+                    x: size.x / 2.0,
+                    y: size.y
+                }
+            }),
+            DragState::Right => self.drag.draw_quad_abs(cx, Rect {
+                pos: Vec2 {
+                    x: pos.x + size.x / 2.0,
+                    y: pos.y
+                },
+                size: Vec2 {
+                    x: size.x / 2.0,
+                    y: size.y
+                }
+            }),
+            DragState::Top => self.drag.draw_quad_abs(cx, Rect {
+                pos,
+                size: Vec2 {
+                    x: size.x,
+                    y: size.y / 2.0,
+                }
+            }),
+            DragState::Bottom => self.drag.draw_quad_abs(cx, Rect {
+                pos: Vec2 {
+                    x: pos.x,
+                    y: pos.y + size.y / 2.0,
+                },
+                size: Vec2 {
+                    x: size.x,
+                    y: size.y / 2.0,
+                }
+            }),
+            DragState::Center => self.drag.draw_quad_abs(cx, panel.drag_rect),
+            DragState::None => {},
         }
         panel.view.end_view(cx);
     }
@@ -160,7 +156,7 @@ impl Dock {
                     view: View::new().with_is_overlay(true),
                     tab_bar: TabBar::new(cx),
                     drag_rect: Rect::default(),
-                    drag_state: None,
+                    drag_state: DragState::None,
                 }));
         }
         self.panels_by_panel_id[panel_id].as_tab_panel_mut()
@@ -211,7 +207,7 @@ impl Dock {
                             let new_drag_state = if rect.contains(event.abs) {
                                 let top_left = rect.pos;
                                 let bottom_right = rect.pos + rect.size;
-                                Some(if (event.abs.x - top_left.x) / rect.size.x < 0.1 {
+                                if (event.abs.x - top_left.x) / rect.size.x < 0.1 {
                                     DragState::Left
                                 } else if (bottom_right.x - event.abs.x) / rect.size.x < 0.1 {
                                     DragState::Right
@@ -221,9 +217,9 @@ impl Dock {
                                     DragState::Bottom
                                 } else {
                                     DragState::Center
-                                })
+                                }
                             } else {
-                                None
+                                DragState::None
                             };
                             if panel.drag_state != new_drag_state {
                                 panel.drag_state = new_drag_state;
@@ -276,7 +272,7 @@ struct TabPanel {
     view: View,
     tab_bar: TabBar,
     drag_rect: Rect,
-    drag_state: Option<DragState>,
+    drag_state: DragState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -286,6 +282,7 @@ enum DragState {
     Top,
     Bottom,
     Center,
+    None,
 }
 
 pub enum Action {
