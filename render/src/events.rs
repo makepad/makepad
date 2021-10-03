@@ -555,37 +555,6 @@ impl Event {
                     })
                 }
             },
-            Event::FingerDrag(event) => {
-                let rect = area.get_rect(cx);
-                if area == cx.drag_area {
-                    if rect.contains_with_margin(event.abs, &opt.margin) {
-                        cx.new_drag_area = area;
-                        return Event::FingerDrag(FingerDragEvent {
-                            rel: area.abs_to_rel(cx, event.abs),
-                            rect,
-                            ..event.clone()
-                        })
-                    } else {
-                        cx.new_drag_area = Area::default();
-                        return Event::FingerDrag(FingerDragEvent {
-                            rel: area.abs_to_rel(cx, event.abs),
-                            rect,
-                            state: DragState::Out,
-                            ..event.clone()
-                        })
-                    }
-                } else {
-                    if rect.contains_with_margin(event.abs, &opt.margin) {
-                        cx.new_drag_area = area;
-                        return Event::FingerDrag(FingerDragEvent {
-                            rel: area.abs_to_rel(cx, event.abs),
-                            rect,
-                            state: DragState::In,
-                            ..event.clone()
-                        })
-                    }
-                }
-            }
             _ => ()
         };
         return Event::None;
@@ -604,7 +573,6 @@ impl Event {
                             ..event.clone()
                         })
                     } else {
-                        cx.new_drag_area = Area::default();
                         Event::FingerDrag(FingerDragEvent {
                             rel: area.abs_to_rel(cx, event.abs),
                             rect,
