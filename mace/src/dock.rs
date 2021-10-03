@@ -10,15 +10,21 @@ use {
 pub struct Dock {
     panels_by_panel_id: IdMap<PanelId, Panel>,
     panel_id_stack: Vec<PanelId>,
-    drag_quad: DrawColor,
+    drag: DrawColor,
 }
 
 impl Dock {
+    pub fn style(cx: &mut Cx) {
+        live_body!(cx, {
+            self::drag_color: #FFFFFF80;
+        })
+    }
+
     pub fn new(cx: &mut Cx) -> Dock {
         Dock {
             panels_by_panel_id: IdMap::new(),
             panel_id_stack: Vec::new(),
-            drag_quad: DrawColor::new(cx, default_shader!()).with_draw_depth(10.0),
+            drag: DrawColor::new(cx, default_shader!()).with_draw_depth(10.0),
         }
     }
 
@@ -51,11 +57,10 @@ impl Dock {
     pub fn end_tab_panel(&mut self, cx: &mut Cx) {
         let panel_id = self.panel_id_stack.pop().unwrap();
         let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
-        self.drag_quad.color = vec4(1.0, 0.0, 0.0, 0.5);
         match panel.drag_state {
             Some(drag_state) => {
                 let Rect { pos, size } = panel.drag_rect;
-                self.drag_quad.draw_quad_abs(cx, match drag_state {
+                self.drag.draw_quad_abs(cx, match drag_state {
                     DragState::Left => Rect {
                         pos,
                         size: Vec2 {
@@ -119,6 +124,10 @@ impl Dock {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
         panel.tab_bar.tab(cx, tab_id, name);
+    }
+
+    pub fn apply_style(&mut self, cx: &mut Cx) {
+        self.drag.color = live_vec4!(cx, self::drag_color);
     }
 
     fn contents(&mut self, cx: &mut Cx) {
