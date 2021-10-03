@@ -1,6 +1,7 @@
 use {
     crate::{
-        id::{Id, IdMap},
+        id::Id,
+        id_map::IdMap,
         splitter::{self, Splitter},
         tab_bar::{self, TabBar, TabId},
     },
