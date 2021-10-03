@@ -7,6 +7,8 @@ pub mod delta;
 pub mod dock;
 pub mod file_tree;
 pub mod id;
+pub mod id_allocator;
+pub mod id_map;
 pub mod list_logic;
 pub mod position;
 pub mod position_set;
