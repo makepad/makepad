@@ -1970,6 +1970,10 @@ pub fn define_cocoa_view_class() -> *const Class {
 
     extern fn dragging_exited(this: &Object, _: Sel, sender: id) {
         dragging(this, sender);
+
+    }
+
+    extern fn dragging_ended(this: &Object, _: Sel, sender: id) {
         let window = get_cocoa_window(this);
         window.end_live_resize();
     }
@@ -2075,6 +2079,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         decl.add_method(sel!(draggingEntered:), dragging_entered as extern fn(&Object, Sel, id) -> NSDragOperation);
         decl.add_method(sel!(draggingExited:), dragging_exited as extern fn(&Object, Sel, id));
         decl.add_method(sel!(draggingUpdated:), dragging_updated as extern fn(&Object, Sel, id) -> NSDragOperation);
+        decl.add_method(sel!(draggingEnded:), dragging_ended as extern fn(&Object, Sel, id));
     }
     decl.add_ivar::<*mut c_void>("cocoa_window_ptr");
     decl.add_ivar::<id>("markedText");

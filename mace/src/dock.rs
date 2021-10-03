@@ -217,9 +217,9 @@ impl Dock {
                                 None
                             };
                             if panel.drag_state != new_drag_state {
+                                panel.drag_state = new_drag_state;
                                 panel.view.redraw_view(cx);
                             }
-                            panel.drag_state = new_drag_state;
                         }
                         _ => {}
                     }
