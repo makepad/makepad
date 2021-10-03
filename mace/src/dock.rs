@@ -184,7 +184,8 @@ impl Dock {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, Action),
     ) {
-        for panel in &mut self.panels_by_panel_id {
+        // TODO: Should we use the panel map for this, or just recurse over the panels?
+        for panel in self.panels_by_panel_id.values_mut() {
             match panel {
                 Panel::Split(panel) => {
                     panel.splitter.handle_event(cx, event, &mut |cx, action| match action {
