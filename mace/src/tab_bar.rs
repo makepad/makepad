@@ -1,6 +1,7 @@
 use {
     crate::{
-        id::{Id, IdMap},
+        id::Id,
+        id_map::IdMap,
         tab::{self, Tab},
     },
     makepad_render::*,

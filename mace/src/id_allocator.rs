@@ -1,4 +1,4 @@
-use super::Id;
+use crate::id::Id;
 
 #[derive(Debug, Default)]
 pub struct IdAllocator {
