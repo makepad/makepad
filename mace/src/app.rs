@@ -39,6 +39,7 @@ impl App {
     pub fn style(cx: &mut Cx) {
         makepad_widget::set_widget_style(cx);
         CodeEditor::style(cx);
+        Dock::style(cx);
         FileTree::style(cx);
         Splitter::style(cx);
         tab::Tab::style(cx);
@@ -123,6 +124,7 @@ impl AppInner {
 
     fn draw(&mut self, cx: &mut Cx, state: &State) {
         if self.window.begin_desktop_window(cx, None).is_ok() {
+            self.dock.apply_style(cx);
             self.draw_panel(cx, state, state.root_panel_id);
             self.window.end_desktop_window(cx);
         }
@@ -151,7 +153,12 @@ impl AppInner {
                     if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
                         let tab = &state.tabs_by_tab_id[tab_id];
                         match tab.kind {
-                            TabKind::FileTree => self.draw_file_tree(cx, state),
+                            TabKind::FileTree => {
+                                if self.file_tree.begin(cx).is_ok() {
+                                    self.draw_file_node(cx, state, state.root_file_node_id);
+                                    self.file_tree.end(cx);
+                                }    
+                            },
                             TabKind::CodeEditor { .. } => {
                                 let panel = state.panels_by_panel_id[tab.panel_id].as_tab_panel();
                                 self.code_editor.draw(cx, &state.code_editor_state, panel.view_id.unwrap());
@@ -161,13 +168,6 @@ impl AppInner {
                     self.dock.end_tab_panel(cx);
                 }
             }
-        }
-    }
-
-    fn draw_file_tree(&mut self, cx: &mut Cx, state: &State) {
-        if self.file_tree.begin(cx).is_ok() {
-            self.draw_file_node(cx, state, state.root_file_node_id);
-            self.file_tree.end(cx);
         }
     }
 
