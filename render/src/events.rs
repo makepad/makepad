@@ -291,6 +291,14 @@ pub struct FingerDragEvent {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct FingerDropEvent {
+    pub handled: bool,
+    pub abs: Vec2,
+    pub rel: Vec2,
+    pub rect: Rect,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum DragState {
     In,
     Over,
@@ -346,6 +354,7 @@ pub enum Event {
     LiveRecompile(LiveRecompileEvent),
     WebSocketMessage(WebSocketMessageEvent),
     FingerDrag(FingerDragEvent),
+    FingerDrop(FingerDropEvent)
 }
 
 impl Default for Event {
@@ -565,8 +574,9 @@ impl Event {
             Event::FingerDrag(event) => {
                 let rect = area.get_rect(cx);
                 if area == cx.drag_area {
-                    if rect.contains_with_margin(event.abs, &opt.margin) {
+                    if !event.handled && rect.contains_with_margin(event.abs, &opt.margin) {
                         cx.new_drag_area = area;
+                        event.handled = true;
                         Event::FingerDrag(FingerDragEvent {
                             rel: area.abs_to_rel(cx, event.abs),
                             rect,
@@ -581,8 +591,9 @@ impl Event {
                         })
                     }
                 } else {
-                    if rect.contains_with_margin(event.abs, &opt.margin) {
+                    if !event.handled && rect.contains_with_margin(event.abs, &opt.margin) {
                         cx.new_drag_area = area;
+                        event.handled = true;
                         Event::FingerDrag(FingerDragEvent {
                             rel: area.abs_to_rel(cx, event.abs),
                             rect,
@@ -592,6 +603,18 @@ impl Event {
                     } else {
                         Event::None
                     }
+                }
+            }
+            Event::FingerDrop(event) => {
+                let rect = area.get_rect(cx);
+                if !event.handled && rect.contains_with_margin(event.abs, &opt.margin) {
+                    Event::FingerDrop(FingerDropEvent {
+                        rel: area.abs_to_rel(cx, event.abs),
+                        rect,
+                        ..event.clone()
+                    })
+                } else {
+                    Event::None
                 }
             }
             _ => Event::None,
