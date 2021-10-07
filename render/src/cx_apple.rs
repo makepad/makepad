@@ -12,7 +12,6 @@ pub use makepad_objc_sys::{Encode, Encoding};
 pub type id = *mut makepad_objc_sys::runtime::Object;
 pub const nil: id = 0 as id;
 
-
 #[link(name = "Foundation", kind = "framework")]
 extern {
     pub static NSRunLoopCommonModes: id;
@@ -21,6 +20,8 @@ extern {
 
 #[link(name = "AppKit", kind = "framework")]
 extern {
+    pub static NSPasteboardURLReadingFileURLsOnlyKey: id;
+
     pub static NSStringPboardType: id;
     pub static NSPasteboardTypeURL: id;
 }

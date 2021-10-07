@@ -3,7 +3,8 @@
 
 use std::collections::{HashMap,BTreeSet};
 use crate::cx_apple::*;
-use std::os::raw::c_void;
+use std::ffi::CStr;
+use std::os::raw::{c_char, c_void};
 use std::sync::{Mutex};
 use std::time::Instant;
 //use core_graphics::display::CGDisplay;
@@ -1961,6 +1962,34 @@ pub fn define_cocoa_view_class() -> *const Class {
     extern fn dragging_entered(this: &Object, _: Sel, sender: id) -> NSDragOperation {
         let window = get_cocoa_window(this);
         window.start_live_resize();
+
+        let pasteboard: id = unsafe { msg_send![sender, draggingPasteboard] };
+        let class: id = unsafe { msg_send![class!(NSURL), class] };
+        let classes: id = unsafe {
+            msg_send![class!(NSArray), arrayWithObject: class]
+        };
+        let object: id = unsafe {
+            msg_send![class!(NSNumber), numberWithBool:true]
+        };
+        let options: id = unsafe {
+            msg_send![
+                class!(NSDictionary),
+                dictionaryWithObject: object
+                forKey: NSPasteboardURLReadingFileURLsOnlyKey
+            ]
+        };
+        let urls: id = unsafe {
+            msg_send![pasteboard, readObjectsForClasses:classes options:options]
+        };
+        let count: usize = unsafe { msg_send![urls, count] };
+        for index in 0..count {
+            let url: id = unsafe { msg_send![urls, objectAtIndex:index] };
+            let url: id = unsafe { msg_send![url, filePathURL] };
+            let string: id = unsafe { msg_send![url, absoluteString] };
+            let string = unsafe { CStr::from_ptr(msg_send![string, UTF8String]) };
+            println!("{:?}", string);
+        }
+
         dragging(this, sender)
     }
 
@@ -1970,12 +1999,6 @@ pub fn define_cocoa_view_class() -> *const Class {
 
     extern fn dragging_exited(this: &Object, _: Sel, sender: id) {
         dragging(this, sender);
-
-    }
-
-    extern fn dragging_ended(this: &Object, _: Sel, sender: id) {
-        let window = get_cocoa_window(this);
-        window.end_live_resize();
     }
 
     fn dragging(this: &Object, sender: id) -> NSDragOperation {
@@ -1994,19 +2017,34 @@ pub fn define_cocoa_view_class() -> *const Class {
         window.do_callback(&mut events);
         match &events[0] {
             Event::FingerDrag(event) => {
-                drag_action_to_ns_drag_operation(event.action)
+                match event.action {
+                    DragAction::None => NSDragOperation::None,
+                    DragAction::Copy => NSDragOperation::Copy,
+                    DragAction::Link => NSDragOperation::Link,
+                    DragAction::Move => NSDragOperation::Move,
+                }
             },
             _ => panic!()
         }
     }
 
-    fn drag_action_to_ns_drag_operation(action: DragAction) -> NSDragOperation {
-        match action {
-            DragAction::None => NSDragOperation::None,
-            DragAction::Copy => NSDragOperation::Copy,
-            DragAction::Link => NSDragOperation::Link,
-            DragAction::Move => NSDragOperation::Move,
-        }
+    extern fn dragging_ended(this: &Object, _: Sel, sender: id) {
+        let window = get_cocoa_window(this);
+        window.end_live_resize();
+    }
+
+    extern fn perform_drag_operation(this: &Object, _: Sel, sender: id) {
+        let window = get_cocoa_window(this);
+        let pos = ns_point_to_vec2(window_point_to_view_point(this, unsafe {
+            msg_send![sender, draggingLocation]
+        }));
+        let mut events = vec![Event::FingerDrop(FingerDropEvent {
+            handled: false,
+            abs: pos,
+            rel: pos,
+            rect: Rect::default(),
+        })];
+        window.do_callback(&mut events);
     }
 
     /*
@@ -2079,6 +2117,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         decl.add_method(sel!(draggingEntered:), dragging_entered as extern fn(&Object, Sel, id) -> NSDragOperation);
         decl.add_method(sel!(draggingExited:), dragging_exited as extern fn(&Object, Sel, id));
         decl.add_method(sel!(draggingUpdated:), dragging_updated as extern fn(&Object, Sel, id) -> NSDragOperation);
+        decl.add_method(sel!(performDragOperation:), perform_drag_operation as extern fn(&Object, Sel, id));
         decl.add_method(sel!(draggingEnded:), dragging_ended as extern fn(&Object, Sel, id));
     }
     decl.add_ivar::<*mut c_void>("cocoa_window_ptr");

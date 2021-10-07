@@ -207,6 +207,7 @@ impl Dock {
                         Event::FingerDrag(event) => {
                             let rect = panel.drag_rect;
                             let new_drag_state = if rect.contains(event.abs) {
+                                event.action = DragAction::Copy;
                                 let top_left = rect.pos;
                                 let bottom_right = rect.pos + rect.size;
                                 if (event.abs.x - top_left.x) / rect.size.x < 0.1 {
@@ -223,6 +224,13 @@ impl Dock {
                             } else {
                                 DragState::None
                             };
+                            if panel.drag_state != new_drag_state {
+                                panel.drag_state = new_drag_state;
+                                panel.view.redraw_view(cx);
+                            }
+                        }
+                        Event::FingerDrop(_) => {
+                            let new_drag_state = DragState::None;
                             if panel.drag_state != new_drag_state {
                                 panel.drag_state = new_drag_state;
                                 panel.view.redraw_view(cx);
