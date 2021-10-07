@@ -168,7 +168,6 @@ impl Cx {
                                 cocoa_app.update_app_menu(menu, &self.command_settings)
                             }
                         }
-                        
                         // build a list of renderpasses to repaint
                         let mut windows_need_repaint = 0;
                         self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
@@ -296,7 +295,6 @@ impl Cx {
             timer.timer_id = 0;
         }
     }
-    
     pub fn post_signal(signal: Signal, status: StatusId) {
         if signal.signal_id != 0 {
             CocoaApp::post_signal(signal.signal_id, status);
