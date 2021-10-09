@@ -93,12 +93,13 @@ impl CodeEditor {
             if let Some(session_id) = view.session_id {
                 let session = &state.sessions_by_session_id[session_id];
                 let document = &state.documents_by_document_id[session.document_id];
+                let document_inner = document.inner.as_ref().unwrap();
                 self.apply_style(cx);
-                let visible_lines = self.visible_lines(cx, view_id, document.text.as_lines().len());
-                self.draw_selections(cx, &session.selections, &document.text, visible_lines);
-                self.draw_text(cx, &document.text, &document.token_cache, visible_lines);
+                let visible_lines = self.visible_lines(cx, view_id, document_inner.text.as_lines().len());
+                self.draw_selections(cx, &session.selections, &document_inner.text, visible_lines);
+                self.draw_text(cx, &document_inner.text, &document_inner.token_cache, visible_lines);
                 self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
-                self.set_turtle_bounds(cx, &document.text);
+                self.set_turtle_bounds(cx, &document_inner.text);
             }
             let view = &mut self.views_by_view_id[view_id];
             view.view.end_view(cx);
@@ -437,7 +438,8 @@ impl CodeEditor {
                 if let Some(session_id) = view.session_id {
                     let session = &state.sessions_by_session_id[session_id];
                     let document = &state.documents_by_document_id[session.document_id];
-                    let position = self.position(&document.text, rel);
+                    let document_inner = document.inner.as_ref().unwrap();
+                    let position = self.position(&document_inner.text, rel);
                     match modifiers {
                         KeyModifiers { control: true, .. } => {
                             state.add_cursor(session_id, position);
@@ -455,7 +457,8 @@ impl CodeEditor {
                 if let Some(session_id) = view.session_id {
                     let session = &state.sessions_by_session_id[session_id];
                     let document = &state.documents_by_document_id[session.document_id];
-                    let position = self.position(&document.text, rel);
+                    let document_inner = document.inner.as_ref().unwrap();
+                    let position = self.position(&document_inner.text, rel);
                     state.move_cursors_to(session_id, position, true);
                     let view = &mut self.views_by_view_id[view_id];
                     view.view.redraw_view(cx);
@@ -582,12 +585,13 @@ impl CodeEditor {
                     let document_id = state.document_ids_by_path[&path];
 
                     let document = &mut state.documents_by_document_id[document_id];
-                    document.outstanding_deltas.pop_front();
-                    document.revision += 1;
-                    if let Some(outstanding_delta) = document.outstanding_deltas.front() {
+                    let document_inner = document.inner.as_mut().unwrap();
+                    document_inner.outstanding_deltas.pop_front();
+                    document_inner.revision += 1;
+                    if let Some(outstanding_delta) = document_inner.outstanding_deltas.front() {
                         send_request(Request::ApplyDelta(
                             path.clone(),
-                            document.revision,
+                            document_inner.revision,
                             outstanding_delta.clone(),
                         ));
                     }
@@ -609,16 +613,17 @@ impl CodeEditor {
                 let document_id = state.document_ids_by_path[&path];
 
                 let document = &mut state.documents_by_document_id[document_id];
+                let document_inner = document.inner.as_mut().unwrap();
                 let mut delta = delta;
-                for outstanding_delta_ref in &mut document.outstanding_deltas {
+                for outstanding_delta_ref in &mut document_inner.outstanding_deltas {
                     let outstanding_delta = mem::replace(outstanding_delta_ref, Delta::identity());
                     let (new_delta, new_outstanding_delta) = delta.transform(outstanding_delta);
                     delta = new_delta;
                     *outstanding_delta_ref = new_outstanding_delta;
                 }
 
-                transform_edit_stack(&mut document.undo_stack, delta.clone());
-                transform_edit_stack(&mut document.redo_stack, delta.clone());
+                transform_edit_stack(&mut document_inner.undo_stack, delta.clone());
+                transform_edit_stack(&mut document_inner.redo_stack, delta.clone());
 
                 let document = &state.documents_by_document_id[document_id];
                 for session_id in document.session_ids.iter().cloned() {
@@ -627,7 +632,8 @@ impl CodeEditor {
                 }
 
                 let document = &mut state.documents_by_document_id[document_id];
-                document.revision += 1;
+                let document_inner = document.inner.as_mut().unwrap();
+                document_inner.revision += 1;
                 document.apply_delta(delta);
 
                 self.redraw_document_views(cx, state, document_id);
@@ -721,13 +727,15 @@ impl State {
             document_id,
             Document {
                 session_ids: HashSet::new(),
-                undo_stack: Vec::new(),
-                redo_stack: Vec::new(),
                 path: path.clone(),
-                revision,
-                text,
-                token_cache,
-                outstanding_deltas: VecDeque::new(),
+                inner: Some(DocumentInner {
+                    undo_stack: Vec::new(),
+                    redo_stack: Vec::new(),
+                    revision,
+                    text,
+                    token_cache,
+                    outstanding_deltas: VecDeque::new(),
+                }),
             },
         );
         self.document_ids_by_path.insert(path, document_id);
@@ -755,28 +763,32 @@ impl State {
     fn move_cursors_left(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions_by_session_id[session_id];
         let document = &self.documents_by_document_id[session.document_id];
-        session.cursors.move_left(&document.text, select);
+        let document_inner = document.inner.as_ref().unwrap();
+        session.cursors.move_left(&document_inner.text, select);
         session.update_selections_and_carets();
     }
 
     fn move_cursors_right(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions_by_session_id[session_id];
         let document = &self.documents_by_document_id[session.document_id];
-        session.cursors.move_right(&document.text, select);
+        let document_inner = document.inner.as_ref().unwrap();
+        session.cursors.move_right(&document_inner.text, select);
         session.update_selections_and_carets();
     }
 
     fn move_cursors_up(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions_by_session_id[session_id];
         let document = &self.documents_by_document_id[session.document_id];
-        session.cursors.move_up(&document.text, select);
+        let document_inner = document.inner.as_ref().unwrap();
+        session.cursors.move_up(&document_inner.text, select);
         session.update_selections_and_carets();
     }
 
     fn move_cursors_down(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions_by_session_id[session_id];
         let document = &self.documents_by_document_id[session.document_id];
-        session.cursors.move_down(&document.text, select);
+        let document_inner = document.inner.as_ref().unwrap();
+        session.cursors.move_down(&document_inner.text, select);
         session.update_selections_and_carets();
     }
 
@@ -826,6 +838,7 @@ impl State {
     fn insert_backspace(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(Request)) {
         let session = &self.sessions_by_session_id[session_id];
         let document = &self.documents_by_document_id[session.document_id];
+        let document_inner = document.inner.as_ref().unwrap();
 
         let mut builder_0 = delta::Builder::new();
         for span in session.selections.spans() {
@@ -846,7 +859,7 @@ impl State {
                     if position.line != 0 {
                         builder_1.retain(Size {
                             line: distance.line - 1,
-                            column: document.text.as_lines()[position.line - 1].len(),
+                            column: document_inner.text.as_lines()[position.line - 1].len(),
                         });
                         builder_1.delete(Size { line: 1, column: 0 })
                     }
@@ -872,11 +885,10 @@ impl State {
     fn undo(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(Request)) {
         let session = &self.sessions_by_session_id[session_id];
         let document = &mut self.documents_by_document_id[session.document_id];
-        if let Some(undo) = document.undo_stack.pop() {
-            let session = &self.sessions_by_session_id[session_id];
-            let document = &mut self.documents_by_document_id[session.document_id];
-            let inverse_delta = undo.delta.clone().invert(&document.text);
-            document.redo_stack.push(Edit {
+        let document_inner = document.inner.as_mut().unwrap();
+        if let Some(undo) = document_inner.undo_stack.pop() {
+            let inverse_delta = undo.delta.clone().invert(&document_inner.text);
+            document_inner.redo_stack.push(Edit {
                 cursors: session.cursors.clone(),
                 delta: inverse_delta,
             });
@@ -905,11 +917,10 @@ impl State {
     fn redo(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(Request)) {
         let session = &self.sessions_by_session_id[session_id];
         let document = &mut self.documents_by_document_id[session.document_id];
-        if let Some(redo) = document.redo_stack.pop() {
-            let session = &self.sessions_by_session_id[session_id];
-            let document = &mut self.documents_by_document_id[session.document_id];
-            let inverse_delta = redo.delta.clone().invert(&document.text);
-            document.undo_stack.push(Edit {
+        let document_inner = document.inner.as_mut().unwrap();
+        if let Some(redo) = document_inner.redo_stack.pop() {
+            let inverse_delta = redo.delta.clone().invert(&document_inner.text);
+            document_inner.undo_stack.push(Edit {
                 cursors: session.cursors.clone(),
                 delta: inverse_delta,
             });
@@ -943,8 +954,9 @@ impl State {
     ) {
         let session = &self.sessions_by_session_id[session_id];
         let document = &mut self.documents_by_document_id[session.document_id];
-        let inverse_delta = delta.clone().invert(&document.text);
-        document.undo_stack.push(Edit {
+        let document_inner = document.inner.as_mut().unwrap();
+        let inverse_delta = delta.clone().invert(&document_inner.text);
+        document_inner.undo_stack.push(Edit {
             cursors: session.cursors.clone(),
             delta: inverse_delta,
         });
@@ -1008,10 +1020,14 @@ impl AsRef<Id> for DocumentId {
 }
 
 struct Document {
+    path: PathBuf,
     session_ids: HashSet<SessionId>,
+    inner: Option<DocumentInner>,
+}
+
+struct DocumentInner {
     undo_stack: Vec<Edit>,
     redo_stack: Vec<Edit>,
-    path: PathBuf,
     revision: usize,
     text: Text,
     token_cache: TokenCache,
@@ -1020,9 +1036,10 @@ struct Document {
 
 impl Document {
     fn apply_delta(&mut self, delta: Delta) {
-        self.token_cache.invalidate(&delta);
-        self.text.apply_delta(delta);
-        self.token_cache.refresh(&self.text);
+        let inner = self.inner.as_mut().unwrap();
+        inner.token_cache.invalidate(&delta);
+        inner.text.apply_delta(delta);
+        inner.token_cache.refresh(&inner.text);
     }
 
     fn schedule_apply_delta_request(
@@ -1030,17 +1047,18 @@ impl Document {
         delta: Delta,
         send_request: &mut dyn FnMut(Request),
     ) {
-        if self.outstanding_deltas.len() == 2 {
-            let outstanding_delta = self.outstanding_deltas.pop_back().unwrap();
-            self.outstanding_deltas
+        let inner = self.inner.as_mut().unwrap();
+        if inner.outstanding_deltas.len() == 2 {
+            let outstanding_delta = inner.outstanding_deltas.pop_back().unwrap();
+            inner.outstanding_deltas
                 .push_back(outstanding_delta.compose(delta));
         } else {
-            self.outstanding_deltas.push_back(delta.clone());
-            if self.outstanding_deltas.len() == 1 {
+            inner.outstanding_deltas.push_back(delta.clone());
+            if inner.outstanding_deltas.len() == 1 {
                 send_request(Request::ApplyDelta(
                     self.path.clone(),
-                    self.revision,
-                    self.outstanding_deltas.front().unwrap().clone(),
+                    inner.revision,
+                    inner.outstanding_deltas.front().unwrap().clone(),
                 ));
             }
         }
