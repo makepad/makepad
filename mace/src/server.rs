@@ -89,6 +89,7 @@ impl Connection {
     }
 
     pub fn open_file(&self, path: PathBuf) -> Result<(usize, Text), Error> {
+        std::thread::sleep(std::time::Duration::from_millis(2000));
         let mut documents_by_path_guard = self.shared.documents_by_path.write().unwrap();
         match documents_by_path_guard.get(&path) {
             Some(document) => {
