@@ -299,15 +299,16 @@ impl AppInner {
                     let node = &state.file_nodes_by_file_node_id[file_node_id];
                     if node.is_file() {
                         let path = state.file_node_path(file_node_id);
-                        match state.code_editor_state.document_id_by_path(&path) {
-                            Some(document_id) => {
-                                let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                                let session_id =
-                                    state.code_editor_state.create_session(document_id);
-                                self.create_code_editor_tab(cx, state, name, session_id);
-                            }
-                            None => self.send_request(Request::OpenFile(path)),
-                        }
+                        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                        let session_id = match state.code_editor_state.document_id_by_path(&path) {
+                            Some(document_id) => state.code_editor_state.create_session(document_id),
+                            None => {
+                                self.send_request(Request::OpenFile(path.clone()));
+                                state.code_editor_state.create_document_and_session(path)
+                            },
+                        };
+                        self.create_or_update_view(cx, state, state.panel_id, session_id);
+                        self.create_code_editor_tab(cx, state, name, session_id);
                     }
                 }
             }
@@ -385,12 +386,14 @@ impl AppInner {
             },
             Response::OpenFile(response) => match request {
                 Request::OpenFile(path) => {
+                    // TODO: There is a potential race here when you open a document, close it, then
+                    // open it again. In that case the open file request for the first document may
+                    // arrive while we're waiting for the open file request for the second document
+                    // to arrive. How to handle this?
                     let (revision, text) = response.unwrap();
-                    let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                    let session_id = state
-                        .code_editor_state
-                        .create_document_and_session(path, revision, text);
-                    self.create_code_editor_tab(cx, state, name, session_id);
+                    let document_id = state.code_editor_state.document_id_by_path(&path).unwrap();
+                    state.code_editor_state.initialize_document(document_id, revision, text);
+                    self.code_editor.redraw_document_views(cx, &state.code_editor_state, document_id);
                 }
                 _ => panic!(),
             },

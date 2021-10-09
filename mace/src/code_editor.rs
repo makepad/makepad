@@ -93,13 +93,14 @@ impl CodeEditor {
             if let Some(session_id) = view.session_id {
                 let session = &state.sessions_by_session_id[session_id];
                 let document = &state.documents_by_document_id[session.document_id];
-                let document_inner = document.inner.as_ref().unwrap();
-                self.apply_style(cx);
-                let visible_lines = self.visible_lines(cx, view_id, document_inner.text.as_lines().len());
-                self.draw_selections(cx, &session.selections, &document_inner.text, visible_lines);
-                self.draw_text(cx, &document_inner.text, &document_inner.token_cache, visible_lines);
-                self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
-                self.set_turtle_bounds(cx, &document_inner.text);
+                if let Some(document_inner) = document.inner.as_ref() {
+                    self.apply_style(cx);
+                    let visible_lines = self.visible_lines(cx, view_id, document_inner.text.as_lines().len());
+                    self.draw_selections(cx, &session.selections, &document_inner.text, visible_lines);
+                    self.draw_text(cx, &document_inner.text, &document_inner.token_cache, visible_lines);
+                    self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
+                    self.set_turtle_bounds(cx, &document_inner.text);
+                }
             }
             let view = &mut self.views_by_view_id[view_id];
             view.view.end_view(cx);
@@ -682,10 +683,8 @@ impl State {
     pub fn create_document_and_session(
         &mut self,
         path: PathBuf,
-        revision: usize,
-        text: Text,
     ) -> SessionId {
-        let document_id = self.create_document(path, revision, text);
+        let document_id = self.create_document(path);
         self.create_session(document_id)
     }
 
@@ -720,26 +719,31 @@ impl State {
         self.session_id_allocator.deallocate(session_id.0);
     }
 
-    fn create_document(&mut self, path: PathBuf, revision: usize, text: Text) -> DocumentId {
+    fn create_document(&mut self, path: PathBuf) -> DocumentId {
         let document_id = DocumentId(self.document_id_allocator.allocate());
-        let token_cache = TokenCache::new(&text);
         self.documents_by_document_id.insert(
             document_id,
             Document {
                 session_ids: HashSet::new(),
                 path: path.clone(),
-                inner: Some(DocumentInner {
-                    undo_stack: Vec::new(),
-                    redo_stack: Vec::new(),
-                    revision,
-                    text,
-                    token_cache,
-                    outstanding_deltas: VecDeque::new(),
-                }),
+                inner: None,
             },
         );
         self.document_ids_by_path.insert(path, document_id);
         document_id
+    }
+
+    pub fn initialize_document(&mut self, document_id: DocumentId, revision: usize, text: Text) {
+        let document = &mut self.documents_by_document_id[document_id];
+        let token_cache = TokenCache::new(&text);
+        document.inner = Some(DocumentInner {
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            revision,
+            text,
+            token_cache,
+            outstanding_deltas: VecDeque::new(),
+        });
     }
 
     fn destroy_document(&mut self, document_id: DocumentId, send_request: &mut dyn FnMut(Request)) {
