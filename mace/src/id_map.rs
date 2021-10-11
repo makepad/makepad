@@ -90,7 +90,7 @@ impl<K: AsRef<Id>, V> IdMap<K, V> {
 
     pub fn into_values(self) -> IntoValues<V> {
         IntoValues {
-            iter: self.entries.into_iter()
+            iter: self.entries.into_iter(),
         }
     }
 }

@@ -158,11 +158,15 @@ impl AppInner {
                                 if self.file_tree.begin(cx).is_ok() {
                                     self.draw_file_node(cx, state, state.root_file_node_id);
                                     self.file_tree.end(cx);
-                                }    
-                            },
+                                }
+                            }
                             TabKind::CodeEditor { .. } => {
                                 let panel = state.panels_by_panel_id[tab.panel_id].as_tab_panel();
-                                self.code_editor.draw(cx, &state.code_editor_state, panel.view_id.unwrap());
+                                self.code_editor.draw(
+                                    cx,
+                                    &state.code_editor_state,
+                                    panel.code_editor_view_id.unwrap(),
+                                );
                             }
                         }
                     }
@@ -217,10 +221,15 @@ impl AppInner {
                 kind: TabKind::CodeEditor { session_id },
             },
         );
-        let panel = state.panels_by_panel_id.get_mut(state.panel_id).unwrap().as_tab_panel_mut();
+        let panel = state
+            .panels_by_panel_id
+            .get_mut(state.panel_id)
+            .unwrap()
+            .as_tab_panel_mut();
         panel.tab_ids.push(tab_id);
-        self.create_or_update_view(cx, state, state.panel_id, session_id);
-        self.dock.set_selected_tab_id(cx, state.panel_id, Some(tab_id));
+        self.create_or_update_code_editor_view(cx, state, state.panel_id, session_id);
+        self.dock
+            .set_selected_tab_id(cx, state.panel_id, Some(tab_id));
         self.dock.redraw_tab_bar(cx, state.panel_id);
     }
 
@@ -242,7 +251,7 @@ impl AppInner {
                     match tab.kind {
                         TabKind::CodeEditor { session_id } => {
                             let panel_id = tab.panel_id;
-                            self.create_or_update_view(cx, state, panel_id, session_id);
+                            self.create_or_update_code_editor_view(cx, state, panel_id, session_id);
                             self.dock.set_selected_tab_id(cx, panel_id, Some(tab_id));
                         }
                         _ => {}
@@ -254,12 +263,15 @@ impl AppInner {
                         TabKind::CodeEditor { session_id } => {
                             let panel_id = tab.panel_id;
                             match state.panels_by_panel_id.get_mut(panel_id).unwrap() {
-                                Panel::Tab(TabPanel { tab_ids, view_id }) => {
-                                    if let Some(view_id) = view_id {
+                                Panel::Tab(TabPanel {
+                                    tab_ids,
+                                    code_editor_view_id,
+                                }) => {
+                                    if let Some(code_editor_view_id) = code_editor_view_id {
                                         self.code_editor.set_view_session_id(
                                             cx,
                                             &mut state.code_editor_state,
-                                            *view_id,
+                                            *code_editor_view_id,
                                             None,
                                         );
                                     }
@@ -301,13 +313,20 @@ impl AppInner {
                         let path = state.file_node_path(file_node_id);
                         let name = path.file_name().unwrap().to_string_lossy().into_owned();
                         let session_id = match state.code_editor_state.document_id_by_path(&path) {
-                            Some(document_id) => state.code_editor_state.create_session(document_id),
+                            Some(document_id) => {
+                                state.code_editor_state.create_session(document_id)
+                            }
                             None => {
                                 self.send_request(Request::OpenFile(path.clone()));
                                 state.code_editor_state.create_document_and_session(path)
-                            },
+                            }
                         };
-                        self.create_or_update_view(cx, state, state.panel_id, session_id);
+                        self.create_or_update_code_editor_view(
+                            cx,
+                            state,
+                            state.panel_id,
+                            session_id,
+                        );
                         self.create_code_editor_tab(cx, state, name, session_id);
                     }
                 }
@@ -323,12 +342,15 @@ impl AppInner {
                         panel_id_stack.push(*child_id);
                     }
                 }
-                Panel::Tab(TabPanel { view_id, .. }) => {
-                    if let Some(view_id) = view_id {
+                Panel::Tab(TabPanel {
+                    code_editor_view_id,
+                    ..
+                }) => {
+                    if let Some(code_editor_view_id) = code_editor_view_id {
                         self.code_editor.handle_event(
                             cx,
                             &mut state.code_editor_state,
-                            *view_id,
+                            *code_editor_view_id,
                             event,
                             &mut {
                                 let outstanding_requests = &mut self.outstanding_requests;
@@ -380,7 +402,8 @@ impl AppInner {
                 Request::GetFileTree() => {
                     self.set_file_tree(cx, state, response.unwrap());
                     let tab = &state.tabs_by_tab_id[state.file_tree_tab_id];
-                    self.dock.set_selected_tab_id(cx, tab.panel_id, Some(state.file_tree_tab_id));
+                    self.dock
+                        .set_selected_tab_id(cx, tab.panel_id, Some(state.file_tree_tab_id));
                 }
                 _ => panic!(),
             },
@@ -392,8 +415,14 @@ impl AppInner {
                     // to arrive. How to handle this?
                     let (revision, text) = response.unwrap();
                     let document_id = state.code_editor_state.document_id_by_path(&path).unwrap();
-                    state.code_editor_state.initialize_document(document_id, revision, text);
-                    self.code_editor.redraw_document_views(cx, &state.code_editor_state, document_id);
+                    state
+                        .code_editor_state
+                        .initialize_document(document_id, revision, text);
+                    self.code_editor.redraw_document_views(
+                        cx,
+                        &state.code_editor_state,
+                        document_id,
+                    );
                 }
                 _ => panic!(),
             },
@@ -422,15 +451,19 @@ impl AppInner {
         }
     }
 
-    fn create_or_update_view(
+    fn create_or_update_code_editor_view(
         &mut self,
         cx: &mut Cx,
         state: &mut State,
         panel_id: PanelId,
         session_id: SessionId,
     ) {
-        let panel = state.panels_by_panel_id.get_mut(panel_id).unwrap().as_tab_panel_mut();
-        match panel.view_id {
+        let panel = state
+            .panels_by_panel_id
+            .get_mut(panel_id)
+            .unwrap()
+            .as_tab_panel_mut();
+        match panel.code_editor_view_id {
             Some(view_id) => {
                 self.code_editor.set_view_session_id(
                     cx,
@@ -440,7 +473,7 @@ impl AppInner {
                 );
             }
             None => {
-                panel.view_id = Some(self.code_editor.create_view(
+                panel.code_editor_view_id = Some(self.code_editor.create_view(
                     cx,
                     &mut state.code_editor_state,
                     Some(session_id),
@@ -488,7 +521,7 @@ impl State {
             panel_id_0,
             Panel::Tab(TabPanel {
                 tab_ids: vec![file_tree_tab_id],
-                view_id: None,
+                code_editor_view_id: None,
             }),
         );
         tabs_by_tab_id.insert(
@@ -505,7 +538,7 @@ impl State {
             panel_id_1,
             Panel::Tab(TabPanel {
                 tab_ids: vec![],
-                view_id: None,
+                code_editor_view_id: None,
             }),
         );
 
@@ -616,13 +649,13 @@ impl Panel {
 
 #[derive(Debug)]
 struct SplitPanel {
-    child_ids: [PanelId; 2]
+    child_ids: [PanelId; 2],
 }
 
 #[derive(Debug)]
 struct TabPanel {
     tab_ids: Vec<TabId>,
-    view_id: Option<ViewId>,
+    code_editor_view_id: Option<ViewId>,
 }
 
 struct Tab {

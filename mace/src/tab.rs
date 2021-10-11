@@ -153,19 +153,17 @@ impl Tab {
             _ => {}
         }
         match event.drag_hits(cx, self.tab.area(), HitOpt::default()) {
-            Event::FingerDrag(FingerDragEvent { state, .. }) => {
-                match state {
-                    DragState::In => {
-                        self.is_dragged = true;
-                        cx.redraw_child_area(self.tab.area());
-                    }
-                    DragState::Out => {
-                        self.is_dragged = false;
-                        cx.redraw_child_area(self.tab.area());
-                    }
-                    _ => {}
+            Event::FingerDrag(FingerDragEvent { state, .. }) => match state {
+                DragState::In => {
+                    self.is_dragged = true;
+                    cx.redraw_child_area(self.tab.area());
                 }
-            }
+                DragState::Out => {
+                    self.is_dragged = false;
+                    cx.redraw_child_area(self.tab.area());
+                }
+                _ => {}
+            },
             _ => {}
         }
     }

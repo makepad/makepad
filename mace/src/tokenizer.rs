@@ -142,7 +142,7 @@ impl InitialState {
             | ('.', _, _)
             | ('/', _, _)
             | (':', _, _)
-            | (';', _, _) 
+            | (';', _, _)
             | ('<', _, _)
             | ('=', _, _)
             | ('>', _, _)
@@ -572,9 +572,10 @@ impl InitialState {
         keyword: Keyword,
         cursor: &mut Cursor,
     ) -> (State, TokenKind) {
-        if string.chars().all(|expected| {
-            cursor.skip_if(|actual| actual == expected)
-        }) {
+        if string
+            .chars()
+            .all(|expected| cursor.skip_if(|actual| actual == expected))
+        {
             if !cursor.peek(0).is_identifier_continue() {
                 return (State::Initial(InitialState), TokenKind::Keyword(keyword));
             }
