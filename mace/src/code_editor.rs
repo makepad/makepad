@@ -95,9 +95,20 @@ impl CodeEditor {
                 let document = &state.documents_by_document_id[session.document_id];
                 if let Some(document_inner) = document.inner.as_ref() {
                     self.apply_style(cx);
-                    let visible_lines = self.visible_lines(cx, view_id, document_inner.text.as_lines().len());
-                    self.draw_selections(cx, &session.selections, &document_inner.text, visible_lines);
-                    self.draw_text(cx, &document_inner.text, &document_inner.token_cache, visible_lines);
+                    let visible_lines =
+                        self.visible_lines(cx, view_id, document_inner.text.as_lines().len());
+                    self.draw_selections(
+                        cx,
+                        &session.selections,
+                        &document_inner.text,
+                        visible_lines,
+                    );
+                    self.draw_text(
+                        cx,
+                        &document_inner.text,
+                        &document_inner.token_cache,
+                        visible_lines,
+                    );
                     self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
                     self.set_turtle_bounds(cx, &document_inner.text);
                 }
@@ -680,10 +691,7 @@ impl State {
         State::default()
     }
 
-    pub fn create_document_and_session(
-        &mut self,
-        path: PathBuf,
-    ) -> SessionId {
+    pub fn create_document_and_session(&mut self, path: PathBuf) -> SessionId {
         let document_id = self.create_document(path);
         self.create_session(document_id)
     }
@@ -1054,7 +1062,8 @@ impl Document {
         let inner = self.inner.as_mut().unwrap();
         if inner.outstanding_deltas.len() == 2 {
             let outstanding_delta = inner.outstanding_deltas.pop_back().unwrap();
-            inner.outstanding_deltas
+            inner
+                .outstanding_deltas
                 .push_back(outstanding_delta.compose(delta));
         } else {
             inner.outstanding_deltas.push_back(delta.clone());
