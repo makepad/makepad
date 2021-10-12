@@ -585,43 +585,36 @@ impl CodeEditor {
     pub fn handle_response(
         &mut self,
         state: &mut State,
-        request: Request,
         response: Response,
         send_request: &mut dyn FnMut(Request),
     ) {
         match response {
-            Response::ApplyDelta(response) => match request {
-                Request::ApplyDelta(path, _, _) => {
-                    let _ = response.unwrap();
+            Response::ApplyDelta(response) => {
+                let path = response.unwrap();
 
-                    let document_id = state.document_ids_by_path[&path];
+                let document_id = state.document_ids_by_path[&path];
 
-                    let document = &mut state.documents_by_document_id[document_id];
-                    let document_inner = document.inner.as_mut().unwrap();
-                    document_inner.outstanding_deltas.pop_front();
-                    document_inner.revision += 1;
-                    if let Some(outstanding_delta) = document_inner.outstanding_deltas.front() {
-                        send_request(Request::ApplyDelta(
-                            path.clone(),
-                            document_inner.revision,
-                            outstanding_delta.clone(),
-                        ));
-                    }
+                let document = &mut state.documents_by_document_id[document_id];
+                let document_inner = document.inner.as_mut().unwrap();
+                document_inner.outstanding_deltas.pop_front();
+                document_inner.revision += 1;
+                if let Some(outstanding_delta) = document_inner.outstanding_deltas.front() {
+                    send_request(Request::ApplyDelta(
+                        path.clone(),
+                        document_inner.revision,
+                        outstanding_delta.clone(),
+                    ));
                 }
-                _ => panic!(),
             },
-            Response::CloseFile(response) => match request {
-                Request::CloseFile(path) => {
-                    let _ = response.unwrap();
+            Response::CloseFile(response) => {
+                let path = response.unwrap();
 
-                    let document_id = state.document_ids_by_path[&path];
+                let document_id = state.document_ids_by_path[&path];
 
-                    let document = &mut state.documents_by_document_id[document_id];
-                    state.document_ids_by_path.remove(&document.path);
-                    state.documents_by_document_id.remove(document_id);
-                    state.document_id_allocator.deallocate(document_id.0);
-                }
-                _ => panic!(),
+                let document = &mut state.documents_by_document_id[document_id];
+                state.document_ids_by_path.remove(&document.path);
+                state.documents_by_document_id.remove(document_id);
+                state.document_id_allocator.deallocate(document_id.0);
             },
             _ => {}
         }

@@ -88,7 +88,7 @@ impl Connection {
         })
     }
 
-    pub fn open_file(&self, path: PathBuf) -> Result<(usize, Text), Error> {
+    pub fn open_file(&self, path: PathBuf) -> Result<(PathBuf, usize, Text), Error> {
         std::thread::sleep(std::time::Duration::from_millis(1000));
 
         let mut documents_by_path_guard = self.shared.documents_by_path.write().unwrap();
@@ -110,7 +110,7 @@ impl Connection {
 
                 drop(documents_by_path_guard);
 
-                Ok((their_revision, text))
+                Ok((path, their_revision, text))
             }
             None => {
                 let bytes = fs::read(&path).map_err(|error| Error::Unknown(error.to_string()))?;
@@ -130,7 +130,7 @@ impl Connection {
                 );
 
                 documents_by_path_guard.insert(
-                    path,
+                    path.clone(),
                     Mutex::new(Document {
                         our_revision: 0,
                         text: text.clone(),
@@ -141,12 +141,12 @@ impl Connection {
 
                 drop(documents_by_path_guard);
 
-                Ok((0, text))
+                Ok((path, 0, text))
             }
         }
     }
 
-    fn apply_delta(&self, path: PathBuf, their_revision: usize, delta: Delta) -> Result<(), Error> {
+    fn apply_delta(&self, path: PathBuf, their_revision: usize, delta: Delta) -> Result<PathBuf, Error> {
         let documents_by_path_guard = self.shared.documents_by_path.read().unwrap();
 
         let document = documents_by_path_guard.get(&path).unwrap();
@@ -187,19 +187,17 @@ impl Connection {
 
         document_guard.notify_other_participants(
             self.connection_id,
-            Notification::DeltaWasApplied(path, delta),
+            Notification::DeltaWasApplied(path.clone(), delta),
         );
 
         drop(document_guard);
 
         drop(documents_by_path_guard);
 
-        Ok(())
+        Ok(path)
     }
 
-    fn close_file(&self, path: PathBuf) -> Result<(), Error> {
-        std::thread::sleep(std::time::Duration::from_millis(1000));
-
+    fn close_file(&self, path: PathBuf) -> Result<PathBuf, Error> {
         let mut documents_by_path_guard = self.shared.documents_by_path.write().unwrap();
 
         let document = documents_by_path_guard.get(&path).unwrap();
@@ -218,7 +216,7 @@ impl Connection {
 
         drop(documents_by_path_guard);
 
-        Ok(())
+        Ok(path)
     }
 }
 
