@@ -592,7 +592,7 @@ impl CodeEditor {
         match response {
             Response::ApplyDelta(response) => match request {
                 Request::ApplyDelta(path, _, _) => {
-                    let _ = response.as_ref().unwrap();
+                    let _ = response.unwrap();
 
                     let document_id = state.document_ids_by_path[&path];
 
@@ -607,6 +607,19 @@ impl CodeEditor {
                             outstanding_delta.clone(),
                         ));
                     }
+                }
+                _ => panic!(),
+            },
+            Response::CloseFile(response) => match request {
+                Request::CloseFile(path) => {
+                    let _ = response.unwrap();
+
+                    let document_id = state.document_ids_by_path[&path];
+
+                    let document = &mut state.documents_by_document_id[document_id];
+                    state.document_ids_by_path.remove(&document.path);
+                    state.documents_by_document_id.remove(document_id);
+                    state.document_id_allocator.deallocate(document_id.0);
                 }
                 _ => panic!(),
             },
@@ -691,8 +704,12 @@ impl State {
         State::default()
     }
 
-    pub fn create_document_and_session(&mut self, path: PathBuf) -> SessionId {
-        let document_id = self.create_document(path);
+    pub fn create_document_and_session(
+        &mut self,
+        path: PathBuf,
+        send_request: &mut dyn FnMut(Request),
+    ) -> SessionId {
+        let document_id = self.create_document(path, send_request);
         self.create_session(document_id)
     }
 
@@ -727,7 +744,11 @@ impl State {
         self.session_id_allocator.deallocate(session_id.0);
     }
 
-    fn create_document(&mut self, path: PathBuf) -> DocumentId {
+    fn create_document(
+        &mut self,
+        path: PathBuf,
+        send_request: &mut dyn FnMut(Request),
+    ) -> DocumentId {
         let document_id = DocumentId(self.document_id_allocator.allocate());
         self.documents_by_document_id.insert(
             document_id,
@@ -737,7 +758,8 @@ impl State {
                 inner: None,
             },
         );
-        self.document_ids_by_path.insert(path, document_id);
+        self.document_ids_by_path.insert(path.clone(), document_id);
+        send_request(Request::OpenFile(path));
         document_id
     }
 
@@ -757,9 +779,6 @@ impl State {
     fn destroy_document(&mut self, document_id: DocumentId, send_request: &mut dyn FnMut(Request)) {
         let document = &self.documents_by_document_id[document_id];
         send_request(Request::CloseFile(document.path.clone()));
-        self.document_ids_by_path.remove(&document.path);
-        self.documents_by_document_id.remove(document_id);
-        self.document_id_allocator.deallocate(document_id.0);
     }
 
     pub fn document_id_by_path(&self, path: &Path) -> Option<DocumentId> {
