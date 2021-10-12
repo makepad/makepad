@@ -286,6 +286,7 @@ impl AppInner {
                                     state.tabs_by_tab_id.remove(tab_id);
                                     state.tab_id_allocator.deallocate(tab_id.0);
                                     self.dock.set_selected_tab_id(cx, panel_id, None);
+                                    self.dock.redraw_tab_bar(cx, panel_id);
                                 }
                                 _ => panic!(),
                             }
