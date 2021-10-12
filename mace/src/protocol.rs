@@ -21,9 +21,9 @@ pub enum ResponseOrNotification {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Response {
     GetFileTree(Result<FileNode, Error>),
-    OpenFile(Result<(usize, Text), Error>),
-    ApplyDelta(Result<(), Error>),
-    CloseFile(Result<(), Error>),
+    OpenFile(Result<(PathBuf, usize, Text), Error>),
+    ApplyDelta(Result<PathBuf, Error>),
+    CloseFile(Result<PathBuf, Error>),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
