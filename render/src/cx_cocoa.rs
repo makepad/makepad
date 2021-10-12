@@ -1962,34 +1962,6 @@ pub fn define_cocoa_view_class() -> *const Class {
     extern fn dragging_entered(this: &Object, _: Sel, sender: id) -> NSDragOperation {
         let window = get_cocoa_window(this);
         window.start_live_resize();
-
-        let pasteboard: id = unsafe { msg_send![sender, draggingPasteboard] };
-        let class: id = unsafe { msg_send![class!(NSURL), class] };
-        let classes: id = unsafe {
-            msg_send![class!(NSArray), arrayWithObject: class]
-        };
-        let object: id = unsafe {
-            msg_send![class!(NSNumber), numberWithBool:true]
-        };
-        let options: id = unsafe {
-            msg_send![
-                class!(NSDictionary),
-                dictionaryWithObject: object
-                forKey: NSPasteboardURLReadingFileURLsOnlyKey
-            ]
-        };
-        let urls: id = unsafe {
-            msg_send![pasteboard, readObjectsForClasses:classes options:options]
-        };
-        let count: usize = unsafe { msg_send![urls, count] };
-        for index in 0..count {
-            let url: id = unsafe { msg_send![urls, objectAtIndex:index] };
-            let url: id = unsafe { msg_send![url, filePathURL] };
-            let string: id = unsafe { msg_send![url, absoluteString] };
-            let string = unsafe { CStr::from_ptr(msg_send![string, UTF8String]) };
-            println!("{:?}", string);
-        }
-
         dragging(this, sender)
     }
 
@@ -2038,11 +2010,41 @@ pub fn define_cocoa_view_class() -> *const Class {
         let pos = ns_point_to_vec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
         }));
+        let pasteboard: id = unsafe { msg_send![sender, draggingPasteboard] };
+        let class: id = unsafe { msg_send![class!(NSURL), class] };
+        let classes: id = unsafe {
+            msg_send![class!(NSArray), arrayWithObject: class]
+        };
+        let object: id = unsafe {
+            msg_send![class!(NSNumber), numberWithBool:true]
+        };
+        let options: id = unsafe {
+            msg_send![
+                class!(NSDictionary),
+                dictionaryWithObject: object
+                forKey: NSPasteboardURLReadingFileURLsOnlyKey
+            ]
+        };
+        let urls: id = unsafe {
+            msg_send![pasteboard, readObjectsForClasses:classes options:options]
+        };
+        let count: usize = unsafe { msg_send![urls, count] };
+        let mut file_urls = Vec::with_capacity(count);
+        for index in 0..count {
+            let url: id = unsafe { msg_send![urls, objectAtIndex:index] };
+            let url: id = unsafe { msg_send![url, filePathURL] };
+            let string: id = unsafe { msg_send![url, absoluteString] };
+            let string = unsafe { CStr::from_ptr(msg_send![string, UTF8String]) };
+            file_urls.push(string.to_str().unwrap().to_string());
+        }
         let mut events = vec![Event::FingerDrop(FingerDropEvent {
             handled: false,
             abs: pos,
             rel: pos,
             rect: Rect::default(),
+            dragged_item: DraggedItem {
+                file_urls,
+            }
         })];
         window.do_callback(&mut events);
     }
