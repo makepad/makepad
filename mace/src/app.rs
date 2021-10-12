@@ -16,7 +16,6 @@ use {
     makepad_render::*,
     makepad_widget::*,
     std::{
-        collections::VecDeque,
         env,
         ffi::OsString,
         io::{Read, Write},
@@ -68,7 +67,6 @@ struct AppInner {
     dock: Dock,
     file_tree: FileTree,
     code_editor: CodeEditor,
-    outstanding_requests: VecDeque<Request>,
     request_sender: Sender<Request>,
     response_or_notification_signal: Signal,
     response_or_notification_receiver: Receiver<ResponseOrNotification>,
@@ -114,7 +112,6 @@ impl AppInner {
             dock: Dock::new(cx),
             file_tree: FileTree::new(cx),
             code_editor: CodeEditor::new(cx),
-            outstanding_requests: VecDeque::new(),
             request_sender,
             response_or_notification_signal,
             response_or_notification_receiver,
@@ -234,7 +231,6 @@ impl AppInner {
     }
 
     fn send_request(&mut self, request: Request) {
-        self.outstanding_requests.push_back(request.clone());
         self.request_sender.send(request).unwrap();
     }
 
@@ -276,10 +272,8 @@ impl AppInner {
                                         );
                                     }
                                     state.code_editor_state.destroy_session(session_id, &mut {
-                                        let outstanding_requests = &mut self.outstanding_requests;
                                         let request_sender = &self.request_sender;
                                         move |request| {
-                                            outstanding_requests.push_back(request.clone());
                                             request_sender.send(request).unwrap()
                                         }
                                     });
@@ -317,10 +311,8 @@ impl AppInner {
                                 state
                                     .code_editor_state
                                     .create_document_and_session(path, &mut {
-                                        let outstanding_requests = &mut self.outstanding_requests;
                                         let request_sender = &self.request_sender;
                                         move |request| {
-                                            outstanding_requests.push_back(request.clone());
                                             request_sender.send(request).unwrap()
                                         }
                                     });
@@ -357,10 +349,8 @@ impl AppInner {
                             *code_editor_view_id,
                             event,
                             &mut {
-                                let outstanding_requests = &mut self.outstanding_requests;
                                 let request_sender = &self.request_sender;
                                 move |request| {
-                                    outstanding_requests.push_back(request.clone());
                                     request_sender.send(request).unwrap()
                                 }
                             },
@@ -379,8 +369,7 @@ impl AppInner {
                 loop {
                     match self.response_or_notification_receiver.try_recv() {
                         Ok(ResponseOrNotification::Response(response)) => {
-                            let request = self.outstanding_requests.pop_front().unwrap();
-                            self.handle_response(cx, state, request, response)
+                            self.handle_response(cx, state, response)
                         }
                         Ok(ResponseOrNotification::Notification(notification)) => {
                             self.handle_notification(cx, state, notification)
@@ -398,47 +387,33 @@ impl AppInner {
         &mut self,
         cx: &mut Cx,
         state: &mut State,
-        request: Request,
         response: Response,
     ) {
         match response {
-            Response::GetFileTree(response) => match request {
-                Request::GetFileTree() => {
-                    self.set_file_tree(cx, state, response.unwrap());
-                    let tab = &state.tabs_by_tab_id[state.file_tree_tab_id];
-                    self.dock
-                        .set_selected_tab_id(cx, tab.panel_id, Some(state.file_tree_tab_id));
-                }
-                _ => panic!(),
+            Response::GetFileTree(response) => {
+                self.set_file_tree(cx, state, response.unwrap());
+                let tab = &state.tabs_by_tab_id[state.file_tree_tab_id];
+                self.dock
+                    .set_selected_tab_id(cx, tab.panel_id, Some(state.file_tree_tab_id));
             },
-            Response::OpenFile(response) => match request {
-                Request::OpenFile(path) => {
-                    // TODO: There is a potential race here when you open a document, close it, then
-                    // open it again. In that case the open file request for the first document may
-                    // arrive while we're waiting for the open file request for the second document
-                    // to arrive. How to handle this?
-                    let (revision, text) = response.unwrap();
-                    let document_id = state.code_editor_state.document_id_by_path(&path).unwrap();
-                    state
-                        .code_editor_state
-                        .initialize_document(document_id, revision, text);
-                    self.code_editor.redraw_document_views(
-                        cx,
-                        &state.code_editor_state,
-                        document_id,
-                    );
-                }
-                _ => panic!(),
+            Response::OpenFile(response) => {
+                let (path, revision, text) = response.unwrap();
+                let document_id = state.code_editor_state.document_id_by_path(&path).unwrap();
+                state
+                    .code_editor_state
+                    .initialize_document(document_id, revision, text);
+                self.code_editor.redraw_document_views(
+                    cx,
+                    &state.code_editor_state,
+                    document_id,
+                );
             },
             response => self.code_editor.handle_response(
                 &mut state.code_editor_state,
-                request,
                 response,
                 &mut {
-                    let outstanding_requests = &mut self.outstanding_requests;
                     let request_sender = &self.request_sender;
                     move |request| {
-                        outstanding_requests.push_back(request.clone());
                         request_sender.send(request).unwrap()
                     }
                 },
