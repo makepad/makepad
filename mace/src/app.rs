@@ -77,7 +77,6 @@ struct AppInner {
 impl AppInner {
     fn new(cx: &mut Cx) -> AppInner {
         let server = Server::new(env::current_dir().unwrap());
-        spawn_connection_listener(TcpListener::bind("127.0.0.1:0").unwrap(), server.clone());
         let (request_sender, request_receiver) = mpsc::channel();
         let response_or_notification_signal = cx.new_signal();
         let (response_or_notification_sender, response_or_notification_receiver) = mpsc::channel();
@@ -109,6 +108,7 @@ impl AppInner {
                 );
             }
         }
+        spawn_connection_listener(TcpListener::bind("127.0.0.1:0").unwrap(), server);
         let mut inner = AppInner {
             window: DesktopWindow::new(cx),
             dock: Dock::new(cx),
@@ -312,22 +312,26 @@ impl AppInner {
                     if node.is_file() {
                         let path = state.file_node_path(file_node_id);
                         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                        let session_id = match state.code_editor_state.document_id_by_path(&path) {
-                            Some(document_id) => {
-                                state.code_editor_state.create_session(document_id)
-                            }
-                            None => {
-                                self.send_request(Request::OpenFile(path.clone()));
-                                state.code_editor_state.create_document_and_session(path)
-                            }
-                        };
-                        self.create_or_update_code_editor_view(
-                            cx,
-                            state,
-                            state.panel_id,
-                            session_id,
-                        );
-                        self.create_code_editor_tab(cx, state, name, session_id);
+                        if state.code_editor_state.document_id_by_path(&path).is_none() {
+                            let session_id =
+                                state
+                                    .code_editor_state
+                                    .create_document_and_session(path, &mut {
+                                        let outstanding_requests = &mut self.outstanding_requests;
+                                        let request_sender = &self.request_sender;
+                                        move |request| {
+                                            outstanding_requests.push_back(request.clone());
+                                            request_sender.send(request).unwrap()
+                                        }
+                                    });
+                            self.create_code_editor_tab(cx, state, name, session_id);
+                            self.create_or_update_code_editor_view(
+                                cx,
+                                state,
+                                state.panel_id,
+                                session_id,
+                            );
+                        }
                     }
                 }
             }
