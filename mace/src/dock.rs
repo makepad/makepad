@@ -10,6 +10,7 @@ use {
 
 pub struct Dock {
     panels_by_panel_id: IdMap<PanelId, Panel>,
+    panel_ids: Vec<PanelId>,
     panel_id_stack: Vec<PanelId>,
     drag: DrawColor,
 }
@@ -24,6 +25,7 @@ impl Dock {
     pub fn new(cx: &mut Cx) -> Dock {
         Dock {
             panels_by_panel_id: IdMap::new(),
+            panel_ids: Vec::new(),
             panel_id_stack: Vec::new(),
             drag: DrawColor::new(cx, default_shader!()).with_draw_depth(10.0),
         }
@@ -32,6 +34,7 @@ impl Dock {
     pub fn begin_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> Result<(), ()> {
         let panel = self.get_or_create_split_panel(cx, panel_id);
         panel.splitter.begin(cx)?;
+        self.panel_ids.push(panel_id);
         self.panel_id_stack.push(panel_id);
         Ok(())
     }
@@ -51,6 +54,7 @@ impl Dock {
     pub fn begin_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> Result<(), ()> {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
         panel.view.begin_view(cx, Layout::default())?;
+        self.panel_ids.push(panel_id);
         self.panel_id_stack.push(panel_id);
         Ok(())
     }
@@ -200,8 +204,8 @@ impl Dock {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, Action),
     ) {
-        // TODO: Should we use the panel map for this, or just recurse over the panels?
-        for panel in self.panels_by_panel_id.values_mut() {
+        for panel_id in &self.panel_ids {
+            let panel = &mut self.panels_by_panel_id[*panel_id];
             match panel {
                 Panel::Split(panel) => {
                     panel
