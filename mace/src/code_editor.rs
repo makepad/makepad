@@ -605,7 +605,7 @@ impl CodeEditor {
                         outstanding_delta.clone(),
                     ));
                 }
-            },
+            }
             Response::CloseFile(response) => {
                 let path = response.unwrap();
 
@@ -615,7 +615,7 @@ impl CodeEditor {
                 state.document_ids_by_path.remove(&document.path);
                 state.documents_by_document_id.remove(document_id);
                 state.document_id_allocator.deallocate(document_id.0);
-            },
+            }
             _ => {}
         }
     }

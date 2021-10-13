@@ -110,6 +110,10 @@ impl Splitter {
         self.align_position = align_position;
     }
 
+    pub fn redraw(&mut self, cx: &mut Cx) {
+        self.view.redraw_view(cx);
+    }
+
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
