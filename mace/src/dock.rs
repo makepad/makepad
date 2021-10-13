@@ -12,13 +12,15 @@ pub struct Dock {
     panels_by_panel_id: IdMap<PanelId, Panel>,
     panel_ids: Vec<PanelId>,
     panel_id_stack: Vec<PanelId>,
-    drag: DrawColor,
+    drag: Option<Drag>,
+    drag_view: View,
+    drag_quad: DrawColor,
 }
 
 impl Dock {
     pub fn style(cx: &mut Cx) {
         live_body!(cx, {
-            self::drag_color: #FFFFFF80;
+            self::drag_quad_color: #FFFFFF80;
         })
     }
 
@@ -27,7 +29,9 @@ impl Dock {
             panels_by_panel_id: IdMap::new(),
             panel_ids: Vec::new(),
             panel_id_stack: Vec::new(),
-            drag: DrawColor::new(cx, default_shader!()).with_draw_depth(10.0),
+            drag: None,
+            drag_view: View::new().with_is_overlay(true),
+            drag_quad: DrawColor::new(cx, default_shader!()).with_draw_depth(10.0),
         }
     }
 
@@ -37,14 +41,22 @@ impl Dock {
         Ok(())
     }
 
-    pub fn end(&mut self, _cx: &mut Cx) {}
+    pub fn end(&mut self, cx: &mut Cx) {
+        if self.drag_view.begin_view(cx, Layout::abs_origin_zero()).is_ok() {
+            if let Some(drag) = self.drag.as_ref() {
+                let panel = self.panels_by_panel_id[drag.panel_id].as_tab_panel();
+                let rect = compute_drag_rect(panel.contents_rect, drag.position);
+                self.drag_quad.draw_quad_abs(cx, rect);
+            }
+            self.drag_view.end_view(cx);
+        }
+    }
 
-    pub fn begin_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> Result<(), ()> {
+    pub fn begin_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) {
         self.panel_ids.push(panel_id);
         let panel = self.get_or_create_split_panel(cx, panel_id);
-        panel.splitter.begin(cx)?;
+        panel.splitter.begin(cx);
         self.panel_id_stack.push(panel_id);
-        Ok(())
     }
 
     pub fn middle_split_panel(&mut self, cx: &mut Cx) {
@@ -59,70 +71,14 @@ impl Dock {
         panel.splitter.end(cx);
     }
 
-    pub fn begin_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> Result<(), ()> {
-        let panel = self.get_or_create_tab_panel(cx, panel_id);
-        panel.view.begin_view(cx, Layout::default())?;
+    pub fn begin_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) {
         self.panel_ids.push(panel_id);
+        self.get_or_create_tab_panel(cx, panel_id);
         self.panel_id_stack.push(panel_id);
-        Ok(())
     }
 
-    pub fn end_tab_panel(&mut self, cx: &mut Cx) {
-        let panel_id = self.panel_id_stack.pop().unwrap();
-        let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
-        let Rect { pos, size } = panel.drag_rect;
-        if let Some(drag_position) = panel.drag_position {
-            match drag_position {
-                DragPosition::Left => self.drag.draw_quad_abs(
-                    cx,
-                    Rect {
-                        pos,
-                        size: Vec2 {
-                            x: size.x / 2.0,
-                            y: size.y,
-                        },
-                    },
-                ),
-                DragPosition::Right => self.drag.draw_quad_abs(
-                    cx,
-                    Rect {
-                        pos: Vec2 {
-                            x: pos.x + size.x / 2.0,
-                            y: pos.y,
-                        },
-                        size: Vec2 {
-                            x: size.x / 2.0,
-                            y: size.y,
-                        },
-                    },
-                ),
-                DragPosition::Top => self.drag.draw_quad_abs(
-                    cx,
-                    Rect {
-                        pos,
-                        size: Vec2 {
-                            x: size.x,
-                            y: size.y / 2.0,
-                        },
-                    },
-                ),
-                DragPosition::Bottom => self.drag.draw_quad_abs(
-                    cx,
-                    Rect {
-                        pos: Vec2 {
-                            x: pos.x,
-                            y: pos.y + size.y / 2.0,
-                        },
-                        size: Vec2 {
-                            x: size.x,
-                            y: size.y / 2.0,
-                        },
-                    },
-                ),
-                DragPosition::Center => self.drag.draw_quad_abs(cx, panel.drag_rect),
-            }
-        }
-        panel.view.end_view(cx);
+    pub fn end_tab_panel(&mut self, _cx: &mut Cx) {
+        self.panel_id_stack.pop().unwrap();
     }
 
     pub fn begin_tab_bar(&mut self, cx: &mut Cx) -> Result<(), ()> {
@@ -149,14 +105,14 @@ impl Dock {
     }
 
     pub fn apply_style(&mut self, cx: &mut Cx) {
-        self.drag.color = live_vec4!(cx, self::drag_color);
+        self.drag_quad.color = live_vec4!(cx, self::drag_quad_color);
     }
 
     fn contents(&mut self, cx: &mut Cx) {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
         cx.turtle_new_line();
-        panel.drag_rect = Rect {
+        panel.contents_rect = Rect {
             pos: cx.get_turtle_pos(),
             size: Vec2 {
                 x: cx.get_width_left(),
@@ -182,10 +138,8 @@ impl Dock {
             self.panels_by_panel_id.insert(
                 panel_id,
                 Panel::Tab(TabPanel {
-                    view: View::new().with_is_overlay(true),
                     tab_bar: TabBar::new(cx),
-                    drag_rect: Rect::default(),
-                    drag_position: None,
+                    contents_rect: Rect::default(),
                 }),
             );
         }
@@ -208,11 +162,6 @@ impl Dock {
     pub fn set_selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: Option<TabId>) {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
         panel.tab_bar.set_selected_tab_id(cx, tab_id);
-    }
-
-    pub fn redraw_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) {
-        let panel = self.get_or_create_split_panel(cx, panel_id);
-        panel.splitter.redraw(cx);
     }
 
     pub fn redraw_tab_bar(&mut self, cx: &mut Cx, panel_id: PanelId) {
@@ -249,21 +198,27 @@ impl Dock {
                                 dispatch_action(cx, Action::TabButtonWasPressed(tab_id))
                             }
                         });
-                    match event {
-                        Event::FingerDrag(event) => {
-                            let drag_position = compute_drag_position(panel.drag_rect, event.abs);
-                            if drag_position.is_some() {
-                                event.action = DragAction::Copy;
-                            }
-                            if panel.drag_position != drag_position {
-                                panel.drag_position = drag_position;
-                                panel.view.redraw_view(cx);
-                            }
-                        }
-                        _ => {}
-                    }
                 }
             }
+        }
+        match event {
+            Event::FingerDrag(event) => {
+                self.drag = None;
+                for panel_id in &self.panel_ids {
+                    let panel = &mut self.panels_by_panel_id[*panel_id];
+                    if let Panel::Tab(panel) = panel {
+                        if panel.contents_rect.contains(event.abs) {
+                            event.action = DragAction::Copy;
+                            self.drag = Some(Drag {
+                                panel_id: *panel_id,
+                                position: compute_drag_position(panel.contents_rect, event.abs)
+                            });
+                        }    
+                    }
+                }
+                self.drag_view.redraw_view(cx);
+            }
+            _ => {}
         }
     }
 }
@@ -290,6 +245,13 @@ impl Panel {
         }
     }
 
+    fn as_tab_panel(&self) -> &TabPanel {
+        match self {
+            Panel::Tab(panel) => panel,
+            _ => panic!(),
+        }
+    }
+
     fn as_tab_panel_mut(&mut self) -> &mut TabPanel {
         match self {
             Panel::Tab(panel) => panel,
@@ -303,14 +265,17 @@ struct SplitPanel {
 }
 
 struct TabPanel {
-    view: View,
     tab_bar: TabBar,
-    drag_rect: Rect,
-    drag_position: Option<DragPosition>,
+    contents_rect: Rect,
+}
+
+struct Drag {
+    panel_id: PanelId,
+    position: DragPosition,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum DragPosition {
+enum DragPosition {
     Left,
     Right,
     Top,
@@ -323,22 +288,58 @@ pub enum Action {
     TabButtonWasPressed(TabId),
 }
 
-fn compute_drag_position(rect: Rect, position: Vec2) -> Option<DragPosition> {
-    if rect.contains(position) {
-        let top_left = rect.pos;
-        let bottom_right = rect.pos + rect.size;
-        Some(if (position.x - top_left.x) / rect.size.x < 0.1 {
-            DragPosition::Left
-        } else if (bottom_right.x - position.x) / rect.size.x < 0.1 {
-            DragPosition::Right
-        } else if (position.y - top_left.y) / rect.size.y < 0.1 {
-            DragPosition::Top
-        } else if (bottom_right.y - position.y) / rect.size.y < 0.1 {
-            DragPosition::Bottom
-        } else {
-            DragPosition::Center
-        })
+fn compute_drag_position(rect: Rect, position: Vec2) -> DragPosition {
+    let top_left = rect.pos;
+    let bottom_right = rect.pos + rect.size;
+    if (position.x - top_left.x) / rect.size.x < 0.1 {
+        DragPosition::Left
+    } else if (bottom_right.x - position.x) / rect.size.x < 0.1 {
+        DragPosition::Right
+    } else if (position.y - top_left.y) / rect.size.y < 0.1 {
+        DragPosition::Top
+    } else if (bottom_right.y - position.y) / rect.size.y < 0.1 {
+        DragPosition::Bottom
     } else {
-        None
+        DragPosition::Center
+    }
+}
+
+fn compute_drag_rect(rect: Rect, position: DragPosition) -> Rect {
+    match position {
+        DragPosition::Left => Rect {
+            pos: rect.pos,
+            size: Vec2 {
+                x: rect.size.x / 2.0,
+                y: rect.size.y,
+            },
+        },
+        DragPosition::Right => Rect {
+            pos: Vec2 {
+                x: rect.pos.x + rect.size.x / 2.0,
+                y: rect.pos.y,
+            },
+            size: Vec2 {
+                x: rect.size.x / 2.0,
+                y: rect.size.y,
+            },
+        },
+        DragPosition::Top => Rect {
+            pos: rect.pos,
+            size: Vec2 {
+                x: rect.size.x,
+                y: rect.size.y / 2.0,
+            },
+        },
+        DragPosition::Bottom => Rect {
+            pos: Vec2 {
+                x: rect.pos.x,
+                y: rect.pos.y + rect.size.y / 2.0,
+            },
+            size: Vec2 {
+                x: rect.size.x,
+                y: rect.size.y / 2.0,
+            },
+        },
+        DragPosition::Center => rect,
     }
 }

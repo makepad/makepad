@@ -1,7 +1,7 @@
 use {
     crate::{
         code_editor::{self, CodeEditor, SessionId, ViewId},
-        dock::{self, Dock, DragPosition, PanelId},
+        dock::{self, Dock, PanelId},
         file_tree::{self, FileNodeId, FileTree},
         id_allocator::IdAllocator,
         id_map::IdMap,
@@ -124,8 +124,8 @@ impl AppInner {
         if self.window.begin_desktop_window(cx, None).is_ok() {
             if self.dock.begin(cx).is_ok() {
                 self.draw_panel(cx, state, state.root_panel_id);
-                self.window.end_desktop_window(cx);
                 self.dock.end(cx);
+                self.window.end_desktop_window(cx);
             }
         }
     }
@@ -134,43 +134,41 @@ impl AppInner {
         let panel = &state.panels_by_panel_id[panel_id];
         match &panel.kind {
             PanelKind::Split(SplitPanel { child_panel_ids }) => {
-                if self.dock.begin_split_panel(cx, panel_id).is_ok() {
-                    self.draw_panel(cx, state, child_panel_ids[0]);
-                    self.dock.middle_split_panel(cx);
-                    self.draw_panel(cx, state, child_panel_ids[01]);
-                    self.dock.end_split_panel(cx);
-                }
+                self.dock.begin_split_panel(cx, panel_id);
+                self.draw_panel(cx, state, child_panel_ids[0]);
+                self.dock.middle_split_panel(cx);
+                self.draw_panel(cx, state, child_panel_ids[01]);
+                self.dock.end_split_panel(cx);
             }
             PanelKind::Tab(TabPanel { tab_ids, .. }) => {
-                if self.dock.begin_tab_panel(cx, panel_id).is_ok() {
-                    if self.dock.begin_tab_bar(cx).is_ok() {
-                        for tab_id in tab_ids {
-                            let tab = &state.tabs_by_tab_id[*tab_id];
-                            self.dock.tab(cx, *tab_id, &tab.name);
-                        }
-                        self.dock.end_tab_bar(cx);
+                self.dock.begin_tab_panel(cx, panel_id);
+                if self.dock.begin_tab_bar(cx).is_ok() {
+                    for tab_id in tab_ids {
+                        let tab = &state.tabs_by_tab_id[*tab_id];
+                        self.dock.tab(cx, *tab_id, &tab.name);
                     }
-                    if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
-                        let tab = &state.tabs_by_tab_id[tab_id];
-                        match tab.kind {
-                            TabKind::FileTree => {
-                                if self.file_tree.begin(cx).is_ok() {
-                                    self.draw_file_node(cx, state, state.root_file_node_id);
-                                    self.file_tree.end(cx);
-                                }
-                            }
-                            TabKind::CodeEditor { .. } => {
-                                let panel = state.panels_by_panel_id[tab.panel_id].as_tab_panel();
-                                self.code_editor.draw(
-                                    cx,
-                                    &state.code_editor_state,
-                                    panel.code_editor_view_id.unwrap(),
-                                );
-                            }
-                        }
-                    }
-                    self.dock.end_tab_panel(cx);
+                    self.dock.end_tab_bar(cx);
                 }
+                if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
+                    let tab = &state.tabs_by_tab_id[tab_id];
+                    match tab.kind {
+                        TabKind::FileTree => {
+                            if self.file_tree.begin(cx).is_ok() {
+                                self.draw_file_node(cx, state, state.root_file_node_id);
+                                self.file_tree.end(cx);
+                            }
+                        }
+                        TabKind::CodeEditor { .. } => {
+                            let panel = state.panels_by_panel_id[tab.panel_id].as_tab_panel();
+                            self.code_editor.draw(
+                                cx,
+                                &state.code_editor_state,
+                                panel.code_editor_view_id.unwrap(),
+                            );
+                        }
+                    }
+                }
+                self.dock.end_tab_panel(cx);
             }
         }
     }
