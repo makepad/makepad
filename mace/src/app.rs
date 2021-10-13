@@ -1,7 +1,7 @@
 use {
     crate::{
         code_editor::{self, CodeEditor, SessionId, ViewId},
-        dock::{self, Dock, PanelId},
+        dock::{self, Dock, DragPosition, PanelId},
         file_tree::{self, FileNodeId, FileTree},
         id_allocator::IdAllocator,
         id_map::IdMap,
@@ -122,24 +122,29 @@ impl AppInner {
 
     fn draw(&mut self, cx: &mut Cx, state: &State) {
         if self.window.begin_desktop_window(cx, None).is_ok() {
-            self.dock.apply_style(cx);
-            self.draw_panel(cx, state, state.root_panel_id);
-            self.window.end_desktop_window(cx);
+            println!("Begin dock");
+            if self.dock.begin(cx).is_ok() {
+                self.draw_panel(cx, state, state.root_panel_id);
+                self.window.end_desktop_window(cx);
+                self.dock.end(cx);
+            }
+            println!("End dock");
         }
     }
 
     fn draw_panel(&mut self, cx: &mut Cx, state: &State, panel_id: PanelId) {
+        println!("Drawing panel {:?}", panel_id);
         let panel = &state.panels_by_panel_id[panel_id];
-        match panel {
-            Panel::Split(SplitPanel { child_ids }) => {
+        match &panel.kind {
+            PanelKind::Split(SplitPanel { child_panel_ids }) => {
                 if self.dock.begin_split_panel(cx, panel_id).is_ok() {
-                    self.draw_panel(cx, state, child_ids[0]);
+                    self.draw_panel(cx, state, child_panel_ids[0]);
                     self.dock.middle_split_panel(cx);
-                    self.draw_panel(cx, state, child_ids[01]);
+                    self.draw_panel(cx, state, child_panel_ids[01]);
                     self.dock.end_split_panel(cx);
                 }
             }
-            Panel::Tab(TabPanel { tab_ids, .. }) => {
+            PanelKind::Tab(TabPanel { tab_ids, .. }) => {
                 if self.dock.begin_tab_panel(cx, panel_id).is_ok() {
                     if self.dock.begin_tab_bar(cx).is_ok() {
                         for tab_id in tab_ids {
@@ -258,40 +263,77 @@ impl AppInner {
                     match tab.kind {
                         TabKind::CodeEditor { session_id } => {
                             let panel_id = tab.panel_id;
-                            match state.panels_by_panel_id.get_mut(panel_id).unwrap() {
-                                Panel::Tab(TabPanel {
-                                    tab_ids,
+                            let panel = state
+                                .panels_by_panel_id
+                                .get_mut(panel_id)
+                                .unwrap()
+                                .as_tab_panel_mut();
+                            if let Some(code_editor_view_id) = panel.code_editor_view_id {
+                                self.code_editor.set_view_session_id(
+                                    cx,
+                                    &mut state.code_editor_state,
                                     code_editor_view_id,
-                                }) => {
-                                    if let Some(code_editor_view_id) = code_editor_view_id {
-                                        self.code_editor.set_view_session_id(
-                                            cx,
-                                            &mut state.code_editor_state,
-                                            *code_editor_view_id,
-                                            None,
-                                        );
-                                    }
-                                    state.code_editor_state.destroy_session(session_id, &mut {
-                                        let request_sender = &self.request_sender;
-                                        move |request| {
-                                            request_sender.send(request).unwrap()
-                                        }
-                                    });
-                                    tab_ids.remove(
-                                        tab_ids
-                                            .iter()
-                                            .position(|existing_tab_id| *existing_tab_id == tab_id)
-                                            .unwrap(),
-                                    );
-                                    state.tabs_by_tab_id.remove(tab_id);
-                                    state.tab_id_allocator.deallocate(tab_id.0);
-                                    self.dock.set_selected_tab_id(cx, panel_id, None);
-                                    self.dock.redraw_tab_bar(cx, panel_id);
-                                }
-                                _ => panic!(),
+                                    None,
+                                );
                             }
+                            state.code_editor_state.destroy_session(session_id, &mut {
+                                let request_sender = &self.request_sender;
+                                move |request| request_sender.send(request).unwrap()
+                            });
+                            panel.tab_ids.remove(
+                                panel
+                                    .tab_ids
+                                    .iter()
+                                    .position(|existing_tab_id| *existing_tab_id == tab_id)
+                                    .unwrap(),
+                            );
+                            state.tabs_by_tab_id.remove(tab_id);
+                            state.tab_id_allocator.deallocate(tab_id.0);
+                            self.dock.set_selected_tab_id(cx, panel_id, None);
+                            self.dock.redraw_tab_bar(cx, panel_id);
                         }
                         _ => {}
+                    }
+                }
+                dock::Action::PanelDidReceiveDraggedItem(
+                    panel_id,
+                    drag_position,
+                    _dragged_item,
+                ) => {
+                    let panel = &state.panels_by_panel_id[panel_id];
+                    let parent_panel_id = panel.parent_panel_id;
+                    let split_panel_id = PanelId(state.panel_id_allocator.allocate());
+                    let panel = &mut state.panels_by_panel_id[panel_id];
+                    panel.parent_panel_id = Some(split_panel_id);
+                    let sibling_panel_id = PanelId(state.panel_id_allocator.allocate());
+                    state.panels_by_panel_id.insert(
+                        sibling_panel_id,
+                        Panel {
+                            parent_panel_id: Some(split_panel_id),
+                            kind: PanelKind::Tab(TabPanel {
+                                tab_ids: Vec::new(),
+                                code_editor_view_id: None,
+                            }),
+                        },
+                    );
+                    state.panels_by_panel_id.insert(
+                        split_panel_id,
+                        Panel {
+                            parent_panel_id,
+                            kind: PanelKind::Split(SplitPanel {
+                                child_panel_ids: match drag_position {
+                                    DragPosition::Left => [panel_id, sibling_panel_id],
+                                    DragPosition::Right => [sibling_panel_id, panel_id],
+                                    _ => unimplemented!(),
+                                },
+                            }),
+                        },
+                    );                    
+                    if let Some(parent_panel_id) = parent_panel_id {
+                        let parent_panel = &mut state.panels_by_panel_id[parent_panel_id].as_split_panel_mut();
+                        let position = parent_panel.child_panel_ids.iter().position(|child_panel_id| *child_panel_id == panel_id).unwrap();
+                        parent_panel.child_panel_ids[position] = split_panel_id;
+                        self.dock.redraw_split_panel(cx, parent_panel_id);
                     }
                 }
             }
@@ -313,9 +355,7 @@ impl AppInner {
                                     .code_editor_state
                                     .create_document_and_session(path, &mut {
                                         let request_sender = &self.request_sender;
-                                        move |request| {
-                                            request_sender.send(request).unwrap()
-                                        }
+                                        move |request| request_sender.send(request).unwrap()
                                     });
                             self.create_code_editor_tab(cx, state, name, session_id);
                             self.create_or_update_code_editor_view(
@@ -333,13 +373,13 @@ impl AppInner {
         let mut panel_id_stack = vec![state.root_panel_id];
         while let Some(panel_id) = panel_id_stack.pop() {
             let panel = &state.panels_by_panel_id[panel_id];
-            match panel {
-                Panel::Split(SplitPanel { child_ids }) => {
-                    for child_id in child_ids {
+            match &panel.kind {
+                PanelKind::Split(SplitPanel { child_panel_ids }) => {
+                    for child_id in child_panel_ids {
                         panel_id_stack.push(*child_id);
                     }
                 }
-                Panel::Tab(TabPanel {
+                PanelKind::Tab(TabPanel {
                     code_editor_view_id,
                     ..
                 }) => {
@@ -351,9 +391,7 @@ impl AppInner {
                             event,
                             &mut {
                                 let request_sender = &self.request_sender;
-                                move |request| {
-                                    request_sender.send(request).unwrap()
-                                }
+                                move |request| request_sender.send(request).unwrap()
                             },
                         );
                     }
@@ -384,41 +422,30 @@ impl AppInner {
         }
     }
 
-    fn handle_response(
-        &mut self,
-        cx: &mut Cx,
-        state: &mut State,
-        response: Response,
-    ) {
+    fn handle_response(&mut self, cx: &mut Cx, state: &mut State, response: Response) {
         match response {
             Response::GetFileTree(response) => {
                 self.set_file_tree(cx, state, response.unwrap());
                 let tab = &state.tabs_by_tab_id[state.file_tree_tab_id];
                 self.dock
                     .set_selected_tab_id(cx, tab.panel_id, Some(state.file_tree_tab_id));
-            },
+            }
             Response::OpenFile(response) => {
                 let (path, revision, text) = response.unwrap();
                 let document_id = state.code_editor_state.document_id_by_path(&path).unwrap();
                 state
                     .code_editor_state
                     .initialize_document(document_id, revision, text);
-                self.code_editor.redraw_document_views(
-                    cx,
-                    &state.code_editor_state,
-                    document_id,
-                );
-            },
-            response => self.code_editor.handle_response(
-                &mut state.code_editor_state,
-                response,
-                &mut {
-                    let request_sender = &self.request_sender;
-                    move |request| {
-                        request_sender.send(request).unwrap()
-                    }
-                },
-            ),
+                self.code_editor
+                    .redraw_document_views(cx, &state.code_editor_state, document_id);
+            }
+            response => {
+                self.code_editor
+                    .handle_response(&mut state.code_editor_state, response, &mut {
+                        let request_sender = &self.request_sender;
+                        move |request| request_sender.send(request).unwrap()
+                    })
+            }
         };
     }
 
@@ -464,6 +491,7 @@ impl AppInner {
 }
 
 struct State {
+    panel_id_allocator: IdAllocator,
     panels_by_panel_id: IdMap<PanelId, Panel>,
     root_panel_id: PanelId,
     panel_id: PanelId,
@@ -495,45 +523,56 @@ impl State {
         let mut tab_id_allocator = IdAllocator::new();
         let mut tabs_by_tab_id = IdMap::new();
 
-        let panel_id_0 = PanelId(panel_id_allocator.allocate());
+        let root_panel_id = PanelId(panel_id_allocator.allocate());
+
+        let panel_0_id = PanelId(panel_id_allocator.allocate());
         let file_tree_tab_id = TabId(tab_id_allocator.allocate());
         panels_by_panel_id.insert(
-            panel_id_0,
-            Panel::Tab(TabPanel {
-                tab_ids: vec![file_tree_tab_id],
-                code_editor_view_id: None,
-            }),
+            panel_0_id,
+            Panel {
+                parent_panel_id: Some(root_panel_id),
+                kind: PanelKind::Tab(TabPanel {
+                    tab_ids: vec![file_tree_tab_id],
+                    code_editor_view_id: None,
+                }),
+            },
         );
         tabs_by_tab_id.insert(
             file_tree_tab_id,
             Tab {
-                panel_id: panel_id_0,
+                panel_id: panel_0_id,
                 name: String::from("File Tree"),
                 kind: TabKind::FileTree,
             },
         );
 
-        let panel_id_1 = PanelId(panel_id_allocator.allocate());
+        let panel_1_id = PanelId(panel_id_allocator.allocate());
         panels_by_panel_id.insert(
-            panel_id_1,
-            Panel::Tab(TabPanel {
-                tab_ids: vec![],
-                code_editor_view_id: None,
-            }),
+            panel_1_id,
+            Panel {
+                parent_panel_id: Some(root_panel_id),
+                kind: PanelKind::Tab(TabPanel {
+                    tab_ids: vec![],
+                    code_editor_view_id: None,
+                }),
+            },
         );
 
-        let root_panel_id = PanelId(panel_id_allocator.allocate());
         panels_by_panel_id.insert(
             root_panel_id,
-            Panel::Split(SplitPanel {
-                child_ids: [panel_id_0, panel_id_1],
-            }),
+            Panel {
+                parent_panel_id: None,
+                kind: PanelKind::Split(SplitPanel {
+                    child_panel_ids: [panel_0_id, panel_1_id],
+                }),
+            },
         );
 
         State {
+            panel_id_allocator,
             panels_by_panel_id,
             root_panel_id,
-            panel_id: panel_id_1,
+            panel_id: panel_1_id,
             tab_id_allocator,
             tabs_by_tab_id,
             file_tree_tab_id,
@@ -605,34 +644,46 @@ impl State {
     }
 }
 
-#[derive(Debug)]
-enum Panel {
-    Split(SplitPanel),
-    Tab(TabPanel),
+struct Panel {
+    parent_panel_id: Option<PanelId>,
+    kind: PanelKind,
 }
 
 impl Panel {
+    fn as_split_panel_mut(&mut self) -> &mut SplitPanel {
+        match &mut self.kind {
+            PanelKind::Split(panel) => panel,
+            _ => panic!(),
+        }
+    }
+
     fn as_tab_panel(&self) -> &TabPanel {
-        match self {
-            Panel::Tab(panel) => panel,
+        match &self.kind {
+            PanelKind::Tab(panel) => panel,
             _ => panic!(),
         }
     }
 
     fn as_tab_panel_mut(&mut self) -> &mut TabPanel {
-        match self {
-            Panel::Tab(panel) => panel,
+        match &mut self.kind {
+            PanelKind::Tab(panel) => panel,
             _ => panic!(),
         }
     }
 }
 
-#[derive(Debug)]
-struct SplitPanel {
-    child_ids: [PanelId; 2],
+#[derive(Clone, Debug)]
+enum PanelKind {
+    Split(SplitPanel),
+    Tab(TabPanel),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
+struct SplitPanel {
+    child_panel_ids: [PanelId; 2],
+}
+
+#[derive(Clone, Debug)]
 struct TabPanel {
     tab_ids: Vec<TabId>,
     code_editor_view_id: Option<ViewId>,
