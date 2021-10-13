@@ -9,8 +9,8 @@ use crate::liveerror::LiveError;
 use crate::liveerror::LiveErrorOrigin;
 use crate::livenode::{LiveNode, LiveValue};
 use crate::id::CrateModule;
-use crate::id::LocalNodePtr;
-use crate::id::FullNodePtr;
+use crate::id::LocalPtr;
+use crate::id::LivePtr;
 use crate::id::FileId;
 
 #[derive(Debug)]
@@ -26,10 +26,10 @@ pub struct LiveDocument {
 impl fmt::Display for LiveScopeTarget {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            LiveScopeTarget::Local {..} => {
+            LiveScopeTarget::LocalPtr {..} => {
                 write!(f, "[local]")
             },
-            LiveScopeTarget::Full (ptr) => {
+            LiveScopeTarget::LivePtr (ptr) => {
                 write!(f, "[F:{} L:{} I:{}]", ptr.file_id.to_index(), ptr.local_ptr.level, ptr.local_ptr.index)
             }
         }
@@ -38,18 +38,18 @@ impl fmt::Display for LiveScopeTarget {
 
 #[derive(Copy, Debug, Clone)]
 pub enum LiveScopeTarget {
-    Local(LocalNodePtr),
-    Full(FullNodePtr)
+    LocalPtr(LocalPtr),
+    LivePtr(LivePtr)
 }
 
 impl LiveScopeTarget{
-    pub fn to_full_node_ptr(&self, file_id:FileId)->FullNodePtr{
+    pub fn to_full_node_ptr(&self, file_id:FileId)->LivePtr{
         match self{
-            LiveScopeTarget::Local(local)=>{
-                FullNodePtr{file_id:file_id, local_ptr:*local}
+            LiveScopeTarget::LocalPtr(local_ptr)=>{
+                LivePtr{file_id:file_id, local_ptr:*local_ptr}
             }
-            LiveScopeTarget::Full(full)=>{
-                *full
+            LiveScopeTarget::LivePtr(live_ptr)=>{
+                *live_ptr
             }
         }
     }
@@ -74,7 +74,7 @@ impl LiveDocument {
         }
     }
     
-    pub fn resolve_ptr(&self, local_ptr:LocalNodePtr)->&LiveNode{
+    pub fn resolve_ptr(&self, local_ptr:LocalPtr)->&LiveNode{
         &self.nodes[local_ptr.level][local_ptr.index]
     }
     
@@ -113,7 +113,7 @@ impl LiveDocument {
         self.nodes[level].push(node);
     }
     
-    pub fn scan_for_multi(&self, ids: &[Id]) -> Option<LocalNodePtr> {
+    pub fn scan_for_multi(&self, ids: &[Id]) -> Option<LocalPtr> {
         let mut node_start = 0 as usize;
         let mut node_count = self.nodes[0].len();
         let mut level = 0;
@@ -125,7 +125,7 @@ impl LiveDocument {
                 if node.id_pack == IdPack::single(id) {
                     // we found the node.
                     if i == ids.len() - 1 { // last item
-                        return Some(LocalNodePtr {
+                        return Some(LocalPtr {
                             level: level,
                             index: j + node_start
                         });
@@ -156,7 +156,7 @@ impl LiveDocument {
     }
     
     
-    pub fn scan_for_multi_for_expand(&self, level: usize, node_start: usize, node_count: usize, id_start: usize, id_count: usize, multi_ids: &Vec<Id>) -> Result<LocalNodePtr, String> {
+    pub fn scan_for_multi_for_expand(&self, level: usize, node_start: usize, node_count: usize, id_start: usize, id_count: usize, multi_ids: &Vec<Id>) -> Result<LocalPtr, String> {
         let mut node_start = node_start as usize;
         let mut node_count = node_count as usize;
         let mut level = level;
@@ -168,7 +168,7 @@ impl LiveDocument {
                 if node.id_pack == IdPack::single(id) {
                     // we found the node.
                     if i == id_count - 1 { // last item
-                        return Ok(LocalNodePtr {
+                        return Ok(LocalPtr {
                             level: level,
                             index: j + node_start
                         });
@@ -519,6 +519,9 @@ impl fmt::Display for LiveDocument {
                 },
                 LiveValue::Use {crate_module} => {
                     let _ = write!(f, "use {}::{}", IdFmt::col(&ld.multi_ids, node.id_pack), IdFmt::col(&ld.multi_ids, crate_module));
+                }
+                LiveValue::LiveType(id)=>{
+                    let _ = write!(f, "TypeId {:?}", id);
                 }
                 LiveValue::Class {class, node_start, node_count} => {
                     prefix(node.id_pack, ld, f);

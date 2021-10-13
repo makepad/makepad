@@ -3,7 +3,7 @@
 #[macro_use]
 mod cx;
 #[macro_use]
-mod livemacros;
+mod live;
 
 #[cfg(all(not(feature="ipc"),target_os = "linux"))]
 mod cx_opengl;
@@ -62,7 +62,7 @@ mod events;
 mod menu; 
 mod geometry;
 mod shader;
-//mod shader_std;
+mod shader_std;
 mod gpuinfo;
 
 pub use crate::cx::*;

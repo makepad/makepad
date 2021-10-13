@@ -1,6 +1,36 @@
 use crate::cx::*;
 
+live_body!{
+    DrawShader2D: Shader{
+        uniform camera_projection: mat4 in pass;
+        uniform camera_view: mat4 in pass;
+        uniform camera_inv: mat4 in pass;
+        uniform dpi_factor: float in pass;
+        uniform dpi_dilate: float in pass;
+        
+        uniform view_transform: mat4 in view;
+        
+        uniform draw_clip: vec4 in draw;
+        uniform draw_scroll: vec4 in draw;
+        uniform draw_zbias: float in draw;
+    }
+}
 
+pub fn define_shader_stdlib(cx: &mut Cx) {
+    cx.register_live_body(live_body());
+}
+
+/*
+pub fn register_default_geometry(cx: &mut Cx){
+    
+    let g = Geometry::from_geometry_gen(cx, GeometryGen::from_quad_2d(0.0,0.0,1.0,1.0));
+    // lets also store the reflection information on the geometry object.
+    cx.live_styles.geometries.insert(live_item_id!(self::quad_2d), g);
+    
+    let g = Geometry::from_geometry_gen(cx, GeometryGen::from_cube_3d(1.0,1.0,1.0,1,1,1));
+    cx.live_styles.geometries.insert(live_item_id!(self::cube_3d),g);
+}*/
+/*
 pub fn define_shader_stdlib(cx: &mut Cx) {
 
     let g = Geometry::from_geometry_gen(cx, GeometryGen::from_quad_2d(0.0,0.0,1.0,1.0));
@@ -313,3 +343,5 @@ pub fn define_shader_stdlib(cx: &mut Cx) {
         }
     });
 }
+
+*/

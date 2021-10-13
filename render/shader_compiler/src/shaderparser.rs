@@ -200,7 +200,7 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_self_decl(&mut self, ident: Ident, decl_node_ptr: FullNodePtr) -> Result<Option<DrawShaderFieldDef>, LiveError> {
+    pub fn expect_self_decl(&mut self, ident: Ident, decl_node_ptr: LivePtr) -> Result<Option<DrawShaderFieldDef>, LiveError> {
         let span = self.begin_span();
         let decl_ty = self.expect_ident() ?;
         let decl_name = self.expect_ident() ?;
@@ -454,14 +454,14 @@ impl<'a> ShaderParser<'a> {
         Ok(acc)
     }
     
-    fn scan_scope_for_live_ptr(&mut self, id: Id) -> Option<FullNodePtr> {
+    fn scan_scope_for_live_ptr(&mut self, id: Id) -> Option<LivePtr> {
         for item in self.live_scope.iter().rev() {
             if item.id == id {
                 let full_ptr = match item.target {
-                    LiveScopeTarget::Full(full) => full,
-                    LiveScopeTarget::Local(local) => FullNodePtr {
+                    LiveScopeTarget::LivePtr(live_ptr) => live_ptr,
+                    LiveScopeTarget::LocalPtr(local_ptr) => LivePtr {
                         file_id: self.file_id,
-                        local_ptr: local
+                        local_ptr
                     }
                 };
                 return Some(full_ptr)

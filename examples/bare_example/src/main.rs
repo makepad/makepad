@@ -1,35 +1,6 @@
 use makepad_render::*;  
 
-fn main(){
-    main_app!(BareExampleApp);
-}
-
-/*
-trait LiveComponent{
-    fn new_live(cx:&mut Cx, id:&[Id])->Self;
-    fn new_default(cx:&mut Cx)->Self;
-}
-
-// this is a normal 'Rust' component
-impl LiveComponent for BareExampleApp{
-    fn new_live(cx:&mut Cx, base:LiveNode, id:&[Id]){
-    }
-    
-    fn live_update(&mut self, cx:&mut Cx, event:&mut Event){
-        // thise are all default impls
-    }
-
-    // these 3 are generated
-    fn new_default(cx: &mut Cx){
-    }
-    
-    fn new_from_node(cx:&mut Cx, node:FullNodePtr)->Self{
-    }
-    
-    // this updates self against a live structure. also can use animation
-    fn update_from_node(&mut self, cx:&mut Cx, node:FullNodePtr){
-    }
-}*/
+main_app!(BareExampleApp);
 
 #[derive(Clone)]
 pub struct BareExampleApp {
@@ -38,23 +9,14 @@ pub struct BareExampleApp {
     pass: Pass,
     color_texture: Texture,
     main_view: View,
-    //quad: ButtonQuad,
-    //buttons: Vec<Button>,
-    //design: Design
 }
 
 // what you want is putting down an indirection in the style-sheet for a codefile.
 
-register_live!{ // alrighty. we always map application structures to a live struct
-    design: render::Design{
-        button: widgets::Button{ // ok so how does this thing find 'Button
-        }
-        children:[button]
-    }
-}
- 
 impl BareExampleApp {
     pub fn new(cx:&mut Cx)->Self{
+        
+        println!("{}", std::mem::size_of::<DrawQuad>());
         Self{
             window:Window::new(cx),
             pass:Pass::default(),
@@ -62,35 +24,19 @@ impl BareExampleApp {
             main_view:View::new(),
         }
     }
-    pub fn style(_cx: &mut Cx) { 
-        // ok so our problem is targetting things.
-        //self::ButtonQuad::register(cx);
+    pub fn live_register(cx: &mut Cx) {
+        // ok so we have to register our components.
+        DrawQuad::live_register(cx);
+        
     }
     
     pub fn myui_button_clicked(&mut self, _cx: &mut Cx){
     }
     
-    pub fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
-        // this live updates an object
-        //self.live_update(cx, event);
-        
-        // ok so what if we return a UIComponent.
-        
-        //self.buttons.push(Button::new_live(cx, self.live, id!(self::button)));
-        // this deserialises SomeButton. okay great
-        // now these things have nested 'variants'. 
-        // so this button gets to run tweens on its own structure
-         
-        //let x = Bla::new(cx, id!(self::BlaThing));
-        
-        /*while let Some(action) = self.live.handle_live(cx, event){
-            match action.id(){
-                id!(self::MyUI::Button) => match action.cast::<ButtonAction>(){
-                    Some(ButtonAction::Clicked) => self.myui_button_clicked(cx);
-                }
-            }
-        }
-        */
+    pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
+        let x = DrawQuad::live_new(cx);
+        x._live_type();
+        DrawQuad::live_type();
         
         match event {
             Event::Construct => {

@@ -7,23 +7,125 @@ pub struct LiveBody {
     pub line: usize,
     pub column: usize,
     pub code: String,
-}
-
-impl LiveBody{
-    pub fn register(self, _cx:&mut Cx){
-        
-    }
+    pub live_types: Vec<LiveType>
 }
 
 impl Cx {
-    pub fn add_live_body(&mut self, _live_body:LiveBody){
-        // alright so we have a live_body.
-        // it has a file/line/col etc
-        // now we need to stuff that into our live registry
-        // we also somehow need to route the errors coming from this
+    pub fn live_register(&mut self){
+        crate::DrawQuad::live_register(self);
+        crate::GeometryQuad2D::live_register(self);
+    }
+
+    pub fn verify_type_signature(&self, live_ptr: LivePtr, live_type:LiveType)->bool{
+        let node = self.shader_registry.live_registry.resolve_ptr(live_ptr);
+        if let LiveValue::LiveType(ty) = node.value{
+            if ty == live_type{
+                return true
+            }
+        }
+        false
+    }
+    
+    pub fn register_live_body(&mut self, live_body: LiveBody) {
+        // ok so now what.
+        
+    }
+    
+    pub fn register_factory(&mut self, live_type: LiveType, factory:Box<dyn LiveFactory>){
+        self.live_factories.insert(live_type, factory);
+    }
+    
+    pub fn get_factory(&mut self, live_type: LiveType)-> &Box<dyn LiveFactory>{
+        self.live_factories.get(&live_type).unwrap()
+    }
+    
+    pub fn get_shader_from_ptr(&mut self, _live_ptr: LivePtr)->Option<Shader>{
+        // first see if we can fetch a shader from live_ptr
+        // otherwise analyse shader so we have the struct info
+        // then we wait to compile it on the backend
+        None
     }
 }
 
+pub trait LiveFactory {
+    fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> where Self: Sized;
+    fn live_fields(&self, fields: &mut Vec<LiveField>) where Self: Sized;
+    fn live_type(&self) -> LiveType where Self: Sized;
+}
+
+pub trait LiveNew {
+    fn live_new(cx: &mut Cx) -> Self;
+    fn live_type() -> LiveType;
+    fn live_register(cx: &mut Cx);
+}
+
+pub trait LiveUpdate {
+    fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) where Self: Sized;
+    fn _live_type(&self) -> LiveType;
+}
+
+#[derive(Default)]
+pub struct LiveBinding {
+    pub live_ptr: Option<LivePtr>
+}
+
+#[macro_export]
+macro_rules!live_prim {
+    ($ty: ident, $update: expr) => {
+        impl LiveUpdate for $ty{
+            fn live_update(&mut self, _cx:&mut Cx, _ptr: LivePtr){
+                $update;
+            }
+            
+            fn _live_type(&self)->LiveType{
+                Self::live_type()
+            }
+        }
+        impl LiveNew for $ty{
+            fn live_new(_cx:&mut Cx)->Self{
+                $ty::default()
+            }
+            fn live_type()->LiveType{
+                LiveType(std::any::TypeId::of::<$ty>())
+            }
+            fn live_register(cx: &mut Cx){
+                struct Factory();
+                impl LiveFactory for Factory{
+                    fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> where Self: Sized{
+                        Box::new($ty :: live_new(cx))
+                    }
+                    
+                    fn live_fields(&self, _fields: &mut Vec<LiveField>) where Self: Sized{
+                    }
+                    
+                    fn live_type(&self) -> LiveType where Self: Sized{
+                        $ty::live_type()
+                    }
+                }
+                cx.live_factories.insert($ty::live_type(), Box::new(Factory()));
+            }
+        }
+    }
+}
+
+live_prim!(f32, {});
+live_prim!(Vec2, {});
+
+pub struct LiveField {
+    pub name: String,
+    pub live_type: LiveType
+}
+
+impl LiveField {
+    pub fn new(name: &str, live_type: LiveType) -> Self {
+        Self {
+            name: name.to_string(),
+            live_type
+        }
+    }
+}
+
+/*
 pub trait DrawInputType {
     fn slots() -> usize;
     fn to_ty() -> Ty;
@@ -198,13 +300,7 @@ macro_rules!write_draw_input {
     }
 }
 
-#[macro_export]
-macro_rules!uid {
-    () => {{
-        struct Unique {}
-        std::any::TypeId::of::<Unique>().into()
-    }};
-}
+
 
 #[macro_export]
 macro_rules!default_shader {
@@ -231,4 +327,12 @@ macro_rules!default_shader {
     () => {
         Shader {shader_id: 0, location_hash: live_location_hash(file!(), line!() as u64, column!() as u64)}
     }
-}*/
+}*/*/
+
+#[macro_export]
+macro_rules!uid {
+    () => {{
+        struct Unique {}
+        std::any::TypeId::of::<Unique>().into()
+    }};
+}

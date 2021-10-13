@@ -90,7 +90,7 @@ impl DrawShaderInput {
 
 pub enum LiveNodeFindResult {
     NotFound,
-    Component(FullNodePtr),
+    Component(LivePtr),
     Struct(StructNodePtr),
     Function(FnNodePtr),
     PossibleStatic(StructNodePtr, FnNodePtr),
@@ -133,7 +133,7 @@ impl ShaderRegistry {
     }
     
     pub fn fn_ident_from_ptr(&self, fn_node_ptr: FnNodePtr) -> Ident {
-        let (_, node) = self.live_registry.resolve_ptr(fn_node_ptr.0);
+        let node = self.live_registry.resolve_ptr(fn_node_ptr.0);
         Ident(node.id_pack.unwrap_single())
     }
     
@@ -178,14 +178,14 @@ impl ShaderRegistry {
     }
     
     
-    pub fn find_live_node_by_path(&self, base_ptr: FullNodePtr, ids: &[Id]) -> LiveNodeFindResult {
+    pub fn find_live_node_by_path(&self, base_ptr: LivePtr, ids: &[Id]) -> LiveNodeFindResult {
         // what are the types of things we can find.
         
         fn no_ids(ids: &[Id], result: LiveNodeFindResult) -> LiveNodeFindResult {
             if ids.len() == 0 {result} else {LiveNodeFindResult::NotFound}
         }
         
-        fn var_def_is_const(doc: &LiveDocument, token_start: u32, base_ptr: FullNodePtr) -> LiveNodeFindResult {
+        fn var_def_is_const(doc: &LiveDocument, token_start: u32, base_ptr: LivePtr) -> LiveNodeFindResult {
             if Token::Ident(id!(const)) == doc.tokens[token_start as usize].token {
                 LiveNodeFindResult::Const(ConstNodePtr(base_ptr))
             }
@@ -194,7 +194,7 @@ impl ShaderRegistry {
             }
         }
         
-        let (doc, node) = self.live_registry.resolve_ptr(base_ptr);
+        let (doc, node) = self.live_registry.resolve_doc_ptr(base_ptr);
         match node.value {
             LiveValue::Bool(_) => return no_ids(ids, LiveNodeFindResult::LiveValue(ValueNodePtr(base_ptr), TyLit::Bool)),
             LiveValue::Int(_) => return no_ids(ids, LiveNodeFindResult::LiveValue(ValueNodePtr(base_ptr), TyLit::Int)),
@@ -223,9 +223,9 @@ impl ShaderRegistry {
                         let node = &doc.nodes[level][j + node_start];
                         if node.id_pack == IdPack::single(id) {
                             // we found the node.
-                            let node_ptr = LocalNodePtr {level: level, index: j + node_start};
+                            let node_ptr = LocalPtr {level: level, index: j + node_start};
                             if i == ids.len() - 1 { // last item
-                                let full_node_ptr = FullNodePtr {file_id: base_ptr.file_id, local_ptr: node_ptr};
+                                let full_node_ptr = LivePtr {file_id: base_ptr.file_id, local_ptr: node_ptr};
                                 match node.value {
                                     LiveValue::Class {class, ..} => {
                                         match self.live_registry.find_base_class_id(class) {
@@ -235,7 +235,7 @@ impl ShaderRegistry {
                                         }
                                     },
                                     LiveValue::Fn {..} => { // check if its a method or a free roaming function
-                                        let full_base_ptr = FullNodePtr {file_id: base_ptr.file_id, local_ptr: parent_ptr};
+                                        let full_base_ptr = LivePtr {file_id: base_ptr.file_id, local_ptr: parent_ptr};
                                         let base_node = doc.resolve_ptr(parent_ptr);
                                         if let LiveValue::Class {class, ..} = base_node.value {
                                             // lets check if our base is a component or a struct
@@ -354,7 +354,7 @@ impl ShaderRegistry {
         if self.consts.get(&const_ptr).is_some() {
             return Ok(());
         }
-        let (doc, const_node) = self.live_registry.resolve_ptr(const_ptr.0);
+        let (doc, const_node) = self.live_registry.resolve_doc_ptr(const_ptr.0);
         match const_node.value {
             LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
                 let mut parser_deps = Vec::new();
@@ -395,7 +395,7 @@ impl ShaderRegistry {
             return Ok(());
         }
         // alright lets parse and analyse a plain fn
-        let (doc, fn_node) = self.live_registry.resolve_ptr(fn_ptr.0);
+        let (doc, fn_node) = self.live_registry.resolve_doc_ptr(fn_ptr.0);
         match fn_node.value {
             LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
                 let id = fn_node.id_pack.unwrap_single();
@@ -446,7 +446,7 @@ impl ShaderRegistry {
             return Ok(());
         }
         
-        let (doc, class_node) = self.live_registry.resolve_ptr(struct_ptr.0);
+        let (doc, class_node) = self.live_registry.resolve_doc_ptr(struct_ptr.0);
         //let doc = &self.live_registry.expanded[full_ptr.file_id.to_index()];
         //let class_node = &doc.nodes[full_ptr.local_ptr.level][full_ptr.local_ptr.index];
         
@@ -463,7 +463,7 @@ impl ShaderRegistry {
                 
                 let mut parser_deps = Vec::new();
                 for i in 0..node_count as usize {
-                    let prop_ptr = FullNodePtr {file_id: struct_ptr.0.file_id, local_ptr: LocalNodePtr {
+                    let prop_ptr = LivePtr {file_id: struct_ptr.0.file_id, local_ptr: LocalPtr {
                         level: struct_ptr.0.local_ptr.level + 1,
                         index: i + node_start as usize
                     }};
@@ -550,14 +550,14 @@ impl ShaderRegistry {
             let shader_ptr = DrawShaderNodePtr(shader_ptr);
             let mut draw_shader_def = DrawShaderDef::default();
             // we have a pointer to the thing to instance.
-            let (doc, class_node) = self.live_registry.resolve_ptr(shader_ptr.0);
+            let (doc, class_node) = self.live_registry.resolve_doc_ptr(shader_ptr.0);
             
             match class_node.value {
                 LiveValue::Class {node_start, node_count, ..} => {
                     let mut parser_deps = Vec::new();
                     let mut draw_input_srid = None;
                     for i in 0..node_count as usize {
-                        let prop_ptr = FullNodePtr {file_id: shader_ptr.0.file_id, local_ptr: LocalNodePtr {
+                        let prop_ptr = LivePtr {file_id: shader_ptr.0.file_id, local_ptr: LocalPtr {
                             level: shader_ptr.0.local_ptr.level + 1,
                             index: i + node_start as usize
                         }};

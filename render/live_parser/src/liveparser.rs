@@ -10,23 +10,25 @@ use crate::liveerror::LiveErrorOrigin;
 use crate::id::Id;
 use crate::id::IdPack;
 use crate::livedocument::LiveDocument;
-use crate::livenode::{LiveNode, LiveValue};
+use crate::livenode::{LiveNode, LiveValue, LiveType};
 
 pub struct LiveParser<'a> {
     pub token_index: usize,
     pub file_id: FileId,
+    pub live_types: &'a [LiveType],
     pub tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
     pub token_with_span: TokenWithSpan,
     pub end: usize,
 }
 
 impl<'a> LiveParser<'a> {
-    pub fn new(tokens: &'a [TokenWithSpan]) -> Self {
+    pub fn new(tokens: &'a [TokenWithSpan], live_types: &'a [LiveType]) -> Self {
         let mut tokens_with_span = tokens.iter().cloned();
         let token_with_span = tokens_with_span.next().unwrap();
         LiveParser {
             file_id: FileId::default(),
             tokens_with_span,
+            live_types,
             token_with_span,
             token_index: 0,
             end: 0,
@@ -287,12 +289,35 @@ impl<'a> LiveParser<'a> {
             Token::OpenBrace => { // key/value map
                 let token_id = self.get_token_id();
                 self.skip_token();
-                let (node_start, node_count) = self.expect_object(level + 1, ld) ?;
-                ld.push_node(level, LiveNode {
-                    token_id,
-                    id_pack: prop_id,
-                    value: LiveValue::Object {node_start, node_count}
-                });
+                // if we get an OpenBrace immediately after, we are a type
+                if self.peek_token() == Token::OpenBrace{
+                    // we now expect a number indexing our typelist
+                    self.skip_token();
+                    // we expect now a single number
+                    let token = self.peek_token();
+                    if let Token::Int(val) = token {
+                        if val< 0 || val >= self.live_types.len() as i64{
+                            return Err(self.error(format!("live_type index out of range {}", val)));
+                        }
+                        ld.push_node(level, LiveNode {
+                            token_id,
+                            id_pack: prop_id,
+                            value: LiveValue::LiveType(self.live_types[val as usize])
+                        });
+                    }
+                    else{
+                        return Err(self.error(format!("expected live_type index, unexpected token `{}`", token)));
+                    }
+                    self.expect_token(Token::CloseBrace)?;
+                }
+                else{
+                    let (node_start, node_count) = self.expect_object(level + 1, ld) ?;
+                    ld.push_node(level, LiveNode {
+                        token_id,
+                        id_pack: prop_id,
+                        value: LiveValue::Object {node_start, node_count}
+                    });
+                }
             },
             Token::OpenBracket => { // array
                 let token_id = self.get_token_id();
