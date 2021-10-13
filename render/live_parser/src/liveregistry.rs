@@ -255,7 +255,7 @@ impl LiveRegistry {
         return None
     }
     
-    pub fn parse_live_file(&mut self, file: &str, crate_id: Id, module_id: Id, source: String, live_types: Vec<LiveType>) -> Result<FileId, LiveFileError> {
+    pub fn parse_live_file(&mut self, file: &str, own_crate_module: CrateModule, source: String, live_types: Vec<LiveType>) -> Result<FileId, LiveFileError> {
         
         let (is_new_file_id, file_id) = if let Some(file_id) = self.file_ids.get(file) {
             (false, *file_id)
@@ -266,20 +266,20 @@ impl LiveRegistry {
         };
         
         let lex_result = match lex(source.chars(), file_id) {
-            Err(msg) => panic!("Lex error {}", msg),
+            Err(msg) => return Err(msg.to_live_file_error(file, &source)),//panic!("Lex error {}", msg),
             Ok(lex_result) => lex_result
         };
         
         let mut parser = LiveParser::new(&lex_result.tokens, &live_types);
         
         let mut document = match parser.parse_live_document() {
-            Err(msg) => panic!("Parse error {}", msg.to_live_file_error(file, &source)),
+            Err(msg) => return Err(msg.to_live_file_error(file, &source)),//panic!("Parse error {}", msg.to_live_file_error(file, &source)),
             Ok(ld) => ld
         };
         document.strings = lex_result.strings;
         document.tokens = lex_result.tokens;
         
-        let own_crate_module = CrateModule(crate_id, module_id);
+       // let own_crate_module = CrateModule(crate_id, module_id);
         
         if self.dep_order.iter().position( | v | v.0 == own_crate_module).is_none() {
             self.dep_order.push((own_crate_module, TokenId::default()));
@@ -311,7 +311,7 @@ impl LiveRegistry {
             for node in nodes {
                 match node.value {
                     LiveValue::Use {crate_module} => {
-                        let crate_module = document.fetch_crate_module(crate_module, crate_id);
+                        let crate_module = document.fetch_crate_module(crate_module, own_crate_module.0);
                         dep_graph_set.insert(crate_module);
                         let self_index = self.dep_order.iter().position( | v | v.0 == own_crate_module).unwrap();
                         if let Some(other_index) = self.dep_order.iter().position( | v | v.0 == crate_module) {
