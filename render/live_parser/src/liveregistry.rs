@@ -6,10 +6,11 @@ use crate::livedocument::LiveScopeTarget;
 use crate::livedocument::LiveScopeItem;
 use crate::livenode::LiveNode;
 use crate::livenode::LiveValue;
+use crate::livenode::LiveType;
 use crate::liveparser::LiveParser;
 use crate::id::FileId;
-use crate::id::LocalNodePtr;
-use crate::id::FullNodePtr;
+use crate::id::LocalPtr;
+use crate::id::LivePtr;
 use crate::token::TokenId;
 use crate::token::Token;
 use crate::span::Span;
@@ -38,9 +39,42 @@ pub struct LiveRegistry {
     pub expanded: Vec<LiveDocument >,
 }
 
+pub struct LiveClassIterator {
+    file_id: FileId,
+    level: usize,
+    node_start: usize,
+    node_count: usize,
+    index: usize
+}
+
+impl LiveClassIterator {
+    pub fn next(&mut self, live_registry: &LiveRegistry) -> Option<(Id, LivePtr)> {
+        // ok so we get the
+        loop{
+            if self.index >= self.node_count {
+                return None
+            }
+            
+            let id = live_registry.expanded[self.file_id.to_index()]
+                .nodes[self.level][self.index + self.node_start].id_pack;
+            
+            self.index += 1;
+
+            if id.is_single(){
+                return Some((id.as_single(), LivePtr {
+                    file_id: self.file_id,
+                    local_ptr: LocalPtr {
+                        level: self.level,
+                        index: self.index + self.node_start
+                    }
+                }));
+            }
+        }
+    }
+}
 
 impl LiveRegistry {
-/*
+    /*
     pub fn parse_id_path_from_multi_id(crate_id: Id, module_id: Id, span: Span, target: IdPack, multi_ids: &[Id]) -> Result<IdPath, LiveError> {
         match target.unpack() {
             IdUnpack::Multi {index, count} => {
@@ -72,13 +106,34 @@ impl LiveRegistry {
             message: format!("Unsupported target naming {}", IdFmt::col(multi_ids, target))
         });
     }*/
-
-     pub fn resolve_ptr(&self, full_ptr:FullNodePtr)->(&LiveDocument,&LiveNode){
-        let doc = &self.expanded[full_ptr.file_id.to_index()];
-        (doc,&doc.resolve_ptr(full_ptr.local_ptr))
+    
+    pub fn resolve_doc_ptr(&self, live_ptr: LivePtr) -> (&LiveDocument, &LiveNode) {
+        let doc = &self.expanded[live_ptr.file_id.to_index()];
+        (doc, &doc.resolve_ptr(live_ptr.local_ptr))
     }
     
-    pub fn live_error_to_live_file_error(&self, live_error:LiveError)->LiveFileError{
+    pub fn live_class_iterator(&self, live_ptr: LivePtr) -> Option<LiveClassIterator> {
+        let node = self.resolve_ptr(live_ptr);
+        if let LiveValue::Class{node_start, node_count, ..} = node.value{
+            Some(LiveClassIterator{
+                file_id: live_ptr.file_id,
+                level: live_ptr.local_ptr.level + 1, 
+                index: 0,
+                node_start: node_start as usize,
+                node_count: node_count as usize,
+            })
+        }
+        else{
+            return None
+        }
+    }
+    
+    pub fn resolve_ptr(&self, live_ptr: LivePtr) -> &LiveNode {
+        let doc = &self.expanded[live_ptr.file_id.to_index()];
+        &doc.resolve_ptr(live_ptr.local_ptr)
+    }
+    
+    pub fn live_error_to_live_file_error(&self, live_error: LiveError) -> LiveFileError {
         let live_file = &self.live_files[live_error.span.file_id().to_index()];
         live_error.to_live_file_error(&live_file.file, &live_file.source)
     }
@@ -89,9 +144,9 @@ impl LiveRegistry {
     
     pub fn find_enum_origin(&self, start: IdPack, lhs: IdPack) -> IdPack {
         match start.unpack() {
-            IdUnpack::FullNodePtr(full_ptr) => {
-                let doc = &self.expanded[full_ptr.file_id.to_index()];
-                let node = &doc.nodes[full_ptr.local_ptr.level][full_ptr.local_ptr.index];
+            IdUnpack::LivePtr(live_ptr) => {
+                let doc = &self.expanded[live_ptr.file_id.to_index()];
+                let node = &doc.nodes[live_ptr.local_ptr.level][live_ptr.local_ptr.index];
                 match node.value {
                     LiveValue::IdPack(id) => {
                         return self.find_enum_origin(id, node.id_pack)
@@ -110,7 +165,7 @@ impl LiveRegistry {
         lhs
     }
     
-    pub fn find_full_node_ptr_from_ids(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<FullNodePtr> {
+    pub fn find_full_node_ptr_from_ids(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<LivePtr> {
         let cm = CrateModule(crate_id, module_id);
         if let Some(file_id) = self.crate_module_to_file_id.get(&cm) {
             let exp = &self.expanded[file_id.to_index()];
@@ -118,7 +173,7 @@ impl LiveRegistry {
                 let node = &exp.nodes[local_ptr.level][local_ptr.index];
                 match node.value {
                     LiveValue::Class {..} => {
-                        return Some(FullNodePtr {file_id: *file_id, local_ptr})
+                        return Some(LivePtr {file_id: *file_id, local_ptr})
                     },
                     _ => ()
                 }
@@ -127,10 +182,10 @@ impl LiveRegistry {
         None
     }
     
-    pub fn find_base_class_id(&self, class: IdPack)->Option<IdPack>{
+    pub fn find_base_class_id(&self, class: IdPack) -> Option<IdPack> {
         let mut class_iter = class;
-        while let IdUnpack::FullNodePtr(full_ptr) = class_iter.unpack() {
-            let (_, other_node) = self.resolve_ptr(full_ptr);
+        while let IdUnpack::LivePtr(live_ptr) = class_iter.unpack() {
+            let other_node = self.resolve_ptr(live_ptr);
             if let LiveValue::Class {class, ..} = other_node.value {
                 class_iter = class;
             }
@@ -138,10 +193,10 @@ impl LiveRegistry {
                 return None
             }
         }
-        Some(class_iter)        
+        Some(class_iter)
     }
     
-    pub fn find_component_origin(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<(CrateModule, Id, FullNodePtr)> {
+    pub fn find_component_origin(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<(CrateModule, Id, LivePtr)> {
         let cm = CrateModule(crate_id, module_id);
         if let Some(file_id) = self.crate_module_to_file_id.get(&cm) {
             let exp = &self.expanded[file_id.to_index()];
@@ -152,8 +207,8 @@ impl LiveRegistry {
                         // ok so this thing can be 'endpoint'
                         let mut class_iter = class;
                         let mut token_id_iter = node.token_id;
-                        while let IdUnpack::FullNodePtr(full_ptr) = class_iter.unpack() {
-                            let (_,other_node) = self.resolve_ptr(full_ptr);
+                        while let IdUnpack::LivePtr(full_ptr) = class_iter.unpack() {
+                            let other_node = self.resolve_ptr(full_ptr);
                             //let other = &self.expanded[full_ptr.file_id.to_index()];
                             //let other_node = &other.nodes[full_ptr.local_ptr.level][full_ptr.local_ptr.index];
                             if let LiveValue::Class {class, ..} = other_node.value {
@@ -176,7 +231,7 @@ impl LiveRegistry {
                         let crate_module = file.crate_module;
                         if let Token::Ident(id) = token_span.token {
                             // lets get the factory
-                            return Some((crate_module, id, FullNodePtr {file_id: *file_id, local_ptr: ptr}));
+                            return Some((crate_module, id, LivePtr {file_id: *file_id, local_ptr: ptr}));
                         }
                         // now we can look this up in our
                     }
@@ -200,7 +255,7 @@ impl LiveRegistry {
         return None
     }
     
-    pub fn parse_live_file(&mut self, file: &str, crate_id: Id, module_id: Id, source: String) -> Result<FileId, LiveFileError> {
+    pub fn parse_live_file(&mut self, file: &str, crate_id: Id, module_id: Id, source: String, live_types: Vec<LiveType>) -> Result<FileId, LiveFileError> {
         
         let (is_new_file_id, file_id) = if let Some(file_id) = self.file_ids.get(file) {
             (false, *file_id)
@@ -215,7 +270,7 @@ impl LiveRegistry {
             Ok(lex_result) => lex_result
         };
         
-        let mut parser = LiveParser::new(&lex_result.tokens);
+        let mut parser = LiveParser::new(&lex_result.tokens, &live_types);
         
         let mut document = match parser.parse_live_document() {
             Err(msg) => panic!("Parse error {}", msg.to_live_file_error(file, &source)),
@@ -284,7 +339,7 @@ impl LiveRegistry {
             document
         };
         self.crate_module_to_file_id.insert(own_crate_module, file_id);
-
+        
         if is_new_file_id {
             self.file_ids.insert(file.to_string(), file_id);
             self.live_files.push(live_file);
@@ -347,27 +402,27 @@ impl LiveRegistry {
                 node.id_pack
             };
             
-            fn clone_scope(in_doc: &LiveDocument, out_doc: &mut LiveDocument, scope_start:usize, scope_count: usize, in_file_id:FileId){
+            fn clone_scope(in_doc: &LiveDocument, out_doc: &mut LiveDocument, scope_start: usize, scope_count: usize, in_file_id: FileId) {
                 for i in 0..scope_count {
                     let item = &in_doc.scopes[i + scope_start];
                     // if item is local, it is now 'remote'.
                     match item.target {
-                        LiveScopeTarget::Local(local_ptr) => {
+                        LiveScopeTarget::LocalPtr(local_ptr) => {
                             out_doc.scopes.push(LiveScopeItem {
                                 id: item.id,
-                                target: LiveScopeTarget::Full(
-                                    FullNodePtr {
+                                target: LiveScopeTarget::LivePtr(
+                                    LivePtr {
                                         file_id: in_file_id,
                                         local_ptr
                                     }
                                 )
                             });
                         },
-                        LiveScopeTarget::Full {..} => {
+                        LiveScopeTarget::LivePtr {..} => {
                             out_doc.scopes.push(*item);
                         }
                     }
-                }                
+                }
             }
             
             match node.value {
@@ -549,7 +604,7 @@ impl LiveRegistry {
                             IdUnpack::Single(id) => {
                                 scope_stack.stack[level].push(LiveScopeItem {
                                     id: id,
-                                    target: LiveScopeTarget::Local(LocalNodePtr {level: level, index: index})
+                                    target: LiveScopeTarget::LocalPtr(LocalPtr {level: level, index: index})
                                 });
                             }
                             _ => ()
@@ -569,7 +624,7 @@ impl LiveRegistry {
             out_doc: &mut LiveDocument,
             out_level: usize,
             out_start: usize,
-        ) -> Result<(Option<FileId>, LocalNodePtr), LiveError> {
+        ) -> Result<(Option<FileId>, LocalPtr), LiveError> {
             match resolve_id.unpack() {
                 IdUnpack::Multi {index: id_start, count: id_count} => {
                     let base = in_doc.multi_ids[id_start];
@@ -599,7 +654,7 @@ impl LiveRegistry {
                     }
                     else {
                         match scope_stack.find_item(base) {
-                            Some(LiveScopeTarget::Local(node_ptr)) => {
+                            Some(LiveScopeTarget::LocalPtr(node_ptr)) => {
                                 match &out_doc.nodes[node_ptr.level][node_ptr.index].value {
                                     LiveValue::Class {node_start, node_count, ..} => {
                                         match out_doc.scan_for_multi_for_expand(node_ptr.level + 1, *node_start as usize, *node_count as usize, id_start, id_count, &in_doc.multi_ids) {
@@ -624,13 +679,13 @@ impl LiveRegistry {
                                     }
                                 }
                             }
-                            Some(LiveScopeTarget::Full(full_ptr)) => {
-                                let other_doc = &expanded[full_ptr.file_id.to_index()];
-                                match &other_doc.nodes[full_ptr.local_ptr.level][full_ptr.local_ptr.index].value {
+                            Some(LiveScopeTarget::LivePtr(live_ptr)) => {
+                                let other_doc = &expanded[live_ptr.file_id.to_index()];
+                                match &other_doc.nodes[live_ptr.local_ptr.level][live_ptr.local_ptr.index].value {
                                     LiveValue::Class {node_start, node_count, ..} => {
-                                        match other_doc.scan_for_multi_for_expand(full_ptr.local_ptr.level + 1, *node_start as usize, *node_count as usize, id_start, id_count, &in_doc.multi_ids) {
+                                        match other_doc.scan_for_multi_for_expand(live_ptr.local_ptr.level + 1, *node_start as usize, *node_count as usize, id_start, id_count, &in_doc.multi_ids) {
                                             Ok(found_node) => {
-                                                return Ok((Some(full_ptr.file_id), found_node))
+                                                return Ok((Some(live_ptr.file_id), found_node))
                                             }
                                             Err(message) => {
                                                 return Err(LiveError {
@@ -662,11 +717,11 @@ impl LiveRegistry {
                 }
                 IdUnpack::Single(id) if !LiveRegistry::is_baseclass(IdPack::single(id)) => {
                     match scope_stack.find_item(id) {
-                        Some(LiveScopeTarget::Local(local_ptr)) => {
+                        Some(LiveScopeTarget::LocalPtr(local_ptr)) => {
                             return Ok((None, local_ptr));
                         }
-                        Some(LiveScopeTarget::Full(full_ptr)) => {
-                            return Ok((Some(full_ptr.file_id), full_ptr.local_ptr));
+                        Some(LiveScopeTarget::LivePtr(live_ptr)) => {
+                            return Ok((Some(live_ptr.file_id), live_ptr.local_ptr));
                         }
                         _ => {}
                     }
@@ -708,6 +763,7 @@ impl LiveRegistry {
                 LiveValue::Color(_) => write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, node),
                 LiveValue::Vec2(_) => write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, node),
                 LiveValue::Vec3(_) => write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, node),
+                LiveValue::LiveType(_) => write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, node),
                 LiveValue::IdPack(id_value) => {
                     // lets resolve ID
                     let out_index = out_doc.get_level_len(out_level);
@@ -909,7 +965,7 @@ impl LiveRegistry {
                         token_id: node.token_id,
                         id_pack: node.id_pack,
                         value: LiveValue::ResourceRef {
-                            target//:out_doc.clone_multi_id(target, &in_doc.multi_ids),
+                            target //:out_doc.clone_multi_id(target, &in_doc.multi_ids),
                         }
                     };
                     write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, &new_node);
@@ -928,10 +984,10 @@ impl LiveRegistry {
                                     IdUnpack::Single(id) => {
                                         scope_stack.stack[out_level].push(LiveScopeItem {
                                             id,
-                                            target: LiveScopeTarget::Full(
-                                                FullNodePtr {
+                                            target: LiveScopeTarget::LivePtr(
+                                                LivePtr {
                                                     file_id: *file_id,
-                                                    local_ptr: LocalNodePtr {level: 0, index: i}
+                                                    local_ptr: LocalPtr {level: 0, index: i}
                                                 }
                                             )
                                         });
@@ -949,10 +1005,10 @@ impl LiveRegistry {
                                         IdUnpack::Single(id) => {
                                             scope_stack.stack[out_level].push(LiveScopeItem {
                                                 id: id,
-                                                target: LiveScopeTarget::Full(
-                                                    FullNodePtr {
+                                                target: LiveScopeTarget::LivePtr(
+                                                    LivePtr {
                                                         file_id: *file_id,
-                                                        local_ptr: LocalNodePtr {level: 0, index: i}
+                                                        local_ptr: LocalPtr {level: 0, index: i}
                                                     }
                                                 )
                                             });
@@ -987,10 +1043,10 @@ impl LiveRegistry {
                                             IdUnpack::Single(id) => {
                                                 scope_stack.stack[out_level].push(LiveScopeItem {
                                                     id: id,
-                                                    target: LiveScopeTarget::Full(
-                                                        FullNodePtr {
+                                                    target: LiveScopeTarget::LivePtr(
+                                                        LivePtr {
                                                             file_id: *file_id,
-                                                            local_ptr: LocalNodePtr {level, index: i + node_start}
+                                                            local_ptr: LocalPtr {level, index: i + node_start}
                                                         }
                                                     )
                                                 });
@@ -1007,10 +1063,10 @@ impl LiveRegistry {
                                             if IdPack::single(id) == other_node.id_pack {
                                                 scope_stack.stack[out_level].push(LiveScopeItem {
                                                     id: id,
-                                                    target: LiveScopeTarget::Full(
-                                                        FullNodePtr {
+                                                    target: LiveScopeTarget::LivePtr(
+                                                        LivePtr {
                                                             file_id: *file_id,
-                                                            local_ptr: LocalNodePtr {level, index: i + node_start}
+                                                            local_ptr: LocalPtr {level, index: i + node_start}
                                                         }
                                                     )
                                                 });

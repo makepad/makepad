@@ -107,19 +107,19 @@ impl fmt::Display for CrateModule {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialOrd, Copy, PartialEq)]
-pub struct LocalNodePtr {
+pub struct LocalPtr {
     pub level: usize,
     pub index: usize
 }
 
 #[derive(Clone, Debug, Eq, Hash, Copy, Ord, PartialOrd, PartialEq)]
-pub struct FullNodePtr {
+pub struct LivePtr {
     pub file_id: FileId,
-    pub local_ptr: LocalNodePtr,
+    pub local_ptr: LocalPtr,
 }
 
 
-impl fmt::Display for FullNodePtr {
+impl fmt::Display for LivePtr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}_{}_{}", self.file_id.0, self.local_ptr.level, self.local_ptr.index)
     }
@@ -130,7 +130,7 @@ impl fmt::Display for FullNodePtr {
 pub enum IdUnpack {
     Empty,
     Multi {index: usize, count: usize},
-    FullNodePtr (FullNodePtr),
+    LivePtr (LivePtr),
     Single(Id),
     Number(u64)
 }
@@ -231,9 +231,9 @@ impl IdPack {
     pub fn unpack(&self) -> IdUnpack {
         if self.0 & 0x8000_0000_0000_0000 != 0 {
             match self.0 & 0xE000_0000_0000_0000 {
-                0xA000_0000_0000_0000 => IdUnpack::FullNodePtr(FullNodePtr{
+                0xA000_0000_0000_0000 => IdUnpack::LivePtr(LivePtr{
                     file_id: FileId(((self.0 >> 32) & 0xffff) as u16),
-                    local_ptr: LocalNodePtr {
+                    local_ptr: LocalPtr {
                         level: ((self.0 >> 48) & 0x1fff) as usize,
                         index: (self.0 & 0xffff_ffff)as usize
                     }
@@ -272,7 +272,7 @@ impl IdPack {
         Self(0x0)
     }
     
-    pub fn node_ptr(file_id: FileId, ptr: LocalNodePtr)->Self{
+    pub fn node_ptr(file_id: FileId, ptr: LocalPtr)->Self{
         Self(
             0xA000_0000_0000_0000 |
             (ptr.index as u64) |
@@ -316,6 +316,15 @@ impl IdPack {
             panic!()
         }
         Id(self.0)
+    }
+    
+    pub fn as_single(&self) -> Id {
+        if !self.is_single() {
+            Id::empty()
+        }
+        else{
+            Id(self.0)
+        }
     }
 
 }
@@ -368,7 +377,7 @@ impl fmt::Display for IdPack {
             IdUnpack::Empty => {
                 write!(f, "IdEmpty")
             }
-            IdUnpack::FullNodePtr(full_ptr)=>{
+            IdUnpack::LivePtr(full_ptr)=>{
                 write!(f, "NodePtr{{file:{}, level:{}, index:{}}}", full_ptr.file_id.0, full_ptr.local_ptr.level, full_ptr.local_ptr.index)
             }
         }

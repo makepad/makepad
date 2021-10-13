@@ -256,6 +256,15 @@ impl TokenParser {
         false
     }
     
+    pub fn is_group_with_delim(&mut self, delim: Delimiter)->bool{
+        if let Some(TokenTree::Group(group)) = &self.current {
+            delim == group.delimiter()
+        }
+        else{
+            false
+        }
+    }
+    
     pub fn open_group(&mut self) -> Option<Delimiter> {
         if let Some(TokenTree::Group(group)) = &self.current {
             let delim = group.delimiter();

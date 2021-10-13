@@ -1,7 +1,7 @@
 use makepad_live_parser::Span;
 use makepad_live_parser::Token;
 use makepad_live_parser::Id;
-use makepad_live_parser::FullNodePtr;
+use makepad_live_parser::LivePtr;
 use makepad_live_parser::Vec4;
 use std::fmt::Write;
 use std::cell::{Cell, RefCell};
@@ -17,22 +17,22 @@ use crate::shaderregistry::ShaderResourceId;
 // all the Live node pointer newtypes
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub struct FnNodePtr(pub FullNodePtr);
+pub struct FnNodePtr(pub LivePtr);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub struct StructNodePtr(pub FullNodePtr);
+pub struct StructNodePtr(pub LivePtr);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub struct DrawShaderNodePtr(pub FullNodePtr);
+pub struct DrawShaderNodePtr(pub LivePtr);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub struct ConstNodePtr(pub FullNodePtr);
+pub struct ConstNodePtr(pub LivePtr);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub struct ValueNodePtr(pub FullNodePtr);
+pub struct ValueNodePtr(pub LivePtr);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub struct VarDefNodePtr(pub FullNodePtr);
+pub struct VarDefNodePtr(pub LivePtr);
 
 #[derive(Clone, Debug, Default)]
 pub struct DrawShaderDef {
@@ -64,7 +64,7 @@ pub struct DrawShaderFieldDef {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DrawShaderInputType {
-    VarDef(FullNodePtr),
+    VarDef(LivePtr),
     ShaderResourceId(ShaderResourceId)
 }
 

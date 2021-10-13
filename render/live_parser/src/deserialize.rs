@@ -85,8 +85,8 @@ impl DeLive for f32 {
         let node = &lr.expanded[file].nodes[level][index];
         match node.value {
             LiveValue::IdPack(id)=>{// it should be a pointer
-                if let IdUnpack::FullNodePtr(full_ptr) = id.unpack(){
-                    return DeLive::de_live(lr, full_ptr.file_id.to_index(), full_ptr.local_ptr.level, full_ptr.local_ptr.index)
+                if let IdUnpack::LivePtr(live_ptr) = id.unpack(){
+                    return DeLive::de_live(lr, live_ptr.file_id.to_index(), live_ptr.local_ptr.level, live_ptr.local_ptr.index)
                 }
             }
             LiveValue::Int(v) => return Ok(v as f32),
@@ -103,8 +103,8 @@ impl DeLive for u32 {
         let node = &lr.expanded[file].nodes[level][index];
         match node.value {
             LiveValue::IdPack(id)=>{// it should be a pointer
-                if let IdUnpack::FullNodePtr(full_ptr) = id.unpack(){
-                    return DeLive::de_live(lr, full_ptr.file_id.to_index(), full_ptr.local_ptr.level, full_ptr.local_ptr.index)
+                if let IdUnpack::LivePtr(live_ptr) = id.unpack(){
+                    return DeLive::de_live(lr, live_ptr.file_id.to_index(), live_ptr.local_ptr.level, live_ptr.local_ptr.index)
                 }
             }
             LiveValue::Int(v) => return Ok(v as u32),
