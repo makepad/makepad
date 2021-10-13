@@ -15,7 +15,6 @@ use std::os::raw::{c_char, c_uchar, c_int, c_uint, c_ulong, c_long, c_void};
 use std::ptr;
 use time::precise_time_ns;
 
-
 #[cfg(target_arch = "arm")]
 pub const LINUX_CUSTOM_WINDOW_CHROME: bool = false;
 #[cfg(not(target_arch = "arm"))]

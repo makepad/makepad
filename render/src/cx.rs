@@ -7,6 +7,10 @@ pub use makepad_live_parser::math::*;
 use makepad_shader_compiler::ShaderRegistry;
 pub use makepad_shader_compiler::DrawShaderInput;
 pub use makepad_live_parser::Id;
+pub use makepad_live_parser::LivePtr;
+pub use makepad_live_parser::LiveNode;
+pub use makepad_live_parser::LiveType;
+pub use makepad_live_parser::LiveValue;
 pub use makepad_live_parser::id;
 pub use makepad_shader_compiler::Ty;
 
@@ -27,7 +31,7 @@ pub use crate::view::*;
 pub use crate::pass::*;
 pub use crate::geometry::*;
 pub use crate::texture::*;
-pub use crate::livemacros::*;
+pub use crate::live::*;
 pub use crate::events::*;
 //pub use crate::animator::*;
 pub use crate::area::*;
@@ -104,6 +108,9 @@ pub struct Cx {
     pub turtles: Vec<Turtle>,
     pub align_list: Vec<Area>,
     
+    pub live_factories: HashMap<LiveType, Box<dyn LiveFactory>>,
+    //pub typed_geometry: HashMap<std::any::TypeId, usize>,
+   
     pub redraw_child_areas: Vec<Area>,
     pub redraw_parent_areas: Vec<Area>,
     pub _redraw_child_areas: Vec<Area>,
@@ -141,7 +148,6 @@ pub struct Cx {
     pub profiles: HashMap<u64, Instant>,
     
     pub shader_registry: ShaderRegistry,
-    //pub live_styles: LiveStyles,
     
     pub command_settings: HashMap<CommandId, CxCommandSetting>,
     
@@ -242,6 +248,8 @@ impl Default for Cx {
             view_stack: Vec::new(),
             turtles: Vec::new(),
             align_list: Vec::new(),
+            
+            live_factories: HashMap::new(),
             
             redraw_parent_areas: Vec::new(),
             _redraw_parent_areas: Vec::new(),
@@ -904,28 +912,27 @@ impl Cx {
 #[macro_export]
 macro_rules!main_app {
     ( $ app: ident) => {
-        //TODO do this with a macro to generate both entrypoints for App and Cx
-        let mut cx = Cx::default();
-        cx.style();
-        $ app::style(&mut cx);
-        //cx.init_live_styles();
-        let mut app = $ app::new(&mut cx);
-        //let mut cxafterdraw = CxAfterDraw::new(&mut cx);
-        cx.event_loop( | cx, mut event | {
-            if let Event::Draw = event {
-                app.draw_app(cx);
-                //cxafterdraw.after_draw(cx);
-                return
-            }
-            app.handle_app(cx, &mut event);
-        });
-    }
-}
-
-#[macro_export]
-macro_rules!wasm_app {
-    ( $ app: ident) => {
+        #[cfg(not(target_arch = "wasm32"))]
+        fn main(){
+            //TODO do this with a macro to generate both entrypoints for App and Cx
+            let mut cx = Cx::default();
+            cx.live_register();
+            $ app::live_register(&mut cx);
+            //cx.init_live_styles();
+            let mut app = $ app::new(&mut cx);
+            //let mut cxafterdraw = CxAfterDraw::new(&mut cx);
+            cx.event_loop( | cx, mut event | {
+                if let Event::Draw = event {
+                    app.draw_app(cx);
+                    //cxafterdraw.after_draw(cx);
+                    return
+                }
+                app.handle_app(cx, &mut event);
+            });
+        }
+        
         #[export_name = "create_wasm_app"]
+        #[cfg(target_arch = "wasm32")]
         pub extern "C" fn create_wasm_app() -> u32 {
             let mut cx = Box::new(Cx::default());
             cx.style();
@@ -937,6 +944,7 @@ macro_rules!wasm_app {
         }
         
         #[export_name = "process_to_wasm"]
+        #[cfg(target_arch = "wasm32")]
         pub unsafe extern "C" fn process_to_wasm(appcx: u32, msg_bytes: u32) -> u32 {
             let appcx = &*(appcx as *mut (*mut $ app, *mut Cx/*, *mut CxAfterDraw*/));
             (*appcx.1).process_to_wasm(msg_bytes, | cx, mut event | {
@@ -948,5 +956,5 @@ macro_rules!wasm_app {
                 (*appcx.0).handle_app(cx, &mut event);
             })
         }
-    };
+    }
 }

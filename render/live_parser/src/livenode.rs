@@ -3,6 +3,9 @@ use crate::id::IdPack;
 use crate::token::TokenId;
 use crate::math::{Vec2, Vec3};
 
+#[derive(Clone, Debug, Eq, PartialEq, Copy, Hash)]
+pub struct LiveType(pub core::any::TypeId);
+
 #[derive(Copy, Clone, Debug)]
 pub struct LiveNode { // 3x u64
     pub token_id: TokenId,
@@ -19,6 +22,7 @@ impl LiveValue {
             Self::Color(_) => true,
             Self::Vec2(_) => true,
             Self::Vec3(_) => true,
+            Self::LiveType{..}=>true,
             Self::IdPack(_) => true,
             _ => false
         }
@@ -41,6 +45,7 @@ impl LiveValue {
             Self::ResourceRef {..}=>14,
             Self::Use{..} => 15,
             Self::Class {..}=>16,
+            Self::LiveType{..}=>17
         }
     }
     
@@ -71,6 +76,7 @@ pub enum LiveValue {
     Color(u32),
     Vec2(Vec2),
     Vec3(Vec3),
+    LiveType(LiveType),
     IdPack(IdPack),
     Call {
         target: IdPack,

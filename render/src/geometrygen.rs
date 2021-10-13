@@ -1,3 +1,5 @@
+use crate::cx::*;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GeometryGen {
     pub vertices: Vec<f32>, // vec4 pos, vec3 normal, vec2 uv
@@ -136,5 +138,98 @@ impl GeometryGen {
                 self.indices.push(d as u32);
             }
         }
+    }
+}
+
+live_body!{
+    GeometryQuad2D: Geometry{
+        rust_type: {{GeometryQuad2D}};
+        x1: 0.0,
+        y1:  0.0,
+        x2: 1.0,
+        y2: 1.0,
+    }    
+}
+
+pub trait GeometryFields{
+    fn geometry_fields(fields: &mut Vec<LiveField>);
+}
+
+impl GeometryFields for GeometryQuad2D{
+    fn geometry_fields(fields: &mut Vec<LiveField>){
+        fields.push(LiveField::new("geom_pos", Vec2::live_type()));
+    }
+}
+
+pub struct GeometryQuad2D{
+    //#[private()]
+    pub live_ptr: Option<LivePtr>,
+    //#[default(0.0)]
+    pub x1: f32,
+    //#[default(0.0)]
+    pub y1:  f32,
+    //#[default(1.0)]
+    pub x2: f32,
+    //#[default(1.0)]
+    pub y2: f32,
+    //#[private()]
+    pub geometry: Option<Geometry>
+}
+
+impl GeometryQuad2D{
+    fn live_update_value(&mut self, cx:&mut Cx, id:Id, ptr:LivePtr){
+        match id{
+            id!(x1)=>self.x1.live_update(cx, ptr),
+            id!(y1)=>self.y1.live_update(cx, ptr),
+            id!(x2)=>self.x2.live_update(cx, ptr),
+            id!(y2)=>self.y2.live_update(cx, ptr),
+            _=>()
+        }
+    }    
+}
+
+impl LiveUpdate for GeometryQuad2D{
+    fn live_update(&mut self, _cx:&mut Cx, _live_ptr:LivePtr){
+    }
+            
+    fn _live_type(&self)->LiveType{
+        Self::live_type()
+    }
+}
+
+impl LiveNew for GeometryQuad2D{
+    fn live_new(_cx: &mut Cx)->Self{
+        Self{
+            live_ptr: None,
+            x1: 0.0,
+            y1:  0.0,
+            x2: 1.0,
+            y2: 1.0,
+            geometry: None
+        }
+    }
+
+    fn live_type()->LiveType{
+        LiveType(std::any::TypeId::of::<GeometryQuad2D>())
+    }
+    
+    fn live_register(cx: &mut Cx){
+        struct Factory();
+        impl LiveFactory for Factory{
+            fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> where Self: Sized{
+                Box::new(GeometryQuad2D :: live_new(cx))
+            }
+            
+            fn live_fields(&self, fields: &mut Vec<LiveField>) where Self: Sized{
+                fields.push(LiveField::new("rect_pos", Vec2::live_type()));
+                fields.push(LiveField::new("rect_size", Vec2::live_type()));
+                fields.push(LiveField::new("draw_depth", f32::live_type()));
+            }
+            
+            fn live_type(&self) -> LiveType where Self: Sized{
+                GeometryQuad2D::live_type()
+            }
+        }
+        cx.live_factories.insert(GeometryQuad2D::live_type(), Box::new(Factory()));
     }
 }
