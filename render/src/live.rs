@@ -15,6 +15,11 @@ impl Cx {
         crate::DrawQuad::live_register(self);
         crate::GeometryQuad2D::live_register(self);
     }
+    
+    // ok so now what. now we should run the expansion
+    pub fn live_expand(&mut self){
+        
+    }
 
     pub fn verify_type_signature(&self, live_ptr: LivePtr, live_type:LiveType)->bool{
         let node = self.shader_registry.live_registry.resolve_ptr(live_ptr);
@@ -28,7 +33,16 @@ impl Cx {
     
     pub fn register_live_body(&mut self, live_body: LiveBody) {
         // ok so now what.
-        
+        //println!("{}", live_body.code);
+        let result = self.shader_registry.live_registry.parse_live_file(
+            &live_body.file,
+            CrateModule::from_module_path(&live_body.module_path),
+            live_body.code,
+            live_body.live_types
+        );
+        if let Err(msg) = result{
+            println!("Error parsing live file {}", msg);
+        }
     }
     
     pub fn register_factory(&mut self, live_type: LiveType, factory:Box<dyn LiveFactory>){

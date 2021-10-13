@@ -36,6 +36,37 @@ impl IdPath{
 
 #[derive(Clone, Eq, Hash, Debug, Copy, PartialEq)]
 pub struct CrateModule(pub Id, pub Id);
+
+impl CrateModule{
+    pub const fn from_module_path(module_path: &str)->Self{
+        // ok lets split off the first 2 things from module_path
+        let bytes = module_path.as_bytes();
+        let len = bytes.len();
+        // we have to find the first :
+        let mut crate_id = Id(0);
+        let mut i = 0;
+        while i < len {
+            if bytes[i] == ':' as u8{
+                crate_id = Id::from_bytes(bytes, 0, i);
+                i+=2;
+                break
+            }
+            i+=1;
+        }
+        if i == len{ // module_path is only one thing
+            return CrateModule(Id(0), Id::from_bytes(bytes, 0, len));
+        }
+        let module_start = i;
+        while i < len {
+            if bytes[i] == ':' as u8{
+                break
+            }
+            i+=1;
+        }
+        return CrateModule(crate_id, Id::from_bytes(bytes, module_start, i));
+    }
+}
+
 /*
 impl IdPath{
     const fn from_module_path_self(module_path: &str, path:&[Id;4])->Self{

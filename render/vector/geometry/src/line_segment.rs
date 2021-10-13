@@ -36,9 +36,9 @@ impl LineSegment {
         Some(Point {
             x,
             y: if dx1 <= dx2 {
-                self.p0.y.lerp(self.p1.y, dx1 / dx)
+                self.p0.y.ext_lerp(self.p1.y, dx1 / dx)
             } else {
-                self.p1.y.lerp(self.p0.y, dx2 / dx)
+                self.p1.y.ext_lerp(self.p0.y, dx2 / dx)
             },
         })
     }

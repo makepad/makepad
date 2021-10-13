@@ -291,11 +291,14 @@ impl<'a> LiveParser<'a> {
                 self.skip_token();
                 // if we get an OpenBrace immediately after, we are a type
                 if self.peek_token() == Token::OpenBrace{
+                    println!("HERE");
+
                     // we now expect a number indexing our typelist
                     self.skip_token();
                     // we expect now a single number
                     let token = self.peek_token();
                     if let Token::Int(val) = token {
+                        self.skip_token();
                         if val< 0 || val >= self.live_types.len() as i64{
                             return Err(self.error(format!("live_type index out of range {}", val)));
                         }

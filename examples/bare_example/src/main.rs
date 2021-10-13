@@ -6,7 +6,7 @@ main_app!(BareExampleApp);
 pub struct BareExampleApp {
     //live: LiveNode, // for every component this always points to the node we deserialized from
     window: Window,
-    pass: Pass,
+    pass: Pass, 
     color_texture: Texture,
     main_view: View,
 }
@@ -16,7 +16,6 @@ pub struct BareExampleApp {
 impl BareExampleApp {
     pub fn new(cx:&mut Cx)->Self{
         
-        println!("{}", std::mem::size_of::<DrawQuad>());
         Self{
             window:Window::new(cx),
             pass:Pass::default(),
@@ -24,9 +23,7 @@ impl BareExampleApp {
             main_view:View::new(),
         }
     }
-    pub fn live_register(cx: &mut Cx) {
-        // ok so we have to register our components.
-        DrawQuad::live_register(cx);
+    pub fn live_register(_cx: &mut Cx) {
         
     }
     
