@@ -133,7 +133,7 @@ impl AppInner {
     }
 
     fn draw_panel(&mut self, cx: &mut Cx, state: &State, panel_id: PanelId) {
-        println!("Drawing panel {:?}", panel_id);
+        println!("Draw panel {:?}", panel_id);
         let panel = &state.panels_by_panel_id[panel_id];
         match &panel.kind {
             PanelKind::Split(SplitPanel { child_panel_ids }) => {
@@ -303,9 +303,11 @@ impl AppInner {
                     let panel = &state.panels_by_panel_id[panel_id];
                     let parent_panel_id = panel.parent_panel_id;
                     let split_panel_id = PanelId(state.panel_id_allocator.allocate());
+                    let sibling_panel_id = PanelId(state.panel_id_allocator.allocate());
+
                     let panel = &mut state.panels_by_panel_id[panel_id];
                     panel.parent_panel_id = Some(split_panel_id);
-                    let sibling_panel_id = PanelId(state.panel_id_allocator.allocate());
+
                     state.panels_by_panel_id.insert(
                         sibling_panel_id,
                         Panel {
@@ -316,6 +318,7 @@ impl AppInner {
                             }),
                         },
                     );
+
                     state.panels_by_panel_id.insert(
                         split_panel_id,
                         Panel {
@@ -328,10 +331,16 @@ impl AppInner {
                                 },
                             }),
                         },
-                    );                    
+                    );
+
                     if let Some(parent_panel_id) = parent_panel_id {
-                        let parent_panel = &mut state.panels_by_panel_id[parent_panel_id].as_split_panel_mut();
-                        let position = parent_panel.child_panel_ids.iter().position(|child_panel_id| *child_panel_id == panel_id).unwrap();
+                        let parent_panel =
+                            &mut state.panels_by_panel_id[parent_panel_id].as_split_panel_mut();
+                        let position = parent_panel
+                            .child_panel_ids
+                            .iter()
+                            .position(|child_panel_id| *child_panel_id == panel_id)
+                            .unwrap();
                         parent_panel.child_panel_ids[position] = split_panel_id;
                         self.dock.redraw_split_panel(cx, parent_panel_id);
                     }
