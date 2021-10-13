@@ -1,7 +1,7 @@
 use {
     crate::{
         code_editor::{self, CodeEditor, SessionId, ViewId},
-        dock::{self, Dock, PanelId},
+        dock::{self, Dock, DragPosition, PanelId},
         file_tree::{self, FileNodeId, FileTree},
         id_allocator::IdAllocator,
         id_map::IdMap,
@@ -288,6 +288,51 @@ impl AppInner {
                             self.dock.redraw_tab_bar(cx, panel_id);
                         }
                         _ => {}
+                    }
+                }
+                dock::Action::PanelDidReceiveDraggedItem(panel_id, position, _) => {
+                    let panel = &state.panels_by_panel_id[panel_id];
+                    let parent_panel_id = panel.parent_panel_id;
+                    let split_panel_id = PanelId(state.panel_id_allocator.allocate());
+                    let sibling_panel_id = PanelId(state.panel_id_allocator.allocate());
+
+                    let panel = &mut state.panels_by_panel_id[panel_id];
+                    panel.parent_panel_id = Some(split_panel_id);
+
+                    state.panels_by_panel_id.insert(
+                        sibling_panel_id,
+                        Panel {
+                            parent_panel_id: Some(split_panel_id),
+                            kind: PanelKind::Tab(TabPanel {
+                                tab_ids: Vec::new(),
+                                code_editor_view_id: None,
+                            }),
+                        },
+                    );
+
+                    state.panels_by_panel_id.insert(
+                        split_panel_id,
+                        Panel {
+                            parent_panel_id,
+                            kind: PanelKind::Split(SplitPanel {
+                                child_panel_ids: match position {
+                                    DragPosition::Left => [panel_id, sibling_panel_id],
+                                    DragPosition::Right => [sibling_panel_id, panel_id],
+                                    _ => unimplemented!(),
+                                },
+                            }),
+                        },
+                    );
+                    
+                    if let Some(parent_panel_id) = parent_panel_id {
+                        let parent_panel =
+                            &mut state.panels_by_panel_id[parent_panel_id].as_split_panel_mut();
+                        let position = parent_panel
+                            .child_panel_ids
+                            .iter()
+                            .position(|child_panel_id| *child_panel_id == panel_id)
+                            .unwrap();
+                        parent_panel.child_panel_ids[position] = split_panel_id;
                     }
                 }
             }
