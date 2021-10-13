@@ -122,18 +122,15 @@ impl AppInner {
 
     fn draw(&mut self, cx: &mut Cx, state: &State) {
         if self.window.begin_desktop_window(cx, None).is_ok() {
-            println!("Begin dock");
             if self.dock.begin(cx).is_ok() {
                 self.draw_panel(cx, state, state.root_panel_id);
                 self.window.end_desktop_window(cx);
                 self.dock.end(cx);
             }
-            println!("End dock");
         }
     }
 
     fn draw_panel(&mut self, cx: &mut Cx, state: &State, panel_id: PanelId) {
-        println!("Draw panel {:?}", panel_id);
         let panel = &state.panels_by_panel_id[panel_id];
         match &panel.kind {
             PanelKind::Split(SplitPanel { child_panel_ids }) => {
@@ -293,56 +290,6 @@ impl AppInner {
                             self.dock.redraw_tab_bar(cx, panel_id);
                         }
                         _ => {}
-                    }
-                }
-                dock::Action::PanelDidReceiveDraggedItem(
-                    panel_id,
-                    drag_position,
-                    _dragged_item,
-                ) => {
-                    let panel = &state.panels_by_panel_id[panel_id];
-                    let parent_panel_id = panel.parent_panel_id;
-                    let split_panel_id = PanelId(state.panel_id_allocator.allocate());
-                    let sibling_panel_id = PanelId(state.panel_id_allocator.allocate());
-
-                    let panel = &mut state.panels_by_panel_id[panel_id];
-                    panel.parent_panel_id = Some(split_panel_id);
-
-                    state.panels_by_panel_id.insert(
-                        sibling_panel_id,
-                        Panel {
-                            parent_panel_id: Some(split_panel_id),
-                            kind: PanelKind::Tab(TabPanel {
-                                tab_ids: Vec::new(),
-                                code_editor_view_id: None,
-                            }),
-                        },
-                    );
-
-                    state.panels_by_panel_id.insert(
-                        split_panel_id,
-                        Panel {
-                            parent_panel_id,
-                            kind: PanelKind::Split(SplitPanel {
-                                child_panel_ids: match drag_position {
-                                    DragPosition::Left => [panel_id, sibling_panel_id],
-                                    DragPosition::Right => [sibling_panel_id, panel_id],
-                                    _ => unimplemented!(),
-                                },
-                            }),
-                        },
-                    );
-
-                    if let Some(parent_panel_id) = parent_panel_id {
-                        let parent_panel =
-                            &mut state.panels_by_panel_id[parent_panel_id].as_split_panel_mut();
-                        let position = parent_panel
-                            .child_panel_ids
-                            .iter()
-                            .position(|child_panel_id| *child_panel_id == panel_id)
-                            .unwrap();
-                        parent_panel.child_panel_ids[position] = split_panel_id;
-                        self.dock.redraw_split_panel(cx, parent_panel_id);
                     }
                 }
             }
