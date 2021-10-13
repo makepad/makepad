@@ -33,7 +33,7 @@ impl Point {
 
     /// Linearly interpolate between `self` and `other` with parameter `t`.
     pub fn lerp(self, other: Point, t: f32) -> Point {
-        Point::new(self.x.lerp(other.x, t), self.y.lerp(other.y, t))
+        Point::new(self.x.ext_lerp(other.x, t), self.y.ext_lerp(other.y, t))
     }
 }
 

@@ -11,6 +11,7 @@ pub use makepad_live_parser::LivePtr;
 pub use makepad_live_parser::LiveNode;
 pub use makepad_live_parser::LiveType;
 pub use makepad_live_parser::LiveValue;
+pub use makepad_live_parser::CrateModule;
 pub use makepad_live_parser::id;
 pub use makepad_shader_compiler::Ty;
 
@@ -918,6 +919,7 @@ macro_rules!main_app {
             let mut cx = Cx::default();
             cx.live_register();
             $ app::live_register(&mut cx);
+            cx.live_expand();
             //cx.init_live_styles();
             let mut app = $ app::new(&mut cx);
             //let mut cxafterdraw = CxAfterDraw::new(&mut cx);
@@ -935,8 +937,9 @@ macro_rules!main_app {
         #[cfg(target_arch = "wasm32")]
         pub extern "C" fn create_wasm_app() -> u32 {
             let mut cx = Box::new(Cx::default());
-            cx.style();
-            $ app::style(&mut cx);
+            cx.live_register();
+            $ app::live_register(&mut cx);
+            cx.live_expand();
             //cx.init_live_styles();
             let app = Box::new( $ app::new(&mut cx));
             //let cxafterdraw = Box::new(CxAfterDraw::new(&mut cx));
