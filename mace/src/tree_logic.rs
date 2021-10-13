@@ -51,7 +51,7 @@ impl TreeLogic {
     }
 
     pub fn forget_node(&mut self, node_id: NodeId) {
-        self.nodes_by_node_id.remove(node_id).unwrap();
+        self.nodes_by_node_id.remove(node_id);
         self.animating_node_ids.remove(&node_id);
     }
 
