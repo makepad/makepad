@@ -40,9 +40,9 @@ impl Dock {
     pub fn end(&mut self, _cx: &mut Cx) {}
 
     pub fn begin_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> Result<(), ()> {
+        self.panel_ids.push(panel_id);
         let panel = self.get_or_create_split_panel(cx, panel_id);
         panel.splitter.begin(cx)?;
-        self.panel_ids.push(panel_id);
         self.panel_id_stack.push(panel_id);
         Ok(())
     }
@@ -260,23 +260,6 @@ impl Dock {
                                 panel.view.redraw_view(cx);
                             }
                         }
-                        Event::FingerDrop(event) => {
-                            let drag_position = compute_drag_position(panel.drag_rect, event.abs);
-                            if let Some(drag_position) = drag_position {
-                                dispatch_action(
-                                    cx,
-                                    Action::PanelDidReceiveDraggedItem(
-                                        *panel_id,
-                                        drag_position,
-                                        event.dragged_item.clone(),
-                                    ),
-                                );
-                            }
-                            if panel.drag_position != None {
-                                panel.drag_position = None;
-                                panel.view.redraw_view(cx);
-                            }
-                        }
                         _ => {}
                     }
                 }
@@ -338,7 +321,6 @@ pub enum DragPosition {
 pub enum Action {
     TabWasPressed(TabId),
     TabButtonWasPressed(TabId),
-    PanelDidReceiveDraggedItem(PanelId, DragPosition, DraggedItem),
 }
 
 fn compute_drag_position(rect: Rect, position: Vec2) -> Option<DragPosition> {
