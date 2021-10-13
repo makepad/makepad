@@ -1,12 +1,7 @@
-use crate::cx::*;
-
-const DRAW_QUAD_UNIFORMS:usize = 32;
-const DRAW_QUAD_INSTANCES:usize = 32;
-
 // ok lets implement these things
 live_body!{
     
-    use crate::shader_std::*;
+    //use crate::shader_std::*;
     
     DrawQuad: DrawShader2D{
         rust_type: {{DrawQuad}};
@@ -43,6 +38,11 @@ live_body!{
         }
     }
 }
+
+use crate::cx::*;
+
+const DRAW_QUAD_UNIFORMS:usize = 32;
+const DRAW_QUAD_INSTANCES:usize = 32;
 
 //#[derive(Debug)]
 #[repr(C)]

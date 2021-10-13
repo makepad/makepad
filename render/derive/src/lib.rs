@@ -1,3 +1,4 @@
+#![feature(proc_macro_span)]
 use proc_macro::{TokenStream, Span, Delimiter};
 mod live_component; 
 use crate::live_component::*;
@@ -45,17 +46,20 @@ pub fn live_body(input: TokenStream) -> TokenStream {
     } 
 }
 
-fn parse_type_ident(parser: &mut TokenParser, out: &mut String,  live_types: &mut Vec<TokenStream>){
+fn parse_type_ident(parser: &mut TokenParser, out: &mut String,  live_types: &mut Vec<TokenStream>)->bool{
      if parser.is_group_with_delim(Delimiter::Brace){
         parser.open_group();
-        write!(out, "{{{0}}}", live_types.len()).unwrap();
+        write!(out, "{{{{{0}}}}}", live_types.len()).unwrap();
         live_types.push(parser.eat_level());
+        true
+    }
+    else{
+        false
     }
 }
 
 #[cfg(feature = "nightly")]
 fn tokenparser_to_string(parser: &mut TokenParser, span:Span, out: &mut String, live_types:&mut Vec<TokenStream>, last_end:&mut Option<Lc>){
-    
     fn lc_from_start(span:Span)->Lc{
         Lc{
             line:span.start().line,
@@ -97,7 +101,10 @@ fn tokenparser_to_string(parser: &mut TokenParser, span:Span, out: &mut String, 
         
         if let Some(delim) = parser.open_group(){
             // if delim is { and the next one is also { write out a type index
-            parse_type_ident(parser, out, live_types);
+            if parse_type_ident(parser, out, live_types){
+                parser.eat_eot();
+                continue;
+            }
             
             let (gs,ge) = delim_to_pair(delim);
             let start = lc_from_start(span);
@@ -105,7 +112,7 @@ fn tokenparser_to_string(parser: &mut TokenParser, span:Span, out: &mut String, 
             delta_whitespace(last_end.unwrap(), start, out);
             out.push(gs);
             *last_end = Some(start._next_char());
-            tokenparser_to_string(parser, span, out, inline_types, last_end);
+            tokenparser_to_string(parser, span, out, live_types, last_end);
             delta_whitespace(last_end.unwrap(), end, out);
             *last_end = Some(end);
             out.push(ge);
@@ -118,7 +125,7 @@ fn tokenparser_to_string(parser: &mut TokenParser, span:Span, out: &mut String, 
                 *last_end = Some(lc_from_end(span));
             }
             parser.advance();
-        }
+        } 
     }
 }
 
