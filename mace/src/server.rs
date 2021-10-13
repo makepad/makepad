@@ -146,7 +146,12 @@ impl Connection {
         }
     }
 
-    fn apply_delta(&self, path: PathBuf, their_revision: usize, delta: Delta) -> Result<PathBuf, Error> {
+    fn apply_delta(
+        &self,
+        path: PathBuf,
+        their_revision: usize,
+        delta: Delta,
+    ) -> Result<PathBuf, Error> {
         let documents_by_path_guard = self.shared.documents_by_path.read().unwrap();
 
         let document = documents_by_path_guard.get(&path).unwrap();

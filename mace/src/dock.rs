@@ -31,6 +31,14 @@ impl Dock {
         }
     }
 
+    pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
+        self.apply_style(cx);
+        self.panel_ids.clear();
+        Ok(())
+    }
+
+    pub fn end(&mut self, _cx: &mut Cx) {}
+
     pub fn begin_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> Result<(), ()> {
         let panel = self.get_or_create_split_panel(cx, panel_id);
         panel.splitter.begin(cx)?;
@@ -63,55 +71,56 @@ impl Dock {
         let panel_id = self.panel_id_stack.pop().unwrap();
         let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
         let Rect { pos, size } = panel.drag_rect;
-        match panel.drag_state {
-            DragState::Left => self.drag.draw_quad_abs(
-                cx,
-                Rect {
-                    pos,
-                    size: Vec2 {
-                        x: size.x / 2.0,
-                        y: size.y,
+        if let Some(drag_position) = panel.drag_position {
+            match drag_position {
+                DragPosition::Left => self.drag.draw_quad_abs(
+                    cx,
+                    Rect {
+                        pos,
+                        size: Vec2 {
+                            x: size.x / 2.0,
+                            y: size.y,
+                        },
                     },
-                },
-            ),
-            DragState::Right => self.drag.draw_quad_abs(
-                cx,
-                Rect {
-                    pos: Vec2 {
-                        x: pos.x + size.x / 2.0,
-                        y: pos.y,
+                ),
+                DragPosition::Right => self.drag.draw_quad_abs(
+                    cx,
+                    Rect {
+                        pos: Vec2 {
+                            x: pos.x + size.x / 2.0,
+                            y: pos.y,
+                        },
+                        size: Vec2 {
+                            x: size.x / 2.0,
+                            y: size.y,
+                        },
                     },
-                    size: Vec2 {
-                        x: size.x / 2.0,
-                        y: size.y,
+                ),
+                DragPosition::Top => self.drag.draw_quad_abs(
+                    cx,
+                    Rect {
+                        pos,
+                        size: Vec2 {
+                            x: size.x,
+                            y: size.y / 2.0,
+                        },
                     },
-                },
-            ),
-            DragState::Top => self.drag.draw_quad_abs(
-                cx,
-                Rect {
-                    pos,
-                    size: Vec2 {
-                        x: size.x,
-                        y: size.y / 2.0,
+                ),
+                DragPosition::Bottom => self.drag.draw_quad_abs(
+                    cx,
+                    Rect {
+                        pos: Vec2 {
+                            x: pos.x,
+                            y: pos.y + size.y / 2.0,
+                        },
+                        size: Vec2 {
+                            x: size.x,
+                            y: size.y / 2.0,
+                        },
                     },
-                },
-            ),
-            DragState::Bottom => self.drag.draw_quad_abs(
-                cx,
-                Rect {
-                    pos: Vec2 {
-                        x: pos.x,
-                        y: pos.y + size.y / 2.0,
-                    },
-                    size: Vec2 {
-                        x: size.x,
-                        y: size.y / 2.0,
-                    },
-                },
-            ),
-            DragState::Center => self.drag.draw_quad_abs(cx, panel.drag_rect),
-            DragState::None => {}
+                ),
+                DragPosition::Center => self.drag.draw_quad_abs(cx, panel.drag_rect),
+            }
         }
         panel.view.end_view(cx);
     }
@@ -176,11 +185,19 @@ impl Dock {
                     view: View::new().with_is_overlay(true),
                     tab_bar: TabBar::new(cx),
                     drag_rect: Rect::default(),
-                    drag_state: DragState::None,
+                    drag_position: None,
                 }),
             );
         }
         self.panels_by_panel_id[panel_id].as_tab_panel_mut()
+    }
+
+    pub fn forget(&mut self) {
+        self.panels_by_panel_id.clear();
+    }
+
+    pub fn forget_panel_id(&mut self, panel_id: PanelId) {
+        self.panels_by_panel_id.remove(panel_id);
     }
 
     pub fn selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId) -> Option<TabId> {
@@ -191,6 +208,11 @@ impl Dock {
     pub fn set_selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: Option<TabId>) {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
         panel.tab_bar.set_selected_tab_id(cx, tab_id);
+    }
+
+    pub fn redraw_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) {
+        let panel = self.get_or_create_split_panel(cx, panel_id);
+        panel.splitter.redraw(cx);
     }
 
     pub fn redraw_tab_bar(&mut self, cx: &mut Cx, panel_id: PanelId) {
@@ -229,34 +251,29 @@ impl Dock {
                         });
                     match event {
                         Event::FingerDrag(event) => {
-                            let rect = panel.drag_rect;
-                            let new_drag_state = if rect.contains(event.abs) {
+                            let drag_position = compute_drag_position(panel.drag_rect, event.abs);
+                            if drag_position.is_some() {
                                 event.action = DragAction::Copy;
-                                let top_left = rect.pos;
-                                let bottom_right = rect.pos + rect.size;
-                                if (event.abs.x - top_left.x) / rect.size.x < 0.1 {
-                                    DragState::Left
-                                } else if (bottom_right.x - event.abs.x) / rect.size.x < 0.1 {
-                                    DragState::Right
-                                } else if (event.abs.y - top_left.y) / rect.size.y < 0.1 {
-                                    DragState::Top
-                                } else if (bottom_right.y - event.abs.y) / rect.size.y < 0.1 {
-                                    DragState::Bottom
-                                } else {
-                                    DragState::Center
-                                }
-                            } else {
-                                DragState::None
-                            };
-                            if panel.drag_state != new_drag_state {
-                                panel.drag_state = new_drag_state;
+                            }
+                            if panel.drag_position != drag_position {
+                                panel.drag_position = drag_position;
                                 panel.view.redraw_view(cx);
                             }
                         }
-                        Event::FingerDrop(_) => {
-                            let new_drag_state = DragState::None;
-                            if panel.drag_state != new_drag_state {
-                                panel.drag_state = new_drag_state;
+                        Event::FingerDrop(event) => {
+                            let drag_position = compute_drag_position(panel.drag_rect, event.abs);
+                            if let Some(drag_position) = drag_position {
+                                dispatch_action(
+                                    cx,
+                                    Action::PanelDidReceiveDraggedItem(
+                                        *panel_id,
+                                        drag_position,
+                                        event.dragged_item.clone(),
+                                    ),
+                                );
+                            }
+                            if panel.drag_position != None {
+                                panel.drag_position = None;
                                 panel.view.redraw_view(cx);
                             }
                         }
@@ -306,20 +323,40 @@ struct TabPanel {
     view: View,
     tab_bar: TabBar,
     drag_rect: Rect,
-    drag_state: DragState,
+    drag_position: Option<DragPosition>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum DragState {
+pub enum DragPosition {
     Left,
     Right,
     Top,
     Bottom,
     Center,
-    None,
 }
 
 pub enum Action {
     TabWasPressed(TabId),
     TabButtonWasPressed(TabId),
+    PanelDidReceiveDraggedItem(PanelId, DragPosition, DraggedItem),
+}
+
+fn compute_drag_position(rect: Rect, position: Vec2) -> Option<DragPosition> {
+    if rect.contains(position) {
+        let top_left = rect.pos;
+        let bottom_right = rect.pos + rect.size;
+        Some(if (position.x - top_left.x) / rect.size.x < 0.1 {
+            DragPosition::Left
+        } else if (bottom_right.x - position.x) / rect.size.x < 0.1 {
+            DragPosition::Right
+        } else if (position.y - top_left.y) / rect.size.y < 0.1 {
+            DragPosition::Top
+        } else if (bottom_right.y - position.y) / rect.size.y < 0.1 {
+            DragPosition::Bottom
+        } else {
+            DragPosition::Center
+        })
+    } else {
+        None
+    }
 }

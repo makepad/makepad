@@ -237,6 +237,10 @@ impl FileTree {
         self.logic.forget();
     }
 
+    pub fn forget_node(&mut self, file_node_id: FileNodeId) {
+        self.logic.forget_node(file_node_id.0);
+    }
+
     pub fn file_node_is_expanded(&mut self, file_node_id: FileNodeId) -> bool {
         self.logic.node_is_expanded(file_node_id.0)
     }
