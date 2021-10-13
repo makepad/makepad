@@ -9,10 +9,12 @@ pub struct NormalButton {
     pub bg: DrawQuad,
     pub text: DrawText,
 }
+// components also connect to the Rust component
+
 
 register_live!{
     // includes all the basic types
-    use render::prelude::*;
+    use makepad_render::prelude::*;
     
     // this is the serialized props of NormalButton
     NormalButton: Component {
@@ -26,7 +28,7 @@ register_live!{
             padding: {l: 16.0, t: 12.0, r: 16.0, b: 12.0},
         }
         
-        bg: render::drawquad::DrawQuad {
+        bg: makepad_render::drawquad::DrawQuad {
             instance hover: float;
             instance down: float;
             
@@ -44,7 +46,7 @@ register_live!{
             }
         }
         
-        text: render::drawtext::DrawText {
+        text: makepad_render::drawtext::DrawText {
             text_style: crate::widgetstyle::text_style_normal,
             color: #xfff0
         };
@@ -66,19 +68,22 @@ register_live!{
     }
 }
 
-
 impl NormalButton {
     
-    pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
+    pub fn handle_normal_button(&mut self, id:u64, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
         // this contains all the info we need
         self.handle_live_node(cx, event);
         
-        self.button.handle_button_logic(cx, event, self.bg.area(), | cx, logic_event, _ | match logic_event {
+        let (le, be) = self.logic.handle_button_logic(cx, event, self.bg.area);
+        match le{
             ButtonLogicEvent::Down => self.to_state(cx, id!(state_down)),
             ButtonLogicEvent::Default => self.to_state(cx, id!(state_default)),
             ButtonLogicEvent::Over => self.to_state(cx, id!(state_over)),
-        })
+            _=>()
+        }
+        be
     }
+
     
     pub fn draw_normal_button(&mut self, cx: &mut Cx, label: &str) {
         self.begin_live_node(cx);
