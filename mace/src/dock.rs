@@ -42,7 +42,11 @@ impl Dock {
     }
 
     pub fn end(&mut self, cx: &mut Cx) {
-        if self.drag_view.begin_view(cx, Layout::abs_origin_zero()).is_ok() {
+        if self
+            .drag_view
+            .begin_view(cx, Layout::abs_origin_zero())
+            .is_ok()
+        {
             if let Some(drag) = self.drag.as_ref() {
                 let panel = self.panels_by_panel_id[drag.panel_id].as_tab_panel();
                 let rect = compute_drag_rect(panel.contents_rect, drag.position);
@@ -211,9 +215,28 @@ impl Dock {
                             event.action = DragAction::Copy;
                             self.drag = Some(Drag {
                                 panel_id: *panel_id,
-                                position: compute_drag_position(panel.contents_rect, event.abs)
+                                position: compute_drag_position(panel.contents_rect, event.abs),
                             });
-                        }    
+                        }
+                    }
+                }
+                self.drag_view.redraw_view(cx);
+            }
+            Event::FingerDrop(event) => {
+                self.drag = None;
+                for panel_id in &self.panel_ids {
+                    let panel = &mut self.panels_by_panel_id[*panel_id];
+                    if let Panel::Tab(panel) = panel {
+                        if panel.contents_rect.contains(event.abs) {
+                            dispatch_action(
+                                cx,
+                                Action::PanelDidReceiveDraggedItem(
+                                    *panel_id,
+                                    compute_drag_position(panel.contents_rect, event.abs),
+                                    event.dragged_item.clone(),
+                                ),
+                            );
+                        }
                     }
                 }
                 self.drag_view.redraw_view(cx);
@@ -275,7 +298,7 @@ struct Drag {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum DragPosition {
+pub enum DragPosition {
     Left,
     Right,
     Top,
@@ -286,6 +309,7 @@ enum DragPosition {
 pub enum Action {
     TabWasPressed(TabId),
     TabButtonWasPressed(TabId),
+    PanelDidReceiveDraggedItem(PanelId, DragPosition, DraggedItem),
 }
 
 fn compute_drag_position(rect: Rect, position: Vec2) -> DragPosition {
