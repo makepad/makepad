@@ -20,7 +20,7 @@ use {
         ffi::OsString,
         io::{Read, Write},
         net::{TcpListener, TcpStream},
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::mpsc::{self, Receiver, Sender, TryRecvError},
         thread,
     },
@@ -160,6 +160,7 @@ impl AppInner {
                         }
                         TabKind::CodeEditor { .. } => {
                             let panel = state.panels_by_panel_id[tab.panel_id].as_tab_panel();
+                            println!("Draw code editor at position {:?}", cx.get_turtle_pos());
                             self.code_editor.draw(
                                 cx,
                                 &state.code_editor_state,
@@ -206,28 +207,32 @@ impl AppInner {
         &mut self,
         cx: &mut Cx,
         state: &mut State,
-        name: String,
-        session_id: SessionId,
+        panel_id: PanelId,
+        path: PathBuf,
     ) {
         let tab_id = TabId(state.tab_id_allocator.allocate());
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let session_id = state.code_editor_state.create_session(path, &mut {
+            let request_sender = &self.request_sender;
+            move |request| request_sender.send(request).unwrap()
+        });
         state.tabs_by_tab_id.insert(
             tab_id,
             Tab {
-                panel_id: state.panel_id,
+                panel_id,
                 name,
                 kind: TabKind::CodeEditor { session_id },
             },
         );
         let panel = state
             .panels_by_panel_id
-            .get_mut(state.panel_id)
+            .get_mut(panel_id)
             .unwrap()
             .as_tab_panel_mut();
         panel.tab_ids.push(tab_id);
-        self.create_or_update_code_editor_view(cx, state, state.panel_id, session_id);
-        self.dock
-            .set_selected_tab_id(cx, state.panel_id, Some(tab_id));
-        self.dock.redraw_tab_bar(cx, state.panel_id);
+        self.create_or_update_code_editor_view(cx, state, panel_id, session_id);
+        self.dock.set_selected_tab_id(cx, panel_id, Some(tab_id));
+        self.dock.redraw_tab_bar(cx, panel_id);
     }
 
     fn send_request(&mut self, request: Request) {
@@ -290,7 +295,7 @@ impl AppInner {
                         _ => {}
                     }
                 }
-                dock::Action::PanelDidReceiveDraggedItem(panel_id, position, _) => {
+                dock::Action::PanelDidReceiveDraggedItem(panel_id, position, item) => {
                     let panel = &state.panels_by_panel_id[panel_id];
                     let parent_panel_id = panel.parent_panel_id;
                     let split_panel_id = PanelId(state.panel_id_allocator.allocate());
@@ -316,14 +321,14 @@ impl AppInner {
                             parent_panel_id,
                             kind: PanelKind::Split(SplitPanel {
                                 child_panel_ids: match position {
-                                    DragPosition::Left => [panel_id, sibling_panel_id],
-                                    DragPosition::Right => [sibling_panel_id, panel_id],
+                                    DragPosition::Left | DragPosition::Top => [sibling_panel_id, panel_id],
+                                    DragPosition::Right | DragPosition::Bottom => [panel_id, sibling_panel_id],
                                     _ => unimplemented!(),
                                 },
                             }),
                         },
                     );
-                    
+
                     if let Some(parent_panel_id) = parent_panel_id {
                         let parent_panel =
                             &mut state.panels_by_panel_id[parent_panel_id].as_split_panel_mut();
@@ -334,6 +339,18 @@ impl AppInner {
                             .unwrap();
                         parent_panel.child_panel_ids[position] = split_panel_id;
                     }
+
+                    for file_url in &item.file_urls {
+                        let path = Path::new(&file_url[7..]).to_path_buf();
+                        self.create_code_editor_tab(cx, state, sibling_panel_id, path);
+                    }
+
+                    self.dock.redraw_tab_bar(cx, panel_id);
+                    let panel = state.panels_by_panel_id[panel_id].as_tab_panel();
+                    if let Some(code_editor_view_id) = panel.code_editor_view_id {
+                        self.code_editor.redraw_view(cx, code_editor_view_id);
+                    }
+                    self.dock.redraw(cx);
                 }
             }
         }
@@ -347,22 +364,8 @@ impl AppInner {
                     let node = &state.file_nodes_by_file_node_id[file_node_id];
                     if node.is_file() {
                         let path = state.file_node_path(file_node_id);
-                        let name = path.file_name().unwrap().to_string_lossy().into_owned();
                         if state.code_editor_state.document_id_by_path(&path).is_none() {
-                            let session_id =
-                                state
-                                    .code_editor_state
-                                    .create_document_and_session(path, &mut {
-                                        let request_sender = &self.request_sender;
-                                        move |request| request_sender.send(request).unwrap()
-                                    });
-                            self.create_code_editor_tab(cx, state, name, session_id);
-                            self.create_or_update_code_editor_view(
-                                cx,
-                                state,
-                                state.panel_id,
-                                session_id,
-                            );
+                            self.create_code_editor_tab(cx, state, state.panel_id, path);
                         }
                     }
                 }
@@ -643,6 +646,7 @@ impl State {
     }
 }
 
+#[derive(Debug)]
 struct Panel {
     parent_panel_id: Option<PanelId>,
     kind: PanelKind,

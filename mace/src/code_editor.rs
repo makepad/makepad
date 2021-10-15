@@ -697,16 +697,12 @@ impl State {
         State::default()
     }
 
-    pub fn create_document_and_session(
+    pub fn create_session(
         &mut self,
         path: PathBuf,
         send_request: &mut dyn FnMut(Request),
     ) -> SessionId {
         let document_id = self.create_document(path, send_request);
-        self.create_session(document_id)
-    }
-
-    pub fn create_session(&mut self, document_id: DocumentId) -> SessionId {
         let session_id = SessionId(self.session_id_allocator.allocate());
         let session = Session {
             view_id: None,
