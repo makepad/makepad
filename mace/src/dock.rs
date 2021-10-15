@@ -9,6 +9,7 @@ use {
 };
 
 pub struct Dock {
+    view: View,
     panels_by_panel_id: IdMap<PanelId, Panel>,
     panel_ids: Vec<PanelId>,
     panel_id_stack: Vec<PanelId>,
@@ -26,6 +27,7 @@ impl Dock {
 
     pub fn new(cx: &mut Cx) -> Dock {
         Dock {
+            view: View::new(),
             panels_by_panel_id: IdMap::new(),
             panel_ids: Vec::new(),
             panel_id_stack: Vec::new(),
@@ -36,6 +38,7 @@ impl Dock {
     }
 
     pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
+        self.view.begin_view(cx, Layout::default())?;
         self.apply_style(cx);
         self.panel_ids.clear();
         Ok(())
@@ -54,6 +57,7 @@ impl Dock {
             }
             self.drag_view.end_view(cx);
         }
+        self.view.end_view(cx);
     }
 
     pub fn begin_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) {
@@ -76,19 +80,23 @@ impl Dock {
     }
 
     pub fn begin_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) {
+        println!("Begin panel {:?}", panel_id);
         self.panel_ids.push(panel_id);
         self.get_or_create_tab_panel(cx, panel_id);
         self.panel_id_stack.push(panel_id);
     }
 
     pub fn end_tab_panel(&mut self, _cx: &mut Cx) {
-        self.panel_id_stack.pop().unwrap();
+        let panel_id = self.panel_id_stack.pop().unwrap();
+        println!("End panel {:?}", panel_id);
     }
 
     pub fn begin_tab_bar(&mut self, cx: &mut Cx) -> Result<(), ()> {
         let panel_id = *self.panel_id_stack.last().unwrap();
+        println!("Begin tab bar for panel {:?}", panel_id);
         let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
         if let Err(error) = panel.tab_bar.begin(cx) {
+            println!("Not dirty!");
             self.contents(cx);
             return Err(error);
         }
@@ -97,12 +105,14 @@ impl Dock {
 
     pub fn end_tab_bar(&mut self, cx: &mut Cx) {
         let panel_id = *self.panel_id_stack.last().unwrap();
+        println!("End tab bar for panel {:?}", panel_id);
         let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
         panel.tab_bar.end(cx);
         self.contents(cx);
     }
 
     pub fn tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
+        println!("Draw tab {:?}", name);
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
         panel.tab_bar.tab(cx, tab_id, name);
@@ -166,6 +176,10 @@ impl Dock {
     pub fn set_selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: Option<TabId>) {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
         panel.tab_bar.set_selected_tab_id(cx, tab_id);
+    }
+
+    pub fn redraw(&mut self, cx: &mut Cx) {
+        self.view.redraw_view(cx);
     }
 
     pub fn redraw_tab_bar(&mut self, cx: &mut Cx, panel_id: PanelId) {
