@@ -160,7 +160,7 @@ impl Splitter {
                         }
                     };
                     cx.redraw_child_area(self.split_bar.area());
-                    dispatch_action(cx, Action::Redraw);
+                    dispatch_action(cx, Action::DidChange);
                 }
             }
             _ => {}
@@ -210,5 +210,5 @@ impl AlignPosition {
 }
 
 pub enum Action {
-    Redraw,
+    DidChange,
 }

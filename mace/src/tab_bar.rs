@@ -28,8 +28,8 @@ impl TabBar {
     }
 
     pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
-        self.view.begin_view(cx, self.layout())?;
         self.apply_style(cx);
+        self.view.begin_view(cx, self.layout())?;
         self.tab_ids.clear();
         Ok(())
     }

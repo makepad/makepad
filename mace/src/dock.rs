@@ -80,23 +80,19 @@ impl Dock {
     }
 
     pub fn begin_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) {
-        println!("Begin panel {:?}", panel_id);
         self.panel_ids.push(panel_id);
         self.get_or_create_tab_panel(cx, panel_id);
         self.panel_id_stack.push(panel_id);
     }
 
     pub fn end_tab_panel(&mut self, _cx: &mut Cx) {
-        let panel_id = self.panel_id_stack.pop().unwrap();
-        println!("End panel {:?}", panel_id);
+        let _ = self.panel_id_stack.pop().unwrap();
     }
 
     pub fn begin_tab_bar(&mut self, cx: &mut Cx) -> Result<(), ()> {
         let panel_id = *self.panel_id_stack.last().unwrap();
-        println!("Begin tab bar for panel {:?}", panel_id);
         let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
         if let Err(error) = panel.tab_bar.begin(cx) {
-            println!("Not dirty!");
             self.contents(cx);
             return Err(error);
         }
@@ -105,17 +101,21 @@ impl Dock {
 
     pub fn end_tab_bar(&mut self, cx: &mut Cx) {
         let panel_id = *self.panel_id_stack.last().unwrap();
-        println!("End tab bar for panel {:?}", panel_id);
         let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
         panel.tab_bar.end(cx);
         self.contents(cx);
     }
 
     pub fn tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
-        println!("Draw tab {:?}", name);
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
         panel.tab_bar.tab(cx, tab_id, name);
+    }
+
+    pub fn set_split_panel_axis(&mut self, cx: &mut Cx, panel_id: PanelId, axis: Axis) {
+        let panel = self.get_or_create_split_panel(cx, panel_id);
+        panel.splitter.set_axis(axis);
+        self.redraw(cx);
     }
 
     pub fn apply_style(&mut self, cx: &mut Cx) {
@@ -200,8 +200,8 @@ impl Dock {
                     panel
                         .splitter
                         .handle_event(cx, event, &mut |cx, action| match action {
-                            splitter::Action::Redraw => {
-                                cx.redraw_child_area(Area::All);
+                            splitter::Action::DidChange => {
+                                dispatch_action(cx, Action::SplitPanelDidChange(*panel_id));
                             }
                         });
                 }
@@ -244,7 +244,7 @@ impl Dock {
                         if panel.contents_rect.contains(event.abs) {
                             dispatch_action(
                                 cx,
-                                Action::PanelDidReceiveDraggedItem(
+                                Action::TabPanelDidReceiveDraggedItem(
                                     *panel_id,
                                     compute_drag_position(panel.contents_rect, event.abs),
                                     event.dragged_item.clone(),
@@ -321,9 +321,10 @@ pub enum DragPosition {
 }
 
 pub enum Action {
+    SplitPanelDidChange(PanelId),
     TabWasPressed(TabId),
     TabButtonWasPressed(TabId),
-    PanelDidReceiveDraggedItem(PanelId, DragPosition, DraggedItem),
+    TabPanelDidReceiveDraggedItem(PanelId, DragPosition, DraggedItem),
 }
 
 fn compute_drag_position(rect: Rect, position: Vec2) -> DragPosition {
