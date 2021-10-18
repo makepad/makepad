@@ -244,14 +244,22 @@ impl AppInner {
                         _ => {}
                     }
                 }
-                dock::Action::TabPanelDidReceiveDraggedItem(panel_id, position, item) => {
+                dock::Action::TabDidReceiveDraggedItem(tab_id, item) => {
+                    let tab = &state.tabs_by_tab_id[tab_id];
+                    let panel_id = tab.panel_id;
+                    for file_url in &item.file_urls {
+                        let path = Path::new(&file_url[7..]).to_path_buf();
+                        self.create_code_editor_tab(cx, state, panel_id, Some(tab_id), path);
+                    }
+                }
+                dock::Action::ContentsDidReceiveDraggedItem(panel_id, position, item) => {
                     let panel_id = match position {
                         DragPosition::Center => panel_id,
                         _ => self.split_tab_panel(cx, state, panel_id, position),
                     };
                     for file_url in &item.file_urls {
                         let path = Path::new(&file_url[7..]).to_path_buf();
-                        self.create_code_editor_tab(cx, state, panel_id, path);
+                        self.create_code_editor_tab(cx, state, panel_id, None, path);
                     }
                 }
             }
@@ -267,7 +275,7 @@ impl AppInner {
                     if node.is_file() {
                         let path = state.file_node_path(file_node_id);
                         if state.code_editor_state.document_id_by_path(&path).is_none() {
-                            self.create_code_editor_tab(cx, state, state.panel_id, path);
+                            self.create_code_editor_tab(cx, state, state.panel_id, None, path);
                         }
                     }
                 }
@@ -338,8 +346,11 @@ impl AppInner {
                 state
                     .code_editor_state
                     .initialize_document(document_id, revision, text);
-                self.code_editor
-                    .redraw_views_for_document(cx, &state.code_editor_state, document_id);
+                self.code_editor.redraw_views_for_document(
+                    cx,
+                    &state.code_editor_state,
+                    document_id,
+                );
             }
             response => {
                 self.code_editor
@@ -439,6 +450,7 @@ impl AppInner {
         cx: &mut Cx,
         state: &mut State,
         panel_id: PanelId,
+        next_tab_id: Option<TabId>,
         path: PathBuf,
     ) {
         let tab_id = TabId(state.tab_id_allocator.allocate());
@@ -460,7 +472,19 @@ impl AppInner {
             .get_mut(panel_id)
             .unwrap()
             .as_tab_panel_mut();
-        panel.tab_ids.push(tab_id);
+        match next_tab_id {
+            Some(next_tab_id) => {
+                panel.tab_ids.insert(
+                    panel
+                        .tab_ids
+                        .iter()
+                        .position(|existing_tab_id| *existing_tab_id == next_tab_id)
+                        .unwrap(),
+                    tab_id,
+                );
+            }
+            None => panel.tab_ids.push(tab_id),
+        }
         self.select_tab(cx, state, tab_id);
     }
 

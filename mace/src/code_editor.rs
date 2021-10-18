@@ -417,7 +417,12 @@ impl CodeEditor {
         view.view.redraw_view(cx);
     }
 
-    pub fn redraw_views_for_document(&mut self, cx: &mut Cx, state: &State, document_id: DocumentId) {
+    pub fn redraw_views_for_document(
+        &mut self,
+        cx: &mut Cx,
+        state: &State,
+        document_id: DocumentId,
+    ) {
         let document = &state.documents_by_document_id[document_id];
         for session_id in &document.session_ids {
             let session = &state.sessions_by_session_id[*session_id];
