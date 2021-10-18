@@ -417,7 +417,7 @@ impl CodeEditor {
         view.view.redraw_view(cx);
     }
 
-    pub fn redraw_document_views(&mut self, cx: &mut Cx, state: &State, document_id: DocumentId) {
+    pub fn redraw_views_for_document(&mut self, cx: &mut Cx, state: &State, document_id: DocumentId) {
         let document = &state.documents_by_document_id[document_id];
         for session_id in &document.session_ids {
             let session = &state.sessions_by_session_id[*session_id];
@@ -532,7 +532,7 @@ impl CodeEditor {
                 if let Some(session_id) = view.session_id {
                     state.insert_backspace(session_id, send_request);
                     let session = &state.sessions_by_session_id[session_id];
-                    self.redraw_document_views(cx, state, session.document_id);
+                    self.redraw_views_for_document(cx, state, session.document_id);
                 }
             }
             Event::KeyDown(KeyEvent {
@@ -548,7 +548,7 @@ impl CodeEditor {
                         state.undo(session_id, send_request);
                     }
                     let session = &state.sessions_by_session_id[session_id];
-                    self.redraw_document_views(cx, state, session.document_id);
+                    self.redraw_views_for_document(cx, state, session.document_id);
                 }
             }
             Event::KeyDown(KeyEvent {
@@ -559,7 +559,7 @@ impl CodeEditor {
                 if let Some(session_id) = view.session_id {
                     state.insert_text(session_id, Text::from(vec![vec![], vec![]]), send_request);
                     let session = &state.sessions_by_session_id[session_id];
-                    self.redraw_document_views(cx, state, session.document_id);
+                    self.redraw_views_for_document(cx, state, session.document_id);
                 }
             }
             Event::TextInput(TextInputEvent { input, .. }) => {
@@ -575,7 +575,7 @@ impl CodeEditor {
                         send_request,
                     );
                     let session = &state.sessions_by_session_id[session_id];
-                    self.redraw_document_views(cx, state, session.document_id);
+                    self.redraw_views_for_document(cx, state, session.document_id);
                 }
             }
             _ => {}
@@ -654,7 +654,7 @@ impl CodeEditor {
                 document_inner.revision += 1;
                 document.apply_delta(delta);
 
-                self.redraw_document_views(cx, state, document_id);
+                self.redraw_views_for_document(cx, state, document_id);
             }
         }
     }
