@@ -215,6 +215,9 @@ impl Dock {
                             tab_bar::Action::TabButtonWasPressed(tab_id) => {
                                 dispatch_action(cx, Action::TabButtonWasPressed(tab_id))
                             }
+                            tab_bar::Action::TabDidReceiveDraggedItem(tab_id, item) => {
+                                dispatch_action(cx, Action::TabDidReceiveDraggedItem(tab_id, item))
+                            }
                         });
                 }
             }
@@ -226,11 +229,11 @@ impl Dock {
                     let panel = &mut self.panels_by_panel_id[*panel_id];
                     if let Panel::Tab(panel) = panel {
                         if panel.contents_rect.contains(event.abs) {
-                            event.action = DragAction::Copy;
                             self.drag = Some(Drag {
                                 panel_id: *panel_id,
                                 position: compute_drag_position(panel.contents_rect, event.abs),
                             });
+                            event.action = DragAction::Copy;
                         }
                     }
                 }
@@ -244,7 +247,7 @@ impl Dock {
                         if panel.contents_rect.contains(event.abs) {
                             dispatch_action(
                                 cx,
-                                Action::TabPanelDidReceiveDraggedItem(
+                                Action::ContentsDidReceiveDraggedItem(
                                     *panel_id,
                                     compute_drag_position(panel.contents_rect, event.abs),
                                     event.dragged_item.clone(),
@@ -324,7 +327,8 @@ pub enum Action {
     SplitPanelDidChange(PanelId),
     TabWasPressed(TabId),
     TabButtonWasPressed(TabId),
-    TabPanelDidReceiveDraggedItem(PanelId, DragPosition, DraggedItem),
+    TabDidReceiveDraggedItem(TabId, DraggedItem),
+    ContentsDidReceiveDraggedItem(PanelId, DragPosition, DraggedItem),
 }
 
 fn compute_drag_position(rect: Rect, position: Vec2) -> DragPosition {

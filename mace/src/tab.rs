@@ -153,17 +153,33 @@ impl Tab {
             _ => {}
         }
         match event.drag_hits(cx, self.tab.area(), HitOpt::default()) {
-            Event::FingerDrag(FingerDragEvent { state, .. }) => match state {
+            Event::FingerDrag(drag_event) => match drag_event.state {
                 DragState::In => {
                     self.is_dragged = true;
                     cx.redraw_child_area(self.tab.area());
+                    match event {
+                        Event::FingerDrag(event) => {
+                            event.action = DragAction::Copy;
+                        }
+                        _ => panic!(),
+                    }
                 }
                 DragState::Out => {
                     self.is_dragged = false;
                     cx.redraw_child_area(self.tab.area());
                 }
+                DragState::Over => match event {
+                    Event::FingerDrag(event) => {
+                        event.action = DragAction::Copy;
+                    }
+                    _ => panic!(),
+                },
                 _ => {}
             },
+            Event::FingerDrop(event) => {
+                self.is_dragged = false;
+                dispatch_action(cx, Action::DidReceiveDraggedItem(event.dragged_item))
+            }
             _ => {}
         }
     }
@@ -181,4 +197,5 @@ struct DrawTab {
 pub enum Action {
     WasPressed,
     ButtonWasPressed,
+    DidReceiveDraggedItem(DraggedItem),
 }

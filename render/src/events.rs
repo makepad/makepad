@@ -614,6 +614,8 @@ impl Event {
             Event::FingerDrop(event) => {
                 let rect = area.get_rect(cx);
                 if !event.handled && rect.contains_with_margin(event.abs, &opt.margin) {
+                    cx.new_drag_area = Area::default();
+                    event.handled = true;
                     Event::FingerDrop(FingerDropEvent {
                         rel: area.abs_to_rel(cx, event.abs),
                         rect,
