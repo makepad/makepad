@@ -629,7 +629,7 @@ impl Cx {
         if old_area == Area::Empty || old_area == Area::All {
             return new_area
         }
-        
+
         for finger in &mut self.fingers {
             if finger.captured == old_area {
                 finger.captured = new_area.clone();
