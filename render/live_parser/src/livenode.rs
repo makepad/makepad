@@ -22,7 +22,7 @@ impl LiveValue {
             Self::Color(_) => true,
             Self::Vec2(_) => true,
             Self::Vec3(_) => true,
-            Self::LiveType{..}=>true,
+            Self::LiveType(_) =>true,
             Self::IdPack(_) => true,
             _ => false
         }
@@ -42,10 +42,10 @@ impl LiveValue {
             Self::Object {..}=>11,
             Self::Fn {..}=>12,
             Self::VarDef {..}=>13,
-            Self::ResourceRef {..}=>14,
-            Self::Use{..} => 15,
-            Self::Class {..}=>16,
-            Self::LiveType{..}=>17
+            //Self::ResourceRef {..}=>14,
+            Self::Use{..} => 14,
+            Self::Class {..}=>15,
+            Self::LiveType(_) =>16
         }
     }
     
@@ -97,9 +97,9 @@ pub enum LiveValue {
         scope_start: u32,
         scope_count: u16
     },
-    ResourceRef {
+    /*ResourceRef {
         target: IdPack,
-    },
+    },*/
     VarDef {
         token_start: u32,
         token_count: u32,
@@ -107,7 +107,7 @@ pub enum LiveValue {
         scope_count: u16
     },
     Use{
-        crate_module: IdPack,
+        module_path_ids: IdPack,
     },
     Class {
         class: IdPack, // target class , we can reuse this Id on clone

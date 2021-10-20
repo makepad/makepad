@@ -240,7 +240,7 @@ encode_args_impl!(A, B, C, D, E, F, G, H, I);
 encode_args_impl!(A, B, C, D, E, F, G, H, I, J);
 encode_args_impl!(A, B, C, D, E, F, G, H, I, J, K);
 encode_args_impl!(A, B, C, D, E, F, G, H, I, J, K, L);
-
+/*
 #[cfg(test)]
 mod tests {
     use runtime::{Class, Object, Sel};
@@ -276,4 +276,4 @@ mod tests {
         assert!(enc2 == enc);
         assert!(enc2.as_str() == s);
     }
-}
+}*/

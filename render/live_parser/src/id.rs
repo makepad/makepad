@@ -16,29 +16,12 @@ impl FileId{
 #[derive(Clone, Eq, Hash, Copy, PartialEq)]
 pub struct IdPack(pub u64);
 
-const IDPATH_MAX:usize = 8;
-pub struct IdPath([Id;IDPATH_MAX], usize);
-
-impl IdPath{
-    const fn new(inp:&[Id])->Self{
-        let mut id_set = [Id(0);IDPATH_MAX];
-        let mut i = 0;
-        while i < inp.len(){
-            id_set[i] = inp[i];
-            i += 1;
-        }
-        IdPath(id_set, inp.len())
-    }
-    fn slice(&self)->&[Id]{
-        &self.0[0..self.1]
-    }
-}
-
+//TODO FIX THIS THING TO BE N LEVELS OF MODULES
 #[derive(Clone, Eq, Hash, Debug, Copy, PartialEq)]
-pub struct CrateModule(pub Id, pub Id);
+pub struct ModulePath(pub Id, pub Id);
 
-impl CrateModule{
-    pub const fn from_module_path(module_path: &str)->Self{
+impl ModulePath{
+    pub const fn from_module_path_str(module_path: &str)->Self{
         // ok lets split off the first 2 things from module_path
         let bytes = module_path.as_bytes();
         let len = bytes.len();
@@ -54,7 +37,7 @@ impl CrateModule{
             i+=1;
         }
         if i == len{ // module_path is only one thing
-            return CrateModule(Id(0), Id::from_bytes(bytes, 0, len));
+            return ModulePath(Id(0), Id::from_bytes(bytes, 0, len));
         }
         let module_start = i;
         while i < len {
@@ -63,47 +46,10 @@ impl CrateModule{
             }
             i+=1;
         }
-        return CrateModule(crate_id, Id::from_bytes(bytes, module_start, i));
-    }
-}
-
-/*
-impl IdPath{
-    const fn from_module_path_self(module_path: &str, path:&[Id;4])->Self{
-        // ok lets split off the first 2 things from module_path
-        let bytes = module_path.as_bytes();
-        let len = bytes.len();
-        // we have to find the first :
-        let mut crate_id = Id(0);
-        let mut i = 0;
-        while i < len {
-            if bytes[i] == ':' as u8{
-                crate_id = Id::from_bytes(bytes, 0, i);
-                i+=2;
-                break
-            }
-            i+=1;
-        }
-        if i == len{ // module_path is only one thing
-            return IdPath{
-                crate_module:CrateModule(Id::from_str("main"), Id::from_bytes(bytes, 0, len)),
-                path
-            }
-        }
-        let module_start = i;
-        while i < len {
-            if bytes[i] == ':' as u8{
-                break
-            }
-            i+=1;
-        }
-        return IdPath{
-            crate_module:CrateModule(crate_id, Id::from_bytes(bytes, module_start, i)),
-            path
-        }
+        return ModulePath(crate_id, Id::from_bytes(bytes, module_start, i));
     }
     
-    const fn from_module_path_crate(module_path: &str, module:Id, path:&[Id;4])->Self{
+    pub fn from_module_path_str_check(module_path: &str)->Result<Self, String>{
         // ok lets split off the first 2 things from module_path
         let bytes = module_path.as_bytes();
         let len = bytes.len();
@@ -112,26 +58,27 @@ impl IdPath{
         let mut i = 0;
         while i < len {
             if bytes[i] == ':' as u8{
-                crate_id = Id::from_bytes(bytes, 0, i);
+                crate_id = Id::from_str_check(std::str::from_utf8(&bytes[0..i]).unwrap())?;
                 i+=2;
                 break
             }
             i+=1;
         }
         if i == len{ // module_path is only one thing
-            return IdPath{
-                crate_module:CrateModule(Id::from_str("main"), module)
-                path
+            return Ok(ModulePath(Id(0), Id::from_str_check(std::str::from_utf8(&bytes[0..len]).unwrap())?));
+        }
+        let module_start = i;
+        while i < len {
+            if bytes[i] == ':' as u8{
+                break
             }
+            i+=1;
         }
-        return return IdPath{
-            crate_module:CrateModule(crate_id, module),
-            path
-        }
+        return Ok(ModulePath(crate_id, Id::from_str_check(std::str::from_utf8(&bytes[module_start..i]).unwrap())?));
     }
-}*/
+}
 
-impl fmt::Display for CrateModule {
+impl fmt::Display for ModulePath {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}::{}", self.0, self.1)
     }
@@ -200,7 +147,22 @@ impl Id{
         }
         return Self(x & 0x7fff_ffff_ffff_ffff) // leave the first bit
     }
-        
+    
+    pub fn from_str_check(id_str: &str)->Result<Id, String>{
+        let id = Self::from_str(id_str);
+        IdMap::with( | idmap | {
+            if let Some(stored) = idmap.id_to_string.get(&id) {
+                if stored != id_str {
+                    return Err(stored.clone())
+                }
+            }
+            else {
+                idmap.id_to_string.insert(id, id_str.to_string());
+            }
+            return Ok(id)
+        })
+    }
+    /*
     pub fn panic_collision(self, val: &str) -> Id {
         if let Some(s) = self.check_collision(val) {
             panic!("Collision {} {}", val, s)
@@ -220,7 +182,7 @@ impl Id{
             }
             return None
         })
-    }
+    }*/
     
     pub fn as_string<F, R>(&self, f: F) -> R
     where F: FnOnce(Option<&String>) -> R
