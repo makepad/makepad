@@ -37,7 +37,7 @@ CA:Component {
     pd:#0000ffff
     pe:id1
     pf:NodePtr{file:1, level:0, index:1}
-    fn f1( a1 ) { let x = 1 } "SA:[local], EA:[local], pa:[local], pb:[local], pc:[local], pd:[local], pe:[local], pf:[local]"
+    fn f1( a1 ) { let x = 1 } r1 "SA:[local], EA:[local], pa:[local], pb:[local], pc:[local], pd:[local], pe:[local], pf:[local]"
     r1:[1, 2, 3]
     o1:{x:1, 1.0:2}
     C2:Component {
@@ -82,7 +82,7 @@ CB:NodePtr{file:1, level:1, index:10} {
         x2:"hi"
         x3:[1, 2, 3]
     }
-    fn tst( a1 ) { let x = 1 } "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
+    fn tst( a1 ) { let x = 1 } r1 "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
 }
 CC:NodePtr{file:2, level:0, index:0} {
     vdef2 pa : float "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9]"
@@ -95,8 +95,9 @@ CC:NodePtr{file:2, level:0, index:0} {
         x2:"hi"
         x3:[1, 2, 3]
     }
-    fn tst( a1 ) { let x = 1 } "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
+    fn tst( a1 ) { let x = 1 } r1 "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
 }
+
     "#;
     
     let file_3 = r#"
@@ -118,7 +119,7 @@ CE:NodePtr{file:2, level:0, index:1} {
         x2:"hi"
         x3:[1, 2, 3]
     }
-    fn tst( a1 ) { let x = 1 } "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
+    fn tst( a1 ) { let x = 1 } r1 "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
     t:NodePtr{file:1, level:0, index:0} {p1:5.0}
 }
 
@@ -143,7 +144,7 @@ file3: 5 12 - Cannot find item on scope: ERR - origin: render/live_parser/src/li
     let mut lr = LiveRegistry::default();
     
     for (name_id, source, _) in &sources {
-        match lr.parse_live_file(&format!("{}.live", name_id), ModulePath::from_module_path_str_check(name_id).unwrap(), source.to_string(), vec![]) {
+        match lr.parse_live_file(&format!("{}.live", name_id), ModulePath::from_str(name_id).unwrap(), source.to_string(), vec![]) {
             Err(why) => panic!("Couldnt parse file {}", why),
             _ => ()
         }
@@ -166,7 +167,7 @@ file3: 5 12 - Cannot find item on scope: ERR - origin: render/live_parser/src/li
         let module_path = lr.find_module_path_by_file_id(FileId::index(index)).unwrap();
         let out = format!("{}", file);
         for (name_id, _, check) in &sources {
-            if module_path.1 == Id::from_str_check(name_id).unwrap() {
+            if module_path.1 == Id::from_str(name_id).unwrap() {
                 if !compare_no_ws(&out, check) {
                     println!("Output Unequal {}\n{}", module_path, out);
                     assert_eq!(true, false);

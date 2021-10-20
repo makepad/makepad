@@ -1,4 +1,5 @@
 use crate::cx::*;
+use makepad_shader_compiler::shaderast::DrawShaderNodePtr;
 
 #[derive(Clone, Debug)]
 pub struct LiveBody {
@@ -11,26 +12,26 @@ pub struct LiveBody {
 }
 
 impl Cx {
-    pub fn live_register(&mut self){
+    pub fn live_register(&mut self) {
         crate::DrawQuad::live_register(self);
         crate::GeometryQuad2D::live_register(self);
         crate::shader_std::define_shader_stdlib(self);
     }
     
     // ok so now what. now we should run the expansion
-    pub fn live_expand(&mut self){
+    pub fn live_expand(&mut self) {
         // lets expand the f'er
         let mut errs = Vec::new();
         self.shader_registry.live_registry.expand_all_documents(&mut errs);
-        for err in errs{
-             println!("Error expanding live file {}", err);
+        for err in errs {
+            println!("Error expanding live file {}", err);
         }
     }
-
-    pub fn verify_type_signature(&self, live_ptr: LivePtr, live_type:LiveType)->bool{
+    
+    pub fn verify_type_signature(&self, live_ptr: LivePtr, live_type: LiveType) -> bool {
         let node = self.shader_registry.live_registry.resolve_ptr(live_ptr);
-        if let LiveValue::LiveType(ty) = node.value{
-            if ty == live_type{
+        if let LiveValue::LiveType(ty) = node.value {
+            if ty == live_type {
                 return true
             }
         }
@@ -41,37 +42,44 @@ impl Cx {
         // ok so now what.
         //println!("{}", live_body.code);
         //let cm = CrateModule::from_module_path_check(&live_body.module_path).unwrap();
-        println!("register_live_body: {}", ModulePath::from_module_path_check(&live_body.module_path).unwrap());
+        println!("register_live_body: {}", ModulePath::from_str(&live_body.module_path).unwrap());
         let result = self.shader_registry.live_registry.parse_live_file(
             &live_body.file,
-            ModulePath::from_module_path_check(&live_body.module_path).unwrap(),
+            ModulePath::from_str(&live_body.module_path).unwrap(),
             live_body.code,
             live_body.live_types
         );
-        if let Err(msg) = result{
+        if let Err(msg) = result {
             println!("Error parsing live file {}", msg);
         }
     }
     
-    pub fn register_factory(&mut self, live_type: LiveType, factory:Box<dyn LiveFactory>){
+    pub fn register_factory(&mut self, live_type: LiveType, factory: Box<dyn LiveFactory>) {
         self.live_factories.insert(live_type, factory);
     }
     
-    pub fn get_factory(&mut self, live_type: LiveType)-> &Box<dyn LiveFactory>{
+    pub fn get_factory(&mut self, live_type: LiveType) -> &Box<dyn LiveFactory> {
         self.live_factories.get(&live_type).unwrap()
     }
     
-    pub fn get_shader_from_ptr(&mut self, live_ptr: LivePtr, geometry_fields:&dyn GeometryFields)->Option<Shader>{
+    pub fn get_shader_from_ptr(&mut self, live_ptr: LivePtr, geometry_fields: &dyn GeometryFields) -> Option<Shader> {
         // lets first fetch the shader from live_ptr
-        // if it doesn't exist, we should allocate and 
-        if let Some(shader) = self.live_ptr_to_shader.get(&live_ptr){
+        // if it doesn't exist, we should allocate and
+        if let Some(shader) = self.live_ptr_to_shader.get(&live_ptr) {
             Some(*shader)
         }
-        else{
+        else {
             // ok ! we have to compile it
-            // lets first analyse it.
-            // we have to pass it a closure that allows us to resolve type-ids to fields.
-            
+            let result = self.shader_registry.analyse_draw_shader(DrawShaderNodePtr(live_ptr), | span, id, _live_type, draw_shader_def | {
+                if id == id!(rust_type) {
+                   // draw_shader_def.add_uniform("duni", Ty::Float, span);
+                   // draw_shader_def.add_instance("dinst", Ty::Float, span);
+                   // draw_shader_def.add_instance("dmat", Ty::Mat3, span);
+                }
+                if id == id!(geometry) {
+                    
+                }
+            });
             None
         }
     }
@@ -101,38 +109,38 @@ pub struct LiveBinding {
 
 #[macro_export]
 macro_rules!live_prim {
-    ($ty: ident, $update: expr) => {
-        impl LiveUpdate for $ty{
-            fn live_update(&mut self, _cx:&mut Cx, _ptr: LivePtr){
-                $update;
+    ( $ ty: ident, $ update: expr) => {
+        impl LiveUpdate for $ ty {
+            fn live_update(&mut self, _cx: &mut Cx, _ptr: LivePtr) {
+                $ update;
             }
             
-            fn _live_type(&self)->LiveType{
+            fn _live_type(&self) -> LiveType {
                 Self::live_type()
             }
         }
-        impl LiveNew for $ty{
-            fn live_new(_cx:&mut Cx)->Self{
-                $ty::default()
+        impl LiveNew for $ ty {
+            fn live_new(_cx: &mut Cx) -> Self {
+                $ ty::default()
             }
-            fn live_type()->LiveType{
-                LiveType(std::any::TypeId::of::<$ty>())
+            fn live_type() -> LiveType {
+                LiveType(std::any::TypeId::of::< $ ty>())
             }
-            fn live_register(cx: &mut Cx){
+            fn live_register(cx: &mut Cx) {
                 struct Factory();
-                impl LiveFactory for Factory{
-                    fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> where Self: Sized{
-                        Box::new($ty :: live_new(cx))
+                impl LiveFactory for Factory {
+                    fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> where Self: Sized {
+                        Box::new( $ ty ::live_new(cx))
                     }
                     
-                    fn live_fields(&self, _fields: &mut Vec<LiveField>) where Self: Sized{
+                    fn live_fields(&self, _fields: &mut Vec<LiveField>) where Self: Sized {
                     }
                     
-                    fn live_type(&self) -> LiveType where Self: Sized{
-                        $ty::live_type()
+                    fn live_type(&self) -> LiveType where Self: Sized {
+                        $ ty::live_type()
                     }
                 }
-                cx.live_factories.insert($ty::live_type(), Box::new(Factory()));
+                cx.live_factories.insert( $ ty::live_type(), Box::new(Factory()));
             }
         }
     }
