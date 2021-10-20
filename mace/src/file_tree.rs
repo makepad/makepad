@@ -112,6 +112,7 @@ impl FileTree {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let count = self.count;
         self.count += 1;
+        self.file_node.set_area(Area::Empty);
         self.file_node.color = self.file_node_color(count, info.is_hovered, info.is_selected);
         self.file_node.begin_quad(cx, self.file_node_layout(scale));
         cx.walk_turtle(self.indent_walk(self.stack.len()));
@@ -142,6 +143,7 @@ impl FileTree {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let count = self.count;
         self.count += 1;
+        self.file_node.set_area(Area::Empty);
         self.file_node.color = self.file_node_color(count, info.is_hovered, info.is_selected);
         self.file_node.begin_quad(cx, self.file_node_layout(scale));
         cx.walk_turtle(self.indent_walk(self.stack.len()));

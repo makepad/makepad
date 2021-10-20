@@ -58,7 +58,6 @@ impl TreeLogic {
     pub fn set_node_area(&mut self, cx: &mut Cx, node_id: NodeId, area: Area) {
         let node = &mut self.nodes_by_node_id[node_id];
         cx.update_area_refs(node.area, area);
-        self.node_ids_by_area.remove(&node.area);
         self.node_ids_by_area.insert(area, node_id);
         node.area = area;
     }
@@ -156,15 +155,15 @@ impl TreeLogic {
             event => {
                 for (area, node_id) in &self.node_ids_by_area {
                     match event.hits(cx, *area, HitOpt::default()) {
-                        Event::FingerHover(fe) => {
+                        Event::FingerHover(event) => {
                             cx.set_hover_mouse_cursor(MouseCursor::Hand);
-                            match fe.hover_state {
+                            match event.hover_state {
                                 HoverState::In => {
-                                    println!("Mouse entered node {:?}", node_id);
+                                    println!("Mouse entered node {:?} with area {:?} and rect {:?}", node_id, area, area.get_rect(cx));
                                     dispatch_action(Action::NodeWasEntered(*node_id));
                                 }
                                 HoverState::Out => {
-                                    println!("Mouse exited node {:?}", node_id);
+                                    println!("Mouse exited node {:?} with area {:?} and rect {:?}", node_id, area, area.get_rect(cx));
                                     dispatch_action(Action::NodeWasExited(*node_id));
                                 }
                                 _ => {}
