@@ -21,7 +21,7 @@ pub struct IdPack(pub u64);
 pub struct ModulePath(pub Id, pub Id);
 
 impl ModulePath{
-    pub const fn from_module_path_str(module_path: &str)->Self{
+    pub const fn from_str_unchecked(module_path: &str)->Self{
         // ok lets split off the first 2 things from module_path
         let bytes = module_path.as_bytes();
         let len = bytes.len();
@@ -49,7 +49,7 @@ impl ModulePath{
         return ModulePath(crate_id, Id::from_bytes(bytes, module_start, i));
     }
     
-    pub fn from_module_path_str_check(module_path: &str)->Result<Self, String>{
+    pub fn from_str(module_path: &str)->Result<Self, String>{
         // ok lets split off the first 2 things from module_path
         let bytes = module_path.as_bytes();
         let len = bytes.len();
@@ -58,14 +58,14 @@ impl ModulePath{
         let mut i = 0;
         while i < len {
             if bytes[i] == ':' as u8{
-                crate_id = Id::from_str_check(std::str::from_utf8(&bytes[0..i]).unwrap())?;
+                crate_id = Id::from_str(std::str::from_utf8(&bytes[0..i]).unwrap())?;
                 i+=2;
                 break
             }
             i+=1;
         }
         if i == len{ // module_path is only one thing
-            return Ok(ModulePath(Id(0), Id::from_str_check(std::str::from_utf8(&bytes[0..len]).unwrap())?));
+            return Ok(ModulePath(Id(0), Id::from_str(std::str::from_utf8(&bytes[0..len]).unwrap())?));
         }
         let module_start = i;
         while i < len {
@@ -74,7 +74,7 @@ impl ModulePath{
             }
             i+=1;
         }
-        return Ok(ModulePath(crate_id, Id::from_str_check(std::str::from_utf8(&bytes[module_start..i]).unwrap())?));
+        return Ok(ModulePath(crate_id, Id::from_str(std::str::from_utf8(&bytes[module_start..i]).unwrap())?));
     }
 }
 
@@ -127,7 +127,7 @@ impl Id{
     
     // from https://nullprogram.com/blog/2018/07/31/
     // i have no idea what im doing with start value and finalisation.
-    pub const fn from_str(id_str: &str) -> Self {
+    pub const fn from_str_unchecked(id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
         Self::from_bytes(bytes, 0, bytes.len())
     }
@@ -148,8 +148,8 @@ impl Id{
         return Self(x & 0x7fff_ffff_ffff_ffff) // leave the first bit
     }
     
-    pub fn from_str_check(id_str: &str)->Result<Id, String>{
-        let id = Self::from_str(id_str);
+    pub fn from_str(id_str: &str)->Result<Id, String>{
+        let id = Self::from_str_unchecked(id_str);
         IdMap::with( | idmap | {
             if let Some(stored) = idmap.id_to_string.get(&id) {
                 if stored != id_str {
@@ -392,11 +392,11 @@ pub struct IdMap {
 
 impl IdMap {
     pub fn add(&mut self, val: &str) {
-        self.id_to_string.insert(Id::from_str(val), val.to_string());
+        self.id_to_string.insert(Id::from_str_unchecked(val), val.to_string());
     }
     
     pub fn contains(&mut self, val: &str) -> bool {
-        self.id_to_string.contains_key(&Id::from_str(val))
+        self.id_to_string.contains_key(&Id::from_str_unchecked(val))
     }
     
     pub fn with<F, R>(f: F) -> R

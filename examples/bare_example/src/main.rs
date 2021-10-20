@@ -2,36 +2,49 @@ use makepad_render::*;
 
 main_app!(BareExampleApp);
 
-#[derive(Clone)]
 pub struct BareExampleApp {
     //live: LiveNode, // for every component this always points to the node we deserialized from
     window: Window,
     pass: Pass, 
     color_texture: Texture,
     main_view: View,
+    draw_quad: DrawQuad
 }
 
 // what you want is putting down an indirection in the style-sheet for a codefile.
+live_body!{
+    use makepad_render::drawquad::DrawQuad
+    MyDrawQuad:DrawQuad{
+    }
+}
 
 impl BareExampleApp {
     pub fn new(cx:&mut Cx)->Self{
+        let mut dq = DrawQuad::live_new(cx);
+        
+        let live_ptr = cx.shader_registry.live_registry.module_object_path_to_live_ptr(
+            ModulePath::from_str(&module_path!()).unwrap(),
+            &[id!(MyDrawQuad)]
+        ).unwrap();
+
+        dq.live_update(cx, live_ptr);
         
         Self{
             window:Window::new(cx),
             pass:Pass::default(),
             color_texture:Texture::new(cx),
             main_view:View::new(),
+            draw_quad:dq
         }
     }
-    pub fn live_register(_cx: &mut Cx) {
-        
+    pub fn live_register(cx: &mut Cx) {
+        cx.register_live_body(live_body());
     }
     
     pub fn myui_button_clicked(&mut self, _cx: &mut Cx){
     }
     
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
-        
         
         match event {
             Event::Construct => {

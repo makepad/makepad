@@ -42,8 +42,8 @@ pub struct ShaderRegistry {
 
 impl ShaderRegistry {
     pub fn new() -> Self {
-        Id::from_str_check("default").unwrap();
-        Id::from_str_check("x").unwrap();
+        Id::from_str("default").unwrap();
+        Id::from_str("x").unwrap();
         Self {
             live_registry: LiveRegistry::default(),
             structs: HashMap::new(),
@@ -645,7 +645,7 @@ impl ShaderRegistry {
                                 // lets parse this thing
                                 let parser = ShaderParser::new(
                                     self,
-                                    doc.get_tokens(token_start, token_count + 1),
+                                    doc.get_tokens(token_start, token_count),
                                     doc.get_scopes(scope_start, scope_count),
                                     &mut parser_deps,
                                     Some(FnSelfKind::DrawShader(shader_ptr))

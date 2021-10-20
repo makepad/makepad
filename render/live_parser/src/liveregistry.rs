@@ -65,7 +65,7 @@ impl LiveClassIterator {
                     file_id: self.file_id,
                     local_ptr: LocalPtr {
                         level: self.level,
-                        index: self.index + self.node_start
+                        index: self.index - 1 + self.node_start
                     }
                 }));
             }
