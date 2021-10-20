@@ -31,9 +31,7 @@ impl BareExampleApp {
     }
     
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
-        let x = DrawQuad::live_new(cx);
-        x._live_type();
-        DrawQuad::live_type();
+        
         
         match event {
             Event::Construct => {

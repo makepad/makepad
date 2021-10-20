@@ -215,7 +215,7 @@ impl<'a> ShaderParser<'a> {
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Geometry {
                         is_used_in_pixel_shader: Cell::new(false),
-                        var_def_node_ptr: VarDefNodePtr(decl_node_ptr),
+                        var_def_node_ptr: Some(VarDefNodePtr(decl_node_ptr)),
                     },
                     span,
                     ident,
@@ -226,7 +226,8 @@ impl<'a> ShaderParser<'a> {
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Instance {
                         is_used_in_pixel_shader: Cell::new(false),
-                        input_type: DrawShaderInputType::VarDef(decl_node_ptr),
+                        var_def_node_ptr: Some(VarDefNodePtr(decl_node_ptr)),
+                        //input_type: DrawShaderInputType::VarDef(decl_node_ptr),
                     },
                     span,
                     ident,
@@ -242,7 +243,8 @@ impl<'a> ShaderParser<'a> {
                 };
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Uniform {
-                        input_type: DrawShaderInputType::VarDef(decl_node_ptr),
+                        var_def_node_ptr: Some(VarDefNodePtr(decl_node_ptr)),
+                        //input_type: DrawShaderInputType::VarDef(decl_node_ptr),
                         block_ident,
                     },
                     span,
@@ -263,7 +265,8 @@ impl<'a> ShaderParser<'a> {
             Ident(id!(texture)) => {
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Texture {
-                        input_type: DrawShaderInputType::VarDef(decl_node_ptr),
+                        var_def_node_ptr: Some(VarDefNodePtr(decl_node_ptr)),
+                        //input_type: DrawShaderInputType::VarDef(decl_node_ptr),
                     },
                     span,
                     ident,

@@ -1,15 +1,14 @@
 // ok lets implement these things
 live_body!{
     
-    //use crate::shader_std::*;
+    use crate::shader_std::*;
+    use crate::geometrygen::GeometryQuad2D;
     
     DrawQuad: DrawShader2D{
         rust_type: {{DrawQuad}};
-        
-        geometry: GeometryQuad2D{}; 
-        
+        geometry: GeometryQuad2D{};
         varying pos: vec2;
-               
+        
         //let dpi_dilate: float<Uniform>;
         fn scroll(self) -> vec2 {
             return self.draw_scroll.xy;
@@ -19,7 +18,7 @@ live_body!{
             let scr = self.scroll();
             
             let clipped: vec2 = clamp(
-                self.geom * self.rect_size + self.rect_pos - scr,
+                self.geom_pos * self.rect_size + self.rect_pos - scr,
                 self.draw_clip.xy,
                 self.draw_clip.zw
             );
@@ -46,7 +45,8 @@ const DRAW_QUAD_INSTANCES:usize = 32;
 
 //#[derive(Debug)]
 #[repr(C)]
-pub struct DrawQuad {
+pub struct DrawQuad{
+    //#[after_live_update()]
     //#[private()]
     pub uniforms:[f32;DRAW_QUAD_UNIFORMS],
 
@@ -64,7 +64,7 @@ pub struct DrawQuad {
     //#[private()]
     pub instance_start: usize,
     //#[private()]
-    pub slot_count: usize,
+    pub instance_slots: usize,
     
     pub geometry: GeometryQuad2D,
 
@@ -97,7 +97,7 @@ impl DrawQuad{
 impl DrawQuad{
     fn after_live_update(&mut self, cx:&mut Cx){
         // lets fetch/compile our shader from the info we have
-        self.shader = cx.get_shader_from_ptr(self.live_ptr.unwrap());
+        self.shader = cx.get_shader_from_ptr(self.live_ptr.unwrap(), &self.geometry);
     }
 }
 
@@ -112,7 +112,7 @@ impl LiveNew for DrawQuad{
             many_old_area: Area::Empty,
             
             instance_start: DRAW_QUAD_INSTANCES,
-            slot_count: 5,
+            instance_slots: 5,
             shader: None,
             geometry: LiveNew::live_new(cx),
 
@@ -248,7 +248,7 @@ impl DrawQuad{
                 None
             };
             unsafe{
-                mi.instances.extend_from_slice(std::slice::from_raw_parts(&self.instances[self.instance_start] as *const _ as *const f32, self.slot_count));
+                mi.instances.extend_from_slice(std::slice::from_raw_parts(&self.instances[self.instance_start] as *const _ as *const f32, self.instance_slots));
             }
             
             if let Some(new_area) = new_area{
@@ -264,7 +264,7 @@ impl DrawQuad{
     
     pub fn begin_many(&mut self, cx: &mut Cx) {
         if let Some(shader) = self.shader{
-            let mi = cx.begin_many_aligned_instances(shader, self.slot_count);
+            let mi = cx.begin_many_aligned_instances(shader, self.instance_slots);
             self.many_old_area = self.area;
             //self.many_set_area = false;
             self.area = Area::Instance(InstanceArea {
@@ -286,7 +286,7 @@ impl DrawQuad{
     
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
         unsafe {
-            std::slice::from_raw_parts(&self.instances[self.instance_start] as *const _ as *const f32, self.slot_count)
+            std::slice::from_raw_parts(&self.instances[self.instance_start] as *const _ as *const f32, self.instance_slots)
         }
     }
     

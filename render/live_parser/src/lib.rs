@@ -24,7 +24,7 @@ pub use crate::id::IdFmt;
 pub use crate::id::LocalPtr;
 pub use crate::id::FileId;
 pub use crate::liveregistry::LiveRegistry;
-pub use crate::id::CrateModule;
+pub use crate::id::ModulePath;
 pub use crate::deserialize::DeLive;
 pub use crate::deserialize::DeLiveErr;
 pub use crate::livenode::LiveValue;

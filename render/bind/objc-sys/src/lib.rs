@@ -16,5 +16,5 @@ pub mod rc;
 mod encode;
 mod message;
 
-#[cfg(test)]
-mod test_utils;
+//#[cfg(test)]
+//mod test_utils;

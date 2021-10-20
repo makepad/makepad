@@ -14,11 +14,17 @@ impl Cx {
     pub fn live_register(&mut self){
         crate::DrawQuad::live_register(self);
         crate::GeometryQuad2D::live_register(self);
+        crate::shader_std::define_shader_stdlib(self);
     }
     
     // ok so now what. now we should run the expansion
     pub fn live_expand(&mut self){
-        
+        // lets expand the f'er
+        let mut errs = Vec::new();
+        self.shader_registry.live_registry.expand_all_documents(&mut errs);
+        for err in errs{
+             println!("Error expanding live file {}", err);
+        }
     }
 
     pub fn verify_type_signature(&self, live_ptr: LivePtr, live_type:LiveType)->bool{
@@ -34,9 +40,11 @@ impl Cx {
     pub fn register_live_body(&mut self, live_body: LiveBody) {
         // ok so now what.
         //println!("{}", live_body.code);
+        //let cm = CrateModule::from_module_path_check(&live_body.module_path).unwrap();
+        println!("register_live_body: {}", ModulePath::from_module_path_check(&live_body.module_path).unwrap());
         let result = self.shader_registry.live_registry.parse_live_file(
             &live_body.file,
-            CrateModule::from_module_path(&live_body.module_path),
+            ModulePath::from_module_path_check(&live_body.module_path).unwrap(),
             live_body.code,
             live_body.live_types
         );
@@ -53,11 +61,19 @@ impl Cx {
         self.live_factories.get(&live_type).unwrap()
     }
     
-    pub fn get_shader_from_ptr(&mut self, _live_ptr: LivePtr)->Option<Shader>{
-        // first see if we can fetch a shader from live_ptr
-        // otherwise analyse shader so we have the struct info
-        // then we wait to compile it on the backend
-        None
+    pub fn get_shader_from_ptr(&mut self, live_ptr: LivePtr, geometry_fields:&dyn GeometryFields)->Option<Shader>{
+        // lets first fetch the shader from live_ptr
+        // if it doesn't exist, we should allocate and 
+        if let Some(shader) = self.live_ptr_to_shader.get(&live_ptr){
+            Some(*shader)
+        }
+        else{
+            // ok ! we have to compile it
+            // lets first analyse it.
+            // we have to pass it a closure that allows us to resolve type-ids to fields.
+            
+            None
+        }
     }
 }
 
