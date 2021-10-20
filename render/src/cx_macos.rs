@@ -168,6 +168,11 @@ impl Cx {
                                 cocoa_app.update_app_menu(menu, &self.command_settings)
                             }
                         }
+
+                        if let Some(drag_item) = self.platform.start_drag.take() {
+                            cocoa_app.start_drag(drag_item);
+                        }
+
                         // build a list of renderpasses to repaint
                         let mut windows_need_repaint = 0;
                         self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
@@ -295,6 +300,7 @@ impl Cx {
             timer.timer_id = 0;
         }
     }
+
     pub fn post_signal(signal: Signal, status: StatusId) {
         if signal.signal_id != 0 {
             CocoaApp::post_signal(signal.signal_id, status);
@@ -308,6 +314,11 @@ impl Cx {
             platform.last_menu = Some(menu.clone());
             platform.set_menu = true;
         }
+    }
+
+    pub fn start_drag(&mut self, drag_item: DragItem) {
+        assert!(self.platform.start_drag.is_none());
+        self.platform.start_drag = Some(drag_item);
     }
 }
 
@@ -324,4 +335,5 @@ pub struct CxPlatform {
     pub stop_timer: Vec<u64>,
     pub text_clipboard_response: Option<String>,
     pub desktop: CxDesktop,
+    pub start_drag: Option<DragItem>,
 }

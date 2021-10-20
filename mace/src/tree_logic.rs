@@ -55,8 +55,12 @@ impl TreeLogic {
         self.animating_node_ids.remove(&node_id);
     }
 
-    pub fn set_node_area(&mut self, node_id: NodeId, area: Area) {
+    pub fn set_node_area(&mut self, cx: &mut Cx, node_id: NodeId, area: Area) {
+        let node = &mut self.nodes_by_node_id[node_id];
+        cx.update_area_refs(node.area, area);
+        self.node_ids_by_area.remove(&node.area);
         self.node_ids_by_area.insert(area, node_id);
+        node.area = area;
     }
 
     pub fn node_is_expanded(&mut self, node_id: NodeId) -> bool {
@@ -156,9 +160,11 @@ impl TreeLogic {
                             cx.set_hover_mouse_cursor(MouseCursor::Hand);
                             match fe.hover_state {
                                 HoverState::In => {
+                                    println!("Mouse entered node {:?}", node_id);
                                     dispatch_action(Action::NodeWasEntered(*node_id));
                                 }
                                 HoverState::Out => {
+                                    println!("Mouse exited node {:?}", node_id);
                                     dispatch_action(Action::NodeWasExited(*node_id));
                                 }
                                 _ => {}
@@ -166,7 +172,9 @@ impl TreeLogic {
                         }
                         Event::FingerDown(_) => {
                             dispatch_action(Action::NodeWasPressed(*node_id));
-                            break;
+                        }
+                        Event::FingerMove(_) => {
+                            println!("Finger was moved over node {:?}", node_id);
                         }
                         _ => {}
                     }
@@ -205,6 +213,7 @@ impl NodeInfo {
 #[derive(Clone, Debug)]
 struct Node {
     is_expanded: AnimatedBool,
+    area: Area,
 }
 
 impl Node {
@@ -221,6 +230,7 @@ impl Default for Node {
     fn default() -> Self {
         Self {
             is_expanded: AnimatedBool::new(false),
+            area: Area::Empty,
         }
     }
 }
