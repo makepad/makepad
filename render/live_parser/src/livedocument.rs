@@ -8,7 +8,7 @@ use crate::token::{TokenWithSpan, TokenId};
 use crate::liveerror::LiveError;
 use crate::liveerror::LiveErrorOrigin;
 use crate::livenode::{LiveNode, LiveValue};
-use crate::id::CrateModule;
+use crate::id::ModulePath;
 use crate::id::LocalPtr;
 use crate::id::LivePtr;
 use crate::id::FileId;
@@ -113,18 +113,15 @@ impl LiveDocument {
         self.nodes[level].push(node);
     }
     
-    pub fn scan_for_multi(&self, ids: &[Id]) -> Option<LocalPtr> {
-        let mut node_start = 0 as usize;
-        let mut node_count = self.nodes[0].len();
-        let mut level = 0;
-        for i in 0..ids.len() {
-            let id = ids[i];
+    pub fn scan_for_object_path_from(&self, object_path: &[Id], mut node_start: usize, mut node_count: usize, mut level: usize) -> Option<LocalPtr> {
+        for i in 0..object_path.len() {
+            let id = object_path[i];
             let mut found = false;
             for j in 0..node_count {
                 let node = &self.nodes[level][j + node_start];
                 if node.id_pack == IdPack::single(id) {
                     // we found the node.
-                    if i == ids.len() - 1 { // last item
+                    if i == object_path.len() - 1 { // last item
                         return Some(LocalPtr {
                             level: level,
                             index: j + node_start
@@ -155,6 +152,9 @@ impl LiveDocument {
         None
     }
     
+    pub fn scan_for_object_path(&self, object_path: &[Id]) -> Option<LocalPtr> {
+        self.scan_for_object_path_from(object_path, 0, self.nodes[0].len(), 0)
+    }
     
     pub fn scan_for_multi_for_expand(&self, level: usize, node_start: usize, node_count: usize, id_start: usize, id_count: usize, multi_ids: &Vec<Id>) -> Result<LocalPtr, String> {
         let mut node_start = node_start as usize;
@@ -372,7 +372,7 @@ impl LiveDocument {
         }
     }
     
-    pub fn fetch_crate_module(&self, id_pack: IdPack, outer_crate_id: Id) -> CrateModule {
+    pub fn fetch_module_path(&self, id_pack: IdPack, outer_crate_id: Id) -> ModulePath {
         match id_pack.unpack() {
             IdUnpack::Multi {index, count} if count == 2 => {
                 let crate_id = self.multi_ids[index];
@@ -381,7 +381,7 @@ impl LiveDocument {
                 }else {
                     crate_id
                 };
-                CrateModule(crate_id, self.multi_ids[index + 1])
+                ModulePath(crate_id, self.multi_ids[index + 1])
             }
             _ => {
                 panic!("Unexpected id type {:?}", id_pack.unpack())
@@ -498,10 +498,10 @@ impl fmt::Display for LiveDocument {
                     }
                     let _ = write!(f, "\"");
                 },
-                LiveValue::ResourceRef {target}=>{
-                    prefix(node.id_pack, ld, f);
-                    let _ = write!(f, "{}", IdFmt::col(&ld.multi_ids, target));
-                }
+                //LiveValue::ResourceRef {target}=>{
+                //    prefix(node.id_pack, ld, f);
+                //    let _ = write!(f, "{}", IdFmt::col(&ld.multi_ids, target));
+                // }
                 LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
                     for i in 0..token_count {
                         let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
@@ -517,8 +517,8 @@ impl fmt::Display for LiveDocument {
                     }
                     let _ = write!(f, "\"");
                 },
-                LiveValue::Use {crate_module} => {
-                    let _ = write!(f, "use {}::{}", IdFmt::col(&ld.multi_ids, node.id_pack), IdFmt::col(&ld.multi_ids, crate_module));
+                LiveValue::Use {module_path_ids} => {
+                    let _ = write!(f, "use {}::{}", IdFmt::col(&ld.multi_ids, node.id_pack), IdFmt::col(&ld.multi_ids, module_path_ids));
                 }
                 LiveValue::LiveType(id)=>{
                     let _ = write!(f, "TypeId {:?}", id);

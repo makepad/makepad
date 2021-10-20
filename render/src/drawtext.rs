@@ -36,7 +36,6 @@ pub struct DrawText {
     pub marker: f32,
 }
 
-
 impl Clone for DrawText {
     fn clone(&self) -> Self {
         Self {

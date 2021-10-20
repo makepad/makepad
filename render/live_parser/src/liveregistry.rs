@@ -14,7 +14,7 @@ use crate::id::LivePtr;
 use crate::token::TokenId;
 use crate::token::Token;
 use crate::span::Span;
-use crate::id::CrateModule;
+use crate::id::ModulePath;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use crate::lex::lex;
@@ -22,7 +22,7 @@ use crate::lex::lex;
 
 #[derive(Debug)]
 pub struct LiveFile {
-    pub crate_module: CrateModule,
+    pub module_path: ModulePath,
     pub file: String,
     pub source: String,
     pub document: LiveDocument,
@@ -32,10 +32,10 @@ pub struct LiveFile {
 #[derive(Default, Debug)]
 pub struct LiveRegistry {
     pub file_ids: HashMap<String, FileId>,
-    pub crate_module_to_file_id: HashMap<CrateModule, FileId>,
+    pub module_path_to_file_id: HashMap<ModulePath, FileId>,
     pub live_files: Vec<LiveFile>,
-    pub dep_order: Vec<(CrateModule, TokenId)>,
-    pub dep_graph: HashMap<CrateModule, HashSet<CrateModule >>, // this contains all the dependencies a crate has
+    pub dep_order: Vec<(ModulePath, TokenId)>,
+    pub dep_graph: HashMap<ModulePath, HashSet<ModulePath >>, // this contains all the dependencies a crate has
     pub expanded: Vec<LiveDocument >,
 }
 
@@ -50,7 +50,7 @@ pub struct LiveClassIterator {
 impl LiveClassIterator {
     pub fn next(&mut self, live_registry: &LiveRegistry) -> Option<(Id, LivePtr)> {
         // ok so we get the
-        loop{
+        loop {
             if self.index >= self.node_count {
                 return None
             }
@@ -59,8 +59,8 @@ impl LiveClassIterator {
                 .nodes[self.level][self.index + self.node_start].id_pack;
             
             self.index += 1;
-
-            if id.is_single(){
+            
+            if id.is_single() {
                 return Some((id.as_single(), LivePtr {
                     file_id: self.file_id,
                     local_ptr: LocalPtr {
@@ -107,6 +107,19 @@ impl LiveRegistry {
         });
     }*/
     
+    pub fn module_object_path_to_live_ptr(&self, module_path:ModulePath, object_path: &[Id]) -> Option<LivePtr>{
+        if let Some(file_id) = self.module_path_to_file_id.get(&module_path){
+            let doc = &self.expanded[file_id.to_index()];
+            if let Some(local_ptr) = doc.scan_for_object_path(object_path){
+                return Some(LivePtr{
+                    file_id:*file_id,
+                    local_ptr
+                })
+            }
+        }
+        None
+    }
+    
     pub fn resolve_doc_ptr(&self, live_ptr: LivePtr) -> (&LiveDocument, &LiveNode) {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
         (doc, &doc.resolve_ptr(live_ptr.local_ptr))
@@ -114,16 +127,16 @@ impl LiveRegistry {
     
     pub fn live_class_iterator(&self, live_ptr: LivePtr) -> Option<LiveClassIterator> {
         let node = self.resolve_ptr(live_ptr);
-        if let LiveValue::Class{node_start, node_count, ..} = node.value{
-            Some(LiveClassIterator{
+        if let LiveValue::Class {node_start, node_count, ..} = node.value {
+            Some(LiveClassIterator {
                 file_id: live_ptr.file_id,
-                level: live_ptr.local_ptr.level + 1, 
+                level: live_ptr.local_ptr.level + 1,
                 index: 0,
                 node_start: node_start as usize,
                 node_count: node_count as usize,
             })
         }
-        else{
+        else {
             return None
         }
     }
@@ -139,7 +152,11 @@ impl LiveRegistry {
     }
     
     pub fn is_baseclass(id: IdPack) -> bool {
-        id == id_pack!(Component) || id == id_pack!(Enum) || id == id_pack!(Struct) || id == id_pack!(DrawShader)
+        id == id_pack!(Component)
+            || id == id_pack!(Enum)
+            || id == id_pack!(Struct)
+            || id == id_pack!(DrawShader)
+            || id == id_pack!(Geometry)
     }
     
     pub fn find_enum_origin(&self, start: IdPack, lhs: IdPack) -> IdPack {
@@ -164,7 +181,7 @@ impl LiveRegistry {
         }
         lhs
     }
-    
+    /*
     pub fn find_full_node_ptr_from_ids(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<LivePtr> {
         let cm = CrateModule(crate_id, module_id);
         if let Some(file_id) = self.crate_module_to_file_id.get(&cm) {
@@ -180,7 +197,7 @@ impl LiveRegistry {
             }
         }
         None
-    }
+    }*/
     
     pub fn find_base_class_id(&self, class: IdPack) -> Option<IdPack> {
         let mut class_iter = class;
@@ -196,11 +213,11 @@ impl LiveRegistry {
         Some(class_iter)
     }
     
-    pub fn find_component_origin(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<(CrateModule, Id, LivePtr)> {
-        let cm = CrateModule(crate_id, module_id);
-        if let Some(file_id) = self.crate_module_to_file_id.get(&cm) {
+    pub fn find_component_origin(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<(ModulePath, Id, LivePtr)> {
+        let mp = ModulePath(crate_id, module_id);
+        if let Some(file_id) = self.module_path_to_file_id.get(&mp) {
             let exp = &self.expanded[file_id.to_index()];
-            if let Some(ptr) = exp.scan_for_multi(ids) {
+            if let Some(ptr) = exp.scan_for_object_path(ids) {
                 let node = &exp.nodes[ptr.level][ptr.index];
                 match node.value {
                     LiveValue::Class {class, ..} => {
@@ -228,10 +245,9 @@ impl LiveRegistry {
                         }
                         let token_span = &exp.tokens[token_id_iter.token_id as usize - 2];
                         // ok now we have a live_file_id we can turn into crate_module and a token
-                        let crate_module = file.crate_module;
                         if let Token::Ident(id) = token_span.token {
                             // lets get the factory
-                            return Some((crate_module, id, LivePtr {file_id: *file_id, local_ptr: ptr}));
+                            return Some((file.module_path, id, LivePtr {file_id: *file_id, local_ptr: ptr}));
                         }
                         // now we can look this up in our
                     }
@@ -246,16 +262,16 @@ impl LiveRegistry {
         self.live_files[token_id.file_id.to_index()].document.token_id_to_span(token_id)
     }
     
-    pub fn find_crate_module_by_file_id(&self, scan_file_id: FileId) -> Option<CrateModule> {
-        for (crate_module, file_id) in &self.crate_module_to_file_id {
+    pub fn find_module_path_by_file_id(&self, scan_file_id: FileId) -> Option<ModulePath> {
+        for (module_path, file_id) in &self.module_path_to_file_id {
             if *file_id == scan_file_id {
-                return Some(*crate_module)
+                return Some(*module_path)
             }
         }
         return None
     }
     
-    pub fn parse_live_file(&mut self, file: &str, own_crate_module: CrateModule, source: String, live_types: Vec<LiveType>) -> Result<FileId, LiveFileError> {
+    pub fn parse_live_file(&mut self, file: &str, own_module_path: ModulePath, source: String, live_types: Vec<LiveType>) -> Result<FileId, LiveFileError> {
         
         let (is_new_file_id, file_id) = if let Some(file_id) = self.file_ids.get(file) {
             (false, *file_id)
@@ -266,43 +282,43 @@ impl LiveRegistry {
         };
         
         let lex_result = match lex(source.chars(), file_id) {
-            Err(msg) => return Err(msg.to_live_file_error(file, &source)),//panic!("Lex error {}", msg),
+            Err(msg) => return Err(msg.to_live_file_error(file, &source)), //panic!("Lex error {}", msg),
             Ok(lex_result) => lex_result
         };
         
         let mut parser = LiveParser::new(&lex_result.tokens, &live_types);
         
         let mut document = match parser.parse_live_document() {
-            Err(msg) => return Err(msg.to_live_file_error(file, &source)),//panic!("Parse error {}", msg.to_live_file_error(file, &source)),
+            Err(msg) => return Err(msg.to_live_file_error(file, &source)), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
             Ok(ld) => ld
         };
         document.strings = lex_result.strings;
         document.tokens = lex_result.tokens;
         
-       // let own_crate_module = CrateModule(crate_id, module_id);
+        // let own_crate_module = CrateModule(crate_id, module_id);
         
-        if self.dep_order.iter().position( | v | v.0 == own_crate_module).is_none() {
-            self.dep_order.push((own_crate_module, TokenId::default()));
+        if self.dep_order.iter().position( | v | v.0 == own_module_path).is_none() {
+            self.dep_order.push((own_module_path, TokenId::default()));
         }
         else {
             // marks dependencies dirty recursively (removes the expanded version)
-            fn mark_dirty(cm: CrateModule, registry: &mut LiveRegistry) {
-                if let Some(id) = registry.crate_module_to_file_id.get(&cm) {
+            fn mark_dirty(mp: ModulePath, registry: &mut LiveRegistry) {
+                if let Some(id) = registry.module_path_to_file_id.get(&mp) {
                     registry.expanded[id.to_index()].recompile = true;
                 }
                 //registry.expanded.remove(&cm);
                 
                 let mut dirty = Vec::new();
-                for (cm_iter, hs) in &registry.dep_graph {
-                    if hs.contains(&cm) { // this
-                        dirty.push(*cm_iter);
+                for (mp_iter, hs) in &registry.dep_graph {
+                    if hs.contains(&mp) { // this
+                        dirty.push(*mp_iter);
                     }
                 }
                 for d in dirty {
                     mark_dirty(d, registry);
                 }
             }
-            mark_dirty(own_crate_module, self);
+            mark_dirty(own_module_path, self);
         }
         
         let mut dep_graph_set = HashSet::new();
@@ -310,18 +326,18 @@ impl LiveRegistry {
         for (_, nodes) in document.nodes.iter().enumerate() {
             for node in nodes {
                 match node.value {
-                    LiveValue::Use {crate_module} => {
-                        let crate_module = document.fetch_crate_module(crate_module, own_crate_module.0);
-                        dep_graph_set.insert(crate_module);
-                        let self_index = self.dep_order.iter().position( | v | v.0 == own_crate_module).unwrap();
-                        if let Some(other_index) = self.dep_order.iter().position( | v | v.0 == crate_module) {
+                    LiveValue::Use {module_path_ids} => {
+                        let module_path = document.fetch_module_path(module_path_ids, own_module_path.0);
+                        dep_graph_set.insert(module_path);
+                        let self_index = self.dep_order.iter().position( | v | v.0 == own_module_path).unwrap();
+                        if let Some(other_index) = self.dep_order.iter().position( | v | v.0 == module_path) {
                             if other_index > self_index {
                                 self.dep_order.remove(other_index);
-                                self.dep_order.insert(self_index, (crate_module, node.token_id));
+                                self.dep_order.insert(self_index, (module_path, node.token_id));
                             }
                         }
                         else {
-                            self.dep_order.insert(self_index, (crate_module, node.token_id));
+                            self.dep_order.insert(self_index, (module_path, node.token_id));
                         }
                         
                     }, // import
@@ -330,15 +346,15 @@ impl LiveRegistry {
                 }
             }
         }
-        self.dep_graph.insert(own_crate_module, dep_graph_set);
+        self.dep_graph.insert(own_module_path, dep_graph_set);
         
         let live_file = LiveFile {
-            crate_module: own_crate_module,
+            module_path: own_module_path,
             file: file.to_string(),
             source,
             document
         };
-        self.crate_module_to_file_id.insert(own_crate_module, file_id);
+        self.module_path_to_file_id.insert(own_module_path, file_id);
         
         if is_new_file_id {
             self.file_ids.insert(file.to_string(), file_id);
@@ -567,6 +583,7 @@ impl LiveRegistry {
                     });
                     return CopyRecurResult::Noop
                 }
+                /*
                 LiveValue::ResourceRef {target} => {
                     let new_target = if let Some((in_doc, _)) = in_doc { // copy the string if its from another doc
                         out_doc.clone_multi_id(target, &in_doc.multi_ids)
@@ -582,7 +599,7 @@ impl LiveRegistry {
                         }
                     });
                     return CopyRecurResult::Noop
-                }
+                }*/
                 _ => {
                     out_doc.push_node(out_level, LiveNode {
                         token_id: node.token_id,
@@ -738,7 +755,7 @@ impl LiveRegistry {
         // This should we win me some kind of award. Absolute worst programmer in recent history or something like it.
         fn walk_node(
             expanded: &Vec<LiveDocument >,
-            crate_module_to_file_id: &HashMap<CrateModule, FileId>,
+            module_path_to_file_id: &HashMap<ModulePath, FileId>,
             in_crate: Id,
             in_file_id: FileId,
             errors: &mut Vec<LiveError>,
@@ -805,7 +822,7 @@ impl LiveRegistry {
                 LiveValue::Call {target, node_start, node_count} => {
                     let new_node_start = out_doc.get_level_len(out_level + 1);
                     for i in 0..node_count {
-                        walk_node(expanded, crate_module_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, out_level + 1, i as usize + node_start as usize, out_start, 0);
+                        walk_node(expanded,module_path_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, out_level + 1, i as usize + node_start as usize, out_start, 0);
                     }
                     let new_node = LiveNode {
                         token_id: node.token_id,
@@ -883,7 +900,7 @@ impl LiveRegistry {
                     };
                     let new_node_start = out_doc.get_level_len(shifted_out_level + 1);
                     for i in 0..node_count {
-                        walk_node(expanded, crate_module_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, shifted_out_level + 1, i as usize + node_start as usize, out_start, 0);
+                        walk_node(expanded, module_path_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, shifted_out_level + 1, i as usize + node_start as usize, out_start, 0);
                     }
                     let new_node = LiveNode {
                         token_id: node.token_id,
@@ -905,7 +922,7 @@ impl LiveRegistry {
                     };
                     let new_node_start = out_doc.get_level_len(shifted_out_level + 1);
                     for i in 0..node_count {
-                        walk_node(expanded, crate_module_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, shifted_out_level + 1, i as usize + node_start as usize, out_start, 0);
+                        walk_node(expanded, module_path_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, shifted_out_level + 1, i as usize + node_start as usize, out_start, 0);
                     }
                     let new_node = LiveNode {
                         token_id: node.token_id,
@@ -959,6 +976,7 @@ impl LiveRegistry {
                     };
                     write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, &new_node);
                 },
+                /*
                 LiveValue::ResourceRef {target} => {
                     // we should store the scopestack here so the shader compiler can find symbols.
                     let new_node = LiveNode {
@@ -969,10 +987,10 @@ impl LiveRegistry {
                         }
                     };
                     write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, &new_node);
-                },
-                LiveValue::Use {crate_module} => { // import things on the scope from Use
-                    let crate_module = in_doc.fetch_crate_module(crate_module, in_crate);
-                    let file_id = crate_module_to_file_id.get(&crate_module).unwrap();
+                },*/
+                LiveValue::Use {module_path_ids} => { // import things on the scope from Use
+                    let module_path = in_doc.fetch_module_path(module_path_ids, in_crate);
+                    let file_id = module_path_to_file_id.get(&module_path).unwrap();
                     let other_doc = &expanded[file_id.to_index()];
                     
                     match node.id_pack.unpack() {
@@ -1193,7 +1211,7 @@ impl LiveRegistry {
                             
                             let new_out_count = out_doc.get_level_len(shifted_out_level + 1) - new_out_start;
                             for i in 0..node_count {
-                                walk_node(expanded, crate_module_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, shifted_out_level + 1, i as usize + node_start as usize, new_out_start, new_out_count);
+                                walk_node(expanded, module_path_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, shifted_out_level + 1, i as usize + node_start as usize, new_out_start, new_out_count);
                             }
                             let new_out_count = out_doc.get_level_len(shifted_out_level + 1) - new_out_start;
                             
@@ -1218,7 +1236,7 @@ impl LiveRegistry {
         }
         
         for (crate_module, token_id) in &self.dep_order {
-            let file_id = if let Some(file_id) = self.crate_module_to_file_id.get(crate_module) {
+            let file_id = if let Some(file_id) = self.module_path_to_file_id.get(crate_module) {
                 file_id
             }
             else {
@@ -1247,7 +1265,7 @@ impl LiveRegistry {
             let len = in_doc.nodes[0].len();
             
             for i in 0..len {
-                walk_node(&self.expanded, &self.crate_module_to_file_id, crate_module.0, *file_id, errors, &mut scope_stack, in_doc, &mut out_doc, 0, 0, i, 0, 0);
+                walk_node(&self.expanded, &self.module_path_to_file_id, crate_module.0, *file_id, errors, &mut scope_stack, in_doc, &mut out_doc, 0, 0, i, 0, 0);
             }
             
             out_doc.recompile = false;

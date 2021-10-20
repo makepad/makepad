@@ -220,7 +220,7 @@ pub unsafe fn send_super_message<T, A, R>(obj: *const T, superclass: &Class,
         send_super_unverified(obj, superclass, sel, args)
     })
 }
-
+/*
 #[cfg(test)]
 mod tests {
     use test_utils;
@@ -293,4 +293,4 @@ mod tests {
         // Unimplemented selector
         assert!(obj.verify_message::<(u32,), ()>(sel!(setFoo)).is_err());
     }
-}
+}*/

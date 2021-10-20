@@ -12,7 +12,7 @@ use std::fmt;
 use std::rc::Rc;
 use makepad_live_parser::PrettyPrintedF32;
 use makepad_live_parser::id;
-use crate::shaderregistry::ShaderResourceId;
+//use crate::shaderregistry::ShaderResourceId;
 
 // all the Live node pointer newtypes
 
@@ -37,7 +37,7 @@ pub struct VarDefNodePtr(pub LivePtr);
 #[derive(Clone, Debug, Default)]
 pub struct DrawShaderDef {
     pub debug: bool,
-    pub default_geometry: Option<ShaderResourceId>,
+    //pub default_geometry: Option<ShaderResourceId>,
     pub fields: Vec<DrawShaderFieldDef>,
     pub methods: Vec<FnNodePtr>,
     
@@ -61,28 +61,31 @@ pub struct DrawShaderFieldDef {
     pub kind: DrawShaderFieldKind
 }
 
-
+/*
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DrawShaderInputType {
     VarDef(LivePtr),
     ShaderResourceId(ShaderResourceId)
-}
+}*/
 
 #[derive(Clone, Debug)]
 pub enum DrawShaderFieldKind {
     Geometry {
         is_used_in_pixel_shader: Cell<bool >,
-        var_def_node_ptr: VarDefNodePtr,
+        var_def_node_ptr: Option<VarDefNodePtr>,
     },
     Instance {
         is_used_in_pixel_shader: Cell<bool >,
-        input_type: DrawShaderInputType,
+        var_def_node_ptr: Option<VarDefNodePtr>,
+        //input_type: DrawShaderInputType,
     },
     Texture {
-        input_type: DrawShaderInputType,
+        var_def_node_ptr: Option<VarDefNodePtr>,
+        //input_type: DrawShaderInputType,
     },
     Uniform {
-        input_type: DrawShaderInputType,
+        var_def_node_ptr: Option<VarDefNodePtr>,
+        //input_type: DrawShaderInputType,
         block_ident: Ident,
     },
     Varying {
@@ -776,7 +779,50 @@ impl DrawShaderDef {
         uniform_blocks
     }
     
+    pub fn add_uniform(&mut self, name:&str, ty:Ty, span:Span){
+        let id = Id::from_str_check(name).unwrap();
+        self.fields.push(
+            DrawShaderFieldDef {
+                kind: DrawShaderFieldKind::Uniform {
+                    block_ident: Ident(id!(default)),
+                    var_def_node_ptr: None
+                },
+                span,
+                ident: Ident(id),
+                ty_expr: ty.to_ty_expr(),
+            }
+        )
+    }
     
+    pub fn add_instance(&mut self, name:&str, ty:Ty, span:Span){
+        let id = Id::from_str_check(name).unwrap();
+        self.fields.push(
+            DrawShaderFieldDef {
+                kind: DrawShaderFieldKind::Instance {
+                    is_used_in_pixel_shader: Cell::new(false),
+                    var_def_node_ptr: None
+                },
+                span,
+                ident: Ident(id),
+                ty_expr: ty.to_ty_expr(),
+            }
+        )
+    }   
+    
+     
+    pub fn add_texture(&mut self, name:&str, ty:Ty, span:Span){
+        let id = Id::from_str_check(name).unwrap();
+        self.fields.push(
+            DrawShaderFieldDef {
+                kind: DrawShaderFieldKind::Texture {
+                    var_def_node_ptr: None
+                },
+                span,
+                ident: Ident(id),
+                ty_expr: ty.to_ty_expr(),
+            }
+        )
+    }    
 }
 
 impl BinOp {
@@ -1200,7 +1246,7 @@ impl IdentPath {
             }
             let _ = write!(s, "{}", self.segs[i]);
         }
-        Ident(Id::from_str(&s).panic_collision(&s))
+        Ident(Id::from_str_check(&s).unwrap())
     }
     
     pub fn from_str(value: &str) -> Self {

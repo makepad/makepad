@@ -291,8 +291,6 @@ impl<'a> LiveParser<'a> {
                 self.skip_token();
                 // if we get an OpenBrace immediately after, we are a type
                 if self.peek_token() == Token::OpenBrace{
-                    println!("HERE");
-
                     // we now expect a number indexing our typelist
                     self.skip_token();
                     // we expect now a single number
@@ -311,6 +309,7 @@ impl<'a> LiveParser<'a> {
                     else{
                         return Err(self.error(format!("expected live_type index, unexpected token `{}`", token)));
                     }
+                    self.expect_token(Token::CloseBrace)?;
                     self.expect_token(Token::CloseBrace)?;
                 }
                 else{
@@ -508,12 +507,12 @@ impl<'a> LiveParser<'a> {
                                 let token_id = self.get_token_id();
                                 let id = self.expect_class_id_wildcard(ld) ?;
                                 
-                                let crate_module = ld.create_multi_id(&[crate_name, module_name]);
+                                let module_path_ids = ld.create_multi_id(&[crate_name, module_name]);
                                 // alright we have an id thats either a * or a chain.
                                 ld.push_node(level, LiveNode {
                                     token_id,
                                     id_pack: id,
-                                    value: LiveValue::Use {crate_module}
+                                    value: LiveValue::Use {module_path_ids}
                                 });
                                 if !self.accept_token(Token::Punct(id!(,))) {
                                     self.accept_token(Token::Punct(id!(;)));
@@ -523,36 +522,26 @@ impl<'a> LiveParser<'a> {
                                 // ok so we get an ident.
                                 let token_id = self.get_token_id();
                                 let ty = self.expect_class_id(ld) ?;
-                                if self.accept_token(Token::Punct(id!(:))) { // its a vardef
-                                    self.expect_var_def_type() ?;
-                                    // now an assignment might follow.
+                                 self.expect_token(Token::Punct(id!(:)))?;
+                                self.expect_var_def_type() ?;
+                                // now an assignment might follow.
 
-                                    // we should parse full expressions here
-                                    // consts can only depend on other consts, not on live values
-                                    if self.accept_token(Token::Punct(id!(=))){
-                                        self.expect_value_literal()?;
+                                // we should parse full expressions here
+                                // consts can only depend on other consts, not on live values
+                                if self.accept_token(Token::Punct(id!(=))){
+                                    self.expect_value_literal()?;
+                                }
+                                
+                                ld.push_node(level, LiveNode {
+                                    token_id,
+                                    id_pack: ty,
+                                    value: LiveValue::VarDef {
+                                        token_start: token_start as u32,
+                                        token_count: (self.token_index - token_start) as u32,
+                                        scope_start: 0,
+                                        scope_count: 0
                                     }
-                                    
-                                    ld.push_node(level, LiveNode {
-                                        token_id,
-                                        id_pack: ty,
-                                        value: LiveValue::VarDef {
-                                            token_start: token_start as u32,
-                                            token_count: (self.token_index - token_start) as u32,
-                                            scope_start: 0,
-                                            scope_count: 0
-                                        }
-                                    });
-                                }
-                                else { // its a var ref
-                                    ld.push_node(level, LiveNode {
-                                        token_id,
-                                        id_pack: prop_id,
-                                        value: LiveValue::ResourceRef {
-                                            target:ty
-                                        }
-                                    });
-                                }
+                                });
                                 if !self.accept_token(Token::Punct(id!(,))) {
                                     self.accept_token(Token::Punct(id!(;)));
                                 }

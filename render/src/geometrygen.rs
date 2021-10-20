@@ -145,18 +145,18 @@ live_body!{
     GeometryQuad2D: Geometry{
         rust_type: {{GeometryQuad2D}};
         x1: 0.0,
-        y1:  0.0,
+        y1: 0.0,
         x2: 1.0,
         y2: 1.0,
     }    
 }
 
 pub trait GeometryFields{
-    fn geometry_fields(fields: &mut Vec<LiveField>);
+    fn geometry_fields(&self, fields: &mut Vec<LiveField>);
 }
 
 impl GeometryFields for GeometryQuad2D{
-    fn geometry_fields(fields: &mut Vec<LiveField>){
+    fn geometry_fields(&self, fields: &mut Vec<LiveField>){
         fields.push(LiveField::new("geom_pos", Vec2::live_type()));
     }
 }
@@ -185,7 +185,7 @@ impl GeometryQuad2D{
             id!(y2)=>self.y2.live_update(cx, ptr),
             _=>()
         }
-    }    
+    }
 }
 
 impl LiveUpdate for GeometryQuad2D{
@@ -214,6 +214,7 @@ impl LiveNew for GeometryQuad2D{
     }
     
     fn live_register(cx: &mut Cx){
+        cx.register_live_body(live_body());
         struct Factory();
         impl LiveFactory for Factory{
             fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> where Self: Sized{
@@ -221,9 +222,10 @@ impl LiveNew for GeometryQuad2D{
             }
             
             fn live_fields(&self, fields: &mut Vec<LiveField>) where Self: Sized{
-                fields.push(LiveField::new("rect_pos", Vec2::live_type()));
-                fields.push(LiveField::new("rect_size", Vec2::live_type()));
-                fields.push(LiveField::new("draw_depth", f32::live_type()));
+                fields.push(LiveField::new("x1", f32::live_type()));
+                fields.push(LiveField::new("y1", f32::live_type()));
+                fields.push(LiveField::new("x2", f32::live_type()));
+                fields.push(LiveField::new("y2", f32::live_type()));
             }
             
             fn live_type(&self) -> LiveType where Self: Sized{
