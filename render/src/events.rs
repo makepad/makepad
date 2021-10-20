@@ -296,7 +296,7 @@ pub struct FingerDropEvent {
     pub abs: Vec2,
     pub rel: Vec2,
     pub rect: Rect,
-    pub dragged_item: DraggedItem,
+    pub dragged_item: DragItem,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -312,11 +312,6 @@ pub enum DragAction {
     Copy,
     Link,
     Move,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct DraggedItem {
-    pub file_urls: Vec<String>
 }
 
 #[derive(Clone, Debug, PartialEq)]

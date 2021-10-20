@@ -174,11 +174,10 @@ impl Tab {
                     }
                     _ => panic!(),
                 },
-                _ => {}
             },
             Event::FingerDrop(event) => {
                 self.is_dragged = false;
-                dispatch_action(cx, Action::DidReceiveDraggedItem(event.dragged_item))
+                dispatch_action(cx, Action::DidReceiveDragItem(event.dragged_item))
             }
             _ => {}
         }
@@ -197,5 +196,5 @@ struct DrawTab {
 pub enum Action {
     WasPressed,
     ButtonWasPressed,
-    DidReceiveDraggedItem(DraggedItem),
+    DidReceiveDragItem(DragItem),
 }

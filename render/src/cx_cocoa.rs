@@ -703,6 +703,10 @@ impl CocoaApp {
         self.do_callback(&mut vec![Event::Paint]);
     }
     
+    pub fn start_drag(&mut self, _drag_item: DragItem) {
+        println!("Start drag (not yet implemented)");
+        // TODO
+    }
 }
 
 impl CocoaWindow {
@@ -2042,7 +2046,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             abs: pos,
             rel: pos,
             rect: Rect::default(),
-            dragged_item: DraggedItem {
+            dragged_item: DragItem {
                 file_urls,
             }
         })];

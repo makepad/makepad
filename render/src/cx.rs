@@ -193,6 +193,11 @@ pub struct CxPerFinger {
     pub _over_last: Area
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct DragItem {
+    pub file_urls: Vec<String>
+}
+
 pub const NUM_FINGERS: usize = 10;
 
 impl Default for Cx {

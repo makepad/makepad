@@ -244,7 +244,7 @@ impl AppInner {
                         _ => {}
                     }
                 }
-                dock::Action::TabDidReceiveDraggedItem(tab_id, item) => {
+                dock::Action::TabDidReceiveDragItem(tab_id, item) => {
                     let tab = &state.tabs_by_tab_id[tab_id];
                     let panel_id = tab.panel_id;
                     for file_url in &item.file_urls {
@@ -252,7 +252,7 @@ impl AppInner {
                         self.create_code_editor_tab(cx, state, panel_id, Some(tab_id), path);
                     }
                 }
-                dock::Action::ContentsDidReceiveDraggedItem(panel_id, position, item) => {
+                dock::Action::ContentsDidReceiveDragItem(panel_id, position, item) => {
                     let panel_id = match position {
                         DragPosition::Center => panel_id,
                         _ => self.split_tab_panel(cx, state, panel_id, position),
