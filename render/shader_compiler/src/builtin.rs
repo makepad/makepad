@@ -1,7 +1,7 @@
 macro_rules! builtin {
     ($f:ident, [$(($($a:path),*) -> $b:path),*]) => {
         (
-            Ident(Id::from_str(stringify!($f))),
+            Ident(Id::from_str_unchecked(stringify!($f))),
             Builtin {
                 return_tys: [$(
                     (

@@ -26,12 +26,12 @@ pub fn id(item: TokenStream) -> TokenStream {
     // item HAS to be an identifier.
     let mut parser = TokenParser::new(item);
     if let Some(name) = parser.eat_any_ident() {
-        let id = Id::from_str(&name.to_string());
+        let id = Id::from_str_unchecked(&name.to_string());
         tb.add("Id (").suf_u64(id.0).add(")");
         tb.end()
     }
     else if let Some(punct) = parser.eat_any_punct(){
-        let id = Id::from_str(&punct.to_string());
+        let id = Id::from_str_unchecked(&punct.to_string());
         tb.add("Id (").suf_u64(id.0).add(")");
         tb.end()
     }
@@ -43,7 +43,7 @@ pub fn id(item: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn id_pack(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
-    let id = Id::from_str(&item.to_string());
+    let id = Id::from_str_unchecked(&item.to_string());
     tb.add("IdPack (").suf_u64(id.0).add(")");
     tb.end()
 }

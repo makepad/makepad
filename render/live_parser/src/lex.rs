@@ -350,7 +350,7 @@ C: Iterator<Item = char>,
                     "true" => Token::Bool(true),
                     "false" => Token::Bool(false),
                     _ => {
-                        match Id::from_str_check(&self.temp_string){
+                        match Id::from_str(&self.temp_string){
                             Err(collide)=>return Err(span.error(self, format!("Id has collision {} with {}, please rename one of them", self.temp_string, collide).into())),
                             Ok(id)=>Token::Ident(id)
                         }
