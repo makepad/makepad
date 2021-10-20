@@ -1,7 +1,7 @@
 use crate::cx::*;
 
 live_body!{
-    DrawShader2D: Shader{
+    DrawShader2D: DrawShader{
         uniform camera_projection: mat4 in pass;
         uniform camera_view: mat4 in pass;
         uniform camera_inv: mat4 in pass;

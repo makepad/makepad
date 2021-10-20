@@ -508,7 +508,7 @@ impl fmt::Debug for Object {
         write!(f, "<{:?}: {:p}>", self.class(), self)
     }
 }
-
+/*
 #[cfg(test)]
 mod tests {
     use test_utils;
@@ -612,4 +612,4 @@ mod tests {
         };
         assert!(result == 4);
     }
-}
+}*/

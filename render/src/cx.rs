@@ -5,13 +5,12 @@ use std::time::{Instant};
 pub use makepad_render_derive::*;
 pub use makepad_live_parser::math::*;
 use makepad_shader_compiler::ShaderRegistry;
-pub use makepad_shader_compiler::DrawShaderInput;
 pub use makepad_live_parser::Id;
 pub use makepad_live_parser::LivePtr;
 pub use makepad_live_parser::LiveNode;
 pub use makepad_live_parser::LiveType;
 pub use makepad_live_parser::LiveValue;
-pub use makepad_live_parser::CrateModule;
+pub use makepad_live_parser::ModulePath;
 pub use makepad_live_parser::id;
 pub use makepad_shader_compiler::Ty;
 
@@ -110,8 +109,8 @@ pub struct Cx {
     pub align_list: Vec<Area>,
     
     pub live_factories: HashMap<LiveType, Box<dyn LiveFactory>>,
-    //pub typed_geometry: HashMap<std::any::TypeId, usize>,
-   
+    pub live_ptr_to_shader: HashMap<LivePtr, Shader>,
+    
     pub redraw_child_areas: Vec<Area>,
     pub redraw_parent_areas: Vec<Area>,
     pub _redraw_child_areas: Vec<Area>,
@@ -251,6 +250,7 @@ impl Default for Cx {
             align_list: Vec::new(),
             
             live_factories: HashMap::new(),
+            live_ptr_to_shader: HashMap::new(),
             
             redraw_parent_areas: Vec::new(),
             _redraw_parent_areas: Vec::new(),

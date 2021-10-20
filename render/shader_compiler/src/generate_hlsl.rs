@@ -714,8 +714,8 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
                                     _ => write!(string, ".z").unwrap(),
                                 }
                             }
-                            write!(string, ")").unwrap();
                         }
+                        write!(string, ")").unwrap();
                         return
                     },
                     Ty::Mat2 => {

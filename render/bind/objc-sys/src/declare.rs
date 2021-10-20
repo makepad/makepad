@@ -313,7 +313,7 @@ impl ProtocolDecl {
         }
     }
 }
-
+/*
 #[cfg(test)]
 mod tests {
     use test_utils;
@@ -337,4 +337,4 @@ mod tests {
             assert!(result == 7);
         }
     }
-}
+}*/
