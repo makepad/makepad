@@ -492,7 +492,7 @@ impl<'a> LiveParser<'a> {
                                     id_pack: IdPack::single(prop_id),
                                     value: LiveValue::Fn {
                                         token_start: token_start as u32,
-                                        token_count: (token_index - token_start) as u32,
+                                        token_count: (token_index - token_start + 1) as u32,
                                         scope_start: 0,
                                         scope_count: 0
                                     }

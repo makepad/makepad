@@ -370,7 +370,7 @@ fn main() {
     struct FakeType();
     
     let fake_typeof = LiveType(std::any::TypeId::of::<FakeType>());
-    let module_path = ModulePath::from_module_path_str_check("test").unwrap();
+    let module_path = ModulePath::from_module_path_str("test").unwrap();
     match sr.live_registry.parse_live_file("test.live", module_path, SOURCE.to_string(), vec![fake_typeof]) {
         Err(why) => panic!("Couldnt parse file {}", why),
         _ => ()

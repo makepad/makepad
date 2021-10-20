@@ -780,7 +780,7 @@ impl DrawShaderDef {
     }
     
     pub fn add_uniform(&mut self, name:&str, ty:Ty, span:Span){
-        let id = Id::from_str_check(name).unwrap();
+        let id = Id::from_str(name).unwrap();
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Uniform {
@@ -795,7 +795,7 @@ impl DrawShaderDef {
     }
     
     pub fn add_instance(&mut self, name:&str, ty:Ty, span:Span){
-        let id = Id::from_str_check(name).unwrap();
+        let id = Id::from_str(name).unwrap();
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Instance {
@@ -811,7 +811,7 @@ impl DrawShaderDef {
     
      
     pub fn add_texture(&mut self, name:&str, ty:Ty, span:Span){
-        let id = Id::from_str_check(name).unwrap();
+        let id = Id::from_str(name).unwrap();
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Texture {
@@ -1246,12 +1246,12 @@ impl IdentPath {
             }
             let _ = write!(s, "{}", self.segs[i]);
         }
-        Ident(Id::from_str_check(&s).unwrap())
+        Ident(Id::from_str(&s).unwrap())
     }
     
     pub fn from_str(value: &str) -> Self {
         let mut p = IdentPath::default();
-        p.segs[0] = Id::from_str(value);
+        p.segs[0] = Id::from_str_unchecked(value);
         p.len = 1;
         p
     }

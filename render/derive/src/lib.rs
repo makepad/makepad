@@ -1,7 +1,7 @@
 #![feature(proc_macro_span)]
 use proc_macro::{TokenStream, Span, Delimiter};
-mod live_component; 
-use crate::live_component::*;
+//mod live_component; 
+//use crate::live_component::*;
 #[path = "../../microserde/derive/src/macro_lib.rs"]
 mod macro_lib;
 use crate::macro_lib::*;
@@ -10,12 +10,12 @@ use std::fmt::Write;
 //use crate::id::*;
 #[path = "../../live_parser/src/id.rs"]
 mod id; 
-
+/*
 #[proc_macro_derive(LiveComponent)] 
 pub fn live_derive(input: TokenStream) -> TokenStream {
     live_component_impl(input)
 }
-
+*/
 
 #[proc_macro]
 pub fn live_body(input: TokenStream) -> TokenStream {
