@@ -122,7 +122,7 @@ impl FileTree {
         self.file_node_name.draw_text_walk(cx, name);
         self.file_node.end_quad(cx);
         self.logic
-            .set_node_area(file_node_id.0, self.file_node.area());
+            .set_node_area(cx, file_node_id.0, self.file_node.area());
         cx.turtle_new_line();
         self.stack.push(scale * info.is_expanded_fraction);
         if info.is_fully_collapsed() {
@@ -151,7 +151,7 @@ impl FileTree {
         self.file_node_name.draw_text_walk(cx, name);
         self.file_node.end_quad(cx);
         self.logic
-            .set_node_area(file_node_id.0, self.file_node.area());
+            .set_node_area(cx, file_node_id.0, self.file_node.area());
         cx.turtle_new_line();
         self.logic.end_node();
     }
