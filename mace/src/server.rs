@@ -1,7 +1,7 @@
 use {
     crate::{
         delta::Delta,
-        protocol::{DirectoryEntry, Error, FileNode, Notification, Request, Response},
+        protocol::{DirectoryEntry, Error, FileNode, FileTree, Notification, Request, Response},
         text::Text,
     },
     std::{
@@ -62,7 +62,7 @@ impl Connection {
         }
     }
 
-    pub fn get_file_tree(&self) -> Result<FileNode, Error> {
+    pub fn get_file_tree(&self) -> Result<FileTree, Error> {
         fn get_directory_entries(path: &Path) -> Result<Vec<DirectoryEntry>, Error> {
             let mut entries = Vec::new();
             for entry in fs::read_dir(path).map_err(|error| Error::Unknown(error.to_string()))? {
@@ -83,8 +83,11 @@ impl Connection {
             Ok(entries)
         }
 
-        Ok(FileNode::Directory {
-            entries: get_directory_entries(&self.shared.path)?,
+        Ok(FileTree {
+            path: self.shared.path.clone(),
+            root: FileNode::Directory {
+                entries: get_directory_entries(&self.shared.path)?,
+            }
         })
     }
 

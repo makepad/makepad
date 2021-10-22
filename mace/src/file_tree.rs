@@ -291,6 +291,10 @@ impl FileTree {
         }
     }
 
+    pub fn start_dragging_file_node(&mut self, cx: &mut Cx, file_node_id: FileNodeId, dragged_item: DraggedItem) {
+        self.logic.start_dragging_node(cx, file_node_id.0, dragged_item);
+    }
+
     pub fn redraw(&mut self, cx: &mut Cx) {
         self.view.redraw_view(cx);
     }
@@ -309,21 +313,27 @@ impl FileTree {
             .handle_event(cx, event, &mut |action| actions.push(action));
         for action in actions {
             match action {
-                tree_logic::Action::TreeDidAnimate => {
+                tree_logic::Action::TreeWasAnimated => {
                     self.redraw(cx);
-                }
-                tree_logic::Action::NodeWasPressed(node_id) => {
-                    let file_node_id = FileNodeId(node_id);
-                    self.toggle_file_node_is_expanded(cx, file_node_id, true);
-                    self.set_selected_file_node_id(cx, file_node_id);
-                    dispatch_action(cx, Action::NodeWasPressed(file_node_id));
                 }
                 tree_logic::Action::NodeWasEntered(node_id) => {
                     let file_node_id = FileNodeId(node_id);
                     self.set_hovered_file_node_id(cx, Some(file_node_id));
                 }
-                tree_logic::Action::NodeWasExited(_) => {
-                    self.set_hovered_file_node_id(cx, None);
+                tree_logic::Action::NodeWasExited(node_id) => {
+                    if self.logic.hovered_node_id() == Some(node_id) {
+                        self.set_hovered_file_node_id(cx, None);
+                    }
+                }
+                tree_logic::Action::NodeWasPressed(node_id) => {
+                    let file_node_id = FileNodeId(node_id);
+                    self.toggle_file_node_is_expanded(cx, file_node_id, true);
+                    self.set_selected_file_node_id(cx, file_node_id);
+                    dispatch_action(cx, Action::FileNodeWasPressed(file_node_id));
+                }
+                tree_logic::Action::NodeShouldStartDragging(node_id) => {
+                    let file_node_id = FileNodeId(node_id);
+                    dispatch_action(cx, Action::FileNodeShouldStartDragging(file_node_id));
                 }
             }
         }
@@ -340,5 +350,6 @@ impl AsRef<Id> for FileNodeId {
 }
 
 pub enum Action {
-    NodeWasPressed(FileNodeId),
+    FileNodeWasPressed(FileNodeId),
+    FileNodeShouldStartDragging(FileNodeId),
 }
