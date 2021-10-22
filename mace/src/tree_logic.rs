@@ -11,6 +11,7 @@ pub struct TreeLogic {
     animating_node_ids: HashSet<NodeId>,
     hovered_node_id: Option<NodeId>,
     selected_node_ids: HashSet<NodeId>,
+    dragging_node_id: Option<NodeId>,
     next_frame: NextFrame,
 }
 
@@ -115,6 +116,10 @@ impl TreeLogic {
         }
     }
 
+    pub fn hovered_node_id(&mut self) -> Option<NodeId> {
+        self.hovered_node_id
+    }
+
     pub fn set_hovered_node_id(&mut self, node_id: Option<NodeId>) -> bool {
         if self.hovered_node_id == node_id {
             return false;
@@ -130,6 +135,11 @@ impl TreeLogic {
         self.selected_node_ids.clear();
         self.selected_node_ids.insert(node_id);
         true
+    }
+
+    pub fn start_dragging_node(&mut self, cx: &mut Cx, node_id: NodeId, dragged_item: DraggedItem) {
+        self.dragging_node_id = Some(node_id);
+        cx.start_dragging(dragged_item);
     }
 
     pub fn handle_event(
@@ -148,7 +158,7 @@ impl TreeLogic {
                         new_animating_node_ids.insert(*node_id);
                     }
                 }
-                dispatch_action(Action::TreeDidAnimate);
+                dispatch_action(Action::TreeWasAnimated);
                 self.animating_node_ids = new_animating_node_ids;
                 self.update_next_frame(cx);
             }
@@ -159,11 +169,9 @@ impl TreeLogic {
                             cx.set_hover_mouse_cursor(MouseCursor::Hand);
                             match event.hover_state {
                                 HoverState::In => {
-                                    println!("Mouse entered node {:?} with area {:?} and rect {:?}", node_id, area, area.get_rect(cx));
                                     dispatch_action(Action::NodeWasEntered(*node_id));
                                 }
                                 HoverState::Out => {
-                                    println!("Mouse exited node {:?} with area {:?} and rect {:?}", node_id, area, area.get_rect(cx));
                                     dispatch_action(Action::NodeWasExited(*node_id));
                                 }
                                 _ => {}
@@ -173,7 +181,9 @@ impl TreeLogic {
                             dispatch_action(Action::NodeWasPressed(*node_id));
                         }
                         Event::FingerMove(_) => {
-                            println!("Finger was moved over node {:?}", node_id);
+                            if self.dragging_node_id.is_none() {
+                                dispatch_action(Action::NodeShouldStartDragging(*node_id));
+                            }
                         }
                         _ => {}
                     }
@@ -275,8 +285,9 @@ impl AnimatedBool {
 }
 
 pub enum Action {
-    TreeDidAnimate,
+    TreeWasAnimated,
     NodeWasEntered(NodeId),
     NodeWasExited(NodeId),
     NodeWasPressed(NodeId),
+    NodeShouldStartDragging(NodeId),
 }

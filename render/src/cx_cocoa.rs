@@ -703,8 +703,8 @@ impl CocoaApp {
         self.do_callback(&mut vec![Event::Paint]);
     }
     
-    pub fn start_drag(&mut self, _drag_item: DragItem) {
-        println!("Start drag (not yet implemented)");
+    pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
+        println!("Start dragging {:?}", dragged_item);
         // TODO
     }
 }
@@ -1615,8 +1615,8 @@ pub fn define_cocoa_window_delegate() -> *const Class {
         decl.add_method(sel!(windowDidEndLiveResize:), window_did_end_live_resize as extern fn(&Object, Sel, id));
         
         decl.add_method(sel!(windowDidMove:), window_did_move as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(windowDidChangeScreen:), window_did_change_screen as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(windowDidChangeBackingProperties:), window_did_change_backing_properties as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(windowChangedScreen:), window_did_change_screen as extern fn(&Object, Sel, id));
+        decl.add_method(sel!(windowChangedBackingProperties:), window_did_change_backing_properties as extern fn(&Object, Sel, id));
         decl.add_method(sel!(windowDidBecomeKey:), window_did_become_key as extern fn(&Object, Sel, id));
         decl.add_method(sel!(windowDidResignKey:), window_did_resign_key as extern fn(&Object, Sel, id));
         
@@ -2046,7 +2046,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             abs: pos,
             rel: pos,
             rect: Rect::default(),
-            dragged_item: DragItem {
+            dragged_item: DraggedItem {
                 file_urls,
             }
         })];

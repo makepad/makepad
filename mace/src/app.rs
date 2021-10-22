@@ -202,7 +202,7 @@ impl AppInner {
             .handle_event(cx, event, &mut |_, action| actions.push(action));
         for action in actions {
             match action {
-                dock::Action::SplitPanelDidChange(panel_id) => {
+                dock::Action::SplitPanelChanged(panel_id) => {
                     self.dock.redraw(cx);
                     self.redraw_panel(cx, state, panel_id);
                 }
@@ -244,7 +244,7 @@ impl AppInner {
                         _ => {}
                     }
                 }
-                dock::Action::TabDidReceiveDragItem(tab_id, item) => {
+                dock::Action::TabReceivedDraggedItem(tab_id, item) => {
                     let tab = &state.tabs_by_tab_id[tab_id];
                     let panel_id = tab.panel_id;
                     for file_url in &item.file_urls {
@@ -252,7 +252,7 @@ impl AppInner {
                         self.create_code_editor_tab(cx, state, panel_id, Some(tab_id), path);
                     }
                 }
-                dock::Action::ContentsDidReceiveDragItem(panel_id, position, item) => {
+                dock::Action::ContentsReceivedDraggedItem(panel_id, position, item) => {
                     let panel_id = match position {
                         DragPosition::Center => panel_id,
                         _ => self.split_tab_panel(cx, state, panel_id, position),
@@ -270,7 +270,7 @@ impl AppInner {
             .handle_event(cx, event, &mut |_cx, action| actions.push(action));
         for action in actions {
             match action {
-                file_tree::Action::NodeWasPressed(file_node_id) => {
+                file_tree::Action::FileNodeWasPressed(file_node_id) => {
                     let node = &state.file_nodes_by_file_node_id[file_node_id];
                     if node.is_file() {
                         let path = state.file_node_path(file_node_id);
@@ -278,6 +278,12 @@ impl AppInner {
                             self.create_code_editor_tab(cx, state, state.panel_id, None, path);
                         }
                     }
+                }
+                file_tree::Action::FileNodeShouldStartDragging(file_node_id) => {
+                    let path = state.file_node_path(file_node_id);
+                    self.file_tree.start_dragging_file_node(cx, file_node_id, DraggedItem {
+                        file_urls: vec![String::from("file://") + &*path.into_os_string().to_string_lossy()]
+                    })
                 }
             }
         }
@@ -371,9 +377,9 @@ impl AppInner {
         }
     }
 
-    fn set_file_tree(&mut self, cx: &mut Cx, state: &mut State, root: protocol::FileNode) {
+    fn set_file_tree(&mut self, cx: &mut Cx, state: &mut State, file_tree: protocol::FileTree) {
         self.file_tree.forget();
-        state.set_file_tree(root);
+        state.set_file_tree(file_tree);
         self.file_tree
             .set_file_node_is_expanded(cx, state.root_file_node_id, true, true);
         self.file_tree.redraw(cx);
@@ -563,6 +569,7 @@ struct State {
     file_tree_tab_id: TabId,
     file_node_id_allocator: IdAllocator,
     file_nodes_by_file_node_id: IdMap<FileNodeId, FileNode>,
+    path: PathBuf,
     root_file_node_id: FileNodeId,
     code_editor_state: code_editor::State,
 }
@@ -641,6 +648,7 @@ impl State {
             file_tree_tab_id,
             file_node_id_allocator,
             file_nodes_by_file_node_id,
+            path: PathBuf::new(),
             root_file_node_id,
             code_editor_state: code_editor::State::new(),
         }
@@ -653,10 +661,10 @@ impl State {
             components.push(&edge.name);
             file_node = &self.file_nodes_by_file_node_id[edge.file_node_id];
         }
-        components.into_iter().rev().collect::<PathBuf>()
+        self.path.join(components.into_iter().rev().collect::<PathBuf>())
     }
 
-    fn set_file_tree(&mut self, root: protocol::FileNode) {
+    fn set_file_tree(&mut self, file_tree: protocol::FileTree) {
         fn create_file_node(
             file_node_id_allocator: &mut IdAllocator,
             file_nodes_by_file_node_id: &mut IdMap<FileNodeId, FileNode>,
@@ -696,13 +704,14 @@ impl State {
             file_node_id
         }
 
+        self.path = file_tree.path;
         self.file_node_id_allocator.clear();
         self.file_nodes_by_file_node_id.clear();
         self.root_file_node_id = create_file_node(
             &mut self.file_node_id_allocator,
             &mut self.file_nodes_by_file_node_id,
             None,
-            root,
+            file_tree.root,
         );
     }
 }
