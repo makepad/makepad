@@ -296,7 +296,7 @@ pub struct FingerDropEvent {
     pub abs: Vec2,
     pub rel: Vec2,
     pub rect: Rect,
-    pub dragged_item: DragItem,
+    pub dragged_item: DraggedItem,
 }
 
 #[derive(Clone, Debug, PartialEq)]
