@@ -20,10 +20,16 @@ pub enum ResponseOrNotification {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Response {
-    GetFileTree(Result<FileNode, Error>),
+    GetFileTree(Result<FileTree, Error>),
     OpenFile(Result<(PathBuf, usize, Text), Error>),
     ApplyDelta(Result<PathBuf, Error>),
     CloseFile(Result<PathBuf, Error>),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FileTree {
+    pub path: PathBuf,
+    pub root: FileNode,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
