@@ -279,9 +279,9 @@ impl AppInner {
                         }
                     }
                 }
-                file_tree::Action::FileNodeShouldStartDragging(file_node_id) => {
+                file_tree::Action::FileNodeShouldStartDragging(window_id, file_node_id) => {
                     let path = state.file_node_path(file_node_id);
-                    self.file_tree.start_dragging_file_node(cx, file_node_id, DraggedItem {
+                    self.file_tree.start_dragging_file_node(cx, window_id, file_node_id, DraggedItem {
                         file_urls: vec![String::from("file://") + &*path.into_os_string().to_string_lossy()]
                     })
                 }
