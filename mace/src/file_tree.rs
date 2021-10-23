@@ -291,8 +291,8 @@ impl FileTree {
         }
     }
 
-    pub fn start_dragging_file_node(&mut self, cx: &mut Cx, file_node_id: FileNodeId, dragged_item: DraggedItem) {
-        self.logic.start_dragging_node(cx, file_node_id.0, dragged_item);
+    pub fn start_dragging_file_node(&mut self, cx: &mut Cx, window_id: usize, file_node_id: FileNodeId, dragged_item: DraggedItem) {
+        self.logic.start_dragging_node(cx, window_id, file_node_id.0, dragged_item);
     }
 
     pub fn redraw(&mut self, cx: &mut Cx) {
@@ -331,9 +331,9 @@ impl FileTree {
                     self.set_selected_file_node_id(cx, file_node_id);
                     dispatch_action(cx, Action::FileNodeWasPressed(file_node_id));
                 }
-                tree_logic::Action::NodeShouldStartDragging(node_id) => {
+                tree_logic::Action::NodeShouldStartDragging(window_id, node_id) => {
                     let file_node_id = FileNodeId(node_id);
-                    dispatch_action(cx, Action::FileNodeShouldStartDragging(file_node_id));
+                    dispatch_action(cx, Action::FileNodeShouldStartDragging(window_id, file_node_id));
                 }
             }
         }
