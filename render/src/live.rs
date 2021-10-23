@@ -126,12 +126,17 @@ impl Cx {
                 Ok(draw_shader_def) => {
                     // OK! SO the shader parsed
                     let shader_id = self.shaders.len();
+                    let mut mapping =  CxShaderMapping::from_draw_shader_def(draw_shader_def, true);
+                    mapping.update_live_uniforms(&self.shader_registry.live_registry);
+                    
                     self.shaders.push(CxShader {
                         name: "todo".to_string(),
                         default_geometry: geometry_fields.get_geometry(),
                         platform: None,
-                        mapping: CxShaderMapping::from_draw_shader_def(draw_shader_def, true)
+                        mapping: mapping
                     });
+                    // ok so. maybe we should fill the live_uniforms buffer?
+                    
                     self.live_ptr_to_shader_id.insert(live_ptr, shader_id);
                     self.shader_compile_set.insert(live_ptr);
                     // now we simply queue it somewhere somehow to compile.

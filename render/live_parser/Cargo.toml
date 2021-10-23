@@ -8,4 +8,4 @@ edition = "2018"
 
 [dependencies]
 makepad-microserde = { path = "../microserde", version = "0.1" }
-makepad-live-macros = { path = "live_macros", version = "0.1" }
+makepad-id-macros = { path = "id_macros", version = "0.1" }
