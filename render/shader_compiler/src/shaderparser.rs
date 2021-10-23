@@ -239,7 +239,7 @@ impl<'a> ShaderParser<'a> {
                     self.expect_ident() ?
                 }
                 else {
-                    Ident(id!(default))
+                    Ident(id!(user))
                 };
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Uniform {
