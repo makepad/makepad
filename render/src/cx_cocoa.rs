@@ -702,11 +702,6 @@ impl CocoaApp {
     pub fn send_paint_event(&mut self) {
         self.do_callback(&mut vec![Event::Paint]);
     }
-    
-    pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
-        println!("Start dragging {:?}", dragged_item);
-        // TODO
-    }
 }
 
 impl CocoaWindow {
@@ -1086,6 +1081,38 @@ impl CocoaWindow {
             was_paste: false,
             replace_last: replace_last
         })])
+    }
+
+    pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
+        println!("Start dragging {:?}", dragged_item);
+
+        let dragging_items = dragged_item.file_urls.iter().map(|file_url| {
+            let pasteboard_item: id = msg_send![class!(NSPasteboardItem), new];
+            let _: () = msg_send![
+                pasteboard_item,
+                setString:str_to_nsstring(file_url)
+                forType:NSPasteboardTypeFileURL
+            ];
+            let dragging_item: id = msg_send![
+                class!(NSDraggingItem),
+                initWithPasteboardWriter: pasteboard_item
+            ];
+            let bounds: NSRect = msg_send![self.view, bounds];
+            let _: () = msg_send![dragging_item, setDraggingFrame: bounds contents: self.view];
+            dragging_item
+        }).collect::<Vec<_>>();
+
+        /*
+         self.delegate?.cellClick(self ,index:self.index)
+        //
+        let pasteboardItem = NSPasteboardItem()
+        pasteboardItem.setString(zText!.stringValue, forType:.string)
+        let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardItem)
+        draggingItem.setDraggingFrame(self.bounds, contents:self)
+        beginDraggingSession(with: [draggingItem], event: event, source: self.zIcon.image)
+        */
+
+        // TODO
     }
 }
 
@@ -1679,7 +1706,7 @@ pub fn define_cocoa_view_class() -> *const Class {
                 );
                 (*this).set_ivar("markedText", marked_text);
             }
-            let types = [NSPasteboardTypeURL];
+            let types = [NSPasteboardTypeFileURL];
             let types_nsarray: id = msg_send![
                 class!(NSArray),
                 arrayWithObjects: types.as_ptr()

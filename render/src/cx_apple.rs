@@ -23,7 +23,7 @@ extern {
     pub static NSPasteboardURLReadingFileURLsOnlyKey: id;
 
     pub static NSStringPboardType: id;
-    pub static NSPasteboardTypeURL: id;
+    pub static NSPasteboardTypeFileURL: id;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
