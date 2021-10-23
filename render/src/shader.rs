@@ -1,5 +1,7 @@
 use crate::cx::*;
 use makepad_shader_compiler::Ty;
+use makepad_shader_compiler::shaderast::DrawShaderDef;
+use makepad_shader_compiler::shaderast::DrawShaderFieldKind;
 use std::collections::HashMap;
 
 #[derive(PartialEq, Copy, Clone, Hash, Eq, Debug, PartialOrd, Ord)]
@@ -9,10 +11,10 @@ impl LiveItemId {
     fn as_index(&self) -> u64 {self.0}
 }
 
-#[derive(Copy, Clone, Default, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub struct Shader {
     pub shader_id: usize,
-    pub location_hash: u64
+    pub live_ptr: LivePtr
 }
 
 pub enum ShaderCompileResult{
@@ -25,6 +27,7 @@ pub struct PropDef {
     pub name: String,
     pub ty: Ty,
     pub id: Id,
+    pub live_ptr: Option<LivePtr>
 }
 
 #[derive(Debug, Default, Clone)]
@@ -210,70 +213,81 @@ pub struct CxShaderMapping {
 }
 
 impl CxShaderMapping {
-    /*
-    pub fn from_shader_ast(shader_ast: ShaderAst, options: ShaderCompileOptions, metal_uniform_packing:bool) -> Self {
+    
+    pub fn from_draw_shader_def(draw_shader_def: &DrawShaderDef, metal_uniform_packing:bool)->CxShaderMapping{//}, options: ShaderCompileOptions, metal_uniform_packing:bool) -> Self {
         
         let mut instances = Vec::new();
         let mut geometries = Vec::new();
         let mut user_uniforms = Vec::new();
-        let mut live_uniforms = Vec::new();
+        let  live_uniforms = Vec::new();
         let mut draw_uniforms = Vec::new();
         let mut view_uniforms = Vec::new();
         let mut pass_uniforms = Vec::new();
         let mut textures = Vec::new();
-        for decl in shader_ast.decls {
-            match decl {
-                Decl::Geometry(decl) => {
-                    let prop_def = PropDef {
-                        name: decl.ident.to_string(),
-                        ty: decl.ty_expr.ty.borrow().clone().unwrap(),
-                        live_item_id: decl.qualified_ident_path.to_live_item_id()
-                    };
-                    geometries.push(prop_def);
+        
+        for field in &draw_shader_def.fields {
+            match &field.kind {
+                DrawShaderFieldKind::Geometry{var_def_node_ptr,..} => {
+                    geometries.push(PropDef {
+                        name: field.ident.to_string(),
+                        ty: field.ty_expr.ty.borrow().clone().unwrap(),
+                        id: field.ident.0,
+                        live_ptr: if let Some(l) = var_def_node_ptr{Some(l.0)}else{None}
+                    });
                 }
-                Decl::Instance(decl) => {
-                    let prop_def = PropDef {
-                        name: decl.ident.to_string(),
-                        ty: decl.ty_expr.ty.borrow().clone().unwrap(),
-                        live_item_id: decl.qualified_ident_path.to_live_item_id()
-                    };
-                    instances.push(prop_def);
+                DrawShaderFieldKind::Instance{var_def_node_ptr, ..} => {
+                    instances.push(PropDef {
+                        name: field.ident.to_string(),
+                        ty: field.ty_expr.ty.borrow().clone().unwrap(),
+                        id: field.ident.0,
+                        live_ptr: if let Some(l) = var_def_node_ptr{Some(l.0)}else{None}
+                    });
                 }
-                Decl::Uniform(decl) => {
+                DrawShaderFieldKind::Uniform{var_def_node_ptr,block_ident,..} => {
                     let prop_def = PropDef {
-                        name: decl.ident.to_string(),
-                        ty: decl.ty_expr.ty.borrow().clone().unwrap(),
-                        live_item_id: decl.qualified_ident_path.to_live_item_id()
+                        name: field.ident.to_string(),
+                        ty: field.ty_expr.ty.borrow().clone().unwrap(),
+                        id: field.ident.0,
+                        live_ptr: if let Some(l) = var_def_node_ptr{Some(l.0)}else{None}
                     };
-                    match decl.block_ident {
-                        Some(bi) if bi == Ident::new("draw") => {
+                    match block_ident.0 {
+                        id!(draw) => {
                             draw_uniforms.push(prop_def);
                         }
-                        Some(bi) if bi == Ident::new("view") => {
+                        id!(view) => {
                             view_uniforms.push(prop_def);
                         }
-                        Some(bi) if bi == Ident::new("pass") => {
+                        id!(pass) => {
                             pass_uniforms.push(prop_def);
                         }
-                        None => {
+                        id!(default) => {
                             user_uniforms.push(prop_def);
                         }
                         _ => ()
                     }
                 }
-                Decl::Texture(decl) => {
-                    let prop_def = PropDef {
-                        name: decl.ident.to_string(),
-                        ty: decl.ty_expr.ty.borrow().clone().unwrap(),
-                        live_item_id: decl.qualified_ident_path.to_live_item_id()
-                    };
-                    textures.push(prop_def);
+                DrawShaderFieldKind::Texture{var_def_node_ptr, ..} => {
+                    textures.push(PropDef {
+                        name: field.ident.to_string(),
+                        ty: field.ty_expr.ty.borrow().clone().unwrap(),
+                        id: field.ident.0,
+                        live_ptr: if let Some(l) = var_def_node_ptr{Some(l.0)}else{None}
+                    });
                 }
                 _ => ()
             }
         }
         
-         for (ty, qualified_ident_path) in shader_ast.livestyle_uniform_deps.borrow().as_ref().unwrap() {
+        // ok now the live uniforms
+        for (_value_node_ptr, _ty) in draw_shader_def.all_live_refs.borrow().iter(){
+            /*
+            live_uniforms.push(PropDef {
+                name: field.ident.to_string(),
+                ty: field.ty_expr.ty.borrow().clone().unwrap(),
+                id: field.ident.0,
+                live_ptr: if let Some(l) = var_def_node_ptr{Some(l.0)}else{None}
+            });
+            
             let prop_def = PropDef {
                 name: {
                     let mut out = format!("mpsc_live_");
@@ -283,7 +297,7 @@ impl CxShaderMapping {
                 ty: ty.clone(),
                 live_item_id: qualified_ident_path.to_live_item_id()
             };
-            live_uniforms.push(prop_def)
+            live_uniforms.push(prop_def)*/
         }
         
         
@@ -298,12 +312,7 @@ impl CxShaderMapping {
             instance_props: InstanceProps::construct(&instances),
             geometry_props: InstanceProps::construct(&geometries),
             textures: textures,
-            const_table: if options.create_const_table {
-                shader_ast.const_table.borrow_mut().take()
-            }
-            else {
-                None
-            },
+            const_table: None,
             instances,
             geometries,
             pass_uniforms,
@@ -313,7 +322,7 @@ impl CxShaderMapping {
             user_uniforms
         }
     }
-    
+    /*
     pub fn update_live_uniforms(&mut self, live_styles: &LiveStyles) {
         // and write em into the live_uniforms buffer
         for prop in &self.live_uniform_props.props {

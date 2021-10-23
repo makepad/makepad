@@ -393,9 +393,9 @@ fn main() {
     
     let result = sr.analyse_draw_shader(shader_ptr, | span, id, _live_type, draw_shader_def | {
         if id == id!(rust_type) {
-            draw_shader_def.add_uniform("duni", Ty::Float, span);
-            draw_shader_def.add_instance("dinst", Ty::Float, span);
-            draw_shader_def.add_instance("dmat", Ty::Mat3, span);
+            draw_shader_def.add_uniform(Id::from_str("duni").unwrap(), Ty::Float, span);
+            draw_shader_def.add_instance(Id::from_str("dinst").unwrap(), Ty::Float, span);
+            draw_shader_def.add_instance(Id::from_str("dmat").unwrap(), Ty::Mat3, span);
         }
         if id == id!(geometry) {
             

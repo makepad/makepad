@@ -23,9 +23,8 @@ impl Cx {
         
         let mut metal_windows: Vec<MetalWindow> = Vec::new();
         
-        self.mtl_compile_all_shaders(&metal_cx);
-        
-        self.load_all_fonts();
+        //self.mtl_compile_all_shaders(&metal_cx);
+        //self.load_all_fonts();
         
         self.call_event_handler(&mut Event::Construct);
         
@@ -239,7 +238,8 @@ impl Cx {
                     cocoa_app.terminate_event_loop();
                 }
             }
-            
+
+            self.mtl_compile_shaders(&metal_cx);
             /*
             if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0 {
                 let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
@@ -247,7 +247,6 @@ impl Cx {
                 self.mtl_update_all_shaders(&metal_cx, &mut errors);
                 self.call_live_recompile_event(changed_live_bodies, errors);
             }
-            
             self.process_live_style_errors();*/
             
             if  self.redraw_parent_areas.len() != 0
