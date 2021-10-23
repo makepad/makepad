@@ -1,5 +1,5 @@
 #![allow(unused_variables)]
-use makepad_live_macros::*;
+use makepad_id_macros::*;
 use crate::id::{Id, IdPack, IdUnpack, IdFmt};
 use std::fmt;
 use crate::span::Span;

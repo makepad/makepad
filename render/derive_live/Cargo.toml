@@ -1,9 +1,9 @@
 [package]
-name = "makepad-live-macros"
+name = "makepad-derive-live"
 version = "0.1.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
-description = "Makepad live macros"
+description = "Makepad render derive macros"
 license = "MIT"
 
 [lib]
@@ -11,4 +11,6 @@ proc-macro = true
 
 [dependencies]
 
-
+[features]
+default = ["nightly"]
+nightly = []

@@ -1,6 +1,6 @@
 use crate::id::{Id, IdPack, IdUnpack, IdFmt};
 use crate::liveerror::{LiveError, LiveFileError, LiveErrorOrigin};
-use makepad_live_macros::*;
+use makepad_id_macros::*;
 use crate::livedocument::LiveDocument;
 use crate::livedocument::LiveScopeTarget;
 use crate::livedocument::LiveScopeItem;
