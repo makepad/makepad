@@ -7,6 +7,7 @@ use makepad_objc_sys::{msg_send};
 use makepad_objc_sys::runtime::YES;
 use makepad_shader_compiler::shaderast::DrawShaderNodePtr;
 use makepad_shader_compiler::generate_metal;
+use makepad_shader_compiler::generate_metal::MetalGeneratedShader;
 use makepad_shader_compiler::shaderast::DrawShaderDef;
 
 //use metal::*;
@@ -123,17 +124,26 @@ impl Cx {
                 let draw_uniforms = draw_call.draw_uniforms.as_slice();
                 
                 unsafe {
-                    let () = msg_send![encoder, setVertexBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: 2u64];
-                    let () = msg_send![encoder, setVertexBytes: view_uniforms.as_ptr() as *const std::ffi::c_void length: (view_uniforms.len() * 4) as u64 atIndex: 3u64];
-                    let () = msg_send![encoder, setVertexBytes: draw_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_uniforms.len() * 4) as u64 atIndex: 4u64];
-                    let () = msg_send![encoder, setVertexBytes: draw_call.user_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.user_uniforms.len() * 4) as u64 atIndex: 5u64];
-                    let () = msg_send![encoder, setVertexBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 6u64];
+
+                    let () = msg_send![encoder, setVertexBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 2u64];
+                    let () = msg_send![encoder, setFragmentBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 2u64];
                     
-                    let () = msg_send![encoder, setFragmentBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: 0u64];
-                    let () = msg_send![encoder, setFragmentBytes: view_uniforms.as_ptr() as *const std::ffi::c_void length: (view_uniforms.len() * 4) as u64 atIndex: 1u64];
-                    let () = msg_send![encoder, setFragmentBytes: draw_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_uniforms.len() * 4) as u64 atIndex: 2u64];
-                    let () = msg_send![encoder, setFragmentBytes: draw_call.user_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.user_uniforms.len() * 4) as u64 atIndex: 3u64];
-                    let () = msg_send![encoder, setFragmentBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 4u64];
+                    if let Some(id) = shp.draw_uniform_buffer_id{
+                        let () = msg_send![encoder, setVertexBytes: draw_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_uniforms.len() * 4) as u64 atIndex: id];
+                        let () = msg_send![encoder, setFragmentBytes: draw_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_uniforms.len() * 4) as u64 atIndex: id];
+                    }
+                    if let Some(id) = shp.pass_uniform_buffer_id{
+                        let () = msg_send![encoder, setVertexBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: id];
+                        let () = msg_send![encoder, setFragmentBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: id];
+                    }
+                    if let Some(id) = shp.view_uniform_buffer_id{
+                        let () = msg_send![encoder, setVertexBytes: view_uniforms.as_ptr() as *const std::ffi::c_void length: (view_uniforms.len() * 4) as u64 atIndex: id];
+                        let () = msg_send![encoder, setFragmentBytes: view_uniforms.as_ptr() as *const std::ffi::c_void length: (view_uniforms.len() * 4) as u64 atIndex: id];
+                    }
+                    if let Some(id) = shp.user_uniform_buffer_id{
+                        let () = msg_send![encoder, setVertexBytes: draw_call.user_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.user_uniforms.len() * 4) as u64 atIndex: id];
+                        let () = msg_send![encoder, setFragmentBytes: draw_call.user_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.user_uniforms.len() * 4) as u64 atIndex: id];
+                    }
                     
                     if let Some(ct) = &sh.mapping.const_table {
                         let () = msg_send![encoder, setVertexBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 7u64];
@@ -611,6 +621,10 @@ pub struct CxPlatformShader {
     pub library: objc_id,
     pub metal_shader: String,
     pub pipeline_state: objc_id,
+    pub draw_uniform_buffer_id: Option<u64>,
+    pub pass_uniform_buffer_id: Option<u64>,
+    pub view_uniform_buffer_id: Option<u64>,
+    pub user_uniform_buffer_id: Option<u64>,
 }
 
 impl PartialEq for CxPlatformShader {
@@ -633,8 +647,8 @@ impl Cx {
             if let Some(shader_id) = self.live_ptr_to_shader_id.get(&live_ptr){
                 let cx_shader = &mut self.shaders[*shader_id];
                 let draw_shader_def = self.shader_registry.draw_shaders.get(&DrawShaderNodePtr(*live_ptr));
-                let mtlsl = generate_metal::generate_shader(draw_shader_def.as_ref().unwrap(), &self. shader_registry);
-                metal_cx.compile_draw_shader(cx_shader, mtlsl, draw_shader_def.as_ref().unwrap());
+                let gen = generate_metal::generate_shader(draw_shader_def.as_ref().unwrap(), &self. shader_registry);
+                metal_cx.compile_draw_shader(cx_shader, gen, draw_shader_def.as_ref().unwrap());
             } 
         }
         self.shader_compile_set.clear();
@@ -786,18 +800,18 @@ impl MetalCx {
     pub fn compile_draw_shader(
         &self,
         sh: &mut CxShader,
-        mtlsl: String,
+        gen: MetalGeneratedShader,
         draw_shader_def: &DrawShaderDef,
     ) -> ShaderCompileResult {
-        
+        println!("{}", gen.mtlsl);
         //let debug = ;
         //mapping.update_live_uniforms(live_styles);
         if draw_shader_def.debug {
-            println!("{}\n---------------\n",  mtlsl);
+            println!("{}\n---------------\n",  gen.mtlsl);
         }
         
         if let Some(sh_platform) = &sh.platform {
-            if sh_platform.metal_shader == mtlsl {
+            if sh_platform.metal_shader == gen.mtlsl {
                 //sh.mapping = mapping;
                 return ShaderCompileResult::Nop
             }
@@ -810,7 +824,7 @@ impl MetalCx {
             setFastMathEnabled: true
         ]};
         
-        let ns_mtlsl: objc_id = str_to_nsstring(&mtlsl);
+        let ns_mtlsl: objc_id = str_to_nsstring(&gen.mtlsl);
         let mut err: objc_id = nil;
         let library: objc_id = unsafe {msg_send![
             self.device,
@@ -829,8 +843,30 @@ impl MetalCx {
         //sh.name = name;
         //sh.default_geometry = default_geometry;
         //sh.mapping = mapping;
+
+        let mut draw_uniform_buffer_id = None;
+        let mut pass_uniform_buffer_id = None;
+        let mut view_uniform_buffer_id = None;
+        let mut user_uniform_buffer_id = None;
+
+        let mut buffer_id = 4;
+        for (field, _set) in gen.fields_as_uniform_blocks {
+            match field.0{
+                id!(draw)=>draw_uniform_buffer_id = Some(buffer_id),
+                id!(pass)=>pass_uniform_buffer_id = Some(buffer_id),
+                id!(view)=>view_uniform_buffer_id = Some(buffer_id),
+                id!(default)=>user_uniform_buffer_id = Some(buffer_id),
+                _=>panic!()
+            }
+            buffer_id += 1;
+        }
+        
         sh.platform = Some(CxPlatformShader {
-            metal_shader: mtlsl,
+            draw_uniform_buffer_id,
+            pass_uniform_buffer_id,
+            view_uniform_buffer_id,
+            user_uniform_buffer_id,
+            metal_shader: gen.mtlsl,
             pipeline_state: unsafe {
                 let vert: objc_id = msg_send![library, newFunctionWithName: str_to_nsstring("vertex_main")];
                 let frag: objc_id = msg_send![library, newFunctionWithName: str_to_nsstring("fragment_main")];
