@@ -790,7 +790,7 @@ impl DrawShaderDef {
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Uniform {
-                    block_ident: Ident(id!(default)),
+                    block_ident: Ident(id!(user)),
                     var_def_node_ptr: None
                 },
                 span,
