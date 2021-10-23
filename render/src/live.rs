@@ -42,7 +42,7 @@ impl Cx {
         // ok so now what.
         //println!("{}", live_body.code);
         //let cm = CrateModule::from_module_path_check(&live_body.module_path).unwrap();
-        println!("register_live_body: {}", ModulePath::from_str(&live_body.module_path).unwrap());
+        //println!("register_live_body: {}", ModulePath::from_str(&live_body.module_path).unwrap());
         let result = self.shader_registry.live_registry.parse_live_file(
             &live_body.file,
             ModulePath::from_str(&live_body.module_path).unwrap(),
@@ -65,30 +65,94 @@ impl Cx {
     pub fn get_shader_from_ptr(&mut self, live_ptr: LivePtr, geometry_fields: &dyn GeometryFields) -> Option<Shader> {
         // lets first fetch the shader from live_ptr
         // if it doesn't exist, we should allocate and
-        if let Some(shader) = self.live_ptr_to_shader.get(&live_ptr) {
-            Some(*shader)
+        if let Some(shader_id) = self.live_ptr_to_shader_id.get(&live_ptr) {
+            Some(Shader{
+                live_ptr,
+                shader_id:*shader_id
+            })
         }
         else {
+            fn live_type_to_shader_ty(live_type: LiveType) -> Option<Ty> {
+                if live_type == f32::live_type() {Some(Ty::Float)}
+                else if live_type == Vec2::live_type() {Some(Ty::Vec2)}
+                else {None}
+            }
             // ok ! we have to compile it
-            let result = self.shader_registry.analyse_draw_shader(DrawShaderNodePtr(live_ptr), | span, id, _live_type, draw_shader_def | {
+            let live_factories = &self.live_factories;
+            let result = self.shader_registry.analyse_draw_shader(DrawShaderNodePtr(live_ptr), | span, id, live_type, draw_shader_def | {
                 if id == id!(rust_type) {
-                   // draw_shader_def.add_uniform("duni", Ty::Float, span);
-                   // draw_shader_def.add_instance("dinst", Ty::Float, span);
-                   // draw_shader_def.add_instance("dmat", Ty::Mat3, span);
+                    if let Some(lf) = live_factories.get(&live_type) {
+                        let mut fields = Vec::new();
+                        lf.live_fields(&mut fields);
+                        
+                        let mut is_instance = false;
+                        for field in fields {
+                            if field.id == id!(geometry) {
+                                is_instance = true;
+                                continue
+                            }
+                            
+                            if let Some(ty) = live_type_to_shader_ty(field.live_type) {
+                                if is_instance {
+                                    draw_shader_def.add_instance(field.id, ty, span);
+                                }
+                                else {
+                                    draw_shader_def.add_uniform(field.id, ty, span);
+                                }
+                            };
+                        }
+                    }
                 }
                 if id == id!(geometry) {
-                    
+                    if let Some(lf) = live_factories.get(&live_type) {
+                        if lf.live_type() == geometry_fields.live_type_check() {
+                            let mut fields = Vec::new();
+                            geometry_fields.geometry_fields(&mut fields);
+                            for field in fields {
+                                draw_shader_def.add_geometry(field.id, field.ty, span);
+                            }
+                        }
+                        else {
+                            eprintln!("lf.get_type() != geometry_fields.live_type_check()");
+                        }
+                    }
                 }
             });
+            // ok lets print an error
+            match result {
+                Err(e) => {
+                    println!("Error {}", e.to_live_file_error("", ""));
+                }
+                Ok(draw_shader_def) => {
+                    // OK! SO the shader parsed
+                    let shader_id = self.shaders.len();
+                    self.shaders.push(CxShader {
+                        name: "todo".to_string(),
+                        default_geometry: geometry_fields.get_geometry(),
+                        platform: None,
+                        mapping: CxShaderMapping::from_draw_shader_def(draw_shader_def, true)
+                    });
+                    self.live_ptr_to_shader_id.insert(live_ptr, shader_id);
+                    self.shader_compile_set.insert(live_ptr);
+                    // now we simply queue it somewhere somehow to compile.
+                    return Some(Shader {
+                        shader_id,
+                        live_ptr
+                    });
+                    // also we should allocate it a Shader object
+                }
+            }
             None
         }
+        
+        
     }
 }
 
 pub trait LiveFactory {
-    fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> where Self: Sized;
-    fn live_fields(&self, fields: &mut Vec<LiveField>) where Self: Sized;
-    fn live_type(&self) -> LiveType where Self: Sized;
+    fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate>;
+    fn live_fields(&self, fields: &mut Vec<LiveField>);
+    fn live_type(&self) -> LiveType;
 }
 
 pub trait LiveNew {
@@ -98,7 +162,7 @@ pub trait LiveNew {
 }
 
 pub trait LiveUpdate {
-    fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) where Self: Sized;
+    fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr);
     fn _live_type(&self) -> LiveType;
 }
 
@@ -106,6 +170,8 @@ pub trait LiveUpdate {
 pub struct LiveBinding {
     pub live_ptr: Option<LivePtr>
 }
+
+
 
 #[macro_export]
 macro_rules!live_prim {
@@ -149,19 +215,12 @@ macro_rules!live_prim {
 live_prim!(f32, {});
 live_prim!(Vec2, {});
 
+#[derive(Debug)]
 pub struct LiveField {
-    pub name: String,
+    pub id: Id,
     pub live_type: LiveType
 }
 
-impl LiveField {
-    pub fn new(name: &str, live_type: LiveType) -> Self {
-        Self {
-            name: name.to_string(),
-            live_type
-        }
-    }
-}
 
 /*
 pub trait DrawInputType {

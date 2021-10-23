@@ -109,7 +109,8 @@ pub struct Cx {
     pub align_list: Vec<Area>,
     
     pub live_factories: HashMap<LiveType, Box<dyn LiveFactory>>,
-    pub live_ptr_to_shader: HashMap<LivePtr, Shader>,
+    pub live_ptr_to_shader_id: HashMap<LivePtr, usize>,
+    pub shader_compile_set: BTreeSet<LivePtr>,
     
     pub redraw_child_areas: Vec<Area>,
     pub redraw_parent_areas: Vec<Area>,
@@ -250,7 +251,8 @@ impl Default for Cx {
             align_list: Vec::new(),
             
             live_factories: HashMap::new(),
-            live_ptr_to_shader: HashMap::new(),
+            live_ptr_to_shader_id: HashMap::new(),
+            shader_compile_set: BTreeSet::new(),
             
             redraw_parent_areas: Vec::new(),
             _redraw_parent_areas: Vec::new(),
@@ -865,24 +867,24 @@ impl Cx {
         for _i in 0..depth {
             indent.push_str("  ");
         }
-        let draw_calls_len = self.views[view_id].draw_calls_len;
+        let draw_items_len = self.views[view_id].draw_items_len;
         if view_id == 0 {
             writeln!(s, "---------- Begin Debug draw tree for redraw_id: {} ---------", self.redraw_id).unwrap();
         }
-        writeln!(s, "{}view {}: len:{} rect:{:?} scroll:{:?}", indent, view_id, draw_calls_len, self.views[view_id].rect, self.views[view_id].get_local_scroll()).unwrap();
+        writeln!(s, "{}view {}: len:{} rect:{:?} scroll:{:?}", indent, view_id, draw_items_len, self.views[view_id].rect, self.views[view_id].get_local_scroll()).unwrap();
         indent.push_str("  ");
-        for draw_call_id in 0..draw_calls_len {
-            let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
-            if sub_view_id != 0 {
+        for draw_item_id in 0..draw_items_len {
+            if let Some(sub_view_id) = self.views[view_id].draw_items[draw_item_id].sub_view_id{
+                
                 self.debug_draw_tree_recur(dump_instances, s, sub_view_id, depth + 1);
             }
             else {
                 let cxview = &mut self.views[view_id];
-                let draw_call = &mut cxview.draw_calls[draw_call_id];
+                let draw_call = cxview.draw_items[draw_item_id].draw_call.as_mut().unwrap();
                 let sh = &self.shaders[draw_call.shader.shader_id];
                 let slots = sh.mapping.instance_props.total_slots;
                 let instances = draw_call.instances.len() / slots;
-                writeln!(s, "{}call {}: {}({}) *:{} scroll:{}", indent, draw_call_id, sh.name, draw_call.shader.shader_id, instances, draw_call.get_local_scroll()).unwrap();
+                writeln!(s, "{}call {}: {}({}) *:{} scroll:{}", indent, draw_item_id, sh.name, draw_call.shader.shader_id, instances, draw_call.get_local_scroll()).unwrap();
                 // lets dump the instance geometry
                 if dump_instances {
                     for inst in 0..instances.min(1) {
@@ -919,17 +921,21 @@ macro_rules!main_app {
             let mut cx = Cx::default();
             cx.live_register();
             $ app::live_register(&mut cx);
+            
             cx.live_expand();
             //cx.init_live_styles();
-            let mut app = $ app::new(&mut cx);
+            let mut app = None;
             //let mut cxafterdraw = CxAfterDraw::new(&mut cx);
             cx.event_loop( | cx, mut event | {
-                if let Event::Draw = event {
-                    app.draw_app(cx);
-                    //cxafterdraw.after_draw(cx);
+                if let Event::Construct = event{
+                    app = Some($ app::new(cx));
                     return
                 }
-                app.handle_app(cx, &mut event);
+                if let Event::Draw = event {
+                    app.as_mut().unwrap().draw_app(cx);
+                    return
+                }
+                app.as_mut().unwrap().handle_app(cx, &mut event);
             });
         }
         
@@ -941,9 +947,9 @@ macro_rules!main_app {
             $ app::live_register(&mut cx);
             cx.live_expand();
             //cx.init_live_styles();
-            let app = Box::new( $ app::new(&mut cx));
+            //let app = Box::new( $ app::new(&mut cx));
             //let cxafterdraw = Box::new(CxAfterDraw::new(&mut cx));
-            Box::into_raw(Box::new((Box::into_raw(app), Box::into_raw(cx)/*, Box::into_raw(cxafterdraw)*/))) as u32
+            Box::into_raw(Box::new((0, Box::into_raw(cx)/*, Box::into_raw(cxafterdraw)*/))) as u32
         }
         
         #[export_name = "process_to_wasm"]
@@ -951,6 +957,10 @@ macro_rules!main_app {
         pub unsafe extern "C" fn process_to_wasm(appcx: u32, msg_bytes: u32) -> u32 {
             let appcx = &*(appcx as *mut (*mut $ app, *mut Cx/*, *mut CxAfterDraw*/));
             (*appcx.1).process_to_wasm(msg_bytes, | cx, mut event | {
+                if let Event::Construct = event{
+                    (*appcx.0) = Box::new($ app::new(&mut cx));
+                    return
+                }
                 if let Event::Draw = event {
                     (*appcx.0).draw_app(cx);
                     //(*appcx.2).after_draw(cx);

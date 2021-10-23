@@ -15,9 +15,9 @@ pub enum GeometryAxis {
 
 impl GeometryGen {
     
-    pub fn from_quad_2d(x1:f32, y1:f32, x2:f32, y2:f32)->GeometryGen{
+    pub fn from_quad_2d(x1: f32, y1: f32, x2: f32, y2: f32) -> GeometryGen {
         let mut g = Self::default();
-        g.add_quad_2d(x1,y1,x2,y2);
+        g.add_quad_2d(x1, y1, x2, y2);
         g
     }
     
@@ -28,14 +28,14 @@ impl GeometryGen {
         width_segments: usize,
         height_segments: usize,
         depth_segments: usize
-    )->GeometryGen{
+    ) -> GeometryGen {
         let mut g = Self::default();
         g.add_cube_3d(width, height, depth, width_segments, height_segments, depth_segments);
         g
     }
     
     // requires pos:vec2 normalized layout
-    pub fn add_quad_2d(&mut self, x1:f32, y1:f32, x2:f32, y2:f32) {
+    pub fn add_quad_2d(&mut self, x1: f32, y1: f32, x2: f32, y2: f32) {
         let vertex_offset = self.vertices.len() as u32;
         self.vertices.push(x1);
         self.vertices.push(y1);
@@ -66,9 +66,9 @@ impl GeometryGen {
         self.add_plane_3d(GeometryAxis::Z, GeometryAxis::Y, GeometryAxis::X, -1.0, -1.0, depth, height, width, depth_segments, height_segments, 0.0);
         self.add_plane_3d(GeometryAxis::Z, GeometryAxis::Y, GeometryAxis::X, 1.0, -1.0, depth, height, -width, depth_segments, height_segments, 1.0);
         self.add_plane_3d(GeometryAxis::X, GeometryAxis::Z, GeometryAxis::Y, 1.0, 1.0, width, depth, height, width_segments, depth_segments, 2.0);
-        self.add_plane_3d(GeometryAxis::X, GeometryAxis::Z, GeometryAxis::Y, 1.0, - 1.0, width, depth, -height, width_segments, depth_segments, 3.0);
-        self.add_plane_3d(GeometryAxis::X, GeometryAxis::Y, GeometryAxis::Z, 1.0, - 1.0, width, height, depth, width_segments, height_segments, 4.0);
-        self.add_plane_3d(GeometryAxis::X, GeometryAxis::Y, GeometryAxis::Z, -1.0, -1.0, width, height, -depth, width_segments, height_segments, 5.0); 
+        self.add_plane_3d(GeometryAxis::X, GeometryAxis::Z, GeometryAxis::Y, 1.0, -1.0, width, depth, -height, width_segments, depth_segments, 3.0);
+        self.add_plane_3d(GeometryAxis::X, GeometryAxis::Y, GeometryAxis::Z, 1.0, -1.0, width, height, depth, width_segments, height_segments, 4.0);
+        self.add_plane_3d(GeometryAxis::X, GeometryAxis::Y, GeometryAxis::Z, -1.0, -1.0, width, height, -depth, width_segments, height_segments, 5.0);
     }
     
     
@@ -142,32 +142,36 @@ impl GeometryGen {
 }
 
 live_body!{
-    GeometryQuad2D: Geometry{
+    GeometryQuad2D: Geometry {
         rust_type: {{GeometryQuad2D}};
         x1: 0.0,
         y1: 0.0,
         x2: 1.0,
         y2: 1.0,
-    }    
-}
-
-pub trait GeometryFields{
-    fn geometry_fields(&self, fields: &mut Vec<LiveField>);
-}
-
-impl GeometryFields for GeometryQuad2D{
-    fn geometry_fields(&self, fields: &mut Vec<LiveField>){
-        fields.push(LiveField::new("geom_pos", Vec2::live_type()));
     }
 }
 
-pub struct GeometryQuad2D{
+impl GeometryFields for GeometryQuad2D {
+    fn geometry_fields(&self, fields: &mut Vec<GeometryField>) {
+        fields.push(GeometryField {id: id!(geom_pos), ty: Ty::Vec2});
+    }
+    
+    fn get_geometry(&self) -> Option<Geometry> {
+        self.geometry
+    }
+    
+    fn live_type_check(&self) -> LiveType {
+        Self::live_type()
+    }
+}
+
+pub struct GeometryQuad2D {
     //#[private()]
     pub live_ptr: Option<LivePtr>,
     //#[default(0.0)]
     pub x1: f32,
     //#[default(0.0)]
-    pub y1:  f32,
+    pub y1: f32,
     //#[default(1.0)]
     pub x2: f32,
     //#[default(1.0)]
@@ -176,59 +180,66 @@ pub struct GeometryQuad2D{
     pub geometry: Option<Geometry>
 }
 
-impl GeometryQuad2D{
-    fn live_update_value(&mut self, cx:&mut Cx, id:Id, ptr:LivePtr){
-        match id{
-            id!(x1)=>self.x1.live_update(cx, ptr),
-            id!(y1)=>self.y1.live_update(cx, ptr),
-            id!(x2)=>self.x2.live_update(cx, ptr),
-            id!(y2)=>self.y2.live_update(cx, ptr),
-            _=>()
+impl GeometryQuad2D {
+    fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
+        match id {
+            id!(x1) => self.x1.live_update(cx, ptr),
+            id!(y1) => self.y1.live_update(cx, ptr),
+            id!(x2) => self.x2.live_update(cx, ptr),
+            id!(y2) => self.y2.live_update(cx, ptr),
+            _ => ()
         }
     }
 }
 
-impl LiveUpdate for GeometryQuad2D{
-    fn live_update(&mut self, _cx:&mut Cx, _live_ptr:LivePtr){
+impl LiveUpdate for GeometryQuad2D {
+    fn live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
+        // lets generate geometry
+        self.geometry = Some(Geometry::from_geometry_gen(cx, GeometryGen::from_quad_2d(
+            self.x1,
+            self.y1,
+            self.x2,
+            self.y2,
+        )));
     }
-            
-    fn _live_type(&self)->LiveType{
+    
+    fn _live_type(&self) -> LiveType {
         Self::live_type()
     }
 }
 
-impl LiveNew for GeometryQuad2D{
-    fn live_new(_cx: &mut Cx)->Self{
-        Self{
+impl LiveNew for GeometryQuad2D {
+    fn live_new(_cx: &mut Cx) -> Self {
+        Self {
             live_ptr: None,
             x1: 0.0,
-            y1:  0.0,
+            y1: 0.0,
             x2: 1.0,
             y2: 1.0,
             geometry: None
         }
     }
-
-    fn live_type()->LiveType{
+    
+    fn live_type() -> LiveType {
         LiveType(std::any::TypeId::of::<GeometryQuad2D>())
     }
     
-    fn live_register(cx: &mut Cx){
+    fn live_register(cx: &mut Cx) {
         cx.register_live_body(live_body());
         struct Factory();
-        impl LiveFactory for Factory{
-            fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> where Self: Sized{
-                Box::new(GeometryQuad2D :: live_new(cx))
+        impl LiveFactory for Factory {
+            fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> {
+                Box::new(GeometryQuad2D ::live_new(cx))
             }
             
-            fn live_fields(&self, fields: &mut Vec<LiveField>) where Self: Sized{
-                fields.push(LiveField::new("x1", f32::live_type()));
-                fields.push(LiveField::new("y1", f32::live_type()));
-                fields.push(LiveField::new("x2", f32::live_type()));
-                fields.push(LiveField::new("y2", f32::live_type()));
+            fn live_fields(&self, fields: &mut Vec<LiveField>) {
+                fields.push(LiveField {id: id!(x1), live_type: f32::live_type()});
+                fields.push(LiveField {id: id!(y1), live_type: f32::live_type()});
+                fields.push(LiveField {id: id!(x2), live_type: f32::live_type()});
+                fields.push(LiveField {id: id!(y2), live_type: f32::live_type()});
             }
             
-            fn live_type(&self) -> LiveType where Self: Sized{
+            fn live_type(&self) -> LiveType where Self: Sized {
                 GeometryQuad2D::live_type()
             }
         }
