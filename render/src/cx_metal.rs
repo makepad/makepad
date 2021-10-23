@@ -5,8 +5,10 @@
 //use core_graphics::color::CGColor;
 use makepad_objc_sys::{msg_send};
 use makepad_objc_sys::runtime::YES;
-use makepad_live_parser::LiveError;
-//use makepad_shader_compiler::generate_metal;
+use makepad_shader_compiler::shaderast::DrawShaderNodePtr;
+use makepad_shader_compiler::generate_metal;
+use makepad_shader_compiler::shaderast::DrawShaderDef;
+
 //use metal::*;
 use crate::cx_apple::*;
 use crate::cx_cocoa::*;
@@ -26,16 +28,15 @@ impl Cx {
         metal_cx: &MetalCx,
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        let draw_calls_len = self.views[view_id].draw_calls_len;
+        let draw_items_len = self.views[view_id].draw_items_len;
         //self.views[view_id].set_clipping_uniforms();
         self.views[view_id].uniform_view_transform(&Mat4::identity());
         self.views[view_id].parent_scroll = scroll;
         let local_scroll = self.views[view_id].get_local_scroll();
         let clip = self.views[view_id].intersect_clip(clip);
         
-        for draw_call_id in 0..draw_calls_len {
-            let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
-            if sub_view_id != 0 {
+        for draw_item_id in 0..draw_items_len {
+            if let Some(sub_view_id) = self.views[view_id].draw_items[draw_item_id].sub_view_id{
                 self.render_view(
                     pass_id,
                     sub_view_id,
@@ -50,7 +51,7 @@ impl Cx {
             else {
                 let cxview = &mut self.views[view_id];
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
-                let draw_call = &mut cxview.draw_calls[draw_call_id];
+                let draw_call = cxview.draw_items[draw_item_id].draw_call.as_mut().unwrap();
                 let sh = &self.shaders[draw_call.shader.shader_id];
                 let shp = sh.platform.as_ref().unwrap();
                 
@@ -397,147 +398,6 @@ pub struct MetalCx {
     pub command_queue: objc_id
 }
 
-impl MetalCx {
-    
-    pub fn new() -> MetalCx {
-        /*
-        let devices = get_all_metal_devices();
-        for device in devices {
-            let is_low_power: BOOL = unsafe {msg_send![device, isLowPower]};
-            let command_queue: id = unsafe {msg_send![device, newCommandQueue]};
-            if is_low_power == YES {
-                return MetalCx {
-                    command_queue: command_queue,
-                    device: device
-                }
-            }
-        }*/
-        let device = get_default_metal_device().expect("Cannot get default metal device");
-        MetalCx {
-            command_queue: unsafe {msg_send![device, newCommandQueue]},
-            device: device
-        }
-    }
-    
-    pub fn update_platform_render_target(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2, is_depth: bool) -> bool {
-        
-        let width = if let Some(width) = cxtexture.desc.width {width as u64} else {(size.x * dpi_factor) as u64};
-        let height = if let Some(height) = cxtexture.desc.height {height as u64} else {(size.y * dpi_factor) as u64};
-        
-        if cxtexture.platform.width == width && cxtexture.platform.height == height && cxtexture.platform.alloc_desc == cxtexture.desc {
-            return false
-        }
-        cxtexture.platform.mtl_texture = None;
-        
-        let mdesc: objc_id = unsafe {msg_send![class!(MTLTextureDescriptor), new]};
-        if !is_depth {
-            match cxtexture.desc.format {
-                TextureFormat::Default | TextureFormat::RenderBGRA => {
-                    unsafe {
-                        let () = msg_send![mdesc, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
-                        let () = msg_send![mdesc, setTextureType: MTLTextureType::D2];
-                        let () = msg_send![mdesc, setStorageMode: MTLStorageMode::Private];
-                        let () = msg_send![mdesc, setUsage: MTLTextureUsage::RenderTarget];
-                    }
-                },
-                _ => {
-                    println!("update_platform_render_target unsupported texture format");
-                    return false;
-                }
-            }
-        }
-        else {
-            match cxtexture.desc.format {
-                TextureFormat::Default | TextureFormat::Depth32Stencil8 => {
-                    unsafe {
-                        let () = msg_send![mdesc, setPixelFormat: MTLPixelFormat::Depth32Float_Stencil8];
-                        let () = msg_send![mdesc, setTextureType: MTLTextureType::D2];
-                        let () = msg_send![mdesc, setStorageMode: MTLStorageMode::Private];
-                        let () = msg_send![mdesc, setUsage: MTLTextureUsage::RenderTarget];
-                    }
-                },
-                _ => {
-                    println!("update_platform_render_targete unsupported texture format");
-                    return false;
-                }
-            }
-        }
-        let () = unsafe {msg_send![mdesc, setWidth: width as u64]};
-        let () = unsafe {msg_send![mdesc, setHeight: height as u64]};
-        let () = unsafe {msg_send![mdesc, setDepth: 1u64]};
-        
-        let tex: objc_id = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
-        
-        cxtexture.platform.width = width;
-        cxtexture.platform.height = height;
-        cxtexture.platform.alloc_desc = cxtexture.desc.clone();
-        cxtexture.platform.mtl_texture = Some(tex);
-        return true
-    }
-    
-    pub fn update_platform_texture_image2d(&self, cxtexture: &mut CxTexture) {
-        
-        if cxtexture.desc.width.is_none() || cxtexture.desc.height.is_none() {
-            println!("update_platform_texture_image2d without width/height");
-            return;
-        }
-        
-        let width = cxtexture.desc.width.unwrap();
-        let height = cxtexture.desc.height.unwrap();
-        
-        // allocate new texture if descriptor change
-        if cxtexture.platform.alloc_desc != cxtexture.desc {
-            cxtexture.platform.mtl_texture = None;
-            
-            let mdesc: objc_id = unsafe {msg_send![class!(MTLTextureDescriptor), new]};
-            unsafe {
-                let () = msg_send![mdesc, setTextureType: MTLTextureType::D2];
-                let () = msg_send![mdesc, setStorageMode: MTLStorageMode::Managed];
-                let () = msg_send![mdesc, setUsage: MTLTextureUsage::RenderTarget];
-                let () = msg_send![mdesc, setWidth: width as u64];
-                let () = msg_send![mdesc, setHeight: height as u64];
-            }
-            
-            match cxtexture.desc.format {
-                TextureFormat::Default | TextureFormat::ImageBGRA => {
-                    let () = unsafe {msg_send![mdesc, setPixelFormat: MTLPixelFormat::BGRA8Unorm]};
-                    
-                    let tex: objc_id = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
-                    
-                    cxtexture.platform.mtl_texture = Some(tex);
-                    
-                    if cxtexture.image_u32.len() != width * height {
-                        println!("update_platform_texture_image2d with wrong buffer_u32 size!");
-                        cxtexture.platform.mtl_texture = None;
-                        return;
-                    }
-                    let region = MTLRegion {
-                        origin: MTLOrigin {x: 0, y: 0, z: 0},
-                        size: MTLSize {width: width as u64, height: height as u64, depth: 1}
-                    };
-                    if let Some(mtl_texture) = cxtexture.platform.mtl_texture {
-                        let () = unsafe {msg_send![
-                            mtl_texture,
-                            replaceRegion: region
-                            mipmapLevel: 0
-                            withBytes: cxtexture.image_u32.as_ptr() as *const std::ffi::c_void
-                            bytesPerRow: (width * std::mem::size_of::<u32>()) as u64
-                        ]};
-                    }
-                },
-                _ => {
-                    println!("update_platform_texture_image2d with unsupported format");
-                    return;
-                }
-            }
-            cxtexture.platform.alloc_desc = cxtexture.desc.clone();
-            cxtexture.platform.width = width as u64;
-            cxtexture.platform.height = height as u64;
-        }
-        
-        cxtexture.update_image = false;
-    }
-}
 
 #[derive(Clone)]
 pub struct MetalWindow {
@@ -768,145 +628,220 @@ pub struct SlErr {
 
 impl Cx {
     
-    pub fn mtl_compile_all_shaders(&mut self, _metal_cx: &MetalCx) {
+    pub fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
+        for live_ptr in &self.shader_compile_set{
+            if let Some(shader_id) = self.live_ptr_to_shader_id.get(&live_ptr){
+                let cx_shader = &mut self.shaders[*shader_id];
+                let draw_shader_def = self.shader_registry.draw_shaders.get(&DrawShaderNodePtr(*live_ptr));
+                let mtlsl = generate_metal::generate_shader(draw_shader_def.as_ref().unwrap(), &self. shader_registry);
+                metal_cx.compile_draw_shader(cx_shader, mtlsl, draw_shader_def.as_ref().unwrap());
+            } 
+        }
+        self.shader_compile_set.clear();
+    }
+}
+
+impl MetalCx {
+    
+    pub fn new() -> MetalCx {
         /*
-        let options = ShaderCompileOptions {
-            gather_all: false,
-            create_const_table: false,
-            no_const_collapse: false
-        };
-        
-        for (live_item_id, shader) in &self.live_styles.shader_alloc {
-            match self.live_styles.collect_and_analyse_shader(*live_item_id, options) {
-                Err(err) => {
-                    eprintln!("{}", err);
-                    panic!()
-                },
-                Ok((shader_ast, default_geometry)) => {
-                    let shader_id = shader.shader_id;
-                    Self::mtl_compile_shader(
-                        shader_id,
-                        self.live_styles.live_item_id_to_string(*live_item_id).unwrap(),
-                        &mut self.shaders[shader_id],
-                        shader_ast,
-                        default_geometry,
-                        options,
-                        metal_cx,
-                        &self.live_styles
-                    );
+        let devices = get_all_metal_devices();
+        for device in devices {
+            let is_low_power: BOOL = unsafe {msg_send![device, isLowPower]};
+            let command_queue: id = unsafe {msg_send![device, newCommandQueue]};
+            if is_low_power == YES {
+                return MetalCx {
+                    command_queue: command_queue,
+                    device: device
                 }
             }
-        };
-        self.live_styles.changed_shaders.clear();*/
+        }*/
+        let device = get_default_metal_device().expect("Cannot get default metal device");
+        MetalCx {
+            command_queue: unsafe {msg_send![device, newCommandQueue]},
+            device: device
+        }
     }
     
-    pub fn mtl_update_all_shaders(&mut self, _metal_cx: &MetalCx, _errors:&mut Vec<LiveError>)  {
-      
-        // recompile shaders, and update values
-        /*
-        let options = ShaderCompileOptions {
-            gather_all: true,
-            create_const_table: true,
-            no_const_collapse: false
-        };
+    pub fn update_platform_render_target(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2, is_depth: bool) -> bool {
         
-        for (live_item_id, change) in &self.live_styles.changed_shaders {
-            match change {
-                LiveChangeType::Recompile => {
-                    match self.live_styles.collect_and_analyse_shader(*live_item_id, options) {
-                        Err(err) => {
-                            errors.push(err);
-                        },
-                        Ok((shader_ast, default_geometry)) => {
-                            let shader_id = self.live_styles.shader_alloc.get(&live_item_id).unwrap().shader_id;
-                            Self::mtl_compile_shader(
-                                shader_id,
-                                self.live_styles.live_item_id_to_string(*live_item_id).unwrap(),
-                                &mut self.shaders[shader_id],
-                                shader_ast,
-                                default_geometry,
-                                options,
-                                metal_cx,
-                                &self.live_styles
-                            );
-                        }
+        let width = if let Some(width) = cxtexture.desc.width {width as u64} else {(size.x * dpi_factor) as u64};
+        let height = if let Some(height) = cxtexture.desc.height {height as u64} else {(size.y * dpi_factor) as u64};
+        
+        if cxtexture.platform.width == width && cxtexture.platform.height == height && cxtexture.platform.alloc_desc == cxtexture.desc {
+            return false
+        }
+        cxtexture.platform.mtl_texture = None;
+        
+        let mdesc: objc_id = unsafe {msg_send![class!(MTLTextureDescriptor), new]};
+        if !is_depth {
+            match cxtexture.desc.format {
+                TextureFormat::Default | TextureFormat::RenderBGRA => {
+                    unsafe {
+                        let () = msg_send![mdesc, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+                        let () = msg_send![mdesc, setTextureType: MTLTextureType::D2];
+                        let () = msg_send![mdesc, setStorageMode: MTLStorageMode::Private];
+                        let () = msg_send![mdesc, setUsage: MTLTextureUsage::RenderTarget];
                     }
-                }
-                LiveChangeType::UpdateValue => {
-                    let shader_id = self.live_styles.shader_alloc.get(&live_item_id).unwrap().shader_id;
-                    self.shaders[shader_id].mapping.update_live_uniforms(&self.live_styles);
+                },
+                _ => {
+                    println!("update_platform_render_target unsupported texture format");
+                    return false;
                 }
             }
         }
-        self.live_styles.changed_shaders.clear();*/
+        else {
+            match cxtexture.desc.format {
+                TextureFormat::Default | TextureFormat::Depth32Stencil8 => {
+                    unsafe {
+                        let () = msg_send![mdesc, setPixelFormat: MTLPixelFormat::Depth32Float_Stencil8];
+                        let () = msg_send![mdesc, setTextureType: MTLTextureType::D2];
+                        let () = msg_send![mdesc, setStorageMode: MTLStorageMode::Private];
+                        let () = msg_send![mdesc, setUsage: MTLTextureUsage::RenderTarget];
+                    }
+                },
+                _ => {
+                    println!("update_platform_render_targete unsupported texture format");
+                    return false;
+                }
+            }
+        }
+        let () = unsafe {msg_send![mdesc, setWidth: width as u64]};
+        let () = unsafe {msg_send![mdesc, setHeight: height as u64]};
+        let () = unsafe {msg_send![mdesc, setDepth: 1u64]};
+        
+        let tex: objc_id = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
+        
+        cxtexture.platform.width = width;
+        cxtexture.platform.height = height;
+        cxtexture.platform.alloc_desc = cxtexture.desc.clone();
+        cxtexture.platform.mtl_texture = Some(tex);
+        return true
     }
-    /*
-    pub fn mtl_compile_shader(
-        shader_id: usize,
-        name: String,
+    
+    pub fn update_platform_texture_image2d(&self, cxtexture: &mut CxTexture) {
+        
+        if cxtexture.desc.width.is_none() || cxtexture.desc.height.is_none() {
+            println!("update_platform_texture_image2d without width/height");
+            return;
+        }
+        
+        let width = cxtexture.desc.width.unwrap();
+        let height = cxtexture.desc.height.unwrap();
+        
+        // allocate new texture if descriptor change
+        if cxtexture.platform.alloc_desc != cxtexture.desc {
+            cxtexture.platform.mtl_texture = None;
+            
+            let mdesc: objc_id = unsafe {msg_send![class!(MTLTextureDescriptor), new]};
+            unsafe {
+                let () = msg_send![mdesc, setTextureType: MTLTextureType::D2];
+                let () = msg_send![mdesc, setStorageMode: MTLStorageMode::Managed];
+                let () = msg_send![mdesc, setUsage: MTLTextureUsage::RenderTarget];
+                let () = msg_send![mdesc, setWidth: width as u64];
+                let () = msg_send![mdesc, setHeight: height as u64];
+            }
+            
+            match cxtexture.desc.format {
+                TextureFormat::Default | TextureFormat::ImageBGRA => {
+                    let () = unsafe {msg_send![mdesc, setPixelFormat: MTLPixelFormat::BGRA8Unorm]};
+                    
+                    let tex: objc_id = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
+                    
+                    cxtexture.platform.mtl_texture = Some(tex);
+                    
+                    if cxtexture.image_u32.len() != width * height {
+                        println!("update_platform_texture_image2d with wrong buffer_u32 size!");
+                        cxtexture.platform.mtl_texture = None;
+                        return;
+                    }
+                    let region = MTLRegion {
+                        origin: MTLOrigin {x: 0, y: 0, z: 0},
+                        size: MTLSize {width: width as u64, height: height as u64, depth: 1}
+                    };
+                    if let Some(mtl_texture) = cxtexture.platform.mtl_texture {
+                        let () = unsafe {msg_send![
+                            mtl_texture,
+                            replaceRegion: region
+                            mipmapLevel: 0
+                            withBytes: cxtexture.image_u32.as_ptr() as *const std::ffi::c_void
+                            bytesPerRow: (width * std::mem::size_of::<u32>()) as u64
+                        ]};
+                    }
+                },
+                _ => {
+                    println!("update_platform_texture_image2d with unsupported format");
+                    return;
+                }
+            }
+            cxtexture.platform.alloc_desc = cxtexture.desc.clone();
+            cxtexture.platform.width = width as u64;
+            cxtexture.platform.height = height as u64;
+        }
+        
+        cxtexture.update_image = false;
+    }
+    
+        
+    pub fn compile_draw_shader(
+        &self,
         sh: &mut CxShader,
-        shader_ast: ShaderAst,
-        default_geometry: Option<Geometry>,
-        options: ShaderCompileOptions,
-        metal_cx: &MetalCx,
-        live_styles: &LiveStyles
+        mtlsl: String,
+        draw_shader_def: &DrawShaderDef,
     ) -> ShaderCompileResult {
         
-        let mtlsl = generate_metal::generate_shader(&shader_ast, live_styles, options);
-        let debug = shader_ast.debug;
-        let mut mapping = CxShaderMapping::from_shader_ast(shader_ast, options, true);
-        mapping.update_live_uniforms(live_styles);
-        if debug {
-            println!("--------------- Shader {} --------------- \n{}\n---------------\n", shader_id, mtlsl);
+        //let debug = ;
+        //mapping.update_live_uniforms(live_styles);
+        if draw_shader_def.debug {
+            println!("{}\n---------------\n",  mtlsl);
         }
         
         if let Some(sh_platform) = &sh.platform {
             if sh_platform.metal_shader == mtlsl {
-                sh.mapping = mapping;
+                //sh.mapping = mapping;
                 return ShaderCompileResult::Nop
             }
         }
         
-        let mtl_compile_options: id = unsafe {msg_send![class!(MTLCompileOptions), new]};
+        let mtl_compile_options: objc_id = unsafe {msg_send![class!(MTLCompileOptions), new]};
         
-        let _: id = unsafe {msg_send![
+        let _: objc_id = unsafe {msg_send![
             mtl_compile_options,
             setFastMathEnabled: true
         ]};
         
-        let ns_mtlsl: id = str_to_nsstring(&mtlsl);
-        let mut err: id = nil;
-        let library: id = unsafe {msg_send![
-            metal_cx.device,
+        let ns_mtlsl: objc_id = str_to_nsstring(&mtlsl);
+        let mut err: objc_id = nil;
+        let library: objc_id = unsafe {msg_send![
+            self.device,
             newLibraryWithSource: ns_mtlsl
             options: mtl_compile_options
             error: &mut err
         ]};
         if library == nil {
-            let err_str: id = unsafe {msg_send![err, localizedDescription]};
-            eprintln!("{}", nsstring_to_string(err_str));
+            let err_str: objc_id = unsafe {msg_send![err, localizedDescription]};
+            println!("{}", nsstring_to_string(err_str));
             panic!("{}", nsstring_to_string(err_str));
             //return Err(SlErr {msg: nsstring_to_string(err_str)})
         }
-        
         //let err_str: id = unsafe {msg_send![err, localizedDescription]};
         //println!("{}", nsstring_to_string(err_str));
-        sh.name = name;
-        sh.default_geometry = default_geometry;
-        sh.mapping = mapping;
+        //sh.name = name;
+        //sh.default_geometry = default_geometry;
+        //sh.mapping = mapping;
         sh.platform = Some(CxPlatformShader {
             metal_shader: mtlsl,
             pipeline_state: unsafe {
-                let vert: id = msg_send![library, newFunctionWithName: str_to_nsstring("mpsc_vertex_main")];
-                let frag: id = msg_send![library, newFunctionWithName: str_to_nsstring("mpsc_fragment_main")];
-                let rpd: id = msg_send![class!(MTLRenderPipelineDescriptor), new];
+                let vert: objc_id = msg_send![library, newFunctionWithName: str_to_nsstring("vertex_main")];
+                let frag: objc_id = msg_send![library, newFunctionWithName: str_to_nsstring("fragment_main")];
+                let rpd: objc_id = msg_send![class!(MTLRenderPipelineDescriptor), new];
                 
                 let () = msg_send![rpd, setVertexFunction: vert];
                 let () = msg_send![rpd, setFragmentFunction: frag];
                 
-                let color_attachments: id = msg_send![rpd, colorAttachments];
+                let color_attachments: objc_id = msg_send![rpd, colorAttachments];
                 
-                let ca: id = msg_send![color_attachments, objectAtIndexedSubscript: 0u64];
+                let ca: objc_id = msg_send![color_attachments, objectAtIndexedSubscript: 0u64];
                 
                 let () = msg_send![ca, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
                 let () = msg_send![ca, setBlendingEnabled: YES];
@@ -920,9 +855,9 @@ impl Cx {
                 
                 let () = msg_send![rpd, setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float_Stencil8];
                 
-                let mut err: id = nil;
-                let rps: id = msg_send![
-                    metal_cx.device,
+                let mut err: objc_id = nil;
+                let rps: objc_id = msg_send![
+                    self.device,
                     newRenderPipelineStateWithDescriptor: rpd
                     error: &mut err
                 ];
@@ -934,5 +869,5 @@ impl Cx {
             library: library,
         });
         return ShaderCompileResult::Ok
-    }*/
+    }
 }

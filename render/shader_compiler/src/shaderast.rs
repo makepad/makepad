@@ -34,6 +34,13 @@ pub struct ValueNodePtr(pub LivePtr);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct VarDefNodePtr(pub LivePtr);
 
+
+#[derive(Clone, Debug, Default)]
+pub struct DrawShaderConstTable {
+    pub table: Vec<f32>,
+    pub offsets: BTreeMap<FnNodePtr, usize>
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DrawShaderDef {
     pub debug: bool,
@@ -50,7 +57,7 @@ pub struct DrawShaderDef {
     pub all_structs: RefCell<Vec<StructNodePtr >>,
     pub vertex_structs: RefCell<Vec<StructNodePtr >>,
     pub pixel_structs: RefCell<Vec<StructNodePtr >>,
-    
+    pub const_table: DrawShaderConstTable
 }
 
 #[derive(Clone, Debug)]
@@ -779,8 +786,7 @@ impl DrawShaderDef {
         uniform_blocks
     }
     
-    pub fn add_uniform(&mut self, name:&str, ty:Ty, span:Span){
-        let id = Id::from_str(name).unwrap();
+    pub fn add_uniform(&mut self, id:Id, ty:Ty, span:Span){
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Uniform {
@@ -794,8 +800,7 @@ impl DrawShaderDef {
         )
     }
     
-    pub fn add_instance(&mut self, name:&str, ty:Ty, span:Span){
-        let id = Id::from_str(name).unwrap();
+    pub fn add_instance(&mut self, id:Id, ty:Ty, span:Span){
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Instance {
@@ -808,10 +813,23 @@ impl DrawShaderDef {
             }
         )
     }   
+
+    pub fn add_geometry(&mut self, id:Id, ty:Ty, span:Span){
+        self.fields.push(
+            DrawShaderFieldDef {
+                kind: DrawShaderFieldKind::Geometry {
+                    is_used_in_pixel_shader: Cell::new(false),
+                    var_def_node_ptr: None
+                },
+                span,
+                ident: Ident(id),
+                ty_expr: ty.to_ty_expr(),
+            }
+        )
+    }  
     
      
-    pub fn add_texture(&mut self, name:&str, ty:Ty, span:Span){
-        let id = Id::from_str(name).unwrap();
+    pub fn add_texture(&mut self, id:Id, ty:Ty, span:Span){
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Texture {

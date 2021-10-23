@@ -58,10 +58,9 @@ impl View {
                 return
             }
             cx.views[view_id].uniform_view_transform(mat);
-            let draw_calls_len = cx.views[view_id].draw_calls_len;
-            for draw_call_id in 0..draw_calls_len {
-                let sub_view_id = cx.views[view_id].draw_calls[draw_call_id].sub_view_id;
-                if sub_view_id != 0 {
+            let draw_items_len = cx.views[view_id].draw_items_len;
+            for draw_item_id in 0..draw_items_len {
+                if let Some(sub_view_id) = cx.views[view_id].draw_items[draw_item_id].sub_view_id {
                     set_view_transform_recur(sub_view_id, cx, mat);
                 }
             }
@@ -153,32 +152,32 @@ impl View {
             // we need a new draw
             let parent_cxview = &mut cx.views[parent_view_id];
             
-            let id = parent_cxview.draw_calls_len;
-            parent_cxview.draw_calls_len = parent_cxview.draw_calls_len + 1;
+            let id = parent_cxview.draw_items_len;
+            parent_cxview.draw_items_len = parent_cxview.draw_items_len + 1;
             
             // see if we need to add a new one
-            if parent_cxview.draw_calls_len > parent_cxview.draw_calls.len() {
-                parent_cxview.draw_calls.push({
-                    DrawCall {
+            if parent_cxview.draw_items_len > parent_cxview.draw_items.len() {
+                parent_cxview.draw_items.push({
+                    DrawItem {
                         view_id: parent_view_id,
-                        draw_call_id: parent_cxview.draw_calls.len(),
+                        draw_item_id: parent_cxview.draw_items.len(),
                         redraw_id: cx.redraw_id,
-                        sub_view_id: view_id,
-                        ..Default::default()
+                        sub_view_id: Some(view_id),
+                        draw_call: None
                     }
                 })
             }
             else { // or reuse a sub list node
-                let draw = &mut parent_cxview.draw_calls[id];
-                draw.sub_view_id = view_id;
-                draw.redraw_id = cx.redraw_id;
+                let draw_item = &mut parent_cxview.draw_items[id];
+                draw_item.sub_view_id = Some(view_id);
+                draw_item.redraw_id = cx.redraw_id;
             }
         }
         
         // set nesting draw list id for incremental repaint scanning
         cx.views[view_id].nesting_view_id = nesting_view_id;
         
-        if !self.always_redraw && cx.views[view_id].draw_calls_len != 0 && !cx.view_will_redraw(view_id) {
+        if !self.always_redraw && cx.views[view_id].draw_items_len != 0 && !cx.view_will_redraw(view_id) {
             
             // walk the turtle because we aren't drawing
             let w = Width::Fix(cx.views[view_id].rect.size.x);
@@ -194,7 +193,7 @@ impl View {
         let last_redraw_id = cxview.redraw_id;
         self.redraw_id = cx.redraw_id;
         cxview.redraw_id = cx.redraw_id;
-        cxview.draw_calls_len = 0;
+        cxview.draw_items_len = 0;
         
         cx.view_stack.push(view_id);
         
@@ -288,103 +287,74 @@ impl View {
 
 impl Cx {
     
-    pub fn new_draw_call(&mut self, shader: Shader) -> &mut DrawCall {
+    pub fn new_draw_call(&mut self, shader: Shader) -> &mut DrawItem {
         return self.get_draw_call(false, shader, None);
     }
     
-    pub fn append_to_draw_call(&mut self, shader: Shader, slots: usize) -> &mut DrawCall {
+    pub fn append_to_draw_call(&mut self, shader: Shader, slots: usize) -> &mut DrawItem {
         return self.get_draw_call(true, shader, Some(slots));
     }
     
-    pub fn get_draw_call(&mut self, append: bool, shader: Shader, slots: Option<usize>) -> &mut DrawCall {
+    pub fn get_draw_call(&mut self, append: bool, shader: Shader, slots: Option<usize>) -> &mut DrawItem {
         let sh = &self.shaders[shader.shader_id];
         
         let current_view_id = *self.view_stack.last().unwrap();
         let cxview = &mut self.views[current_view_id];
-        let draw_call_id = cxview.draw_calls_len;
+        let draw_item_id = cxview.draw_items_len;
         
         if append {
             if let Some(index) = cxview.find_appendable_drawcall(shader) {
-                return &mut cxview.draw_calls[index];
+                return &mut cxview.draw_items[index];
             }
         }
         
         // add one
-        cxview.draw_calls_len += 1;
-
+        cxview.draw_items_len += 1;
         if let Some(slots) = slots {
             if slots != sh.mapping.instance_props.total_slots {
                 log!("Warning, instance disalignment between struct and shader in {}", sh.name)
             }
         }
         // see if we need to add a new one
-        if draw_call_id >= cxview.draw_calls.len() {
-            cxview.draw_calls.push(DrawCall {
-                geometry: None,
-                draw_call_id: draw_call_id,
+        if draw_item_id >= cxview.draw_items.len() {
+            cxview.draw_items.push(DrawItem {
+                draw_item_id: draw_item_id,
                 view_id: current_view_id,
                 redraw_id: self.redraw_id,
-                do_h_scroll: true,
-                do_v_scroll: true,
-                in_many_instances: false,
-                sub_view_id: 0,
-                shader: shader,
-                instances: Vec::new(),
-                total_instance_slots: sh.mapping.instance_props.total_slots,
-                draw_uniforms: DrawUniforms::default(),
-                user_uniforms: {
-                    let mut f = Vec::new();
-                    f.resize(sh.mapping.user_uniform_props.total_slots, 0.0);
-                    f
-                },
-                textures_2d: {
-                    let mut f = Vec::new();
-                    f.resize(sh.mapping.textures.len(), 0);
-                    f
-                },
-                //current_instance_offset: 0,
-                instance_dirty: true,
-                uniforms_dirty: true,
-                platform: CxPlatformDrawCall::default()
+                sub_view_id: None,
+                draw_call: Some(DrawCall::new_from_shader_mapping(shader, &sh.mapping))
             });
-            let dc = &mut cxview.draw_calls[draw_call_id];
-            return dc
+            return &mut cxview.draw_items[draw_item_id];
         }
         // reuse an older one, keeping all GPU resources attached
-        let dc = &mut cxview.draw_calls[draw_call_id];
-        dc.shader = shader;
-        dc.geometry = None;
-        dc.sub_view_id = 0; // make sure its recognised as a draw call
-        // truncate buffers and set update frame
-        dc.redraw_id = self.redraw_id;
-        dc.instances.truncate(0);
-        dc.total_instance_slots = sh.mapping.instance_props.total_slots;
-        dc.user_uniforms.truncate(0);
-        dc.user_uniforms.resize(sh.mapping.user_uniform_props.total_slots, 0.0);
-        dc.textures_2d.truncate(0);
-        dc.textures_2d.resize(sh.mapping.textures.len(), 0);
-        dc.instance_dirty = true;
-        dc.uniforms_dirty = true;
-        dc.do_h_scroll = true;
-        dc.do_v_scroll = true;
-        dc
+        let mut draw_item = &mut cxview.draw_items[draw_item_id];
+        draw_item.sub_view_id = None;
+        draw_item.redraw_id = self.redraw_id;
+        if let Some(dc) = &mut draw_item.draw_call {
+            dc.update_from_shader_mapping(shader, &sh.mapping);
+        }
+        else {
+            draw_item.draw_call = Some(DrawCall::new_from_shader_mapping(shader, &sh.mapping))
+        }
+        return draw_item;
     }
     
     pub fn begin_many_instances(&mut self, shader: Shader, slots: usize) -> ManyInstances {
-        let dc = self.append_to_draw_call(shader, slots);
+        let draw_item = self.append_to_draw_call(shader, slots);
+        let draw_call = draw_item.draw_call.as_mut().unwrap();
         let mut instances = Vec::new();
-        if dc.in_many_instances {
+        if draw_call.in_many_instances {
             panic!("please call end_many_instances before calling begin_many_instances again")
         }
-        dc.in_many_instances = true;
-        std::mem::swap(&mut instances, &mut dc.instances);
+        draw_call.in_many_instances = true;
+        std::mem::swap(&mut instances, &mut draw_call.instances);
         ManyInstances {
             instance_area: InstanceArea {
-                view_id: dc.view_id,
-                draw_call_id: dc.draw_call_id,
+                view_id: draw_item.view_id,
+                draw_item_id: draw_item.draw_item_id,
                 instance_count: 0,
                 instance_offset: instances.len(),
-                redraw_id: dc.redraw_id
+                redraw_id: draw_item.redraw_id
             },
             aligned: None,
             instances
@@ -401,14 +371,15 @@ impl Cx {
     pub fn end_many_instances(&mut self, mut many_instances: ManyInstances) -> Area {
         let mut ia = many_instances.instance_area;
         let cxview = &mut self.views[ia.view_id];
-        let dc = &mut cxview.draw_calls[ia.draw_call_id];
+        let draw_item = &mut cxview.draw_items[ia.draw_item_id];
+        let draw_call = draw_item.draw_call.as_mut().unwrap();
         
-        if !dc.in_many_instances {
+        if !draw_call.in_many_instances {
             panic!("please call begin_many_instances before calling end_many_instances")
         }
-        dc.in_many_instances = false;
-        std::mem::swap(&mut many_instances.instances, &mut dc.instances);
-        ia.instance_count = (dc.instances.len() - ia.instance_offset) / dc.total_instance_slots;
+        draw_call.in_many_instances = false;
+        std::mem::swap(&mut many_instances.instances, &mut draw_call.instances);
+        ia.instance_count = (draw_call.instances.len() - ia.instance_offset) / draw_call.total_instance_slots;
         if let Some(aligned) = many_instances.aligned {
             self.align_list[aligned] = ia.clone().into();
         }
@@ -416,38 +387,40 @@ impl Cx {
     }
     
     pub fn add_instance(&mut self, shader: Shader, data: &[f32]) -> Area {
-        let dc = self.append_to_draw_call(shader, data.len());
-        let instance_count = data.len() / dc.total_instance_slots;
-        let check = data.len() % dc.total_instance_slots;
+        let draw_item = self.append_to_draw_call(shader, data.len());
+        let draw_call = draw_item.draw_call.as_mut().unwrap();
+        let instance_count = data.len() / draw_call.total_instance_slots;
+        let check = data.len() % draw_call.total_instance_slots;
         if check > 0 {
             panic!("Data not multiple of total slots");
         }
         let ia = InstanceArea {
-            view_id: dc.view_id,
-            draw_call_id: dc.draw_call_id,
+            view_id: draw_item.view_id,
+            draw_item_id: draw_item.draw_item_id,
             instance_count: instance_count,
-            instance_offset: dc.instances.len(),
-            redraw_id: dc.redraw_id
+            instance_offset: draw_call.instances.len(),
+            redraw_id: draw_item.redraw_id
         };
-        dc.instances.extend_from_slice(data);
+        draw_call.instances.extend_from_slice(data);
         ia.into()
     }
     
     pub fn add_aligned_instance(&mut self, shader: Shader, data: &[f32]) -> Area {
-        let dc = self.append_to_draw_call(shader, data.len());
-        let instance_count = data.len() / dc.total_instance_slots;
-        let check = data.len() % dc.total_instance_slots;
+        let draw_item = self.append_to_draw_call(shader, data.len());
+        let draw_call = draw_item.draw_call.as_mut().unwrap();
+        let instance_count = data.len() / draw_call.total_instance_slots;
+        let check = data.len() % draw_call.total_instance_slots;
         if check > 0 {
             panic!("Data not multiple of total slots");
         }
         let ia: Area = (InstanceArea {
-            view_id: dc.view_id,
-            draw_call_id: dc.draw_call_id,
+            view_id: draw_item.view_id,
+            draw_item_id: draw_item.draw_item_id,
             instance_count: instance_count,
-            instance_offset: dc.instances.len(),
-            redraw_id: dc.redraw_id
+            instance_offset: draw_call.instances.len(),
+            redraw_id: draw_item.redraw_id
         }).into();
-        dc.instances.extend_from_slice(data);
+        draw_call.instances.extend_from_slice(data);
         self.align_list.push(ia.clone());
         ia
     }
@@ -512,13 +485,18 @@ impl DrawUniforms {
     }
 }
 
-#[derive(Default, Clone)]
-pub struct DrawCall {
-    pub draw_call_id: usize,
+#[derive(Clone)]
+pub struct DrawItem {
+    pub draw_item_id: usize,
     pub view_id: usize,
     pub redraw_id: u64,
-    pub sub_view_id: usize, // if not 0, its a subnode
     
+    pub sub_view_id: Option<usize>,
+    pub draw_call: Option<DrawCall>,
+}
+
+#[derive(Clone)]
+pub struct DrawCall {
     pub shader: Shader, // if shader_id changed, delete gl vao
     
     pub in_many_instances: bool,
@@ -540,6 +518,48 @@ pub struct DrawCall {
 }
 
 impl DrawCall {
+    
+    pub fn new_from_shader_mapping(shader: Shader, mapping: &CxShaderMapping) -> Self {
+        DrawCall {
+            geometry: None,
+            do_h_scroll: true,
+            do_v_scroll: true,
+            in_many_instances: false,
+            shader: shader,
+            instances: Vec::new(),
+            total_instance_slots: mapping.instance_props.total_slots,
+            draw_uniforms: DrawUniforms::default(),
+            user_uniforms: {
+                let mut f = Vec::new();
+                f.resize(mapping.user_uniform_props.total_slots, 0.0);
+                f
+            },
+            textures_2d: {
+                let mut f = Vec::new();
+                f.resize(mapping.textures.len(), 0);
+                f
+            },
+            //current_instance_offset: 0,
+            instance_dirty: true,
+            uniforms_dirty: true,
+            platform: CxPlatformDrawCall::default()
+        }
+    }
+    
+    pub fn update_from_shader_mapping(&mut self, shader:Shader, mapping:&CxShaderMapping){
+        self.shader = shader;
+        self.geometry = None;
+        self.instances.truncate(0);
+        self.total_instance_slots = mapping.instance_props.total_slots;
+        self.user_uniforms.truncate(0);
+        self.user_uniforms.resize(mapping.user_uniform_props.total_slots, 0.0);
+        self.textures_2d.truncate(0);
+        self.textures_2d.resize(mapping.textures.len(), 0);
+        self.instance_dirty = true;
+        self.uniforms_dirty = true;
+        self.do_h_scroll = true;
+        self.do_v_scroll = true;        
+    }
     
     pub fn set_local_scroll(&mut self, scroll: Vec2, local_scroll: Vec2) {
         self.draw_uniforms.draw_scroll_x = scroll.x;
@@ -573,7 +593,7 @@ impl DrawCall {
         self.draw_uniforms.draw_clip_x2 = clip.1.x;
         self.draw_uniforms.draw_clip_y2 = clip.1.y;
     }
-    
+    /*
     pub fn into_area(&self) -> Area {
         Area::Instance(InstanceArea {
             view_id: self.view_id,
@@ -582,7 +602,7 @@ impl DrawCall {
             instance_offset: 0,
             instance_count: 0
         })
-    }
+    }*/
     /*
     pub fn get_current_instance_area(&self, instance_count: usize) -> InstanceArea {
         InstanceArea {
@@ -633,8 +653,8 @@ pub struct CxView {
     pub locked_view_transform: bool,
     pub do_v_scroll: bool, // this means we
     pub do_h_scroll: bool,
-    pub draw_calls: Vec<DrawCall>,
-    pub draw_calls_len: usize,
+    pub draw_items: Vec<DrawItem>,
+    pub draw_items_len: usize,
     pub parent_scroll: Vec2,
     pub view_uniforms: ViewUniforms,
     pub unsnapped_scroll: Vec2,
@@ -689,12 +709,13 @@ impl CxView {
     
     pub fn find_appendable_drawcall(&mut self, shader: Shader) -> Option<usize> {
         // find our drawcall to append to the current layer
-        if self.draw_calls_len > 0 {
-            for i in (0..self.draw_calls_len).rev() {
-                let dc = &mut self.draw_calls[i];
-                if dc.sub_view_id == 0 && dc.shader == shader {
-                    //dc.current_instance_offset = dc.instances.len();
-                    return Some(i)
+        if self.draw_items_len > 0 {
+            for i in (0..self.draw_items_len).rev() {
+                let draw_item = &mut self.draw_items[i];
+                if let Some(draw_call) = &draw_item.draw_call {
+                    if draw_item.sub_view_id.is_none() && draw_call.shader == shader {
+                        return Some(i)
+                    }
                 }
             }
         }

@@ -614,7 +614,7 @@ impl Cx {
             match align_item {
                 Area::Instance(inst) => {
                     let cxview = &mut self.views[inst.view_id];
-                    let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
+                    let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                     let sh = &self.shaders[draw_call.shader.shader_id];
                     for i in 0..inst.instance_count {
                         if let Some(rect_pos) = sh.mapping.rect_instance_props.rect_pos {
@@ -634,7 +634,7 @@ impl Cx {
             match align_item {
                 Area::Instance(inst) => {
                     let cxview = &mut self.views[inst.view_id];
-                    let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
+                    let draw_call = &mut cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                     let sh = &self.shaders[draw_call.shader.shader_id];
                     for i in 0..inst.instance_count {
                         if let Some(rect_pos) = sh.mapping.rect_instance_props.rect_pos {

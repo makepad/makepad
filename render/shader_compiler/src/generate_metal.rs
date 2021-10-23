@@ -6,16 +6,14 @@ use std::fmt;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use crate::shaderregistry::ShaderRegistry;
-use crate::shaderregistry::FinalConstTable;
 
-pub fn generate_shader(draw_shader_def: &DrawShaderDef, final_const_table: &FinalConstTable, shader_registry: &ShaderRegistry) -> String {
+pub fn generate_shader(draw_shader_def: &DrawShaderDef, shader_registry: &ShaderRegistry) -> String {
     let mut string = String::new();
     DrawShaderGenerator {
         draw_shader_def,
         shader_registry,
-        final_const_table,
         string: &mut string,
-        backend_writer: &MetalBackendWriter {shader_registry, draw_shader_def, final_const_table}
+        backend_writer: &MetalBackendWriter {shader_registry, draw_shader_def}
     }
     .generate_shader();
     string
@@ -24,7 +22,6 @@ pub fn generate_shader(draw_shader_def: &DrawShaderDef, final_const_table: &Fina
 struct DrawShaderGenerator<'a> {
     draw_shader_def: &'a DrawShaderDef,
     shader_registry: &'a ShaderRegistry,
-    final_const_table: &'a FinalConstTable,
     string: &'a mut String,
     backend_writer: &'a dyn BackendWriter
 }
@@ -66,7 +63,7 @@ impl<'a> DrawShaderGenerator<'a> {
         
         let all_fns = self.draw_shader_def.all_fns.borrow();
         for fn_iter in all_fns.iter().rev() {
-            let const_table_offset = self.final_const_table.offsets.get(fn_iter).cloned();
+            let const_table_offset = self.draw_shader_def.const_table.offsets.get(fn_iter).cloned();
             let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
             if fn_def.has_closure_args() {
                 for call_iter in all_fns.iter().rev() {
@@ -419,7 +416,6 @@ impl<'a> DrawShaderGenerator<'a> {
 struct MetalBackendWriter<'a> {
     pub shader_registry: &'a ShaderRegistry,
     pub draw_shader_def: &'a DrawShaderDef,
-    pub final_const_table: &'a FinalConstTable
 }
 
 impl<'a> BackendWriter for MetalBackendWriter<'a> {
@@ -585,7 +581,7 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
     
     fn write_call_expr_hidden_args(&self, string: &mut String, hidden_args: &BTreeSet<HiddenArgKind >, sep: &str) {
         let mut sep = sep;
-        if self.final_const_table.table.len()>0 {
+        if self.draw_shader_def.const_table.table.len()>0 {
             write!(string, "{}", sep).unwrap();
             sep = ", ";
             write!(string, "const_table").unwrap();
@@ -595,7 +591,7 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
             write!(string, "{}", sep).unwrap();
             match hidden_arg {
                 HiddenArgKind::Geometries => {
-                    write!(string, "geometry").unwrap();
+                    write!(string, "geometries").unwrap();
                 }
                 HiddenArgKind::Instances => {
                     write!(string, "instances").unwrap();
@@ -619,7 +615,7 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
     
     fn write_fn_def_hidden_params(&self, string: &mut String, hidden_args: &BTreeSet<HiddenArgKind >, sep: &str) {
         let mut sep = sep;
-        if self.final_const_table.table.len()>0 {
+        if self.draw_shader_def.const_table.table.len()>0 {
             write!(string, "{}", sep).unwrap();
             sep = ", ";
             write!(string, "constant const float *const_table").unwrap();
@@ -641,10 +637,10 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
                     write!(string, "Textures textures").unwrap();
                 }
                 HiddenArgKind::Uniform(ident) => {
-                    write!(string, "constant Uniforms_{0} uniforms_{0}", ident).unwrap();
+                    write!(string, "constant Uniforms_{0} &uniforms_{0}", ident).unwrap();
                 }
                 HiddenArgKind::LiveUniforms => {
-                    write!(string, "constant LiveUniforms live_uniforms").unwrap();
+                    write!(string, "constant LiveUniforms &live_uniforms").unwrap();
                 }
             }
             sep = ", ";

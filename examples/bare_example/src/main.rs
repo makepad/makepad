@@ -22,7 +22,7 @@ impl BareExampleApp {
     pub fn new(cx:&mut Cx)->Self{
         let mut dq = DrawQuad::live_new(cx);
         
-        let live_ptr = cx.shader_registry.live_registry.module_object_path_to_live_ptr(
+        let live_ptr = cx.shader_registry.live_registry.live_ptr_from_path(
             ModulePath::from_str(&module_path!()).unwrap(),
             &[id!(MyDrawQuad)]
         ).unwrap();
@@ -44,7 +44,7 @@ impl BareExampleApp {
     pub fn myui_button_clicked(&mut self, _cx: &mut Cx){
     }
     
-    pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
         
         match event {
             Event::Construct => {
