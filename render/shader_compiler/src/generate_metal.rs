@@ -7,22 +7,33 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use crate::shaderregistry::ShaderRegistry;
 
-pub fn generate_shader(draw_shader_def: &DrawShaderDef, shader_registry: &ShaderRegistry) -> String {
+pub struct MetalGeneratedShader{
+    pub mtlsl: String,
+    pub fields_as_uniform_blocks:BTreeMap<Ident, Vec<(usize, Ident) >>   
+}
+
+pub fn generate_shader(draw_shader_def: &DrawShaderDef, shader_registry: &ShaderRegistry) -> MetalGeneratedShader {
     let mut string = String::new();
+    let fields_as_uniform_blocks = draw_shader_def.fields_as_uniform_blocks();
     DrawShaderGenerator {
         draw_shader_def,
         shader_registry,
         string: &mut string,
+        fields_as_uniform_blocks: &fields_as_uniform_blocks,
         backend_writer: &MetalBackendWriter {shader_registry, draw_shader_def}
     }
     .generate_shader();
-    string
+    MetalGeneratedShader{
+        mtlsl:string, 
+        fields_as_uniform_blocks
+    }
 }
 
 struct DrawShaderGenerator<'a> {
     draw_shader_def: &'a DrawShaderDef,
     shader_registry: &'a ShaderRegistry,
     string: &'a mut String,
+    fields_as_uniform_blocks: &'a BTreeMap<Ident, Vec<(usize, Ident) >>,
     backend_writer: &'a dyn BackendWriter
 }
 
@@ -40,8 +51,8 @@ impl<'a> DrawShaderGenerator<'a> {
         };
         
         self.generate_struct_defs();
-        let fields_as_uniform_blocks = self.draw_shader_def.fields_as_uniform_blocks();
-        self.generate_uniform_structs(&fields_as_uniform_blocks);
+        //let fields_as_uniform_blocks = self.draw_shader_def.fields_as_uniform_blocks();
+        self.generate_uniform_structs();
         self.generate_texture_struct();
         self.generate_geometry_struct();
         self.generate_instance_struct();
@@ -91,8 +102,8 @@ impl<'a> DrawShaderGenerator<'a> {
             }
             .generate_fn_def()
         }
-        self.generate_vertex_main(&fields_as_uniform_blocks);
-        self.generate_pixel_main(&fields_as_uniform_blocks);
+        self.generate_vertex_main();
+        self.generate_pixel_main();
     }
     
     fn generate_struct_defs(&mut self) {
@@ -112,7 +123,7 @@ impl<'a> DrawShaderGenerator<'a> {
         }
     }
     
-    fn generate_uniform_structs(&mut self, fields_as_uniform_blocks: &BTreeMap<Ident, Vec<(usize, Ident) >>) {
+    fn generate_uniform_structs(&mut self,) {
         writeln!(self.string, "struct LiveUniforms {{").unwrap();
         for (value_node_ptr, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
             // we have a span and an ident_path.
@@ -125,7 +136,7 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         writeln!(self.string, "}};").unwrap();
         
-        for (ident, vec) in fields_as_uniform_blocks {
+        for (ident, vec) in self.fields_as_uniform_blocks {
             writeln!(self.string, "struct Uniforms_{} {{", ident).unwrap();
             for (index, _item) in vec {
                 let field = &self.draw_shader_def.fields[*index];
@@ -294,7 +305,7 @@ impl<'a> DrawShaderGenerator<'a> {
         .generate_fn_def()
     }
     
-    fn generate_vertex_main(&mut self, fields_as_uniform_blocks: &BTreeMap<Ident, Vec<(usize, Ident) >>) {
+    fn generate_vertex_main(&mut self) {
         
         write!(self.string, "vertex Varyings vertex_main(").unwrap();
         writeln!(self.string, "Textures textures").unwrap();
@@ -303,7 +314,7 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, ", constant LiveUniforms &live_uniforms [[buffer(2)]]").unwrap();
         writeln!(self.string, ", constant const float *const_table [[buffer(3)]]").unwrap();
         let mut buffer_id = 4;
-        for (field, _set) in fields_as_uniform_blocks {
+        for (field, _set) in self.fields_as_uniform_blocks {
             writeln!(self.string, ", constant Uniforms_{0} &uniforms_{0} [[buffer({1})]]", field, buffer_id).unwrap();
             buffer_id += 1;
         }
@@ -358,7 +369,7 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, "}}").unwrap();
     }
     
-    fn generate_pixel_main(&mut self, fields_as_uniform_blocks: &BTreeMap<Ident, Vec<(usize, Ident) >>) {
+    fn generate_pixel_main(&mut self) {
         
         write!(self.string, "fragment float4 fragment_main(").unwrap();
         writeln!(self.string, "Varyings varyings[[stage_in]]").unwrap();
@@ -366,7 +377,7 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, ", constant LiveUniforms &live_uniforms [[buffer(2)]]").unwrap();
         writeln!(self.string, ", constant const float *const_table [[buffer(3)]]").unwrap();
         let mut buffer_id = 4;
-        for (field, _set) in fields_as_uniform_blocks {
+        for (field, _set) in self.fields_as_uniform_blocks {
             writeln!(self.string, ", constant Uniforms_{0} &uniforms_{0} [[buffer({1})]]", field, buffer_id).unwrap();
             buffer_id += 1;
         }

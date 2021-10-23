@@ -33,6 +33,8 @@ impl Cx {
         let mut passes_todo = Vec::new();
         
         cocoa_app.event_loop( | cocoa_app, events | {
+
+            self.mtl_compile_shaders(&metal_cx);
             //let mut paint_dirty = false;
             for mut event in events {
                 
@@ -239,7 +241,7 @@ impl Cx {
                 }
             }
 
-            self.mtl_compile_shaders(&metal_cx);
+            //self.mtl_compile_shaders(&metal_cx);
             /*
             if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0 {
                 let changed_live_bodies = self.live_styles.changed_live_bodies.clone();

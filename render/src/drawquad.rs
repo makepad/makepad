@@ -9,7 +9,6 @@ live_body!{
         geometry: GeometryQuad2D {};
         varying pos: vec2;
         
-        //let dpi_dilate: float<Uniform>;
         fn scroll(self) -> vec2 {
             return self.draw_scroll.xy;
         }
@@ -248,7 +247,7 @@ impl DrawQuad {
                 None
             };
             unsafe {
-                mi.instances.extend_from_slice(std::slice::from_raw_parts(&self.instances[self.instance_start] as *const _ as *const f32, self.instance_slots));
+                mi.instances.extend_from_slice(std::slice::from_raw_parts((&self.instances[self.instance_start-1] as *const _ as *const f32).offset(1), self.instance_slots));
             }
             
             if let Some(new_area) = new_area {
@@ -286,7 +285,7 @@ impl DrawQuad {
     
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
         unsafe {
-            std::slice::from_raw_parts(&self.instances[self.instance_start] as *const _ as *const f32, self.instance_slots)
+            std::slice::from_raw_parts((&self.instances[self.instance_start-1] as *const _ as *const f32).offset(1), self.instance_slots)
         }
     }
     
