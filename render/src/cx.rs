@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, BTreeSet};
 use std::fmt::Write;
 use std::time::{Instant};
 
-pub use makepad_render_derive::*;
+pub use makepad_derive_live::*;
 pub use makepad_live_parser::math::*;
 use makepad_shader_compiler::ShaderRegistry;
 pub use makepad_live_parser::Id;
@@ -892,10 +892,10 @@ impl Cx {
                         let mut off = 0;
                         for prop in &sh.mapping.instance_props.props {
                             match prop.slots {
-                                1 => out.push_str(&format!("{}:{} ", prop.name, draw_call.instances[inst * slots + off])),
-                                2 => out.push_str(&format!("{}:v2({},{}) ", prop.name, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off])),
-                                3 => out.push_str(&format!("{}:v3({},{},{}) ", prop.name, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off], draw_call.instances[inst * slots + 1 + off])),
-                                4 => out.push_str(&format!("{}:v4({},{},{},{}) ", prop.name, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off], draw_call.instances[inst * slots + 2 + off], draw_call.instances[inst * slots + 3 + off])),
+                                1 => out.push_str(&format!("{}:{} ", prop.id, draw_call.instances[inst * slots + off])),
+                                2 => out.push_str(&format!("{}:v2({},{}) ", prop.id, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off])),
+                                3 => out.push_str(&format!("{}:v3({},{},{}) ", prop.id, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off], draw_call.instances[inst * slots + 1 + off])),
+                                4 => out.push_str(&format!("{}:v4({},{},{},{}) ", prop.id, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off], draw_call.instances[inst * slots + 2 + off], draw_call.instances[inst * slots + 3 + off])),
                                 _ => {}
                             }
                             off += prop.slots;

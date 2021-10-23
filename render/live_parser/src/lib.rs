@@ -14,7 +14,7 @@ pub mod liveregistry;
 pub mod deserialize;
 pub mod id;
 
-pub use makepad_live_macros::*;
+pub use makepad_id_macros::*;
 pub use crate::math::*;
 pub use crate::id::Id;
 pub use crate::id::IdPack;

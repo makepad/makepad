@@ -220,8 +220,8 @@ impl<'a> DrawShaderAnalyser<'a> {
             let fn_def = self.shader_registry.all_fns.get(any_fn).unwrap();
             all_live_refs.extend(fn_def.live_refs.borrow().as_ref().cloned().unwrap());
             all_const_refs.extend(fn_def.const_refs.borrow().as_ref().unwrap());
-            // technically we should only be allowed to do this on our own fn_defs
-            if let Some(FnSelfKind::DrawShader(_)) = fn_def.self_kind {
+            // fill in fns where hidden args is none
+            if fn_def.hidden_args.borrow().is_none(){
                 self.analyse_hidden_args(fn_def);
             }
         }
@@ -279,6 +279,7 @@ impl<'a> DrawShaderAnalyser<'a> {
         // merge in the others
         for callee in fn_def.callees.borrow().as_ref().unwrap().iter(){
             let other_fn_def = self.shader_registry.all_fns.get(callee).unwrap();
+            
             hidden_args.extend(other_fn_def.hidden_args.borrow().as_ref().unwrap().iter().cloned());
         }
         *fn_def.hidden_args.borrow_mut() = Some(hidden_args);

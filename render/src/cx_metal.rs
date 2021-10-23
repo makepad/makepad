@@ -803,7 +803,7 @@ impl MetalCx {
         gen: MetalGeneratedShader,
         draw_shader_def: &DrawShaderDef,
     ) -> ShaderCompileResult {
-        println!("{}", gen.mtlsl);
+        //println!("{}", gen.mtlsl);
         //let debug = ;
         //mapping.update_live_uniforms(live_styles);
         if draw_shader_def.debug {
