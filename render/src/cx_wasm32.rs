@@ -44,6 +44,8 @@ impl Cx {
                     break;
                 },
                 1 => { // fetch_deps
+                    self.call_event_handler(&mut Event::Construct);
+                    
                     self.gpu_info.init_from_info(
                         to_wasm.mu32(), // min_uniforms
                         to_wasm.parse_string(), // min_uniforms
@@ -111,7 +113,7 @@ impl Cx {
                         self.windows[0].window_geom = self.platform.window_geom.clone();
                     }
                     
-                    self.call_event_handler(&mut Event::Construct);
+                    
                     
                     self.redraw_child_area(Area::All);
                 },

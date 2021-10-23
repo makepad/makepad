@@ -4,7 +4,7 @@ use crate::cx::*;
 #[derive(Clone, Default, Hash, Ord, PartialOrd, Eq,Debug, PartialEq, Copy)]
 pub struct InstanceArea{
     pub view_id:usize,
-    pub draw_call_id:usize,
+    pub draw_item_id:usize,
     pub instance_offset:usize,
     pub instance_count:usize,
     pub redraw_id:u64
@@ -109,7 +109,7 @@ impl Area{
                     Vec2::default()
                 }
                 else{
-                    let draw_call = &cxview.draw_calls[inst.draw_call_id];
+                    let draw_call = &cxview.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
                     Vec2{
                         x:draw_call.draw_uniforms.draw_scroll_x,
                         y:draw_call.draw_uniforms.draw_scroll_y
@@ -132,7 +132,7 @@ impl Area{
                     return
                 }
                 else{
-                    let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
+                    let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                     draw_call.do_h_scroll = hor;
                     draw_call.do_v_scroll = ver;
                 }
@@ -160,7 +160,7 @@ impl Area{
                 if cxview.redraw_id != inst.redraw_id {
                     return Rect::default();
                 }
-                let draw_call = &cxview.draw_calls[inst.draw_call_id];
+                    let draw_call = &cxview.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
                 if draw_call.in_many_instances{
                     panic!("get_rect called whilst in many instances");
                     //return Rect::default();
@@ -204,7 +204,7 @@ impl Area{
                 if cxview.redraw_id != inst.redraw_id {
                     return abs;
                 }
-                let draw_call = &cxview.draw_calls[inst.draw_call_id];
+                let draw_call = &cxview.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
                 let sh = &cx.shaders[draw_call.shader.shader_id];
                 // ok now we have to patch x/y/w/h into it
                 if let Some(rect_pos) = sh.mapping.rect_instance_props.rect_pos{
@@ -236,7 +236,7 @@ impl Area{
                     println!("set_rect called on invalid area pointer, use mark/sweep correctly!");
                     return;
                 }
-                let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
+                let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                 let sh = &cx.shaders[draw_call.shader.shader_id];        // ok now we have to patch x/y/w/h into it
                 
                 if let Some(rect_pos) = sh.mapping.rect_instance_props.rect_pos{
@@ -260,7 +260,7 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
-                let draw_call = &cxview.draw_calls[inst.draw_call_id];
+                let draw_call = &cxview.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
                 if cxview.redraw_id != inst.redraw_id {
                     println!("get_instance_read_ref called on invalid area pointer, use mark/sweep correctly!");
                     return None;
@@ -309,7 +309,7 @@ impl Area{
                 if cxview.redraw_id != inst.redraw_id {
                     return None;
                 }
-                let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
+                let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                 let sh = &cx.shaders[draw_call.shader.shader_id];
                 if let Some(prop_id) = sh.mapping.user_uniform_props.prop_map.get(&id){
                     let prop = &sh.mapping.user_uniform_props.props[*prop_id];
@@ -358,7 +358,7 @@ impl Area{
          match self{
             Area::Instance(inst)=>{
                 let cxview = &mut cx.views[inst.view_id];
-                let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
+                let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                 let sh = &cx.shaders[draw_call.shader.shader_id];
                 for (index, prop) in sh.mapping.textures.iter().enumerate(){
                     if prop.id == id{

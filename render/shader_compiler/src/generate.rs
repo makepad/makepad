@@ -692,9 +692,13 @@ impl<'a> ExprGenerator<'a> {
                 self.backend_writer.generate_draw_shader_field_expr(&mut self.string, field_ident, ty);
                 //write!(self.string, "{}", &DisplayDsIdent(field_ident)).unwrap();
             }
-            _ => {
+            Some(Ty::Struct{..})=>{
                 self.generate_expr(expr);
                 write!(self.string, ".{}", &DisplayStructField(field_ident)).unwrap();
+            }
+            _=>{
+                self.generate_expr(expr);
+                write!(self.string, ".{}", field_ident).unwrap();
             }
         }
     }

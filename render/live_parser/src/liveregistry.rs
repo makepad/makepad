@@ -107,7 +107,7 @@ impl LiveRegistry {
         });
     }*/
     
-    pub fn module_object_path_to_live_ptr(&self, module_path:ModulePath, object_path: &[Id]) -> Option<LivePtr>{
+    pub fn live_ptr_from_path(&self, module_path:ModulePath, object_path: &[Id]) -> Option<LivePtr>{
         if let Some(file_id) = self.module_path_to_file_id.get(&module_path){
             let doc = &self.expanded[file_id.to_index()];
             if let Some(local_ptr) = doc.scan_for_object_path(object_path){

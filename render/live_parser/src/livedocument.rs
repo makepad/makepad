@@ -40,7 +40,7 @@ impl fmt::Display for LiveScopeTarget {
 pub enum LiveScopeTarget {
     LocalPtr(LocalPtr),
     LivePtr(LivePtr)
-}
+} 
 
 impl LiveScopeTarget{
     pub fn to_full_node_ptr(&self, file_id:FileId)->LivePtr{

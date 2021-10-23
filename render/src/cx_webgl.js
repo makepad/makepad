@@ -1377,7 +1377,7 @@
                 premultipliedAlpha: canvas.getAttribute("premultipliedAlpha")? true: false,
                 preserveDrawingBuffer: canvas.getAttribute("preserveDrawingBuffer")? true: false,
                 preferLowPowerToHighPerformance: true,
-                xrCompatible: true
+                //xrCompatible: true
             }
             
             var gl = this.gl = canvas.getContext('webgl', options)

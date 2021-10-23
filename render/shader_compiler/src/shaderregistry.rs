@@ -12,9 +12,6 @@ use std::collections::HashMap;
 use crate::builtin::Builtin;
 use crate::builtin::generate_builtins;
 use crate::shaderast::Scopes;
-use crate::generate_glsl;
-use crate::generate_metal;
-use crate::generate_hlsl;
 /*
 #[derive(Clone, Debug, Copy, Hash, Eq, PartialEq)]
 pub struct ShaderResourceId(CrateModule, Id);
@@ -97,15 +94,10 @@ pub enum LiveNodeFindResult {
     LiveValue(ValueNodePtr, TyLit)
 }
 
-#[derive(Clone, Default)]
-pub struct FinalConstTable {
-    pub table: Vec<f32>,
-    pub offsets: BTreeMap<FnNodePtr, usize>
-}
 
 impl ShaderRegistry {
     
-    pub fn compute_final_const_table(&self, draw_shader_def: &DrawShaderDef, filter_file_id: Option<FileId>) -> FinalConstTable {
+    pub fn compute_const_table(&self, draw_shader_def: &mut DrawShaderDef, filter_file_id: Option<FileId>){
         if let Some(filter_file_id) = filter_file_id {
             let mut offsets = BTreeMap::new();
             let mut table = Vec::new();
@@ -124,10 +116,12 @@ impl ShaderRegistry {
             for _ in 0..align_gap {
                 table.push(0.0);
             }
-            FinalConstTable {table, offsets}
+            draw_shader_def.const_table.table = table;
+            draw_shader_def.const_table.offsets = offsets;
         }
-        else {
-            FinalConstTable::default()
+        else{
+            draw_shader_def.const_table.table.truncate(0);
+            draw_shader_def.const_table.offsets.clear();
         }
     }
     
@@ -543,7 +537,7 @@ impl ShaderRegistry {
     }
     
     // lets compile the thing
-    pub fn analyse_draw_shader<F>(&mut self, shader_ptr: DrawShaderNodePtr, mut ext_self: F) -> Result<(), LiveError>
+    pub fn analyse_draw_shader<F>(&mut self, shader_ptr: DrawShaderNodePtr, mut ext_self: F) -> Result<&DrawShaderDef, LiveError>
     where F: FnMut(Span, Id, LiveType, &mut DrawShaderDef)
     {
         
@@ -559,174 +553,95 @@ impl ShaderRegistry {
             LiveValue::Class {node_start, node_count, ..} => {
                 let mut parser_deps = Vec::new();
                 
-                for i in 0..node_count as usize {
-                    let prop_ptr = LivePtr {file_id: shader_ptr.0.file_id, local_ptr: LocalPtr {
-                        level: shader_ptr.0.local_ptr.level + 1,
-                        index: i + node_start as usize
-                    }};
-                    let prop = doc.resolve_ptr(prop_ptr.local_ptr);
-                    match prop.value {
-                        /*
-                        LiveValue::ResourceRef {target} => {
-                            // draw input or default_geometry
-                            match prop.id_pack {
-                                id_pack!(draw_input) => {
-                                    let srid = Self::parse_shader_resource_id_from_multi_id(
-                                        crate_id,
-                                        module_id,
-                                        self.live_registry.token_id_to_span(prop.token_id),
-                                        target,
-                                        &doc.multi_ids
-                                    ) ?;
-                                    draw_input_srid = Some((srid, self.live_registry.token_id_to_span(prop.token_id)))
-                                },
-                                id_pack!(default_geometry) => {
-                                    // this thing needs to have 3 seg
-                                    let srid = Self::parse_shader_resource_id_from_multi_id(
-                                        crate_id,
-                                        module_id,
-                                        self.live_registry.token_id_to_span(prop.token_id),
-                                        target,
-                                        &doc.multi_ids
-                                    ) ?;
-                                    draw_shader_def.default_geometry = Some(srid);
-                                },
-                                _ => { // unknown
-                                    return Err(LiveError {
-                                        origin: live_error_origin!(),
-                                        span: self.live_registry.token_id_to_span(prop.token_id),
-                                        message: format!("Unknown var ref type {}", prop.id_pack)
-                                    })
+                /*
+                let class_ptr = LivePtr {file_id: shader_ptr.0.file_id, local_ptr: LocalPtr {
+                    level: shader_ptr.0.local_ptr.level + 1,
+                    index: i + node_start as usize
+                }};
+                */
+                if let Some(mut iter) = self.live_registry.live_class_iterator(shader_ptr.0) {
+                    while let Some((id, prop_ptr)) = iter.next(&self.live_registry) {
+                        let prop = doc.resolve_ptr(prop_ptr.local_ptr);
+                        
+                        match prop.value {
+                            LiveValue::LiveType(lt) => {
+                                if let IdUnpack::Single(id) = prop.id_pack.unpack() {
+                                    if id == id!(rust_type) {
+                                        ext_self(
+                                            self.live_registry.token_id_to_span(prop.token_id),
+                                            id,
+                                            lt,
+                                            &mut draw_shader_def
+                                        );
+                                    }
                                 }
                             }
-                        }*/
-                        // this HAS to be rust_type
-                        LiveValue::LiveType(lt) => {
-                            if let IdUnpack::Single(id) = prop.id_pack.unpack() {
-                                if id == id!(rust_type) {
-                                    ext_self(
-                                        self.live_registry.token_id_to_span(prop.token_id),
-                                        id,
-                                        lt,
-                                        &mut draw_shader_def
+                            LiveValue::Class {class, node_start, node_count} => {
+                                // if our id is geometry, process it
+                                if prop.id_pack == id_pack!(geometry) {
+                                    // we need to find the rust_type from here
+                                    if let Some(local_ptr) = doc.scan_for_object_path_from(
+                                        &[id!(rust_type)],
+                                        node_start as usize,
+                                        node_count as usize,
+                                        prop_ptr.local_ptr.level + 1
+                                    ){
+                                        let node = doc.resolve_ptr(local_ptr);
+                                        if let LiveValue::LiveType(lt) = node.value{
+                                            ext_self(
+                                                self.live_registry.token_id_to_span(prop.token_id),
+                                                id,
+                                                lt,
+                                                &mut draw_shader_def
+                                            );
+                                        }
+                                    }
+                                }
+                            },
+                            LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
+                                if let IdUnpack::Single(id) = prop.id_pack.unpack() {
+                                    let mut parser = ShaderParser::new(
+                                        self,
+                                        doc.get_tokens(token_start, token_count + 1),
+                                        doc.get_scopes(scope_start, scope_count),
+                                        &mut parser_deps,
+                                        Some(FnSelfKind::DrawShader(shader_ptr))
+                                        //None
                                     );
+                                    let decl = parser.expect_self_decl(Ident(id), prop_ptr) ?;
+                                    if let Some(decl) = decl {
+                                        draw_shader_def.fields.push(decl);
+                                    }
+                                    //else{ // it was a const
+                                    //}
+                                }
+                            },
+                            LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
+                                if let IdUnpack::Single(id) = prop.id_pack.unpack() {
+                                    // lets parse this thing
+                                    let parser = ShaderParser::new(
+                                        self,
+                                        doc.get_tokens(token_start, token_count),
+                                        doc.get_scopes(scope_start, scope_count),
+                                        &mut parser_deps,
+                                        Some(FnSelfKind::DrawShader(shader_ptr))
+                                        //None
+                                    );
+                                    
+                                    let fn_def = parser.expect_method_def(
+                                        FnNodePtr(prop_ptr),
+                                        Ident(id),
+                                    ) ?;
+                                    if let Some(fn_def) = fn_def {
+                                        draw_shader_def.methods.push(fn_def.fn_node_ptr);
+                                        self.all_fns.insert(fn_def.fn_node_ptr, fn_def);
+                                    }
                                 }
                             }
-                            // ok so we are a livetype ref.
-                            // we have to be a 'rust_type' id
-                            // this allows us to query the live_type registry for fields
+                            _ => ()
                         }
-                        LiveValue::Class {class, node_start, node_count} => {
-                            // if our id is geometry, process it
-                            if prop.id_pack == id_pack!(geometry) {
-                                println!("HERE!")
-                            }
-                        },
-                        LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
-                            if let IdUnpack::Single(id) = prop.id_pack.unpack() {
-                                let mut parser = ShaderParser::new(
-                                    self,
-                                    doc.get_tokens(token_start, token_count + 1),
-                                    doc.get_scopes(scope_start, scope_count),
-                                    &mut parser_deps,
-                                    Some(FnSelfKind::DrawShader(shader_ptr))
-                                    //None
-                                );
-                                let decl = parser.expect_self_decl(Ident(id), prop_ptr) ?;
-                                if let Some(decl) = decl {
-                                    draw_shader_def.fields.push(decl);
-                                }
-                                //else{ // it was a const
-                                //}
-                            }
-                        },
-                        LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
-                            if let IdUnpack::Single(id) = prop.id_pack.unpack() {
-                                // lets parse this thing
-                                let parser = ShaderParser::new(
-                                    self,
-                                    doc.get_tokens(token_start, token_count),
-                                    doc.get_scopes(scope_start, scope_count),
-                                    &mut parser_deps,
-                                    Some(FnSelfKind::DrawShader(shader_ptr))
-                                    //None
-                                );
-                                
-                                let fn_def = parser.expect_method_def(
-                                    FnNodePtr(prop_ptr),
-                                    Ident(id),
-                                ) ?;
-                                if let Some(fn_def) = fn_def {
-                                    draw_shader_def.methods.push(fn_def.fn_node_ptr);
-                                    self.all_fns.insert(fn_def.fn_node_ptr, fn_def);
-                                }
-                            }
-                        }
-                        _ => ()
                     }
                 }
-                /*
-                // if we have a draw_input process it.
-                if let Some((draw_input_srid, span)) = draw_input_srid {
-                    if let Some(draw_input) = self.draw_inputs.get(&draw_input_srid) {
-                        for decl in &draw_shader_def.fields {
-                            if let DrawShaderFieldKind::Instance {..} = decl.kind {
-                                return Err(LiveError {
-                                    origin: live_error_origin!(),
-                                    span,
-                                    message: format!("Cannot use both instance defs and draw_input {}", draw_input_srid)
-                                })
-                            }
-                        }
-                        for instance in &draw_input.instances {
-                            draw_shader_def.fields.push(
-                                DrawShaderFieldDef {
-                                    kind: DrawShaderFieldKind::Instance {
-                                        is_used_in_pixel_shader: Cell::new(false),
-                                        input_type: DrawShaderInputType::ShaderResourceId(draw_input_srid),
-                                    },
-                                    span,
-                                    ident: instance.ident,
-                                    ty_expr: instance.ty_expr.clone(),
-                                }
-                            )
-                        }
-                        
-                        for uniform in &draw_input.uniforms {
-                            draw_shader_def.fields.push(
-                                DrawShaderFieldDef {
-                                    kind: DrawShaderFieldKind::Uniform {
-                                        block_ident: Ident(id!(default)),
-                                        input_type: DrawShaderInputType::ShaderResourceId(draw_input_srid),
-                                    },
-                                    span,
-                                    ident: uniform.ident,
-                                    ty_expr: uniform.ty_expr.clone(),
-                                }
-                            )
-                        }
-                        
-                        for texture in &draw_input.textures {
-                            draw_shader_def.fields.push(
-                                DrawShaderFieldDef {
-                                    kind: DrawShaderFieldKind::Texture {
-                                        input_type: DrawShaderInputType::ShaderResourceId(draw_input_srid),
-                                    },
-                                    span,
-                                    ident: texture.ident,
-                                    ty_expr: texture.ty_expr.clone(),
-                                }
-                            )
-                        }
-                    }
-                    else {
-                        return Err(LiveError {
-                            origin: live_error_origin!(),
-                            span,
-                            message: format!("Cannot find draw_input {}", draw_input_srid)
-                        })
-                    }
-                }*/
                 // lets check for duplicate fields
                 for i in 0..draw_shader_def.fields.len() {
                     for j in (i + 1)..draw_shader_def.fields.len() {
@@ -746,8 +661,9 @@ impl ShaderRegistry {
                 
                 self.analyse_deps(&parser_deps) ?;
                 
+                let draw_shader_def = self.draw_shaders.get(&shader_ptr).unwrap();
                 let mut sa = DrawShaderAnalyser {
-                    draw_shader_def: self.draw_shaders.get(&shader_ptr).unwrap(),
+                    draw_shader_def: draw_shader_def,
                     scopes: &mut Scopes::new(),
                     shader_registry: self,
                     options: ShaderAnalyseOptions {
@@ -757,7 +673,7 @@ impl ShaderRegistry {
                 sa.analyse_shader() ?;
                 
                 // ok we have all structs
-                return Ok(())
+                return Ok(draw_shader_def)
             }
             _ => return Err(LiveError {
                 origin: live_error_origin!(),
@@ -766,33 +682,27 @@ impl ShaderRegistry {
             })
         }
     }
-    
-    pub fn generate_glsl_shader(&mut self, shader_ptr: DrawShaderNodePtr, const_file_id: Option<FileId>) -> Result<(String, String), LiveError> {
+    /*
+    pub fn generate_glsl_shader(&mut self, shader_ptr: DrawShaderNodePtr) -> (String, String) {
         // lets find the FullPointer
         let draw_shader_decl = self.draw_shaders.get(&shader_ptr).unwrap();
         // TODO this env needs its const table transferred
-        let final_const_table = self.compute_final_const_table(draw_shader_decl, const_file_id);
-        let vertex = generate_glsl::generate_vertex_shader(draw_shader_decl, &final_const_table, self);
-        let pixel = generate_glsl::generate_pixel_shader(draw_shader_decl, &final_const_table, self);
-        return Ok((vertex, pixel))
+        let vertex = generate_glsl::generate_vertex_shader(draw_shader_decl, self);
+        let pixel = generate_glsl::generate_pixel_shader(draw_shader_decl, self);
+        return (vertex, pixel)
     }
     
-    pub fn generate_metal_shader(&mut self, shader_ptr: DrawShaderNodePtr, const_file_id: Option<FileId>) -> Result<String, LiveError> {
+    pub fn generate_metal_shader(&mut self, shader_ptr: DrawShaderNodePtr) -> String{
         // lets find the FullPointer
         let draw_shader_decl = self.draw_shaders.get(&shader_ptr).unwrap();
-        // TODO this env needs its const table transferred
-        let final_const_table = self.compute_final_const_table(draw_shader_decl, const_file_id);
-        let shader = generate_metal::generate_shader(draw_shader_decl, &final_const_table, self);
-        return Ok(shader)
+        let shader = generate_metal::generate_shader(draw_shader_decl, self);
+        return shader
     }
     
-    
-    pub fn generate_hlsl_shader(&mut self, shader_ptr: DrawShaderNodePtr, const_file_id: Option<FileId>) -> Result<String, LiveError> {
+    pub fn generate_hlsl_shader(&mut self, shader_ptr: DrawShaderNodePtr) -> String{
         // lets find the FullPointer
         let draw_shader_decl = self.draw_shaders.get(&shader_ptr).unwrap();
-        // TODO this env needs its const table transferred
-        let final_const_table = self.compute_final_const_table(draw_shader_decl, const_file_id);
-        let shader = generate_hlsl::generate_shader(draw_shader_decl, &final_const_table, self);
-        return Ok(shader)
-    }
+        let shader = generate_hlsl::generate_shader(draw_shader_decl, self);
+        return shader
+    }*/
 }
