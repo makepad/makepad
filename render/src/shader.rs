@@ -1,4 +1,5 @@
 use crate::cx::*;
+use makepad_live_parser::LiveRegistry;
 use makepad_shader_compiler::Ty;
 use makepad_shader_compiler::shaderast::DrawShaderDef;
 use makepad_shader_compiler::shaderast::DrawShaderFieldKind;
@@ -24,7 +25,7 @@ pub enum ShaderCompileResult{
 
 #[derive(Debug, Clone, Hash, PartialEq)]
 pub struct PropDef {
-    pub name: String,
+   // pub name: String,
     pub ty: Ty,
     pub id: Id,
     pub live_ptr: Option<LivePtr>
@@ -41,9 +42,9 @@ impl RectInstanceProps {
         let mut rect_size = None;
         let mut slot = 0;
         for inst in instances {
-            match inst.name.as_ref() {
-                "rect_pos" => rect_pos = Some(slot),
-                "rect_size" => rect_size = Some(slot),
+            match inst.id {
+                id!(rect_pos) => rect_pos = Some(slot),
+                id!(rect_size) => rect_size = Some(slot),
                 _ => ()
             }
             slot += inst.ty.size(); //sg.get_type_slots(&inst.ty);
@@ -57,7 +58,6 @@ impl RectInstanceProps {
 
 #[derive(Debug, Clone)]
 pub struct InstanceProp {
-    pub name: String,
     pub id: Id,
     pub ty: Ty,
     pub offset: usize,
@@ -73,7 +73,6 @@ pub struct InstanceProps {
 
 #[derive(Debug, Clone)]
 pub struct UniformProp {
-    pub name: String,
     pub id: Id,
     pub ty: Ty,
     pub offset: usize,
@@ -89,7 +88,7 @@ pub struct UniformProps {
 
 #[derive(Debug, Clone)]
 pub struct NamedProp {
-    pub name: String,
+    pub id: Id,
     pub ty: Ty,
     pub offset: usize,
     pub slots: usize
@@ -108,8 +107,8 @@ impl NamedProps {
         for prop in in_props {
             let slots = prop.ty.size();
             out_props.push(NamedProp {
+                id: prop.id,
                 ty: prop.ty.clone(),
-                name: prop.name.clone(),
                 offset: offset,
                 slots: slots
             });
@@ -134,7 +133,6 @@ impl InstanceProps {
             out_props.push(InstanceProp {
                 id: prop.id,
                 ty: prop.ty.clone(),
-                name: prop.name.clone(),
                 offset: offset,
                 slots: slots
             });
@@ -167,7 +165,6 @@ impl UniformProps {
             out_props.push(UniformProp {
                 id: prop.id,
                 ty: prop.ty.clone(),
-                name: prop.name.clone(),
                 offset: offset,
                 slots: slots
             });
@@ -185,7 +182,7 @@ impl UniformProps {
     
     pub fn find_zbias_uniform_prop(&self) -> Option<usize> {
         for prop in &self.props {
-            if prop.name == "zbias" {
+            if prop.id == id!(zbias) {
                 return Some(prop.offset)
             }
         }
@@ -219,7 +216,7 @@ impl CxShaderMapping {
         let mut instances = Vec::new();
         let mut geometries = Vec::new();
         let mut user_uniforms = Vec::new();
-        let  live_uniforms = Vec::new();
+        let mut live_uniforms = Vec::new();
         let mut draw_uniforms = Vec::new();
         let mut view_uniforms = Vec::new();
         let mut pass_uniforms = Vec::new();
@@ -229,7 +226,7 @@ impl CxShaderMapping {
             match &field.kind {
                 DrawShaderFieldKind::Geometry{var_def_node_ptr,..} => {
                     geometries.push(PropDef {
-                        name: field.ident.to_string(),
+                        //name: field.ident.to_string(),
                         ty: field.ty_expr.ty.borrow().clone().unwrap(),
                         id: field.ident.0,
                         live_ptr: if let Some(l) = var_def_node_ptr{Some(l.0)}else{None}
@@ -237,7 +234,7 @@ impl CxShaderMapping {
                 }
                 DrawShaderFieldKind::Instance{var_def_node_ptr, ..} => {
                     instances.push(PropDef {
-                        name: field.ident.to_string(),
+                        //name: field.ident.to_string(),
                         ty: field.ty_expr.ty.borrow().clone().unwrap(),
                         id: field.ident.0,
                         live_ptr: if let Some(l) = var_def_node_ptr{Some(l.0)}else{None}
@@ -245,7 +242,7 @@ impl CxShaderMapping {
                 }
                 DrawShaderFieldKind::Uniform{var_def_node_ptr,block_ident,..} => {
                     let prop_def = PropDef {
-                        name: field.ident.to_string(),
+                        //name: field.ident.to_string(),
                         ty: field.ty_expr.ty.borrow().clone().unwrap(),
                         id: field.ident.0,
                         live_ptr: if let Some(l) = var_def_node_ptr{Some(l.0)}else{None}
@@ -268,7 +265,7 @@ impl CxShaderMapping {
                 }
                 DrawShaderFieldKind::Texture{var_def_node_ptr, ..} => {
                     textures.push(PropDef {
-                        name: field.ident.to_string(),
+                        //name: field.ident.to_string(),
                         ty: field.ty_expr.ty.borrow().clone().unwrap(),
                         id: field.ident.0,
                         live_ptr: if let Some(l) = var_def_node_ptr{Some(l.0)}else{None}
@@ -279,15 +276,14 @@ impl CxShaderMapping {
         }
         
         // ok now the live uniforms
-        for (_value_node_ptr, _ty) in draw_shader_def.all_live_refs.borrow().iter(){
-            /*
-            live_uniforms.push(PropDef {
-                name: field.ident.to_string(),
-                ty: field.ty_expr.ty.borrow().clone().unwrap(),
-                id: field.ident.0,
-                live_ptr: if let Some(l) = var_def_node_ptr{Some(l.0)}else{None}
-            });
+        for (value_node_ptr, ty) in draw_shader_def.all_live_refs.borrow().iter(){
             
+            live_uniforms.push(PropDef {
+                ty: ty.clone(),
+                id: Id(0),
+                live_ptr: Some(value_node_ptr.0)
+            });
+            /*
             let prop_def = PropDef {
                 name: {
                     let mut out = format!("mpsc_live_");
@@ -300,10 +296,10 @@ impl CxShaderMapping {
             live_uniforms.push(prop_def)*/
         }
         
-        
         let live_uniform_props = UniformProps::construct(&live_uniforms, metal_uniform_packing);
         let mut live_uniforms_buf = Vec::new();
         live_uniforms_buf.resize(live_uniform_props.total_slots, 0.0);
+        
         CxShaderMapping {
             live_uniforms_buf,
             rect_instance_props: RectInstanceProps::construct(&instances),
@@ -315,35 +311,43 @@ impl CxShaderMapping {
             const_table: None,
             instances,
             geometries,
-            pass_uniforms,
+            pass_uniforms, 
             view_uniforms,
             draw_uniforms,
             live_uniforms,
             user_uniforms
         }
     }
-    /*
-    pub fn update_live_uniforms(&mut self, live_styles: &LiveStyles) {
+    
+    pub fn update_live_uniforms(&mut self, live_registry:&LiveRegistry) {
         // and write em into the live_uniforms buffer
-        for prop in &self.live_uniform_props.props {
+        for i in 0..self.live_uniforms.len(){
+            let prop = &self.live_uniform_props.props[i];
+            let uni = &self.live_uniforms[i];
             match prop.ty {
-                Ty::Vec4 => { // color or anim
-                    let color = live_styles.get_vec4(prop.live_item_id, &prop.name);
-                    let o = prop.offset;
-                    self.live_uniforms_buf[o + 0] = color.x;
-                    self.live_uniforms_buf[o + 1] = color.y;
-                    self.live_uniforms_buf[o + 2] = color.z;
-                    self.live_uniforms_buf[o + 3] = color.w;
+                Ty::Vec4 => { // color
+                    let node = live_registry.resolve_ptr(uni.live_ptr.unwrap());
+                    if let LiveValue::Color(color_u32) = node.value{
+                        let o = prop.offset;
+                        let color = Vec4::from_u32(color_u32);
+                        self.live_uniforms_buf[o + 0] = color.x;
+                        self.live_uniforms_buf[o + 1] = color.y;
+                        self.live_uniforms_buf[o + 2] = color.z;
+                        self.live_uniforms_buf[o + 3] = color.w;
+                    }
                 },
-                Ty::Float => { // float or anim
-                    let float = live_styles.get_float(prop.live_item_id, &prop.name);
-                    let o = prop.offset;
-                    self.live_uniforms_buf[o] = float;
+                Ty::Float => { // float
+                    let node = live_registry.resolve_ptr(uni.live_ptr.unwrap());
+                    if let LiveValue::Float(float) = node.value{
+                        let o = prop.offset;
+                        self.live_uniforms_buf[o] = float as f32;
+                        
+                    }
                 },
                 _=>()
             }
         }
-    }*/
+    }
 }
 
 #[derive(Default, Clone)]
