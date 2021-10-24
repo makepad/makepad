@@ -244,7 +244,7 @@ impl AppInner {
                         _ => {}
                     }
                 }
-                dock::Action::TabReceivedDraggedItem(tab_id, item) => {
+                dock::Action::TabReceivedDragItem(tab_id, item) => {
                     let tab = &state.tabs_by_tab_id[tab_id];
                     let panel_id = tab.panel_id;
                     for file_url in &item.file_urls {
@@ -252,7 +252,7 @@ impl AppInner {
                         self.create_code_editor_tab(cx, state, panel_id, Some(tab_id), path);
                     }
                 }
-                dock::Action::ContentsReceivedDraggedItem(panel_id, position, item) => {
+                dock::Action::ContentsReceivedDragItem(panel_id, position, item) => {
                     let panel_id = match position {
                         DragPosition::Center => panel_id,
                         _ => self.split_tab_panel(cx, state, panel_id, position),
@@ -271,6 +271,7 @@ impl AppInner {
         for action in actions {
             match action {
                 file_tree::Action::FileNodeWasPressed(file_node_id) => {
+                    /*
                     let node = &state.file_nodes_by_file_node_id[file_node_id];
                     if node.is_file() {
                         let path = state.file_node_path(file_node_id);
@@ -278,10 +279,11 @@ impl AppInner {
                             self.create_code_editor_tab(cx, state, state.panel_id, None, path);
                         }
                     }
+                    */
                 }
-                file_tree::Action::FileNodeShouldStartDragging(window_id, file_node_id) => {
+                file_tree::Action::FileNodeShouldStartDrag(file_node_id) => {
                     let path = state.file_node_path(file_node_id);
-                    self.file_tree.start_dragging_file_node(cx, window_id, file_node_id, DraggedItem {
+                    self.file_tree.start_drag_file_node(cx, file_node_id, DragItem {
                         file_urls: vec![String::from("file://") + &*path.into_os_string().to_string_lossy()]
                     })
                 }

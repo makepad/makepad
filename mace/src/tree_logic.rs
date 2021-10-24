@@ -137,9 +137,9 @@ impl TreeLogic {
         true
     }
 
-    pub fn start_dragging_node(&mut self, cx: &mut Cx, window_id: usize, node_id: NodeId, dragged_item: DraggedItem) {
+    pub fn start_drag_node(&mut self, cx: &mut Cx, node_id: NodeId, drag_item: DragItem) {
         self.dragging_node_id = Some(node_id);
-        cx.start_dragging(window_id, dragged_item);
+        cx.start_drag(drag_item);
     }
 
     pub fn handle_event(
@@ -180,9 +180,9 @@ impl TreeLogic {
                         Event::FingerDown(_) => {
                             dispatch_action(Action::NodeWasPressed(*node_id));
                         }
-                        Event::FingerMove(event) => {
+                        Event::FingerMove(_) => {
                             if self.dragging_node_id.is_none() {
-                                dispatch_action(Action::NodeShouldStartDragging(event.window_id, *node_id));
+                                dispatch_action(Action::NodeShouldStartDrag(*node_id));
                             }
                         }
                         _ => {}
@@ -289,5 +289,5 @@ pub enum Action {
     NodeWasEntered(NodeId),
     NodeWasExited(NodeId),
     NodeWasPressed(NodeId),
-    NodeShouldStartDragging(window_id, NodeId),
+    NodeShouldStartDrag(NodeId),
 }
