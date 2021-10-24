@@ -194,7 +194,7 @@ pub struct CxPerFinger {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct DraggedItem {
+pub struct DragItem {
     pub file_urls: Vec<String>
 }
 

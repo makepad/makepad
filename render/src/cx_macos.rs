@@ -169,11 +169,6 @@ impl Cx {
                             }
                         }
 
-                        if let Some(dragged_item) = self.platform.start_dragging.take() {
-                            // TODO
-                            // cocoa_app.window.start_dragging(dragged_item);
-                        }
-
                         // build a list of renderpasses to repaint
                         let mut windows_need_repaint = 0;
                         self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
@@ -248,6 +243,11 @@ impl Cx {
                         self.call_event_handler(&mut event);
                     }
                 }
+
+                if let Some(drag_item) = self.platform.start_drag.take() {
+                    cocoa_app.start_drag(drag_item);
+                }
+
                 if self.process_desktop_post_event(event) {
                     cocoa_app.terminate_event_loop();
                 }
@@ -267,7 +267,7 @@ impl Cx {
                 || self.redraw_parent_areas.len() != 0
                 || self.redraw_child_areas.len() != 0
                 || self.next_frames.len() != 0 {
-                false
+                false   
             } else {
                 true
             }
@@ -317,9 +317,9 @@ impl Cx {
         }
     }
 
-    pub fn start_dragging(&mut self, window_id: usize, dragged_item: DraggedItem) {
-        assert!(self.platform.start_dragging.is_none());
-        self.platform.start_dragging = Some((window_id, dragged_item));
+    pub fn start_drag(&mut self, drag_item: DragItem) {
+        assert!(self.platform.start_drag.is_none());
+        self.platform.start_drag = Some(drag_item);
     }
 }
 
@@ -336,5 +336,5 @@ pub struct CxPlatform {
     pub stop_timer: Vec<u64>,
     pub text_clipboard_response: Option<String>,
     pub desktop: CxDesktop,
-    pub start_dragging: Option<(usize, DraggedItem)>,
+    pub start_drag: Option<DragItem>,
 }
