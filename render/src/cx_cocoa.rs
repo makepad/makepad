@@ -5,6 +5,7 @@ use std::collections::{HashMap,BTreeSet};
 use crate::cx_apple::*;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
+use std::ptr;
 use std::sync::{Mutex};
 use std::time::Instant;
 //use core_graphics::display::CGDisplay;
@@ -69,7 +70,8 @@ pub struct CocoaApp {
     pub loop_block: bool,
     pub cursors: HashMap<MouseCursor, id>,
     pub current_cursor: MouseCursor,
-    pub status_map: Mutex<CocoaStatusMap>
+    pub status_map: Mutex<CocoaStatusMap>,
+    pub ns_event: id,
 }
 
 #[derive(Default)]
@@ -129,6 +131,7 @@ impl CocoaApp {
                 cursors: HashMap::new(),
                 status_map: Mutex::new(CocoaStatusMap::default()),
                 current_cursor: MouseCursor::Default,
+                ns_event: ptr::null_mut(),
             }
         }
     }
@@ -690,7 +693,6 @@ impl CocoaApp {
         self.do_callback(&mut vec![Event::Paint]);
     }
     
-    
     pub fn send_command_event(&mut self, command: CommandId) {
         self.do_callback(&mut vec![
             Event::Command(command)
@@ -698,9 +700,19 @@ impl CocoaApp {
         self.do_callback(&mut vec![Event::Paint]);
     }
     
-    
     pub fn send_paint_event(&mut self) {
         self.do_callback(&mut vec![Event::Paint]);
+    }
+
+    pub fn start_drag(&mut self, drag_item: DragItem) {
+        let cocoa_window = unsafe {
+            let window: id = msg_send![self.ns_event, window];
+            let window_delegate: id = msg_send![window, delegate];
+            let cocoa_window: *mut c_void = *(*window_delegate).get_ivar("cocoa_window_ptr");
+            &mut *(cocoa_window as *mut CocoaWindow)
+        };
+
+        cocoa_window.start_drag(self.ns_event, drag_item);
     }
 }
 
@@ -1019,7 +1031,7 @@ impl CocoaWindow {
         })]);
     }
     
-    pub fn send_finger_hover_and_move(&mut self, pos: Vec2, modifiers: KeyModifiers) {
+    pub fn send_finger_hover_and_move(&mut self, event: id, pos: Vec2, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
         let mut events = Vec::new();
         
@@ -1054,7 +1066,10 @@ impl CocoaWindow {
             modifiers: modifiers,
             time: self.time_now()
         }));
+
+        unsafe { (*self.cocoa_app).ns_event = event };
         self.do_callback(&mut events);
+        unsafe { (*self.cocoa_app).ns_event = ptr::null_mut() };
     }
     
     pub fn send_window_close_requested_event(&mut self) -> bool {
@@ -1083,24 +1098,42 @@ impl CocoaWindow {
         })])
     }
 
-    pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
-        println!("Start dragging {:?}", dragged_item);
+    pub fn start_drag(&mut self, ns_event: id, drag_item: DragItem) {
+        println!("Start dragging");
 
-        let dragging_items = dragged_item.file_urls.iter().map(|file_url| {
-            let pasteboard_item: id = msg_send![class!(NSPasteboardItem), new];
-            let _: () = msg_send![
-                pasteboard_item,
-                setString:str_to_nsstring(file_url)
-                forType:NSPasteboardTypeFileURL
-            ];
-            let dragging_item: id = msg_send![
-                class!(NSDraggingItem),
-                initWithPasteboardWriter: pasteboard_item
-            ];
-            let bounds: NSRect = msg_send![self.view, bounds];
-            let _: () = msg_send![dragging_item, setDraggingFrame: bounds contents: self.view];
+        let dragging_items = drag_item.file_urls.iter().map(|file_url| {
+            let pasteboard_item: id = unsafe { msg_send![class!(NSPasteboardItem), new] };
+            let _: () = unsafe {
+                msg_send![
+                    pasteboard_item,
+                    setString:str_to_nsstring(file_url)
+                    forType:NSPasteboardTypeFileURL
+                ]
+            };
+            let dragging_item: id = unsafe { msg_send![class!(NSDraggingItem), alloc] };
+            let _: () = unsafe { msg_send![dragging_item, initWithPasteboardWriter:pasteboard_item] };
+            let bounds: NSRect = unsafe { msg_send![self.view, bounds] };
+            let _: () = unsafe {
+                msg_send![dragging_item, setDraggingFrame:bounds contents:self.view]
+            };
             dragging_item
         }).collect::<Vec<_>>();
+        let dragging_items: id = unsafe {
+            msg_send![
+                class!(NSArray),
+                arrayWithObjects: dragging_items.as_ptr()
+                count: dragging_items.len()
+            ]
+        };
+
+        unsafe {
+            msg_send![
+                self.view,
+                beginDraggingSessionWithItems:dragging_items
+                event:ns_event
+                source:self.view
+            ]
+        }
 
         /*
          self.delegate?.cellClick(self ,index:self.index)
@@ -1786,7 +1819,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         let cw = get_cocoa_window(this);
         let pos = mouse_pos_from_event(this, event);
         let modifiers = get_event_key_modifier(event);
-        cw.send_finger_hover_and_move(pos, modifiers);
+        cw.send_finger_hover_and_move(event, pos, modifiers);
     }
     
     extern fn mouse_moved(this: &Object, _sel: Sel, event: id) {
@@ -2073,7 +2106,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             abs: pos,
             rel: pos,
             rect: Rect::default(),
-            dragged_item: DraggedItem {
+            drag_item: DragItem {
                 file_urls,
             }
         })];

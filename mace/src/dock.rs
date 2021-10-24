@@ -215,8 +215,8 @@ impl Dock {
                             tab_bar::Action::TabButtonWasPressed(tab_id) => {
                                 dispatch_action(cx, Action::TabButtonWasPressed(tab_id))
                             }
-                            tab_bar::Action::TabReceivedDraggedItem(tab_id, item) => {
-                                dispatch_action(cx, Action::TabReceivedDraggedItem(tab_id, item))
+                            tab_bar::Action::TabReceivedDragItem(tab_id, item) => {
+                                dispatch_action(cx, Action::TabReceivedDragItem(tab_id, item))
                             }
                         });
                 }
@@ -247,10 +247,10 @@ impl Dock {
                         if panel.contents_rect.contains(event.abs) {
                             dispatch_action(
                                 cx,
-                                Action::ContentsReceivedDraggedItem(
+                                Action::ContentsReceivedDragItem(
                                     *panel_id,
                                     compute_drag_position(panel.contents_rect, event.abs),
-                                    event.dragged_item.clone(),
+                                    event.drag_item.clone(),
                                 ),
                             );
                         }
@@ -327,8 +327,8 @@ pub enum Action {
     SplitPanelChanged(PanelId),
     TabWasPressed(TabId),
     TabButtonWasPressed(TabId),
-    TabReceivedDraggedItem(TabId, DraggedItem),
-    ContentsReceivedDraggedItem(PanelId, DragPosition, DraggedItem),
+    TabReceivedDragItem(TabId, DragItem),
+    ContentsReceivedDragItem(PanelId, DragPosition, DragItem),
 }
 
 fn compute_drag_position(rect: Rect, position: Vec2) -> DragPosition {
