@@ -287,23 +287,23 @@ impl View {
 
 impl Cx {
     
-    pub fn new_draw_call(&mut self, shader: Shader) -> &mut DrawItem {
-        return self.get_draw_call(false, shader, None);
+    pub fn new_draw_call(&mut self, draw_shader: DrawShader) -> &mut DrawItem {
+        return self.get_draw_call(false, draw_shader, None);
     }
     
-    pub fn append_to_draw_call(&mut self, shader: Shader, slots: usize) -> &mut DrawItem {
-        return self.get_draw_call(true, shader, Some(slots));
+    pub fn append_to_draw_call(&mut self, draw_shader: DrawShader, slots: usize) -> &mut DrawItem {
+        return self.get_draw_call(true, draw_shader, Some(slots));
     }
     
-    pub fn get_draw_call(&mut self, append: bool, shader: Shader, slots: Option<usize>) -> &mut DrawItem {
-        let sh = &self.shaders[shader.shader_id];
+    pub fn get_draw_call(&mut self, append: bool, draw_shader: DrawShader, slots: Option<usize>) -> &mut DrawItem {
+        let sh = &self.draw_shaders[draw_shader.draw_shader_id];
         
         let current_view_id = *self.view_stack.last().unwrap();
         let cxview = &mut self.views[current_view_id];
         let draw_item_id = cxview.draw_items_len;
         
         if append {
-            if let Some(index) = cxview.find_appendable_drawcall(shader) {
+            if let Some(index) = cxview.find_appendable_drawcall(draw_shader) {
                 return &mut cxview.draw_items[index];
             }
         }
@@ -322,7 +322,7 @@ impl Cx {
                 view_id: current_view_id,
                 redraw_id: self.redraw_id,
                 sub_view_id: None,
-                draw_call: Some(DrawCall::new_from_shader_mapping(shader, &sh.mapping))
+                draw_call: Some(DrawCall::new_from_shader_mapping(draw_shader, &sh.mapping))
             });
             return &mut cxview.draw_items[draw_item_id];
         }
@@ -331,16 +331,16 @@ impl Cx {
         draw_item.sub_view_id = None;
         draw_item.redraw_id = self.redraw_id;
         if let Some(dc) = &mut draw_item.draw_call {
-            dc.update_from_shader_mapping(shader, &sh.mapping);
+            dc.update_from_shader_mapping(draw_shader, &sh.mapping);
         }
         else {
-            draw_item.draw_call = Some(DrawCall::new_from_shader_mapping(shader, &sh.mapping))
+            draw_item.draw_call = Some(DrawCall::new_from_shader_mapping(draw_shader, &sh.mapping))
         }
         return draw_item;
     }
     
-    pub fn begin_many_instances(&mut self, shader: Shader, slots: usize) -> ManyInstances {
-        let draw_item = self.append_to_draw_call(shader, slots);
+    pub fn begin_many_instances(&mut self, draw_shader:DrawShader, slots: usize) -> ManyInstances {
+        let draw_item = self.append_to_draw_call(draw_shader, slots);
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let mut instances = Vec::new();
         if draw_call.in_many_instances {
@@ -361,8 +361,8 @@ impl Cx {
         }
     }
     
-    pub fn begin_many_aligned_instances(&mut self, shader: Shader, slots: usize) -> ManyInstances {
-        let mut li = self.begin_many_instances(shader, slots);
+    pub fn begin_many_aligned_instances(&mut self, draw_shader: DrawShader, slots: usize) -> ManyInstances {
+        let mut li = self.begin_many_instances(draw_shader, slots);
         li.aligned = Some(self.align_list.len());
         self.align_list.push(Area::Empty);
         li
@@ -386,8 +386,8 @@ impl Cx {
         ia.into()
     }
     
-    pub fn add_instance(&mut self, shader: Shader, data: &[f32]) -> Area {
-        let draw_item = self.append_to_draw_call(shader, data.len());
+    pub fn add_instance(&mut self, draw_shader: DrawShader, data: &[f32]) -> Area {
+        let draw_item = self.append_to_draw_call(draw_shader, data.len());
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let instance_count = data.len() / draw_call.total_instance_slots;
         let check = data.len() % draw_call.total_instance_slots;
@@ -405,8 +405,8 @@ impl Cx {
         ia.into()
     }
     
-    pub fn add_aligned_instance(&mut self, shader: Shader, data: &[f32]) -> Area {
-        let draw_item = self.append_to_draw_call(shader, data.len());
+    pub fn add_aligned_instance(&mut self, draw_shader: DrawShader, data: &[f32]) -> Area {
+        let draw_item = self.append_to_draw_call(draw_shader, data.len());
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let instance_count = data.len() / draw_call.total_instance_slots;
         let check = data.len() % draw_call.total_instance_slots;
@@ -497,7 +497,7 @@ pub struct DrawItem {
 
 #[derive(Clone)]
 pub struct DrawCall {
-    pub shader: Shader, // if shader_id changed, delete gl vao
+    pub draw_shader: DrawShader, // if shader_id changed, delete gl vao
     
     pub in_many_instances: bool,
     pub instances: Vec<f32>,
@@ -519,13 +519,13 @@ pub struct DrawCall {
 
 impl DrawCall {
     
-    pub fn new_from_shader_mapping(shader: Shader, mapping: &CxShaderMapping) -> Self {
+    pub fn new_from_shader_mapping(draw_shader: DrawShader, mapping: &CxDrawShaderMapping) -> Self {
         DrawCall {
             geometry: None,
             do_h_scroll: true,
             do_v_scroll: true,
             in_many_instances: false,
-            shader: shader,
+            draw_shader: draw_shader,
             instances: Vec::new(),
             total_instance_slots: mapping.instance_props.total_slots,
             draw_uniforms: DrawUniforms::default(),
@@ -546,8 +546,8 @@ impl DrawCall {
         }
     }
     
-    pub fn update_from_shader_mapping(&mut self, shader:Shader, mapping:&CxShaderMapping){
-        self.shader = shader;
+    pub fn update_from_shader_mapping(&mut self, draw_shader:DrawShader, mapping:&CxDrawShaderMapping){
+        self.draw_shader = draw_shader;
         self.geometry = None;
         self.instances.truncate(0);
         self.total_instance_slots = mapping.instance_props.total_slots;
@@ -707,13 +707,13 @@ impl CxView {
         }
     }
     
-    pub fn find_appendable_drawcall(&mut self, shader: Shader) -> Option<usize> {
+    pub fn find_appendable_drawcall(&mut self, draw_shader: DrawShader) -> Option<usize> {
         // find our drawcall to append to the current layer
         if self.draw_items_len > 0 {
             for i in (0..self.draw_items_len).rev() {
                 let draw_item = &mut self.draw_items[i];
                 if let Some(draw_call) = &draw_item.draw_call {
-                    if draw_item.sub_view_id.is_none() && draw_call.shader == shader {
+                    if draw_item.sub_view_id.is_none() && draw_call.draw_shader == draw_shader {
                         return Some(i)
                     }
                 }

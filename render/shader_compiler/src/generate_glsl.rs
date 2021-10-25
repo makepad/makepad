@@ -143,7 +143,7 @@ impl<'a> DrawShaderGenerator<'a> {
         
         let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(vertex))).unwrap();
         
-        writeln!(self.string, "    gl_Position = {}();", DisplayFnName(vertex_def.fn_node_ptr, vertex_def.ident)).unwrap();
+        writeln!(self.string, "    gl_Position = {}();", DisplayFnName(vertex_def.fn_ptr, vertex_def.ident)).unwrap();
         let mut varying_packer = VarPacker::new(
             "packed_varying",
             packed_varyings_size,
@@ -166,7 +166,7 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, "}}").unwrap();
     }
     
-    pub fn generate_shader_body(&mut self, fn_deps: &Vec<FnNodePtr>, struct_deps: &Vec<StructNodePtr>) {
+    pub fn generate_shader_body(&mut self, fn_deps: &Vec<FnPtr>, struct_deps: &Vec<StructPtr>) {
         
         // alright so. we have our fn deps which have struct deps
         // and we have struct deps in our struct deps.
@@ -295,7 +295,7 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         // we need to collect all consts
         let pixel_decl = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(pixel))).unwrap();
-        writeln!(self.string, "    gl_FragColor = {}();", DisplayFnName(pixel_decl.fn_node_ptr, pixel_decl.ident)).unwrap();
+        writeln!(self.string, "    gl_FragColor = {}();", DisplayFnName(pixel_decl.fn_ptr, pixel_decl.ident)).unwrap();
         writeln!(self.string, "}}").unwrap();
     }
     
@@ -354,7 +354,7 @@ impl<'a> DrawShaderGenerator<'a> {
         self.generate_packed_var_decls("varying", "packed_varying", packed_varyings_size);
     }
     
-    fn generate_struct_def(&mut self, struct_ptr: StructNodePtr, struct_def: &StructDef) {
+    fn generate_struct_def(&mut self, struct_ptr: StructPtr, struct_def: &StructDef) {
         write!(self.string, "struct {} {{", struct_ptr).unwrap();
         if !struct_def.fields.is_empty() {
             writeln!(self.string).unwrap();
@@ -370,7 +370,7 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, "}};").unwrap();
     }
     
-    fn generate_const_def(&mut self, ptr: ConstNodePtr, def: &ConstDef) {
+    fn generate_const_def(&mut self, ptr: ConstPtr, def: &ConstDef) {
         write!(self.string, "const ").unwrap();
         self.write_var_decl(
             &ptr,
@@ -390,7 +390,7 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, ";").unwrap();
     }
     
-    fn generate_live_decl(&mut self, ptr: ValueNodePtr, ty: &Ty) {
+    fn generate_live_decl(&mut self, ptr: ValuePtr, ty: &Ty) {
         write!(self.string, "uniform ").unwrap();
         self.write_var_decl(
             &ptr,

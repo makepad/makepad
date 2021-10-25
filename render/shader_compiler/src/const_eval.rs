@@ -75,10 +75,10 @@ impl ConstEvaluator {
                 ..
             } => self.try_const_eval_var_expr(span, kind),
             ExprKind::StructCons{
-                struct_node_ptr,
+                struct_ptr,
                 span,
                 ref args
-            } => self.try_const_eval_struct_cons(struct_node_ptr, span, args),
+            } => self.try_const_eval_struct_cons(struct_ptr, span, args),
             ExprKind::Lit { span, lit } => self.try_const_eval_lit_expr(span, lit),
         };
         *expr.const_val.borrow_mut() = Some(const_val.clone());
@@ -252,7 +252,7 @@ impl ConstEvaluator {
 
     fn try_const_eval_struct_cons(
         &self,
-        _struct_node_ptr: StructNodePtr,
+        _struct_ptr: StructPtr,
         _span: Span,
         args: &Vec<(Ident,Expr)>,
     ) -> Option<Val> {

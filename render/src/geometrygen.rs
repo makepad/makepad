@@ -15,6 +15,13 @@ pub enum GeometryAxis {
 
 impl GeometryGen {
     
+    pub fn to_geometry(self, cx:&mut Cx, geometry:Geometry){
+        let cxgeom = &mut cx.geometries[geometry.geometry_id];
+        cxgeom.indices = self.indices;
+        cxgeom.vertices = self.vertices;
+        cxgeom.dirty = true;
+    }
+    
     pub fn from_quad_2d(x1: f32, y1: f32, x2: f32, y2: f32) -> GeometryGen {
         let mut g = Self::default();
         g.add_quad_2d(x1, y1, x2, y2);
@@ -156,7 +163,7 @@ impl GeometryFields for GeometryQuad2D {
         fields.push(GeometryField {id: id!(geom_pos), ty: Ty::Vec2});
     }
     
-    fn get_geometry(&self) -> Option<Geometry> {
+    fn get_geometry(&self) -> Geometry {
         self.geometry
     }
     
@@ -177,7 +184,7 @@ pub struct GeometryQuad2D {
     //#[default(1.0)]
     pub y2: f32,
     //#[private()]
-    pub geometry: Option<Geometry>
+    pub geometry: Geometry
 }
 
 impl GeometryQuad2D {
@@ -195,12 +202,12 @@ impl GeometryQuad2D {
 impl LiveUpdate for GeometryQuad2D {
     fn live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
         // lets generate geometry
-        self.geometry = Some(Geometry::from_geometry_gen(cx, GeometryGen::from_quad_2d(
+        GeometryGen::from_quad_2d(
             self.x1,
             self.y1,
             self.x2,
             self.y2,
-        )));
+        ).to_geometry(cx, self.geometry);
     }
     
     fn _live_type(&self) -> LiveType {
@@ -209,14 +216,14 @@ impl LiveUpdate for GeometryQuad2D {
 }
 
 impl LiveNew for GeometryQuad2D {
-    fn live_new(_cx: &mut Cx) -> Self {
+    fn live_new(cx: &mut Cx) -> Self {
         Self {
             live_ptr: None,
             x1: 0.0,
             y1: 0.0,
             x2: 1.0,
             y2: 1.0,
-            geometry: None
+            geometry: cx.new_geometry()
         }
     }
     
