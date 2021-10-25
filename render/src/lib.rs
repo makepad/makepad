@@ -55,7 +55,7 @@ mod geometrygen;
 
 mod drawquad;
 //mod drawtext;
-//mod drawcolor;
+mod drawcolor;
 //mod drawcube;
 //mod drawimage;
 mod events;
@@ -68,7 +68,7 @@ mod gpuinfo;
 pub use crate::cx::*;
 pub use crate::drawquad::*;
 //pub use crate::drawtext::*;
-//pub use crate::drawcolor::*;
+pub use crate::drawcolor::*;
 //pub use crate::drawcube::*;
 //pub use crate::drawimage::*;
 //pub use crate::elements::*;

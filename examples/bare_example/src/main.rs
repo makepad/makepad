@@ -8,20 +8,20 @@ pub struct BareExampleApp {
     pass: Pass, 
     color_texture: Texture,
     main_view: View,
-    draw_quad: DrawQuad
+    draw_quad: DrawColor
 }
 
 // what you want is putting down an indirection in the style-sheet for a codefile.
 live_body!{
-    use makepad_render::drawquad::DrawQuad
-    MyDrawQuad:DrawQuad{
+    use makepad_render::drawcolor::DrawColor
+    MyDrawQuad:DrawColor{
         color: #00f
     }
 }
 
 impl BareExampleApp {
     pub fn new(cx:&mut Cx)->Self{
-        let mut dq = DrawQuad::live_new(cx);
+        let mut dq = DrawColor::live_new(cx);
         
         let live_ptr = cx.shader_registry.live_registry.live_ptr_from_path(
             ModulePath::from_str(&module_path!()).unwrap(),

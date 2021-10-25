@@ -1,7 +1,4 @@
 use crate::cx::*;
-use makepad_shader_compiler::shaderast::DrawShaderPtr;
-use makepad_shader_compiler::shaderast::VarInputKind;
-use makepad_shader_compiler::ShaderRegistry;
 use makepad_live_parser::LiveValue;
 
 #[derive(Clone, Debug)]
@@ -17,6 +14,7 @@ pub struct LiveBody {
 impl Cx {
     pub fn live_register(&mut self) {
         crate::DrawQuad::live_register(self);
+        crate::DrawColor::live_register(self);
         crate::GeometryQuad2D::live_register(self);
         crate::shader_std::define_shader_stdlib(self);
     }
@@ -64,173 +62,6 @@ impl Cx {
     pub fn get_factory(&mut self, live_type: LiveType) -> &Box<dyn LiveFactory> {
         self.live_factories.get(&live_type).unwrap()
     }
-    
-    pub fn update_var_inputs(&self, draw_shader_ptr: DrawShaderPtr, value_ptr: LivePtr, id: Id, uniforms: &mut [f32], instances: &mut [f32]) {
-        fn store_values(shader_registry: &ShaderRegistry, draw_shader_ptr: DrawShaderPtr, id: Id, values: &[f32], uniforms: &mut[f32], instances: &mut [f32]) {
-            if let Some(draw_shader_def) = shader_registry.draw_shaders.get(&draw_shader_ptr) {
-                let var_inputs = draw_shader_def.var_inputs.borrow();
-                for input in &var_inputs.inputs {
-                    if input.ident.0 == id {
-                        match input.kind {
-                            VarInputKind::Instance => {
-                                if values.len() == input.size {
-                                    for i in 0..input.size {
-                                        let index = instances.len() - var_inputs.instance_slots + input.offset + i;
-                                        instances[index] = values[i];
-                                    }
-                                }
-                                else {
-                                    println!("variable shader input size not correct {} {}", values.len(), input.size)
-                                }
-                            }
-                            VarInputKind::Uniform => {
-                                if values.len() == input.size {
-                                    for i in 0..input.size {
-                                        uniforms[input.offset + i] = values[i];
-                                    }
-                                }
-                                else {
-                                    println!("variable shader input size not correct {} {}", values.len(), input.size)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        let node = self.shader_registry.live_registry.resolve_ptr(value_ptr);
-        match node.value {
-            LiveValue::Int(val) => {
-                store_values(&self.shader_registry, draw_shader_ptr, id, &[val as f32], uniforms, instances);
-            }
-            LiveValue::Float(val) => {
-                store_values(&self.shader_registry, draw_shader_ptr, id, &[val as f32], uniforms, instances);
-            }
-            LiveValue::Color(val) => {
-                let val = Vec4::from_u32(val);
-                store_values(&self.shader_registry, draw_shader_ptr, id, &[val.x, val.y, val.z, val.w], uniforms, instances);
-            }
-            LiveValue::Vec2(val) => {
-                store_values(&self.shader_registry, draw_shader_ptr, id, &[val.x, val.y], uniforms, instances);
-            }
-            LiveValue::Vec3(val) => {
-                store_values(&self.shader_registry, draw_shader_ptr, id, &[val.x, val.y, val.z], uniforms, instances);
-            }
-            _ => ()
-        }
-    }
-    
-    pub fn get_var_inputs_instance_layout(
-        &self,
-        draw_shader: Option<DrawShader>,
-        instance_start: &mut usize,
-        base_start: usize,
-        instance_slots: &mut usize,
-        base_slots: usize
-    ) {
-        // ALRIGHT so
-        // we need to fetch a draw_shader_def
-        // then we need to update the instance layout values
-        if let Some(draw_shader) = draw_shader {
-            if let Some(draw_shader_def) = self.shader_registry.draw_shaders.get(&draw_shader.draw_shader_ptr) {
-                let var_inputs = draw_shader_def.var_inputs.borrow();
-                *instance_start = base_start - var_inputs.instance_slots;
-                *instance_slots = base_slots + var_inputs.instance_slots;
-            }
-        }
-    }
-    
-    pub fn get_draw_shader_from_ptr(&mut self, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) -> Option<DrawShader> {
-        // lets first fetch the shader from live_ptr
-        // if it doesn't exist, we should allocate and
-        if let Some(draw_shader_id) = self.draw_shader_ptr_to_id.get(&draw_shader_ptr) {
-            Some(DrawShader {
-                draw_shader_ptr,
-                draw_shader_id: *draw_shader_id
-            })
-        }
-        else {
-            fn live_type_to_shader_ty(live_type: LiveType) -> Option<Ty> {
-                if live_type == f32::live_type() {Some(Ty::Float)}
-                else if live_type == Vec2::live_type() {Some(Ty::Vec2)}
-                else {None}
-            }
-            // ok ! we have to compile it
-            let live_factories = &self.live_factories;
-            let result = self.shader_registry.analyse_draw_shader(draw_shader_ptr, | span, id, live_type, draw_shader_def | {
-                if id == id!(rust_type) {
-                    if let Some(lf) = live_factories.get(&live_type) {
-                        let mut fields = Vec::new();
-                        lf.live_fields(&mut fields);
-                        
-                        let mut is_instance = false;
-                        for field in fields {
-                            if field.id == id!(geometry) {
-                                is_instance = true;
-                                continue
-                            }
-                            
-                            if let Some(ty) = live_type_to_shader_ty(field.live_type) {
-                                if is_instance {
-                                    draw_shader_def.add_instance(field.id, ty, span);
-                                }
-                                else {
-                                    draw_shader_def.add_uniform(field.id, ty, span);
-                                }
-                            };
-                        }
-                    }
-                }
-                if id == id!(geometry) {
-                    if let Some(lf) = live_factories.get(&live_type) {
-                        if lf.live_type() == geometry_fields.live_type_check() {
-                            let mut fields = Vec::new();
-                            geometry_fields.geometry_fields(&mut fields);
-                            for field in fields {
-                                draw_shader_def.add_geometry(field.id, field.ty, span);
-                            }
-                        }
-                        else {
-                            eprintln!("lf.get_type() != geometry_fields.live_type_check()");
-                        }
-                    }
-                }
-            });
-            // ok lets print an error
-            match result {
-                Err(e) => {
-                    println!("Error {}", e.to_live_file_error("", ""));
-                }
-                Ok(draw_shader_def) => {
-                    // OK! SO the shader parsed
-                    let draw_shader_id = self.draw_shaders.len();
-                    let mut mapping = CxDrawShaderMapping::from_draw_shader_def(draw_shader_def, true);
-                    mapping.update_live_uniforms(&self.shader_registry.live_registry);
-                    
-                    self.draw_shaders.push(CxDrawShader {
-                        name: "todo".to_string(),
-                        default_geometry: Some(geometry_fields.get_geometry()),
-                        platform: None,
-                        mapping: mapping
-                    });
-                    // ok so. maybe we should fill the live_uniforms buffer?
-                    
-                    self.draw_shader_ptr_to_id.insert(draw_shader_ptr, draw_shader_id);
-                    self.draw_shader_compile_set.insert(draw_shader_ptr);
-                    // now we simply queue it somewhere somehow to compile.
-                    return Some(DrawShader {
-                        draw_shader_id,
-                        draw_shader_ptr
-                    });
-                    // also we should allocate it a Shader object
-                }
-            }
-            None
-        }
-        
-        
-    }
 }
 
 pub trait LiveFactory {
@@ -250,20 +81,24 @@ pub trait LiveUpdate {
     fn _live_type(&self) -> LiveType;
 }
 
+
+pub trait LiveUpdateHooks {
+    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr);
+    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr);
+    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr:LivePtr);
+}
+
 #[derive(Default)]
 pub struct LiveBinding {
     pub live_ptr: Option<LivePtr>
 }
 
 
-
 #[macro_export]
 macro_rules!live_prim {
-    ( $ ty: ident, $ update: expr) => {
+    ( $ ty: ident, $ update: item) => {
         impl LiveUpdate for $ ty {
-            fn live_update(&mut self, _cx: &mut Cx, _ptr: LivePtr) {
-                $ update;
-            }
+            $update
             
             fn _live_type(&self) -> LiveType {
                 Self::live_type()
@@ -296,8 +131,38 @@ macro_rules!live_prim {
     }
 }
 
-live_prim!(f32, {});
-live_prim!(Vec2, {});
+live_prim!(f32, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+    let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
+    match node.value{
+        LiveValue::Int(val)=>*self = val as f32,
+        LiveValue::Float(val)=>*self = val as f32,
+        _=>()
+    }
+});
+
+live_prim!(Vec2, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+    let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
+    match node.value{
+        LiveValue::Vec2(v)=>*self =v,
+        _=>()
+    }
+});
+
+live_prim!(Vec3, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+    let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
+    match node.value{
+        LiveValue::Vec3(v)=>*self =v,
+        _=>()
+    }
+});
+
+live_prim!(Vec4, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+    let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
+    match node.value{
+        LiveValue::Color(v)=>*self = Vec4::from_u32(v),
+        _=>()
+    }
+});
 
 #[derive(Debug)]
 pub struct LiveField {
