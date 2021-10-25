@@ -5,19 +5,19 @@ use makepad_shader_compiler::Ty;
 use makepad_shader_compiler::shaderast::DrawShaderDef;
 use makepad_shader_compiler::shaderast::DrawShaderFieldKind;
 use makepad_shader_compiler::shaderast::DrawShaderPtr;
-use makepad_shader_compiler::shaderast::VarInputKind;
+use makepad_shader_compiler::shaderast::DrawShaderVarInputKind;
 use makepad_shader_compiler::ShaderRegistry;
 use std::collections::HashMap;
 
 impl Cx{
-    pub fn update_var_inputs(&self, draw_shader_ptr: DrawShaderPtr, value_ptr: LivePtr, id: Id, uniforms: &mut [f32], instances: &mut [f32]) {
+    pub fn update_draw_shader_var_inputs(&self, draw_shader_ptr: DrawShaderPtr, value_ptr: LivePtr, id: Id, uniforms: &mut [f32], instances: &mut [f32]) {
         fn store_values(shader_registry: &ShaderRegistry, draw_shader_ptr: DrawShaderPtr, id: Id, values: &[f32], uniforms: &mut[f32], instances: &mut [f32]) {
             if let Some(draw_shader_def) = shader_registry.draw_shaders.get(&draw_shader_ptr) {
                 let var_inputs = draw_shader_def.var_inputs.borrow();
                 for input in &var_inputs.inputs {
                     if input.ident.0 == id {
                         match input.kind {
-                            VarInputKind::Instance => {
+                            DrawShaderVarInputKind::Instance => {
                                 if values.len() == input.size {
                                     for i in 0..input.size {
                                         let index = instances.len() - var_inputs.var_instance_slots + input.offset + i;
@@ -28,7 +28,7 @@ impl Cx{
                                     println!("variable shader input size not correct {} {}", values.len(), input.size)
                                 }
                             }
-                            VarInputKind::Uniform => {
+                            DrawShaderVarInputKind::Uniform => {
                                 if values.len() == input.size {
                                     for i in 0..input.size {
                                         uniforms[input.offset + i] = values[i];
@@ -66,12 +66,12 @@ impl Cx{
         }
     }
     
-    pub fn get_var_inputs_instance_layout(
+    pub fn get_draw_shader_var_input_layout(
         &self,
         draw_shader: Option<DrawShader>,
-        instance_start: &mut usize,
-        instance_slots: &mut usize,
-        var_instance_slots: usize
+        var_instance_start: &mut usize,
+        var_instance_slots: &mut usize,
+        var_instance_buffer_size: usize
     ) {
         // ALRIGHT so
         // we need to fetch a draw_shader_def
@@ -79,9 +79,8 @@ impl Cx{
         if let Some(draw_shader) = draw_shader {
             if let Some(draw_shader_def) = self.shader_registry.draw_shaders.get(&draw_shader.draw_shader_ptr) {
                 let var_inputs = draw_shader_def.var_inputs.borrow();
-                *instance_start = var_instance_slots - var_inputs.var_instance_slots;
-                *instance_slots = var_inputs.total_instance_slots;
-                println!("")
+                *var_instance_start = var_instance_buffer_size - var_inputs.var_instance_slots;
+                *var_instance_slots = var_inputs.total_instance_slots;
             }
         }
     }

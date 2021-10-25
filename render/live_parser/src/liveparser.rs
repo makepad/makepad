@@ -22,11 +22,11 @@ pub struct LiveParser<'a> {
 }
 
 impl<'a> LiveParser<'a> {
-    pub fn new(tokens: &'a [TokenWithSpan], live_types: &'a [LiveType]) -> Self {
+    pub fn new(tokens: &'a [TokenWithSpan], live_types: &'a [LiveType], file_id: FileId) -> Self {
         let mut tokens_with_span = tokens.iter().cloned();
         let token_with_span = tokens_with_span.next().unwrap();
         LiveParser {
-            file_id: FileId::default(),
+            file_id,//: FileId::default(),
             tokens_with_span,
             live_types,
             token_with_span,

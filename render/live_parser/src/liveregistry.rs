@@ -286,7 +286,7 @@ impl LiveRegistry {
             Ok(lex_result) => lex_result
         };
         
-        let mut parser = LiveParser::new(&lex_result.tokens, &live_types);
+        let mut parser = LiveParser::new(&lex_result.tokens, &live_types, file_id);
         
         let mut document = match parser.parse_live_document() {
             Err(msg) => return Err(msg.to_live_file_error(file, &source)), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
@@ -298,7 +298,7 @@ impl LiveRegistry {
         // let own_crate_module = CrateModule(crate_id, module_id);
         
         if self.dep_order.iter().position( | v | v.0 == own_module_path).is_none() {
-            self.dep_order.push((own_module_path, TokenId::default()));
+            self.dep_order.push((own_module_path, TokenId{file_id, token_id:0}));
         }
         else {
             // marks dependencies dirty recursively (removes the expanded version)

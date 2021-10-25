@@ -48,7 +48,7 @@ const DRAW_QUAD_VAR_INSTANCES: usize = 32;
 #[repr(C)]
 pub struct DrawQuad {
     //#[local()]
-    pub uniforms: [f32; DRAW_QUAD_VAR_UNIFORMS],
+    pub var_uniforms: [f32; DRAW_QUAD_VAR_UNIFORMS],
     
     //#[local()]
     pub area: Area,
@@ -62,14 +62,14 @@ pub struct DrawQuad {
     pub draw_shader_ptr: Option<DrawShaderPtr>,
     
     //#[local(0)]
-    uniform_start: usize,
+    var_uniform_start: usize,
     //#[local(0)]
-    uniform_slots: usize,
+    var_uniform_slots: usize,
 
     //#[local(0)]
-    instance_start: usize,
-    //#[local(5)]
-    instance_slots: usize,
+    var_instance_start: usize,
+    //#[local(0)]
+    var_instance_slots: usize,
     
     //#[live()]
     pub geometry: GeometryQuad2D,
@@ -78,7 +78,7 @@ pub struct DrawQuad {
     pub draw_shader: Option<DrawShader>,
     
     //#[local()]
-    pub instances: [f32; DRAW_QUAD_VAR_INSTANCES],
+    pub var_instances: [f32; DRAW_QUAD_VAR_INSTANCES],
     
     //#[live(Vec2::all(0.0))]
     pub rect_pos: Vec2,
@@ -103,7 +103,7 @@ impl DrawQuad {
 
 impl LiveUpdateHooks for DrawQuad {
     fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
-        cx.update_var_inputs(self.draw_shader_ptr.unwrap(), ptr, id, &mut self.uniforms, &mut self.instances);
+        cx.update_draw_shader_var_inputs(self.draw_shader_ptr.unwrap(), ptr, id, &mut self.var_uniforms, &mut self.var_instances);
     }
     
     fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr){
@@ -112,10 +112,10 @@ impl LiveUpdateHooks for DrawQuad {
     }
     
     fn after_live_update(&mut self, cx: &mut Cx, _live_ptr:LivePtr) {
-        cx.get_var_inputs_instance_layout(
+        cx.get_draw_shader_var_input_layout(
             self.draw_shader,
-            &mut self.instance_start,
-            &mut self.instance_slots,
+            &mut self.var_instance_start,
+            &mut self.var_instance_slots,
             DRAW_QUAD_VAR_INSTANCES,
         );
     }
@@ -125,21 +125,21 @@ impl LiveUpdateHooks for DrawQuad {
 impl LiveNew for DrawQuad {
     fn live_new(cx: &mut Cx) -> Self {
         Self {
-            uniforms: [0.0; DRAW_QUAD_VAR_UNIFORMS],
+            var_uniforms: [0.0; DRAW_QUAD_VAR_UNIFORMS],
             
             area: Area::Empty,
             many: None,
             many_old_area: Area::Empty,
             
-            uniform_start: 0,
-            uniform_slots: 0,
-            instance_start: 0,
-            instance_slots: 0,
+            var_uniform_start: 0,
+            var_uniform_slots: 0,
+            var_instance_start: 0,
+            var_instance_slots: 0,
             draw_shader: None,
             geometry: LiveNew::live_new(cx),
             
             draw_shader_ptr: None,
-            instances: [0.0; DRAW_QUAD_VAR_INSTANCES],
+            var_instances: [0.0; DRAW_QUAD_VAR_INSTANCES],
             rect_pos: Vec2::all(0.0),
             rect_size: Vec2::all(0.0),
             draw_depth: 1.0,
@@ -256,7 +256,7 @@ impl DrawQuad {
                 None
             };
             unsafe {
-                mi.instances.extend_from_slice(std::slice::from_raw_parts((&self.instances[self.instance_start - 1] as *const _ as *const f32).offset(1), self.instance_slots));
+                mi.instances.extend_from_slice(std::slice::from_raw_parts((&self.var_instances[self.var_instance_start - 1] as *const _ as *const f32).offset(1), self.var_instance_slots));
             }
             
             if let Some(new_area) = new_area {
@@ -272,7 +272,7 @@ impl DrawQuad {
     
     pub fn begin_many(&mut self, cx: &mut Cx) {
         if let Some(draw_shader) = self.draw_shader {
-            let mi = cx.begin_many_aligned_instances(draw_shader, self.instance_slots);
+            let mi = cx.begin_many_aligned_instances(draw_shader, self.var_instance_slots);
             self.many_old_area = self.area;
             //self.many_set_area = false;
             self.area = Area::Instance(InstanceArea {
@@ -294,7 +294,7 @@ impl DrawQuad {
     
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
         unsafe {
-            std::slice::from_raw_parts((&self.instances[self.instance_start - 1] as *const _ as *const f32).offset(1), self.instance_slots)
+            std::slice::from_raw_parts((&self.var_instances[self.var_instance_start - 1] as *const _ as *const f32).offset(1), self.var_instance_slots)
         }
     }
     

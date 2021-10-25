@@ -16,7 +16,7 @@ pub enum ShaderParserDep {
 
 pub struct ShaderParser<'a> {
     pub token_index: usize,
-    pub file_id: FileId,
+   pub file_id: FileId,
     pub tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
     pub live_scope: &'a [LiveScopeItem],
     pub shader_registry: &'a ShaderRegistry,
@@ -33,7 +33,8 @@ impl<'a> ShaderParser<'a> {
         tokens: &'a [TokenWithSpan],
         live_scope: &'a [LiveScopeItem],
         type_deps: &'a mut Vec<ShaderParserDep>,
-        self_kind: Option<FnSelfKind>
+        self_kind: Option<FnSelfKind>,
+        
         
     ) -> Self {
         let mut tokens_with_span = tokens.iter().cloned();
@@ -41,7 +42,7 @@ impl<'a> ShaderParser<'a> {
         ShaderParser {
             closure_defs:Vec::new(),
             shader_registry,
-            file_id: FileId::default(),
+            file_id: FileId(0),
             live_scope,
             type_deps,
             tokens_with_span,

@@ -123,32 +123,32 @@ impl<'a> DrawShaderAnalyser<'a> {
     
     pub fn analyse_shader(&mut self) -> Result<(), LiveError> {
         self.scopes.push_scope();
-        
-        let mut var_inputs = VarInputs::default();
+         
+        let mut var_inputs = DrawShaderVarInputs::default();
         for field in &self.draw_shader_def.fields {
             self.analyse_field_decl(field) ?;
             if let DrawShaderFieldKind::Instance{var_def_ptr,..} = field.kind{
                 if var_def_ptr.is_some(){
-                    var_inputs.inputs.push(VarInput{
+                    var_inputs.inputs.push(DrawShaderVarInput{
                         ident: field.ident,
                         offset:var_inputs.var_instance_slots,
                         size: field.ty_expr.ty.borrow().as_ref().unwrap().size(),
-                        kind:VarInputKind::Instance
+                        kind:DrawShaderVarInputKind::Instance
                     });
                     var_inputs.var_instance_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
                 }
                 var_inputs.total_instance_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
             }
             if let DrawShaderFieldKind::Uniform{var_def_ptr,block_ident,..} = field.kind{
-                if block_ident != Ident(id!(user)){
+                if block_ident != Ident(id!(user)){ 
                     continue
                 }
                 if var_def_ptr.is_some(){
-                    var_inputs.inputs.push(VarInput{
+                    var_inputs.inputs.push(DrawShaderVarInput{
                         ident:field.ident,
                         offset:var_inputs.var_uniform_slots,
                         size: field.ty_expr.ty.borrow().as_ref().unwrap().size(),
-                        kind:VarInputKind::Uniform
+                        kind:DrawShaderVarInputKind::Uniform
                     });
                     var_inputs.var_uniform_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
                 }
