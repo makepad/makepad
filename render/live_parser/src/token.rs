@@ -55,7 +55,7 @@ impl fmt::Display for Token {
     }
 }
 
-#[derive(Clone, Copy, Default, Eq, Ord, PartialOrd, PartialEq)]
+#[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq)]
 pub struct TokenId {
     pub file_id:FileId,
     pub token_id:u32

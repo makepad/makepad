@@ -5,7 +5,7 @@ use std::sync::Once;
 use std::fmt;
 use std::cmp::Ordering;
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialOrd, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialOrd, Hash, PartialEq)]
 pub struct FileId(pub u16);
 
 impl FileId{

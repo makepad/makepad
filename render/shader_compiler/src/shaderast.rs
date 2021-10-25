@@ -42,26 +42,26 @@ pub struct DrawShaderConstTable {
 }
 
 #[derive(Clone, Debug)]
-pub struct VarInput {
+pub struct DrawShaderVarInput {
     pub ident: Ident,
     pub offset: usize,
     pub size: usize,
-    pub kind: VarInputKind
+    pub kind: DrawShaderVarInputKind
 }
 
 #[derive(Clone, Debug)]
-pub enum VarInputKind{
+pub enum DrawShaderVarInputKind{
     Instance,
     Uniform,
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct VarInputs{
+pub struct DrawShaderVarInputs{
     pub var_uniform_slots: usize,
     pub var_instance_slots: usize,
     pub total_uniform_slots: usize,
     pub total_instance_slots: usize,
-    pub inputs: Vec<VarInput>
+    pub inputs: Vec<DrawShaderVarInput>
 }
 
 
@@ -82,7 +82,7 @@ pub struct DrawShaderDef {
     pub vertex_structs: RefCell<Vec<StructPtr >>,
     pub pixel_structs: RefCell<Vec<StructPtr >>,
     pub const_table: DrawShaderConstTable,
-    pub var_inputs: RefCell<VarInputs>
+    pub var_inputs: RefCell<DrawShaderVarInputs>
 }
 
 #[derive(Clone, Debug)]
