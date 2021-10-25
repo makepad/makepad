@@ -17,47 +17,70 @@ use makepad_live_parser::id;
 // all the Live node pointer newtypes
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub struct FnNodePtr(pub LivePtr);
+pub struct FnPtr(pub LivePtr);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub struct StructNodePtr(pub LivePtr);
+pub struct StructPtr(pub LivePtr);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub struct DrawShaderNodePtr(pub LivePtr);
+pub struct DrawShaderPtr(pub LivePtr);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub struct ConstNodePtr(pub LivePtr);
+pub struct ConstPtr(pub LivePtr);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub struct ValueNodePtr(pub LivePtr);
+pub struct ValuePtr(pub LivePtr);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub struct VarDefNodePtr(pub LivePtr);
+pub struct VarDefPtr(pub LivePtr);
 
 
 #[derive(Clone, Debug, Default)]
 pub struct DrawShaderConstTable {
     pub table: Vec<f32>,
-    pub offsets: BTreeMap<FnNodePtr, usize>
+    pub offsets: BTreeMap<FnPtr, usize>
 }
+
+#[derive(Clone, Debug)]
+pub struct VarInput {
+    pub ident: Ident,
+    pub offset: usize,
+    pub size: usize,
+    pub kind: VarInputKind
+}
+
+#[derive(Clone, Debug)]
+pub enum VarInputKind{
+    Instance,
+    Uniform,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VarInputs{
+    pub uniform_slots: usize,
+    pub instance_slots: usize,
+    pub inputs: Vec<VarInput>
+}
+
 
 #[derive(Clone, Debug, Default)]
 pub struct DrawShaderDef {
     pub debug: bool,
     //pub default_geometry: Option<ShaderResourceId>,
     pub fields: Vec<DrawShaderFieldDef>,
-    pub methods: Vec<FnNodePtr>,
+    pub methods: Vec<FnPtr>,
     
     // analysis results:
-    pub all_const_refs: RefCell<BTreeSet<ConstNodePtr>>,
-    pub all_live_refs: RefCell<BTreeMap<ValueNodePtr, Ty >>,
-    pub all_fns: RefCell<Vec<FnNodePtr >>,
-    pub vertex_fns: RefCell<Vec<FnNodePtr >>,
-    pub pixel_fns: RefCell<Vec<FnNodePtr >>,
-    pub all_structs: RefCell<Vec<StructNodePtr >>,
-    pub vertex_structs: RefCell<Vec<StructNodePtr >>,
-    pub pixel_structs: RefCell<Vec<StructNodePtr >>,
-    pub const_table: DrawShaderConstTable
+    pub all_const_refs: RefCell<BTreeSet<ConstPtr>>,
+    pub all_live_refs: RefCell<BTreeMap<ValuePtr, Ty >>,
+    pub all_fns: RefCell<Vec<FnPtr >>,
+    pub vertex_fns: RefCell<Vec<FnPtr >>,
+    pub pixel_fns: RefCell<Vec<FnPtr >>,
+    pub all_structs: RefCell<Vec<StructPtr >>,
+    pub vertex_structs: RefCell<Vec<StructPtr >>,
+    pub pixel_structs: RefCell<Vec<StructPtr >>,
+    pub const_table: DrawShaderConstTable,
+    pub var_inputs: RefCell<VarInputs>
 }
 
 #[derive(Clone, Debug)]
@@ -79,24 +102,24 @@ pub enum DrawShaderInputType {
 pub enum DrawShaderFieldKind {
     Geometry {
         is_used_in_pixel_shader: Cell<bool >,
-        var_def_node_ptr: Option<VarDefNodePtr>,
+        var_def_ptr: Option<VarDefPtr>,
     },
     Instance {
         is_used_in_pixel_shader: Cell<bool >,
-        var_def_node_ptr: Option<VarDefNodePtr>,
+        var_def_ptr: Option<VarDefPtr>,
         //input_type: DrawShaderInputType,
     },
     Texture {
-        var_def_node_ptr: Option<VarDefNodePtr>,
+        var_def_ptr: Option<VarDefPtr>,
         //input_type: DrawShaderInputType,
     },
     Uniform {
-        var_def_node_ptr: Option<VarDefNodePtr>,
+        var_def_ptr: Option<VarDefPtr>,
         //input_type: DrawShaderInputType,
         block_ident: Ident,
     },
     Varying {
-        var_def_node_ptr: VarDefNodePtr,
+        var_def_ptr: VarDefPtr,
     }
 }
 
@@ -118,8 +141,8 @@ pub struct ConstDef {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum FnSelfKind {
-    Struct(StructNodePtr),
-    DrawShader(DrawShaderNodePtr)
+    Struct(StructPtr),
+    DrawShader(DrawShaderPtr)
 }
 
 impl FnSelfKind {
@@ -147,14 +170,14 @@ pub enum HiddenArgKind {
 
 #[derive(Clone, Debug)]
 pub struct FnDef {
-    pub fn_node_ptr: FnNodePtr,
+    pub fn_ptr: FnPtr,
     
     pub ident: Ident,
     
     pub self_kind: Option<FnSelfKind>,
     pub has_return: Cell<bool>,
     
-    pub callees: RefCell<Option<BTreeSet<FnNodePtr >> >,
+    pub callees: RefCell<Option<BTreeSet<FnPtr >> >,
     pub builtin_deps: RefCell<Option<BTreeSet<Ident >> >,
     // pub closure_deps: RefCell<Option<BTreeSet<Ident >> >,
     
@@ -164,10 +187,10 @@ pub struct FnDef {
     
     pub hidden_args: RefCell<Option<BTreeSet<HiddenArgKind >> >,
     pub draw_shader_refs: RefCell<Option<BTreeSet<Ident >> >,
-    pub const_refs: RefCell<Option<BTreeSet<ConstNodePtr >> >,
-    pub live_refs: RefCell<Option<BTreeMap<ValueNodePtr, Ty >> >,
+    pub const_refs: RefCell<Option<BTreeSet<ConstPtr >> >,
+    pub live_refs: RefCell<Option<BTreeMap<ValuePtr, Ty >> >,
     
-    pub struct_refs: RefCell<Option<BTreeSet<StructNodePtr >> >,
+    pub struct_refs: RefCell<Option<BTreeSet<StructPtr >> >,
     pub constructor_fn_deps: RefCell<Option<BTreeSet<(TyLit, Vec<Ty>) >> >,
     
     pub closure_defs: Vec<ClosureDef>,
@@ -208,7 +231,7 @@ pub enum ClosureDefKind {
 
 #[derive(Clone, Debug)]
 pub struct ClosureSite { //
-    pub call_to: FnNodePtr,
+    pub call_to: FnPtr,
     pub all_closed_over: BTreeSet<Sym>,
     pub closure_args: Vec<ClosureSiteArg>
 }
@@ -223,14 +246,14 @@ pub struct ClosureSiteArg {
 pub struct StructDef {
     pub span: Span,
     //pub ident: Ident,
-    pub struct_refs: RefCell<Option<BTreeSet<StructNodePtr >> >,
+    pub struct_refs: RefCell<Option<BTreeSet<StructPtr >> >,
     pub fields: Vec<StructFieldDef>,
-    pub methods: Vec<FnNodePtr>,
+    pub methods: Vec<FnPtr>,
 }
 
 #[derive(Clone, Debug)]
 pub struct StructFieldDef {
-    pub var_def_node_ptr: VarDefNodePtr,
+    pub var_def_ptr: VarDefPtr,
     pub span: Span,
     pub ident: Ident,
     pub ty_expr: TyExpr,
@@ -349,7 +372,7 @@ pub enum ExprKind {
     PlainCall { // not very pretty but otherwise closures cannot override a normal fn
         // possible solution is to capture it in a refcell sub-enum.
         span: Span,
-        fn_node_ptr: Option<FnNodePtr>,
+        fn_ptr: Option<FnPtr>,
         ident: Option<Ident>,
         param_index: Cell<Option<usize >>, // used by the closure case
         closure_site_index: Cell<Option<usize >>, // used by the plain fn case
@@ -367,7 +390,7 @@ pub enum ExprKind {
         arg_exprs: Vec<Expr>,
     },
     StructCons {
-        struct_node_ptr: StructNodePtr,
+        struct_ptr: StructPtr,
         span: Span,
         args: Vec<(Ident, Expr)>
     },
@@ -393,17 +416,17 @@ pub enum PlainCallType {
 #[derive(Clone, Copy, Debug)]
 pub enum VarResolve {
     NotFound,
-    Function(FnNodePtr),
-    Const(ConstNodePtr),
-    LiveValue(ValueNodePtr, TyLit)
+    Function(FnPtr),
+    Const(ConstPtr),
+    LiveValue(ValuePtr, TyLit)
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum VarKind {
     Local {ident: Ident, shadow: ScopeSymShadow},
     MutLocal {ident: Ident, shadow: ScopeSymShadow},
-    Const(ConstNodePtr),
-    LiveValue(ValueNodePtr)
+    Const(ConstPtr),
+    LiveValue(ValuePtr)
 }
 
 #[derive(Clone, Debug)]
@@ -419,8 +442,8 @@ pub enum TyExprKind {
         elem_ty_expr: Box<TyExpr>,
         len: u32,
     },
-    Struct(StructNodePtr),
-    DrawShader(DrawShaderNodePtr),
+    Struct(StructPtr),
+    DrawShader(DrawShaderPtr),
     Lit {
         ty_lit: TyLit,
     },
@@ -485,8 +508,8 @@ pub enum Ty {
     Mat4,
     Texture2D,
     Array {elem_ty: Rc<Ty>, len: usize},
-    Struct(StructNodePtr),
-    DrawShader(DrawShaderNodePtr),
+    Struct(StructPtr),
+    DrawShader(DrawShaderPtr),
     ClosureDef(ClosureDefIndex),
     ClosureDecl
 }
@@ -702,7 +725,7 @@ impl StructDef {
 impl FnDef {
 
     pub fn new(
-        fn_node_ptr: FnNodePtr,
+        fn_ptr: FnPtr,
         span: Span,
         ident: Ident,
         self_kind: Option<FnSelfKind>,
@@ -712,7 +735,7 @@ impl FnDef {
         closure_defs:Vec<ClosureDef>
     )->Self{
         FnDef {
-            fn_node_ptr,
+            fn_ptr,
             span,
             ident,
             self_kind,
@@ -791,7 +814,7 @@ impl DrawShaderDef {
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Uniform {
                     block_ident: Ident(id!(user)),
-                    var_def_node_ptr: None
+                    var_def_ptr: None
                 },
                 span,
                 ident: Ident(id),
@@ -805,7 +828,7 @@ impl DrawShaderDef {
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Instance {
                     is_used_in_pixel_shader: Cell::new(false),
-                    var_def_node_ptr: None
+                    var_def_ptr: None
                 },
                 span,
                 ident: Ident(id),
@@ -819,7 +842,7 @@ impl DrawShaderDef {
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Geometry {
                     is_used_in_pixel_shader: Cell::new(false),
-                    var_def_node_ptr: None
+                    var_def_ptr: None
                 },
                 span,
                 ident: Ident(id),
@@ -833,7 +856,7 @@ impl DrawShaderDef {
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Texture {
-                    var_def_node_ptr: None
+                    var_def_ptr: None
                 },
                 span,
                 ident: Ident(id),
@@ -1351,25 +1374,25 @@ impl fmt::Display for Val {
     }
 }
 
-impl fmt::Display for StructNodePtr {
+impl fmt::Display for StructPtr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "struct_{}", self.0)
     }
 }
 
-impl fmt::Display for FnNodePtr {
+impl fmt::Display for FnPtr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "fn_{}", self.0)
     }
 }
 
-impl fmt::Display for ConstNodePtr {
+impl fmt::Display for ConstPtr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "const_{}", self.0)
     }
 }
 
-impl fmt::Display for ValueNodePtr {
+impl fmt::Display for ValuePtr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "live_{}", self.0)
     }

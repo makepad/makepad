@@ -9,9 +9,9 @@ use crate::shaderregistry::LiveNodeFindResult;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum ShaderParserDep {
-    Const(ConstNodePtr),
-    Struct(StructNodePtr),
-    Function(Option<StructNodePtr>, FnNodePtr)
+    Const(ConstPtr),
+    Struct(StructPtr),
+    Function(Option<StructPtr>, FnPtr)
 }
 
 pub struct ShaderParser<'a> {
@@ -215,7 +215,7 @@ impl<'a> ShaderParser<'a> {
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Geometry {
                         is_used_in_pixel_shader: Cell::new(false),
-                        var_def_node_ptr: Some(VarDefNodePtr(decl_node_ptr)),
+                        var_def_ptr: Some(VarDefPtr(decl_node_ptr)),
                     },
                     span,
                     ident,
@@ -226,7 +226,7 @@ impl<'a> ShaderParser<'a> {
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Instance {
                         is_used_in_pixel_shader: Cell::new(false),
-                        var_def_node_ptr: Some(VarDefNodePtr(decl_node_ptr)),
+                        var_def_ptr: Some(VarDefPtr(decl_node_ptr)),
                         //input_type: DrawShaderInputType::VarDef(decl_node_ptr),
                     },
                     span,
@@ -243,7 +243,7 @@ impl<'a> ShaderParser<'a> {
                 };
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Uniform {
-                        var_def_node_ptr: Some(VarDefNodePtr(decl_node_ptr)),
+                        var_def_ptr: Some(VarDefPtr(decl_node_ptr)),
                         //input_type: DrawShaderInputType::VarDef(decl_node_ptr),
                         block_ident,
                     },
@@ -255,7 +255,7 @@ impl<'a> ShaderParser<'a> {
             Ident(id!(varying)) => {
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Varying {
-                        var_def_node_ptr: VarDefNodePtr(decl_node_ptr),
+                        var_def_ptr: VarDefPtr(decl_node_ptr),
                     },
                     span,
                     ident,
@@ -265,7 +265,7 @@ impl<'a> ShaderParser<'a> {
             Ident(id!(texture)) => {
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Texture {
-                        var_def_node_ptr: Some(VarDefNodePtr(decl_node_ptr)),
+                        var_def_ptr: Some(VarDefPtr(decl_node_ptr)),
                         //input_type: DrawShaderInputType::VarDef(decl_node_ptr),
                     },
                     span,
@@ -311,7 +311,7 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_field(&mut self, ident: Ident, var_def_node_ptr: VarDefNodePtr) -> Result<Option<StructFieldDef>, LiveError> {
+    pub fn expect_field(&mut self, ident: Ident, var_def_ptr: VarDefPtr) -> Result<Option<StructFieldDef>, LiveError> {
         let span = self.begin_span();
         let decl_ty = self.expect_ident() ?;
         let decl_name = self.expect_ident() ?;
@@ -324,7 +324,7 @@ impl<'a> ShaderParser<'a> {
         match decl_ty {
             Ident(id!(field)) => {
                 return span.end(self, | span | Ok(Some(StructFieldDef {
-                    var_def_node_ptr,
+                    var_def_ptr,
                     span,
                     ident,
                     ty_expr
@@ -340,7 +340,7 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_method_def(mut self, fn_node_ptr: FnNodePtr, ident: Ident) -> Result<Option<FnDef>, LiveError> {
+    pub fn expect_method_def(mut self, fn_ptr: FnPtr, ident: Ident) -> Result<Option<FnDef>, LiveError> {
         let span = self.begin_span();
         
         self.expect_token(Token::OpenParen) ?;
@@ -383,7 +383,7 @@ impl<'a> ShaderParser<'a> {
         let self_kind = self.self_kind.clone();
         let span = span.end(&mut self, | span | span);
         Ok(Some(FnDef::new(
-            fn_node_ptr,
+            fn_ptr,
             span,
             ident,
             self_kind,
@@ -395,7 +395,7 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_plain_fn_def(mut self, fn_node_ptr: FnNodePtr, ident: Ident) -> Result<FnDef, LiveError> {
+    pub fn expect_plain_fn_def(mut self, fn_ptr: FnPtr, ident: Ident) -> Result<FnDef, LiveError> {
         let span = self.begin_span();
         
         self.expect_token(Token::OpenParen) ?;
@@ -421,7 +421,7 @@ impl<'a> ShaderParser<'a> {
         let self_kind = self.self_kind.clone();
         let span = span.end(&mut self, | span | span);
         Ok(FnDef::new(
-            fn_node_ptr,
+            fn_ptr,
             span,
             ident,
             self_kind,
@@ -476,7 +476,7 @@ impl<'a> ShaderParser<'a> {
     
     fn scan_scope_for_struct(&mut self, id: Id) -> bool {
         if let Some(full_node_ptr) = self.scan_scope_for_live_ptr(id) {
-            let ptr = ShaderParserDep::Struct(StructNodePtr(full_node_ptr));
+            let ptr = ShaderParserDep::Struct(StructPtr(full_node_ptr));
             
             if !self.type_deps.contains(&ptr) {
                 self.type_deps.push(ptr);
@@ -1039,7 +1039,7 @@ impl<'a> ShaderParser<'a> {
                     match self.peek_token() {
                         Token::OpenBrace => { // its a struct constructor call
                             
-                            let struct_node_ptr = if ident_path.len() == 1 && ident_path.segs[0] == id!(Self) {
+                            let struct_ptr = if ident_path.len() == 1 && ident_path.segs[0] == id!(Self) {
                                 if let Some(FnSelfKind::Struct(struct_node_ptr)) = self.self_kind {
                                     struct_node_ptr
                                 }
@@ -1090,7 +1090,7 @@ impl<'a> ShaderParser<'a> {
                                             const_val: RefCell::new(None),
                                             const_index: Cell::new(None),
                                             kind: ExprKind::StructCons {
-                                                struct_node_ptr,
+                                                struct_ptr,
                                                 span,
                                                 args
                                             },
@@ -1127,8 +1127,8 @@ impl<'a> ShaderParser<'a> {
                                         | LiveNodeFindResult::LiveValue(_, _) => {
                                         Err(span.error(self, live_error_origin!(), format!("Not a function `{}`", ident_path).into()))
                                     }
-                                    LiveNodeFindResult::Function(fn_node_ptr) => {
-                                        self.type_deps.push(ShaderParserDep::Function(None, fn_node_ptr));
+                                    LiveNodeFindResult::Function(fn_ptr) => {
+                                        self.type_deps.push(ShaderParserDep::Function(None, fn_ptr));
                                         Ok(span.end(self, | span | Expr {
                                             span,
                                             ty: RefCell::new(None),
@@ -1136,7 +1136,7 @@ impl<'a> ShaderParser<'a> {
                                             const_index: Cell::new(None),
                                             kind: ExprKind::PlainCall {
                                                 span,
-                                                fn_node_ptr: Some(fn_node_ptr),
+                                                fn_ptr: Some(fn_ptr),
                                                 ident: if ident_path.len()==1{Some(Ident(ident_path.segs[0]))}else{None},
                                                 arg_exprs,
                                                 param_index:Cell::new(None),
@@ -1145,10 +1145,10 @@ impl<'a> ShaderParser<'a> {
                                         }))
                                         //Err(span.error(self, live_error_origin!(), format!("Cannot call a struct `{}`", ident_path).into()))
                                     }
-                                    LiveNodeFindResult::PossibleStatic(struct_node_ptr, fn_node_ptr) => {
+                                    LiveNodeFindResult::PossibleStatic(struct_ptr, fn_ptr) => {
                                         // we need to register struct_node_ptr as a dep to compile
-                                        self.type_deps.push(ShaderParserDep::Struct(struct_node_ptr));
-                                        self.type_deps.push(ShaderParserDep::Function(Some(struct_node_ptr), fn_node_ptr));
+                                        self.type_deps.push(ShaderParserDep::Struct(struct_ptr));
+                                        self.type_deps.push(ShaderParserDep::Function(Some(struct_ptr), fn_ptr));
                                         Ok(span.end(self, | span | Expr {
                                             span,
                                             ty: RefCell::new(None),
@@ -1157,7 +1157,7 @@ impl<'a> ShaderParser<'a> {
                                             kind: ExprKind::PlainCall {
                                                 span,
                                                 ident: if ident_path.len()==1{Some(Ident(ident_path.segs[0]))}else{None},
-                                                fn_node_ptr:Some(fn_node_ptr),
+                                                fn_ptr:Some(fn_ptr),
                                                 arg_exprs,
                                                 param_index:Cell::new(None),
                                                 closure_site_index:Cell::new(None),
@@ -1178,7 +1178,7 @@ impl<'a> ShaderParser<'a> {
                                     kind:  ExprKind::PlainCall {
                                         span,
                                         ident: Some(Ident(ident_path.segs[0])),
-                                        fn_node_ptr:None,
+                                        fn_ptr:None,
                                         arg_exprs,
                                         param_index:Cell::new(None),
                                         closure_site_index:Cell::new(None),

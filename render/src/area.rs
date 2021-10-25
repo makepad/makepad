@@ -169,7 +169,7 @@ impl Area{
                     println!("No instances but everything else valid?");
                     return Rect::default()
                 }
-                let sh = &cx.shaders[draw_call.shader.shader_id];
+                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 // ok now we have to patch x/y/w/h into it
                 if let Some(rect_pos) = sh.mapping.rect_instance_props.rect_pos{
                     let x = draw_call.instances[inst.instance_offset + rect_pos + 0];
@@ -205,7 +205,7 @@ impl Area{
                     return abs;
                 }
                 let draw_call = &cxview.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
-                let sh = &cx.shaders[draw_call.shader.shader_id];
+                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 // ok now we have to patch x/y/w/h into it
                 if let Some(rect_pos) = sh.mapping.rect_instance_props.rect_pos{
                     let x = draw_call.instances[inst.instance_offset + rect_pos + 0];
@@ -237,7 +237,7 @@ impl Area{
                     return;
                 }
                 let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
-                let sh = &cx.shaders[draw_call.shader.shader_id];        // ok now we have to patch x/y/w/h into it
+                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];        // ok now we have to patch x/y/w/h into it
                 
                 if let Some(rect_pos) = sh.mapping.rect_instance_props.rect_pos{
                     draw_call.instances[inst.instance_offset + rect_pos + 0] = rect.pos.x;
@@ -265,7 +265,7 @@ impl Area{
                     println!("get_instance_read_ref called on invalid area pointer, use mark/sweep correctly!");
                     return None;
                 }
-                let sh = &cx.shaders[draw_call.shader.shader_id];
+                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 if let Some(prop_id) = sh.mapping.user_uniform_props.prop_map.get(&id){
                     let prop = &sh.mapping.user_uniform_props.props[*prop_id];
                     if prop.ty != ty{
@@ -310,7 +310,7 @@ impl Area{
                     return None;
                 }
                 let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
-                let sh = &cx.shaders[draw_call.shader.shader_id];
+                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 if let Some(prop_id) = sh.mapping.user_uniform_props.prop_map.get(&id){
                     let prop = &sh.mapping.user_uniform_props.props[*prop_id];
                     if prop.ty != ty{
@@ -359,7 +359,7 @@ impl Area{
             Area::Instance(inst)=>{
                 let cxview = &mut cx.views[inst.view_id];
                 let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
-                let sh = &cx.shaders[draw_call.shader.shader_id];
+                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 for (index, prop) in sh.mapping.textures.iter().enumerate(){
                     if prop.id == id{
                         draw_call.textures_2d[index] = texture_id as u32;

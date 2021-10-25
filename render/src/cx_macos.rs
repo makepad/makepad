@@ -236,6 +236,7 @@ impl Cx {
                         self.call_event_handler(&mut event);
                     }
                 }
+
                 if self.process_desktop_post_event(event) {
                     cocoa_app.terminate_event_loop();
                 }

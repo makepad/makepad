@@ -11,7 +11,7 @@ use crate::shaderregistry::ShaderRegistry;
 pub struct ClosureSiteInfo<'a> {
     pub site_index: usize,
     pub closure_site: &'a ClosureSite,
-    pub call_ptr: FnNodePtr
+    pub call_ptr: FnPtr
 }
 
 pub trait BackendWriter {
@@ -447,12 +447,12 @@ impl<'a> ExprGenerator<'a> {
                 } => self.generate_method_call_expr(span, ident, arg_exprs, closure_site_index),
                 ExprKind::PlainCall {
                     span,
-                    fn_node_ptr,
+                    fn_ptr,
                     ident,
                     ref arg_exprs,
                     ref closure_site_index,
                     ref param_index,
-                } => self.generate_plain_call_expr(span, ident, fn_node_ptr, arg_exprs, closure_site_index, param_index),
+                } => self.generate_plain_call_expr(span, ident, fn_ptr, arg_exprs, closure_site_index, param_index),
                 ExprKind::BuiltinCall {
                     span,
                     ident,
@@ -471,10 +471,10 @@ impl<'a> ExprGenerator<'a> {
                     ref arg_exprs,
                 } => self.generate_cons_call_expr(span, ty_lit, arg_exprs),
                 ExprKind::StructCons {
-                    struct_node_ptr,
+                    struct_ptr,
                     span,
                     ref args
-                } => self.generate_struct_cons(struct_node_ptr, span, args),
+                } => self.generate_struct_cons(struct_ptr, span, args),
                 ExprKind::Var {
                     span,
                     ref kind,
@@ -632,7 +632,7 @@ impl<'a> ExprGenerator<'a> {
             // and then our args
             write!(self.string, "{} (", DisplayFnNameWithClosureArgs(
                 closure_site_index,
-                call_def.fn_node_ptr,
+                call_def.fn_ptr,
                 fn_def.ident
             )).unwrap();
             
@@ -672,7 +672,7 @@ impl<'a> ExprGenerator<'a> {
             write!(self.string, ")").unwrap();
         }
         else {
-            write!(self.string, "{}_{} (", fn_def.fn_node_ptr, fn_def.ident).unwrap();
+            write!(self.string, "{}_{} (", fn_def.fn_ptr, fn_def.ident).unwrap();
             let mut sep = "";
             for arg_expr in arg_exprs {
                 write!(self.string, "{}", sep).unwrap();
@@ -705,14 +705,14 @@ impl<'a> ExprGenerator<'a> {
     
     fn generate_struct_cons(
         &mut self,
-        struct_node_ptr: StructNodePtr,
+        struct_ptr: StructPtr,
         _span: Span,
         args: &Vec<(Ident, Expr)>,
     ) {
-        let struct_decl = self.shader_registry.structs.get(&struct_node_ptr).unwrap();
+        let struct_decl = self.shader_registry.structs.get(&struct_ptr).unwrap();
         let (sep1, sep2) = if self.backend_writer.needs_cstyle_struct_cons() { ("(",")")}else{("{","}")};
 
-        write!(self.string, "{}{}", struct_node_ptr, sep1).unwrap();
+        write!(self.string, "{}{}", struct_ptr, sep1).unwrap();
         for (index, field) in struct_decl.fields.iter().enumerate() {
             if index != 0 {
                 write!(self.string, ",").unwrap();
@@ -750,13 +750,13 @@ impl<'a> ExprGenerator<'a> {
     }
     
     
-    fn generate_plain_call_expr(&mut self, _span: Span, _ident: Option<Ident>, fn_node_ptr: Option<FnNodePtr>, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>, param_index: &Cell<Option<usize >>) {
+    fn generate_plain_call_expr(&mut self, _span: Span, _ident: Option<Ident>, fn_ptr: Option<FnPtr>, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>, param_index: &Cell<Option<usize >>) {
         // lets create a fn name for this thing.
         if param_index.get().is_some(){ // its a closure
             self.generate_closure_call_expr(_span, arg_exprs, param_index);
         }
         else{
-            let fn_def = self.shader_registry.all_fns.get(&fn_node_ptr.unwrap()).unwrap();
+            let fn_def = self.shader_registry.all_fns.get(&fn_ptr.unwrap()).unwrap();
             self.generate_call_body(_span, fn_def, arg_exprs, closure_site_index);
         }
     }
@@ -881,7 +881,7 @@ impl<'a> FnDefGenerator<'a> {
             "",
             false,
             false,
-            &DisplayFnName(self.fn_def.fn_node_ptr, self.fn_def.ident), // here we must expand IdentPath to something
+            &DisplayFnName(self.fn_def.fn_ptr, self.fn_def.ident), // here we must expand IdentPath to something
             self.fn_def.return_ty.borrow().as_ref().unwrap()
         );
         write!(self.string, "(").unwrap();
@@ -946,7 +946,7 @@ impl<'a> FnDefWithClosureArgsGenerator<'a> {
         for (closure_def_index, closure_def) in call_def.closure_defs.iter().enumerate() {
             let closure_def_index = ClosureDefIndex(closure_def_index);
             for site in call_def.closure_sites.borrow().as_ref().unwrap() {
-                if site.call_to == fn_def.fn_node_ptr { // alright this site calls the fn_def
+                if site.call_to == fn_def.fn_ptr { // alright this site calls the fn_def
                     for closure_site_arg in &site.closure_args {
                         if closure_site_arg.closure_def_index == closure_def_index {
                             // alright lets generate this closure
@@ -970,13 +970,13 @@ impl<'a> FnDefWithClosureArgsGenerator<'a> {
         
         for (site_index, closure_site) in call_def.closure_sites.borrow().as_ref().unwrap().iter().enumerate() {
             // for each site
-            if closure_site.call_to == fn_def.fn_node_ptr { // alright this site calls the fn_def
+            if closure_site.call_to == fn_def.fn_ptr { // alright this site calls the fn_def
                 // alright we need a fn def for this site_index
                 FnDefWithClosureArgsGenerator {
                     closure_site_info: ClosureSiteInfo {
                         site_index,
                         closure_site,
-                        call_ptr: call_def.fn_node_ptr,
+                        call_ptr: call_def.fn_ptr,
                     },
                     fn_def,
                     call_def,
@@ -1000,7 +1000,7 @@ impl<'a> FnDefWithClosureArgsGenerator<'a> {
             false,
             &DisplayFnNameWithClosureArgs(
                 self.closure_site_info.site_index,
-                self.call_def.fn_node_ptr,
+                self.call_def.fn_ptr,
                 self.fn_def.ident
             ), // here we must expand IdentPath to something
             self.fn_def.return_ty.borrow().as_ref().unwrap()
@@ -1091,7 +1091,7 @@ impl<'a> ClosureDefGenerator<'a> {
                 "",
                 false,
                 false,
-                &DisplayClosureName(self.call_def.fn_node_ptr, self.closure_site_arg.closure_def_index), // here we must expand IdentPath to something
+                &DisplayClosureName(self.call_def.fn_ptr, self.closure_site_arg.closure_def_index), // here we must expand IdentPath to something
                 return_ty.borrow().as_ref().unwrap(),
             );
             write!(self.string, "(").unwrap();
@@ -1195,21 +1195,21 @@ impl fmt::Display for DisplayStructField {
     }
 }
 
-pub struct DisplayFnName(pub FnNodePtr, pub Ident);
+pub struct DisplayFnName(pub FnPtr, pub Ident);
 impl fmt::Display for DisplayFnName {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}_{}", self.0, self.1)
     }
 }
 
-pub struct DisplayFnNameWithClosureArgs(pub usize, pub FnNodePtr, pub Ident);
+pub struct DisplayFnNameWithClosureArgs(pub usize, pub FnPtr, pub Ident);
 impl fmt::Display for DisplayFnNameWithClosureArgs {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "site_{}_of_{}_{}", self.0, self.1, self.2)
     }
 }
 
-pub struct DisplayClosureName(pub FnNodePtr, pub ClosureDefIndex);
+pub struct DisplayClosureName(pub FnPtr, pub ClosureDefIndex);
 impl fmt::Display for DisplayClosureName {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "closure_{}_in_{}", self.1.0, self.0)

@@ -5,12 +5,12 @@ pub struct Geometry {
     pub geometry_id: usize,
 }
 
-impl Geometry{
-    pub fn from_geometry_gen(cx:&mut Cx, gen:GeometryGen)->Geometry{
-        let geometry_id = cx.geometries.len();
-        cx.geometries.push(CxGeometry{
-            indices: gen.indices,
-            vertices: gen.vertices,
+impl Cx{
+    pub fn new_geometry(&mut self)->Geometry{
+        let geometry_id = self.geometries.len();
+        self.geometries.push(CxGeometry{
+            indices: Vec::new(),
+            vertices: Vec::new(),
             dirty: true,
             platform: CxPlatformGeometry::default()
         });
@@ -35,7 +35,7 @@ pub struct GeometryField {
 pub trait GeometryFields{
     fn geometry_fields(&self, fields: &mut Vec<GeometryField>);
     fn live_type_check(&self)->LiveType;
-    fn get_geometry(&self)->Option<Geometry>;
+    fn get_geometry(&self)->Geometry;
 }
 
 

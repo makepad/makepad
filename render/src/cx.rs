@@ -4,7 +4,8 @@ use std::time::{Instant};
 
 pub use makepad_derive_live::*;
 pub use makepad_live_parser::math::*;
-use makepad_shader_compiler::ShaderRegistry;
+pub use makepad_shader_compiler::ShaderRegistry;
+pub use makepad_shader_compiler::shaderast::DrawShaderPtr;
 pub use makepad_live_parser::Id;
 pub use makepad_live_parser::LivePtr;
 pub use makepad_live_parser::LiveNode;
@@ -97,7 +98,7 @@ pub struct Cx {
     pub textures_free: Vec<usize>,
     
     pub geometries: Vec<CxGeometry>,
-    pub shaders: Vec<CxShader>,
+    pub draw_shaders: Vec<CxDrawShader>,
     
     pub in_redraw_cycle: bool,
     pub default_dpi_factor: f32,
@@ -109,8 +110,8 @@ pub struct Cx {
     pub align_list: Vec<Area>,
     
     pub live_factories: HashMap<LiveType, Box<dyn LiveFactory>>,
-    pub live_ptr_to_shader_id: HashMap<LivePtr, usize>,
-    pub shader_compile_set: BTreeSet<LivePtr>,
+    pub draw_shader_ptr_to_id: HashMap<DrawShaderPtr, usize>,
+    pub draw_shader_compile_set: BTreeSet<DrawShaderPtr>,
     
     pub redraw_child_areas: Vec<Area>,
     pub redraw_parent_areas: Vec<Area>,
@@ -207,6 +208,7 @@ impl Default for Cx {
         let mut fingers = Vec::new();
         fingers.resize(NUM_FINGERS, CxPerFinger::default());
         
+        // the null texture
         let textures = vec![CxTexture {
             desc: TextureDesc {
                 format: TextureFormat::ImageBGRA,
@@ -236,7 +238,7 @@ impl Default for Cx {
             //fonts_atlas: CxFontsAtlas::default(),
             textures: textures,
             textures_free: Vec::new(),
-            shaders: Vec::new(),
+            draw_shaders: Vec::new(),
             //shader_recompiles: Vec::new(),
             
             geometries: Vec::new(),
@@ -251,8 +253,8 @@ impl Default for Cx {
             align_list: Vec::new(),
             
             live_factories: HashMap::new(),
-            live_ptr_to_shader_id: HashMap::new(),
-            shader_compile_set: BTreeSet::new(),
+            draw_shader_ptr_to_id: HashMap::new(),
+            draw_shader_compile_set: BTreeSet::new(),
             
             redraw_parent_areas: Vec::new(),
             _redraw_parent_areas: Vec::new(),
@@ -881,10 +883,10 @@ impl Cx {
             else {
                 let cxview = &mut self.views[view_id];
                 let draw_call = cxview.draw_items[draw_item_id].draw_call.as_mut().unwrap();
-                let sh = &self.shaders[draw_call.shader.shader_id];
+                let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 let slots = sh.mapping.instance_props.total_slots;
                 let instances = draw_call.instances.len() / slots;
-                writeln!(s, "{}call {}: {}({}) *:{} scroll:{}", indent, draw_item_id, sh.name, draw_call.shader.shader_id, instances, draw_call.get_local_scroll()).unwrap();
+                writeln!(s, "{}call {}: {}({}) *:{} scroll:{}", indent, draw_item_id, sh.name, draw_call.draw_shader.draw_shader_id, instances, draw_call.get_local_scroll()).unwrap();
                 // lets dump the instance geometry
                 if dump_instances {
                     for inst in 0..instances.min(1) {

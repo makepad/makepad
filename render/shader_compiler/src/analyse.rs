@@ -124,9 +124,33 @@ impl<'a> DrawShaderAnalyser<'a> {
     pub fn analyse_shader(&mut self) -> Result<(), LiveError> {
         self.scopes.push_scope();
         
-        for decl in &self.draw_shader_def.fields {
-            self.analyse_field_decl(decl) ?;
+        let mut var_inputs = VarInputs::default();
+        for field in &self.draw_shader_def.fields {
+            self.analyse_field_decl(field) ?;
+            if let DrawShaderFieldKind::Instance{var_def_ptr,..} = field.kind{
+                if var_def_ptr.is_some(){
+                    var_inputs.inputs.push(VarInput{
+                        ident: field.ident,
+                        offset:var_inputs.instance_slots,
+                        size: field.ty_expr.ty.borrow().as_ref().unwrap().size(),
+                        kind:VarInputKind::Instance
+                    });
+                    var_inputs.instance_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
+                }
+            }
+            if let DrawShaderFieldKind::Uniform{var_def_ptr,..} = field.kind{
+                if var_def_ptr.is_some(){
+                    var_inputs.inputs.push(VarInput{
+                        ident:field.ident,
+                        offset:var_inputs.uniform_slots,
+                        size: field.ty_expr.ty.borrow().as_ref().unwrap().size(),
+                        kind:VarInputKind::Uniform
+                    });
+                    var_inputs.uniform_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
+                }
+            }
         }
+
         // first analyse decls
         for fn_node_ptr in &self.draw_shader_def.methods {
             let fn_def = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
@@ -225,6 +249,7 @@ impl<'a> DrawShaderAnalyser<'a> {
                 self.analyse_hidden_args(fn_def);
             }
         }
+        *self.draw_shader_def.var_inputs.borrow_mut() = var_inputs;
 
         *self.draw_shader_def.all_live_refs.borrow_mut() = all_live_refs;
         *self.draw_shader_def.all_const_refs.borrow_mut() = all_const_refs;
@@ -236,7 +261,6 @@ impl<'a> DrawShaderAnalyser<'a> {
         *self.draw_shader_def.all_structs.borrow_mut() = all_structs;
         *self.draw_shader_def.vertex_structs.borrow_mut() = vertex_structs;
         *self.draw_shader_def.pixel_structs.borrow_mut() = pixel_structs;
-        
         Ok(())
     }
     
@@ -415,11 +439,11 @@ impl<'a> DrawShaderAnalyser<'a> {
     
     fn analyse_struct_tree(
         &self,
-        call_stack: &mut Vec<StructNodePtr>,
-        struct_ptr: StructNodePtr,
+        call_stack: &mut Vec<StructPtr>,
+        struct_ptr: StructPtr,
         struct_def: &StructDef,
-        deps: &mut Vec<StructNodePtr>,
-        all_deps: &mut Vec<StructNodePtr>,
+        deps: &mut Vec<StructPtr>,
+        all_deps: &mut Vec<StructPtr>,
     ) -> Result<(), LiveError> {
         // lets see if callee is already in the vec, ifso remove it
         if let Some(index) = deps.iter().position( | v | v == &struct_ptr) {
@@ -454,28 +478,28 @@ impl<'a> DrawShaderAnalyser<'a> {
     
     fn analyse_call_tree(
         &self,
-        call_stack: &mut Vec<FnNodePtr>,
+        call_stack: &mut Vec<FnPtr>,
         def: &FnDef,
         //callee: Callee,
-        deps: &mut Vec<FnNodePtr>,
-        all_deps: &mut Vec<FnNodePtr>,
+        deps: &mut Vec<FnPtr>,
+        all_deps: &mut Vec<FnPtr>,
     ) -> Result<(), LiveError> {
         // lets see if callee is already in the vec, ifso remove it
-        if let Some(index) = deps.iter().position( | v | v == &def.fn_node_ptr) {
+        if let Some(index) = deps.iter().position( | v | v == &def.fn_ptr) {
             deps.remove(index);
         }
-        deps.push(def.fn_node_ptr);
+        deps.push(def.fn_ptr);
         
-        if let Some(index) = all_deps.iter().position( | v | v == &def.fn_node_ptr) {
+        if let Some(index) = all_deps.iter().position( | v | v == &def.fn_ptr) {
             all_deps.remove(index);
         }
-        all_deps.push(def.fn_node_ptr);
+        all_deps.push(def.fn_ptr);
         
-        call_stack.push(def.fn_node_ptr);
+        call_stack.push(def.fn_ptr);
         for callee in def.callees.borrow().as_ref().unwrap().iter() {
             // ok now we need a fn decl for this callee
             let callee_decl = self.shader_registry.all_fns.get(&callee).unwrap();
-            if call_stack.contains(&callee_decl.fn_node_ptr) {
+            if call_stack.contains(&callee_decl.fn_ptr) {
                 return Err(LiveError {
                     origin: live_error_origin!(),
                     span: def.span,

@@ -5,7 +5,6 @@
 //use core_graphics::color::CGColor;
 use makepad_objc_sys::{msg_send};
 use makepad_objc_sys::runtime::YES;
-use makepad_shader_compiler::shaderast::DrawShaderNodePtr;
 use makepad_shader_compiler::generate_metal;
 use makepad_shader_compiler::generate_metal::MetalGeneratedShader;
 use makepad_shader_compiler::shaderast::DrawShaderDef;
@@ -53,7 +52,7 @@ impl Cx {
                 let cxview = &mut self.views[view_id];
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
                 let draw_call = cxview.draw_items[draw_item_id].draw_call.as_mut().unwrap();
-                let sh = &self.shaders[draw_call.shader.shader_id];
+                let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 let shp = sh.platform.as_ref().unwrap();
                 
                 if draw_call.instance_dirty {
@@ -643,15 +642,15 @@ pub struct SlErr {
 impl Cx {
     
     pub fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
-        for live_ptr in &self.shader_compile_set{
-            if let Some(shader_id) = self.live_ptr_to_shader_id.get(&live_ptr){
-                let cx_shader = &mut self.shaders[*shader_id];
-                let draw_shader_def = self.shader_registry.draw_shaders.get(&DrawShaderNodePtr(*live_ptr));
+        for draw_shader_ptr in &self.draw_shader_compile_set{
+            if let Some(draw_shader_id) = self.draw_shader_ptr_to_id.get(&draw_shader_ptr){
+                let cx_shader = &mut self.draw_shaders[*draw_shader_id];
+                let draw_shader_def = self.shader_registry.draw_shaders.get(&draw_shader_ptr);
                 let gen = generate_metal::generate_shader(draw_shader_def.as_ref().unwrap(), &self. shader_registry);
                 metal_cx.compile_draw_shader(cx_shader, gen, draw_shader_def.as_ref().unwrap());
             } 
         }
-        self.shader_compile_set.clear();
+        self.draw_shader_compile_set.clear();
     }
 }
 
@@ -799,7 +798,7 @@ impl MetalCx {
         
     pub fn compile_draw_shader(
         &self,
-        sh: &mut CxShader,
+        sh: &mut CxDrawShader,
         gen: MetalGeneratedShader,
         draw_shader_def: &DrawShaderDef,
     ) -> ShaderCompileResult {
