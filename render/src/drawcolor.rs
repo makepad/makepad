@@ -24,7 +24,6 @@ pub struct DrawColor {
     color: Vec4
 }
 
-
 impl std::ops::Deref for DrawColor {
     type Target = DrawQuad;
     fn deref(&self) -> &Self::Target {&self.deref_target}
