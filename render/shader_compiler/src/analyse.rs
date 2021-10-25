@@ -131,23 +131,28 @@ impl<'a> DrawShaderAnalyser<'a> {
                 if var_def_ptr.is_some(){
                     var_inputs.inputs.push(VarInput{
                         ident: field.ident,
-                        offset:var_inputs.instance_slots,
+                        offset:var_inputs.var_instance_slots,
                         size: field.ty_expr.ty.borrow().as_ref().unwrap().size(),
                         kind:VarInputKind::Instance
                     });
-                    var_inputs.instance_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
+                    var_inputs.var_instance_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
                 }
+                var_inputs.total_instance_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
             }
-            if let DrawShaderFieldKind::Uniform{var_def_ptr,..} = field.kind{
+            if let DrawShaderFieldKind::Uniform{var_def_ptr,block_ident,..} = field.kind{
+                if block_ident != Ident(id!(user)){
+                    continue
+                }
                 if var_def_ptr.is_some(){
                     var_inputs.inputs.push(VarInput{
                         ident:field.ident,
-                        offset:var_inputs.uniform_slots,
+                        offset:var_inputs.var_uniform_slots,
                         size: field.ty_expr.ty.borrow().as_ref().unwrap().size(),
                         kind:VarInputKind::Uniform
                     });
-                    var_inputs.uniform_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
+                    var_inputs.var_uniform_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
                 }
+                var_inputs.total_uniform_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
             }
         }
 
