@@ -57,8 +57,10 @@ pub enum VarInputKind{
 
 #[derive(Clone, Debug, Default)]
 pub struct VarInputs{
-    pub uniform_slots: usize,
-    pub instance_slots: usize,
+    pub var_uniform_slots: usize,
+    pub var_instance_slots: usize,
+    pub total_uniform_slots: usize,
+    pub total_instance_slots: usize,
     pub inputs: Vec<VarInput>
 }
 

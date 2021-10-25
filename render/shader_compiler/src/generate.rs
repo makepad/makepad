@@ -1188,6 +1188,13 @@ impl fmt::Display for DisplayDsIdent {
     }
 }
 
+pub struct DisplayPadding(pub usize);
+impl fmt::Display for DisplayPadding {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "pad_{}", self.0)
+    }
+}
+
 pub struct DisplayStructField(pub Ident);
 impl fmt::Display for DisplayStructField {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

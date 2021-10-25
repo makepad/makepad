@@ -43,62 +43,66 @@ use crate::cx::*;
 
 const DRAW_QUAD_VAR_UNIFORMS: usize = 32;
 const DRAW_QUAD_VAR_INSTANCES: usize = 32;
-const DRAW_QUAD_INSTANCE_SLOTS: usize = 5;
 
 //#[derive(Debug)]
 #[repr(C)]
 pub struct DrawQuad {
-    //#[after_live_update()]
-    //#[private()]
+    //#[local()]
     pub uniforms: [f32; DRAW_QUAD_VAR_UNIFORMS],
     
-    //#[private()]
+    //#[local()]
     pub area: Area,
     
-    //#[private()]
-    pub many: Option<ManyInstances>,
-    //#[private()]
-    pub many_old_area: Area,
+    //#[local()]
+    many: Option<ManyInstances>,
+    //#[local()]
+    many_old_area: Area,
     
-    //#[private()]
+    //#[local()]
     pub draw_shader_ptr: Option<DrawShaderPtr>,
     
-    //#[private()]
-    pub instance_start: usize,
-    //#[private()]
-    pub instance_slots: usize,
+    //#[local(0)]
+    uniform_start: usize,
+    //#[local(0)]
+    uniform_slots: usize,
+
+    //#[local(0)]
+    instance_start: usize,
+    //#[local(5)]
+    instance_slots: usize,
     
+    //#[live()]
     pub geometry: GeometryQuad2D,
     
-    //#[private()]
+    //#[local()]
     pub draw_shader: Option<DrawShader>,
     
-    //#[private()]
+    //#[local()]
     pub instances: [f32; DRAW_QUAD_VAR_INSTANCES],
     
-    //#[default(Vec2::all(0.0))]
+    //#[live(Vec2::all(0.0))]
     pub rect_pos: Vec2,
-    //#[default(Vec2::all(0.0))]
+    //#[live(Vec2::all(0.0))]
     pub rect_size: Vec2,
-    //#[default(1.0)]
-    pub draw_depth: f32
+    //#[live(1.0)]
+    pub draw_depth: f32,
+    //#[pad_f32()]
 }
 
 impl DrawQuad {
-    fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
+    pub fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
         match id {
+            id!(geometry) => self.geometry.live_update(cx, ptr),
             id!(rect_pos) => self.rect_pos.live_update(cx, ptr),
             id!(rect_size) => self.rect_size.live_update(cx, ptr),
             id!(draw_depth) => self.draw_depth.live_update(cx, ptr),
-            id!(geometry) => self.geometry.live_update(cx, ptr),
             _ => self.live_update_value_unknown(cx, id, ptr)
         }
     }
 }
 
-impl DrawQuad {
+impl LiveUpdateHooks for DrawQuad {
     fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
-        // lets update our instances/uniforms
         cx.update_var_inputs(self.draw_shader_ptr.unwrap(), ptr, id, &mut self.uniforms, &mut self.instances);
     }
     
@@ -111,9 +115,8 @@ impl DrawQuad {
         cx.get_var_inputs_instance_layout(
             self.draw_shader,
             &mut self.instance_start,
-            DRAW_QUAD_VAR_INSTANCES,
             &mut self.instance_slots,
-            DRAW_QUAD_INSTANCE_SLOTS
+            DRAW_QUAD_VAR_INSTANCES,
         );
     }
 }
@@ -128,8 +131,10 @@ impl LiveNew for DrawQuad {
             many: None,
             many_old_area: Area::Empty,
             
-            instance_start: DRAW_QUAD_VAR_INSTANCES,
-            instance_slots: DRAW_QUAD_INSTANCE_SLOTS,
+            uniform_start: 0,
+            uniform_slots: 0,
+            instance_start: 0,
+            instance_slots: 0,
             draw_shader: None,
             geometry: LiveNew::live_new(cx),
             
@@ -137,7 +142,7 @@ impl LiveNew for DrawQuad {
             instances: [0.0; DRAW_QUAD_VAR_INSTANCES],
             rect_pos: Vec2::all(0.0),
             rect_size: Vec2::all(0.0),
-            draw_depth: 1.0
+            draw_depth: 1.0,
         }
     }
     
@@ -154,10 +159,12 @@ impl LiveNew for DrawQuad {
             }
             
             fn live_fields(&self, fields: &mut Vec<LiveField>) {
-                fields.push(LiveField {id: id!(geometry), live_type: GeometryQuad2D::live_type()});
-                fields.push(LiveField {id: id!(rect_pos), live_type: Vec2::live_type()});
-                fields.push(LiveField {id: id!(rect_size), live_type: Vec2::live_type()});
-                fields.push(LiveField {id: id!(draw_depth), live_type: f32::live_type()});
+                fields.push(LiveField {id: Id::from_str("geometry").unwrap(), live_type: GeometryQuad2D::live_type()});
+                fields.push(LiveField {id: Id::from_str("rect_pos").unwrap(), live_type: Vec2::live_type()});
+                fields.push(LiveField {id: Id::from_str("rect_size").unwrap(), live_type: Vec2::live_type()});
+                fields.push(LiveField {id: Id::from_str("draw_depth").unwrap(), live_type: f32::live_type()});
+                // can i somehow someway autogenerate this
+                fields.push(LiveField {id: Id(0), live_type: f32::live_type()});
             }
             
             fn live_type(&self) -> LiveType {
@@ -189,20 +196,6 @@ impl LiveUpdate for DrawQuad {
     }
 }
 
-
-pub struct DrawColor {
-    base: DrawQuad,
-    color: Vec4
-}
-
-impl std::ops::Deref for DrawColor {
-    type Target = DrawQuad;
-    fn deref(&self) -> &Self::Target {&self.base}
-}
-
-impl std::ops::DerefMut for DrawColor {
-    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.base}
-}
 
 impl DrawQuad {
     

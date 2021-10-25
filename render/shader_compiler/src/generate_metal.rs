@@ -182,6 +182,7 @@ impl<'a> DrawShaderGenerator<'a> {
     }
     
     fn generate_instance_struct(&mut self) {
+        let mut padding = 0;
         writeln!(self.string, "struct Instances {{").unwrap();
         for field in &self.draw_shader_def.fields {
             match field.kind {
@@ -189,27 +190,36 @@ impl<'a> DrawShaderGenerator<'a> {
                     match field.ty_expr.ty.borrow().as_ref().unwrap() {
                         Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {
                             write!(self.string, "    ").unwrap();
-                            self.write_var_decl(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
+                            if field.ident == Ident(Id(0)){
+                                self.write_var_decl_packed(&DisplayPadding(padding), field.ty_expr.ty.borrow().as_ref().unwrap(),);
+                                padding += 1;
+                            }
+                            else{
+                                self.write_var_decl_packed(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
+                            }
                             writeln!(self.string, ";").unwrap();
+                            //write!(self.string, "    ").unwrap();
+                            //self.write_var_decl(&DisplayDsIdent(field.ident), field.ty_expr.ty.borrow().as_ref().unwrap(),);
+                            //writeln!(self.string, ";").unwrap();
                         },
                         Ty::Mat4 => {
                             for i in 0..4 {
                                 write!(self.string, "    ").unwrap();
-                                self.write_ty_lit(TyLit::Vec4);
-                                writeln!(self.string, " {}{};", &DisplayDsIdent(field.ident), i).unwrap();
+                                self.write_var_decl_packed(&DisplayDsIdent(field.ident), &Ty::Vec4);
+                                writeln!(self.string, " {};", i).unwrap();
                             }
                         },
                         Ty::Mat3 => {
                             for i in 0..3 {
                                 write!(self.string, "    ").unwrap();
-                                self.write_ty_lit(TyLit::Vec3);
-                                writeln!(self.string, " {}{};", &DisplayDsIdent(field.ident), i).unwrap();
+                                self.write_var_decl_packed(&DisplayDsIdent(field.ident), &Ty::Vec3);
+                                writeln!(self.string, " {};", i).unwrap();
                             }
                         },
                         Ty::Mat2 => {
                             write!(self.string, "    ").unwrap();
-                            self.write_ty_lit(TyLit::Vec4);
-                            writeln!(self.string, " {};", &DisplayDsIdent(field.ident)).unwrap();
+                            self.write_var_decl_packed(&DisplayDsIdent(field.ident), &Ty::Vec4);
+                            writeln!(self.string, ";").unwrap();
                         },
                         _ => panic!("unsupported type in generate_instance_struct")
                     }
