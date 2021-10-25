@@ -4,7 +4,7 @@ use crate::livenode::LiveNode;
 use crate::id::IdPack;
 use crate::id::IdUnpack;
 
-#[derive(Clone, Debug)]
+//#[derive(Clone, Debug)]
 pub struct DeLiveErr {
     pub msg: String,
     pub file: usize,
