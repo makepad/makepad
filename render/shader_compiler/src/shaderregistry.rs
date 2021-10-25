@@ -26,14 +26,9 @@ impl fmt::Display for ShaderResourceId {
 pub struct ShaderRegistry {
     pub live_registry: LiveRegistry,
     pub consts: HashMap<ConstPtr, ConstDef>,
-    
     pub all_fns: HashMap<FnPtr, FnDef>,
-    
-    //pub plain_fns: HashMap<FnNodePtr, FnDecl>,
     pub draw_shaders: HashMap<DrawShaderPtr, DrawShaderDef>,
     pub structs: HashMap<StructPtr, StructDef>,
-    
-    //pub draw_inputs: HashMap<ShaderResourceId, DrawShaderInput>,
     pub builtins: HashMap<Ident, Builtin>,
 }
 
@@ -47,42 +42,10 @@ impl ShaderRegistry {
             consts: HashMap::new(),
             draw_shaders: HashMap::new(),
             all_fns: HashMap::new(),
-            //plain_fns: HashMap::new(),
-            //draw_inputs: HashMap::new(),
             builtins: generate_builtins()
         }
     }
 }
-/*
-#[derive(Clone, Debug, Default)]
-pub struct DrawShaderInput {
-    pub uniforms: Vec<DrawShaderInputItem>,
-    pub instances: Vec<DrawShaderInputItem>,
-    pub textures: Vec<DrawShaderInputItem>,
-}
-
-#[derive(Clone, Debug)]
-pub struct DrawShaderInputItem {
-    pub ident: Ident,
-    pub ty_expr: TyExpr
-}
-
-impl DrawShaderInput {
-    pub fn add_uniform(&mut self, name: &str, ty: Ty) {
-        Id::from_str_check(name).unwrap();
-        if let Ty::Texture2D = ty{
-            self.textures.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr:ty.to_ty_expr()});
-        }
-        else{
-            self.uniforms.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr:ty.to_ty_expr()});
-        }
-    }
-    
-    pub fn add_instance(&mut self, name: &str, ty: Ty) {
-        Id::from_str_check(name).unwrap();
-        self.instances.push(DrawShaderInputItem {ident: Ident(Id::from_str(name)), ty_expr:ty.to_ty_expr()});
-    }
-}*/
 
 pub enum LiveNodeFindResult {
     NotFound,
@@ -612,7 +575,7 @@ impl ShaderRegistry {
                                 if let IdUnpack::Single(id) = prop.id_pack.unpack() {
                                     let mut parser = ShaderParser::new(
                                         self,
-                                        doc.get_tokens(token_start, token_count + 1),
+                                        doc.get_tokens(token_start, token_count),
                                         doc.get_scopes(scope_start, scope_count),
                                         &mut parser_deps,
                                         Some(FnSelfKind::DrawShader(draw_shader_ptr))
