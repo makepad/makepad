@@ -88,10 +88,10 @@ impl<'a> ConstGatherer<'a> {
                 ..
             } => self.const_gather_var_expr(span, kind),
             ExprKind::StructCons{
-                struct_node_ptr,
+                struct_ptr,
                 span,
                 ref args
-            } => self.const_gather_struct_cons(struct_node_ptr, span, args),
+            } => self.const_gather_struct_cons(struct_ptr, span, args),
             ExprKind::Lit { span, lit } => self.const_gather_lit_expr(span, lit),
         }
     }
@@ -138,7 +138,7 @@ impl<'a> ConstGatherer<'a> {
 
     fn const_gather_struct_cons(
         &self,
-        _struct_node_ptr: StructNodePtr,
+        _struct_ptr: StructPtr,
         _span: Span,
         args: &Vec<(Ident,Expr)>,
     ) {

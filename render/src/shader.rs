@@ -3,6 +3,7 @@ use makepad_live_parser::LiveRegistry;
 use makepad_shader_compiler::Ty;
 use makepad_shader_compiler::shaderast::DrawShaderDef;
 use makepad_shader_compiler::shaderast::DrawShaderFieldKind;
+use makepad_shader_compiler::shaderast::DrawShaderPtr;
 use std::collections::HashMap;
 
 #[derive(PartialEq, Copy, Clone, Hash, Eq, Debug, PartialOrd, Ord)]
@@ -13,9 +14,9 @@ impl LiveItemId {
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub struct Shader {
-    pub shader_id: usize,
-    pub live_ptr: LivePtr
+pub struct DrawShader {
+    pub draw_shader_id: usize,
+    pub draw_shader_ptr: DrawShaderPtr
 }
 
 pub enum ShaderCompileResult{
@@ -191,7 +192,7 @@ impl UniformProps {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct CxShaderMapping {
+pub struct CxDrawShaderMapping {
     pub rect_instance_props: RectInstanceProps,
     pub user_uniform_props: UniformProps,
     pub live_uniform_props: UniformProps,
@@ -209,9 +210,9 @@ pub struct CxShaderMapping {
     pub user_uniforms: Vec<PropDef>
 }
 
-impl CxShaderMapping {
+impl CxDrawShaderMapping {
     
-    pub fn from_draw_shader_def(draw_shader_def: &DrawShaderDef, metal_uniform_packing:bool)->CxShaderMapping{//}, options: ShaderCompileOptions, metal_uniform_packing:bool) -> Self {
+    pub fn from_draw_shader_def(draw_shader_def: &DrawShaderDef, metal_uniform_packing:bool)->CxDrawShaderMapping{//}, options: ShaderCompileOptions, metal_uniform_packing:bool) -> Self {
         
         let mut instances = Vec::new();
         let mut geometries = Vec::new();
@@ -224,28 +225,28 @@ impl CxShaderMapping {
         
         for field in &draw_shader_def.fields {
             match &field.kind {
-                DrawShaderFieldKind::Geometry{var_def_node_ptr,..} => {
+                DrawShaderFieldKind::Geometry{var_def_ptr,..} => {
                     geometries.push(PropDef {
                         //name: field.ident.to_string(),
                         ty: field.ty_expr.ty.borrow().clone().unwrap(),
                         id: field.ident.0,
-                        live_ptr: if let Some(l) = var_def_node_ptr{Some(l.0)}else{None}
+                        live_ptr: if let Some(l) = var_def_ptr{Some(l.0)}else{None}
                     });
                 }
-                DrawShaderFieldKind::Instance{var_def_node_ptr, ..} => {
+                DrawShaderFieldKind::Instance{var_def_ptr, ..} => {
                     instances.push(PropDef {
                         //name: field.ident.to_string(),
                         ty: field.ty_expr.ty.borrow().clone().unwrap(),
                         id: field.ident.0,
-                        live_ptr: if let Some(l) = var_def_node_ptr{Some(l.0)}else{None}
+                        live_ptr: if let Some(l) = var_def_ptr{Some(l.0)}else{None}
                     });
                 }
-                DrawShaderFieldKind::Uniform{var_def_node_ptr,block_ident,..} => {
+                DrawShaderFieldKind::Uniform{var_def_ptr,block_ident,..} => {
                     let prop_def = PropDef {
                         //name: field.ident.to_string(),
                         ty: field.ty_expr.ty.borrow().clone().unwrap(),
                         id: field.ident.0,
-                        live_ptr: if let Some(l) = var_def_node_ptr{Some(l.0)}else{None}
+                        live_ptr: if let Some(l) = var_def_ptr{Some(l.0)}else{None}
                     };
                     match block_ident.0 {
                         id!(draw) => {
@@ -263,12 +264,12 @@ impl CxShaderMapping {
                         _ => ()
                     }
                 }
-                DrawShaderFieldKind::Texture{var_def_node_ptr, ..} => {
+                DrawShaderFieldKind::Texture{var_def_ptr, ..} => {
                     textures.push(PropDef {
                         //name: field.ident.to_string(),
                         ty: field.ty_expr.ty.borrow().clone().unwrap(),
                         id: field.ident.0,
-                        live_ptr: if let Some(l) = var_def_node_ptr{Some(l.0)}else{None}
+                        live_ptr: if let Some(l) = var_def_ptr{Some(l.0)}else{None}
                     });
                 }
                 _ => ()
@@ -300,7 +301,7 @@ impl CxShaderMapping {
         let mut live_uniforms_buf = Vec::new();
         live_uniforms_buf.resize(live_uniform_props.total_slots, 0.0);
         
-        CxShaderMapping {
+        CxDrawShaderMapping {
             live_uniforms_buf,
             rect_instance_props: RectInstanceProps::construct(&instances),
             user_uniform_props: UniformProps::construct(&user_uniforms, metal_uniform_packing),
@@ -351,9 +352,9 @@ impl CxShaderMapping {
 }
 
 #[derive(Default, Clone)]
-pub struct CxShader {
+pub struct CxDrawShader {
     pub name: String,
     pub default_geometry: Option<Geometry>,
     pub platform: Option<CxPlatformShader>,
-    pub mapping: CxShaderMapping
+    pub mapping: CxDrawShaderMapping
 }

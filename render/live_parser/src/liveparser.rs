@@ -1,4 +1,4 @@
-
+ 
 use makepad_id_macros::*;
 use crate::token::{Token, TokenWithSpan, TokenId};
 use std::iter::Cloned;
@@ -528,9 +528,6 @@ impl<'a> LiveParser<'a> {
 
                                 // we should parse full expressions here
                                 // consts can only depend on other consts, not on live values
-                                if self.accept_token(Token::Punct(id!(=))){
-                                    self.expect_value_literal()?;
-                                }
                                 
                                 ld.push_node(level, LiveNode {
                                     token_id,
@@ -542,6 +539,12 @@ impl<'a> LiveParser<'a> {
                                         scope_count: 0
                                     }
                                 });
+                                
+                                if self.accept_token(Token::Punct(id!(=))){
+                                    // ok we now emit a value
+                                    self.expect_live_value(ty, level, ld)?;
+                                }
+                                
                                 if !self.accept_token(Token::Punct(id!(,))) {
                                     self.accept_token(Token::Punct(id!(;)));
                                 }

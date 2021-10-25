@@ -42,7 +42,6 @@ impl LiveValue {
             Self::Object {..}=>11,
             Self::Fn {..}=>12,
             Self::VarDef {..}=>13,
-            //Self::ResourceRef {..}=>14,
             Self::Use{..} => 14,
             Self::Class {..}=>15,
             Self::LiveType(_) =>16
