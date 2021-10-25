@@ -113,12 +113,12 @@ impl<'a> TyChecker<'a> {
             ExprKind::PlainCall {
                 span,
                 ident,
-                fn_node_ptr,
+                fn_ptr,
                 ref arg_exprs,
                 ref closure_site_index,
                 ref param_index,
                 ..
-            } => self.ty_check_plain_call_expr(span, ident, arg_exprs, fn_node_ptr, closure_site_index, param_index),
+            } => self.ty_check_plain_call_expr(span, ident, arg_exprs, fn_ptr, closure_site_index, param_index),
             ExprKind::MethodCall {
                 span,
                 ident,
@@ -161,10 +161,10 @@ impl<'a> TyChecker<'a> {
                 ident,
             } => self.ty_check_var_expr(span, kind, var_resolve, ident),
             ExprKind::StructCons {
-                struct_node_ptr,
+                struct_ptr,
                 span,
                 ref args
-            } => self.ty_check_struct_cons(struct_node_ptr, span, args),
+            } => self.ty_check_struct_cons(struct_ptr, span, args),
             ExprKind::Lit {span, lit} => self.ty_check_lit_expr(span, lit),
         } ?;
         *expr.ty.borrow_mut() = Some(ty.clone());
@@ -443,7 +443,7 @@ impl<'a> TyChecker<'a> {
         span: Span,
         ident: Option<Ident>,
         arg_exprs: &[Expr],
-        fn_node_ptr: Option<FnNodePtr>,
+        fn_ptr: Option<FnPtr>,
         closure_site_index: &Cell<Option<usize>>,
         outer_param_index: &Cell<Option<usize>>,
     ) -> Result<Ty, LiveError> {
@@ -475,10 +475,10 @@ impl<'a> TyChecker<'a> {
         }
         
         // alright so.it must be a plain call
-        if let Some(fn_node_ptr) = fn_node_ptr{
-            let fn_def = self.shader_registry.all_fns.get(&fn_node_ptr).expect("fn ptr invalid");
+        if let Some(fn_ptr) = fn_ptr{
+            let fn_def = self.shader_registry.all_fns.get(&fn_ptr).expect("fn ptr invalid");
             
-            self.check_call_args(span, fn_node_ptr, arg_exprs, &fn_def, Some(closure_site_index)) ?;
+            self.check_call_args(span, fn_ptr, arg_exprs, &fn_def, Some(closure_site_index)) ?;
             
             // lets return the right ty
             return Ok(fn_def.return_ty.borrow().clone().unwrap())
@@ -511,7 +511,7 @@ impl<'a> TyChecker<'a> {
                         self.ty_check_expr(arg_expr) ?;
                     }
 
-                    self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl, Some(closure_site_index)) ?;
+                    self.check_call_args(span, fn_decl.fn_ptr, arg_exprs, fn_decl, Some(closure_site_index)) ?;
                     
                     if let Some(return_ty) = fn_decl.return_ty.borrow().clone() {
                         return Ok(return_ty);
@@ -534,7 +534,7 @@ impl<'a> TyChecker<'a> {
                         self.ty_check_expr(arg_expr) ?;
                     }
 
-                    self.check_call_args(span, fn_decl.fn_node_ptr, arg_exprs, fn_decl, Some(closure_site_index)) ?;
+                    self.check_call_args(span, fn_decl.fn_ptr, arg_exprs, fn_decl, Some(closure_site_index)) ?;
                     
                     if let Some(return_ty) = fn_decl.return_ty.borrow().clone() {
                         return Ok(return_ty);
@@ -591,7 +591,7 @@ impl<'a> TyChecker<'a> {
     fn check_call_args(
         &mut self,
         span: Span,
-        fn_node_ptr: FnNodePtr,
+        fn_ptr: FnPtr,
         arg_exprs: &[Expr],
         fn_def: &FnDef,
         closure_site_index: Option<&Cell<Option<usize>>>
@@ -600,7 +600,7 @@ impl<'a> TyChecker<'a> {
            Err(err)=> Err(LiveError {
                 origin: live_error_origin!(),
                 span,
-                message: format!("function: `{}`: {}", self.shader_registry.fn_ident_from_ptr(fn_node_ptr), err.message)
+                message: format!("function: `{}`: {}", self.shader_registry.fn_ident_from_ptr(fn_ptr), err.message)
             }),
             Ok(closure_args)=>{
                 if closure_args.len()>0{
@@ -609,12 +609,12 @@ impl<'a> TyChecker<'a> {
                         return Err(LiveError {
                             origin: live_error_origin!(),
                             span,
-                            message: format!("Closures not supported here {}", self.shader_registry.fn_ident_from_ptr(fn_node_ptr))
+                            message: format!("Closures not supported here {}", self.shader_registry.fn_ident_from_ptr(fn_ptr))
                         });
                     }
                     closure_site_index.unwrap().set(Some(ci.len()));
                     ci.push(ClosureSite{
-                        call_to: fn_node_ptr,
+                        call_to: fn_ptr,
                         all_closed_over: BTreeSet::new(),
                         closure_args
                     })
@@ -951,12 +951,12 @@ impl<'a> TyChecker<'a> {
     
     fn ty_check_struct_cons(
         &mut self,
-        struct_node_ptr: StructNodePtr,
+        struct_ptr: StructPtr,
         span: Span,
         args: &Vec<(Ident, Expr)>,
     ) -> Result<Ty, LiveError> {
 
-        let struct_decl = self.shader_registry.structs.get(&struct_node_ptr).unwrap();
+        let struct_decl = self.shader_registry.structs.get(&struct_ptr).unwrap();
         for (ident, expr) in args {
             self.ty_check_expr(expr) ?;
             // ok so now we find ident, then check the type
@@ -1002,7 +1002,7 @@ impl<'a> TyChecker<'a> {
             }
         }
         // its all ok.
-        Ok(Ty::Struct(struct_node_ptr))
+        Ok(Ty::Struct(struct_ptr))
     }
     
     fn ty_check_lit_expr(&mut self, _span: Span, lit: Lit) -> Result<Ty, LiveError> {

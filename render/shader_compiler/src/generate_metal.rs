@@ -340,16 +340,16 @@ impl<'a> DrawShaderGenerator<'a> {
                     match decl.ty_expr.ty.borrow().as_ref().unwrap() {
                         Ty::Mat4 => {
                             for i in 0..4 {
-                                writeln!(self.string, "    varyings.{0}{1} = instances.{0}{1};", decl.ident, i).unwrap();
+                                writeln!(self.string, "    varyings.{0}{1} = instances.{0}{1};", DisplayDsIdent(decl.ident), i).unwrap();
                             }
                         }
                         Ty::Mat3 => {
                             for i in 0..3 {
-                                writeln!(self.string, "    varyings.{0}{1} = instances.{0}{1};", decl.ident, i).unwrap();
+                                writeln!(self.string, "    varyings.{0}{1} = instances.{0}{1};", DisplayDsIdent(decl.ident), i).unwrap();
                             }
                         }
                         _ => {
-                            writeln!(self.string, "    varyings.{0} = instances.{0};", decl.ident).unwrap();
+                            writeln!(self.string, "    varyings.{0} = instances.{0};", DisplayDsIdent(decl.ident)).unwrap();
                         }
                     }
                 }
@@ -358,7 +358,7 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         
         let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(vertex))).unwrap();
-        write!(self.string, "    varyings.position = {}", DisplayFnName(vertex_def.fn_node_ptr, vertex_def.ident)).unwrap();
+        write!(self.string, "    varyings.position = {}", DisplayFnName(vertex_def.fn_ptr, vertex_def.ident)).unwrap();
         
         write!(self.string, "(").unwrap();
         self.backend_writer.write_call_expr_hidden_args(self.string, vertex_def.hidden_args.borrow().as_ref().unwrap(), "");
@@ -387,7 +387,7 @@ impl<'a> DrawShaderGenerator<'a> {
         write!(self.string, "    return ").unwrap();
         
         let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(pixel))).unwrap();
-        write!(self.string, "    {}", DisplayFnName(pixel_def.fn_node_ptr, pixel_def.ident)).unwrap();
+        write!(self.string, "    {}", DisplayFnName(pixel_def.fn_ptr, pixel_def.ident)).unwrap();
         
         write!(self.string, "(").unwrap();
         self.backend_writer.write_call_expr_hidden_args(self.string, pixel_def.hidden_args.borrow().as_ref().unwrap(), "");
@@ -727,7 +727,7 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
                         return
                     },
                     _ => {
-                        write!(string, "instances.").unwrap();
+                        write!(string, "{}.",prefix).unwrap();
                     }
                 }
             }

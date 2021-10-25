@@ -53,10 +53,10 @@ impl<'a> DepAnalyser<'a> {
                 //dent,
                 ref arg_exprs,
                 ref param_index,
-                fn_node_ptr,
+                fn_ptr,
                 ..
             } => if param_index.get().is_none() {
-                self.dep_analyse_plain_call_expr(span, arg_exprs, fn_node_ptr.unwrap())
+                self.dep_analyse_plain_call_expr(span, arg_exprs, fn_ptr.unwrap())
             },
             ExprKind::BuiltinCall {
                 span,
@@ -70,10 +70,10 @@ impl<'a> DepAnalyser<'a> {
                 ref arg_exprs,
             } => self.dep_analyse_cons_call_expr(span, ty_lit, arg_exprs),
             ExprKind::StructCons{
-                struct_node_ptr,
+                struct_ptr,
                 span,
                 ref args
-            } => self.dep_analyse_struct_cons(struct_node_ptr, span, args),
+            } => self.dep_analyse_struct_cons(struct_ptr, span, args),
             ExprKind::Var {
                 span,
                 ref kind,
@@ -168,7 +168,7 @@ impl<'a> DepAnalyser<'a> {
         span: Span,
         //ident: Ident,
         arg_exprs: &[Expr],
-        fn_node_ptr: FnNodePtr,
+        fn_ptr: FnPtr,
         
     ) {
         //let ident = ident_path.get_single().expect("IMPL");
@@ -176,7 +176,7 @@ impl<'a> DepAnalyser<'a> {
             self.dep_analyse_expr(arg_expr);
         }
         let mut set = self.fn_def.callees.borrow_mut();
-        set.as_mut().unwrap().insert(fn_node_ptr);
+        set.as_mut().unwrap().insert(fn_ptr);
     }
     
     fn dep_analyse_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident) {
@@ -217,12 +217,12 @@ impl<'a> DepAnalyser<'a> {
     
     fn dep_analyse_struct_cons(
         &mut self,
-        struct_node_ptr: StructNodePtr,
+        struct_ptr: StructPtr,
         _span: Span,
         args: &Vec<(Ident,Expr)>,
     ) {
         // alright we have a struct constructor
-        self.fn_def.struct_refs.borrow_mut().as_mut().unwrap().insert(struct_node_ptr);
+        self.fn_def.struct_refs.borrow_mut().as_mut().unwrap().insert(struct_ptr);
         for arg in args{
             self.dep_analyse_expr(&arg.1);
         }

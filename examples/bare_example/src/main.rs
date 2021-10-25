@@ -15,6 +15,7 @@ pub struct BareExampleApp {
 live_body!{
     use makepad_render::drawquad::DrawQuad
     MyDrawQuad:DrawQuad{
+        color: #00f
     }
 }
 

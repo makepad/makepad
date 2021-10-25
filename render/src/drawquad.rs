@@ -5,11 +5,11 @@ live_body!{
     use crate::geometrygen::GeometryQuad2D;
     
     DrawQuad: DrawShader2D {
-
+        //debug: true;
         rust_type: {{DrawQuad}};
         geometry: GeometryQuad2D {};
-
-        varying pos: vec2;
+        
+        varying pos: vec2; 
         
         fn scroll(self) -> vec2 {
             return self.draw_scroll.xy;
@@ -33,23 +33,24 @@ live_body!{
             )));
         }
         
-        fn pixel() -> vec4 {
-            return #0f0;
+        fn pixel(self) -> vec4 {
+            return #f0f;
         }
     }
 }
 
 use crate::cx::*;
 
-const DRAW_QUAD_UNIFORMS: usize = 32;
-const DRAW_QUAD_INSTANCES: usize = 32;
+const DRAW_QUAD_VAR_UNIFORMS: usize = 32;
+const DRAW_QUAD_VAR_INSTANCES: usize = 32;
+const DRAW_QUAD_INSTANCE_SLOTS: usize = 5;
 
 //#[derive(Debug)]
 #[repr(C)]
 pub struct DrawQuad {
     //#[after_live_update()]
     //#[private()]
-    pub uniforms: [f32; DRAW_QUAD_UNIFORMS],
+    pub uniforms: [f32; DRAW_QUAD_VAR_UNIFORMS],
     
     //#[private()]
     pub area: Area,
@@ -60,7 +61,7 @@ pub struct DrawQuad {
     pub many_old_area: Area,
     
     //#[private()]
-    pub live_ptr: Option<LivePtr>,
+    pub draw_shader_ptr: Option<DrawShaderPtr>,
     
     //#[private()]
     pub instance_start: usize,
@@ -70,10 +71,10 @@ pub struct DrawQuad {
     pub geometry: GeometryQuad2D,
     
     //#[private()]
-    pub shader: Option<Shader>,
+    pub draw_shader: Option<DrawShader>,
     
     //#[private()]
-    pub instances: [f32; DRAW_QUAD_INSTANCES],
+    pub instances: [f32; DRAW_QUAD_VAR_INSTANCES],
     
     //#[default(Vec2::all(0.0))]
     pub rect_pos: Vec2,
@@ -90,15 +91,30 @@ impl DrawQuad {
             id!(rect_size) => self.rect_size.live_update(cx, ptr),
             id!(draw_depth) => self.draw_depth.live_update(cx, ptr),
             id!(geometry) => self.geometry.live_update(cx, ptr),
-            _ => ()
+            _ => self.live_update_value_unknown(cx, id, ptr)
         }
     }
 }
 
 impl DrawQuad {
-    fn after_live_update(&mut self, cx: &mut Cx) {
-        // lets fetch/compile our shader from the info we have
-        self.shader = cx.get_shader_from_ptr(self.live_ptr.unwrap(), &self.geometry);
+    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
+        // lets update our instances/uniforms
+        cx.update_var_inputs(self.draw_shader_ptr.unwrap(), ptr, id, &mut self.uniforms, &mut self.instances);
+    }
+    
+    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr){
+        self.draw_shader_ptr = Some(DrawShaderPtr(live_ptr));
+        self.draw_shader = cx.get_draw_shader_from_ptr(self.draw_shader_ptr.unwrap(), &self.geometry);
+    }
+    
+    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr:LivePtr) {
+        cx.get_var_inputs_instance_layout(
+            self.draw_shader,
+            &mut self.instance_start,
+            DRAW_QUAD_VAR_INSTANCES,
+            &mut self.instance_slots,
+            DRAW_QUAD_INSTANCE_SLOTS
+        );
     }
 }
 
@@ -106,24 +122,24 @@ impl DrawQuad {
 impl LiveNew for DrawQuad {
     fn live_new(cx: &mut Cx) -> Self {
         Self {
-            uniforms: [0.0; DRAW_QUAD_UNIFORMS],
+            uniforms: [0.0; DRAW_QUAD_VAR_UNIFORMS],
             
             area: Area::Empty,
             many: None,
             many_old_area: Area::Empty,
             
-            instance_start: DRAW_QUAD_INSTANCES,
-            instance_slots: 5,
-            shader: None,
+            instance_start: DRAW_QUAD_VAR_INSTANCES,
+            instance_slots: DRAW_QUAD_INSTANCE_SLOTS,
+            draw_shader: None,
             geometry: LiveNew::live_new(cx),
             
-            live_ptr: None,
-            instances: [0.0; DRAW_QUAD_INSTANCES],
+            draw_shader_ptr: None,
+            instances: [0.0; DRAW_QUAD_VAR_INSTANCES],
             rect_pos: Vec2::all(0.0),
             rect_size: Vec2::all(0.0),
             draw_depth: 1.0
         }
-    } 
+    }
     
     fn live_type() -> LiveType {
         LiveType(std::any::TypeId::of::<DrawQuad>())
@@ -154,16 +170,18 @@ impl LiveNew for DrawQuad {
 
 impl LiveUpdate for DrawQuad {
     fn live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {
-        self.live_ptr = Some(live_ptr);
+        self.before_live_update(cx, live_ptr);
+        // how do we verify this?
         if let Some(mut iter) = cx.shader_registry.live_registry.live_class_iterator(live_ptr) {
             while let Some((id, live_ptr)) = iter.next(&cx.shader_registry.live_registry) {
                 if id == id!(rust_type) && !cx.verify_type_signature(live_ptr, Self::live_type()) {
+                    // give off an error/warning somehow!
                     return;
                 }
                 self.live_update_value(cx, id, live_ptr)
             }
         }
-        self.after_live_update(cx);
+        self.after_live_update(cx, live_ptr);
     }
     
     fn _live_type(&self) -> LiveType {
@@ -186,18 +204,14 @@ impl std::ops::DerefMut for DrawColor {
     fn deref_mut(&mut self) -> &mut Self::Target {&mut self.base}
 }
 
-
-
-
-
 impl DrawQuad {
     
     pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) {
         if self.many.is_some() {
             panic!("Cannot use begin_quad inside a many block");
         }
-        if let Some(shader) = self.shader {
-            let new_area = cx.add_aligned_instance(shader, self.as_slice());
+        if let Some(draw_shader) = self.draw_shader {
+            let new_area = cx.add_aligned_instance(draw_shader, self.as_slice());
             self.area = cx.update_area_refs(self.area, new_area);
         }
         cx.begin_turtle(layout, self.area);
@@ -249,7 +263,7 @@ impl DrawQuad {
                 None
             };
             unsafe {
-                mi.instances.extend_from_slice(std::slice::from_raw_parts((&self.instances[self.instance_start-1] as *const _ as *const f32).offset(1), self.instance_slots));
+                mi.instances.extend_from_slice(std::slice::from_raw_parts((&self.instances[self.instance_start - 1] as *const _ as *const f32).offset(1), self.instance_slots));
             }
             
             if let Some(new_area) = new_area {
@@ -257,15 +271,15 @@ impl DrawQuad {
             }
             return
         }
-        if let Some(shader) = self.shader {
-            let new_area = cx.add_aligned_instance(shader, self.as_slice());
+        if let Some(draw_shader) = self.draw_shader {
+            let new_area = cx.add_aligned_instance(draw_shader, self.as_slice());
             self.area = cx.update_area_refs(self.area, new_area);
         }
     }
     
     pub fn begin_many(&mut self, cx: &mut Cx) {
-        if let Some(shader) = self.shader {
-            let mi = cx.begin_many_aligned_instances(shader, self.instance_slots);
+        if let Some(draw_shader) = self.draw_shader {
+            let mi = cx.begin_many_aligned_instances(draw_shader, self.instance_slots);
             self.many_old_area = self.area;
             //self.many_set_area = false;
             self.area = Area::Instance(InstanceArea {
@@ -287,7 +301,7 @@ impl DrawQuad {
     
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
         unsafe {
-            std::slice::from_raw_parts((&self.instances[self.instance_start-1] as *const _ as *const f32).offset(1), self.instance_slots)
+            std::slice::from_raw_parts((&self.instances[self.instance_start - 1] as *const _ as *const f32).offset(1), self.instance_slots)
         }
     }
     
