@@ -117,6 +117,20 @@ impl TabBar {
                 }
             });
         }
+        match event.drag_hits(cx, self.view.area(), HitOpt::default()) {
+            Event::FingerDrag(_) => {
+                match event {
+                    Event::FingerDrag(event) => {
+                        event.action = DragAction::Copy;
+                    }
+                    _ => panic!(),
+                }
+            }
+            Event::FingerDrop(event) => {
+                dispatch_action(cx, Action::ReceivedDragItem(event.drag_item))
+            }
+            _ => {}
+        }
     }
 }
 
@@ -130,6 +144,7 @@ impl AsRef<Id> for TabId {
 }
 
 pub enum Action {
+    ReceivedDragItem(DragItem),
     TabWasPressed(TabId),
     TabButtonWasPressed(TabId),
     TabReceivedDragItem(TabId, DragItem),
