@@ -355,7 +355,8 @@ pub enum Event {
     LiveRecompile(LiveRecompileEvent),
     WebSocketMessage(WebSocketMessageEvent),
     FingerDrag(FingerDragEvent),
-    FingerDrop(FingerDropEvent)
+    FingerDrop(FingerDropEvent),
+    DragEnd,
 }
 
 impl Default for Event {
