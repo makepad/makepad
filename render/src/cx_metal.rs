@@ -158,8 +158,9 @@ impl Cx {
                 //encoder.set_fragment_bytes(2, (draw_uniforms.len() * 4) as u64, draw_uniforms.as_ptr() as *const std::ffi::c_void);
                 //encoder.set_fragment_bytes(3, (draw_call.uniforms.len() * 4) as u64, draw_call.uniforms.as_ptr() as *const std::ffi::c_void);
                 // lets set our textures
-                for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
-                    let cxtexture = &mut self.textures[*texture_id as usize];
+                for i in 0..sh.mapping.textures.len() {
+                    let texture_id = draw_call.textures_2d[i].unwrap().texture_id;
+                    let cxtexture = &mut self.textures[texture_id as usize];
                     if cxtexture.update_image {
                         metal_cx.update_platform_texture_image2d(cxtexture);
                     }
