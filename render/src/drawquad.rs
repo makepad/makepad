@@ -9,7 +9,7 @@ live_body!{
         rust_type: {{DrawQuad}};
         geometry: GeometryQuad2D {};
         
-        varying pos: vec2; 
+        varying pos: vec2;
         
         fn scroll(self) -> vec2 {
             return self.draw_scroll.xy;
@@ -38,39 +38,14 @@ live_body!{
         }
     }
 }
- 
-use crate::cx::*;
 
-const DRAW_QUAD_VAR_UNIFORMS: usize = 32;
-const DRAW_QUAD_VAR_INSTANCES: usize = 32;
+use crate::cx::*;
 
 //#[derive(Debug)]
 #[repr(C)]
 pub struct DrawQuad {
-    pub uni_test1: f32,
-    //#[local()]
-    pub var_uniforms: [f32; DRAW_QUAD_VAR_UNIFORMS],
-    
     //#[local()]
     pub area: Area,
-    
-    //#[local()]
-    many: Option<ManyInstances>,
-    //#[local()]
-    many_old_area: Area,
-    
-    //#[local()]
-    pub draw_shader_ptr: Option<DrawShaderPtr>,
-    
-    //#[local(0)]
-    var_uniform_start: usize,
-    //#[local(0)]
-    var_uniform_slots: usize,
-
-    //#[local(0)]
-    var_instance_start: usize,
-    //#[local(0)]
-    var_instance_slots: usize,
     
     //#[live()]
     pub geometry: GeometryQuad2D,
@@ -79,7 +54,7 @@ pub struct DrawQuad {
     pub draw_shader: Option<DrawShader>,
     
     //#[local()]
-    pub var_instances: [f32; DRAW_QUAD_VAR_INSTANCES],
+    pub draw_call_vars: DrawCallVars,
     
     //#[live(Vec2::all(0.0))]
     pub rect_pos: Vec2,
@@ -87,13 +62,12 @@ pub struct DrawQuad {
     pub rect_size: Vec2,
     //#[live(1.0)]
     pub draw_depth: f32,
-    //#[pad_f32()]
+    //#[pad_f32()] 
 }
 
 impl DrawQuad {
     pub fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
         match id {
-            id!(uni_test1) => self.uni_test1.live_update(cx, ptr),
             id!(geometry) => self.geometry.live_update(cx, ptr),
             id!(rect_pos) => self.rect_pos.live_update(cx, ptr),
             id!(rect_size) => self.rect_size.live_update(cx, ptr),
@@ -105,20 +79,25 @@ impl DrawQuad {
 
 impl LiveUpdateHooks for DrawQuad {
     fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
-        cx.update_draw_shader_var_inputs(self.draw_shader_ptr.unwrap(), ptr, id, &mut self.var_uniforms, &mut self.var_instances);
+        cx.update_draw_call_var(
+            self.draw_shader.as_ref().unwrap().draw_shader_ptr,
+            ptr,
+            id,
+            &mut self.draw_call_vars
+        );
     }
     
-    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr){
-        self.draw_shader_ptr = Some(DrawShaderPtr(live_ptr));
-        self.draw_shader = cx.get_draw_shader_from_ptr(self.draw_shader_ptr.unwrap(), &self.geometry);
+    fn before_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {
+        self.draw_shader = cx.get_draw_shader_from_ptr(
+            DrawShaderPtr(live_ptr),
+            &self.geometry
+        );
     }
     
-    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr:LivePtr) {
-        cx.get_draw_shader_var_input_layout(
+    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
+        cx.init_draw_call_vars(
             self.draw_shader,
-            &mut self.var_instance_start,
-            &mut self.var_instance_slots,
-            DRAW_QUAD_VAR_INSTANCES,
+            &mut self.draw_call_vars
         );
     }
 }
@@ -127,23 +106,12 @@ impl LiveUpdateHooks for DrawQuad {
 impl LiveNew for DrawQuad {
     fn live_new(cx: &mut Cx) -> Self {
         Self {
-            uni_test1: 0.5,
-            
-            var_uniforms: [0.0; DRAW_QUAD_VAR_UNIFORMS],
-            
             area: Area::Empty,
-            many: None,
-            many_old_area: Area::Empty,
             
-            var_uniform_start: 0,
-            var_uniform_slots: 0,
-            var_instance_start: 0,
-            var_instance_slots: 0,
             draw_shader: None,
             geometry: LiveNew::live_new(cx),
             
-            draw_shader_ptr: None,
-            var_instances: [0.0; DRAW_QUAD_VAR_INSTANCES],
+            draw_call_vars: DrawCallVars::default(),
             rect_pos: Vec2::all(0.0),
             rect_size: Vec2::all(0.0),
             draw_depth: 1.0,
@@ -163,7 +131,6 @@ impl LiveNew for DrawQuad {
             }
             
             fn live_fields(&self, fields: &mut Vec<LiveField>) {
-                fields.push(LiveField {id: Id::from_str("uni_test1").unwrap(), live_type: f32::live_type()});
                 fields.push(LiveField {id: Id::from_str("geometry").unwrap(), live_type: GeometryQuad2D::live_type()});
                 fields.push(LiveField {id: Id::from_str("rect_pos").unwrap(), live_type: Vec2::live_type()});
                 fields.push(LiveField {id: Id::from_str("rect_size").unwrap(), live_type: Vec2::live_type()});
@@ -205,11 +172,8 @@ impl LiveUpdate for DrawQuad {
 impl DrawQuad {
     
     pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) {
-        if self.many.is_some() {
-            panic!("Cannot use begin_quad inside a many block");
-        }
         if let Some(draw_shader) = self.draw_shader {
-            let new_area = cx.add_aligned_instance(draw_shader, self.as_slice());
+            let new_area = cx.add_aligned_instance(draw_shader, self.draw_call_vars.instance_slice(), &self.draw_call_vars);
             self.area = cx.update_area_refs(self.area, new_area);
         }
         cx.begin_turtle(layout, self.area);
@@ -241,67 +205,12 @@ impl DrawQuad {
     }
     
     pub fn draw_quad(&mut self, cx: &mut Cx) {
-        if let Some(mi) = &mut self.many {
-            let new_area = if let Area::Instance(ia) = &mut self.area {
-                // we need to update the area pointer
-                if mi.instance_area.redraw_id != ia.redraw_id {
-                    Some(Area::Instance(InstanceArea {
-                        instance_count: 1,
-                        instance_offset: mi.instances.len(),
-                        ..mi.instance_area.clone()
-                    }))
-                }
-                else { // just patch up the area without notifying Cx
-                    ia.instance_count = 1;
-                    ia.instance_offset = mi.instances.len();
-                    None
-                }
-            }
-            else {
-                None
-            };
-            unsafe {
-                mi.instances.extend_from_slice(std::slice::from_raw_parts((&self.var_instances[self.var_instance_start - 1] as *const _ as *const f32).offset(1), self.var_instance_slots));
-            }
-            
-            if let Some(new_area) = new_area {
-                self.area = cx.update_area_refs(self.area, new_area);
-            }
-            return
-        }
         if let Some(draw_shader) = self.draw_shader {
-            let new_area = cx.add_aligned_instance(draw_shader, self.as_slice());
+            let new_area = cx.add_aligned_instance(draw_shader, self.draw_call_vars.instance_slice(), &self.draw_call_vars);
             self.area = cx.update_area_refs(self.area, new_area);
         }
     }
     
-    pub fn begin_many(&mut self, cx: &mut Cx) {
-        if let Some(draw_shader) = self.draw_shader {
-            let mi = cx.begin_many_aligned_instances(draw_shader, self.var_instance_slots);
-            self.many_old_area = self.area;
-            //self.many_set_area = false;
-            self.area = Area::Instance(InstanceArea {
-                instance_count: 0,
-                instance_offset: mi.instances.len(),
-                ..mi.instance_area.clone()
-            });
-            self.many = Some(mi);
-        }
-    }
-    
-    pub fn end_many(&mut self, cx: &mut Cx) {
-        if let Some(mi) = self.many.take() {
-            // update area pointer
-            let new_area = cx.end_many_instances(mi);
-            self.area = cx.update_area_refs(self.many_old_area, new_area);
-        }
-    }
-    
-    pub fn as_slice<'a>(&'a self) -> &'a [f32] {
-        unsafe {
-            std::slice::from_raw_parts((&self.var_instances[self.var_instance_start - 1] as *const _ as *const f32).offset(1), self.var_instance_slots)
-        }
-    }
     
 }
 

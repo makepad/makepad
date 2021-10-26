@@ -9,7 +9,7 @@ live_body!{
     DrawColor: DrawQuad {
         rust_type: {{DrawColor}};
         fn pixel(self) -> vec4 {
-            return self.color * self.uni_test1;
+            return self.color;
         }
     }
 }

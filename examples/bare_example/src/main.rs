@@ -15,12 +15,14 @@ pub struct BareExampleApp {
 live_body!{
     use makepad_render::drawcolor::DrawColor
     MyDrawQuad:DrawColor{
-        color: #f0f 
+        color: #fff 
     }
 }
 
 impl BareExampleApp {
     pub fn new(cx:&mut Cx)->Self{
+        println!("{}", std::mem::size_of::<DrawCall>());
+
         let mut dq = DrawColor::live_new(cx);
         
         let live_ptr = cx.shader_registry.live_registry.live_ptr_from_path(
@@ -35,7 +37,7 @@ impl BareExampleApp {
             pass:Pass::default(),
             color_texture:Texture::new(cx),
             main_view:View::new(),
-            draw_quad:dq
+            draw_quad:dq  
         }
     }
     pub fn live_register(cx: &mut Cx) {
