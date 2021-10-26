@@ -285,17 +285,38 @@ impl View {
     }
 }
 
+const DRAW_CALL_USER_UNIFORMS: usize = 32;
+const DRAW_CALL_TEXTURE_SLOTS: usize = 16;
+const DRAW_CALL_VAR_INSTANCES: usize = 32;
+
+#[derive(Default)]
+pub struct DrawCallVars{
+    pub var_instance_start: usize,
+    pub var_instance_slots: usize,
+    pub user_uniforms: [f32;DRAW_CALL_USER_UNIFORMS],
+    pub texture_slots:[Option<Texture>;DRAW_CALL_TEXTURE_SLOTS],
+    pub var_instances:[f32;DRAW_CALL_VAR_INSTANCES]
+}
+
+impl DrawCallVars{
+    pub fn instance_slice<'a>(&'a self) -> &'a [f32] {
+        unsafe {
+            std::slice::from_raw_parts((&self.var_instances[self.var_instance_start - 1] as *const _ as *const f32).offset(1), self.var_instance_slots)
+        }
+    }    
+}
+
 impl Cx {
     
-    pub fn new_draw_call(&mut self, draw_shader: DrawShader) -> &mut DrawItem {
-        return self.get_draw_call(false, draw_shader, None);
+    pub fn new_draw_call(&mut self, draw_shader: DrawShader, draw_call_vars:&DrawCallVars) -> &mut DrawItem {
+        return self.get_draw_call(false, draw_shader, None, draw_call_vars);
     }
     
-    pub fn append_to_draw_call(&mut self, draw_shader: DrawShader, slots: usize) -> &mut DrawItem {
-        return self.get_draw_call(true, draw_shader, Some(slots));
+    pub fn append_to_draw_call(&mut self, draw_shader: DrawShader, slots: usize, draw_call_vars:&DrawCallVars) -> &mut DrawItem {
+        return self.get_draw_call(true, draw_shader, Some(slots), draw_call_vars);
     }
     
-    pub fn get_draw_call(&mut self, append: bool, draw_shader: DrawShader, slots: Option<usize>) -> &mut DrawItem {
+    pub fn get_draw_call(&mut self, append: bool, draw_shader: DrawShader, slots: Option<usize>, draw_call_vars:&DrawCallVars) -> &mut DrawItem {
         let sh = &self.draw_shaders[draw_shader.draw_shader_id];
         
         let current_view_id = *self.view_stack.last().unwrap();
@@ -322,7 +343,7 @@ impl Cx {
                 view_id: current_view_id,
                 redraw_id: self.redraw_id,
                 sub_view_id: None,
-                draw_call: Some(DrawCall::new_from_shader_mapping(draw_shader, &sh.mapping))
+                draw_call: Some(DrawCall::new_from_shader_mapping(draw_shader, &sh.mapping, draw_call_vars))
             });
             return &mut cxview.draw_items[draw_item_id];
         }
@@ -331,16 +352,16 @@ impl Cx {
         draw_item.sub_view_id = None;
         draw_item.redraw_id = self.redraw_id;
         if let Some(dc) = &mut draw_item.draw_call {
-            dc.update_from_shader_mapping(draw_shader, &sh.mapping);
+            dc.update_from_shader_mapping(draw_shader, &sh.mapping, draw_call_vars);
         }
         else {
-            draw_item.draw_call = Some(DrawCall::new_from_shader_mapping(draw_shader, &sh.mapping))
+            draw_item.draw_call = Some(DrawCall::new_from_shader_mapping(draw_shader, &sh.mapping, draw_call_vars))
         }
         return draw_item;
     }
-    
-    pub fn begin_many_instances(&mut self, draw_shader:DrawShader, slots: usize) -> ManyInstances {
-        let draw_item = self.append_to_draw_call(draw_shader, slots);
+     
+    pub fn begin_many_instances(&mut self, draw_shader:DrawShader, slots: usize, draw_call_vars:&DrawCallVars) -> ManyInstances {
+        let draw_item = self.append_to_draw_call(draw_shader, slots, draw_call_vars);
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let mut instances = Vec::new();
         if draw_call.in_many_instances {
@@ -361,8 +382,8 @@ impl Cx {
         }
     }
     
-    pub fn begin_many_aligned_instances(&mut self, draw_shader: DrawShader, slots: usize) -> ManyInstances {
-        let mut li = self.begin_many_instances(draw_shader, slots);
+    pub fn begin_many_aligned_instances(&mut self, draw_shader: DrawShader, slots: usize, draw_call_vars:&DrawCallVars) -> ManyInstances {
+        let mut li = self.begin_many_instances(draw_shader, slots, draw_call_vars);
         li.aligned = Some(self.align_list.len());
         self.align_list.push(Area::Empty);
         li
@@ -386,8 +407,8 @@ impl Cx {
         ia.into()
     }
     
-    pub fn add_instance(&mut self, draw_shader: DrawShader, data: &[f32]) -> Area {
-        let draw_item = self.append_to_draw_call(draw_shader, data.len());
+    pub fn add_instance(&mut self, draw_shader: DrawShader, data: &[f32], draw_call_vars:&DrawCallVars) -> Area {
+        let draw_item = self.append_to_draw_call(draw_shader, data.len(), draw_call_vars);
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let instance_count = data.len() / draw_call.total_instance_slots;
         let check = data.len() % draw_call.total_instance_slots;
@@ -405,8 +426,8 @@ impl Cx {
         ia.into()
     }
     
-    pub fn add_aligned_instance(&mut self, draw_shader: DrawShader, data: &[f32]) -> Area {
-        let draw_item = self.append_to_draw_call(draw_shader, data.len());
+    pub fn add_aligned_instance(&mut self, draw_shader: DrawShader, data: &[f32], draw_call_vars:&DrawCallVars) -> Area {
+        let draw_item = self.append_to_draw_call(draw_shader, data.len(), draw_call_vars);
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let instance_count = data.len() / draw_call.total_instance_slots;
         let check = data.len() % draw_call.total_instance_slots;
@@ -495,6 +516,10 @@ pub struct DrawItem {
     pub draw_call: Option<DrawCall>,
 }
 
+pub struct UserUniforms{
+    
+}
+
 #[derive(Clone)]
 pub struct DrawCall {
     pub draw_shader: DrawShader, // if shader_id changed, delete gl vao
@@ -506,12 +531,12 @@ pub struct DrawCall {
     
     pub draw_uniforms: DrawUniforms, // draw uniforms
     pub geometry: Option<Geometry>,
-    pub user_uniforms: Vec<f32>, // user uniforms
+    pub user_uniforms: [f32;DRAW_CALL_USER_UNIFORMS], // user uniforms
     
     pub do_v_scroll: bool,
     pub do_h_scroll: bool,
     
-    pub textures_2d: Vec<u32>,
+    pub textures_2d: [Option<Texture>;DRAW_CALL_TEXTURE_SLOTS],
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
     pub platform: CxPlatformDrawCall
@@ -519,7 +544,7 @@ pub struct DrawCall {
 
 impl DrawCall {
     
-    pub fn new_from_shader_mapping(draw_shader: DrawShader, mapping: &CxDrawShaderMapping) -> Self {
+    pub fn new_from_shader_mapping(draw_shader: DrawShader, mapping: &CxDrawShaderMapping, draw_call_vars:&DrawCallVars) -> Self {
         DrawCall {
             geometry: None,
             do_h_scroll: true,
@@ -529,16 +554,8 @@ impl DrawCall {
             instances: Vec::new(),
             total_instance_slots: mapping.instance_props.total_slots,
             draw_uniforms: DrawUniforms::default(),
-            user_uniforms: {
-                let mut f = Vec::new();
-                f.resize(mapping.user_uniform_props.total_slots, 0.0);
-                f
-            },
-            textures_2d: {
-                let mut f = Vec::new();
-                f.resize(mapping.textures.len(), 0);
-                f
-            },
+            user_uniforms: draw_call_vars.user_uniforms,
+            textures_2d: draw_call_vars.texture_slots,
             //current_instance_offset: 0,
             instance_dirty: true,
             uniforms_dirty: true,
@@ -546,15 +563,17 @@ impl DrawCall {
         }
     }
     
-    pub fn update_from_shader_mapping(&mut self, draw_shader:DrawShader, mapping:&CxDrawShaderMapping){
+    pub fn update_from_shader_mapping(&mut self, draw_shader:DrawShader, mapping:&CxDrawShaderMapping, draw_call_vars:&DrawCallVars){
         self.draw_shader = draw_shader;
         self.geometry = None;
         self.instances.truncate(0);
         self.total_instance_slots = mapping.instance_props.total_slots;
-        self.user_uniforms.truncate(0);
-        self.user_uniforms.resize(mapping.user_uniform_props.total_slots, 0.0);
-        self.textures_2d.truncate(0);
-        self.textures_2d.resize(mapping.textures.len(), 0);
+        for i in 0..mapping.user_uniform_props.total_slots{
+            self.user_uniforms[i] = draw_call_vars.user_uniforms[i];
+        }
+        for i in 0..mapping.textures.len(){
+            self.textures_2d[i] = draw_call_vars.texture_slots[i];
+        }
         self.instance_dirty = true;
         self.uniforms_dirty = true;
         self.do_h_scroll = true;
