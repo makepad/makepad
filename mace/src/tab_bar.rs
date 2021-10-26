@@ -112,8 +112,8 @@ impl TabBar {
                 tab::Action::ButtonWasPressed => {
                     dispatch_action(cx, Action::TabButtonWasPressed(*tab_id));
                 }
-                tab::Action::ReceivedDragItem(item) => {
-                    dispatch_action(cx, Action::TabReceivedDragItem(*tab_id, item));
+                tab::Action::ReceivedDraggedItem(item) => {
+                    dispatch_action(cx, Action::TabReceivedDraggedItem(*tab_id, item));
                 }
             });
         }
@@ -127,7 +127,7 @@ impl TabBar {
                 }
             }
             Event::FingerDrop(event) => {
-                dispatch_action(cx, Action::ReceivedDragItem(event.drag_item))
+                dispatch_action(cx, Action::ReceivedDraggedItem(event.dragged_item))
             }
             _ => {}
         }
@@ -144,10 +144,10 @@ impl AsRef<Id> for TabId {
 }
 
 pub enum Action {
-    ReceivedDragItem(DragItem),
+    ReceivedDraggedItem(DraggedItem),
     TabWasPressed(TabId),
     TabButtonWasPressed(TabId),
-    TabReceivedDragItem(TabId, DragItem),
+    TabReceivedDraggedItem(TabId, DraggedItem),
 }
 
 #[derive(Clone, DrawQuad)]

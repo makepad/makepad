@@ -244,8 +244,8 @@ impl Cx {
                     }
                 }
 
-                if let Some(drag_item) = self.platform.start_drag.take() {
-                    cocoa_app.start_drag(drag_item);
+                if let Some(dragged_item) = self.platform.start_dragging.take() {
+                    cocoa_app.start_dragging(dragged_item);
                 }
 
                 if self.process_desktop_post_event(event) {
@@ -317,9 +317,9 @@ impl Cx {
         }
     }
 
-    pub fn start_drag(&mut self, drag_item: DragItem) {
-        assert!(self.platform.start_drag.is_none());
-        self.platform.start_drag = Some(drag_item);
+    pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
+        assert!(self.platform.start_dragging.is_none());
+        self.platform.start_dragging = Some(dragged_item);
     }
 }
 
@@ -336,5 +336,5 @@ pub struct CxPlatform {
     pub stop_timer: Vec<u64>,
     pub text_clipboard_response: Option<String>,
     pub desktop: CxDesktop,
-    pub start_drag: Option<DragItem>,
+    pub start_dragging: Option<DraggedItem>,
 }

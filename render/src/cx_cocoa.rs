@@ -704,7 +704,7 @@ impl CocoaApp {
         self.do_callback(&mut vec![Event::Paint]);
     }
 
-    pub fn start_drag(&mut self, drag_item: DragItem) {
+    pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
         let cocoa_window = unsafe {
             let window: id = msg_send![self.ns_event, window];
             let window_delegate: id = msg_send![window, delegate];
@@ -712,7 +712,7 @@ impl CocoaApp {
             &mut *(cocoa_window as *mut CocoaWindow)
         };
 
-        cocoa_window.start_drag(self.ns_event, drag_item);
+        cocoa_window.start_dragging(self.ns_event, dragged_item);
     }
 }
 
@@ -1098,8 +1098,8 @@ impl CocoaWindow {
         })])
     }
 
-    pub fn start_drag(&mut self, ns_event: id, drag_item: DragItem) {
-        let dragging_items = drag_item.file_urls.iter().map(|file_url| {
+    pub fn start_dragging(&mut self, ns_event: id, dragged_item: DraggedItem) {
+        let dragging_items = dragged_item.file_urls.iter().map(|file_url| {
             let pasteboard_item: id = unsafe { msg_send![class!(NSPasteboardItem), new] };
             let _: () = unsafe {
                 msg_send![
@@ -2111,7 +2111,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             abs: pos,
             rel: pos,
             rect: Rect::default(),
-            drag_item: DragItem {
+            dragged_item: DraggedItem {
                 file_urls,
             }
         })];
