@@ -291,7 +291,12 @@ impl FileTree {
         }
     }
 
-    pub fn start_drag_file_node(&mut self, cx: &mut Cx, file_node_id: FileNodeId, drag_item: DragItem) {
+    pub fn start_drag_file_node(
+        &mut self,
+        cx: &mut Cx,
+        file_node_id: FileNodeId,
+        drag_item: DragItem,
+    ) {
         self.logic.start_drag_node(cx, file_node_id.0, drag_item);
     }
 
@@ -325,11 +330,11 @@ impl FileTree {
                         self.set_hovered_file_node_id(cx, None);
                     }
                 }
-                tree_logic::Action::NodeWasPressed(node_id) => {
+                tree_logic::Action::NodeWasClicked(node_id) => {
                     let file_node_id = FileNodeId(node_id);
                     self.toggle_file_node_is_expanded(cx, file_node_id, true);
                     self.set_selected_file_node_id(cx, file_node_id);
-                    dispatch_action(cx, Action::FileNodeWasPressed(file_node_id));
+                    dispatch_action(cx, Action::FileNodeWasClicked(file_node_id));
                 }
                 tree_logic::Action::NodeShouldStartDrag(node_id) => {
                     let file_node_id = FileNodeId(node_id);
@@ -350,6 +355,6 @@ impl AsRef<Id> for FileNodeId {
 }
 
 pub enum Action {
-    FileNodeWasPressed(FileNodeId),
+    FileNodeWasClicked(FileNodeId),
     FileNodeShouldStartDrag(FileNodeId),
 }
