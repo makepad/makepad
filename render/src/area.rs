@@ -353,7 +353,7 @@ impl Area{
         }
         None
     }
-
+/*
     pub fn write_texture_2d_id(&self, cx:&mut Cx, id:Id, name:&str, texture_id: usize){
          match self{
             Area::Instance(inst)=>{
@@ -370,7 +370,7 @@ impl Area{
             _=>(),
         }
         panic!("Cannot find texture2D prop {}", name)
-    }
+    }*/
 }
 
 impl Into<Area> for InstanceArea{

@@ -10,8 +10,8 @@ use makepad_shader_compiler::ShaderRegistry;
 use std::collections::HashMap;
 
 impl Cx{
-    pub fn update_draw_shader_var_inputs(&self, draw_shader_ptr: DrawShaderPtr, value_ptr: LivePtr, id: Id, uniforms: &mut [f32], instances: &mut [f32]) {
-        fn store_values(shader_registry: &ShaderRegistry, draw_shader_ptr: DrawShaderPtr, id: Id, values: &[f32], uniforms: &mut[f32], instances: &mut [f32]) {
+    pub fn update_draw_call_var(&self, draw_shader_ptr: DrawShaderPtr, value_ptr: LivePtr, id: Id, draw_call_vars:&mut DrawCallVars) {
+        fn store_values(shader_registry: &ShaderRegistry, draw_shader_ptr: DrawShaderPtr, id: Id, values: &[f32], draw_call_vars:&mut DrawCallVars) {
             if let Some(draw_shader_def) = shader_registry.draw_shaders.get(&draw_shader_ptr) {
                 let var_inputs = draw_shader_def.var_inputs.borrow();
                 for input in &var_inputs.inputs {
@@ -20,18 +20,18 @@ impl Cx{
                             DrawShaderVarInputKind::Instance => {
                                 if values.len() == input.size {
                                     for i in 0..input.size {
-                                        let index = instances.len() - var_inputs.var_instance_slots + input.offset + i;
-                                        instances[index] = values[i];
+                                        let index = draw_call_vars.var_instances.len() - var_inputs.var_instance_slots + input.offset + i;
+                                        draw_call_vars.var_instances[index] = values[i];
                                     }
                                 }
                                 else {
                                     println!("variable shader input size not correct {} {}", values.len(), input.size)
                                 }
                             }
-                            DrawShaderVarInputKind::Uniform => {
+                            DrawShaderVarInputKind::Uniform => { //TODO DO THIS RIGHT WITH MAPPING
                                 if values.len() == input.size {
                                     for i in 0..input.size {
-                                        uniforms[input.offset + i] = values[i];
+                                        draw_call_vars.user_uniforms[input.offset + i] = values[i];
                                     }
                                 }
                                 else {
@@ -47,31 +47,29 @@ impl Cx{
         let node = self.shader_registry.live_registry.resolve_ptr(value_ptr);
         match node.value {
             LiveValue::Int(val) => {
-                store_values(&self.shader_registry, draw_shader_ptr, id, &[val as f32], uniforms, instances);
+                store_values(&self.shader_registry, draw_shader_ptr, id, &[val as f32], draw_call_vars);
             }
             LiveValue::Float(val) => {
-                store_values(&self.shader_registry, draw_shader_ptr, id, &[val as f32], uniforms, instances);
+                store_values(&self.shader_registry, draw_shader_ptr, id, &[val as f32], draw_call_vars);
             }
             LiveValue::Color(val) => {
                 let val = Vec4::from_u32(val);
-                store_values(&self.shader_registry, draw_shader_ptr, id, &[val.x, val.y, val.z, val.w], uniforms, instances);
+                store_values(&self.shader_registry, draw_shader_ptr, id, &[val.x, val.y, val.z, val.w], draw_call_vars);
             }
             LiveValue::Vec2(val) => {
-                store_values(&self.shader_registry, draw_shader_ptr, id, &[val.x, val.y], uniforms, instances);
+                store_values(&self.shader_registry, draw_shader_ptr, id, &[val.x, val.y], draw_call_vars);
             }
             LiveValue::Vec3(val) => {
-                store_values(&self.shader_registry, draw_shader_ptr, id, &[val.x, val.y, val.z], uniforms, instances);
+                store_values(&self.shader_registry, draw_shader_ptr, id, &[val.x, val.y, val.z], draw_call_vars);
             }
             _ => ()
         }
     }
     
-    pub fn get_draw_shader_var_input_layout(
+    pub fn init_draw_call_vars(
         &self,
         draw_shader: Option<DrawShader>,
-        var_instance_start: &mut usize,
-        var_instance_slots: &mut usize,
-        var_instance_buffer_size: usize
+        draw_call_vars: &mut DrawCallVars,
     ) {
         // ALRIGHT so
         // we need to fetch a draw_shader_def
@@ -79,8 +77,8 @@ impl Cx{
         if let Some(draw_shader) = draw_shader {
             if let Some(draw_shader_def) = self.shader_registry.draw_shaders.get(&draw_shader.draw_shader_ptr) {
                 let var_inputs = draw_shader_def.var_inputs.borrow();
-                *var_instance_start = var_instance_buffer_size - var_inputs.var_instance_slots;
-                *var_instance_slots = var_inputs.total_instance_slots;
+                draw_call_vars.var_instance_start = draw_call_vars.var_instances.len() - var_inputs.var_instance_slots;
+                draw_call_vars.var_instance_slots = var_inputs.total_instance_slots;
             }
         }
     }
@@ -106,7 +104,7 @@ impl Cx{
             let live_factories = &self.live_factories;
             let result = self.shader_registry.analyse_draw_shader(draw_shader_ptr, | span, id, live_type, draw_shader_def | {
                 if id == id!(rust_type) {
-                    fn recur_expand(is_instance:&mut bool, live_type:LiveType, live_factories:&HashMap<LiveType, Box<dyn LiveFactory>>, draw_shader_def:&mut DrawShaderDef, span:Span){
+                    fn recur_expand(live_type:LiveType, live_factories:&HashMap<LiveType, Box<dyn LiveFactory>>, draw_shader_def:&mut DrawShaderDef, span:Span){
                         if let Some(lf) = live_factories.get(&live_type) {
                             
                             let mut fields = Vec::new();
@@ -114,27 +112,22 @@ impl Cx{
                             lf.live_fields(&mut fields);
                             
                             for field in fields {
-                                if field.id == id!(geometry) {
+                                /*if field.id == id!(geometry) {
                                     *is_instance = true;
                                     continue
-                                }
+                                }*/
                                 if field.id == id!(deref_target){
-                                    recur_expand(is_instance, field.live_type, live_factories, draw_shader_def, span);
+                                    recur_expand(field.live_type, live_factories, draw_shader_def, span);
                                     continue
                                 }
                                 if let Some(ty) = live_type_to_shader_ty(field.live_type) {
-                                    if *is_instance {
-                                        draw_shader_def.add_instance(field.id, ty, span);
-                                    }
-                                    else {
-                                        draw_shader_def.add_uniform(field.id, ty, span);
-                                    }
+                                    draw_shader_def.add_instance(field.id, ty, span);
                                 };
                             }
                             // when should i insert a filler float?
                         }
                     }
-                    recur_expand(&mut false, live_type, live_factories, draw_shader_def, span);
+                    recur_expand(live_type, live_factories, draw_shader_def, span);
                 }
                 if id == id!(geometry) {
                     if let Some(lf) = live_factories.get(&live_type) {
