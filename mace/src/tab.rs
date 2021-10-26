@@ -82,8 +82,8 @@ impl Tab {
         self.tab.begin_quad(cx, self.layout());
         self.name.color = self.name_color(self.is_selected);
         self.name.draw_text_walk(cx, name);
-        self.close_button.draw(cx);
         cx.turtle_align_y();
+        self.close_button.draw(cx);
         self.tab.end_quad(cx);
         if self.is_dragged {
             self.drag.draw_quad_abs(cx, self.tab.area().get_rect(cx));
