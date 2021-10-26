@@ -10,20 +10,24 @@ use {
 
 pub struct TabBar {
     view: ScrollView,
+    is_dragged: bool,
     tabs_by_tab_id: IdMap<TabId, Tab>,
     tab_ids: Vec<TabId>,
     selected_tab_id: Option<TabId>,
     tab_height: f32,
+    drag: DrawColor,
 }
 
 impl TabBar {
     pub fn new(cx: &mut Cx) -> TabBar {
         TabBar {
             view: ScrollView::new_standard_hv(cx),
+            is_dragged: false,
             tabs_by_tab_id: IdMap::new(),
             tab_ids: Vec::new(),
             selected_tab_id: None,
             tab_height: 0.0,
+            drag: DrawColor::new(cx, default_shader!()).with_draw_depth(1.0),
         }
     }
 
@@ -35,6 +39,13 @@ impl TabBar {
     }
 
     pub fn end(&mut self, cx: &mut Cx) {
+        if self.is_dragged {
+            self.drag.draw_quad_walk(cx, Walk {
+                width: Width::Fill,
+                height: Height::Fill,
+                ..Walk::default()
+            });
+        }
         self.view.end_view(cx);
     }
 
@@ -46,6 +57,7 @@ impl TabBar {
 
     fn apply_style(&mut self, cx: &mut Cx) {
         self.tab_height = live_float!(cx, crate::tab::height);
+        self.drag.color = live_vec4!(cx, crate::tab::drag_color);
     }
 
     fn layout(&self) -> Layout {
@@ -118,8 +130,22 @@ impl TabBar {
             });
         }
         match event.drag_hits(cx, self.view.area(), HitOpt::default()) {
-            Event::FingerDrag(_) => {
-                match event {
+            Event::FingerDrag(drag_event) => match drag_event.state {
+                DragState::In => {
+                    self.is_dragged = true;
+                    self.redraw(cx);
+                    match event {
+                        Event::FingerDrag(event) => {
+                            event.action = DragAction::Copy;
+                        }
+                        _ => panic!(),
+                    }
+                }
+                DragState::Out => {
+                    self.is_dragged = false;
+                    self.redraw(cx);
+                }
+                DragState::Over => match event {
                     Event::FingerDrag(event) => {
                         event.action = DragAction::Copy;
                     }
@@ -127,6 +153,8 @@ impl TabBar {
                 }
             }
             Event::FingerDrop(event) => {
+                self.is_dragged = false;
+                self.redraw(cx);
                 dispatch_action(cx, Action::ReceivedDraggedItem(event.dragged_item))
             }
             _ => {}

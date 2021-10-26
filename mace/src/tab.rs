@@ -177,6 +177,7 @@ impl Tab {
             },
             Event::FingerDrop(event) => {
                 self.is_dragged = false;
+                cx.redraw_child_area(self.tab.area());
                 dispatch_action(cx, Action::ReceivedDraggedItem(event.dragged_item))
             }
             _ => {}
