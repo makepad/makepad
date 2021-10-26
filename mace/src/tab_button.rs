@@ -15,7 +15,16 @@ impl TabButton {
                 draw_input: self::DrawTabButton;
 
                 fn pixel() -> vec4 {
-                    return vec4(1.0, 0.0, 0.0, 0.0);
+                    let cx = Df::viewport(pos * rect_size);
+                    let mid = rect_size / 2.0;
+                    let size = 0.5 * length(rect_size) / 2.0;
+                    let min = mid - vec2(size);
+                    let max = mid + vec2(size);
+                    cx.move_to(min.x, min.y);
+                    cx.line_to(max.x, max.y);
+                    cx.move_to(min.x, max.y);
+                    cx.line_to(max.x, min.y);
+                    return cx.stroke(vec4(1.0), 1.0);
                 }
             }
         })
