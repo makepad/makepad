@@ -502,6 +502,21 @@ impl fmt::Display for LiveDocument {
                 //    prefix(node.id_pack, ld, f);
                 //    let _ = write!(f, "{}", IdFmt::col(&ld.multi_ids, target));
                 // }
+                LiveValue::Const {token_start, token_count, scope_start, scope_count} => {
+                    for i in 0..token_count {
+                        let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
+                    }
+                    let _ = write!(f, "\"");
+                    for i in 0..(scope_count as u32) {
+                        let item = &ld.scopes[(i + scope_start) as usize];
+                        let _ = write!(f, "{}:{}", item.id, item.target);
+                        if i != (scope_count - 1) as u32 {
+                            let _ = write!(f, ", ");
+                            
+                        }
+                    }
+                    let _ = write!(f, "\"");
+                },
                 LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
                     for i in 0..token_count {
                         let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);

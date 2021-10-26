@@ -34,15 +34,14 @@ impl<'a> ShaderParser<'a> {
         live_scope: &'a [LiveScopeItem],
         type_deps: &'a mut Vec<ShaderParserDep>,
         self_kind: Option<FnSelfKind>,
-        
-        
+        file_id: FileId,
     ) -> Self {
         let mut tokens_with_span = tokens.iter().cloned();
         let token_with_span = tokens_with_span.next().unwrap();
         ShaderParser {
             closure_defs:Vec::new(),
             shader_registry,
-            file_id: FileId(0),
+            file_id,
             live_scope,
             type_deps,
             tokens_with_span,
@@ -72,8 +71,21 @@ impl<'a> ShaderParser<'a> {
     
     fn skip_token(&mut self) {
         self.end = self.token_with_span.span.end() as usize;
-        self.token_with_span = self.tokens_with_span.next().unwrap();
-        self.token_index += 1;
+        if Token::Eof == self.token_with_span.token{
+            return
+        }
+        
+        if let Some(token_with_span) = self.tokens_with_span.next(){
+            self.token_with_span = token_with_span;
+            self.token_index += 1;
+        }
+        else{
+            self.token_with_span = TokenWithSpan{
+                span:self.token_with_span.span,
+                token:Token::Eof
+            };
+            self.token_index += 1;
+        }
     }
     
     fn error(&mut self, origin: LiveErrorOrigin, message: String) -> LiveError {
