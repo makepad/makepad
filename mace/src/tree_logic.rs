@@ -162,6 +162,9 @@ impl TreeLogic {
                 self.animating_node_ids = new_animating_node_ids;
                 self.update_next_frame(cx);
             }
+            Event::DragEnd => {
+                self.dragging_node_id = None
+            },
             event => {
                 for (area, node_id) in &self.node_ids_by_area {
                     match event.hits(cx, *area, HitOpt::default()) {
@@ -182,6 +185,7 @@ impl TreeLogic {
                         }
                         Event::FingerMove(_) => {
                             if self.dragging_node_id.is_none() {
+                                // println!("Should start drag for node {:?}", node_id);
                                 dispatch_action(Action::NodeShouldStartDrag(*node_id));
                             }
                         }
