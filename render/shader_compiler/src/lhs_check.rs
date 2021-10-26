@@ -150,7 +150,7 @@ impl<'a> LhsChecker<'a> {
         // lets grab the ty from expr
         match expr.ty.borrow().as_ref().unwrap(){
             Ty::DrawShader(shader_ptr)=>{
-                let field_decl = self.shader_registry.draw_shaders.get(shader_ptr).unwrap().find_field(field_ident) .unwrap();
+                let field_decl = self.shader_registry.draw_shader_defs.get(shader_ptr).unwrap().find_field(field_ident) .unwrap();
                 match &field_decl.kind{
                     DrawShaderFieldKind::Varying{..}=>{
                         Ok(())

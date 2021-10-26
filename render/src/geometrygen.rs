@@ -200,7 +200,17 @@ impl GeometryQuad2D {
 }
 
 impl LiveUpdate for GeometryQuad2D {
-    fn live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
+    fn live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {
+        // how do we verify this?
+        if let Some(mut iter) = cx.shader_registry.live_registry.live_class_iterator(live_ptr) {
+            while let Some((id, live_ptr)) = iter.next(&cx.shader_registry.live_registry) {
+                if id == id!(rust_type) && !cx.verify_type_signature(live_ptr, Self::live_type()) {
+                    // give off an error/warning somehow!
+                    return;
+                }
+                self.live_update_value(cx, id, live_ptr)
+            }
+        }
         // lets generate geometry
         GeometryGen::from_quad_2d(
             self.x1,

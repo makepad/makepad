@@ -51,9 +51,6 @@ pub struct DrawQuad {
     pub geometry: GeometryQuad2D,
     
     //#[local()]
-    pub draw_shader: Option<DrawShader>,
-    
-    //#[local()]
     pub draw_call_vars: DrawCallVars,
     
     //#[live(Vec2::all(0.0))]
@@ -79,26 +76,15 @@ impl DrawQuad {
 
 impl LiveUpdateHooks for DrawQuad {
     fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
-        cx.update_draw_call_var(
-            self.draw_shader.as_ref().unwrap().draw_shader_ptr,
-            ptr,
-            id,
-            &mut self.draw_call_vars
-        );
+        self.draw_call_vars.update_var(cx, ptr, id);
     }
     
     fn before_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {
-        self.draw_shader = cx.get_draw_shader_from_ptr(
-            DrawShaderPtr(live_ptr),
-            &self.geometry
-        );
+        self.draw_call_vars.init_shader(cx, DrawShaderPtr(live_ptr), &self.geometry);
     }
     
     fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
-        cx.init_draw_call_vars(
-            self.draw_shader,
-            &mut self.draw_call_vars
-        );
+        self.draw_call_vars.init_slicer(cx);
     }
 }
 
@@ -108,7 +94,6 @@ impl LiveNew for DrawQuad {
         Self {
             area: Area::Empty,
             
-            draw_shader: None,
             geometry: LiveNew::live_new(cx),
             
             draw_call_vars: DrawCallVars::default(),
@@ -172,16 +157,18 @@ impl LiveUpdate for DrawQuad {
 impl DrawQuad {
     
     pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) {
-        if let Some(draw_shader) = self.draw_shader {
-            let new_area = cx.add_aligned_instance(draw_shader, self.draw_call_vars.instance_slice(), &self.draw_call_vars);
+        if self.draw_call_vars.draw_shader.is_some(){
+            let new_area = cx.add_aligned_instance(&self.draw_call_vars);
             self.area = cx.update_area_refs(self.area, new_area);
+            cx.begin_turtle(layout, self.area);
         }
-        cx.begin_turtle(layout, self.area);
     }
     
     pub fn end_quad(&mut self, cx: &mut Cx) {
-        let rect = cx.end_turtle(self.area);
-        self.area.set_rect(cx, &rect);
+        if self.draw_call_vars.draw_shader.is_some(){
+            let rect = cx.end_turtle(self.area);
+            self.area.set_rect(cx, &rect);
+        }
     }
     
     pub fn draw_quad_walk(&mut self, cx: &mut Cx, walk: Walk) {
@@ -205,12 +192,10 @@ impl DrawQuad {
     }
     
     pub fn draw_quad(&mut self, cx: &mut Cx) {
-        if let Some(draw_shader) = self.draw_shader {
-            let new_area = cx.add_aligned_instance(draw_shader, self.draw_call_vars.instance_slice(), &self.draw_call_vars);
+        if self.draw_call_vars.draw_shader.is_some(){
+            let new_area = cx.add_aligned_instance( &self.draw_call_vars);
             self.area = cx.update_area_refs(self.area, new_area);
         }
     }
-    
-    
 }
 

@@ -604,7 +604,7 @@ impl<'a> ExprGenerator<'a> {
             }
             Ty::DrawShader(shader_ptr) => {
                 let fn_def = self.shader_registry.draw_shader_method_decl_from_ident(
-                    self.shader_registry.draw_shaders.get(shader_ptr).unwrap(),
+                    self.shader_registry.draw_shader_defs.get(shader_ptr).unwrap(),
                     ident
                 ).unwrap();
                 
