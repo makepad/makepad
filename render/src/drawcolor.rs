@@ -7,11 +7,9 @@ live_body!{
     use crate::drawquad::DrawQuad;
     
     DrawColor: DrawQuad {
-        //debug:true;
         rust_type: {{DrawColor}};
-
         fn pixel(self) -> vec4 {
-            return self.color;
+            return self.color * self.uni_test1;
         }
     }
 }

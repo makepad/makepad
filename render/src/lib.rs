@@ -61,7 +61,7 @@ mod drawcolor;
 mod events;
 mod menu; 
 mod geometry;
-mod shader;
+mod drawshader;
 mod shader_std;
 mod gpuinfo;
 

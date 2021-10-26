@@ -854,7 +854,7 @@ impl MetalCx {
                 id!(draw)=>draw_uniform_buffer_id = Some(buffer_id),
                 id!(pass)=>pass_uniform_buffer_id = Some(buffer_id),
                 id!(view)=>view_uniform_buffer_id = Some(buffer_id),
-                id!(default)=>user_uniform_buffer_id = Some(buffer_id),
+                id!(user)=>user_uniform_buffer_id = Some(buffer_id),
                 _=>panic!()
             }
             buffer_id += 1;
