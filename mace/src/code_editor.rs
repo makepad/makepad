@@ -665,7 +665,7 @@ impl CodeEditor {
     }
 
     fn position(&self, text: &Text, position: Vec2) -> Position {
-        let line = (position.y / self.text_glyph_size.y) as usize;
+        let line = ((position.y / self.text_glyph_size.y) as usize).min(text.as_lines().len() - 1);
         Position {
             line,
             column: ((position.x / self.text_glyph_size.x) as usize)
