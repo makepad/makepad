@@ -4,6 +4,8 @@ use {
     std::collections::{HashMap, HashSet},
 };
 
+const MIN_DRAG_DISTANCE: f32 = 10.0;
+
 #[derive(Default)]
 pub struct TreeLogic {
     nodes_by_node_id: IdMap<NodeId, Node>,
@@ -162,9 +164,7 @@ impl TreeLogic {
                 self.animating_node_ids = new_animating_node_ids;
                 self.update_next_frame(cx);
             }
-            Event::DragEnd => {
-                self.dragging_node_id = None
-            },
+            Event::DragEnd => self.dragging_node_id = None,
             event => {
                 for (area, node_id) in &self.node_ids_by_area {
                     match event.hits(cx, *area, HitOpt::default()) {
@@ -180,12 +180,16 @@ impl TreeLogic {
                                 _ => {}
                             }
                         }
-                        Event::FingerDown(_) => {
-                            dispatch_action(Action::NodeWasPressed(*node_id));
-                        }
-                        Event::FingerMove(_) => {
-                            if self.dragging_node_id.is_none() {
+                        Event::FingerMove(event) => {
+                            if self.dragging_node_id.is_none()
+                                && event.abs.distance(&event.abs_start) >= MIN_DRAG_DISTANCE
+                            {
                                 dispatch_action(Action::NodeShouldStartDrag(*node_id));
+                            }
+                        }
+                        Event::FingerUp(event) => {
+                            if area.get_rect(cx).contains(event.abs_start) {
+                                dispatch_action(Action::NodeWasClicked(*node_id));
                             }
                         }
                         _ => {}
@@ -291,6 +295,6 @@ pub enum Action {
     TreeWasAnimated,
     NodeWasEntered(NodeId),
     NodeWasExited(NodeId),
-    NodeWasPressed(NodeId),
+    NodeWasClicked(NodeId),
     NodeShouldStartDrag(NodeId),
 }
