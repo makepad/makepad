@@ -26,7 +26,7 @@ impl<'a> LiveParser<'a> {
         let mut tokens_with_span = tokens.iter().cloned();
         let token_with_span = tokens_with_span.next().unwrap();
         LiveParser {
-            file_id,//: FileId::default(),
+            file_id,
             tokens_with_span,
             live_types,
             token_with_span,
@@ -492,7 +492,7 @@ impl<'a> LiveParser<'a> {
                                     id_pack: IdPack::single(prop_id),
                                     value: LiveValue::Fn {
                                         token_start: token_start as u32,
-                                        token_count: (token_index - token_start + 1) as u32,
+                                        token_count: (token_index - token_start) as u32,
                                         scope_start: 0,
                                         scope_count: 0
                                     }
@@ -518,6 +518,29 @@ impl<'a> LiveParser<'a> {
                                     self.accept_token(Token::Punct(id!(;)));
                                 }
                             }
+                            id_pack!(const)=>{
+                                let token_id = self.get_token_id();
+                                let ty = self.expect_class_id(ld) ?;
+                                self.expect_token(Token::Punct(id!(:)))?;
+                                self.expect_ident() ?;
+
+                                self.expect_token(Token::Punct(id!(=)))?;
+                                self.expect_value_literal()?;
+                                
+                                ld.push_node(level, LiveNode {
+                                    token_id,
+                                    id_pack: ty,
+                                    value: LiveValue::Const {
+                                        token_start: token_start as u32,
+                                        token_count: (self.token_index - token_start) as u32,
+                                        scope_start: 0,
+                                        scope_count: 0
+                                    }
+                                });
+                                if !self.accept_token(Token::Punct(id!(,))) {
+                                    self.accept_token(Token::Punct(id!(;)));
+                                }
+                            }
                             _ => {
                                 // ok so we get an ident.
                                 let token_id = self.get_token_id();
@@ -534,7 +557,7 @@ impl<'a> LiveParser<'a> {
                                     id_pack: ty,
                                     value: LiveValue::VarDef {
                                         token_start: token_start as u32,
-                                        token_count: (self.token_index - token_start +1) as u32,
+                                        token_count: (self.token_index - token_start) as u32,
                                         scope_start: 0,
                                         scope_count: 0
                                     }

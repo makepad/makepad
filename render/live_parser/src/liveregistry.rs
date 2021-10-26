@@ -976,6 +976,27 @@ impl LiveRegistry {
                     };
                     write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, &new_node);
                 },
+                LiveValue::Const {token_start, token_count, ..} => {
+                    // we should store the scopestack here so the shader compiler can find symbols.
+                    let new_scope_start = out_doc.scopes.len();
+                    for i in 0..scope_stack.stack.len() {
+                        let scope = &scope_stack.stack[i];
+                        for j in 0..scope.len() {
+                            out_doc.scopes.push(scope[j]);
+                        }
+                    }
+                    let new_node = LiveNode {
+                        token_id: node.token_id,
+                        id_pack: node.id_pack,
+                        value: LiveValue::Const {
+                            token_start,
+                            token_count,
+                            scope_start: new_scope_start as u32,
+                            scope_count: (out_doc.scopes.len() - new_scope_start) as u16
+                        }
+                    };
+                    write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, &new_node);
+                },
                 /*
                 LiveValue::ResourceRef {target} => {
                     // we should store the scopestack here so the shader compiler can find symbols.
