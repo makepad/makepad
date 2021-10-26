@@ -185,7 +185,6 @@ impl TreeLogic {
                         }
                         Event::FingerMove(_) => {
                             if self.dragging_node_id.is_none() {
-                                // println!("Should start drag for node {:?}", node_id);
                                 dispatch_action(Action::NodeShouldStartDrag(*node_id));
                             }
                         }
