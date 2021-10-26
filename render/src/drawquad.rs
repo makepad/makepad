@@ -47,6 +47,7 @@ const DRAW_QUAD_VAR_INSTANCES: usize = 32;
 //#[derive(Debug)]
 #[repr(C)]
 pub struct DrawQuad {
+    pub uni_test1: f32,
     //#[local()]
     pub var_uniforms: [f32; DRAW_QUAD_VAR_UNIFORMS],
     
@@ -92,6 +93,7 @@ pub struct DrawQuad {
 impl DrawQuad {
     pub fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
         match id {
+            id!(uni_test1) => self.uni_test1.live_update(cx, ptr),
             id!(geometry) => self.geometry.live_update(cx, ptr),
             id!(rect_pos) => self.rect_pos.live_update(cx, ptr),
             id!(rect_size) => self.rect_size.live_update(cx, ptr),
@@ -125,6 +127,8 @@ impl LiveUpdateHooks for DrawQuad {
 impl LiveNew for DrawQuad {
     fn live_new(cx: &mut Cx) -> Self {
         Self {
+            uni_test1: 0.5,
+            
             var_uniforms: [0.0; DRAW_QUAD_VAR_UNIFORMS],
             
             area: Area::Empty,
@@ -159,6 +163,7 @@ impl LiveNew for DrawQuad {
             }
             
             fn live_fields(&self, fields: &mut Vec<LiveField>) {
+                fields.push(LiveField {id: Id::from_str("uni_test1").unwrap(), live_type: f32::live_type()});
                 fields.push(LiveField {id: Id::from_str("geometry").unwrap(), live_type: GeometryQuad2D::live_type()});
                 fields.push(LiveField {id: Id::from_str("rect_pos").unwrap(), live_type: Vec2::live_type()});
                 fields.push(LiveField {id: Id::from_str("rect_size").unwrap(), live_type: Vec2::live_type()});

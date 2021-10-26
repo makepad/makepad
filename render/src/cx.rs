@@ -37,7 +37,7 @@ pub use crate::events::*;
 //pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::menu::*;
-pub use crate::shader::*;
+pub use crate::drawshader::*;
 pub use crate::geometrygen::*;
 pub use crate::gpuinfo::*;
 pub use crate::uid;

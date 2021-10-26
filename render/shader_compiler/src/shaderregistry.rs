@@ -231,53 +231,7 @@ impl ShaderRegistry {
         }
         LiveNodeFindResult::NotFound
     }
-    /*
-    pub fn register_draw_input(&mut self, mod_path: &str, name: &str, draw_input: DrawShaderInput) {
-        let parts = mod_path.split("::").collect::<Vec<_ >> ();
-        if parts.len()>2 {
-            panic!("submodules not supported");
-        }
-        let crate_module = CrateModule(
-            Id::from_str(parts[0]),
-            Id::from_str(if parts.len()>1 {parts[1]}else {"main"})
-        );
-        let name_id = Id::from_str(name);
-        self.draw_inputs.insert(ShaderResourceId(crate_module, name_id), draw_input);
-    }
-    */
-    /*
-    pub fn parse_shader_resource_id_from_multi_id(crate_id: Id, module_id: Id, span: Span, target: IdPack, multi_ids: &[Id]) -> Result<ShaderResourceId, LiveError> {
-        match target.unpack() {
-            IdUnpack::Multi {index, count} => {
-                if count == 2 {
-                    let part1 = multi_ids[index + 0];
-                    let part2 = multi_ids[index + 1];
-                    if part1 != id!(self) {
-                        return Err(LiveError {
-                            origin: live_error_origin!(),
-                            span: span,
-                            message: format!("Unsupported target naming {}", IdFmt::col(multi_ids, target))
-                        });
-                    }
-                    // ok so we have to find crate_id, module_id, part2
-                    return Ok(ShaderResourceId(CrateModule(crate_id, module_id), part2))
-                }
-                if count == 3 {
-                    let part1 = multi_ids[index + 0];
-                    let part2 = multi_ids[index + 1];
-                    let part3 = multi_ids[index + 1];
-                    return Ok(ShaderResourceId(CrateModule(if part1 == id!(crate) {crate_id}else {part1}, part2), part3));
-                }
-            }
-            _ => ()
-        }
-        return Err(LiveError {
-            origin: live_error_origin!(),
-            span: span,
-            message: format!("Unsupported target naming {}", IdFmt::col(multi_ids, target))
-        });
-    }
-    */
+   
     pub fn analyse_deps(&mut self, deps: &[ShaderParserDep]) -> Result<(), LiveError> {
         // recur on used types
         for dep in deps {
