@@ -369,6 +369,7 @@ impl UniformProps {
 
 #[derive(Debug, Default, Clone)]
 pub struct CxDrawShaderMapping {
+    pub draw_call_compare: bool,
     pub rect_instance_props: RectInstanceProps,
     pub user_uniform_props: UniformProps,
     pub live_uniform_props: UniformProps,
