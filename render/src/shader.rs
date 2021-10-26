@@ -124,9 +124,11 @@ impl Cx{
                                 }
                                 if let Some(ty) = live_type_to_shader_ty(field.live_type) {
                                     if *is_instance {
+                                        
                                         draw_shader_def.add_instance(field.id, ty, span);
                                     }
                                     else {
+                                        
                                         draw_shader_def.add_uniform(field.id, ty, span);
                                     }
                                 };
