@@ -68,6 +68,9 @@ pub struct DrawShaderVarInputs{
 #[derive(Clone, Debug, Default)]
 pub struct DrawShaderDef {
     pub debug: bool,
+    pub draw_call_compare: bool,
+    pub draw_call_always: bool,
+    
     //pub default_geometry: Option<ShaderResourceId>,
     pub fields: Vec<DrawShaderFieldDef>,
     pub methods: Vec<FnPtr>,

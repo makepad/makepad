@@ -27,7 +27,7 @@ pub struct ShaderRegistry {
     pub live_registry: LiveRegistry,
     pub consts: HashMap<ConstPtr, ConstDef>,
     pub all_fns: HashMap<FnPtr, FnDef>,
-    pub draw_shaders: HashMap<DrawShaderPtr, DrawShaderDef>,
+    pub draw_shader_defs: HashMap<DrawShaderPtr, DrawShaderDef>,
     pub structs: HashMap<StructPtr, StructDef>,
     pub builtins: HashMap<Ident, Builtin>,
 }
@@ -39,7 +39,7 @@ impl ShaderRegistry {
             live_registry: LiveRegistry::default(),
             structs: HashMap::new(),
             consts: HashMap::new(),
-            draw_shaders: HashMap::new(),
+            draw_shader_defs: HashMap::new(),
             all_fns: HashMap::new(),
             builtins: generate_builtins()
         }
@@ -483,6 +483,12 @@ impl ShaderRegistry {
                                     if id == id!(debug) {
                                         draw_shader_def.debug = true;
                                     }
+                                    if id == id!(draw_call_compare){
+                                        draw_shader_def.draw_call_compare = true;
+                                    }
+                                    if id == id!(draw_call_always){
+                                        draw_shader_def.draw_call_always = true;
+                                    }
                                 }
                             }
                             LiveValue::LiveType(lt) => {
@@ -602,11 +608,11 @@ impl ShaderRegistry {
                     }
                 }
                 
-                self.draw_shaders.insert(draw_shader_ptr, draw_shader_def);
+                self.draw_shader_defs.insert(draw_shader_ptr, draw_shader_def);
                 
                 self.analyse_deps(&parser_deps) ?;
                 
-                let draw_shader_def = self.draw_shaders.get(&draw_shader_ptr).unwrap();
+                let draw_shader_def = self.draw_shader_defs.get(&draw_shader_ptr).unwrap();
                 let mut sa = DrawShaderAnalyser {
                     draw_shader_def: draw_shader_def,
                     scopes: &mut Scopes::new(),
