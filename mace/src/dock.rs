@@ -209,6 +209,9 @@ impl Dock {
                     panel
                         .tab_bar
                         .handle_event(cx, event, &mut |cx, action| match action {
+                            tab_bar::Action::ReceivedDragItem(item) => {
+                                dispatch_action(cx, Action::TabBarReceivedDragItem(*panel_id, item))
+                            }
                             tab_bar::Action::TabWasPressed(tab_id) => {
                                 dispatch_action(cx, Action::TabWasPressed(tab_id))
                             }
@@ -325,6 +328,7 @@ pub enum DragPosition {
 
 pub enum Action {
     SplitPanelChanged(PanelId),
+    TabBarReceivedDragItem(PanelId, DragItem),
     TabWasPressed(TabId),
     TabButtonWasPressed(TabId),
     TabReceivedDragItem(TabId, DragItem),

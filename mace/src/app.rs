@@ -206,6 +206,12 @@ impl AppInner {
                     self.dock.redraw(cx);
                     self.redraw_panel(cx, state, panel_id);
                 }
+                dock::Action::TabBarReceivedDragItem(panel_id, item) => {
+                    for file_url in &item.file_urls {
+                        let path = Path::new(&file_url[7..]).to_path_buf();
+                        self.create_code_editor_tab(cx, state, panel_id, None, path);
+                    }
+                }
                 dock::Action::TabWasPressed(tab_id) => self.select_tab(cx, state, tab_id),
                 dock::Action::TabButtonWasPressed(tab_id) => {
                     let tab = &state.tabs_by_tab_id[tab_id];
