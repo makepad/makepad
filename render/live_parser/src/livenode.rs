@@ -27,6 +27,7 @@ impl LiveValue {
             _ => false
         }
     }
+    
     pub fn get_type_nr(&self)->usize{
         match self {
             Self::String {..}=>1,
@@ -41,10 +42,11 @@ impl LiveValue {
             Self::Array {..}=>10,
             Self::Object {..}=>11,
             Self::Fn {..}=>12,
-            Self::VarDef {..}=>13,
-            Self::Use{..} => 14,
-            Self::Class {..}=>15,
-            Self::LiveType(_) =>16
+            Self::Const {..}=>13,
+            Self::VarDef {..}=>14,
+            Self::Use{..} => 15,
+            Self::Class {..}=>16,
+            Self::LiveType(_) =>17
         }
     }
     
@@ -96,10 +98,16 @@ pub enum LiveValue {
         scope_start: u32,
         scope_count: u16
     },
+    Const {
+        token_start: u32,
+        token_count: u32,
+        scope_start: u32,
+        scope_count: u16
+    },
     /*ResourceRef {
         target: IdPack,
     },*/
-    VarDef {
+    VarDef { //instance/uniform def
         token_start: u32,
         token_count: u32,
         scope_start: u32,

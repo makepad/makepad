@@ -19,7 +19,7 @@ fn main() {
             r1: [1, 2, 3]
             o1: {x: 1, 1.0: 2}
             C2: Component {
-                vdef2 pa: float;
+                vdef2 pa: float
                 pa: 1.0,
                 a1: r1 {},
                 b1: SA::p1 {},
@@ -28,29 +28,29 @@ fn main() {
         }
     "#;
     let file_1_check = r#"
-SA:Struct {p1:5.0}
-EA:Enum {}
-CA:Component {
-    pa:1.0
-    pb:true
-    pc:2
-    pd:#0000ffff
-    pe:id1
-    pf:NodePtr{file:1, level:0, index:1}
-    fn f1( a1 ) { let x = 1 } r1 "SA:[local], EA:[local], pa:[local], pb:[local], pc:[local], pd:[local], pe:[local], pf:[local]"
-    r1:[1, 2, 3]
-    o1:{x:1, 1.0:2}
-    C2:Component {
-        vdef2 pa : float "SA:[local], EA:[local], pa:[local], pb:[local], pc:[local], pd:[local], pe:[local], pf:[local], f1:[local], r1:[local], o1:[local]"
-        pa:1.0
-        a1:[1, 2, 3]
-        b1:5.0
-        c1:Component {
-            x1:6
-            x4:NodePtr{file:1, level:0, index:0} {p1:5.0}
+        SA: Struct {p1: 5.0}
+        EA: Enum {}
+        CA: Component {
+            pa: 1.0
+            pb: true
+            pc: 2
+            pd: #0000ffff
+            pe: id1
+            pf: NodePtr {file: 1, level: 0, index: 1}
+            fn f1(a1) {let x = 1} "SA:[local], EA:[local], pa:[local], pb:[local], pc:[local], pd:[local], pe:[local], pf:[local]"
+            r1: [1, 2, 3]
+            o1: {x: 1, 1.0: 2}
+            C2: Component {
+                vdef2 pa: float "SA:[local], EA:[local], pa:[local], pb:[local], pc:[local], pd:[local], pe:[local], pf:[local], f1:[local], r1:[local], o1:[local]"
+                pa: 1.0
+                a1: [1, 2, 3]
+                b1: 5.0
+                c1: Component {
+                    x1: 6
+                    x4: NodePtr {file: 1, level: 0, index: 0} {p1: 5.0}
+                }
+            }
         }
-    }
-}
     "#;
     
     let file_2 = r#"
@@ -71,33 +71,33 @@ CA:Component {
     "#;
     
     let file_2_check = r#"
-CB:NodePtr{file:1, level:1, index:10} {
-    vdef2 pa : float "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9]"
-    pa:2.0
-    a1:[1, 2, 3]
-    b1:6.0
-    c1:Component {
-        x1:7
-        x4:NodePtr{file:1, level:0, index:0} {p1:5.0}
-        x2:"hi"
-        x3:[1, 2, 3]
-    }
-    fn tst( a1 ) { let x = 1 } r1 "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
-}
-CC:NodePtr{file:2, level:0, index:0} {
-    vdef2 pa : float "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9]"
-    pa:2.0
-    a1:[1, 2, 3]
-    b1:6.0
-    c1:Component {
-        x1:7
-        x4:NodePtr{file:1, level:0, index:0} {p1:5.0}
-        x2:"hi"
-        x3:[1, 2, 3]
-    }
-    fn tst( a1 ) { let x = 1 } r1 "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
-}
-
+        CB: NodePtr {file: 1, level: 1, index: 10} {
+            vdef2 pa: float "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9]"
+            pa: 2.0
+            a1: [1, 2, 3]
+            b1: 6.0
+            c1: Component {
+                x1: 7
+                x4: NodePtr {file: 1, level: 0, index: 0} {p1: 5.0}
+                x2: "hi"
+                x3: [1, 2, 3]
+            }
+            fn tst(a1) {let x = 1} "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
+        }
+        CC: NodePtr {file: 2, level: 0, index: 0} {
+            vdef2 pa: float "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9]"
+            pa: 2.0
+            a1: [1, 2, 3]
+            b1: 6.0
+            c1: Component {
+                x1: 7
+                x4: NodePtr {file: 1, level: 0, index: 0} {p1: 5.0}
+                x2: "hi"
+                x3: [1, 2, 3]
+            }
+            fn tst(a1) {let x = 1} "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
+        }
+        
     "#;
     
     let file_3 = r#"
@@ -108,31 +108,30 @@ CC:NodePtr{file:2, level:0, index:0} {
     "#;
     
     let file_3_check = r#"
-CE:NodePtr{file:2, level:0, index:1} {
-    vdef2 pa : float "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9]"
-    pa:2.0
-    a1:[1, 2, 3]
-    b1:6.0
-    c1:Component {
-        x1:7
-        x4:NodePtr{file:1, level:0, index:0} {p1:5.0}
-        x2:"hi"
-        x3:[1, 2, 3]
-    }
-    fn tst( a1 ) { let x = 1 } r1 "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
-    t:NodePtr{file:1, level:0, index:0} {p1:5.0}
-}
-
+        CE: NodePtr {file: 2, level: 0, index: 1} {
+            vdef2 pa: float "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6], f1:[F:1 L:1 I:7], r1:[F:1 L:1 I:8], o1:[F:1 L:1 I:9]"
+            pa: 2.0
+            a1: [1, 2, 3]
+            b1: 6.0
+            c1: Component {
+                x1: 7
+                x4: NodePtr {file: 1, level: 0, index: 0} {p1: 5.0}
+                x2: "hi"
+                x3: [1, 2, 3]
+            }
+            fn tst(a1) {let x = 1} "SA:[F:1 L:0 I:0], EA:[F:1 L:0 I:1], pa:[F:1 L:1 I:1], pb:[F:1 L:1 I:2], pc:[F:1 L:1 I:3], pd:[F:1 L:1 I:4], pe:[F:1 L:1 I:5], pf:[F:1 L:1 I:6]"
+            t: NodePtr {file: 1, level: 0, index: 0} {p1: 5.0}
+        }
     "#;
     
     let error_check = r#"
-file1: 9 16 - Cannot find item on scope: id1 - origin: render/live_parser/src/liveregistry.rs:749 
-file1: 13 17 - Cannot find item on scope: x - origin: render/live_parser/src/liveregistry.rs:749 
-file2: 12 28 - Cannot find item on scope: h1 - origin: render/live_parser/src/liveregistry.rs:749 
-file2: 12 22 - Cannot inherit with different node type c1.x4.p1 - origin: render/live_parser/src/livedocument.rs:232 
-file2: 14 12 - Cannot find class SA.B - origin: render/live_parser/src/liveregistry.rs:709 
-file2: 15 26 - Cannot inherit with different node type c1.x4.p1 - origin: render/live_parser/src/livedocument.rs:232 
-file3: 5 12 - Cannot find item on scope: ERR - origin: render/live_parser/src/liveregistry.rs:749 
+        file1: 9 16 - Cannot find item on scope: id1 - origin: render / live_parser / src / liveregistry.rs: 749
+        file1: 13 17 - Cannot find item on scope: x - origin: render / live_parser / src / liveregistry.rs: 749
+        file2: 12 28 - Cannot find item on scope: h1 - origin: render / live_parser / src / liveregistry.rs: 749
+        file2: 12 22 - Cannot inherit with different node type c1.x4.p1 - origin: render / live_parser / src / livedocument.rs: 232
+        file2: 14 12 - Cannot find class SA.B - origin: render / live_parser / src / liveregistry.rs: 709
+        file2: 15 26 - Cannot inherit with different node type c1.x4.p1 - origin: render / live_parser / src / livedocument.rs: 232
+        file3: 5 12 - Cannot find item on scope: ERR - origin: render / live_parser / src / liveregistry.rs: 749
     "#;
     
     let sources = [
@@ -153,23 +152,13 @@ file3: 5 12 - Cannot find item on scope: ERR - origin: render/live_parser/src/li
     let mut errors = Vec::new();
     lr.expand_all_documents(&mut errors);
     
-    fn compare_no_ws(a: &str, b: &str) -> bool {
-        let mut b = b.to_string();
-        let mut a = a.to_string();
-        println!("{}", b);
-        a.retain( | c | c != ' ' && c != '\n');
-        b.retain( | c | c != ' ' && c != '\n');
-        
-        return a == b
-    }
-    
     for (index, file) in lr.expanded.iter().enumerate() {
         let module_path = lr.find_module_path_by_file_id(FileId::index(index)).unwrap();
         let out = format!("{}", file);
         for (name_id, _, check) in &sources {
             if module_path.1 == Id::from_str(name_id).unwrap() {
-                if !compare_no_ws(&out, check) {
-                    println!("Output Unequal {}\n{}", module_path, out);
+                if let Some(err) = compare_no_ws(&out, check) {
+                    println!("Output Unequal {}\n{}", name_id, err);
                     assert_eq!(true, false);
                 }
             }
@@ -184,8 +173,8 @@ file3: 5 12 - Cannot find item on scope: ERR - origin: render/live_parser/src/li
         )));
     }
     
-    if !compare_no_ws(&err_cmp, error_check) {
-        println!("Errors Unequal\n{}", err_cmp);
+    if let Some(err) = compare_no_ws(&err_cmp, error_check) {
+        println!("Errors Unequal\n{}", err);
         assert_eq!(true, false);
     }
     //        assert_eq!(true, false);
@@ -273,4 +262,54 @@ file3: 5 12 - Cannot find item on scope: ERR - origin: render/live_parser/src/li
             println!("No Value");
         }
     }*/
+}
+
+
+fn compare_no_ws(a_in: &str, b_in: &str) -> Option<String> {
+    let mut b_str = b_in.to_string();
+    b_str.retain( | c | !c.is_whitespace());
+    let mut a_str = a_in.to_string();
+    a_str.retain( | c | !c.is_whitespace());
+    
+    let b = b_str.as_bytes();
+    let a = a_str.as_bytes();
+    
+    let mut start = 0;
+    let mut changed = false;
+    let len = b.len().min(a.len());
+    for i in 0..len {
+        if a[i] != b[i] {
+            changed = true;
+            break
+        }
+        start = i;
+    }
+    // now go from the back to i
+    let mut end = 0;
+    for i in 2..len {
+        end = i - 2;
+        if a[a.len() - i] != b[b.len() - i] {
+            changed = true;
+            break
+        }
+    }
+    // okaay so we have to show the changed thing
+    if changed {
+        let range_a = if start < (a.len() - end - 1) {std::str::from_utf8(&a[start..(a.len() - end - 1)]).unwrap()} else {""};
+        let range_b = if start < (b.len() - end - 1) {std::str::from_utf8(&b[start..(b.len() - end - 1)]).unwrap()} else {""};
+        Some(format!(
+            "########## NEW ########## {} to {}\n{}\n########## OLD ########## {} to {}\n{}\n########## END ##########\n\n########## NEW ALL ##########\n{}\n########## OLD ALL ##########\n{}",
+            start,
+            (a.len() - end - 1),
+            range_a,
+            start,
+            (b.len() - end - 1),
+            range_b,
+            a_in,
+            b_in,
+        ))
+    }
+    else {
+        None
+    }
 }
