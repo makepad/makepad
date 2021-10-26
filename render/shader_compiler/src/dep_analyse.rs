@@ -136,7 +136,7 @@ impl<'a> DepAnalyser<'a> {
                     self.dep_analyse_expr(arg_expr);
                 }
                 let mut set = self.fn_def.callees.borrow_mut();
-                let draw_shader_decl = self.shader_registry.draw_shaders.get(shader_ptr).unwrap();
+                let draw_shader_decl = self.shader_registry.draw_shader_defs.get(shader_ptr).unwrap();
                 if let Some(fn_node_ptr) = self.shader_registry.draw_shader_method_ptr_from_ident(draw_shader_decl, method_ident){
                     set.as_mut().unwrap().insert(fn_node_ptr);
                 }

@@ -503,7 +503,7 @@ impl<'a> TyChecker<'a> {
             Ty::DrawShader(shader_ptr) => { // a shader method call
                 
                 if let Some(fn_decl) = self.shader_registry.draw_shader_method_decl_from_ident(
-                    self.shader_registry.draw_shaders.get(&shader_ptr).unwrap(),
+                    self.shader_registry.draw_shader_defs.get(&shader_ptr).unwrap(),
                     ident
                 ) {
 
@@ -756,7 +756,7 @@ impl<'a> TyChecker<'a> {
                 }) ? .ty_expr .ty .borrow() .as_ref() .unwrap() .clone())
             },
             Ty::DrawShader(shader_ptr) => {
-                Ok(self.shader_registry.draw_shaders.get(&shader_ptr).unwrap().find_field(field_ident) .ok_or(LiveError {
+                Ok(self.shader_registry.draw_shader_defs.get(&shader_ptr).unwrap().find_field(field_ident) .ok_or(LiveError {
                     origin: live_error_origin!(),
                     span,
                     message: format!("field `{}` is not defined on shader `{:?}`", field_ident, shader_ptr),
