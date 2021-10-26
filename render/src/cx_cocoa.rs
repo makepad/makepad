@@ -1099,8 +1099,6 @@ impl CocoaWindow {
     }
 
     pub fn start_drag(&mut self, ns_event: id, drag_item: DragItem) {
-        println!("Start dragging");
-
         let dragging_items = drag_item.file_urls.iter().map(|file_url| {
             let pasteboard_item: id = unsafe { msg_send![class!(NSPasteboardItem), new] };
             let _: () = unsafe {
@@ -2023,6 +2021,13 @@ pub fn define_cocoa_view_class() -> *const Class {
         cw.send_change_event();
     }
 
+    extern fn dragging_session_ended_at_point_operation(this: &Object, _: Sel, _session: id, _point: NSPoint, _operation: NSDragOperation) {
+        let window = get_cocoa_window(this);
+        window.fingers_down[0] = false;
+        let mut events = vec![Event::DragEnd];
+        window.do_callback(&mut events);
+    }
+
     extern fn dragging_entered(this: &Object, _: Sel, sender: id) -> NSDragOperation {
         let window = get_cocoa_window(this);
         window.start_live_resize();
@@ -2064,7 +2069,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         }
     }
 
-    extern fn dragging_ended(this: &Object, _: Sel, sender: id) {
+    extern fn dragging_ended(this: &Object, _: Sel, _sender: id) {
         let window = get_cocoa_window(this);
         window.end_live_resize();
     }
@@ -2179,6 +2184,8 @@ pub fn define_cocoa_view_class() -> *const Class {
         decl.add_method(sel!(resignFirstResponder:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
         
         decl.add_method(sel!(displayLayer:), display_layer as extern fn(&Object, Sel, id));
+
+        decl.add_method(sel!(draggingSession:endedAtPoint:operation:), dragging_session_ended_at_point_operation as extern fn(&Object, Sel, id, NSPoint, NSDragOperation));
 
         decl.add_method(sel!(draggingEntered:), dragging_entered as extern fn(&Object, Sel, id) -> NSDragOperation);
         decl.add_method(sel!(draggingExited:), dragging_exited as extern fn(&Object, Sel, id));
