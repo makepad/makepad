@@ -270,8 +270,7 @@ impl AppInner {
             .handle_event(cx, event, &mut |_cx, action| actions.push(action));
         for action in actions {
             match action {
-                file_tree::Action::FileNodeWasPressed(file_node_id) => {
-                    /*
+                file_tree::Action::FileNodeWasClicked(file_node_id) => {
                     let node = &state.file_nodes_by_file_node_id[file_node_id];
                     if node.is_file() {
                         let path = state.file_node_path(file_node_id);
@@ -279,13 +278,18 @@ impl AppInner {
                             self.create_code_editor_tab(cx, state, state.panel_id, None, path);
                         }
                     }
-                    */
                 }
                 file_tree::Action::FileNodeShouldStartDrag(file_node_id) => {
                     let path = state.file_node_path(file_node_id);
-                    self.file_tree.start_drag_file_node(cx, file_node_id, DragItem {
-                        file_urls: vec![String::from("file://") + &*path.into_os_string().to_string_lossy()]
-                    })
+                    self.file_tree.start_drag_file_node(
+                        cx,
+                        file_node_id,
+                        DragItem {
+                            file_urls: vec![
+                                String::from("file://") + &*path.into_os_string().to_string_lossy(),
+                            ],
+                        },
+                    )
                 }
             }
         }
@@ -663,7 +667,8 @@ impl State {
             components.push(&edge.name);
             file_node = &self.file_nodes_by_file_node_id[edge.file_node_id];
         }
-        self.path.join(components.into_iter().rev().collect::<PathBuf>())
+        self.path
+            .join(components.into_iter().rev().collect::<PathBuf>())
     }
 
     fn set_file_tree(&mut self, file_tree: protocol::FileTree) {

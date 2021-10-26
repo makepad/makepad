@@ -87,7 +87,7 @@ impl Connection {
             path: self.shared.path.clone(),
             root: FileNode::Directory {
                 entries: get_directory_entries(&self.shared.path)?,
-            }
+            },
         })
     }
 
