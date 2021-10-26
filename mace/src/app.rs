@@ -206,7 +206,7 @@ impl AppInner {
                     self.dock.redraw(cx);
                     self.redraw_panel(cx, state, panel_id);
                 }
-                dock::Action::TabBarReceivedDragItem(panel_id, item) => {
+                dock::Action::TabBarReceivedDraggedItem(panel_id, item) => {
                     for file_url in &item.file_urls {
                         let path = Path::new(&file_url[7..]).to_path_buf();
                         self.create_code_editor_tab(cx, state, panel_id, None, path);
@@ -250,7 +250,7 @@ impl AppInner {
                         _ => {}
                     }
                 }
-                dock::Action::TabReceivedDragItem(tab_id, item) => {
+                dock::Action::TabReceivedDraggedItem(tab_id, item) => {
                     let tab = &state.tabs_by_tab_id[tab_id];
                     let panel_id = tab.panel_id;
                     for file_url in &item.file_urls {
@@ -258,7 +258,7 @@ impl AppInner {
                         self.create_code_editor_tab(cx, state, panel_id, Some(tab_id), path);
                     }
                 }
-                dock::Action::ContentsReceivedDragItem(panel_id, position, item) => {
+                dock::Action::ContentsReceivedDraggedItem(panel_id, position, item) => {
                     let panel_id = match position {
                         DragPosition::Center => panel_id,
                         _ => self.split_tab_panel(cx, state, panel_id, position),
@@ -285,12 +285,12 @@ impl AppInner {
                         }
                     }
                 }
-                file_tree::Action::FileNodeShouldStartDrag(file_node_id) => {
+                file_tree::Action::FileNodeShouldStartDragging(file_node_id) => {
                     let path = state.file_node_path(file_node_id);
-                    self.file_tree.start_drag_file_node(
+                    self.file_tree.start_dragging_file_node(
                         cx,
                         file_node_id,
-                        DragItem {
+                        DraggedItem {
                             file_urls: vec![
                                 String::from("file://") + &*path.into_os_string().to_string_lossy(),
                             ],
