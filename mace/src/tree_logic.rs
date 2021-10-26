@@ -139,9 +139,9 @@ impl TreeLogic {
         true
     }
 
-    pub fn start_drag_node(&mut self, cx: &mut Cx, node_id: NodeId, drag_item: DragItem) {
+    pub fn start_dragging_node(&mut self, cx: &mut Cx, node_id: NodeId, dragged_item: DraggedItem) {
         self.dragging_node_id = Some(node_id);
-        cx.start_drag(drag_item);
+        cx.start_dragging(dragged_item);
     }
 
     pub fn handle_event(
@@ -184,7 +184,7 @@ impl TreeLogic {
                             if self.dragging_node_id.is_none()
                                 && event.abs.distance(&event.abs_start) >= MIN_DRAG_DISTANCE
                             {
-                                dispatch_action(Action::NodeShouldStartDrag(*node_id));
+                                dispatch_action(Action::NodeShouldStartDragging(*node_id));
                             }
                         }
                         Event::FingerUp(event) => {
@@ -296,5 +296,5 @@ pub enum Action {
     NodeWasEntered(NodeId),
     NodeWasExited(NodeId),
     NodeWasClicked(NodeId),
-    NodeShouldStartDrag(NodeId),
+    NodeShouldStartDragging(NodeId),
 }

@@ -209,8 +209,8 @@ impl Dock {
                     panel
                         .tab_bar
                         .handle_event(cx, event, &mut |cx, action| match action {
-                            tab_bar::Action::ReceivedDragItem(item) => {
-                                dispatch_action(cx, Action::TabBarReceivedDragItem(*panel_id, item))
+                            tab_bar::Action::ReceivedDraggedItem(item) => {
+                                dispatch_action(cx, Action::TabBarReceivedDraggedItem(*panel_id, item))
                             }
                             tab_bar::Action::TabWasPressed(tab_id) => {
                                 dispatch_action(cx, Action::TabWasPressed(tab_id))
@@ -218,8 +218,8 @@ impl Dock {
                             tab_bar::Action::TabButtonWasPressed(tab_id) => {
                                 dispatch_action(cx, Action::TabButtonWasPressed(tab_id))
                             }
-                            tab_bar::Action::TabReceivedDragItem(tab_id, item) => {
-                                dispatch_action(cx, Action::TabReceivedDragItem(tab_id, item))
+                            tab_bar::Action::TabReceivedDraggedItem(tab_id, item) => {
+                                dispatch_action(cx, Action::TabReceivedDraggedItem(tab_id, item))
                             }
                         });
                 }
@@ -250,10 +250,10 @@ impl Dock {
                         if panel.contents_rect.contains(event.abs) {
                             dispatch_action(
                                 cx,
-                                Action::ContentsReceivedDragItem(
+                                Action::ContentsReceivedDraggedItem(
                                     *panel_id,
                                     compute_drag_position(panel.contents_rect, event.abs),
-                                    event.drag_item.clone(),
+                                    event.dragged_item.clone(),
                                 ),
                             );
                         }
@@ -328,11 +328,11 @@ pub enum DragPosition {
 
 pub enum Action {
     SplitPanelChanged(PanelId),
-    TabBarReceivedDragItem(PanelId, DragItem),
+    TabBarReceivedDraggedItem(PanelId, DraggedItem),
     TabWasPressed(TabId),
     TabButtonWasPressed(TabId),
-    TabReceivedDragItem(TabId, DragItem),
-    ContentsReceivedDragItem(PanelId, DragPosition, DragItem),
+    TabReceivedDraggedItem(TabId, DraggedItem),
+    ContentsReceivedDraggedItem(PanelId, DragPosition, DraggedItem),
 }
 
 fn compute_drag_position(rect: Rect, position: Vec2) -> DragPosition {
