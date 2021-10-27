@@ -831,21 +831,22 @@ impl DrawCallVars {
                             let mut fields = Vec::new();
                             
                             lf.live_fields(&mut fields);
-                            
+                            let mut slots = 0;
                             for field in fields {
-                                /*if field.id == id!(geometry) {
-                                    *is_instance = true;
-                                    continue
-                                }*/
                                 if field.id == id!(deref_target) {
                                     recur_expand(field.live_type, live_factories, draw_shader_def, span);
                                     continue
                                 }
+                                // lets count sizes
                                 if let Some(ty) = live_type_to_shader_ty(field.live_type) {
+                                    slots += ty.slots();
                                     draw_shader_def.add_instance(field.id, ty, span);
                                 };
                             }
-                            // when should i insert a filler float?
+                            // insert padding
+                            if slots%2 == 1{
+                                draw_shader_def.add_instance(Id(0), Ty::Float, span);
+                            }
                         }
                     }
                     recur_expand(live_type, live_factories, draw_shader_def, span);
