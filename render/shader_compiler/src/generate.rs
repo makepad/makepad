@@ -7,6 +7,24 @@ use std::collections::BTreeSet;
 use std::fmt;
 use crate::shaderregistry::ShaderRegistry;
 
+struct VoidWrap();
+impl VoidWrap{
+    pub fn unwrap(&self){}
+}
+
+macro_rules! write {
+    ($dst:expr, $($arg:tt)*) => ({let _ =$dst.write_fmt(std::format_args!($($arg)*));VoidWrap()})
+}
+
+macro_rules! writeln {
+    ($dst:expr $(,)?) => (
+        write!($dst, "\n")
+    );
+    ($dst:expr, $($arg:tt)*) => (
+        {let _ = $dst.write_fmt(std::format_args!($($arg)*));VoidWrap()}
+    );
+}
+
 #[derive(Clone)]
 pub struct ClosureSiteInfo<'a> {
     pub site_index: usize,
@@ -156,7 +174,7 @@ impl<'a> BlockGenerator<'a> {
             self.indent_level -= 1;
             self.write_indent();
         }
-        write!(self.string, "}}").unwrap()
+        write!(self.string, "}}").unwrap();
     }
     
     fn generate_stmt(&mut self, stmt: &Stmt) {
@@ -366,7 +384,7 @@ impl<'a> ExprGenerator<'a> {
                 1 => write!(string, "[{}].y", base).unwrap(),
                 2 => write!(string, "[{}].z", base).unwrap(),
                 _ => write!(string, "[{}].w", base).unwrap(),
-            }
+            };
         }
         match (in_expr.const_val.borrow().as_ref(), in_expr.const_index.get()) {
             (Some(Some(Val::Vec4(_))), Some(mut index)) if self.const_table_offset.is_some() => {
@@ -1184,62 +1202,71 @@ impl<'a> ClosureDefGenerator<'a> {
 pub struct DisplayDsIdent(pub Ident);
 impl fmt::Display for DisplayDsIdent {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ds_{}", self.0)
+        write!(f, "ds_{}", self.0);
+        fmt::Result::Ok(())
     }
 }
 
 pub struct DisplayPadding(pub usize);
 impl fmt::Display for DisplayPadding {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "pad_{}", self.0)
+        write!(f, "pad_{}", self.0);
+        fmt::Result::Ok(())
     }
 }
 
 pub struct DisplayStructField(pub Ident);
 impl fmt::Display for DisplayStructField {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "f_{}", self.0)
+        write!(f, "f_{}", self.0);
+        fmt::Result::Ok(())
     }
 }
 
 pub struct DisplayFnName(pub FnPtr, pub Ident);
 impl fmt::Display for DisplayFnName {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}_{}", self.0, self.1)
+        write!(f, "{}_{}", self.0, self.1);
+        fmt::Result::Ok(())
     }
 }
 
 pub struct DisplayFnNameWithClosureArgs(pub usize, pub FnPtr, pub Ident);
 impl fmt::Display for DisplayFnNameWithClosureArgs {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "site_{}_of_{}_{}", self.0, self.1, self.2)
+        write!(f, "site_{}_of_{}_{}", self.0, self.1, self.2);
+        fmt::Result::Ok(())
     }
 }
 
 pub struct DisplayClosureName(pub FnPtr, pub ClosureDefIndex);
 impl fmt::Display for DisplayClosureName {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "closure_{}_in_{}", self.1.0, self.0)
+        write!(f, "closure_{}_in_{}", self.1.0, self.0);
+        fmt::Result::Ok(())
     }
 }
 
 pub struct DisplayVarName(pub Ident, pub ScopeSymShadow);
 impl fmt::Display for DisplayVarName {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "var_{}_{}", self.0, self.1.0)
+        write!(f, "var_{}_{}", self.0, self.1.0);
+        fmt::Result::Ok(())
     }
 }
 
 pub struct DisplayClosedOverArg(pub Ident, pub ScopeSymShadow);
 impl fmt::Display for DisplayClosedOverArg {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "pass_{}_{}", self.0, self.1.0)
+        write!(f, "pass_{}_{}", self.0, self.1.0);
+        fmt::Result::Ok(())
     }
 }
 
 pub struct DisplaConstructorArg(pub usize);
 impl fmt::Display for DisplaConstructorArg {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "x{}", self.0)
+        write!(f, "x{}", self.0);
+        fmt::Result::Ok(())
     }
 }

@@ -5,7 +5,7 @@ use makepad_live_parser::Span;
 use crate::shaderast::Val;
 use std::cell::Cell;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ConstGatherer<'a> {
     pub fn_def: &'a FnDef,
 }
