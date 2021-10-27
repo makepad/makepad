@@ -20,7 +20,6 @@ use std::collections::HashSet;
 use crate::lex::lex;
 //use std::fmt;
 
-#[derive(Debug)]
 pub struct LiveFile {
     pub module_path: ModulePath,
     pub file: String,
@@ -29,7 +28,7 @@ pub struct LiveFile {
 }
 
 
-#[derive(Default, Debug)]
+#[derive(Default)]
 pub struct LiveRegistry {
     pub file_ids: HashMap<String, FileId>,
     pub module_path_to_file_id: HashMap<ModulePath, FileId>,

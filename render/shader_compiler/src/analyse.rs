@@ -22,12 +22,11 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct ShaderAnalyseOptions {
     pub no_const_collapse: bool
 }
 
-#[derive(Debug)]
 pub struct StructAnalyser<'a> {
     pub struct_def: &'a StructDef,
     pub scopes: &'a mut Scopes,
@@ -104,8 +103,6 @@ impl<'a> StructAnalyser<'a> {
     
 }
 
-
-#[derive(Debug)]
 pub struct DrawShaderAnalyser<'a> {
     pub draw_shader_def: &'a DrawShaderDef,
     pub scopes: &'a mut Scopes,
@@ -124,9 +121,10 @@ impl<'a> DrawShaderAnalyser<'a> {
     pub fn analyse_shader(&mut self) -> Result<(), LiveError> {
         self.scopes.push_scope();
          
-        let mut var_inputs = DrawShaderVarInputs::default();
+        //let mut var_inputs = DrawShaderVarInputs::default();
         for field in &self.draw_shader_def.fields {
             self.analyse_field_decl(field) ?;
+            /*
             if let DrawShaderFieldKind::Instance{var_def_ptr,..} = field.kind{
                 if var_def_ptr.is_some(){
                     var_inputs.inputs.push(DrawShaderVarInput{
@@ -153,7 +151,7 @@ impl<'a> DrawShaderAnalyser<'a> {
                     var_inputs.var_uniform_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
                 }
                 var_inputs.total_uniform_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
-            }
+            }*/
         }
 
         // first analyse decls
@@ -254,7 +252,7 @@ impl<'a> DrawShaderAnalyser<'a> {
                 self.analyse_hidden_args(fn_def);
             }
         }
-        *self.draw_shader_def.var_inputs.borrow_mut() = var_inputs;
+       // *self.draw_shader_def.var_inputs.borrow_mut() = var_inputs;
 
         *self.draw_shader_def.all_live_refs.borrow_mut() = all_live_refs;
         *self.draw_shader_def.all_const_refs.borrow_mut() = all_const_refs;
@@ -520,9 +518,6 @@ impl<'a> DrawShaderAnalyser<'a> {
     }
 }
 
-
-
-#[derive(Debug)]
 pub struct ConstAnalyser<'a> {
     pub const_def: &'a ConstDef,
     pub scopes: &'a mut Scopes,
@@ -563,8 +558,6 @@ impl<'a> ConstAnalyser<'a> {
     }
 }
 
-
-#[derive(Debug)]
 pub struct FnDefAnalyser<'a> {
     pub fn_def: &'a FnDef,
     pub closure_return_ty: Option<&'a RefCell<Option<Ty>>>,

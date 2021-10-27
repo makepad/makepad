@@ -7,7 +7,7 @@ use crate::span::Span;
 use crate::token::{Token, TokenWithSpan};
 use crate::colors::hex_bytes_to_u32;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Lex<C> {
     chars: C,
     file_id: FileId,

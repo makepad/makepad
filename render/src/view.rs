@@ -1,5 +1,4 @@
 use crate::cx::*;
-use makepad_shader_compiler::shaderast::DrawShaderVarInputKind;
 use makepad_shader_compiler::ShaderRegistry;
 use std::collections::HashMap;
 use makepad_shader_compiler::shaderast::DrawShaderDef;
@@ -309,7 +308,7 @@ impl Cx {
         let cxview = &mut self.views[current_view_id];
         let draw_item_id = cxview.draw_items_len;
         
-        if append && !sh.mapping.draw_call_always{
+        if append && !sh.mapping.flags.draw_call_always{
             if let Some(index) = cxview.find_appendable_drawcall(sh, draw_call_vars) {
                 return &mut cxview.draw_items[index];
             }
@@ -530,7 +529,7 @@ impl DrawCall {
     
     pub fn new(mapping: &CxDrawShaderMapping, draw_call_vars:&DrawCallVars) -> Self {
         DrawCall {
-            geometry: None,
+            geometry: draw_call_vars.geometry,
             do_h_scroll: true,
             do_v_scroll: true,
             in_many_instances: false,
@@ -549,7 +548,7 @@ impl DrawCall {
     
     pub fn update(&mut self,  mapping:&CxDrawShaderMapping, draw_call_vars:&DrawCallVars){
         self.draw_shader = draw_call_vars.draw_shader.unwrap();
-        self.geometry = None;
+        self.geometry = draw_call_vars.geometry;
         self.instances.truncate(0);
         self.total_instance_slots = mapping.instance_props.total_slots;
         for i in 0..mapping.user_uniform_props.total_slots{
@@ -718,7 +717,10 @@ impl CxView {
                 if let Some(draw_call) = &draw_item.draw_call {
                     if draw_item.sub_view_id.is_none() && draw_call.draw_shader == draw_call_vars.draw_shader.unwrap() {
                         // lets compare uniforms and textures..
-                        if sh.mapping.draw_call_compare{
+                        if sh.mapping.flags.draw_call_compare{
+                            if draw_call.geometry != draw_call_vars.geometry{
+                                return None
+                            }
                             for i in 0..sh.mapping.user_uniform_props.total_slots{
                                 if draw_call.user_uniforms[i] != draw_call_vars.user_uniforms[i]{
                                     return None
@@ -781,6 +783,7 @@ pub struct DrawCallVars{
     pub var_instance_start: usize,
     pub var_instance_slots: usize,
     pub draw_shader: Option<DrawShader>,
+    pub geometry: Option<Geometry>,
     pub user_uniforms: [f32;DRAW_CALL_USER_UNIFORMS],
     pub texture_slots:[Option<Texture>;DRAW_CALL_TEXTURE_SLOTS],
     pub var_instances:[f32;DRAW_CALL_VAR_INSTANCES]
@@ -867,7 +870,6 @@ impl DrawCallVars{
                     
                     cx.draw_shaders.push(CxDrawShader {
                         name: "todo".to_string(),
-                        default_geometry: Some(geometry_fields.get_geometry()),
                         platform: None,
                         mapping: mapping
                     });
@@ -880,6 +882,8 @@ impl DrawCallVars{
                         draw_shader_id,
                         draw_shader_ptr
                     });
+                    
+                    self.geometry = Some(geometry_fields.get_geometry());
                     // also we should allocate it a Shader object
                 }
             }
@@ -887,32 +891,30 @@ impl DrawCallVars{
     }    
 
     pub fn update_var(&mut self, cx:&mut Cx, value_ptr: LivePtr, id: Id) {
-        fn store_values(shader_registry: &ShaderRegistry, draw_shader_ptr: DrawShaderPtr, id: Id, values: &[f32], draw_call_vars:&mut DrawCallVars) {
-            if let Some(draw_shader_def) = shader_registry.draw_shader_defs.get(&draw_shader_ptr) {
-                let var_inputs = draw_shader_def.var_inputs.borrow();
-                for input in &var_inputs.inputs {
-                    if input.ident.0 == id {
-                        match input.kind {
-                            DrawShaderVarInputKind::Instance => {
-                                if values.len() == input.size {
-                                    for i in 0..input.size {
-                                        let index = draw_call_vars.var_instances.len() - var_inputs.var_instance_slots + input.offset + i;
-                                        draw_call_vars.var_instances[index] = values[i];
-                                    }
-                                }
-                                else {
-                                    println!("variable shader input size not correct {} {}", values.len(), input.size)
+        fn store_values(cx:&Cx, draw_shader: DrawShader, id: Id, values: &[f32], draw_call_vars:&mut DrawCallVars) {
+            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+            for input in &sh.mapping.var_inputs.inputs {
+                if input.ident == id {
+                    match input.kind {
+                        DrawShaderVarInputKind::Instance => {
+                            if values.len() == input.size {
+                                for i in 0..input.size {
+                                    let index = draw_call_vars.var_instances.len() - sh.mapping.var_inputs.var_instance_slots + input.offset + i;
+                                    draw_call_vars.var_instances[index] = values[i];
                                 }
                             }
-                            DrawShaderVarInputKind::Uniform => { //TODO DO THIS RIGHT WITH MAPPING
-                                if values.len() == input.size {
-                                    for i in 0..input.size {
-                                        draw_call_vars.user_uniforms[input.offset + i] = values[i];
-                                    }
+                            else {
+                                println!("variable shader input size not correct {} {}", values.len(), input.size)
+                            }
+                        }
+                        DrawShaderVarInputKind::Uniform => { //TODO DO THIS RIGHT WITH MAPPING
+                            if values.len() == input.size {
+                                for i in 0..input.size {
+                                    draw_call_vars.user_uniforms[input.offset + i] = values[i];
                                 }
-                                else {
-                                    println!("variable shader input size not correct {} {}", values.len(), input.size)
-                                }
+                            }
+                            else {
+                                println!("variable shader input size not correct {} {}", values.len(), input.size)
                             }
                         }
                     }
@@ -923,20 +925,20 @@ impl DrawCallVars{
             let node = cx.shader_registry.live_registry.resolve_ptr(value_ptr);
             match node.value {
                 LiveValue::Int(val) => {
-                    store_values(&cx.shader_registry, draw_shader.draw_shader_ptr, id, &[val as f32], self);
+                    store_values(&cx, draw_shader, id, &[val as f32], self);
                 }
                 LiveValue::Float(val) => {
-                    store_values(&cx.shader_registry, draw_shader.draw_shader_ptr, id, &[val as f32], self);
+                    store_values(&cx, draw_shader, id, &[val as f32], self);
                 }
                 LiveValue::Color(val) => {
                     let val = Vec4::from_u32(val);
-                    store_values(&cx.shader_registry, draw_shader.draw_shader_ptr, id, &[val.x, val.y, val.z, val.w], self);
+                    store_values(&cx, draw_shader, id, &[val.x, val.y, val.z, val.w], self);
                 }
                 LiveValue::Vec2(val) => {
-                    store_values(&cx.shader_registry, draw_shader.draw_shader_ptr, id, &[val.x, val.y], self);
+                    store_values(&cx, draw_shader, id, &[val.x, val.y], self);
                 }
                 LiveValue::Vec3(val) => {
-                    store_values(&cx.shader_registry, draw_shader.draw_shader_ptr, id, &[val.x, val.y, val.z], self);
+                    store_values(&cx, draw_shader, id, &[val.x, val.y, val.z], self);
                 }
                 _ => ()
             }
@@ -948,11 +950,10 @@ impl DrawCallVars{
         cx:&mut Cx,
     ) {
         if let Some(draw_shader) = self.draw_shader {
-            if let Some(draw_shader_def) = cx.shader_registry.draw_shader_defs.get(&draw_shader.draw_shader_ptr) {
-                let var_inputs = draw_shader_def.var_inputs.borrow();
-                self.var_instance_start = self.var_instances.len() - var_inputs.var_instance_slots;
-                self.var_instance_slots = var_inputs.total_instance_slots;
-            }
+            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+            let var_inputs = &sh.mapping.var_inputs;
+            self.var_instance_start = self.var_instances.len() - var_inputs.var_instance_slots;
+            self.var_instance_slots = var_inputs.total_instance_slots;
         }
     }
 }
