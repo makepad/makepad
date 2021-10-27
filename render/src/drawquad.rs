@@ -8,7 +8,6 @@ live_body!{
         //debug: true;
         rust_type: {{DrawQuad}};
         geometry: GeometryQuad2D {};
-        uniform test: float = 0.5;
         varying pos: vec2;
         
         fn scroll(self) -> vec2 {
@@ -109,7 +108,6 @@ impl DrawQuad {
     }
 }
 
-
 impl LiveUpdateHooks for DrawQuad {
     fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
         self.draw_call_vars.update_var(cx, ptr, id);
@@ -123,7 +121,6 @@ impl LiveUpdateHooks for DrawQuad {
         self.draw_call_vars.init_slicer(cx);
     }
 }
-
 
 /*
 impl LiveUpdateValue for DrawQuad {
