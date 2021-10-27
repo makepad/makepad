@@ -2,10 +2,8 @@ use crate::cx::*;
 use crate::drawquad::DrawQuad;
 
 live_body!{
-    
     use crate::shader_std::*;
     use crate::drawquad::DrawQuad;
-    
     DrawColor: DrawQuad {
         rust_type: {{DrawColor}};
         fn pixel(self) -> vec4 {
@@ -14,14 +12,15 @@ live_body!{
     }
 }
 
-
-//#[derive(Debug)]
+#[derive(Live)]
 #[repr(C)]
 pub struct DrawColor {
+    #[live()]
     deref_target: DrawQuad,
+    #[live()]
     color: Vec4
 }
-
+/*
 impl std::ops::Deref for DrawColor {
     type Target = DrawQuad;
     fn deref(&self) -> &Self::Target {&self.deref_target}
@@ -108,4 +107,4 @@ impl LiveUpdate for DrawColor {
         Self::live_type()
     }
 }
-
+*/
