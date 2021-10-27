@@ -81,6 +81,10 @@ pub trait LiveUpdate {
     fn _live_type(&self) -> LiveType;
 }
 
+pub trait LiveUpdateValue{
+    fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr);
+}
+
 
 pub trait LiveUpdateHooks {
     fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr);
