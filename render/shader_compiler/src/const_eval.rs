@@ -9,7 +9,6 @@ use makepad_live_parser::Span;
 use crate::shaderast::Val;
 use std::cell::Cell;
 
-#[derive(Debug)]
 pub struct ConstEvaluator {
     pub options: ShaderAnalyseOptions
 }

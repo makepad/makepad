@@ -8,7 +8,7 @@ live_body!{
         //debug: true;
         rust_type: {{DrawQuad}};
         geometry: GeometryQuad2D {};
-        
+        uniform test:float = 0.5;
         varying pos: vec2;
         
         fn scroll(self) -> vec2 {

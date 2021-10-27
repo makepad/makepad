@@ -7,6 +7,24 @@ use std::fmt;
 use std::collections::BTreeSet;
 use crate::shaderregistry::ShaderRegistry;
 
+struct VoidWrap();
+impl VoidWrap{
+    pub fn unwrap(&self){}
+}
+
+macro_rules! write {
+    ($dst:expr, $($arg:tt)*) => ({let _ =$dst.write_fmt(std::format_args!($($arg)*));VoidWrap()})
+}
+
+macro_rules! writeln {
+    ($dst:expr $(,)?) => (
+        write!($dst, "\n")
+    );
+    ($dst:expr, $($arg:tt)*) => (
+        {let _ = $dst.write_fmt(std::format_args!($($arg)*));VoidWrap()}
+    );
+}
+
 pub fn generate_vertex_shader(draw_shader_def: &DrawShaderDef, shader_registry: &ShaderRegistry) -> String {
     let mut string = String::new();
     DrawShaderGenerator {

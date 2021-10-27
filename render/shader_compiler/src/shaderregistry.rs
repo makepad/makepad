@@ -22,7 +22,6 @@ impl fmt::Display for ShaderResourceId {
     }
 }*/
 
-#[derive(Debug)]
 pub struct ShaderRegistry {
     pub live_registry: LiveRegistry,
     pub consts: HashMap<ConstPtr, ConstDef>,
@@ -59,31 +58,27 @@ pub enum LiveNodeFindResult {
 
 impl ShaderRegistry {
     
-    pub fn compute_const_table(&self, draw_shader_def: &mut DrawShaderDef, filter_file_id: Option<FileId>) {
-        if let Some(filter_file_id) = filter_file_id {
-            let mut offsets = BTreeMap::new();
-            let mut table = Vec::new();
-            let mut offset = 0;
-            for callee in draw_shader_def.all_fns.borrow().iter() {
-                let fn_decl = self.all_fns.get(callee).unwrap();
-                if fn_decl.span.file_id() == filter_file_id {
-                    let sub_table = fn_decl.const_table.borrow();
-                    table.extend(sub_table.as_ref().unwrap().iter());
-                    offsets.insert(*callee, offset);
-                    offset += sub_table.as_ref().unwrap().len();
-                }
+    pub fn compute_const_table(&self, draw_shader_def: &mut DrawShaderDef, filter_file_id: FileId)->DrawShaderConstTable {
+        let mut offsets = BTreeMap::new();
+        let mut table = Vec::new();
+        let mut offset = 0;
+        for callee in draw_shader_def.all_fns.borrow().iter() {
+            let fn_decl = self.all_fns.get(callee).unwrap();
+            if fn_decl.span.file_id() == filter_file_id {
+                let sub_table = fn_decl.const_table.borrow();
+                table.extend(sub_table.as_ref().unwrap().iter());
+                offsets.insert(*callee, offset);
+                offset += sub_table.as_ref().unwrap().len();
             }
-            let size = table.len();
-            let align_gap = 4 - (size - ((size >> 2) << 2));
-            for _ in 0..align_gap {
-                table.push(0.0);
-            }
-            draw_shader_def.const_table.table = table;
-            draw_shader_def.const_table.offsets = offsets;
         }
-        else {
-            draw_shader_def.const_table.table.truncate(0);
-            draw_shader_def.const_table.offsets.clear();
+        let size = table.len();
+        let align_gap = 4 - (size - ((size >> 2) << 2));
+        for _ in 0..align_gap {
+            table.push(0.0);
+        }
+        DrawShaderConstTable{
+            table,
+            offsets
         }
     }
     
@@ -481,13 +476,13 @@ impl ShaderRegistry {
                             LiveValue::Bool(val)=>{
                                 if let IdUnpack::Single(id) = prop.id_pack.unpack() {
                                     if id == id!(debug) {
-                                        draw_shader_def.debug = true;
+                                        draw_shader_def.flags.debug = true;
                                     }
                                     if id == id!(draw_call_compare){
-                                        draw_shader_def.draw_call_compare = true;
+                                        draw_shader_def.flags.draw_call_compare = true;
                                     }
                                     if id == id!(draw_call_always){
-                                        draw_shader_def.draw_call_always = true;
+                                        draw_shader_def.flags.draw_call_always = true;
                                     }
                                 }
                             }

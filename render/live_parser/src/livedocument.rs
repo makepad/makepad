@@ -13,7 +13,6 @@ use crate::id::LocalPtr;
 use crate::id::LivePtr;
 use crate::id::FileId;
 
-#[derive(Debug)]
 pub struct LiveDocument {
     pub recompile: bool,
     pub nodes: Vec<Vec<LiveNode >>,
@@ -36,7 +35,7 @@ impl fmt::Display for LiveScopeTarget {
     }
 }
 
-#[derive(Copy, Debug, Clone)]
+#[derive(Copy, Clone)]
 pub enum LiveScopeTarget {
     LocalPtr(LocalPtr),
     LivePtr(LivePtr)
@@ -55,7 +54,7 @@ impl LiveScopeTarget{
     }
 }
 
-#[derive(Copy, Debug, Clone)]
+#[derive(Copy, Clone)]
 pub struct LiveScopeItem {
     pub id: Id,
     pub target: LiveScopeTarget

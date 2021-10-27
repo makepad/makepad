@@ -36,7 +36,7 @@ impl Cx {
         let clip = self.views[view_id].intersect_clip(clip);
         
         for draw_item_id in 0..draw_items_len {
-            if let Some(sub_view_id) = self.views[view_id].draw_items[draw_item_id].sub_view_id{
+            if let Some(sub_view_id) = self.views[view_id].draw_items[draw_item_id].sub_view_id {
                 self.render_view(
                     pass_id,
                     sub_view_id,
@@ -80,15 +80,18 @@ impl Cx {
                 let pipeline_state = shp.pipeline_state;
                 unsafe {let () = msg_send![encoder, setRenderPipelineState: pipeline_state];}
                 
-                let geometry_id = if let Some(geometry) = draw_call.geometry{
+                let geometry_id = if let Some(geometry) = draw_call.geometry {
                     geometry.geometry_id
                 }
-                else if let Some(geometry) = sh.default_geometry{
-                    geometry.geometry_id
-                }
-                else{
-                    continue
+                else {
+                    continue;
                 };
+                // else if let Some(geometry) = sh.default_geometry{
+                //    geometry.geometry_id
+                //}
+                // else{
+                //     continue
+                //};
                 
                 let geometry = &mut self.geometries[geometry_id];
                 
@@ -123,28 +126,29 @@ impl Cx {
                 let draw_uniforms = draw_call.draw_uniforms.as_slice();
                 
                 unsafe {
-
+                    
                     let () = msg_send![encoder, setVertexBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 2u64];
                     let () = msg_send![encoder, setFragmentBytes: sh.mapping.live_uniforms_buf.as_ptr() as *const std::ffi::c_void length: (sh.mapping.live_uniforms_buf.len() * 4) as u64 atIndex: 2u64];
                     
-                    if let Some(id) = shp.draw_uniform_buffer_id{
+                    if let Some(id) = shp.draw_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: draw_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_uniforms.len() * 4) as u64 atIndex: id];
                         let () = msg_send![encoder, setFragmentBytes: draw_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_uniforms.len() * 4) as u64 atIndex: id];
                     }
-                    if let Some(id) = shp.pass_uniform_buffer_id{
+                    if let Some(id) = shp.pass_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: id];
                         let () = msg_send![encoder, setFragmentBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: id];
                     }
-                    if let Some(id) = shp.view_uniform_buffer_id{
+                    if let Some(id) = shp.view_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: view_uniforms.as_ptr() as *const std::ffi::c_void length: (view_uniforms.len() * 4) as u64 atIndex: id];
                         let () = msg_send![encoder, setFragmentBytes: view_uniforms.as_ptr() as *const std::ffi::c_void length: (view_uniforms.len() * 4) as u64 atIndex: id];
                     }
-                    if let Some(id) = shp.user_uniform_buffer_id{
+                    if let Some(id) = shp.user_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: draw_call.user_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.user_uniforms.len() * 4) as u64 atIndex: id];
                         let () = msg_send![encoder, setFragmentBytes: draw_call.user_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.user_uniforms.len() * 4) as u64 atIndex: id];
                     }
                     
-                    if let Some(ct) = &sh.mapping.const_table {
+                    let ct = &sh.mapping.const_table.table;
+                    if ct.len()>0 {
                         let () = msg_send![encoder, setVertexBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 7u64];
                         let () = msg_send![encoder, setFragmentBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 5u64];
                     }
@@ -197,7 +201,7 @@ impl Cx {
     
     pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: objc_id, pass_id: usize, inherit_dpi_factor: f32, first_texture: Option<objc_id>, metal_cx: &MetalCx) {
         let pass_size = self.passes[pass_id].pass_size;
-
+        
         self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
         self.passes[pass_id].paint_dirty = false;
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
@@ -509,7 +513,7 @@ pub struct CxPlatformPass {
     pub mtl_depth_state: Option<objc_id>
 }
 
-#[derive(Default, Clone)] 
+#[derive(Default, Clone)]
 pub struct MultiMetalBuffer {
     pub buffer: Option<objc_id>,
     pub size: usize,
@@ -643,13 +647,17 @@ pub struct SlErr {
 impl Cx {
     
     pub fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
-        for draw_shader_ptr in &self.draw_shader_compile_set{
-            if let Some(draw_shader_id) = self.draw_shader_ptr_to_id.get(&draw_shader_ptr){
+        for draw_shader_ptr in &self.draw_shader_compile_set {
+            if let Some(draw_shader_id) = self.draw_shader_ptr_to_id.get(&draw_shader_ptr) {
                 let cx_shader = &mut self.draw_shaders[*draw_shader_id];
                 let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
-                let gen = generate_metal::generate_shader(draw_shader_def.as_ref().unwrap(), &self. shader_registry);
+                let gen = generate_metal::generate_shader(
+                    draw_shader_def.as_ref().unwrap(),
+                    &cx_shader.mapping.const_table,
+                    &self.shader_registry
+                );
                 metal_cx.compile_draw_shader(cx_shader, gen, draw_shader_def.as_ref().unwrap());
-            } 
+            }
         }
         self.draw_shader_compile_set.clear();
     }
@@ -796,7 +804,7 @@ impl MetalCx {
         cxtexture.update_image = false;
     }
     
-        
+    
     pub fn compile_draw_shader(
         &self,
         sh: &mut CxDrawShader,
@@ -806,8 +814,8 @@ impl MetalCx {
         //println!("{}", gen.mtlsl);
         //let debug = ;
         //mapping.update_live_uniforms(live_styles);
-        if draw_shader_def.debug {
-            println!("{}\n---------------\n",  gen.mtlsl);
+        if draw_shader_def.flags.debug {
+            println!("{}\n---------------\n", gen.mtlsl);
         }
         
         if let Some(sh_platform) = &sh.platform {
@@ -843,20 +851,20 @@ impl MetalCx {
         //sh.name = name;
         //sh.default_geometry = default_geometry;
         //sh.mapping = mapping;
-
+        
         let mut draw_uniform_buffer_id = None;
         let mut pass_uniform_buffer_id = None;
         let mut view_uniform_buffer_id = None;
         let mut user_uniform_buffer_id = None;
-
+        
         let mut buffer_id = 4;
         for (field, _set) in gen.fields_as_uniform_blocks {
-            match field.0{
-                id!(draw)=>draw_uniform_buffer_id = Some(buffer_id),
-                id!(pass)=>pass_uniform_buffer_id = Some(buffer_id),
-                id!(view)=>view_uniform_buffer_id = Some(buffer_id),
-                id!(user)=>user_uniform_buffer_id = Some(buffer_id),
-                _=>panic!()
+            match field.0 {
+                id!(draw) => draw_uniform_buffer_id = Some(buffer_id),
+                id!(pass) => pass_uniform_buffer_id = Some(buffer_id),
+                id!(view) => view_uniform_buffer_id = Some(buffer_id),
+                id!(user) => user_uniform_buffer_id = Some(buffer_id),
+                _ => panic!()
             }
             buffer_id += 1;
         }

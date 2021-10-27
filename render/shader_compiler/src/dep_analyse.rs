@@ -9,7 +9,7 @@ use crate::shaderast::{Ty, TyLit};
 use std::cell::{Cell};
 use crate::shaderregistry::ShaderRegistry;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DepAnalyser<'a> {
     pub fn_def: &'a FnDef,
     pub shader_registry: &'a ShaderRegistry,

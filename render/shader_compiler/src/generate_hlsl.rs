@@ -6,6 +6,23 @@ use std::fmt;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use crate::shaderregistry::ShaderRegistry;
+struct VoidWrap();
+impl VoidWrap{
+    pub fn unwrap(&self){}
+}
+
+macro_rules! write {
+    ($dst:expr, $($arg:tt)*) => ({let _ =$dst.write_fmt(std::format_args!($($arg)*));VoidWrap()})
+}
+
+macro_rules! writeln {
+    ($dst:expr $(,)?) => (
+        write!($dst, "\n")
+    );
+    ($dst:expr, $($arg:tt)*) => (
+        {let _ = $dst.write_fmt(std::format_args!($($arg)*));VoidWrap()}
+    );
+}
 
 pub fn index_to_char(index: usize) -> char {
     std::char::from_u32(index as u32 + 65).unwrap()

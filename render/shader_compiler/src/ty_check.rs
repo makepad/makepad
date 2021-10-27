@@ -18,7 +18,7 @@ use std::rc::Rc;
 use crate::shaderregistry::ShaderRegistry;
 use crate::shaderast::ScopeSymKind;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TyChecker<'a> {
     pub scopes: &'a Scopes,
     pub shader_registry: &'a ShaderRegistry
