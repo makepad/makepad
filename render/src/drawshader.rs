@@ -4,7 +4,33 @@ use makepad_shader_compiler::Ty;
 use makepad_shader_compiler::shaderast::DrawShaderDef;
 use makepad_shader_compiler::shaderast::DrawShaderFieldKind;
 use makepad_shader_compiler::shaderast::DrawShaderPtr;
+use makepad_shader_compiler::shaderast::DrawShaderFlags;
+use makepad_shader_compiler::shaderast::DrawShaderConstTable;
 use std::collections::HashMap;
+
+
+#[derive(Clone, Default)]
+pub struct DrawShaderVarInputs{
+    pub var_uniform_slots: usize,
+    pub var_instance_slots: usize,
+    pub total_uniform_slots: usize,
+    pub total_instance_slots: usize,
+    pub inputs: Vec<DrawShaderVarInput>
+}
+
+#[derive(Clone)]
+pub struct DrawShaderVarInput {
+    pub ident: Id,
+    pub offset: usize,
+    pub size: usize,
+    pub kind: DrawShaderVarInputKind
+}
+
+#[derive(Clone)]
+pub enum DrawShaderVarInputKind{
+    Instance,
+    Uniform,
+}
 
 
 // TODO CLEAN THIS UP, MAYBE MOVE TO DRAW_SHADER_DEF:
@@ -187,17 +213,17 @@ impl UniformProps {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct CxDrawShaderMapping {
-    pub draw_call_compare: bool,
-    pub draw_call_always: bool,
+    pub flags: DrawShaderFlags,
+    pub var_inputs: DrawShaderVarInputs,
     pub rect_instance_props: RectInstanceProps,
     pub user_uniform_props: UniformProps,
     pub live_uniform_props: UniformProps,
     pub instance_props: InstanceProps,
     pub geometry_props: InstanceProps,
     pub textures: Vec<PropDef>,
-    pub const_table: Option<Vec<f32 >>,
+    pub const_table: DrawShaderConstTable,
     pub geometries: Vec<PropDef>,
     pub instances: Vec<PropDef>,
     pub live_uniforms_buf: Vec<f32>, 
@@ -221,6 +247,8 @@ impl CxDrawShaderMapping {
         let mut pass_uniforms = Vec::new();
         let mut textures = Vec::new();
         
+        let mut var_inputs = DrawShaderVarInputs::default();
+
         for field in &draw_shader_def.fields {
             match &field.kind {
                 DrawShaderFieldKind::Geometry{var_def_ptr,..} => {
@@ -232,6 +260,18 @@ impl CxDrawShaderMapping {
                     });
                 }
                 DrawShaderFieldKind::Instance{var_def_ptr, ..} => {
+                    if var_def_ptr.is_some(){
+                        var_inputs.inputs.push(DrawShaderVarInput{
+                            ident: field.ident.0,
+                            offset:var_inputs.var_instance_slots,
+                            size: field.ty_expr.ty.borrow().as_ref().unwrap().size(),
+                            kind:DrawShaderVarInputKind::Instance
+                        });
+                        var_inputs.var_instance_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
+                    }
+                    var_inputs.total_instance_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
+
+                    
                     instances.push(PropDef {
                         //name: field.ident.to_string(),
                         ty: field.ty_expr.ty.borrow().clone().unwrap(),
@@ -256,10 +296,22 @@ impl CxDrawShaderMapping {
                         id!(pass) => {
                             pass_uniforms.push(prop_def);
                         }
-                        id!(default) => {
+                        id!(user) => {
                             user_uniforms.push(prop_def);
                         }
                         _ => ()
+                    }
+                    if block_ident.0 == id!(user){ 
+                        if var_def_ptr.is_some(){
+                            var_inputs.inputs.push(DrawShaderVarInput{
+                                ident:field.ident.0,
+                                offset:var_inputs.var_uniform_slots,
+                                size: field.ty_expr.ty.borrow().as_ref().unwrap().size(),
+                                kind:DrawShaderVarInputKind::Uniform
+                            });
+                            var_inputs.var_uniform_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
+                        }
+                        var_inputs.total_uniform_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
                     }
                 }
                 DrawShaderFieldKind::Texture{var_def_ptr, ..} => {
@@ -300,8 +352,7 @@ impl CxDrawShaderMapping {
         live_uniforms_buf.resize(live_uniform_props.total_slots, 0.0);
         
         CxDrawShaderMapping {
-            draw_call_compare: draw_shader_def.draw_call_compare,
-            draw_call_always: draw_shader_def.draw_call_always,
+            flags: draw_shader_def.flags,
             live_uniforms_buf,
             rect_instance_props: RectInstanceProps::construct(&instances),
             user_uniform_props: UniformProps::construct(&user_uniforms, metal_uniform_packing),
@@ -309,8 +360,9 @@ impl CxDrawShaderMapping {
             instance_props: InstanceProps::construct(&instances),
             geometry_props: InstanceProps::construct(&geometries),
             textures: textures,
-            const_table: None,
+            const_table: DrawShaderConstTable::default(),
             instances,
+            var_inputs,
             geometries,
             pass_uniforms, 
             view_uniforms,
@@ -326,6 +378,31 @@ impl CxDrawShaderMapping {
             let prop = &self.live_uniform_props.props[i];
             let uni = &self.live_uniforms[i];
             match prop.ty {
+                Ty::Float => { // float
+                    let node = live_registry.resolve_ptr(uni.live_ptr.unwrap());
+                    if let LiveValue::Float(float) = node.value{
+                        let o = prop.offset;
+                        self.live_uniforms_buf[o] = float as f32;
+                        
+                    }
+                },
+                Ty::Vec2 => { // float
+                    let node = live_registry.resolve_ptr(uni.live_ptr.unwrap());
+                    if let LiveValue::Vec2(value) = node.value{
+                        let o = prop.offset;
+                        self.live_uniforms_buf[o + 0] = value.x;
+                        self.live_uniforms_buf[o + 1] = value.y;
+                    }
+                },
+                Ty::Vec3 => { // float
+                    let node = live_registry.resolve_ptr(uni.live_ptr.unwrap());
+                    if let LiveValue::Vec3(value) = node.value{
+                        let o = prop.offset;
+                        self.live_uniforms_buf[o + 0] = value.x;
+                        self.live_uniforms_buf[o + 1] = value.y;
+                        self.live_uniforms_buf[o + 2] = value.z;
+                    }
+                },
                 Ty::Vec4 => { // color
                     let node = live_registry.resolve_ptr(uni.live_ptr.unwrap());
                     if let LiveValue::Color(color_u32) = node.value{
@@ -337,15 +414,7 @@ impl CxDrawShaderMapping {
                         self.live_uniforms_buf[o + 3] = color.w;
                     }
                 },
-                Ty::Float => { // float
-                    let node = live_registry.resolve_ptr(uni.live_ptr.unwrap());
-                    if let LiveValue::Float(float) = node.value{
-                        let o = prop.offset;
-                        self.live_uniforms_buf[o] = float as f32;
-                        
-                    }
-                },
-                _=>()
+                _=>panic!()
             }
         }
     }
@@ -354,7 +423,6 @@ impl CxDrawShaderMapping {
 #[derive(Default, Clone)]
 pub struct CxDrawShader {
     pub name: String,
-    pub default_geometry: Option<Geometry>,
     pub platform: Option<CxPlatformShader>,
     pub mapping: CxDrawShaderMapping
 }

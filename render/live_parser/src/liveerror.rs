@@ -2,20 +2,20 @@ use crate::span::Span;
 //use std::error;
 use std::fmt;
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct LiveErrorOrigin {
     pub filename: String,
     pub line:usize
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LiveError {
     pub origin: LiveErrorOrigin,
     pub span: Span,
     pub message: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct LiveFileError {
     pub origin: LiveErrorOrigin,
     pub file: String,

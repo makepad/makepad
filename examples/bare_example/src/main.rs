@@ -16,8 +16,8 @@ live_body!{
     use makepad_render::drawcolor::DrawColor
     MyDrawQuad:DrawColor{
         color: #fff 
-    }
-}
+    } 
+} 
 
 impl BareExampleApp {
     pub fn new(cx:&mut Cx)->Self{
