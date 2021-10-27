@@ -8,13 +8,12 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
     let _main_attribs = parser.eat_attributes();
     parser.eat_ident("pub");
-    // lets skip other #[] things
+
     if parser.eat_ident("struct") {
         if let Some(struct_name) = parser.eat_any_ident() {
             let generic = parser.eat_generic();
             let types = parser.eat_all_types();
             let where_clause = parser.eat_where_clause(Some("LiveUpdateHooks"));
-            
             
             let mut ln = TokenBuilder::new();
             let mut lf = TokenBuilder::new();
@@ -23,6 +22,8 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
                 return parser.unexpected();
             }
             else if let Some(fields) = parser.eat_all_struct_fields() {
+                let deref_target =  fields.iter().find(|field| field.name == "deref_target");
+                
                 lf.add("fn live_fields(&self, fields: &mut Vec<LiveField>) {");
                 lu.add("fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
                 lu.add("match id {");
@@ -30,18 +31,18 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
                 ln.add("fn live_new(cx: &mut Cx) -> Self {");
                 ln.add("    Self {");
                 // alright now. we have a field
-                for field in fields{
+                for field in &fields{
                     ln.ident(&field.name).add(":");
                     let mut attr_found = false;
                     
                     // ok check what our options are.
-                    for attr in field.attrs{
+                    for attr in &field.attrs{
                         if attr.name == "local"{
                             if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty(){
                                 ln.add("Default::default()");
                             }
                             else{
-                                ln.stream(attr.args);
+                                ln.stream(attr.args.clone());
                             }
                             ln.add(",");
                             attr_found = true;
@@ -50,7 +51,7 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
                         else if attr.name == "live"{
 
                             lf.add("fields.push(LiveField{id:Id::from_str(").string(&field.name).add(").unwrap()");
-                            lf.add(", live_type:").stream(Some(field.ty)).add("::live_type()});");
+                            lf.add(", live_type:").stream(Some(field.ty.clone())).add("::live_type()});");
 
                             lu.add("Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".live_update(cx, ptr),");
 
@@ -58,7 +59,7 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
                                 ln.add("LiveNew::live_new(cx)");
                             }
                             else{
-                                ln.stream(attr.args);
+                                ln.stream(attr.args.clone());
                             }
                             ln.add(",");
                             attr_found = true;
@@ -69,7 +70,43 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
                         return error(&format!("Field {} does not have a live or local attribute", field.name));
                     }
                 }
-                lu.add(" _=> self.live_update_value_unknown(cx, id, ptr)");
+                
+                if let Some(deref_target) = deref_target{
+                    lu.add(" _=> self.deref_target.live_update_value(cx, id, ptr)");
+                    
+                    // just forward the hooks
+                    tb.add("impl").stream(generic.clone());
+                    tb.add("LiveUpdateHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+                    tb.add("    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
+                    tb.add("        self.deref_target.live_update_value_unknown(cx, id, ptr);");
+                    tb.add("    }");
+                    
+                    tb.add("    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr){");
+                    tb.add("        self.deref_target.before_live_update(cx, live_ptr);");
+                    tb.add("    }");
+                    
+                    tb.add("    fn after_live_update(&mut self, cx: &mut Cx, live_ptr:LivePtr) {");
+                    tb.add("        self.deref_target.after_live_update(cx, live_ptr);");
+                    tb.add("    }");
+                    tb.add("}");
+
+                    // just forward the hooks
+                    tb.add("impl").stream(generic.clone());
+                    tb.add("std::ops::Deref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+                    tb.add("    type Target = ").stream(Some(deref_target.ty.clone())).add(";");
+                    tb.add("    fn deref(&self) -> &Self::Target {&self.deref_target}");
+                    tb.add("}");
+                    tb.add("impl").stream(generic.clone());
+                    
+                    tb.add("std::ops::DerefMut for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+                    tb.add("    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.deref_target}");
+                    tb.add("}");
+                    
+                }
+                else{
+                    lu.add(" _=> self.live_update_value_unknown(cx, id, ptr)");
+                }
+                
                 lu.add("} }");
                 ln.add("    }");
                 ln.add("}");
@@ -126,87 +163,6 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             tb.add("}");
 
             return tb.end();
-
-/*            
-            //live_new.add("fn live_new(cx:& mut Cx){")
-            
-            tb.add("fn de_live ( lr : & makepad_live_parser :: LiveRegistry , file : usize , level : usize , index : usize )");
-            tb.add("-> std :: result :: Result < Self , makepad_live_parser :: DeLiveErr > { ");
-            
-            tb.add("let doc = & lr . expanded [ file ] ;");
-            tb.add("let cn = & doc . nodes [ level ] [ index ] ;");
-            
-            // forward if just an ID
-            tb.add("if let makepad_live_parser :: LiveValue :: IdPack ( id ) = cn . value {");
-            tb.add("if let makepad_live_parser :: IdUnpack :: FullNodePtr ( p ) = id . unpack ( ) {");
-            tb.add("return makepad_live_parser :: DeLive :: de_live ( lr , p . file_id . to_index ( ) , p . local_ptr . level , p . local_ptr . index ) ;");
-            tb.add("}");
-            tb.add("}");
-            
-            if let Some(types) = types { // we can support this!
-                
-                tb.add("if let makepad_live_parser :: LiveValue :: Call { node_start , node_count , .. } = cn . value {");
-                tb.add("if node_count < ").unsuf_usize(types.len()).add("{");
-                tb.add("return Err ( makepad_live_parser :: DeLiveErr :: arg_count ( cn . id_pack , node_count as usize ,");
-                tb.unsuf_usize(types.len()).add(", file , level , index ) ) ;");
-                tb.add("}");
-                tb.add("let ln = level + 1 ;");
-                tb.add("let ns = node_start as usize ;");
-                tb.add("return std :: result :: Result :: Ok ( Self (");
-                for i in 0..types.len() {
-                    tb.add("makepad_live_parser :: DeLive :: de_live ( lr , file , ln , ns +").unsuf_usize(i).add(") ? ,");
-                }
-                tb.add(") ) }");
-                tb.add("else {");
-                tb.add("return Err ( makepad_live_parser :: DeLiveErr :: not_class ( cn , file , level , index ) )");
-                tb.add("}");
-            }
-            else if let Some(fields) = parser.eat_all_struct_fields() { // if all our fields are f32's
-                
-                tb.add("if let makepad_live_parser :: LiveValue :: Class { node_start , node_count , .. } = cn . value {");
-                tb.add("let ln = level + 1 ;");
-                
-                for field in &fields {
-                    tb.add("let mut").ident(&format!("_{}", field.name)).add("= None ;");
-                }
-                tb.add("for i in 0 .. ( node_count as usize ) {");
-                tb.add("let si = i + ( node_start as usize ) ;");
-                tb.add("let n = & doc . nodes [ ln ] [ si ] ;");
-                tb.add("match n . id_pack {");
-                for field in &fields {
-                    // lets id it
-                    let id = Id::from_str(&field.name).unwrap();
-                    tb.add("IdPack (").suf_u64(id.0).add(") =>");
-                    tb.ident(&format!("_{}", field.name));
-                    tb.add("= Some ( makepad_live_parser :: DeLive :: de_live ( lr , file , ln , si ) ? ) ,");
-                }
-                tb.add("_ => ( )");
-                tb.add("} }");
-                
-                tb.add("return std :: result :: Result :: Ok ( Self {");
-                for field in fields {
-                    tb.ident(&field.name).add(":");
-                    if field.ty.into_iter().next().unwrap().to_string() == "Option" {
-                        tb.add("if let Some ( t ) = ").ident(&format!("_{}", field.name));
-                        tb.add("{ Some ( t ) } else { None } ,");
-                    }
-                    else {
-                        tb.add("if let Some ( t ) =").ident(&format!("_{}", field.name));
-                        tb.add("{ t } else { return Err ( makepad_live_parser :: DeLiveErr :: miss_prop ( cn . id_pack ,");
-                        tb.string(&field.name).add(", file , level , index ) ) } ,");
-                    }
-                }
-                tb.add("} ) }");
-                
-                tb.add("else {");
-                tb.add("return Err ( makepad_live_parser :: DeLiveErr :: not_class ( cn , file , level , index ) )");
-                tb.add("}");
-            }
-            else {
-                return parser.unexpected()
-            }
-            tb.add("} } ;");
-            */
         }
     }
     /*
