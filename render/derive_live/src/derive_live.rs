@@ -3,20 +3,134 @@ use proc_macro::{TokenStream};
 use crate::macro_lib::*;
 use crate::id::*;
 
-pub fn live_component_impl(input: TokenStream) -> TokenStream {
+pub fn derive_live_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
+    let _main_attribs = parser.eat_attributes();
     parser.eat_ident("pub");
-    
+    // lets skip other #[] things
     if parser.eat_ident("struct") {
-        if let Some(name) = parser.eat_any_ident() {
+        if let Some(struct_name) = parser.eat_any_ident() {
             let generic = parser.eat_generic();
             let types = parser.eat_all_types();
-            let where_clause = parser.eat_where_clause(Some("DeLive"));
+            let where_clause = parser.eat_where_clause(Some("LiveUpdateHooks"));
             
+            
+            let mut ln = TokenBuilder::new();
+            let mut lf = TokenBuilder::new();
+            let mut lu = TokenBuilder::new();
+            if let Some(_types) = types {
+                return parser.unexpected();
+            }
+            else if let Some(fields) = parser.eat_all_struct_fields() {
+                lf.add("fn live_fields(&self, fields: &mut Vec<LiveField>) {");
+                lu.add("fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
+                lu.add("match id {");
+                
+                ln.add("fn live_new(cx: &mut Cx) -> Self {");
+                ln.add("    Self {");
+                // alright now. we have a field
+                for field in fields{
+                    ln.ident(&field.name).add(":");
+                    let mut attr_found = false;
+                    
+                    // ok check what our options are.
+                    for attr in field.attrs{
+                        if attr.name == "local"{
+                            if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty(){
+                                ln.add("Default::default()");
+                            }
+                            else{
+                                ln.stream(attr.args);
+                            }
+                            ln.add(",");
+                            attr_found = true;
+                            break;
+                        }
+                        else if attr.name == "live"{
+
+                            lf.add("fields.push(LiveField{id:Id::from_str(").string(&field.name).add(").unwrap()");
+                            lf.add(", live_type:").stream(Some(field.ty)).add("::live_type()});");
+
+                            lu.add("Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".live_update(cx, ptr),");
+
+                            if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty(){
+                                ln.add("LiveNew::live_new(cx)");
+                            }
+                            else{
+                                ln.stream(attr.args);
+                            }
+                            ln.add(",");
+                            attr_found = true;
+                            break;
+                        }
+                    }
+                    if !attr_found{
+                        return error(&format!("Field {} does not have a live or local attribute", field.name));
+                    }
+                }
+                lu.add(" _=> self.live_update_value_unknown(cx, id, ptr)");
+                lu.add("} }");
+                ln.add("    }");
+                ln.add("}");
+                lf.add("}");
+            }
+            else{
+                return parser.unexpected();
+            }
+
             tb.add("impl").stream(generic.clone());
-            tb.add("makepad_live_parser :: DeLive for").ident(&name).stream(generic).stream(where_clause);
-            tb.add("{ fn de_live ( lr : & makepad_live_parser :: LiveRegistry , file : usize , level : usize , index : usize )");
+            tb.add("LiveUpdateValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.stream(Some(lu.end()));
+            tb.add("}");
+
+            tb.add("impl").stream(generic.clone());
+            tb.add("LiveUpdate for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("    fn live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {");
+            tb.add("        self.before_live_update(cx, live_ptr);");
+            tb.add("        if let Some(mut iter) = cx.shader_registry.live_registry.live_class_iterator(live_ptr) {");
+            tb.add("            while let Some((id, live_ptr)) = iter.next(&cx.shader_registry.live_registry) {");
+            tb.add("                if id == id!(rust_type) && !cx.verify_type_signature(live_ptr, Self::live_type()) {");
+            tb.add("                    return;");
+            tb.add("                 }");
+            tb.add("                self.live_update_value(cx, id, live_ptr)");
+            tb.add("            }");
+            tb.add("        }");
+            tb.add("        self.after_live_update(cx, live_ptr);");
+            tb.add("    }");
+            tb.add("    fn _live_type(&self) -> LiveType {");
+            tb.add("        Self::live_type()");
+            tb.add("    }");
+            tb.add("}");
+
+            tb.add("impl").stream(generic.clone());
+            tb.add("LiveNew for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
+            tb.add("    fn live_type() -> LiveType {");
+            tb.add("        LiveType(std::any::TypeId::of::<").ident(&struct_name).add(">())");
+            tb.add("    }");
+            tb.add("    fn live_register(cx: &mut Cx) {");
+            tb.add("        cx.register_live_body(live_body());");
+            tb.add("        struct Factory();");
+            tb.add("        impl LiveFactory for Factory {");
+            tb.add("            fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> {");
+            tb.add("                Box::new(").ident(&struct_name).add(" ::live_new(cx))");
+            tb.add("            }");
+            tb.add("            fn live_type(&self) -> LiveType {");
+            tb.add("                ").ident(&struct_name).add(" ::live_type()");
+            tb.add("            }");
+            tb.stream(Some(lf.end()));
+            tb.add("        }");
+            tb.add("        cx.register_factory(").ident(&struct_name).add("::live_type(), Box::new(Factory()));");
+            tb.add("    }");
+            tb.stream(Some(ln.end()));
+            tb.add("}");
+
+            return tb.end();
+
+/*            
+            //live_new.add("fn live_new(cx:& mut Cx){")
+            
+            tb.add("fn de_live ( lr : & makepad_live_parser :: LiveRegistry , file : usize , level : usize , index : usize )");
             tb.add("-> std :: result :: Result < Self , makepad_live_parser :: DeLiveErr > { ");
             
             tb.add("let doc = & lr . expanded [ file ] ;");
@@ -61,7 +175,7 @@ pub fn live_component_impl(input: TokenStream) -> TokenStream {
                 tb.add("match n . id_pack {");
                 for field in &fields {
                     // lets id it
-                    let id = Id::from_str(&field.name);
+                    let id = Id::from_str(&field.name).unwrap();
                     tb.add("IdPack (").suf_u64(id.0).add(") =>");
                     tb.ident(&format!("_{}", field.name));
                     tb.add("= Some ( makepad_live_parser :: DeLive :: de_live ( lr , file , ln , si ) ? ) ,");
@@ -92,9 +206,10 @@ pub fn live_component_impl(input: TokenStream) -> TokenStream {
                 return parser.unexpected()
             }
             tb.add("} } ;");
-            return tb.end();
+            */
         }
     }
+    /*
     else if parser.eat_ident("enum") {
         
         if let Some(name) = parser.eat_any_ident() {
@@ -142,7 +257,7 @@ pub fn live_component_impl(input: TokenStream) -> TokenStream {
                 tb.add("let orig_id = lr . find_enum_origin ( id , id ) ;");
                 tb.add("match orig_id {");
                 for variant in bare {
-                    let id = Id::from_str(&variant);
+                    let id = Id::from_str(&variant).unwrap();
                     tb.add("IdPack (").suf_u64(id.0).add(") =>");
                     tb.add("return Ok ( Self ::").ident(&variant).add(") ,");
                 }
@@ -156,7 +271,7 @@ pub fn live_component_impl(input: TokenStream) -> TokenStream {
                 tb.add("let orig_id = lr . find_enum_origin ( target , target ) ;");
                 tb.add("match orig_id {");
                 for (variant, types) in unnamed {
-                    let id = Id::from_str(&variant);
+                    let id = Id::from_str(&variant).unwrap();
                     tb.add("IdPack (").suf_u64(id.0).add(") => {");
                     // ok now we need to parse the arguments
                     
@@ -182,7 +297,7 @@ pub fn live_component_impl(input: TokenStream) -> TokenStream {
                 tb.add("let orig_id = lr . find_enum_origin ( class , class ) ;");
                 tb.add("match orig_id {");
                 for (variant, fields) in named {
-                    let id = Id::from_str(&variant);
+                    let id = Id::from_str(&variant).unwrap();
                     tb.add("IdPack (").suf_u64(id.0).add(") => {");
                     
                     tb.add("let ln = level + 1 ;");
@@ -196,7 +311,7 @@ pub fn live_component_impl(input: TokenStream) -> TokenStream {
                     tb.add("match n . id_pack {");
                     for field in &fields {
                         // lets id it
-                        let id = Id::from_str(&field.name);
+                        let id = Id::from_str(&field.name).unwrap();
                         tb.add("IdPack (").suf_u64(id.0).add(") =>");
                         tb.ident(&format!("_{}", field.name));
                         tb.add("= Some ( makepad_live_parser :: DeLive :: de_live ( lr , file , ln , si ) ? ) ,");
@@ -231,6 +346,6 @@ pub fn live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("} }");
             return tb.end();
         }
-    }
+    }*/
     return parser.unexpected()
 }

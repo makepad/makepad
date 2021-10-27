@@ -8,7 +8,7 @@ live_body!{
         //debug: true;
         rust_type: {{DrawQuad}};
         geometry: GeometryQuad2D {};
-        uniform test:float = 0.5;
+        uniform test: float = 0.5;
         varying pos: vec2;
         
         fn scroll(self) -> vec2 {
@@ -41,38 +41,74 @@ live_body!{
 
 use crate::cx::*;
 
-//#[derive(Debug)]
+#[derive(Live)]
 #[repr(C)]
 pub struct DrawQuad {
-    //#[local()]
+    #[local()]
     pub area: Area,
     
-    //#[live()]
+    #[live()]
     pub geometry: GeometryQuad2D,
     
-    //#[local()]
+    #[local()]
     pub draw_call_vars: DrawCallVars,
     
-    //#[live(Vec2::all(0.0))]
+    #[live(Vec2::all(0.0))]
     pub rect_pos: Vec2,
-    //#[live(Vec2::all(0.0))]
+    
+    #[live(Vec2::all(0.0))]
     pub rect_size: Vec2,
-    //#[live(1.0)]
+    
+    #[live(1.0)]
     pub draw_depth: f32,
-    //#[pad_f32()] 
 }
 
+
 impl DrawQuad {
-    pub fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
-        match id {
-            id!(geometry) => self.geometry.live_update(cx, ptr),
-            id!(rect_pos) => self.rect_pos.live_update(cx, ptr),
-            id!(rect_size) => self.rect_size.live_update(cx, ptr),
-            id!(draw_depth) => self.draw_depth.live_update(cx, ptr),
-            _ => self.live_update_value_unknown(cx, id, ptr)
+    
+    pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) {
+        if self.draw_call_vars.draw_shader.is_some() {
+            let new_area = cx.add_aligned_instance(&self.draw_call_vars);
+            self.area = cx.update_area_refs(self.area, new_area);
+            cx.begin_turtle(layout, self.area);
+        }
+    }
+    
+    pub fn end_quad(&mut self, cx: &mut Cx) {
+        if self.draw_call_vars.draw_shader.is_some() {
+            let rect = cx.end_turtle(self.area);
+            self.area.set_rect(cx, &rect);
+        }
+    }
+    
+    pub fn draw_quad_walk(&mut self, cx: &mut Cx, walk: Walk) {
+        let rect = cx.walk_turtle(walk);
+        self.rect_pos = rect.pos;
+        self.rect_size = rect.size;
+        self.draw_quad(cx);
+    }
+    
+    pub fn draw_quad_abs(&mut self, cx: &mut Cx, rect: Rect) {
+        self.rect_pos = rect.pos;
+        self.rect_size = rect.size;
+        self.draw_quad(cx);
+    }
+    
+    pub fn draw_quad_rel(&mut self, cx: &mut Cx, rect: Rect) {
+        let rect = rect.translate(cx.get_turtle_origin());
+        self.rect_pos = rect.pos;
+        self.rect_size = rect.size;
+        self.draw_quad(cx);
+    }
+    
+    pub fn draw_quad(&mut self, cx: &mut Cx) {
+        if self.draw_call_vars.draw_shader.is_some() {
+            let new_area = cx.add_aligned_instance(&self.draw_call_vars);
+            self.area = cx.update_area_refs(self.area, new_area);
         }
     }
 }
+
 
 impl LiveUpdateHooks for DrawQuad {
     fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
@@ -88,6 +124,20 @@ impl LiveUpdateHooks for DrawQuad {
     }
 }
 
+
+/*
+impl LiveUpdateValue for DrawQuad {
+    fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
+        match id {
+            id!(geometry) => self.geometry.live_update(cx, ptr),
+            id!(rect_pos) => self.rect_pos.live_update(cx, ptr),
+            id!(rect_size) => self.rect_size.live_update(cx, ptr),
+            id!(draw_depth) => self.draw_depth.live_update(cx, ptr),
+            _ => self.live_update_value_unknown(cx, id, ptr)
+        }
+    }
+}*/
+/*
 // how could we compile this away
 impl LiveNew for DrawQuad {
     fn live_new(cx: &mut Cx) -> Self {
@@ -120,8 +170,6 @@ impl LiveNew for DrawQuad {
                 fields.push(LiveField {id: Id::from_str("rect_pos").unwrap(), live_type: Vec2::live_type()});
                 fields.push(LiveField {id: Id::from_str("rect_size").unwrap(), live_type: Vec2::live_type()});
                 fields.push(LiveField {id: Id::from_str("draw_depth").unwrap(), live_type: f32::live_type()});
-                // can i somehow someway autogenerate this
-                fields.push(LiveField {id: Id(0), live_type: f32::live_type()});
             }
             
             fn live_type(&self) -> LiveType {
@@ -152,50 +200,5 @@ impl LiveUpdate for DrawQuad {
         Self::live_type()
     }
 }
-
-
-impl DrawQuad {
-    
-    pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) {
-        if self.draw_call_vars.draw_shader.is_some(){
-            let new_area = cx.add_aligned_instance(&self.draw_call_vars);
-            self.area = cx.update_area_refs(self.area, new_area);
-            cx.begin_turtle(layout, self.area);
-        }
-    }
-    
-    pub fn end_quad(&mut self, cx: &mut Cx) {
-        if self.draw_call_vars.draw_shader.is_some(){
-            let rect = cx.end_turtle(self.area);
-            self.area.set_rect(cx, &rect);
-        }
-    }
-    
-    pub fn draw_quad_walk(&mut self, cx: &mut Cx, walk: Walk) {
-        let rect = cx.walk_turtle(walk);
-        self.rect_pos = rect.pos;
-        self.rect_size = rect.size;
-        self.draw_quad(cx);
-    }
-    
-    pub fn draw_quad_abs(&mut self, cx: &mut Cx, rect: Rect) {
-        self.rect_pos = rect.pos;
-        self.rect_size = rect.size;
-        self.draw_quad(cx);
-    }
-    
-    pub fn draw_quad_rel(&mut self, cx: &mut Cx, rect: Rect) {
-        let rect = rect.translate(cx.get_turtle_origin());
-        self.rect_pos = rect.pos;
-        self.rect_size = rect.size;
-        self.draw_quad(cx);
-    }
-    
-    pub fn draw_quad(&mut self, cx: &mut Cx) {
-        if self.draw_call_vars.draw_shader.is_some(){
-            let new_area = cx.add_aligned_instance( &self.draw_call_vars);
-            self.area = cx.update_area_refs(self.area, new_area);
-        }
-    }
-}
+*/
 
