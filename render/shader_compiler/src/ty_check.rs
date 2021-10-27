@@ -710,9 +710,9 @@ impl<'a> TyChecker<'a> {
                     if swizzle.len() > 4 {
                         return false;
                     }
-                    let size = ty.size();
+                    let slots = ty.slots();
                     for &index in swizzle {
-                        if index > size {
+                        if index > slots {
                             return false;
                         }
                     }
@@ -835,30 +835,30 @@ impl<'a> TyChecker<'a> {
                 })
             })() =>
             {
-                let expected_size = ty.size();
-                let actual_size = arg_tys.iter().map( | arg_ty | arg_ty.size()).sum::<usize>();
-                if actual_size < expected_size {
+                let expected_slots = ty.slots();
+                let actual_slots = arg_tys.iter().map( | arg_ty | arg_ty.slots()).sum::<usize>();
+                if actual_slots < expected_slots {
                     return Err(LiveError {
                         origin: live_error_origin!(),
                         span,
                         message: format!(
                             "not enough components for call to constructor `{}`: expected {}, got {}",
                             ty_lit,
-                            actual_size,
-                            expected_size,
+                            actual_slots,
+                            expected_slots,
                         )
                             .into()
                     });
                 }
-                if actual_size > expected_size {
+                if actual_slots > expected_slots {
                     return Err(LiveError {
                         origin: live_error_origin!(),
                         span,
                         message: format!(
                             "too many components for call to constructor `{}`: expected {}, got {}",
                             ty_lit,
-                            expected_size,
-                            actual_size,
+                            expected_slots,
+                            actual_slots,
                         )
                             .into(),
                     });

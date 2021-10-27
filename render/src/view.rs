@@ -1,8 +1,8 @@
 use crate::cx::*;
-use makepad_shader_compiler::ShaderRegistry;
 use std::collections::HashMap;
 use makepad_shader_compiler::shaderast::DrawShaderDef;
 use makepad_shader_compiler::shaderast::DrawShaderPtr;
+use makepad_shader_compiler::shaderast::DrawShaderConstTable;
 use makepad_live_parser::Span;
 
 #[derive(Clone)]
@@ -293,22 +293,22 @@ impl View {
 
 impl Cx {
     
-    pub fn new_draw_call(&mut self, draw_call_vars:&DrawCallVars) -> &mut DrawItem {
+    pub fn new_draw_call(&mut self, draw_call_vars: &DrawCallVars) -> &mut DrawItem {
         return self.get_draw_call(false, draw_call_vars);
     }
     
-    pub fn append_to_draw_call(&mut self, draw_call_vars:&DrawCallVars) -> &mut DrawItem {
+    pub fn append_to_draw_call(&mut self, draw_call_vars: &DrawCallVars) -> &mut DrawItem {
         return self.get_draw_call(true, draw_call_vars);
     }
     
-    pub fn get_draw_call(&mut self, append: bool, draw_call_vars:&DrawCallVars) -> &mut DrawItem {
+    pub fn get_draw_call(&mut self, append: bool, draw_call_vars: &DrawCallVars) -> &mut DrawItem {
         let sh = &self.draw_shaders[draw_call_vars.draw_shader.unwrap().draw_shader_id];
         
         let current_view_id = *self.view_stack.last().unwrap();
         let cxview = &mut self.views[current_view_id];
         let draw_item_id = cxview.draw_items_len;
         
-        if append && !sh.mapping.flags.draw_call_always{
+        if append && !sh.mapping.flags.draw_call_always {
             if let Some(index) = cxview.find_appendable_drawcall(sh, draw_call_vars) {
                 return &mut cxview.draw_items[index];
             }
@@ -316,7 +316,7 @@ impl Cx {
         
         // add one
         cxview.draw_items_len += 1;
-
+        
         // see if we need to add a new one
         if draw_item_id >= cxview.draw_items.len() {
             cxview.draw_items.push(DrawItem {
@@ -340,8 +340,8 @@ impl Cx {
         }
         return draw_item;
     }
-     
-    pub fn begin_many_instances(&mut self, draw_call_vars:&DrawCallVars) -> ManyInstances {
+    
+    pub fn begin_many_instances(&mut self, draw_call_vars: &DrawCallVars) -> ManyInstances {
         let draw_item = self.append_to_draw_call(draw_call_vars);
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let mut instances = Vec::new();
@@ -363,7 +363,7 @@ impl Cx {
         }
     }
     
-    pub fn begin_many_aligned_instances(&mut self, draw_call_vars:&DrawCallVars) -> ManyInstances {
+    pub fn begin_many_aligned_instances(&mut self, draw_call_vars: &DrawCallVars) -> ManyInstances {
         let mut li = self.begin_many_instances(draw_call_vars);
         li.aligned = Some(self.align_list.len());
         self.align_list.push(Area::Empty);
@@ -388,7 +388,7 @@ impl Cx {
         ia.into()
     }
     
-    pub fn add_instance(&mut self, draw_call_vars:&DrawCallVars) -> Area {
+    pub fn add_instance(&mut self, draw_call_vars: &DrawCallVars) -> Area {
         let data = draw_call_vars.instance_slice();
         let draw_item = self.append_to_draw_call(draw_call_vars);
         let draw_call = draw_item.draw_call.as_mut().unwrap();
@@ -408,7 +408,7 @@ impl Cx {
         ia.into()
     }
     
-    pub fn add_aligned_instance(&mut self, draw_call_vars:&DrawCallVars) -> Area {
+    pub fn add_aligned_instance(&mut self, draw_call_vars: &DrawCallVars) -> Area {
         let data = draw_call_vars.instance_slice();
         let draw_item = self.append_to_draw_call(draw_call_vars);
         let draw_call = draw_item.draw_call.as_mut().unwrap();
@@ -499,7 +499,7 @@ pub struct DrawItem {
     pub draw_call: Option<DrawCall>,
 }
 
-pub struct UserUniforms{
+pub struct UserUniforms {
     
 }
 
@@ -514,12 +514,12 @@ pub struct DrawCall {
     
     pub draw_uniforms: DrawUniforms, // draw uniforms
     pub geometry: Option<Geometry>,
-    pub user_uniforms: [f32;DRAW_CALL_USER_UNIFORMS], // user uniforms
+    pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS], // user uniforms
     
     pub do_v_scroll: bool,
     pub do_h_scroll: bool,
     
-    pub texture_slots: [Option<Texture>;DRAW_CALL_TEXTURE_SLOTS],
+    pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
     pub platform: CxPlatformDrawCall
@@ -527,7 +527,7 @@ pub struct DrawCall {
 
 impl DrawCall {
     
-    pub fn new(mapping: &CxDrawShaderMapping, draw_call_vars:&DrawCallVars) -> Self {
+    pub fn new(mapping: &CxDrawShaderMapping, draw_call_vars: &DrawCallVars) -> Self {
         DrawCall {
             geometry: draw_call_vars.geometry,
             do_h_scroll: true,
@@ -535,7 +535,7 @@ impl DrawCall {
             in_many_instances: false,
             draw_shader: draw_call_vars.draw_shader.unwrap(),
             instances: Vec::new(),
-            total_instance_slots: mapping.instance_props.total_slots,
+            total_instance_slots: mapping.instances.total_slots,
             draw_uniforms: DrawUniforms::default(),
             user_uniforms: draw_call_vars.user_uniforms,
             texture_slots: draw_call_vars.texture_slots,
@@ -546,21 +546,21 @@ impl DrawCall {
         }
     }
     
-    pub fn update(&mut self,  mapping:&CxDrawShaderMapping, draw_call_vars:&DrawCallVars){
+    pub fn update(&mut self, mapping: &CxDrawShaderMapping, draw_call_vars: &DrawCallVars) {
         self.draw_shader = draw_call_vars.draw_shader.unwrap();
         self.geometry = draw_call_vars.geometry;
         self.instances.truncate(0);
-        self.total_instance_slots = mapping.instance_props.total_slots;
-        for i in 0..mapping.user_uniform_props.total_slots{
+        self.total_instance_slots = mapping.instances.total_slots;
+        for i in 0..mapping.user_uniforms.total_slots {
             self.user_uniforms[i] = draw_call_vars.user_uniforms[i];
         }
-        for i in 0..mapping.textures.len(){
+        for i in 0..mapping.textures.len() {
             self.texture_slots[i] = draw_call_vars.texture_slots[i];
         }
         self.instance_dirty = true;
         self.uniforms_dirty = true;
         self.do_h_scroll = true;
-        self.do_v_scroll = true;        
+        self.do_v_scroll = true;
     }
     
     pub fn set_local_scroll(&mut self, scroll: Vec2, local_scroll: Vec2) {
@@ -709,7 +709,7 @@ impl CxView {
         }
     }
     
-    pub fn find_appendable_drawcall(&mut self, sh:&CxDrawShader, draw_call_vars: &DrawCallVars) -> Option<usize> {
+    pub fn find_appendable_drawcall(&mut self, sh: &CxDrawShader, draw_call_vars: &DrawCallVars) -> Option<usize> {
         // find our drawcall to append to the current layer
         if self.draw_items_len > 0 {
             for i in (0..self.draw_items_len).rev() {
@@ -717,17 +717,17 @@ impl CxView {
                 if let Some(draw_call) = &draw_item.draw_call {
                     if draw_item.sub_view_id.is_none() && draw_call.draw_shader == draw_call_vars.draw_shader.unwrap() {
                         // lets compare uniforms and textures..
-                        if sh.mapping.flags.draw_call_compare{
-                            if draw_call.geometry != draw_call_vars.geometry{
+                        if sh.mapping.flags.draw_call_compare {
+                            if draw_call.geometry != draw_call_vars.geometry {
                                 return None
                             }
-                            for i in 0..sh.mapping.user_uniform_props.total_slots{
-                                if draw_call.user_uniforms[i] != draw_call_vars.user_uniforms[i]{
+                            for i in 0..sh.mapping.user_uniforms.total_slots {
+                                if draw_call.user_uniforms[i] != draw_call_vars.user_uniforms[i] {
                                     return None
                                 }
                             }
-                            for i in 0..sh.mapping.textures.len(){
-                                if draw_call.texture_slots[i] != draw_call_vars.texture_slots[i]{
+                            for i in 0..sh.mapping.textures.len() {
+                                if draw_call.texture_slots[i] != draw_call_vars.texture_slots[i] {
                                     return None
                                 }
                             }
@@ -778,25 +778,33 @@ const DRAW_CALL_USER_UNIFORMS: usize = 32;
 const DRAW_CALL_TEXTURE_SLOTS: usize = 16;
 const DRAW_CALL_VAR_INSTANCES: usize = 32;
 
+#[cfg(any(target_os = "linux", target_arch = "wasm32", test))]
+const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformGLSL;
+#[cfg(any(target_os = "macos", test))]
+const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsMetal;
+#[cfg(any(target_os = "windows", test))]
+const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsHLSL;
+
+
 #[derive(Default)]
-pub struct DrawCallVars{
+pub struct DrawCallVars {
     pub var_instance_start: usize,
     pub var_instance_slots: usize,
     pub draw_shader: Option<DrawShader>,
     pub geometry: Option<Geometry>,
-    pub user_uniforms: [f32;DRAW_CALL_USER_UNIFORMS],
-    pub texture_slots:[Option<Texture>;DRAW_CALL_TEXTURE_SLOTS],
-    pub var_instances:[f32;DRAW_CALL_VAR_INSTANCES]
+    pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS],
+    pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
+    pub var_instances: [f32; DRAW_CALL_VAR_INSTANCES]
 }
 
-impl DrawCallVars{
+impl DrawCallVars {
     pub fn instance_slice<'a>(&'a self) -> &'a [f32] {
         unsafe {
             std::slice::from_raw_parts((&self.var_instances[self.var_instance_start - 1] as *const _ as *const f32).offset(1), self.var_instance_slots)
         }
-    }    
+    }
     
-    pub fn init_shader(&mut self, cx:&mut Cx, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields)  {
+    pub fn init_shader(&mut self, cx: &mut Cx, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
         // lets first fetch the shader from live_ptr
         // if it doesn't exist, we should allocate and
         if let Some(draw_shader_id) = cx.draw_shader_ptr_to_id.get(&draw_shader_ptr) {
@@ -817,7 +825,7 @@ impl DrawCallVars{
             let live_factories = &cx.live_factories;
             let result = cx.shader_registry.analyse_draw_shader(draw_shader_ptr, | span, id, live_type, draw_shader_def | {
                 if id == id!(rust_type) {
-                    fn recur_expand(live_type:LiveType, live_factories:&HashMap<LiveType, Box<dyn LiveFactory>>, draw_shader_def:&mut DrawShaderDef, span:Span){
+                    fn recur_expand(live_type: LiveType, live_factories: &HashMap<LiveType, Box<dyn LiveFactory >>, draw_shader_def: &mut DrawShaderDef, span: Span) {
                         if let Some(lf) = live_factories.get(&live_type) {
                             
                             let mut fields = Vec::new();
@@ -829,7 +837,7 @@ impl DrawCallVars{
                                     *is_instance = true;
                                     continue
                                 }*/
-                                if field.id == id!(deref_target){
+                                if field.id == id!(deref_target) {
                                     recur_expand(field.live_type, live_factories, draw_shader_def, span);
                                     continue
                                 }
@@ -865,7 +873,15 @@ impl DrawCallVars{
                 Ok(draw_shader_def) => {
                     // OK! SO the shader parsed
                     let draw_shader_id = cx.draw_shaders.len();
-                    let mut mapping = CxDrawShaderMapping::from_draw_shader_def(draw_shader_def, true);
+                    
+                    let const_table = DrawShaderConstTable::default();
+                    //let mut const_table = cx.shader_registry.compute_const_table(&draw_shader_def, NONE)
+                    
+                    let mut mapping = CxDrawShaderMapping::from_draw_shader_def(
+                        draw_shader_def,
+                        const_table,
+                        DRAW_SHADER_INPUT_PACKING
+                    );
                     mapping.update_live_uniforms(&cx.shader_registry.live_registry);
                     
                     cx.draw_shaders.push(CxDrawShader {
@@ -878,7 +894,7 @@ impl DrawCallVars{
                     cx.draw_shader_ptr_to_id.insert(draw_shader_ptr, draw_shader_id);
                     cx.draw_shader_compile_set.insert(draw_shader_ptr);
                     // now we simply queue it somewhere somehow to compile.
-                    self.draw_shader =  Some(DrawShader {
+                    self.draw_shader = Some(DrawShader {
                         draw_shader_id,
                         draw_shader_ptr
                     });
@@ -888,34 +904,26 @@ impl DrawCallVars{
                 }
             }
         }
-    }    
-
-    pub fn update_var(&mut self, cx:&mut Cx, value_ptr: LivePtr, id: Id) {
-        fn store_values(cx:&Cx, draw_shader: DrawShader, id: Id, values: &[f32], draw_call_vars:&mut DrawCallVars) {
+    }
+    
+    pub fn update_var(&mut self, cx: &mut Cx, value_ptr: LivePtr, id: Id) {
+        fn store_values(cx: &Cx, draw_shader: DrawShader, id: Id, values: &[f32], draw_call_vars: &mut DrawCallVars) {
             let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
-            for input in &sh.mapping.var_inputs.inputs {
-                if input.ident == id {
-                    match input.kind {
-                        DrawShaderVarInputKind::Instance => {
-                            if values.len() == input.size {
-                                for i in 0..input.size {
-                                    let index = draw_call_vars.var_instances.len() - sh.mapping.var_inputs.var_instance_slots + input.offset + i;
-                                    draw_call_vars.var_instances[index] = values[i];
-                                }
-                            }
-                            else {
-                                println!("variable shader input size not correct {} {}", values.len(), input.size)
-                            }
+            for input in &sh.mapping.user_uniforms.inputs {
+                if input.id == id {
+                    if values.len() == input.slots {
+                        for i in 0..input.slots {
+                            draw_call_vars.user_uniforms[input.offset + i] = values[i];
                         }
-                        DrawShaderVarInputKind::Uniform => { //TODO DO THIS RIGHT WITH MAPPING
-                            if values.len() == input.size {
-                                for i in 0..input.size {
-                                    draw_call_vars.user_uniforms[input.offset + i] = values[i];
-                                }
-                            }
-                            else {
-                                println!("variable shader input size not correct {} {}", values.len(), input.size)
-                            }
+                    }
+                }
+            }
+            for input in &sh.mapping.var_instances.inputs {
+                if input.id == id {
+                    if values.len() == input.slots {
+                        for i in 0..input.slots {
+                            let index = draw_call_vars.var_instances.len() - sh.mapping.var_instances.total_slots + input.offset + i;
+                            draw_call_vars.var_instances[input.offset + index] = values[i];
                         }
                     }
                 }
@@ -947,13 +955,12 @@ impl DrawCallVars{
     
     pub fn init_slicer(
         &mut self,
-        cx:&mut Cx,
+        cx: &mut Cx,
     ) {
         if let Some(draw_shader) = self.draw_shader {
             let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
-            let var_inputs = &sh.mapping.var_inputs;
-            self.var_instance_start = self.var_instances.len() - var_inputs.var_instance_slots;
-            self.var_instance_slots = var_inputs.total_instance_slots;
+            self.var_instance_start = self.var_instances.len() - sh.mapping.var_instances.total_slots;
+            self.var_instance_slots = sh.mapping.instances.total_slots;
         }
     }
 }

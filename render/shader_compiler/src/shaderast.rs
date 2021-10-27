@@ -1025,7 +1025,7 @@ impl Ty {
         }
     }
     
-    pub fn size(&self) -> usize {
+    pub fn slots(&self) -> usize {
         match self {
             Ty::Void => 0,
             Ty::Bool | Ty::Int | Ty::Float => 1,
@@ -1035,7 +1035,7 @@ impl Ty {
             Ty::Mat3 => 9,
             Ty::Mat4 => 16,
             Ty::Texture2D {..} => panic!(),
-            Ty::Array {elem_ty, len} => elem_ty.size() * len,
+            Ty::Array {elem_ty, len} => elem_ty.slots() * len,
             Ty::Struct(_) => panic!(),
             Ty::DrawShader(_) => panic!(),
             Ty::ClosureDecl => panic!(),
