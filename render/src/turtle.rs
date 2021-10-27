@@ -617,8 +617,8 @@ impl Cx {
                     let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                     let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
                     for i in 0..inst.instance_count {
-                        if let Some(rect_pos) = sh.mapping.rect_instance_props.rect_pos {
-                            draw_call.instances[inst.instance_offset + rect_pos + i * sh.mapping.instance_props.total_slots] += dx;
+                        if let Some(rect_pos) = sh.mapping.rect_pos {
+                            draw_call.instances[inst.instance_offset + rect_pos + i * sh.mapping.instances.total_slots] += dx;
                         }
                     }
                 },
@@ -637,8 +637,8 @@ impl Cx {
                     let draw_call = &mut cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                     let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
                     for i in 0..inst.instance_count {
-                        if let Some(rect_pos) = sh.mapping.rect_instance_props.rect_pos {
-                            draw_call.instances[inst.instance_offset + rect_pos + 1 + i * sh.mapping.instance_props.total_slots] += dy;
+                        if let Some(rect_pos) = sh.mapping.rect_pos {
+                            draw_call.instances[inst.instance_offset + rect_pos + 1 + i * sh.mapping.instances.total_slots] += dy;
                         }
                     }
                 },

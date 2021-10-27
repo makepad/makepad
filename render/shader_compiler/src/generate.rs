@@ -105,7 +105,7 @@ pub fn generate_cons_fn(backend_writer:&dyn BackendWriter, string: &mut String, 
         match param_ty {
             Ty::Bool | Ty::Int | Ty::Float => {
                 let mut sep = "";
-                for _ in 0..ty.size() {
+                for _ in 0..ty.slots() {
                     write!(string, "{}x", sep).unwrap();
                     sep = ", ";
                 }
@@ -147,11 +147,11 @@ pub fn generate_cons_fn(backend_writer:&dyn BackendWriter, string: &mut String, 
     } else {
         let mut sep = "";
         for (index_0, param_ty) in param_tys.iter().enumerate() {
-            if param_ty.size() == 1 {
+            if param_ty.slots() == 1 {
                 write!(string, "{}x{}", sep, index_0).unwrap();
                 sep = ", ";
             } else {
-                for index_1 in 0..param_ty.size() {
+                for index_1 in 0..param_ty.slots() {
                     write!(string, "{}x{}[{}]", sep, index_0, index_1).unwrap();
                     sep = ", ";
                 }

@@ -884,7 +884,7 @@ impl Cx {
                 let cxview = &mut self.views[view_id];
                 let draw_call = cxview.draw_items[draw_item_id].draw_call.as_mut().unwrap();
                 let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
-                let slots = sh.mapping.instance_props.total_slots;
+                let slots = sh.mapping.instances.total_slots;
                 let instances = draw_call.instances.len() / slots;
                 writeln!(s, "{}call {}: {}({}) *:{} scroll:{}", indent, draw_item_id, sh.name, draw_call.draw_shader.draw_shader_id, instances, draw_call.get_local_scroll()).unwrap();
                 // lets dump the instance geometry
@@ -892,15 +892,15 @@ impl Cx {
                     for inst in 0..instances.min(1) {
                         let mut out = String::new();
                         let mut off = 0;
-                        for prop in &sh.mapping.instance_props.props {
-                            match prop.slots {
-                                1 => out.push_str(&format!("{}:{} ", prop.id, draw_call.instances[inst * slots + off])),
-                                2 => out.push_str(&format!("{}:v2({},{}) ", prop.id, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off])),
-                                3 => out.push_str(&format!("{}:v3({},{},{}) ", prop.id, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off], draw_call.instances[inst * slots + 1 + off])),
-                                4 => out.push_str(&format!("{}:v4({},{},{},{}) ", prop.id, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off], draw_call.instances[inst * slots + 2 + off], draw_call.instances[inst * slots + 3 + off])),
+                        for input in &sh.mapping.instances.inputs {
+                            match input.slots {
+                                1 => out.push_str(&format!("{}:{} ", input.id, draw_call.instances[inst * slots + off])),
+                                2 => out.push_str(&format!("{}:v2({},{}) ", input.id, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off])),
+                                3 => out.push_str(&format!("{}:v3({},{},{}) ", input.id, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off], draw_call.instances[inst * slots + 1 + off])),
+                                4 => out.push_str(&format!("{}:v4({},{},{},{}) ", input.id, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off], draw_call.instances[inst * slots + 2 + off], draw_call.instances[inst * slots + 3 + off])),
                                 _ => {}
                             }
-                            off += prop.slots;
+                            off += input.slots;
                         }
                         writeln!(s, "  {}instance {}: {}", indent, inst, out).unwrap();
                     }

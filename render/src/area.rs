@@ -171,10 +171,10 @@ impl Area{
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 // ok now we have to patch x/y/w/h into it
-                if let Some(rect_pos) = sh.mapping.rect_instance_props.rect_pos{
+                if let Some(rect_pos) = sh.mapping.rect_pos{
                     let x = draw_call.instances[inst.instance_offset + rect_pos + 0];
                     let y = draw_call.instances[inst.instance_offset + rect_pos + 1];
-                    if let Some(rect_size) = sh.mapping.rect_instance_props.rect_size{
+                    if let Some(rect_size) = sh.mapping.rect_size{
                         let w = draw_call.instances[inst.instance_offset + rect_size + 0];
                         let h = draw_call.instances[inst.instance_offset + rect_size + 1];
                         return draw_call.clip_and_scroll_rect(x,y,w,h);
@@ -207,7 +207,7 @@ impl Area{
                 let draw_call = &cxview.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 // ok now we have to patch x/y/w/h into it
-                if let Some(rect_pos) = sh.mapping.rect_instance_props.rect_pos{
+                if let Some(rect_pos) = sh.mapping.rect_pos{
                     let x = draw_call.instances[inst.instance_offset + rect_pos + 0];
                     let y = draw_call.instances[inst.instance_offset + rect_pos + 1];
                     return Vec2{
@@ -239,11 +239,11 @@ impl Area{
                 let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];        // ok now we have to patch x/y/w/h into it
                 
-                if let Some(rect_pos) = sh.mapping.rect_instance_props.rect_pos{
+                if let Some(rect_pos) = sh.mapping.rect_pos{
                     draw_call.instances[inst.instance_offset + rect_pos + 0] = rect.pos.x;
                     draw_call.instances[inst.instance_offset + rect_pos + 1] = rect.pos.y;
                 }
-                if let Some(rect_size) = sh.mapping.rect_instance_props.rect_size{
+                if let Some(rect_size) = sh.mapping.rect_size{
                     draw_call.instances[inst.instance_offset + rect_size + 0] = rect.size.x;
                     draw_call.instances[inst.instance_offset + rect_size + 1] = rect.size.y;
                 }
@@ -255,7 +255,7 @@ impl Area{
             _=>()
          }
     }
-    
+    /*
     pub fn get_read_ref<'a>(&self, cx:&'a Cx, id:Id, ty:Ty)->Option<DrawReadRef<'a>>{
         match self{
             Area::Instance(inst)=>{
@@ -352,7 +352,7 @@ impl Area{
             _=>(),
         }
         None
-    }
+    }*/
 /*
     pub fn write_texture_2d_id(&self, cx:&mut Cx, id:Id, name:&str, texture_id: usize){
          match self{
