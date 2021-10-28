@@ -45,7 +45,7 @@ use crate::cx::*;
 pub struct DrawQuad {
     #[hidden()] pub area: Area,
     #[live()] pub geometry: GeometryQuad2D,
-    #[hidden()] pub draw_call_vars: DrawCallVars,
+    #[local()] pub draw_call_vars: DrawCallVars,
     #[live()] pub rect_pos: Vec2,
     #[live()] pub rect_size: Vec2,
     #[live(1.0)] pub draw_depth: f32,

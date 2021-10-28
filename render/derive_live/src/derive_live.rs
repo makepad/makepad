@@ -77,13 +77,19 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
                                 lf.add(", field_type: LiveFieldType::Live");
                                 lu.add("Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".live_update(cx, ptr),");
                             }
-                            else{
+                            else if attr.name == "local"{
                                 lf.add(", field_type: LiveFieldType::Local");
                             }
+                            
                             lf.add("});");
                             
                             if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty(){
-                                ln.add("LiveNew::live_new(cx)");
+                                if attr.name == "live"{
+                                    ln.add("LiveNew::live_new(cx)");
+                                }
+                                else{
+                                    ln.add("Default::default()");
+                                }
                             }
                             else{
                                 ln.stream(attr.args.clone());
