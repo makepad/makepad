@@ -516,9 +516,9 @@ impl<'a> LiveParser<'a> {
                                     id_pack: id,
                                     value: LiveValue::Use {module_path_ids}
                                 });
-                                if !self.accept_token(Token::Punct(id!(,))) {
-                                    self.accept_token(Token::Punct(id!(;)));
-                                }
+                                //if !self.accept_token(Token::Punct(id!(,))) {
+                                self.expect_token(Token::Punct(id!(;)))?;
+                                //}
                             }
                             id_pack!(const)=>{
                                 let token_id = self.get_token_id();
@@ -539,9 +539,9 @@ impl<'a> LiveParser<'a> {
                                         scope_count: 0
                                     }
                                 });
-                                if !self.accept_token(Token::Punct(id!(,))) {
-                                    self.accept_token(Token::Punct(id!(;)));
-                                }
+                                //if !self.accept_token(Token::Punct(id!(,))) {
+                                self.expect_token(Token::Punct(id!(;)))?;
+                                //}
                             }
                             _ => {
                                 // ok so we get an ident.
@@ -570,9 +570,9 @@ impl<'a> LiveParser<'a> {
                                     self.expect_live_value(ty, level, ld)?;
                                 }
                                 
-                                if !self.accept_token(Token::Punct(id!(,))) {
-                                    self.expect_token(Token::Punct(id!(;)))?;
-                                }
+                                //if !self.accept_token(Token::Punct(id!(,))) {
+                                self.expect_token(Token::Punct(id!(;)))?;
+                                //}
                             }
                         }
                     }
@@ -585,7 +585,7 @@ impl<'a> LiveParser<'a> {
                             skip_delim = true;
                         }
                         
-                        if !skip_delim && !self.accept_token(Token::Punct(id!(,))) {
+                        if !skip_delim{//} && !self.accept_token(Token::Punct(id!(,))) {
                             self.expect_token(Token::Punct(id!(;)))?;
                         }
                     }
