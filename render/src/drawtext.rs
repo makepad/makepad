@@ -1,5 +1,109 @@
 use crate::cx::*;
 
+live_body!{
+    
+    use crate::shader_std::*;
+    use crate::geometrygen::GeometryQuad2D;
+    
+    DrawText: DrawShader2D {
+        //debug: true;
+        rust_type: {{DrawText}};
+        geometry: GeometryQuad2D {};
+        
+        uniform curve: float;
+        uniform brightnesS: float;
+        
+        texture texture:Texture2D;
+        
+        varying tex_coord1: vec2;
+        varying tex_coord2: vec2;
+        varying tex_coord3: vec2;
+        varying clipped: vec2;
+        
+        fn scroll(self) -> vec2 {
+            return self.draw_scroll.xy;
+        }
+        
+        fn vertex(self) -> vec4 {
+            let min_pos = vec2(self.rect_pos.x, self.rect_pos.y);
+            let max_pos = vec2(self.rect_pos.x + self.rect_size.x, self.rect_pos.y - self.rect_size.y);
+            
+            self.clipped = clamp(
+                mix(min_pos, max_pos, self.geom_pos) - self.draw_scroll.xy,
+                self.draw_clip.xy,
+                self.draw_clip.zw
+            );
+            
+            let normalized: vec2 = (self.clipped - min_pos + self.draw_scroll.xy) / vec2(self.rect_size.x, - self.rect_size.y);
+            //rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
+            
+            self.tex_coord1 = mix(
+                self.font_t1.xy,
+                self.font_t2.xy,
+                normalized.xy
+            );
+            
+            self.tex_coord2 = mix(
+                self.font_t1.xy,
+                self.font_t1.xy + (self.font_t2.xy - self.font_t1.xy) * 0.75,
+                normalized.xy
+            );
+            
+            self.tex_coord3 = mix(
+                self.font_t1.xy,
+                self.font_t1.xy + (self.font_t2.xy - self.font_t1.xy) * 0.6,
+                normalized.xy
+            );
+            
+            return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
+                self.clipped.x,
+                self.clipped.y,
+                self.char_depth + self.draw_zbias,
+                1.
+            )));
+        }
+        
+        
+        fn get_color(self) -> vec4 {
+            return self.color;
+        }
+        
+        fn pixel(self) -> vec4 {
+            let dx = dFdx(vec2(self.tex_coord1.x * 2048.0, 0.)).x;
+            let dp = 1.0 / 2048.0;
+            
+            // basic hardcoded mipmapping so it stops 'swimming' in VR
+            // mipmaps are stored in red/green/blue channel
+            let s = 1.0;
+            
+            if dx > 7.0 {
+                s = 0.7;
+            }
+            else if dx > 2.75 {
+                s = (
+                    sample2d(self.texture, self.tex_coord3.xy + vec2(0., 0.)).z
+                        + sample2d(self.texture, self.tex_coord3.xy + vec2(dp, 0.)).z
+                        + sample2d(self.texture, self.tex_coord3.xy + vec2(0., dp)).z
+                        + sample2d(self.texture, self.tex_coord3.xy + vec2(dp, dp)).z
+                ) * 0.25;
+            }
+            else if dx > 1.75 {
+                s = sample2d(self.texture, self.tex_coord3.xy).z;
+            }
+            else if dx > 1.3 {
+                s = sample2d(self.texture, self.tex_coord2.xy).y;
+            }
+            else {
+                s = sample2d(self.texture, self.tex_coord1.xy).x;
+            }
+            
+            s = pow(s, curve);
+            let col = get_color(); //color!(white);//get_color();
+            return vec4(s * col.rgb * brightness * col.a, s * col.a);
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 pub enum Wrapping {
     Char,
@@ -9,31 +113,30 @@ pub enum Wrapping {
     Ellipsis(f32)
 }
 
-#[derive(Debug)]
-#[repr(C, packed)]
+#[derive(Live)]
+#[repr(C,)]
 pub struct DrawText {
-    pub shader: Shader,
-    pub area: Area,
-    pub many: Option<ManyInstances>,
-    pub many_old_area: Area,
-    pub slots: usize,
-    pub buf: Vec<char>,
-    pub text_style: TextStyle,
-    pub wrapping: Wrapping,
-    pub font_scale: f32,
-    pub draw_depth: f32,
+    #[hidden()] pub buf: Vec<char>,
+    #[hidden()] pub area: Area,
     
-    // instances
-    pub font_t1: Vec2,
-    pub font_t2: Vec2,
-    pub color: Vec4,
-    pub rect_pos: Vec2,
-    pub rect_size: Vec2,
-    pub char_depth: f32,
-    pub base: Vec2,
-    pub font_size: f32,
-    pub char_offset: f32,
-    pub marker: f32,
+    #[live()] pub geometry: GeometryQuad2D,
+    #[live()] pub text_style: TextStyle,
+    #[live()] pub wrapping: Wrapping,
+    #[live()] pub font_scale: f32,
+    #[live(1.0)] pub draw_depth: f32,    
+
+    #[hidden()] pub draw_call_vars: DrawCallVars,
+    // these values are all generated
+    #[local()] pub font_t1: Vec2,
+    #[local()] pub font_t2: Vec2,
+    #[local()] pub color: Vec4,
+    #[local()] pub rect_pos: Vec2,
+    #[local()] pub rect_size: Vec2,
+    #[local()] pub char_depth: f32,
+    #[local()] pub base: Vec2,
+    #[local()] pub font_size: f32,
+    #[local()] pub char_offset: f32,
+    #[local()] pub marker: f32,
 }
 
 impl Clone for DrawText {

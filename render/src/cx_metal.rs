@@ -815,7 +815,10 @@ impl MetalCx {
         //let debug = ;
         //mapping.update_live_uniforms(live_styles);
         if draw_shader_def.flags.debug {
-            println!("{}\n---------------\n", gen.mtlsl);
+            let split = gen.mtlsl.split("\n");
+            for (i,item) in split.enumerate(){
+                println!("{: >3}:    {}", i+1, item);
+            }
         }
         
         if let Some(sh_platform) = &sh.platform {
