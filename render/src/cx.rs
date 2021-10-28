@@ -15,15 +15,6 @@ pub use makepad_live_parser::ModulePath;
 pub use makepad_live_parser::id;
 pub use makepad_shader_compiler::Ty;
 
-/*
-pub use makepad_live_compiler::livetypes::*;
-pub use makepad_live_compiler::livestyles::*;
-pub use makepad_live_compiler::span::LiveBodyId;
-pub use makepad_live_compiler::math::*;
-pub use makepad_live_compiler::colors::*;
-pub use makepad_live_compiler::ty::{Ty, TyLit, TyExpr};
-*/
-
 //pub use crate::fonts::*;
 pub use crate::turtle::*;
 pub use crate::cursor::*;
@@ -42,41 +33,29 @@ pub use crate::geometrygen::*;
 pub use crate::gpuinfo::*;
 pub use crate::uid;
 
-#[cfg(all(not(feature = "ipc"), target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub use crate::cx_linux::*;
-#[cfg(all(not(feature = "ipc"), target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub use crate::cx_opengl::*;
 
-#[cfg(all(not(feature = "ipc"), target_os = "macos"))]
+#[cfg(target_os = "macos")]
 pub use crate::cx_macos::*;
-#[cfg(all(not(feature = "ipc"), target_os = "macos"))]
+#[cfg(target_os = "macos")]
 pub use crate::cx_metal::*;
 
-#[cfg(all(not(feature = "ipc"), target_os = "windows"))]
+#[cfg(target_os = "windows")]
 pub use crate::cx_windows::*;
-#[cfg(all(not(feature = "ipc"), target_os = "windows"))]
+#[cfg(target_os = "windows")]
 pub use crate::cx_dx11::*;
 
-#[cfg(all(not(feature = "ipc"), target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 pub use crate::cx_webgl::*;
 
-#[cfg(all(not(feature = "ipc"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use crate::cx_desktop::*;
 
-#[cfg(all(not(feature = "ipc"), target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 pub use crate::cx_wasm32::*;
-
-#[cfg(feature = "ipc")]
-pub use crate::cx_ipc_child::*;
-
-#[cfg(all(feature = "ipc", target_arch = "wasm32"))]
-pub use crate::cx_ipc_wasm32::*;
-
-#[cfg(all(feature = "ipc", any(target_os = "linux", target_os = "macos")))]
-pub use crate::cx_ipc_posix::*;
-
-#[cfg(all(feature = "ipc", target_os = "windows"))]
-pub use crate::cx_ipc_win32::*;
 
 pub use crate::log;
 
