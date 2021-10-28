@@ -30,19 +30,25 @@ pub fn live_body(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
     if let Some(span) = parser.span() {
         let (s, live_types) = token_parser_to_whitespace_matching_string(&mut parser, span);
-        
         //tb.ident(&cx);
-        tb.add("fn live_body ( ) -> LiveBody { LiveBody {");
-        tb.add("module_path :").ident_with_span("module_path", span).add("! ( ) . to_string ( ) ,");
-        tb.add("file :").ident_with_span("file", span).add("! ( ) . to_string ( ) . replace ( ").string("\\").add(",").string("/").add(") ,");
-        tb.add("line :").ident_with_span("line", span).add("! ( ) as usize ,");
-        tb.add("column :").ident_with_span("column", span).add("! ( ) as usize ,");
-        tb.add("live_types : { let mut v = Vec :: new ( ) ;");
-        for live_type in live_types {
-            tb.add("v . push (").stream(Some(live_type)).add(" :: live_type ( ) ) ;");
+        tb.add("pub fn live_register(cx:&mut Cx) {");
+        tb.add("    let live_body = LiveBody {");
+        tb.add("        module_path :").ident_with_span("module_path", span).add("!().to_string(),");
+        tb.add("        file:").ident_with_span("file", span).add("!().to_string().replace(").string("\\").add(",").string("/").add("),");
+        tb.add("        line:").unsuf_usize(span.start().line - 1).add(",");
+        tb.add("        column:").unsuf_usize(span.start().column).add(",");
+        tb.add("        live_types:{");
+        tb.add("            let mut v = Vec::new();");
+        for live_type in &live_types {
+            tb.stream(Some(live_type.clone())).add("::live_register(cx);");
+            tb.add("        v.push(").stream(Some(live_type.clone())).add("::live_type());");
         }
-        tb.add(" v } ,");
-        tb.add("code :").string(&s).add(" . to_string ( ) } }");
+        tb.add("            v");
+        tb.add("        },");
+        tb.add("        code:").string(&s).add(".to_string()");
+        tb.add("    };");
+        tb.add("    cx.register_live_body(live_body);");
+        tb.add("}");
         return tb.end();
     }
     else {

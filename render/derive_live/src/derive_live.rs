@@ -10,14 +10,7 @@ pub fn derive_live_update_hooks_impl(input: TokenStream) -> TokenStream {
     parser.eat_ident("pub");
     if parser.eat_ident("struct") {
         if let Some(struct_name) = parser.eat_any_ident() {
-            tb.add("impl LiveUpdateHooks for").ident(&struct_name).add(" {");
-            tb.add("    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
-            tb.add("    }");
-            tb.add("    fn before_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {");
-            tb.add("    }");
-            tb.add("    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {");
-            tb.add("    }");
-            tb.add("}");
+            tb.add("impl LiveUpdateHooks for").ident(&struct_name).add(" { }");
             return tb.end();
         }
     }
@@ -168,9 +161,9 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             tb.add("        }");
             tb.add("        self.after_live_update(cx, live_ptr);");
             tb.add("    }");
-            tb.add("    fn _live_type(&self) -> LiveType {");
-            tb.add("        Self::live_type()");
-            tb.add("    }");
+            //tb.add("    fn _live_type(&self) -> LiveType {");
+            //tb.add("        Self::live_type()");
+            //tb.add("    }");
             tb.add("}");
 
             tb.add("impl").stream(generic.clone());
@@ -179,15 +172,15 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             tb.add("        LiveType(std::any::TypeId::of::<").ident(&struct_name).add(">())");
             tb.add("    }");
             tb.add("    fn live_register(cx: &mut Cx) {");
-            tb.add("        cx.register_live_body(live_body());");
+            //tb.add("        cx.register_live_body(live_body());");
             tb.add("        struct Factory();");
             tb.add("        impl LiveFactory for Factory {");
             tb.add("            fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> {");
             tb.add("                Box::new(").ident(&struct_name).add(" ::live_new(cx))");
             tb.add("            }");
-            tb.add("            fn live_type(&self) -> LiveType {");
-            tb.add("                ").ident(&struct_name).add(" ::live_type()");
-            tb.add("            }");
+            // tb.add("            fn live_type(&self) -> LiveType {");
+            // tb.add("                ").ident(&struct_name).add(" ::live_type()");
+            // tb.add("            }");
             tb.stream(Some(lf.end()));
             tb.add("        }");
             tb.add("        cx.register_factory(").ident(&struct_name).add("::live_type(), Box::new(Factory()));");

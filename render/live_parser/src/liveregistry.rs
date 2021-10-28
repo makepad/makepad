@@ -22,6 +22,7 @@ use crate::lex::lex;
 
 pub struct LiveFile {
     pub module_path: ModulePath,
+    pub line_offset: usize,
     pub file: String,
     pub source: String,
     pub document: LiveDocument,
@@ -147,7 +148,7 @@ impl LiveRegistry {
     
     pub fn live_error_to_live_file_error(&self, live_error: LiveError) -> LiveFileError {
         let live_file = &self.live_files[live_error.span.file_id().to_index()];
-        live_error.to_live_file_error(&live_file.file, &live_file.source)
+        live_error.to_live_file_error(&live_file.file, &live_file.source, live_file.line_offset)
     }
     
     pub fn is_baseclass(id: IdPack) -> bool {
@@ -270,7 +271,7 @@ impl LiveRegistry {
         return None
     }
     
-    pub fn parse_live_file(&mut self, file: &str, own_module_path: ModulePath, source: String, live_types: Vec<LiveType>) -> Result<FileId, LiveFileError> {
+    pub fn parse_live_file(&mut self, file: &str, own_module_path: ModulePath, source: String, live_types: Vec<LiveType>, line_offset:usize) -> Result<FileId, LiveFileError> {
         
         let (is_new_file_id, file_id) = if let Some(file_id) = self.file_ids.get(file) {
             (false, *file_id)
@@ -281,14 +282,14 @@ impl LiveRegistry {
         };
         
         let lex_result = match lex(source.chars(), file_id) {
-            Err(msg) => return Err(msg.to_live_file_error(file, &source)), //panic!("Lex error {}", msg),
+            Err(msg) => return Err(msg.to_live_file_error(file, &source, line_offset)), //panic!("Lex error {}", msg),
             Ok(lex_result) => lex_result
         };
         
         let mut parser = LiveParser::new(&lex_result.tokens, &live_types, file_id);
         
         let mut document = match parser.parse_live_document() {
-            Err(msg) => return Err(msg.to_live_file_error(file, &source)), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
+            Err(msg) => return Err(msg.to_live_file_error(file, &source, line_offset)), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
             Ok(ld) => ld
         };
         document.strings = lex_result.strings;
@@ -350,6 +351,7 @@ impl LiveRegistry {
         let live_file = LiveFile {
             module_path: own_module_path,
             file: file.to_string(),
+            line_offset,
             source,
             document
         };
@@ -1010,7 +1012,17 @@ impl LiveRegistry {
                 },*/
                 LiveValue::Use {module_path_ids} => { // import things on the scope from Use
                     let module_path = in_doc.fetch_module_path(module_path_ids, in_crate);
-                    let file_id = module_path_to_file_id.get(&module_path).unwrap();
+                    let file_id = if let Some(file_id) = module_path_to_file_id.get(&module_path){
+                        file_id
+                    }
+                    else{
+                        errors.push(LiveError {
+                            origin: live_error_origin!(),
+                            span: in_doc.token_id_to_span(node.token_id),
+                            message: format!("Cannot find import {}", IdFmt::col(&in_doc.multi_ids, node.id_pack))
+                        });    
+                        return                    
+                    };
                     let other_doc = &expanded[file_id.to_index()];
                     
                     match node.id_pack.unpack() {

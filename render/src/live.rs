@@ -14,7 +14,7 @@ pub struct LiveBody {
 pub trait LiveFactory {
     fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate>;
     fn live_fields(&self, fields: &mut Vec<LiveField>);
-    fn live_type(&self) -> LiveType;
+//    fn live_type(&self) -> LiveType;
 }
 
 pub trait LiveNew {
@@ -25,7 +25,7 @@ pub trait LiveNew {
 
 pub trait LiveUpdate {
     fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr);
-    fn _live_type(&self) -> LiveType;
+//    fn _live_type(&self) -> LiveType;
 }
 
 pub trait LiveUpdateValue{
@@ -34,9 +34,9 @@ pub trait LiveUpdateValue{
 
 
 pub trait LiveUpdateHooks {
-    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr);
-    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr);
-    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr:LivePtr);
+    fn live_update_value_unknown(&mut self, _cx: &mut Cx, _id: Id, _ptr: LivePtr){}
+    fn before_live_update(&mut self, _cx:&mut Cx, _live_ptr: LivePtr){}
+    fn after_live_update(&mut self, _cx: &mut Cx, _live_ptr:LivePtr){}
 }
 
 pub enum LiveFieldType {
@@ -58,10 +58,12 @@ pub struct LiveBinding {
 
 impl Cx {
     pub fn live_register(&mut self) {
-        crate::DrawQuad::live_register(self);
-        crate::DrawColor::live_register(self);
-        crate::GeometryQuad2D::live_register(self);
-        crate::shader_std::define_shader_stdlib(self);
+        crate::drawquad::live_register(self);
+        crate::drawcolor::live_register(self);
+        crate::drawtext::live_register(self);
+        crate::geometrygen::live_register(self);
+        crate::shader_std::live_register(self);
+        crate::fonts::live_register(self);
     }
     
     // ok so now what. now we should run the expansion
@@ -93,7 +95,8 @@ impl Cx {
             &live_body.file,
             ModulePath::from_str(&live_body.module_path).unwrap(),
             live_body.code,
-            live_body.live_types
+            live_body.live_types,
+            live_body.line
         );
         if let Err(msg) = result {
             println!("Error parsing live file {}", msg);
@@ -111,14 +114,10 @@ impl Cx {
 
 
 #[macro_export]
-macro_rules!live_prim {
+macro_rules!live_primitive {
     ( $ ty: ident, $ update: item) => {
         impl LiveUpdate for $ ty {
             $update
-            
-            fn _live_type(&self) -> LiveType {
-                Self::live_type()
-            }
         }
         impl LiveNew for $ ty {
             fn live_new(_cx: &mut Cx) -> Self {
@@ -136,10 +135,6 @@ macro_rules!live_prim {
                     
                     fn live_fields(&self, _fields: &mut Vec<LiveField>) where Self: Sized {
                     }
-                    
-                    fn live_type(&self) -> LiveType where Self: Sized {
-                        $ ty::live_type()
-                    }
                 }
                 cx.live_factories.insert( $ ty::live_type(), Box::new(Factory()));
             }
@@ -147,7 +142,7 @@ macro_rules!live_prim {
     }
 }
 
-live_prim!(f32, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+live_primitive!(f32, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
     match node.value{
         LiveValue::Int(val)=>*self = val as f32,
@@ -156,7 +151,7 @@ live_prim!(f32, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     }
 });
 
-live_prim!(Vec2, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+live_primitive!(Vec2, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
     match node.value{
         LiveValue::Vec2(v)=>*self =v,
@@ -164,7 +159,7 @@ live_prim!(Vec2, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     }
 });
 
-live_prim!(Vec3, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+live_primitive!(Vec3, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
     match node.value{
         LiveValue::Vec3(v)=>*self =v,
@@ -172,10 +167,20 @@ live_prim!(Vec3, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     }
 });
 
-live_prim!(Vec4, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+live_primitive!(Vec4, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
     match node.value{
         LiveValue::Color(v)=>*self = Vec4::from_u32(v),
+        _=>()
+    }
+});
+
+live_primitive!(String, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+    let (doc, node) = cx.shader_registry.live_registry.resolve_doc_ptr(ptr);
+    match node.value{
+        LiveValue::String {string_start,string_count}=>{
+            doc.get_string(string_start, string_count, self);
+        }
         _=>()
     }
 });
