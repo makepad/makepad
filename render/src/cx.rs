@@ -15,7 +15,7 @@ pub use makepad_live_parser::ModulePath;
 pub use makepad_live_parser::id;
 pub use makepad_shader_compiler::Ty;
 
-//pub use crate::fonts::*;
+pub use crate::fonts::*;
 pub use crate::turtle::*;
 pub use crate::cursor::*;
 pub use crate::window::*;
@@ -71,8 +71,8 @@ pub struct Cx {
     pub views: Vec<CxView>,
     pub views_free: Vec<usize>,
     
-    //pub fonts: Vec<CxFont>,
-    //pub fonts_atlas: CxFontsAtlas,
+    pub fonts: Vec<CxFont>,
+    pub fonts_atlas: CxFontsAtlas,
     pub textures: Vec<CxTexture>,
     pub textures_free: Vec<usize>,
     
@@ -216,8 +216,8 @@ impl Default for Cx {
             passes_free: Vec::new(),
             views: vec![CxView {..Default::default()}],
             views_free: Vec::new(),
-            //fonts: Vec::new(),
-            //fonts_atlas: CxFontsAtlas::default(),
+            fonts: Vec::new(),
+            fonts_atlas: CxFontsAtlas::default(),
             textures: textures,
             textures_free: Vec::new(),
             draw_shaders: Vec::new(),
@@ -912,7 +912,7 @@ macro_rules!main_app {
             //TODO do this with a macro to generate both entrypoints for App and Cx
             let mut cx = Cx::default();
             cx.live_register();
-            $ app::live_register(&mut cx);
+            live_register(&mut cx);
             
             cx.live_expand();
             //cx.init_live_styles();
@@ -936,7 +936,7 @@ macro_rules!main_app {
         pub extern "C" fn create_wasm_app() -> u32 {
             let mut cx = Box::new(Cx::default());
             cx.live_register();
-            $ app::live_register(&mut cx);
+            live_register(&mut cx);
             cx.live_expand();
             //cx.init_live_styles();
             //let app = Box::new( $ app::new(&mut cx));
