@@ -361,7 +361,7 @@ impl<'a> DrawShaderGenerator<'a> {
         for decl in &self.draw_shader_def.fields {
             match &decl.kind {
                 DrawShaderFieldKind::Geometry {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
-                    writeln!(self.string, "    varyings.{0} = geometries.{0};", decl.ident).unwrap();
+                    writeln!(self.string, "    varyings.{0} = geometries.{0};", DisplayDsIdent(decl.ident)).unwrap();
                 }
                 DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
                     match decl.ty_expr.ty.borrow().as_ref().unwrap() {

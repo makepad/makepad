@@ -3,17 +3,37 @@ use proc_macro::{TokenStream};
 use crate::macro_lib::*;
 use crate::id::*;
 
+pub fn derive_live_update_hooks_impl(input: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new();
+    let mut parser = TokenParser::new(input);
+    let _main_attribs = parser.eat_attributes();
+    parser.eat_ident("pub");
+    if parser.eat_ident("struct") {
+        if let Some(struct_name) = parser.eat_any_ident() {
+            tb.add("impl LiveUpdateHooks for").ident(&struct_name).add(" {");
+            tb.add("    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
+            tb.add("    }");
+            tb.add("    fn before_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {");
+            tb.add("    }");
+            tb.add("    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {");
+            tb.add("    }");
+            tb.add("}");
+            return tb.end();
+        }
+    }
+    return parser.unexpected()
+}
+
 pub fn derive_live_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
     let _main_attribs = parser.eat_attributes();
     parser.eat_ident("pub");
-
     if parser.eat_ident("struct") {
         if let Some(struct_name) = parser.eat_any_ident() {
             let generic = parser.eat_generic();
             let types = parser.eat_all_types();
-            let where_clause = parser.eat_where_clause(Some("LiveUpdateHooks"));
+            let where_clause = parser.eat_where_clause(None);//Some("LiveUpdateHooks"));
             
             let mut ln = TokenBuilder::new();
             let mut lf = TokenBuilder::new();
@@ -37,7 +57,7 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
                     
                     // ok check what our options are.
                     for attr in &field.attrs{
-                        if attr.name == "local"{
+                        if attr.name == "hidden"{
                             if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty(){
                                 ln.add("Default::default()");
                             }
@@ -48,13 +68,20 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
                             attr_found = true;
                             break;
                         }
-                        else if attr.name == "live"{
+                        else if attr.name == "live" || attr.name == "local"{
 
                             lf.add("fields.push(LiveField{id:Id::from_str(").string(&field.name).add(").unwrap()");
-                            lf.add(", live_type:").stream(Some(field.ty.clone())).add("::live_type()});");
-
-                            lu.add("Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".live_update(cx, ptr),");
-
+                            lf.add(", live_type:").stream(Some(field.ty.clone())).add("::live_type()");
+                            
+                            if attr.name == "live"{
+                                lf.add(", field_type: LiveFieldType::Live");
+                                lu.add("Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".live_update(cx, ptr),");
+                            }
+                            else{
+                                lf.add(", field_type: LiveFieldType::Local");
+                            }
+                            lf.add("});");
+                            
                             if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty(){
                                 ln.add("LiveNew::live_new(cx)");
                             }

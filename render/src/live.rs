@@ -11,6 +11,51 @@ pub struct LiveBody {
     pub live_types: Vec<LiveType>
 }
 
+pub trait LiveFactory {
+    fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate>;
+    fn live_fields(&self, fields: &mut Vec<LiveField>);
+    fn live_type(&self) -> LiveType;
+}
+
+pub trait LiveNew {
+    fn live_new(cx: &mut Cx) -> Self;
+    fn live_type() -> LiveType;
+    fn live_register(cx: &mut Cx);
+}
+
+pub trait LiveUpdate {
+    fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr);
+    fn _live_type(&self) -> LiveType;
+}
+
+pub trait LiveUpdateValue{
+    fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr);
+}
+
+
+pub trait LiveUpdateHooks {
+    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr);
+    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr);
+    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr:LivePtr);
+}
+
+pub enum LiveFieldType {
+    Local,
+    Live
+}
+
+pub struct LiveField {
+    pub id: Id,
+    pub live_type: LiveType,
+    pub field_type: LiveFieldType
+}
+
+#[derive(Default)]
+pub struct LiveBinding {
+    pub live_ptr: Option<LivePtr>
+}
+
+
 impl Cx {
     pub fn live_register(&mut self) {
         crate::DrawQuad::live_register(self);
@@ -62,39 +107,6 @@ impl Cx {
     pub fn get_factory(&mut self, live_type: LiveType) -> &Box<dyn LiveFactory> {
         self.live_factories.get(&live_type).unwrap()
     }
-}
-
-pub trait LiveFactory {
-    fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate>;
-    fn live_fields(&self, fields: &mut Vec<LiveField>);
-    fn live_type(&self) -> LiveType;
-}
-
-pub trait LiveNew {
-    fn live_new(cx: &mut Cx) -> Self;
-    fn live_type() -> LiveType;
-    fn live_register(cx: &mut Cx);
-}
-
-pub trait LiveUpdate {
-    fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr);
-    fn _live_type(&self) -> LiveType;
-}
-
-pub trait LiveUpdateValue{
-    fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr);
-}
-
-
-pub trait LiveUpdateHooks {
-    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr);
-    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr);
-    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr:LivePtr);
-}
-
-#[derive(Default)]
-pub struct LiveBinding {
-    pub live_ptr: Option<LivePtr>
 }
 
 
@@ -167,13 +179,6 @@ live_prim!(Vec4, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
         _=>()
     }
 });
-
-#[derive(Debug)]
-pub struct LiveField {
-    pub id: Id,
-    pub live_type: LiveType
-}
-
 
 /*
 pub trait DrawInputType {
