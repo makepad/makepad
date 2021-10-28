@@ -1,14 +1,14 @@
 use makepad_render::*;
 
 live_body!{
-    use makepad_render::drawcolor::DrawColor
-    use makepad_render::drawtext::DrawText
+    use makepad_render::drawcolor::DrawColor;
+    use makepad_render::drawtext::DrawText;
 
     App: Component {
         rust_type: {{BareExampleApp}}
         
         draw_quad: DrawColor {
-            color: #f00
+            color: #f00;
             fn pixel(self) -> vec4 {
                 return mix(#f00, #0f0, self.geom_pos.y);
             }
