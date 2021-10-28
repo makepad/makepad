@@ -1,5 +1,5 @@
 // MacOS specific loop
-use crate::cx_cocoa::*;
+use crate::cx_cocoa_app::*;
 use crate::cx::*;
 
 impl Cx {

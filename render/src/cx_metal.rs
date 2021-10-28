@@ -12,7 +12,8 @@ use makepad_shader_compiler::shaderast::DrawShaderDef;
 
 //use metal::*;
 use crate::cx_apple::*;
-use crate::cx_cocoa::*;
+use crate::cx_cocoa_app::*;
+use crate::cx_cocoa_window::*;
 use crate::cx::*;
 
 impl Cx {

@@ -15,7 +15,13 @@ mod cx_linux;
 #[cfg(target_os = "macos")]
 mod cx_metal;
 #[cfg(target_os = "macos")]
-mod cx_cocoa;
+mod cx_cocoa_util;
+#[cfg(target_os = "macos")]
+mod cx_cocoa_delegate;
+#[cfg(target_os = "macos")]
+mod cx_cocoa_app;
+#[cfg(target_os = "macos")]
+mod cx_cocoa_window;
 #[cfg(target_os = "macos")]
 mod cx_macos;
 #[cfg(target_os = "macos")]
