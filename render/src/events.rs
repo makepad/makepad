@@ -1,7 +1,7 @@
 use crate::cx::*;
 use makepad_microserde::*;
 use std::any::TypeId;
-use std::collections::{HashMap,BTreeSet};
+use std::collections::{HashMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct KeyModifiers {
@@ -12,21 +12,21 @@ pub struct KeyModifiers {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum FingerInputType{
+pub enum FingerInputType {
     Mouse,
     Touch,
     XR
 }
 
-impl FingerInputType{
-    pub fn is_touch(&self)->bool{*self == FingerInputType::Touch}
-    pub fn is_mouse(&self)->bool{*self == FingerInputType::Mouse}
-    pub fn is_xr(&self)->bool{*self == FingerInputType::XR}
-    pub fn has_hovers(&self)->bool{ *self == FingerInputType::Mouse || *self == FingerInputType::XR}
+impl FingerInputType {
+    pub fn is_touch(&self) -> bool {*self == FingerInputType::Touch}
+    pub fn is_mouse(&self) -> bool {*self == FingerInputType::Mouse}
+    pub fn is_xr(&self) -> bool {*self == FingerInputType::XR}
+    pub fn has_hovers(&self) -> bool {*self == FingerInputType::Mouse || *self == FingerInputType::XR}
 }
 
-impl Default for FingerInputType{
-    fn default()->Self{Self::Mouse}
+impl Default for FingerInputType {
+    fn default() -> Self {Self::Mouse}
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -148,6 +148,13 @@ pub struct NextFrameEvent {
     pub time: f64
 }
 
+impl NextFrame {
+    pub fn is_active(&self, cx: &mut Cx) -> bool {
+        cx._next_frames.contains(self)
+    }
+}
+
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileReadEvent {
     pub read_id: u64,
@@ -161,12 +168,12 @@ pub struct TimerEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignalEvent {
-    pub signals: HashMap<Signal, BTreeSet<StatusId>>
+    pub signals: HashMap<Signal, BTreeSet<StatusId >>
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TriggersEvent {
-    pub triggers: HashMap<Area, BTreeSet<TriggerId>>
+    pub triggers: HashMap<Area, BTreeSet<TriggerId >>
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -247,24 +254,24 @@ pub struct WindowDragQueryEvent {
 
 #[derive(Clone, Debug, Default, SerBin, DeBin, PartialEq)]
 pub struct XRButton {
-    pub value:f32,
-    pub pressed:bool
+    pub value: f32,
+    pub pressed: bool
 }
 
-#[derive(Clone, Debug, Default, SerBin, DeBin,PartialEq)]
+#[derive(Clone, Debug, Default, SerBin, DeBin, PartialEq)]
 pub struct XRInput {
     pub active: bool,
     pub grip: Transform,
     pub ray: Transform,
     pub num_buttons: usize,
-    pub buttons: [XRButton;8],
+    pub buttons: [XRButton; 8],
     pub num_axes: usize,
-    pub axes: [f32;8],
+    pub axes: [f32; 8],
 }
 
 #[derive(Clone, Debug, SerBin, DeBin, PartialEq)]
 pub struct XRUpdateEvent {
-    // alright what data are we stuffing in 
+    // alright what data are we stuffing in
     pub time: f64,
     pub head_transform: Transform,
     pub left_input: XRInput,
@@ -275,9 +282,48 @@ pub struct XRUpdateEvent {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct WebSocketMessageEvent{
-    pub url: String, 
+pub struct WebSocketMessageEvent {
+    pub url: String,
     pub result: Result<Vec<u8>, String>
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FingerDragEvent {
+    pub handled: bool,
+    pub abs: Vec2,
+    pub rel: Vec2,
+    pub rect: Rect,
+    pub state: DragState,
+    pub action: DragAction,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FingerDropEvent {
+    pub handled: bool,
+    pub abs: Vec2,
+    pub rel: Vec2,
+    pub rect: Rect,
+    pub dragged_item: DraggedItem,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum DragState {
+    In,
+    Over,
+    Out,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DragAction {
+    None,
+    Copy,
+    Link,
+    Move,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DraggedItem {
+    pub file_urls: Vec<String>
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -320,6 +366,9 @@ pub enum Event {
     TextCopy(TextCopyEvent),
     //LiveRecompile(LiveRecompileEvent),
     WebSocketMessage(WebSocketMessageEvent),
+    FingerDrag(FingerDragEvent),
+    FingerDrop(FingerDropEvent),
+    DragEnd,
 }
 
 impl Default for Event {
@@ -341,18 +390,18 @@ pub struct HitOpt {
 
 impl Event {
     
-    pub fn is_next_frame(&self, cx:&mut Cx, next_frame: NextFrame)->Option<NextFrameEvent>{
-         match self {
+    pub fn is_next_frame(&self, cx: &mut Cx, next_frame: NextFrame) -> Option<NextFrameEvent> {
+        match self {
             Event::NextFrame(fe) => {
-                if cx._next_frames.contains(&next_frame){
-                   return Some(fe.clone()) 
+                if cx._next_frames.contains(&next_frame) {
+                    return Some(fe.clone())
                 }
             }
-            _=>()
+            _ => ()
         }
         None
     }
-/*
+    /*
     pub fn is_animate(&self, cx:&mut Cx, animator: &Animator)->Option<AnimateEvent>{
          match self {
             Event::Animate(ae) => {
@@ -364,6 +413,8 @@ impl Event {
         }
         None
     }*/
+    
+    
     
     pub fn hits(&mut self, cx: &mut Cx, area: Area, opt: HitOpt) -> Event {
         match self {
@@ -398,8 +449,8 @@ impl Event {
                 }
             },
             Event::Triggers(te) => {
-                if let Some(triggers) = te.triggers.get(&area).cloned(){
-                    return Event::Trigger(TriggerEvent{triggers})
+                if let Some(triggers) = te.triggers.get(&area).cloned() {
+                    return Event::Trigger(TriggerEvent {triggers})
                 }
             }
             Event::FingerScroll(fe) => {
@@ -435,7 +486,7 @@ impl Event {
                         return Event::FingerHover(FingerHoverEvent {
                             rel: area.abs_to_rel(cx, fe.abs),
                             rect: rect,
-                            any_down:any_down,
+                            any_down: any_down,
                             ..fe.clone()
                         })
                     }
@@ -444,7 +495,7 @@ impl Event {
                         return Event::FingerHover(FingerHoverEvent {
                             rel: area.abs_to_rel(cx, fe.abs),
                             rect: rect,
-                            any_down:any_down,
+                            any_down: any_down,
                             hover_state: HoverState::Out,
                             ..fe.clone()
                         })
@@ -465,7 +516,7 @@ impl Event {
                         return Event::FingerHover(FingerHoverEvent {
                             rel: area.abs_to_rel(cx, fe.abs),
                             rect: rect,
-                            any_down:any_down,
+                            any_down: any_down,
                             hover_state: HoverState::In,
                             ..fe.clone()
                         })
@@ -533,22 +584,78 @@ impl Event {
         };
         return Event::None;
     }
-
+    
+    pub fn drag_hits(&mut self, cx: &mut Cx, area: Area, opt: HitOpt) -> Event {
+        match self {
+            Event::FingerDrag(event) => {
+                let rect = area.get_rect(cx);
+                if area == cx.drag_area {
+                    if !event.handled && rect.contains_with_margin(event.abs, &opt.margin) {
+                        cx.new_drag_area = area;
+                        event.handled = true;
+                        Event::FingerDrag(FingerDragEvent {
+                            rel: area.abs_to_rel(cx, event.abs),
+                            rect,
+                            ..event.clone()
+                        })
+                    } else {
+                        Event::FingerDrag(FingerDragEvent {
+                            rel: area.abs_to_rel(cx, event.abs),
+                            rect,
+                            state: DragState::Out,
+                            ..event.clone()
+                        })
+                    }
+                } else {
+                    if !event.handled && rect.contains_with_margin(event.abs, &opt.margin) {
+                        cx.new_drag_area = area;
+                        event.handled = true;
+                        Event::FingerDrag(FingerDragEvent {
+                            rel: area.abs_to_rel(cx, event.abs),
+                            rect,
+                            state: DragState::In,
+                            ..event.clone()
+                        })
+                    } else {
+                        Event::None
+                    }
+                }
+            }
+            Event::FingerDrop(event) => {
+                let rect = area.get_rect(cx);
+                if !event.handled && rect.contains_with_margin(event.abs, &opt.margin) {
+                    cx.new_drag_area = Area::default();
+                    event.handled = true;
+                    Event::FingerDrop(FingerDropEvent {
+                        rel: area.abs_to_rel(cx, event.abs),
+                        rect,
+                        ..event.clone()
+                    })
+                } else {
+                    Event::None
+                }
+            }
+            _ => Event::None,
+        }
+    }
+    
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq, Copy, Hash)]
 pub struct NextFrame(pub u64);
 
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Default)]
-pub struct Signal(pub usize);
+pub struct Signal {
+    pub signal_id: usize
+}
 
 impl Signal {
     pub fn empty() -> Signal {
-        Signal(0)
+        Signal{signal_id:0}
     }
     
     pub fn is_empty(&self) -> bool {
-        self.0 == 0
+        self.signal_id == 0
     }
 }
 
@@ -559,8 +666,8 @@ impl Signal {
 #[derive(PartialEq, Ord, PartialOrd, Copy, Clone, Hash, Eq, Debug)]
 pub struct StatusId(pub TypeId);
 
-impl Default for StatusId{
-    fn default()->StatusId{uid!()}
+impl Default for StatusId {
+    fn default() -> StatusId {uid!()}
 }
 
 impl Into<StatusId> for TypeId {
@@ -588,7 +695,8 @@ impl FileRead {
         self.read_id != 0
     }
     
-    pub fn resolve_utf8<'a>(&mut self, fr: &'a FileReadEvent) -> Option<Result<&'a str,String>> {
+    pub fn resolve_utf8<'a>(&mut self, fr: &'a FileReadEvent) -> Option<Result<&'a str,
+    String >> {
         if fr.read_id == self.read_id {
             self.read_id = 0;
             if let Ok(str_data) = &fr.data {
@@ -781,6 +889,6 @@ pub enum KeyCode {
     Unknown
 }
 
-impl Default for KeyCode{
-    fn default()->Self{KeyCode::Unknown}
+impl Default for KeyCode {
+    fn default() -> Self {KeyCode::Unknown}
 }

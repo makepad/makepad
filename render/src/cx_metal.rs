@@ -5,6 +5,7 @@
 //use core_graphics::color::CGColor;
 use makepad_objc_sys::{msg_send};
 use makepad_objc_sys::runtime::YES;
+
 use makepad_shader_compiler::generate_metal;
 use makepad_shader_compiler::generate_metal::MetalGeneratedShader;
 use makepad_shader_compiler::shaderast::DrawShaderDef;
@@ -24,7 +25,7 @@ impl Cx {
         clip: (Vec2, Vec2),
         zbias: &mut f32,
         zbias_step: f32,
-        encoder: objc_id,
+        encoder: ObjcId,
         metal_cx: &MetalCx,
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
@@ -199,7 +200,7 @@ impl Cx {
         }
     }
     
-    pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: objc_id, pass_id: usize, inherit_dpi_factor: f32, first_texture: Option<objc_id>, metal_cx: &MetalCx) {
+    pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: ObjcId, pass_id: usize, inherit_dpi_factor: f32, first_texture: Option<ObjcId>, metal_cx: &MetalCx) {
         let pass_size = self.passes[pass_id].pass_size;
         
         self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
@@ -213,8 +214,8 @@ impl Cx {
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         
         for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
-            let color_attachments: objc_id = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
-            let color_attachment: objc_id = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: 0]};
+            let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
+            let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: 0]};
             // let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
             
             let is_initial;
@@ -277,7 +278,7 @@ impl Cx {
             let cxtexture = &mut self.textures[depth_texture_id as usize];
             let is_initial = metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, true);
             
-            let depth_attachment: objc_id = unsafe {msg_send![render_pass_descriptor, depthAttachment]};
+            let depth_attachment: ObjcId = unsafe {msg_send![render_pass_descriptor, depthAttachment]};
             
             if let Some(mtl_texture) = cxtexture.platform.mtl_texture {
                 unsafe {msg_send![depth_attachment, setTexture: mtl_texture]}
@@ -305,10 +306,10 @@ impl Cx {
             // create depth state
             if self.passes[pass_id].platform.mtl_depth_state.is_none() {
                 
-                let desc: objc_id = unsafe {msg_send![class!(MTLDepthStencilDescriptor), new]};
+                let desc: ObjcId = unsafe {msg_send![class!(MTLDepthStencilDescriptor), new]};
                 let () = unsafe {msg_send![desc, setDepthCompareFunction: MTLCompareFunction::LessEqual]};
                 let () = unsafe {msg_send![desc, setDepthWriteEnabled: true]};
-                let depth_stencil_state: objc_id = unsafe {msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc]};
+                let depth_stencil_state: ObjcId = unsafe {msg_send![metal_cx.device, newDepthStencilStateWithDescriptor: desc]};
                 self.passes[pass_id].platform.mtl_depth_state = Some(depth_stencil_state);
             }
         }
@@ -318,26 +319,26 @@ impl Cx {
         &mut self,
         pass_id: usize,
         dpi_factor: f32,
-        layer: objc_id,
+        layer: ObjcId,
         metal_cx: &mut MetalCx,
     ) {
         self.platform.bytes_written = 0;
         self.platform.draw_calls_done = 0;
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
-        let pool: objc_id = unsafe {msg_send![class!(NSAutoreleasePool), new]};
+        let pool: ObjcId = unsafe {msg_send![class!(NSAutoreleasePool), new]};
         
         //let command_buffer = command_queue.new_command_buffer();
-        let drawable: objc_id = unsafe {msg_send![layer, nextDrawable]};
+        let drawable: ObjcId = unsafe {msg_send![layer, nextDrawable]};
         if drawable != nil {
-            let render_pass_descriptor: objc_id = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
+            let render_pass_descriptor: ObjcId = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
             
-            let texture: objc_id = unsafe {msg_send![drawable, texture]};
+            let texture: ObjcId = unsafe {msg_send![drawable, texture]};
             
             self.setup_render_pass_descriptor(render_pass_descriptor, pass_id, dpi_factor, Some(texture), metal_cx);
             
-            let command_buffer: objc_id = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
-            let encoder: objc_id = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
+            let command_buffer: ObjcId = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
+            let encoder: ObjcId = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
             
             unsafe {msg_send![encoder, textureBarrier]}
             
@@ -375,13 +376,13 @@ impl Cx {
     ) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
-        let pool: objc_id = unsafe {msg_send![class!(NSAutoreleasePool), new]};
-        let render_pass_descriptor: objc_id = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
+        let pool: ObjcId = unsafe {msg_send![class!(NSAutoreleasePool), new]};
+        let render_pass_descriptor: ObjcId = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
         
         self.setup_render_pass_descriptor(render_pass_descriptor, pass_id, dpi_factor, None, metal_cx);
         
-        let command_buffer: objc_id = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
-        let encoder: objc_id = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
+        let command_buffer: ObjcId = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
+        let encoder: ObjcId = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
         
         if let Some(depth_state) = self.passes[pass_id].platform.mtl_depth_state {
             let () = unsafe {msg_send![encoder, setDepthStencilState: depth_state]};
@@ -408,8 +409,8 @@ impl Cx {
 }
 
 pub struct MetalCx {
-    pub device: objc_id,
-    pub command_queue: objc_id
+    pub device: ObjcId,
+    pub command_queue: ObjcId
 }
 
 
@@ -419,14 +420,14 @@ pub struct MetalWindow {
     pub first_draw: bool,
     pub window_geom: WindowGeom,
     pub cal_size: Vec2,
-    pub ca_layer: objc_id,
+    pub ca_layer: ObjcId,
     pub cocoa_window: CocoaWindow,
 }
 
 impl MetalWindow {
     pub fn new(window_id: usize, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> MetalWindow {
         
-        let ca_layer: objc_id = unsafe {msg_send![class!(CAMetalLayer), new]};
+        let ca_layer: ObjcId = unsafe {msg_send![class!(CAMetalLayer), new]};
         
         let mut cocoa_window = CocoaWindow::new(cocoa_app, window_id);
         
@@ -505,17 +506,17 @@ pub struct CxPlatformTexture {
     pub alloc_desc: TextureDesc,
     pub width: u64,
     pub height: u64,
-    pub mtl_texture: Option<objc_id>
+    pub mtl_texture: Option<ObjcId>
 }
 
 #[derive(Default, Clone)]
 pub struct CxPlatformPass {
-    pub mtl_depth_state: Option<objc_id>
+    pub mtl_depth_state: Option<ObjcId>
 }
 
 #[derive(Default, Clone)]
 pub struct MultiMetalBuffer {
-    pub buffer: Option<objc_id>,
+    pub buffer: Option<ObjcId>,
     pub size: usize,
     pub used: usize
 }
@@ -558,7 +559,7 @@ impl MetalBuffer {
             elem.buffer = None;
         }
         if let None = elem.buffer {
-            let buffer: objc_id = unsafe {msg_send![
+            let buffer: ObjcId = unsafe {msg_send![
                 metal_cx.device,
                 newBufferWithLength: (data.len() * std::mem::size_of::<f32>()) as u64
                 options: MTLResourceOptions::StorageModeShared
@@ -589,7 +590,7 @@ impl MetalBuffer {
             elem.buffer = None;
         }
         if let None = elem.buffer {
-            let buffer: objc_id = unsafe {msg_send![
+            let buffer: ObjcId = unsafe {msg_send![
                 metal_cx.device,
                 newBufferWithLength: (data.len() * std::mem::size_of::<u32>()) as u64
                 options: MTLResourceOptions::StorageModeShared
@@ -622,9 +623,9 @@ pub struct CxPlatformGeometry {
 
 #[derive(Clone)]
 pub struct CxPlatformShader {
-    pub library: objc_id,
+    pub library: ObjcId,
     pub metal_shader: String,
-    pub pipeline_state: objc_id,
+    pub pipeline_state: ObjcId,
     pub draw_uniform_buffer_id: Option<u64>,
     pub pass_uniform_buffer_id: Option<u64>,
     pub view_uniform_buffer_id: Option<u64>,
@@ -695,7 +696,7 @@ impl MetalCx {
         }
         cxtexture.platform.mtl_texture = None;
         
-        let mdesc: objc_id = unsafe {msg_send![class!(MTLTextureDescriptor), new]};
+        let mdesc: ObjcId = unsafe {msg_send![class!(MTLTextureDescriptor), new]};
         if !is_depth {
             match cxtexture.desc.format {
                 TextureFormat::Default | TextureFormat::RenderBGRA => {
@@ -732,7 +733,7 @@ impl MetalCx {
         let () = unsafe {msg_send![mdesc, setHeight: height as u64]};
         let () = unsafe {msg_send![mdesc, setDepth: 1u64]};
         
-        let tex: objc_id = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
+        let tex: ObjcId = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
         
         cxtexture.platform.width = width;
         cxtexture.platform.height = height;
@@ -755,7 +756,7 @@ impl MetalCx {
         if cxtexture.platform.alloc_desc != cxtexture.desc {
             cxtexture.platform.mtl_texture = None;
             
-            let mdesc: objc_id = unsafe {msg_send![class!(MTLTextureDescriptor), new]};
+            let mdesc: ObjcId = unsafe {msg_send![class!(MTLTextureDescriptor), new]};
             unsafe {
                 let () = msg_send![mdesc, setTextureType: MTLTextureType::D2];
                 let () = msg_send![mdesc, setStorageMode: MTLStorageMode::Managed];
@@ -768,7 +769,7 @@ impl MetalCx {
                 TextureFormat::Default | TextureFormat::ImageBGRA => {
                     let () = unsafe {msg_send![mdesc, setPixelFormat: MTLPixelFormat::BGRA8Unorm]};
                     
-                    let tex: objc_id = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
+                    let tex: ObjcId = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
                     
                     cxtexture.platform.mtl_texture = Some(tex);
                     
@@ -828,23 +829,23 @@ impl MetalCx {
             }
         }
         
-        let mtl_compile_options: objc_id = unsafe {msg_send![class!(MTLCompileOptions), new]};
+        let mtl_compile_options: ObjcId = unsafe {msg_send![class!(MTLCompileOptions), new]};
         
-        let _: objc_id = unsafe {msg_send![
+        let _: ObjcId = unsafe {msg_send![
             mtl_compile_options,
             setFastMathEnabled: true
         ]};
         
-        let ns_mtlsl: objc_id = str_to_nsstring(&gen.mtlsl);
-        let mut err: objc_id = nil;
-        let library: objc_id = unsafe {msg_send![
+        let ns_mtlsl: ObjcId = str_to_nsstring(&gen.mtlsl);
+        let mut err: ObjcId = nil;
+        let library: ObjcId = unsafe {msg_send![
             self.device,
             newLibraryWithSource: ns_mtlsl
             options: mtl_compile_options
             error: &mut err
         ]};
         if library == nil {
-            let err_str: objc_id = unsafe {msg_send![err, localizedDescription]};
+            let err_str: ObjcId = unsafe {msg_send![err, localizedDescription]};
             println!("{}", nsstring_to_string(err_str));
             panic!("{}", nsstring_to_string(err_str));
             //return Err(SlErr {msg: nsstring_to_string(err_str)})
@@ -879,16 +880,16 @@ impl MetalCx {
             user_uniform_buffer_id,
             metal_shader: gen.mtlsl,
             pipeline_state: unsafe {
-                let vert: objc_id = msg_send![library, newFunctionWithName: str_to_nsstring("vertex_main")];
-                let frag: objc_id = msg_send![library, newFunctionWithName: str_to_nsstring("fragment_main")];
-                let rpd: objc_id = msg_send![class!(MTLRenderPipelineDescriptor), new];
+                let vert: ObjcId = msg_send![library, newFunctionWithName: str_to_nsstring("vertex_main")];
+                let frag: ObjcId = msg_send![library, newFunctionWithName: str_to_nsstring("fragment_main")];
+                let rpd: ObjcId = msg_send![class!(MTLRenderPipelineDescriptor), new];
                 
                 let () = msg_send![rpd, setVertexFunction: vert];
                 let () = msg_send![rpd, setFragmentFunction: frag];
                 
-                let color_attachments: objc_id = msg_send![rpd, colorAttachments];
+                let color_attachments: ObjcId = msg_send![rpd, colorAttachments];
                 
-                let ca: objc_id = msg_send![color_attachments, objectAtIndexedSubscript: 0u64];
+                let ca: ObjcId = msg_send![color_attachments, objectAtIndexedSubscript: 0u64];
                 
                 let () = msg_send![ca, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
                 let () = msg_send![ca, setBlendingEnabled: YES];
@@ -902,8 +903,8 @@ impl MetalCx {
                 
                 let () = msg_send![rpd, setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float_Stencil8];
                 
-                let mut err: objc_id = nil;
-                let rps: objc_id = msg_send![
+                let mut err: ObjcId = nil;
+                let rps: ObjcId = msg_send![
                     self.device,
                     newRenderPipelineStateWithDescriptor: rpd
                     error: &mut err
