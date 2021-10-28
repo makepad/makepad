@@ -255,7 +255,7 @@ impl Area{
             _=>()
          }
     }
-    /*
+    
     pub fn get_read_ref<'a>(&self, cx:&'a Cx, id:Id, ty:Ty)->Option<DrawReadRef<'a>>{
         match self{
             Area::Instance(inst)=>{
@@ -266,23 +266,21 @@ impl Area{
                     return None;
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
-                if let Some(prop_id) = sh.mapping.user_uniform_props.prop_map.get(&id){
-                    let prop = &sh.mapping.user_uniform_props.props[*prop_id];
-                    if prop.ty != ty{
-                        panic!("get_read_ref wrong uniform type, expected {:?} got: {:?}!",  prop.ty, ty);
+                if let Some(input) = sh.mapping.user_uniforms.inputs.iter().find(|input| input.id == id){
+                    if input.ty != ty{
+                        panic!("get_read_ref wrong uniform type, expected {:?} got: {:?}!",  input.ty, ty);
                     }
                     return Some(
                         DrawReadRef{
                             repeat: 1,
                             stride: 0,
-                            buffer: &draw_call.user_uniforms[prop.offset..]
+                            buffer: &draw_call.user_uniforms[input.offset..]
                         }
                     )
                 }
-                if let Some(prop_id) = sh.mapping.instance_props.prop_map.get(&id){
-                    let prop = &sh.mapping.instance_props.props[*prop_id];
-                    if prop.ty != ty{
-                        panic!("get_read_ref wrong instance type, expected {:?} got: {:?}!", prop.ty, ty);
+                if let Some(input) = sh.mapping.instances.inputs.iter().find(|input| input.id == id){
+                    if input.ty != ty{
+                        panic!("get_read_ref wrong instance type, expected {:?} got: {:?}!", input.ty, ty);
                     }
                     if inst.instance_count == 0{
                         return None
@@ -290,8 +288,8 @@ impl Area{
                     return Some(
                         DrawReadRef{
                             repeat: inst.instance_count,
-                            stride: sh.mapping.instance_props.total_slots,
-                            buffer: &draw_call.instances[(inst.instance_offset + prop.offset)..],
+                            stride: sh.mapping.instances.total_slots,
+                            buffer: &draw_call.instances[(inst.instance_offset + input.offset)..],
                         }
                     )
                 }
@@ -311,10 +309,10 @@ impl Area{
                 }
                 let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
-                if let Some(prop_id) = sh.mapping.user_uniform_props.prop_map.get(&id){
-                    let prop = &sh.mapping.user_uniform_props.props[*prop_id];
-                    if prop.ty != ty{
-                        panic!("get_write_ref {} wrong uniform type, expected {:?} got: {:?}!", name, prop.ty, ty);
+                
+                if let Some(input) = sh.mapping.user_uniforms.inputs.iter().find(|input| input.id == id){
+                    if input.ty != ty{
+                        panic!("get_write_ref {} wrong uniform type, expected {:?} got: {:?}!", name, input.ty, ty);
                     }
 
                     cx.passes[cxview.pass_id].paint_dirty = true;
@@ -324,14 +322,13 @@ impl Area{
                         DrawWriteRef{
                             repeat: 1,
                             stride: 0,
-                            buffer: &mut draw_call.user_uniforms[prop.offset..]
+                            buffer: &mut draw_call.user_uniforms[input.offset..]
                         }                        
                     )
                 }
-                if let Some(prop_id) = sh.mapping.instance_props.prop_map.get(&id){
-                    let prop = &sh.mapping.instance_props.props[*prop_id];
-                    if prop.ty != ty{
-                        panic!("get_write_ref {} wrong instance type, expected {:?} got: {:?}!", name, prop.ty, ty);
+                if let Some(input) = sh.mapping.instances.inputs.iter().find(|input| input.id == id){
+                    if input.ty != ty{
+                        panic!("get_write_ref {} wrong instance type, expected {:?} got: {:?}!", name, input.ty, ty);
                     }
 
                     cx.passes[cxview.pass_id].paint_dirty = true;
@@ -342,8 +339,8 @@ impl Area{
                     return Some(
                         DrawWriteRef{
                             repeat:inst.instance_count,
-                            stride:sh.mapping.instance_props.total_slots,
-                            buffer: &mut draw_call.instances[(inst.instance_offset + prop.offset)..]
+                            stride:sh.mapping.instances.total_slots,
+                            buffer: &mut draw_call.instances[(inst.instance_offset + input.offset)..]
                         }
                     )
                 }
@@ -352,7 +349,7 @@ impl Area{
             _=>(),
         }
         None
-    }*/
+    }
 /*
     pub fn write_texture_2d_id(&self, cx:&mut Cx, id:Id, name:&str, texture_id: usize){
          match self{

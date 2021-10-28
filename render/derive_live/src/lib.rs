@@ -18,7 +18,7 @@ pub fn derive_live(input: TokenStream) -> TokenStream {
     derive_live_impl(input)
 }
 
-#[proc_macro_derive(LiveUpdateHooks, attributes(local, live, hidden))]
+#[proc_macro_derive(LiveUpdateHooks)]
 pub fn derive_live_update_hooks(input: TokenStream) -> TokenStream {
     derive_live_update_hooks_impl(input)
 }
