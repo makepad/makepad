@@ -100,7 +100,7 @@ const GLSL_OUTPUT: &'static str = r#"
         packed_varying_2.y = dmat[2][0];
     }
     PIXELSHADER
-    // Uniform block default
+    // Uniform block user
     uniform float ds_uni1;
     uniform float ds_duni;
     varying vec4 packed_varying_0;
@@ -163,7 +163,7 @@ const METAL_OUTPUT: &'static str = r#"
     struct LiveUniforms {
         float live_0_1_3;
     };
-    struct Uniforms_default {
+    struct Uniforms_user {
         float ds_uni1;
         float ds_duni;
     };
@@ -173,9 +173,9 @@ const METAL_OUTPUT: &'static str = r#"
     };
     struct Instances {
         float ds_dinst;
-        float3 ds_dmat0;
-        float3 ds_dmat1;
-        float3 ds_dmat2;
+        packed_float3 ds_dmat 0;
+        packed_float3 ds_dmat 1;
+        packed_float3 ds_dmat 2;
     };
     struct Varyings {
         float4 position [[position]];
@@ -199,7 +199,7 @@ const METAL_OUTPUT: &'static str = r#"
         fn_0_2_1_struct_2_set (var_self_0.f_b, site_0_of_fn_0_2_5_struct_1_closure (var_self_0));
     }
     float4 fn_0_1_15_pixel(thread Varyings & varyings) {
-        struct_0_1_5 = struct_0_1_5(1.0, struct_0_1_4((1.0 + instances.ds_dinst)));
+        struct_0_1_5 = struct_0_1_5(1.0, struct_0_1_4((1.0 + varyings.ds_dinst)));
         float3 var_x_1 = (float3(float3(1.0)) * float3x3(varyings.ds_dmat0.x, varyings.ds_dmat1.x, varyings.ds_dmat2.x, varyings.ds_dmat0.y, varyings.ds_dmat1.y, varyings.ds_dmat2.y, varyings.ds_dmat0.z, varyings.ds_dmat1.z, varyings.ds_dmat2.z));
         fn_0_2_5_struct_1_set (var_x_1);
         return float4(1.0, 1.0, 1.0, 1.0);
@@ -207,25 +207,25 @@ const METAL_OUTPUT: &'static str = r#"
     void fn_0_1_16_override() {
         (1 + 1);
     }
-    float4 fn_0_1_17_vertex(thread Varyings & varyings, constant Uniforms_default uniforms_default, constant LiveUniforms live_uniforms) {
-        struct_0_1_4 = struct_0_1_4(((uniforms_default.ds_uni1 + const_0_1_2) + live_uniforms.live_0_1_3));
+    float4 fn_0_1_17_vertex(thread Varyings & varyings, constant Uniforms_user & uniforms_user, constant LiveUniforms & live_uniforms) {
+        struct_0_1_4 = struct_0_1_4(((uniforms_user.ds_uni1 + const_0_1_2) + live_uniforms.live_0_1_3));
         fn_0_2_1_struct_2_set (var_x_0, 3.0);
         float3 var_x_1 = (float3(float3(1.0)) * float3x3(varyings.ds_dmat0.x, varyings.ds_dmat1.x, varyings.ds_dmat2.x, varyings.ds_dmat0.y, varyings.ds_dmat1.y, varyings.ds_dmat2.y, varyings.ds_dmat0.z, varyings.ds_dmat1.z, varyings.ds_dmat2.z));
         fn_0_1_16_override ();
         return float4(1.0, 1.0, 1.0, 1.0);
     }
-    vertex Varyings vertex_main(Textures textures, const device Geometries * in_geometries [[buffer(0)]], const device Instances * in_instances [[buffer(1)]], constant LiveUniforms & live_uniforms [[buffer(2)]], constant const float * const_table [[buffer(3)]], constant Uniforms_default & uniforms_default [[buffer(4)]], uint vtx_id [[vertex_id]], uint inst_id [[instance_id]]) {
+    vertex Varyings vertex_main(Textures textures, const device Geometries * in_geometries [[buffer(0)]], const device Instances * in_instances [[buffer(1)]], constant LiveUniforms & live_uniforms [[buffer(2)]], constant const float * const_table [[buffer(3)]], constant Uniforms_user & uniforms_user [[buffer(4)]], uint vtx_id [[vertex_id]], uint inst_id [[instance_id]]) {
         Geometries geometries = in_geometries[vtx_id];
         Instances instances = in_instances[inst_id];
         Varyings varyings;
-        varyings.dinst = instances.dinst;
-        varyings.dmat0 = instances.dmat0;
-        varyings.dmat1 = instances.dmat1;
-        varyings.dmat2 = instances.dmat2;
-        varyings.position = fn_0_1_17_vertex(varyings, uniforms_default, live_uniforms);
+        varyings.ds_dinst = instances.ds_dinst;
+        varyings.ds_dmat0 = instances.ds_dmat0;
+        varyings.ds_dmat1 = instances.ds_dmat1;
+        varyings.ds_dmat2 = instances.ds_dmat2;
+        varyings.position = fn_0_1_17_vertex(varyings, uniforms_user, live_uniforms);
         return varyings;
     }
-    fragment float4 fragment_main(Varyings varyings[[stage_in]], Textures textures, constant LiveUniforms & live_uniforms [[buffer(2)]], constant const float * const_table [[buffer(3)]], constant Uniforms_default & uniforms_default [[buffer(4)]]) {
+    fragment float4 fragment_main(Varyings varyings[[stage_in]], Textures textures, constant LiveUniforms & live_uniforms [[buffer(2)]], constant const float * const_table [[buffer(3)]], constant Uniforms_user & uniforms_user [[buffer(4)]]) {
         return fn_0_1_15_pixel(varyings);
     }
     
@@ -244,7 +244,7 @@ const HLSL_OUTPUT: &'static str = r#"
         float live_0_1_3;
     };
     cbuffer ConstTable: register(b1) {float4 const_table[0];};
-    cbuffer Uniforms_default: register(b2) {
+    cbuffer Uniforms_user: register(b2) {
         float ds_uni1;
         float ds_duni;
     };
@@ -281,7 +281,7 @@ const HLSL_OUTPUT: &'static str = r#"
         fn_0_2_1_struct_2_set (var_self_0.f_b, site_0_of_fn_0_2_5_struct_1_closure (var_self_0));
     }
     float4 fn_0_1_15_pixel(inout Varyings varyings) {
-        struct_0_1_5 var_x_0 = struct_0_1_5 {1.0, struct_0_1_4 {(1.0 + instances.ds_dinst)}};
+        struct_0_1_5 var_x_0 = struct_0_1_5 {1.0, struct_0_1_4 {(1.0 + varyings.ds_dinst)}};
         float3 var_x_1 = mul(consfn_vec3_float(1.0), float3x3(varyings.ds_dmat0.x, varyings.ds_dmat1.x, varyings.ds_dmat2.x, varyings.ds_dmat0.y, varyings.ds_dmat1.y, varyings.ds_dmat2.y, varyings.ds_dmat0.z, varyings.ds_dmat1.z, varyings.ds_dmat2.z));
         fn_0_2_5_struct_1_set (var_x_1);
         return float4(1.0, 1.0, 1.0, 1.0);
@@ -298,10 +298,10 @@ const HLSL_OUTPUT: &'static str = r#"
     }
     Varyings vertex_main(Geometries geometries, Instances instances, uint inst_id: SV_InstanceID) {
         Varyings varyings = {float4(0.0, 0.0, 0.0, 0.0), 0.0, float3(0.0, 0.0, 0.0), float3(0.0, 0.0, 0.0), float3(0.0, 0.0, 0.0)};
-        varyings.dinst = instances.dinst;
-        varyings.dmat0 = instances.dmat0;
-        varyings.dmat1 = instances.dmat1;
-        varyings.dmat2 = instances.dmat2;
+        varyings.ds_dinst = instances.ds_dinst;
+        varyings.ds_dmat0 = instances.ds_dmat0;
+        varyings.ds_dmat1 = instances.ds_dmat1;
+        varyings.ds_dmat2 = instances.ds_dmat2;
         varyings.position = fn_0_1_17_vertex(varyings,,);
         return varyings;
     }
@@ -315,6 +315,7 @@ const HLSL_OUTPUT: &'static str = r#"
 use makepad_live_parser::*;
 use makepad_shader_compiler::shaderregistry::ShaderRegistry;
 use makepad_shader_compiler::shaderast::DrawShaderPtr;
+use makepad_shader_compiler::shaderast::DrawShaderConstTable;
 use makepad_shader_compiler::shaderast::Ty;
 use makepad_shader_compiler::generate_glsl;
 use makepad_shader_compiler::generate_hlsl;
@@ -368,7 +369,6 @@ fn compare_no_ws(a: &str, b: &str) -> Option<String> {
     }
 }
 
-
 fn main() {
     let mut sr = ShaderRegistry::new();
     
@@ -383,8 +383,6 @@ fn main() {
     
     let mut errors = Vec::new();
     sr.live_registry.expand_all_documents(&mut errors);
-    
-    println!("{}", sr.live_registry.expanded[0]);
     
     for msg in errors {
         println!("{}\n", msg.to_live_file_error("", SOURCE));
@@ -416,7 +414,7 @@ fn main() {
         }
     }
     
-        /*
+    /*
     pub fn generate_glsl_shader(&mut self, shader_ptr: DrawShaderNodePtr) -> (String, String) {
         // lets find the FullPointer
         let draw_shader_decl = self.draw_shaders.get(&shader_ptr).unwrap();
@@ -442,10 +440,11 @@ fn main() {
     
     // ok the shader is analysed.
     // now we will generate the glsl shader.
-    let draw_shader_decl = sr.draw_shaders.get(&shader_ptr).unwrap();
+    let draw_shader_def = sr.draw_shader_defs.get(&shader_ptr).unwrap();
     // TODO this env needs its const table transferred
-    let vertex = generate_glsl::generate_vertex_shader(draw_shader_decl, &sr);
-    let pixel = generate_glsl::generate_pixel_shader(draw_shader_decl, &sr);
+    let mut const_table = DrawShaderConstTable::default();
+    let vertex = generate_glsl::generate_vertex_shader(draw_shader_def, &const_table, &sr);
+    let pixel = generate_glsl::generate_pixel_shader(draw_shader_def, &const_table, &sr);
     let compare = format!("\nVERTEXSHADER\n{}PIXELSHADER\n{}", vertex, pixel);
     if let Some(change) = compare_no_ws(GLSL_OUTPUT, &compare) {
         println!("GLSL OUTPUT CHANGED\n{}", change);
@@ -453,7 +452,7 @@ fn main() {
         assert_eq!(true, false);
     }
     
-    let shader = generate_metal::generate_shader(draw_shader_decl, &sr);
+    let shader = generate_metal::generate_shader(draw_shader_def, &const_table, &sr);
     let compare = format!("\n{}", shader.mtlsl);
     if let Some(change) = compare_no_ws(METAL_OUTPUT, &compare) {
         println!("METAL OUTPUT CHANGED\n{}", change);
@@ -461,7 +460,7 @@ fn main() {
         assert_eq!(true, false);
     }
     
-    let shader = generate_hlsl::generate_shader(draw_shader_decl, &sr);
+    let shader = generate_hlsl::generate_shader(draw_shader_def, &const_table, &sr);
     let compare = format!("\n{}", shader);
     if let Some(change) = compare_no_ws(HLSL_OUTPUT, &compare) {
         println!("HLSL OUTPUT CHANGED\n{}", change);

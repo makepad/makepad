@@ -7,43 +7,28 @@ use std::fmt;
 use std::collections::BTreeSet;
 use crate::shaderregistry::ShaderRegistry;
 
-struct VoidWrap();
-impl VoidWrap{
-    pub fn unwrap(&self){}
-}
 
-macro_rules! write {
-    ($dst:expr, $($arg:tt)*) => ({let _ =$dst.write_fmt(std::format_args!($($arg)*));VoidWrap()})
-}
-
-macro_rules! writeln {
-    ($dst:expr $(,)?) => (
-        write!($dst, "\n")
-    );
-    ($dst:expr, $($arg:tt)*) => (
-        {let _ = $dst.write_fmt(std::format_args!($($arg)*));VoidWrap()}
-    );
-}
-
-pub fn generate_vertex_shader(draw_shader_def: &DrawShaderDef, shader_registry: &ShaderRegistry) -> String {
+pub fn generate_vertex_shader(draw_shader_def: &DrawShaderDef, const_table:&DrawShaderConstTable, shader_registry: &ShaderRegistry) -> String {
     let mut string = String::new();
     DrawShaderGenerator {
         draw_shader_def,
+        const_table,
         shader_registry,
         string: &mut string,
-        backend_writer: &GlslBackendWriter {shader_registry}
+        backend_writer: &GlslBackendWriter {shader_registry, const_table}
     }
     .generate_vertex_shader();
     string
 }
 
-pub fn generate_pixel_shader(draw_shader_def: &DrawShaderDef, shader_registry: &ShaderRegistry) -> String {
+pub fn generate_pixel_shader(draw_shader_def: &DrawShaderDef, const_table:&DrawShaderConstTable, shader_registry: &ShaderRegistry) -> String {
     let mut string = String::new();
     DrawShaderGenerator {
         draw_shader_def,
+        const_table,
         shader_registry,
         string: &mut string,
-        backend_writer: &GlslBackendWriter {shader_registry}
+        backend_writer: &GlslBackendWriter {shader_registry, const_table}
     }
     .generate_pixel_shader();
     string
@@ -53,6 +38,7 @@ struct DrawShaderGenerator<'a> {
     draw_shader_def: &'a DrawShaderDef,
     shader_registry: &'a ShaderRegistry,
     string: &'a mut String,
+    const_table: &'a DrawShaderConstTable,
     backend_writer: &'a dyn BackendWriter
 }
 
@@ -84,13 +70,13 @@ impl<'a> DrawShaderGenerator<'a> {
     }
     
     fn generate_vertex_shader(&mut self) {
-        let packed_geometries_size = self.compute_packed_geometries_size();
-        let packed_instances_size = self.compute_packed_instances_size();
-        let packed_varyings_size = self.compute_packed_varyings_size();
+        let packed_geometries_slots = self.compute_packed_geometries_slots();
+        let packed_instances_slots = self.compute_packed_instances_slots();
+        let packed_varyings_slots = self.compute_packed_varyings_slots();
         self.generate_decls(
-            Some(packed_geometries_size),
-            Some(packed_instances_size),
-            packed_varyings_size,
+            Some(packed_geometries_slots),
+            Some(packed_instances_slots),
+            packed_varyings_slots,
         );
         for field in &self.draw_shader_def.fields {
             match field.kind {
@@ -132,7 +118,7 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, "void main() {{").unwrap();
         let mut geometry_unpacker = VarUnpacker::new(
             "packed_geometry",
-            packed_geometries_size,
+            packed_geometries_slots,
             &mut self.string,
         );
         for decl in &self.draw_shader_def.fields {
@@ -146,7 +132,7 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         let mut instance_unpacker = VarUnpacker::new(
             "packed_instance",
-            packed_instances_size,
+            packed_instances_slots,
             &mut self.string,
         );
         for decl in &self.draw_shader_def.fields {
@@ -164,7 +150,7 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, "    gl_Position = {}();", DisplayFnName(vertex_def.fn_ptr, vertex_def.ident)).unwrap();
         let mut varying_packer = VarPacker::new(
             "packed_varying",
-            packed_varyings_size,
+            packed_varyings_slots,
             &mut self.string,
         );
         for decl in &self.draw_shader_def.fields {
@@ -220,7 +206,7 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         
         for fn_iter in fn_deps.iter().rev() {
-            let const_table_offset = self.draw_shader_def.const_table.offsets.get(fn_iter).cloned();
+            let const_table_offset = self.const_table.offsets.get(fn_iter).cloned();
             let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
             if fn_def.has_closure_args() {
                 for call_iter in fn_deps.iter().rev() {
@@ -251,8 +237,8 @@ impl<'a> DrawShaderGenerator<'a> {
     }
     
     pub fn generate_pixel_shader(&mut self) {
-        let packed_varyings_size = self.compute_packed_varyings_size();
-        self.generate_decls(None, None, packed_varyings_size);
+        let packed_varyings_slots = self.compute_packed_varyings_slots();
+        self.generate_decls(None, None, packed_varyings_slots);
         for field in &self.draw_shader_def.fields {
             match &field.kind {
                 DrawShaderFieldKind::Geometry {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
@@ -291,7 +277,7 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, "void main() {{").unwrap();
         let mut varying_unpacker = VarUnpacker::new(
             "packed_varying",
-            packed_varyings_size,
+            packed_varyings_slots,
             &mut self.string,
         );
         for decl in &self.draw_shader_def.fields {
@@ -324,11 +310,11 @@ impl<'a> DrawShaderGenerator<'a> {
         packed_varyings_size: usize,
     ) {
         
-        if self.draw_shader_def.const_table.table.len()>0 {
+        if self.const_table.table.len()>0 {
             writeln!(
                 self.string,
                 "uniform float const_table[{}];",
-                self.draw_shader_def.const_table.table.len()
+                self.const_table.table.len()
             ).unwrap();
         }
         
@@ -426,39 +412,39 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, ";").unwrap();
     }
     
-    fn compute_packed_geometries_size(&self) -> usize {
+    fn compute_packed_geometries_slots(&self) -> usize {
         let mut packed_attributes_size = 0;
         for field in &self.draw_shader_def.fields {
             packed_attributes_size += match field.kind {
-                DrawShaderFieldKind::Geometry {..} => field.ty_expr.ty.borrow().as_ref().unwrap().size(),
+                DrawShaderFieldKind::Geometry {..} => field.ty_expr.ty.borrow().as_ref().unwrap().slots(),
                 _ => 0,
             }
         }
         packed_attributes_size
     }
     
-    fn compute_packed_instances_size(&self) -> usize {
+    fn compute_packed_instances_slots(&self) -> usize {
         let mut packed_instances_size = 0;
         for field in &self.draw_shader_def.fields {
             packed_instances_size += match field.kind {
-                DrawShaderFieldKind::Instance {..} => field.ty_expr.ty.borrow().as_ref().unwrap().size(),
+                DrawShaderFieldKind::Instance {..} => field.ty_expr.ty.borrow().as_ref().unwrap().slots(),
                 _ => 0,
             }
         }
         packed_instances_size
     }
     
-    fn compute_packed_varyings_size(&self) -> usize {
+    fn compute_packed_varyings_slots(&self) -> usize {
         let mut packed_varyings_size = 0;
         for field in &self.draw_shader_def.fields {
             packed_varyings_size += match &field.kind {
                 DrawShaderFieldKind::Geometry {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
-                    field.ty_expr.ty.borrow().as_ref().unwrap().size()
+                    field.ty_expr.ty.borrow().as_ref().unwrap().slots()
                 }
                 DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} if is_used_in_pixel_shader.get() => {
-                    field.ty_expr.ty.borrow().as_ref().unwrap().size()
+                    field.ty_expr.ty.borrow().as_ref().unwrap().slots()
                 }
-                DrawShaderFieldKind::Varying {..} => field.ty_expr.ty.borrow().as_ref().unwrap().size(),
+                DrawShaderFieldKind::Varying {..} => field.ty_expr.ty.borrow().as_ref().unwrap().slots(),
                 _ => 0,
             }
         }
@@ -542,13 +528,13 @@ impl<'a> VarPacker<'a> {
     }
     
     fn pack_var(&mut self, ident: Ident, ty: &Ty) {
-        let var_size = ty.size();
+        let var_slots = ty.slots();
         let mut var_offset = 0;
         let mut in_matrix = None;
-        while var_offset < var_size {
-            let count = var_size - var_offset;
+        while var_offset < var_slots {
+            let count = var_slots - var_offset;
             let packed_count = self.packed_var_size - self.packed_var_offset;
-            let min_count = if var_size > 4 {1} else {count.min(packed_count)};
+            let min_count = if var_slots > 4 {1} else {count.min(packed_count)};
             write!(
                 self.string,
                 "    {}_{}",
@@ -565,8 +551,8 @@ impl<'a> VarPacker<'a> {
                     .unwrap();
             }
             write!(self.string, " = {}", ident).unwrap();
-            if var_size > 1 {
-                if var_size <= 4 {
+            if var_slots > 1 {
+                if var_slots <= 4 {
                     in_matrix = None;
                     write!(
                         self.string,
@@ -631,16 +617,16 @@ impl<'a> VarUnpacker<'a> {
     }
     
     fn unpack_var(&mut self, ident: Ident, ty: &Ty) {
-        let var_size = ty.size();
+        let var_slots = ty.slots();
         let mut var_offset = 0;
         let mut in_matrix = None;
-        while var_offset < var_size {
-            let count = var_size - var_offset;
+        while var_offset < var_slots {
+            let count = var_slots - var_offset;
             let packed_count = self.packed_var_size - self.packed_var_offset;
-            let min_count = if var_size > 4 {1} else {count.min(packed_count)};
+            let min_count = if var_slots > 4 {1} else {count.min(packed_count)};
             write!(self.string, "    {}", &DisplayDsIdent(ident)).unwrap();
-            if var_size > 1 {
-                if var_size <= 4 { // its a matrix
+            if var_slots > 1 {
+                if var_slots <= 4 { // its a matrix
                     in_matrix = None;
                     write!(
                         self.string,
@@ -697,7 +683,8 @@ impl<'a> VarUnpacker<'a> {
 }
 
 struct GlslBackendWriter<'a> {
-    pub shader_registry: &'a ShaderRegistry
+    pub shader_registry: &'a ShaderRegistry,
+    const_table: &'a DrawShaderConstTable
 }
 
 impl<'a> BackendWriter for GlslBackendWriter<'a> {
