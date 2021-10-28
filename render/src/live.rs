@@ -66,6 +66,13 @@ impl Cx {
         crate::fonts::live_register(self);
     }
     
+    pub fn live_ptr_from_id(&self, path:&str, id:Id)->LivePtr{
+        self.shader_registry.live_registry.live_ptr_from_path(
+            ModulePath::from_str(path).unwrap(),
+            &[id]
+        ).unwrap()
+    }
+    
     // ok so now what. now we should run the expansion
     pub fn live_expand(&mut self) {
         // lets expand the f'er
