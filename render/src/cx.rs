@@ -117,6 +117,9 @@ pub struct Cx {
     pub down_mouse_cursor: Option<MouseCursor>,
     pub hover_mouse_cursor: Option<MouseCursor>,
     pub fingers: Vec<CxPerFinger>,
+
+    pub drag_area: Area,
+    pub new_drag_area: Area,
     
     //pub playing_animator_ids: BTreeMap<AnimatorId, AnimInfo>,
     
@@ -260,6 +263,9 @@ impl Default for Cx {
             down_mouse_cursor: None,
             hover_mouse_cursor: None,
             fingers: fingers, 
+
+            drag_area: Area::Empty,
+            new_drag_area: Area::Empty,
             
             shader_registry: ShaderRegistry::new(),
             
@@ -622,6 +628,11 @@ impl Cx {
                 finger._over_last = new_area.clone();
             }
         }
+
+        if self.drag_area == old_area {
+            self.drag_area = new_area.clone();
+        }
+
         // update capture keyboard
         if self.key_focus == old_area {
             self.key_focus = new_area.clone()
@@ -749,11 +760,11 @@ impl Cx {
     
     pub fn new_signal(&mut self) -> Signal {
         self.signal_id += 1;
-        return Signal(self.signal_id);
+        return Signal{signal_id:self.signal_id};
     }
     
     pub fn send_signal(&mut self, signal: Signal, status: StatusId) {
-        if signal.0 == 0 {
+        if signal.signal_id == 0 {
             return
         }
         if let Some(statusses) = self.signals.get_mut(&signal) {
