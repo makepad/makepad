@@ -1,5 +1,50 @@
 use crate::cx::*;
 
+
+live_body!{
+    GeometryQuad2D: Geometry {
+        rust_type: {{GeometryQuad2D}}
+        x1: 0.0;
+        y1: 0.0;
+        x2: 1.0;
+        y2: 1.0;
+    }
+}
+
+impl LiveUpdateHooks for GeometryQuad2D {
+    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
+        GeometryGen::from_quad_2d(
+            self.x1,
+            self.y1,
+            self.x2,
+            self.y2,
+        ).to_geometry(cx, self.geometry);
+    }
+}
+
+impl GeometryFields for GeometryQuad2D {
+    fn geometry_fields(&self, fields: &mut Vec<GeometryField>) {
+        fields.push(GeometryField {id: id!(geom_pos), ty: Ty::Vec2});
+    }
+    
+    fn get_geometry(&self) -> Geometry {
+        self.geometry
+    }
+    
+    fn live_type_check(&self) -> LiveType {
+        Self::live_type()
+    }
+}
+
+#[derive(Live)]
+pub struct GeometryQuad2D {
+    #[hidden(cx.new_geometry())] pub geometry: Geometry,
+    #[live(0.0)] pub x1: f32,
+    #[live(0.0)] pub y1: f32,
+    #[live(1.0)] pub x2: f32,
+    #[live(1.0)] pub y2: f32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GeometryGen {
     pub vertices: Vec<f32>, // vec4 pos, vec3 normal, vec2 uv
@@ -146,48 +191,4 @@ impl GeometryGen {
             }
         }
     }
-}
-
-live_body!{
-    GeometryQuad2D: Geometry {
-        rust_type: {{GeometryQuad2D}};
-        x1: 0.0,
-        y1: 0.0,
-        x2: 1.0,
-        y2: 1.0,
-    }
-}
-
-impl LiveUpdateHooks for GeometryQuad2D {
-    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
-        GeometryGen::from_quad_2d(
-            self.x1,
-            self.y1,
-            self.x2,
-            self.y2,
-        ).to_geometry(cx, self.geometry);
-    }
-}
-
-impl GeometryFields for GeometryQuad2D {
-    fn geometry_fields(&self, fields: &mut Vec<GeometryField>) {
-        fields.push(GeometryField {id: id!(geom_pos), ty: Ty::Vec2});
-    }
-    
-    fn get_geometry(&self) -> Geometry {
-        self.geometry
-    }
-    
-    fn live_type_check(&self) -> LiveType {
-        Self::live_type()
-    }
-}
-
-#[derive(Live)]
-pub struct GeometryQuad2D {
-    #[hidden(cx.new_geometry())] pub geometry: Geometry,
-    #[live(0.0)] pub x1: f32,
-    #[live(0.0)] pub y1: f32,
-    #[live(1.0)] pub x2: f32,
-    #[live(1.0)] pub y2: f32,
 }

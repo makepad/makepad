@@ -5,7 +5,9 @@ live_body!{
     use crate::shader_std::*;
     use crate::drawquad::DrawQuad;
     DrawColor: DrawQuad {
-        rust_type: {{DrawColor}};
+        
+        rust_type: {{DrawColor}}
+        
         fn pixel(self) -> vec4 {
             return self.color;
         }

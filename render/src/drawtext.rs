@@ -6,10 +6,10 @@ live_body!{
     use crate::fonts::Font;
     
     TextStyle: Struct {
-        rust_type: {{TextStyle}};
+        rust_type: {{TextStyle}}
         font: Font {
             path: "resources/Ubuntu-R.ttf"
-        },
+        }
     }
     
     DrawText: DrawShader2D {

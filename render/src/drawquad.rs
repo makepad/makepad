@@ -6,8 +6,8 @@ live_body!{
     
     DrawQuad: DrawShader2D {
         //debug: true;
-        rust_type: {{DrawQuad}};
-        geometry: GeometryQuad2D {};
+        rust_type: {{DrawQuad}}
+        geometry: GeometryQuad2D {}
         varying pos: vec2;
         
         fn scroll(self) -> vec2 {
