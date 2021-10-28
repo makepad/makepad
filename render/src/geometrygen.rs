@@ -158,6 +158,19 @@ live_body!{
     }
 }
 
+impl LiveUpdateHooks for GeometryQuad2D {
+    fn live_update_value_unknown(&mut self, _cx: &mut Cx, _id: Id, _ptr: LivePtr) {}
+    fn before_live_update(&mut self, _cx: &mut Cx, _live_ptr: LivePtr) {}
+    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
+        GeometryGen::from_quad_2d(
+            self.x1,
+            self.y1,
+            self.x2,
+            self.y2,
+        ).to_geometry(cx, self.geometry);
+    }
+}
+
 impl GeometryFields for GeometryQuad2D {
     fn geometry_fields(&self, fields: &mut Vec<GeometryField>) {
         fields.push(GeometryField {id: id!(geom_pos), ty: Ty::Vec2});
@@ -172,94 +185,12 @@ impl GeometryFields for GeometryQuad2D {
     }
 }
 
+#[derive(Live)]
 pub struct GeometryQuad2D {
-    //#[private()]
-    pub live_ptr: Option<LivePtr>,
-    //#[default(0.0)]
-    pub x1: f32,
-    //#[default(0.0)]
-    pub y1: f32,
-    //#[default(1.0)]
-    pub x2: f32,
-    //#[default(1.0)]
-    pub y2: f32,
-    //#[private()]
-    pub geometry: Geometry
-}
-
-impl GeometryQuad2D {
-    fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
-        match id {
-            id!(x1) => self.x1.live_update(cx, ptr),
-            id!(y1) => self.y1.live_update(cx, ptr),
-            id!(x2) => self.x2.live_update(cx, ptr),
-            id!(y2) => self.y2.live_update(cx, ptr),
-            _ => ()
-        }
-    }
-}
-
-impl LiveUpdate for GeometryQuad2D {
-    fn live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {
-        // how do we verify this?
-        if let Some(mut iter) = cx.shader_registry.live_registry.live_class_iterator(live_ptr) {
-            while let Some((id, live_ptr)) = iter.next(&cx.shader_registry.live_registry) {
-                if id == id!(rust_type) && !cx.verify_type_signature(live_ptr, Self::live_type()) {
-                    // give off an error/warning somehow!
-                    return;
-                }
-                self.live_update_value(cx, id, live_ptr)
-            }
-        }
-        // lets generate geometry
-        GeometryGen::from_quad_2d(
-            self.x1,
-            self.y1,
-            self.x2,
-            self.y2,
-        ).to_geometry(cx, self.geometry);
-    }
-    
-    fn _live_type(&self) -> LiveType {
-        Self::live_type()
-    }
-}
-
-impl LiveNew for GeometryQuad2D {
-    fn live_new(cx: &mut Cx) -> Self {
-        Self {
-            live_ptr: None,
-            x1: 0.0,
-            y1: 0.0,
-            x2: 1.0,
-            y2: 1.0,
-            geometry: cx.new_geometry()
-        }
-    }
-    
-    fn live_type() -> LiveType {
-        LiveType(std::any::TypeId::of::<GeometryQuad2D>())
-    }
-    
-    fn live_register(cx: &mut Cx) {
-        cx.register_live_body(live_body());
-        struct Factory();
-        impl LiveFactory for Factory {
-            fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> {
-                Box::new(GeometryQuad2D ::live_new(cx))
-            }
-            
-            fn live_fields(&self, fields: &mut Vec<LiveField>) {
-                fields.push(LiveField {id: id!(x1), live_type: f32::live_type()});
-                fields.push(LiveField {id: id!(y1), live_type: f32::live_type()});
-                fields.push(LiveField {id: id!(x2), live_type: f32::live_type()});
-                fields.push(LiveField {id: id!(y2), live_type: f32::live_type()});
-            }
-            
-            fn live_type(&self) -> LiveType where Self: Sized {
-                GeometryQuad2D::live_type()
-            }
-        }
-        cx.live_factories.insert(GeometryQuad2D::live_type(), Box::new(Factory()));
-    }
+    #[hidden()] pub live_ptr: Option<LivePtr>,
+    #[hidden(cx.new_geometry())] pub geometry: Geometry,
+    #[live(0.0)] pub x1: f32,
+    #[live(0.0)] pub y1: f32,
+    #[live(1.0)] pub x2: f32,
+    #[live(1.0)] pub y2: f32,
 }
