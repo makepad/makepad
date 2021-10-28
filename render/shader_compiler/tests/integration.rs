@@ -315,6 +315,7 @@ const HLSL_OUTPUT: &'static str = r#"
 use makepad_live_parser::*;
 use makepad_shader_compiler::shaderregistry::ShaderRegistry;
 use makepad_shader_compiler::shaderast::DrawShaderPtr;
+use makepad_shader_compiler::shaderast::DrawShaderConstTable;
 use makepad_shader_compiler::shaderast::Ty;
 use makepad_shader_compiler::generate_glsl;
 use makepad_shader_compiler::generate_hlsl;
@@ -440,10 +441,11 @@ fn main() {
     
     // ok the shader is analysed.
     // now we will generate the glsl shader.
-    let draw_shader_decl = sr.draw_shaders.get(&shader_ptr).unwrap();
+    let draw_shader_def = sr.draw_shader_defs.get(&shader_ptr).unwrap();
     // TODO this env needs its const table transferred
-    let vertex = generate_glsl::generate_vertex_shader(draw_shader_decl, &sr);
-    let pixel = generate_glsl::generate_pixel_shader(draw_shader_decl, &sr);
+    let const_table = DrawShaderConstTable::default();
+    let vertex = generate_glsl::generate_vertex_shader(draw_shader_def, &const_table, &sr);
+    let pixel = generate_glsl::generate_pixel_shader(draw_shader_def, &const_table, &sr);
     let compare = format!("\nVERTEXSHADER\n{}PIXELSHADER\n{}", vertex, pixel);
     if let Some(change) = compare_no_ws(GLSL_OUTPUT, &compare) {
         println!("GLSL OUTPUT CHANGED\n{}", change);
@@ -451,7 +453,7 @@ fn main() {
         assert_eq!(true, false);
     }
     
-    let shader = generate_metal::generate_shader(draw_shader_decl, &sr);
+    let shader = generate_metal::generate_shader(draw_shader_def, &const_table, &sr);
     let compare = format!("\n{}", shader.mtlsl);
     if let Some(change) = compare_no_ws(METAL_OUTPUT, &compare) {
         println!("METAL OUTPUT CHANGED\n{}", change);
@@ -459,7 +461,7 @@ fn main() {
         assert_eq!(true, false);
     }
     
-    let shader = generate_hlsl::generate_shader(draw_shader_decl, &sr);
+    let shader = generate_hlsl::generate_shader(draw_shader_def, &const_table, &sr);
     let compare = format!("\n{}", shader);
     if let Some(change) = compare_no_ws(HLSL_OUTPUT, &compare) {
         println!("HLSL OUTPUT CHANGED\n{}", change);

@@ -6,35 +6,19 @@ use std::fmt;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use crate::shaderregistry::ShaderRegistry;
-struct VoidWrap();
-impl VoidWrap{
-    pub fn unwrap(&self){}
-}
-
-macro_rules! write {
-    ($dst:expr, $($arg:tt)*) => ({let _ =$dst.write_fmt(std::format_args!($($arg)*));VoidWrap()})
-}
-
-macro_rules! writeln {
-    ($dst:expr $(,)?) => (
-        write!($dst, "\n")
-    );
-    ($dst:expr, $($arg:tt)*) => (
-        {let _ = $dst.write_fmt(std::format_args!($($arg)*));VoidWrap()}
-    );
-}
 
 pub fn index_to_char(index: usize) -> char {
     std::char::from_u32(index as u32 + 65).unwrap()
 }
 
-pub fn generate_shader(draw_shader_def: &DrawShaderDef, shader_registry: &ShaderRegistry) -> String {
+pub fn generate_shader(draw_shader_def: &DrawShaderDef, const_table:&DrawShaderConstTable, shader_registry: &ShaderRegistry) -> String {
     let mut string = String::new();
     DrawShaderGenerator {
         draw_shader_def,
         shader_registry,
         string: &mut string,
-        backend_writer: &HlslBackendWriter {shader_registry, draw_shader_def}
+        const_table,
+        backend_writer: &HlslBackendWriter {shader_registry, draw_shader_def, const_table}
     }
     .generate_shader();
     string
@@ -44,7 +28,8 @@ struct DrawShaderGenerator<'a> {
     draw_shader_def: &'a DrawShaderDef,
     shader_registry: &'a ShaderRegistry,
     string: &'a mut String,
-    backend_writer: &'a dyn BackendWriter
+    backend_writer: &'a dyn BackendWriter,
+    const_table: &'a DrawShaderConstTable
 }
 
 impl<'a> DrawShaderGenerator<'a> {
@@ -83,7 +68,7 @@ impl<'a> DrawShaderGenerator<'a> {
         
         let all_fns = self.draw_shader_def.all_fns.borrow();
         for fn_iter in all_fns.iter().rev() {
-            let const_table_offset = self.draw_shader_def.const_table.offsets.get(fn_iter).cloned();
+            let const_table_offset = self.const_table.offsets.get(fn_iter).cloned();
             let fn_def = self.shader_registry.all_fns.get(fn_iter).unwrap();
             if fn_def.has_closure_args() {
                 for call_iter in all_fns.iter().rev() {
@@ -145,7 +130,7 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         writeln!(self.string, "}};").unwrap();
         
-        writeln!(self.string, "cbuffer ConstTable : register(b1){{float4 const_table[{}];}};", self.draw_shader_def.const_table.table.len() >> 2).unwrap();
+        writeln!(self.string, "cbuffer ConstTable : register(b1){{float4 const_table[{}];}};", self.const_table.table.len() >> 2).unwrap();
         
         let mut index = 2;
         
@@ -472,6 +457,7 @@ impl<'a> DrawShaderGenerator<'a> {
 struct HlslBackendWriter<'a> {
     pub shader_registry: &'a ShaderRegistry,
     pub draw_shader_def: &'a DrawShaderDef,
+    pub const_table: &'a DrawShaderConstTable
 }
 
 impl<'a> BackendWriter for HlslBackendWriter<'a> {
@@ -619,7 +605,7 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
     
     fn write_call_expr_hidden_args(&self, string: &mut String, hidden_args: &BTreeSet<HiddenArgKind >, sep: &str) {
         let mut sep = sep;
-        if self.draw_shader_def.const_table.table.len()>0 {
+        if self.const_table.table.len()>0 {
             write!(string, "{}", sep).unwrap();
             sep = ", ";
             write!(string, "const_table").unwrap();
