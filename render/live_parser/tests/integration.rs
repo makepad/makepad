@@ -125,13 +125,13 @@ fn main() {
     "#;
     
     let error_check = r#"
-        file1: 9 16 - Cannot find item on scope: id1 - origin: render / live_parser / src / liveregistry.rs: 749
-        file1: 13 17 - Cannot find item on scope: x - origin: render / live_parser / src / liveregistry.rs: 749
-        file2: 12 28 - Cannot find item on scope: h1 - origin: render / live_parser / src / liveregistry.rs: 749
-        file2: 12 22 - Cannot inherit with different node type c1.x4.p1 - origin: render / live_parser / src / livedocument.rs: 232
-        file2: 14 12 - Cannot find class SA.B - origin: render / live_parser / src / liveregistry.rs: 709
-        file2: 15 26 - Cannot inherit with different node type c1.x4.p1 - origin: render / live_parser / src / livedocument.rs: 232
-        file3: 5 12 - Cannot find item on scope: ERR - origin: render / live_parser / src / liveregistry.rs: 749
+file1: 9 16 - Cannot find item on scope: id1 - origin: render/live_parser/src/liveregistry.rs:748 
+file1: 13 17 - Cannot find item on scope: x - origin: render/live_parser/src/liveregistry.rs:748 
+file2: 12 28 - Cannot find item on scope: h1 - origin: render/live_parser/src/liveregistry.rs:748 
+file2: 12 22 - Cannot inherit with different node type c1.x4.p1 - origin: render/live_parser/src/livedocument.rs:231 
+file2: 14 12 - Cannot find class SA.B - origin: render/live_parser/src/liveregistry.rs:708 
+file2: 15 26 - Cannot inherit with different node type c1.x4.p1 - origin: render/live_parser/src/livedocument.rs:231 
+file3: 5 12 - Cannot find item on scope: ERR - origin: render/live_parser/src/liveregistry.rs:748 
     "#;
     
     let sources = [
