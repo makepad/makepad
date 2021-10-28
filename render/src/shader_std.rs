@@ -16,9 +16,6 @@ live_body!{
     }
 }
 
-pub fn define_shader_stdlib(cx: &mut Cx) {
-    cx.register_live_body(live_body());
-}
 
 /*
 pub fn register_default_geometry(cx: &mut Cx){

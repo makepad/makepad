@@ -1,53 +1,56 @@
-use makepad_render::*;  
+use makepad_render::*;
 
 main_app!(BareExampleApp);
 
+#[derive(Live, LiveUpdateHooks)]
 pub struct BareExampleApp {
-    //live: LiveNode, // for every component this always points to the node we deserialized from
-    window: Window,
-    pass: Pass, 
-    color_texture: Texture,
-    main_view: View,
-    draw_quad: DrawColor
+    #[hidden(Window::new(cx))] window: Window,
+    #[hidden()] pass: Pass,
+    #[hidden(Texture::new(cx))] color_texture: Texture,
+    #[hidden(View::new())] main_view: View,
+    #[live()] draw_quad: DrawColor,
+    #[live()] draw_text: DrawText
 }
 
 // what you want is putting down an indirection in the style-sheet for a codefile.
 live_body!{
     use makepad_render::drawcolor::DrawColor
-    MyDrawQuad:DrawColor{
-        color: #f00 
-        fn pixel(self)->vec4{
-            return mix(#f00,#0f0,self.geom_pos.y);
-        }
-    } 
-} 
- 
-impl BareExampleApp {
-    pub fn new(cx:&mut Cx)->Self{
-        println!("{}", std::mem::size_of::<DrawCall>());
+    use makepad_render::drawtext::DrawText
 
-        let mut dq = DrawColor::live_new(cx);
+    App: Component {
+        rust_type: {{BareExampleApp}}
+        
+        draw_quad: DrawColor {
+            color: #f00
+            fn pixel(self) -> vec4 {
+                return mix(#f00, #0f0, self.geom_pos.y);
+            }
+        }
+
+        draw_text: DrawText{
+        }
+    }
+}
+
+impl BareExampleApp {
+    pub fn new(cx: &mut Cx) -> Self {
+        let mut init = Self::live_new(cx);
         
         let live_ptr = cx.shader_registry.live_registry.live_ptr_from_path(
             ModulePath::from_str(&module_path!()).unwrap(),
-            &[id!(MyDrawQuad)]
+            &[id!(App)]
         ).unwrap();
-
-        dq.live_update(cx, live_ptr);
         
-        Self{
-            window:Window::new(cx),
-            pass:Pass::default(),
-            color_texture:Texture::new(cx),
-            main_view:View::new(),
-            draw_quad:dq  
-        }
-    }
-    pub fn live_register(cx: &mut Cx) {
-        cx.register_live_body(live_body());
+        init.live_update(cx, live_ptr);
+        init
     }
     
-    pub fn myui_button_clicked(&mut self, _cx: &mut Cx){
+    //pub fn live_register(cx: &mut Cx) {
+    //    Self::live_register(cx);
+    //    cx.register_live_body(live_body());
+    // }
+    
+    pub fn myui_button_clicked(&mut self, _cx: &mut Cx) {
     }
     
     pub fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
@@ -64,18 +67,18 @@ impl BareExampleApp {
     }
     
     pub fn draw_app(&mut self, cx: &mut Cx) {
-
+        
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
         self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(Vec4::color("000")));
         if self.main_view.begin_view(cx, Layout::default()).is_ok() {
-            self.draw_quad.draw_quad_abs(cx, Rect{pos:Vec2{x:30.,y:30.},size:Vec2{x:100.,y:100.}});
-/*
+            self.draw_quad.draw_quad_abs(cx, Rect {pos: Vec2 {x: 30., y: 30.}, size: Vec2 {x: 100., y: 100.}});
+            /*
         while let Some(custom) = self.live.draw_live(cx){
             match custom.id_path{
             }
         }*/
-/*
+            /*
             self.quad.counter = 0.;
             self.quad.begin_many(cx);
             

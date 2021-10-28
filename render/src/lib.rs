@@ -47,7 +47,7 @@ mod cx_desktop;
 mod cx_style;
 
 mod turtle;
-//mod fonts;
+mod fonts;
 mod cursor;
 mod window;
 mod view;
@@ -60,7 +60,7 @@ mod area;
 mod geometrygen;
 
 mod drawquad;
-//mod drawtext;
+mod drawtext;
 mod drawcolor;
 //mod drawcube;
 //mod drawimage;
@@ -73,7 +73,7 @@ mod gpuinfo;
 
 pub use crate::cx::*;
 pub use crate::drawquad::*;
-//pub use crate::drawtext::*;
+pub use crate::drawtext::*;
 pub use crate::drawcolor::*;
 //pub use crate::drawcube::*;
 //pub use crate::drawimage::*;
