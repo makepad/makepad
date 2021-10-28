@@ -74,7 +74,7 @@ impl DrawCallVars {
         LiveType(std::any::TypeId::of::<DrawCallVars>())    
     }
     
-    pub fn instance_slice<'a>(&'a self) -> &'a [f32] {
+    pub fn instances_slice<'a>(&'a self) -> &'a [f32] {
         unsafe {
             std::slice::from_raw_parts((&self.var_instances[self.var_instance_start - 1] as *const _ as *const f32).offset(1), self.var_instance_slots)
         }
@@ -138,24 +138,25 @@ impl DrawCallVars {
                     recur_expand(&mut false, live_type, live_factories, draw_shader_def, span);
                 }
                 if id == id!(geometry) {
-                    if let Some(lf) = live_factories.get(&live_type) {
-                        if lf.live_type() == geometry_fields.live_type_check() {
-                            let mut fields = Vec::new();
-                            geometry_fields.geometry_fields(&mut fields);
-                            for field in fields {
-                                draw_shader_def.add_geometry(field.id, field.ty, span);
-                            }
+                    if live_type == geometry_fields.live_type_check() {
+                        let mut fields = Vec::new();
+                        geometry_fields.geometry_fields(&mut fields);
+                        for field in fields {
+                            draw_shader_def.add_geometry(field.id, field.ty, span);
                         }
-                        else {
-                            eprintln!("lf.get_type() != geometry_fields.live_type_check()");
-                        }
+                    }
+                    else {
+                        eprintln!("lf.get_type() != geometry_fields.live_type_check()");
                     }
                 }
             });
             // ok lets print an error
             match result {
                 Err(e) => {
-                    println!("Error {}", e.to_live_file_error("", ""));
+                    // ok so. lets get the source for this file id
+                    let file = &cx.shader_registry.live_registry.live_files[e.span.file_id().to_index()];
+                    //println!("{}", file.source);
+                    println!("Error {}", e.to_live_file_error(&file.file, &file.source, file.line_offset));
                 }
                 Ok(draw_shader_def) => {
                     // OK! SO the shader parsed

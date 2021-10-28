@@ -142,6 +142,9 @@ C: Iterator<Item = char>,
             ('#', _) => {
                 self.skip_char();
                 self.temp_hex.truncate(0);
+                if self.ch_0 == 'x'{
+                    self.skip_char();
+                }
                 while let Some(ch) = self.read_char_if( | ch | ch.is_ascii_hexdigit()) {
                     self.temp_hex.push(ch as u8)
                 }

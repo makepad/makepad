@@ -159,8 +159,6 @@ live_body!{
 }
 
 impl LiveUpdateHooks for GeometryQuad2D {
-    fn live_update_value_unknown(&mut self, _cx: &mut Cx, _id: Id, _ptr: LivePtr) {}
-    fn before_live_update(&mut self, _cx: &mut Cx, _live_ptr: LivePtr) {}
     fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
         GeometryGen::from_quad_2d(
             self.x1,
@@ -187,7 +185,6 @@ impl GeometryFields for GeometryQuad2D {
 
 #[derive(Live)]
 pub struct GeometryQuad2D {
-    #[hidden()] pub live_ptr: Option<LivePtr>,
     #[hidden(cx.new_geometry())] pub geometry: Geometry,
     #[live(0.0)] pub x1: f32,
     #[live(0.0)] pub y1: f32,

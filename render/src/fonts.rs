@@ -5,9 +5,23 @@ use crate::cx::*;
 //use makepad_path::PathIterator;
 
 
-#[derive(Copy, Clone, PartialEq, Debug)]
+live_body!{
+    Font:Struct{
+        rust_type:{{Font}}
+    }
+}
+
+#[derive(Clone, Live)]
 pub struct Font {
-    pub font_id: usize,
+    #[hidden()] pub font_id: Option<usize>,
+    #[live()] pub path: String
+}
+
+impl LiveUpdateHooks for Font {
+    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
+        // ok so we have a path, lets find our font.
+        
+    }
 }
 /*
 impl Cx {

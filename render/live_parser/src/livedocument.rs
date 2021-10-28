@@ -39,15 +39,15 @@ impl fmt::Display for LiveScopeTarget {
 pub enum LiveScopeTarget {
     LocalPtr(LocalPtr),
     LivePtr(LivePtr)
-} 
+}
 
-impl LiveScopeTarget{
-    pub fn to_full_node_ptr(&self, file_id:FileId)->LivePtr{
-        match self{
-            LiveScopeTarget::LocalPtr(local_ptr)=>{
-                LivePtr{file_id:file_id, local_ptr:*local_ptr}
+impl LiveScopeTarget {
+    pub fn to_full_node_ptr(&self, file_id: FileId) -> LivePtr {
+        match self {
+            LiveScopeTarget::LocalPtr(local_ptr) => {
+                LivePtr {file_id: file_id, local_ptr: *local_ptr}
             }
-            LiveScopeTarget::LivePtr(live_ptr)=>{
+            LiveScopeTarget::LivePtr(live_ptr) => {
                 *live_ptr
             }
         }
@@ -73,21 +73,28 @@ impl LiveDocument {
         }
     }
     
-    pub fn resolve_ptr(&self, local_ptr:LocalPtr)->&LiveNode{
+    pub fn resolve_ptr(&self, local_ptr: LocalPtr) -> &LiveNode {
         &self.nodes[local_ptr.level][local_ptr.index]
     }
     
-    pub fn get_tokens(&self, token_start:u32, token_count:u32)->&[TokenWithSpan]{
+    pub fn get_tokens(&self, token_start: u32, token_count: u32) -> &[TokenWithSpan] {
         &self.tokens[token_start as usize..(token_start + token_count)as usize]
     }
-
-    pub fn get_scopes(&self, scope_start:u32, scope_count:u16)->&[LiveScopeItem]{
+    
+    pub fn get_scopes(&self, scope_start: u32, scope_count: u16) -> &[LiveScopeItem] {
         &self.scopes[scope_start as usize..(scope_start + scope_count as u32)as usize]
     }
-
-
-    pub fn restart_from(&mut self, other:&LiveDocument){
-        for node in &mut self.nodes{
+    
+    pub fn get_string(&self, string_start: u32, string_count: u32, out:&mut String) {
+        let chunk = &self.strings[string_start as usize..(string_start + string_count as u32)as usize];
+        out.truncate(0);
+        for chr in chunk {
+            out.push(*chr);
+        }
+    }
+    
+    pub fn restart_from(&mut self, other: &LiveDocument) {
+        for node in &mut self.nodes {
             node.truncate(0);
         }
         self.multi_ids.clone_from(&other.multi_ids.clone());
@@ -222,8 +229,8 @@ impl LiveDocument {
                             if i == id_count - 1 { // last item
                                 // ok now we need to replace this node
                                 
-                                if node.value.get_type_nr() != in_node.value.get_type_nr(){
-                                    if node.value.is_var_def(){ // we can replace a vardef with something else
+                                if node.value.get_type_nr() != in_node.value.get_type_nr() {
+                                    if node.value.is_var_def() { // we can replace a vardef with something else
                                         continue;
                                     }
                                     // we cant replace a VarDef with something else
@@ -314,8 +321,8 @@ impl LiveDocument {
                 for i in node_start..nodes.len() {
                     if nodes[i].id_pack == in_node.id_pack { // overwrite and exit
                         // lets error if the overwrite value type changed.
-                        if nodes[i].value.get_type_nr() != in_node.value.get_type_nr(){
-                            if nodes[i].value.is_var_def(){ // we can replace a vardef with something else
+                        if nodes[i].value.get_type_nr() != in_node.value.get_type_nr() {
+                            if nodes[i].value.is_var_def() { // we can replace a vardef with something else
                                 continue;
                             }
                             return Err(LiveError {
@@ -356,9 +363,9 @@ impl LiveDocument {
         IdPack::multi(multi_index, ids.len())
     }
     
-    pub fn clone_multi_id(&mut self, id:IdPack , other_ids:&[Id]) -> IdPack {
-         match id.unpack() {
-            IdUnpack::Multi {index, count}  => {
+    pub fn clone_multi_id(&mut self, id: IdPack, other_ids: &[Id]) -> IdPack {
+        match id.unpack() {
+            IdUnpack::Multi {index, count} => {
                 let multi_index = self.multi_ids.len();
                 for i in 0..count {
                     self.multi_ids.push(other_ids[i + index]);
@@ -534,7 +541,7 @@ impl fmt::Display for LiveDocument {
                 LiveValue::Use {module_path_ids} => {
                     let _ = write!(f, "use {}::{}", IdFmt::col(&ld.multi_ids, node.id_pack), IdFmt::col(&ld.multi_ids, module_path_ids));
                 }
-                LiveValue::LiveType(id)=>{
+                LiveValue::LiveType(id) => {
                     let _ = write!(f, "TypeId {:?}", id);
                 }
                 LiveValue::Class {class, node_start, node_count} => {

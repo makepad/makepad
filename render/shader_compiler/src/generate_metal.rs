@@ -6,22 +6,7 @@ use std::fmt;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use crate::shaderregistry::ShaderRegistry;
-/*
-struct VoidWrap();
-impl VoidWrap{
-    pub fn unwrap(&self){}
-}
-macro_rules! write {
-    ($dst:expr, $($arg:tt)*) => ({let _ =$dst.write_fmt(std::format_args!($($arg)*));VoidWrap()})
-}
-macro_rules! writeln {
-    ($dst:expr $(,)?) => (
-        write!($dst, "\n")
-    );
-    ($dst:expr, $($arg:tt)*) => (
-        {let _ = $dst.write_fmt(std::format_args!($($arg)*));write!($dst, "\n");VoidWrap()}
-    );
-}*/
+
 pub struct MetalGeneratedShader{
     pub mtlsl: String,
     pub fields_as_uniform_blocks:BTreeMap<Ident, Vec<(usize, Ident) >>   
@@ -173,7 +158,7 @@ impl<'a> DrawShaderGenerator<'a> {
                 DrawShaderFieldKind::Texture {..} => {
                     assert_eq!(*field.ty_expr.ty.borrow().as_ref().unwrap(), Ty::Texture2D);
                     write!(self.string, "    texture2d<float> ").unwrap();
-                    write!(self.string, "{}", field.ident).unwrap();
+                    write!(self.string, "{}", &DisplayDsIdent(field.ident)).unwrap();
                     write!(self.string, " [[texture({})]];", index).unwrap();
                     index += 1;
                 }
