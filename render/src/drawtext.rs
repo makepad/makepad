@@ -104,6 +104,31 @@ live_body!{
     }
 }
 
+#[derive(Clone, Debug, Copy)]
+pub struct TextStyle {
+    pub font: Font,
+    pub font_size: f32,
+    pub brightness: f32,
+    pub curve: f32,
+    pub line_spacing: f32,
+    pub top_drop: f32,
+    pub height_factor: f32,
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        TextStyle {
+            font: Font {font_id: 0},
+            font_size: 8.0,
+            brightness: 1.0,
+            curve: 0.6,
+            line_spacing: 1.4,
+            top_drop: 1.1,
+            height_factor: 1.3,
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 pub enum Wrapping {
     Char,
@@ -118,14 +143,15 @@ pub enum Wrapping {
 pub struct DrawText {
     #[hidden()] pub buf: Vec<char>,
     #[hidden()] pub area: Area,
+    #[hidden()] pub many_instances: Option<ManyInstances>,
     
     #[live()] pub geometry: GeometryQuad2D,
-    #[live()] pub text_style: TextStyle,
-    #[live()] pub wrapping: Wrapping,
+    #[local()] pub text_style: TextStyle,
+    #[local(Wrapping::None)] pub wrapping: Wrapping,
     #[live()] pub font_scale: f32,
     #[live(1.0)] pub draw_depth: f32,    
 
-    #[hidden()] pub draw_call_vars: DrawCallVars,
+    #[local()] pub draw_call_vars: DrawCallVars,
     // these values are all generated
     #[local()] pub font_t1: Vec2,
     #[local()] pub font_t2: Vec2,
@@ -139,6 +165,373 @@ pub struct DrawText {
     #[local()] pub marker: f32,
 }
 
+impl LiveUpdateHooks for DrawText {
+    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
+        self.draw_call_vars.update_var(cx, ptr, id);
+    }
+    
+    fn before_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {
+        self.draw_call_vars.init_shader(cx, DrawShaderPtr(live_ptr), &self.geometry);
+    }
+    
+    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
+        self.draw_call_vars.init_slicer(cx);
+    }
+}
+
+impl DrawText{
+pub fn buf_truncate(&mut self, len:usize){
+        unsafe {
+            self.buf.truncate(len);
+        }
+    }
+    
+    pub fn buf_push_char(&mut self, c:char){
+        unsafe{
+            self.buf.push(c);
+        }
+    }
+    
+    pub fn buf_push_str(&mut self, val:&str){
+        unsafe {
+            for c in val.chars() {
+                self.buf.push(c)
+            }
+        }
+    }
+    
+    pub fn draw_text(&mut self, cx: &mut Cx, pos: Vec2) {
+        let mut buf = Vec::new();
+        std::mem::swap(&mut buf, unsafe {&mut self.buf});
+        self.draw_text_chunk(cx, pos, 0, &buf, | _, _, _, _ | {0.0});
+        std::mem::swap(&mut buf, unsafe {&mut self.buf});
+    }
+
+    pub fn draw_text_rel(&mut self, cx: &mut Cx, pos: Vec2, val:&str) {
+        self.buf_truncate(0);
+        self.buf_push_str(val);
+        self.draw_text(cx, pos + cx.get_turtle_origin());
+    }
+    
+    pub fn draw_text_abs(&mut self, cx: &mut Cx, pos: Vec2, val:&str) {
+        self.buf_truncate(0);
+        self.buf_push_str(val);
+        self.draw_text(cx, pos);
+    }
+
+   pub fn begin_many(&mut self, cx: &mut Cx) {
+        let mi = cx.begin_many_aligned_instances(&self.draw_call_vars);
+        self.area = Area::Instance(InstanceArea {
+            instance_count: 0,
+            instance_offset: mi.instances.len(),
+            ..mi.instance_area.clone()
+        });
+        self.many_instances = Some(mi);
+    }
+
+        
+    pub fn end_many(&mut self, cx: &mut Cx) {
+        unsafe {
+            if let Some(mi) = self.many.take() {
+                let new_area = cx.end_many_instances(mi);
+                self.area = cx.update_area_refs(self.many_old_area, new_area);
+                self.write_uniforms(cx);
+            }
+        }
+    }
+    
+    pub fn draw_text_chunk<F>(&mut self, cx: &mut Cx, pos: Vec2, char_offset: usize, chunk: &[char], mut char_callback: F)
+    where F: FnMut(char, usize, f32, f32) -> f32
+    {
+        if pos.x.is_nan() || pos.y.is_nan() {
+            return
+        }
+        
+        // lets use a many
+        
+        let in_many = unsafe{self.many.is_some()};
+        
+        if !in_many{ 
+            self.begin_many(cx);
+        }
+                
+        let text_style = unsafe {&self.text_style};
+        
+        let mut walk_x = pos.x;
+        let mut char_offset = char_offset;
+        let font_id = text_style.font.font_id;
+        
+        let cxfont = &mut cx.fonts[font_id];
+        
+        let dpi_factor = cx.current_dpi_factor;
+        
+        //let geom_y = (geom_y * dpi_factor).floor() / dpi_factor;
+        let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, text_style.font_size);
+        
+        let font = &mut cxfont.font_loaded.as_ref().unwrap();
+        
+        let font_size_logical = text_style.font_size * 96.0 / (72.0 * font.units_per_em);
+        let font_size_pixels = font_size_logical * dpi_factor;
+        
+        let atlas_page = &mut cxfont.atlas_pages[atlas_page_id];
+
+        
+        let li = unsafe {if let Some(mi) = &mut self.many {mi} else {return}};
+        
+        for wc in chunk {
+            
+            let unicode = *wc as usize;
+            let glyph_id = font.char_code_to_glyph_index_map[unicode];
+            if glyph_id >= font.glyphs.len() {
+                println!("GLYPHID OUT OF BOUNDS {} {} len is {}", unicode, glyph_id, font.glyphs.len());
+                continue;
+            }
+            
+            let glyph = &font.glyphs[glyph_id];
+            
+            let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
+            
+            // snap width/height to pixel granularity
+            let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + 1.0;
+            let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 1.0;
+            
+            // this one needs pixel snapping
+            let min_pos_x = walk_x + font_size_logical * glyph.bounds.p_min.x;
+            let min_pos_y = pos.y - font_size_logical * glyph.bounds.p_min.y + text_style.font_size * text_style.top_drop;
+            
+            // compute subpixel shift
+            let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
+            let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
+            
+            
+            // scale and snap it
+            let scaled_min_pos_x = walk_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
+            let scaled_min_pos_y = pos.y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + text_style.font_size * self.font_scale * text_style.top_drop - subpixel_y_fract;
+            
+            // only use a subpixel id for small fonts
+            let subpixel_id = if text_style.font_size>32.0 {
+                0
+            }
+            else { // subtle 64 index subpixel id
+                ((subpixel_y_fract * 7.0) as usize) << 3 |
+                (subpixel_x_fract * 7.0) as usize
+            };
+            
+            let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
+                //println!("{} {} {} {}", tc.tx1,tc.tx2,tc.ty1,tc.ty2);
+                tc
+            }
+            else {
+                // see if we can fit it
+                // allocate slot
+                cx.fonts_atlas.atlas_todo.push(CxFontsAtlasTodo {
+                    subpixel_x_fract,
+                    subpixel_y_fract,
+                    font_id,
+                    atlas_page_id,
+                    glyph_id,
+                    subpixel_id
+                });
+                
+                atlas_page.atlas_glyphs[glyph_id][subpixel_id] = Some(
+                    cx.fonts_atlas.alloc_atlas_glyph(&cxfont.file, w, h)
+                );
+                
+                atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
+            };
+            
+            // give the callback a chance to do things
+            self.font_t1.x = tc.tx1;
+            self.font_t1.y = tc.ty1;
+            self.font_t2.x = tc.tx2;
+            self.font_t2.y = tc.ty2;
+            self.rect_pos = vec2(scaled_min_pos_x, scaled_min_pos_y);
+            self.rect_size = vec2(w * self.font_scale / dpi_factor, h * self.font_scale / dpi_factor);
+            self.char_depth = self.draw_depth + 0.00001 * min_pos_x;
+            self.base.x = walk_x;
+            self.base.y = pos.y;
+            self.font_size = text_style.font_size;
+            self.char_offset = char_offset as f32;
+            
+            // self.marker = marker;
+            self.marker = char_callback(*wc, char_offset, walk_x, advance);
+            
+            li.instances.extend_from_slice(unsafe {
+                std::slice::from_raw_parts(&self.font_t1 as *const _ as *const f32, self.slots)
+            });
+            // !TODO make sure a derived shader adds 'empty' values here.
+            
+            walk_x += advance;
+            char_offset += 1;
+        }
+        
+        if !in_many{
+            self.end_many(cx)
+        }
+    }
+    
+    pub fn draw_text_walk(&mut self, cx: &mut Cx, text: &str) {
+        let in_many = unsafe{self.many.is_some()};
+        
+        if !in_many{ 
+            self.begin_many(cx);
+        }
+        
+        let mut buf = Vec::new();
+        std::mem::swap(&mut buf, unsafe {&mut self.buf});
+        buf.truncate(0);
+        
+        let mut width = 0.0;
+        let mut elipct = 0;
+        
+        let text_style = unsafe {&self.text_style};
+        let font_size = text_style.font_size;
+        let line_spacing = text_style.line_spacing;
+        let height_factor = text_style.height_factor;
+        let mut iter = text.chars().peekable();
+        
+        let font_id = text_style.font.font_id;
+        let font_size_logical = text_style.font_size * 96.0 / (72.0 * cx.fonts[font_id].font_loaded.as_ref().unwrap().units_per_em);
+        
+        while let Some(c) = iter.next() {
+            let last = iter.peek().is_none();
+            
+            let mut emit = last;
+            let mut newline = false;
+            let slot = if c < '\u{10000}' {
+                cx.fonts[font_id].font_loaded.as_ref().unwrap().char_code_to_glyph_index_map[c as usize]
+            } else {
+                0
+            };
+            if c == '\n' {
+                emit = true;
+                newline = true;
+            }
+            if slot != 0 {
+                let glyph = &cx.fonts[font_id].font_loaded.as_ref().unwrap().glyphs[slot];
+                width += glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
+                match self.wrapping {
+                    Wrapping::Char => {
+                        buf.push(c);
+                        emit = true
+                    },
+                    Wrapping::Word => {
+                        buf.push(c);
+                        if c == ' ' || c == '\t' || c == ',' || c == '\n' {
+                            emit = true;
+                        }
+                    },
+                    Wrapping::Line => {
+                        buf.push(c);
+                        if c == 10 as char || c == 13 as char {
+                            emit = true;
+                        }
+                        newline = true;
+                    },
+                    Wrapping::None => {
+                        buf.push(c);
+                    },
+                    Wrapping::Ellipsis(ellipsis_width) => {
+                        if width>ellipsis_width { // output ...
+                            if elipct < 3 {
+                                buf.push('.');
+                                elipct += 1;
+                            }
+                        }
+                        else {
+                            buf.push(c)
+                        }
+                    }
+                }
+            }
+            if emit {
+                let height = font_size * height_factor * self.font_scale;
+                let rect = cx.walk_turtle(Walk {
+                    width: Width::Fix(width),
+                    height: Height::Fix(height),
+                    margin: Margin::zero()
+                });
+                
+                self.draw_text_chunk(cx, rect.pos, 0, &buf, | _, _, _, _ | {0.0});
+                
+                width = 0.0;
+                buf.truncate(0);
+                if newline {
+                    cx.turtle_new_line_min_height(font_size * line_spacing * self.font_scale);
+                }
+            }
+        }
+        std::mem::swap(&mut buf, unsafe {&mut self.buf});
+        if !in_many{
+            self.end_many(cx)
+        }
+    }
+    
+    // looks up text with the behavior of a text selection mouse cursor
+    pub fn closest_text_offset(&self, cx: &Cx, pos: Vec2) -> Option<usize> {
+        let area = unsafe {&self.area};
+        
+        if !area.is_valid(cx) {
+            return None
+        }
+        
+        let scroll_pos = area.get_scroll_pos(cx);
+        let spos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
+        
+        let base = area.get_read_ref(cx, id!(base), Ty::Vec2).unwrap();
+        let rect_size = area.get_read_ref(cx, id!(rect_size), Ty::Vec2).unwrap();
+        let font_size = area.get_read_ref(cx, id!(font_size), Ty::Float).unwrap();
+        let char_offset = area.get_read_ref(cx, id!(char_offset), Ty::Float).unwrap();
+        
+        let text_style = unsafe {&self.text_style};
+        let line_spacing = text_style.line_spacing;
+        
+        let mut i = 0;
+        while i < base.repeat {
+            let index = base.stride * i;
+            
+            let y = base.buffer[index + 1];
+            let fs = font_size.buffer[index];
+            
+            if y + fs * line_spacing > spos.y { // alright lets find our next x
+                while i < base.repeat {
+                    let index = base.stride * i;
+                    let x = base.buffer[index + 0];
+                    let y = base.buffer[index + 1];
+                    let w = rect_size.buffer[index + 0];
+                    
+                    if x > spos.x + w * 0.5 || y > spos.y {
+                        let prev_index = if i == 0 {0}else {base.stride * (i - 1)};
+                        let prev_x = base.buffer[prev_index + 0];
+                        let prev_w = rect_size.buffer[prev_index + 0];
+                        if i < base.repeat - 1 && prev_x > spos.x + prev_w { // fix newline jump-back
+                            return Some(char_offset.buffer[index] as usize);
+                        }
+                        return Some(char_offset.buffer[prev_index] as usize);
+                    }
+                    i += 1;
+                }
+            }
+            i += 1;
+        }
+        return Some(char_offset.buffer[(base.repeat - 1) * base.stride] as usize);
+    }
+    
+    pub fn get_monospace_base(&self, cx: &Cx) -> Vec2 {
+        let font_id = self.text_style.font.font_id;
+        let font = cx.fonts[font_id].font_loaded.as_ref().unwrap();
+        let slot = font.char_code_to_glyph_index_map[33];
+        let glyph = &font.glyphs[slot];
+        
+        //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
+        Vec2 {
+            x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.units_per_em)),
+            y: self.text_style.line_spacing
+        }
+    }    
+}
+
+/*
 impl Clone for DrawText {
     fn clone(&self) -> Self {
         Self {
@@ -757,4 +1150,4 @@ impl DrawText {
             y: self.text_style.line_spacing
         }
     }
-}
+}*/
