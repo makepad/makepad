@@ -35,6 +35,7 @@ impl Cx {
         cocoa_app.event_loop( | cocoa_app, events | {
 
             self.mtl_compile_shaders(&metal_cx);
+
             //let mut paint_dirty = false;
             for mut event in events {
                 
@@ -79,7 +80,7 @@ impl Cx {
                     },
                     Event::Paint => {
                         
-                        let vsync = self.process_desktop_paint_callbacks(cocoa_app.time_now());
+                        let _vsync = self.process_desktop_paint_callbacks(cocoa_app.time_now());
                         
                         // construct or destruct windows
                         for (index, window) in self.windows.iter_mut().enumerate() {
@@ -169,7 +170,7 @@ impl Cx {
                                 cocoa_app.update_app_menu(menu, &self.command_settings)
                             }
                         }
-                        
+
                         // build a list of renderpasses to repaint
                         let mut windows_need_repaint = 0;
                         self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
@@ -182,10 +183,10 @@ impl Cx {
                                         // its a render window
                                         windows_need_repaint -= 1;
                                         for metal_window in &mut metal_windows {if metal_window.window_id == window_id {
-                                            metal_window.set_vsync_enable(windows_need_repaint == 0 && vsync);
+                                            /* metal_window.set_vsync_enable(windows_need_repaint == 0 && vsync);
                                             metal_window.set_buffer_count(
                                                 if metal_window.window_geom.is_fullscreen {3}else {2}
-                                            );
+                                            );*/
                                             
                                             let dpi_factor = metal_window.window_geom.dpi_factor;
                                             
@@ -197,15 +198,24 @@ impl Cx {
                                                 metal_window.ca_layer,
                                                 &mut metal_cx,
                                             );
+                                            
+                                            //let pass = &mut self.passes[*pass_id];
+                                            /*
+                                            if pass.paint_flush_counter < 30{
+                                                pass.paint_flush_counter += 1;
+                                                pass.paint_dirty  = true;
+                                                paint_dirty = true;
+                                            }*/
+                                            
                                             // call redraw if we guessed the dpi wrong on startup
                                             if metal_window.first_draw {
                                                 metal_window.first_draw = false;
                                                 if dpi_factor != self.default_dpi_factor {
                                                     self.redraw_pass_and_sub_passes(*pass_id);
                                                 }
-                                                
                                             }
                                         }}
+                                        
                                     }
                                     CxPassDepOf::Pass(parent_pass_id) => {
                                         let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
@@ -237,25 +247,28 @@ impl Cx {
                     }
                 }
 
+                if let Some(dragged_item) = self.platform.start_dragging.take() {
+                    cocoa_app.start_dragging(dragged_item);
+                }
+
                 if self.process_desktop_post_event(event) {
                     cocoa_app.terminate_event_loop();
                 }
             }
-
-            //self.mtl_compile_shaders(&metal_cx);
-            /*
-            if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0 {
+            
+           /* if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0 {
                 let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
                 let mut errors = self.process_live_styles_changes();
                 self.mtl_update_all_shaders(&metal_cx, &mut errors);
                 self.call_live_recompile_event(changed_live_bodies, errors);
             }
-            self.process_live_style_errors();*/
             
+            self.process_live_style_errors();
+            */
             if  self.redraw_parent_areas.len() != 0
                 || self.redraw_child_areas.len() != 0
                 || self.next_frames.len() != 0 {
-                false
+                false   
             } else {
                 true
             }
@@ -289,10 +302,10 @@ impl Cx {
             timer.timer_id = 0;
         }
     }
-    
+
     pub fn post_signal(signal: Signal, status: StatusId) {
-        if signal.0 != 0 {
-            CocoaApp::post_signal(signal.0, status);
+        if signal.signal_id != 0 {
+            CocoaApp::post_signal(signal.signal_id, status);
         }
     }
     
@@ -303,6 +316,11 @@ impl Cx {
             platform.last_menu = Some(menu.clone());
             platform.set_menu = true;
         }
+    }
+
+    pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
+        assert!(self.platform.start_dragging.is_none());
+        self.platform.start_dragging = Some(dragged_item);
     }
 }
 
@@ -319,4 +337,5 @@ pub struct CxPlatform {
     pub stop_timer: Vec<u64>,
     pub text_clipboard_response: Option<String>,
     pub desktop: CxDesktop,
+    pub start_dragging: Option<DraggedItem>,
 }
