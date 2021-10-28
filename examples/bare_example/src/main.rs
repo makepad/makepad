@@ -1,18 +1,5 @@
 use makepad_render::*;
 
-main_app!(BareExampleApp);
-
-#[derive(Live, LiveUpdateHooks)]
-pub struct BareExampleApp {
-    #[hidden(Window::new(cx))] window: Window,
-    #[hidden()] pass: Pass,
-    #[hidden(Texture::new(cx))] color_texture: Texture,
-    #[hidden(View::new())] main_view: View,
-    #[live()] draw_quad: DrawColor,
-    #[live()] draw_text: DrawText
-}
-
-// what you want is putting down an indirection in the style-sheet for a codefile.
 live_body!{
     use makepad_render::drawcolor::DrawColor
     use makepad_render::drawtext::DrawText
@@ -32,23 +19,24 @@ live_body!{
     }
 }
 
+main_app!(BareExampleApp);
+
+#[derive(Live, LiveUpdateHooks)]
+pub struct BareExampleApp {
+    #[hidden(Window::new(cx))] window: Window,
+    #[hidden()] pass: Pass,
+    #[hidden(Texture::new(cx))] color_texture: Texture,
+    #[hidden(View::new())] main_view: View,
+    #[live()] draw_quad: DrawColor,
+    #[live()] draw_text: DrawText
+}
+
 impl BareExampleApp {
     pub fn new(cx: &mut Cx) -> Self {
-        let mut init = Self::live_new(cx);
-        
-        let live_ptr = cx.shader_registry.live_registry.live_ptr_from_path(
-            ModulePath::from_str(&module_path!()).unwrap(),
-            &[id!(App)]
-        ).unwrap();
-        
-        init.live_update(cx, live_ptr);
-        init
+        let mut new = Self::live_new(cx);
+        new.live_update(cx, cx.live_ptr_from_id(&module_path!(), id!(App)));
+        new
     }
-    
-    //pub fn live_register(cx: &mut Cx) {
-    //    Self::live_register(cx);
-    //    cx.register_live_body(live_body());
-    // }
     
     pub fn myui_button_clicked(&mut self, _cx: &mut Cx) {
     }
