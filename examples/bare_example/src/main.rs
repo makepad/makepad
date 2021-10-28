@@ -15,10 +15,13 @@ pub struct BareExampleApp {
 live_body!{
     use makepad_render::drawcolor::DrawColor
     MyDrawQuad:DrawColor{
-        color: #fff 
+        color: #f00 
+        fn pixel(self)->vec4{
+            return mix(#f00,#0f0,self.geom_pos.y);
+        }
     } 
 } 
-
+ 
 impl BareExampleApp {
     pub fn new(cx:&mut Cx)->Self{
         println!("{}", std::mem::size_of::<DrawCall>());

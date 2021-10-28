@@ -1,4 +1,4 @@
-// ok lets implement these things
+// ok lets implement these things0
 live_body!{
     
     use crate::shader_std::*;
@@ -43,25 +43,13 @@ use crate::cx::*;
 #[derive(Live)]
 #[repr(C)]
 pub struct DrawQuad {
-    #[local()]
-    pub area: Area,
-    
-    #[live()]
-    pub geometry: GeometryQuad2D,
-    
-    #[local()]
-    pub draw_call_vars: DrawCallVars,
-    
-    #[live(Vec2::all(0.0))]
-    pub rect_pos: Vec2,
-    
-    #[live(Vec2::all(0.0))]
-    pub rect_size: Vec2,
-    
-    #[live(1.0)]
-    pub draw_depth: f32,
+    #[hidden()] pub area: Area,
+    #[live()] pub geometry: GeometryQuad2D,
+    #[hidden()] pub draw_call_vars: DrawCallVars,
+    #[live()] pub rect_pos: Vec2,
+    #[live()] pub rect_size: Vec2,
+    #[live(1.0)] pub draw_depth: f32,
 }
-
 
 impl DrawQuad {
     
