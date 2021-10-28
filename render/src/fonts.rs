@@ -18,7 +18,7 @@ pub struct Font {
 }
 
 impl LiveUpdateHooks for Font {
-    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
+    fn after_live_update(&mut self, _cx: &mut Cx, _live_ptr: LivePtr) {
         // ok so we have a path, lets find our font.
         
     }
