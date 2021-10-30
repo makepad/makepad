@@ -13,7 +13,7 @@ use std::fmt::Write;
 #[path = "../../live_parser/src/id.rs"]
 mod id;
 
-#[proc_macro_derive(Live, attributes(local, live, hidden))]
+#[proc_macro_derive(Live, attributes(local, live, hidden, default))]
 pub fn derive_live(input: TokenStream) -> TokenStream {
     derive_live_impl(input)
 }

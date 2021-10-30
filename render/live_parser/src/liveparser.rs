@@ -282,7 +282,7 @@ impl<'a> LiveParser<'a> {
         }
     }
     
-    fn expect_live_value(&mut self, prop_id: IdPack, level: usize, ld: &mut LiveDocument) -> Result<bool, LiveError> {
+    fn expect_live_value(&mut self, prop_id: IdPack, level: usize, ld: &mut LiveDocument) -> Result<(), LiveError> {
         
         // now we can have an array or a class instance
         match self.peek_token() {
@@ -320,7 +320,7 @@ impl<'a> LiveParser<'a> {
                         value: LiveValue::Object {node_start, node_count}
                     });
                 }
-                return Ok(true)
+                return Ok(())
             },
             Token::OpenBracket => { // array
                 let token_id = self.get_token_id();
@@ -392,7 +392,7 @@ impl<'a> LiveParser<'a> {
                         id_pack: prop_id,
                         value: LiveValue::Class {class: target_id, node_start, node_count}
                     });
-                    return Ok(true)
+                    return Ok(())
                 }
                 else if self.accept_token(Token::OpenParen) {
                     let (node_start, node_count) = self.expect_arguments(level + 1, ld) ?;
@@ -412,7 +412,7 @@ impl<'a> LiveParser<'a> {
             },
             other => return Err(self.error(format!("Unexpected token {} in property value", other)))
         }
-        Ok(false)
+        Ok(())
     }
     
     fn scan_to_token(&mut self, scan_token: Token) -> Result<usize, LiveError> {
@@ -516,9 +516,7 @@ impl<'a> LiveParser<'a> {
                                     id_pack: id,
                                     value: LiveValue::Use {module_path_ids}
                                 });
-                                //if !self.accept_token(Token::Punct(id!(,))) {
-                                self.expect_token(Token::Punct(id!(;)))?;
-                                //}
+                                self.accept_optional_delim();
                             }
                             id_pack!(const)=>{
                                 let token_id = self.get_token_id();
@@ -539,9 +537,7 @@ impl<'a> LiveParser<'a> {
                                         scope_count: 0
                                     }
                                 });
-                                //if !self.accept_token(Token::Punct(id!(,))) {
-                                self.expect_token(Token::Punct(id!(;)))?;
-                                //}
+                                self.accept_optional_delim();
                             }
                             _ => {
                                 // ok so we get an ident.
@@ -570,24 +566,16 @@ impl<'a> LiveParser<'a> {
                                     self.expect_live_value(ty, level, ld)?;
                                 }
                                 
-                                //if !self.accept_token(Token::Punct(id!(,))) {
-                                self.expect_token(Token::Punct(id!(;)))?;
-                                //}
+                                self.accept_optional_delim();
                             }
                         }
                     }
                     else {
                         self.expect_token(Token::Punct(id!(:))) ?;
                         // ok now we get a value to parse
-                        let mut skip_delim = self.expect_live_value(prop_id, level, ld) ?;
+                        self.expect_live_value(prop_id, level, ld) ?;
                         
-                        if self.peek_token() == Token::CloseBrace{
-                            skip_delim = true;
-                        }
-                        
-                        if !skip_delim{//} && !self.accept_token(Token::Punct(id!(,))) {
-                            self.expect_token(Token::Punct(id!(;)))?;
-                        }
+                        self.accept_optional_delim();
                     }
                 },
                 other => return Err(self.error(format!("Unexpected token {} in class body", other)))
@@ -598,6 +586,11 @@ impl<'a> LiveParser<'a> {
             return Ok((node_start as u32, (node_end - node_start) as u16))
         }
         return Err(self.error(format!("Eof in class body")))
+    }
+    
+    pub fn accept_optional_delim(&mut self){
+        while self.accept_token(Token::Punct(id!(,))){};
+        while self.accept_token(Token::Punct(id!(;))){};
     }
     
     pub fn parse_live_document(&mut self) -> Result<LiveDocument, LiveError> {

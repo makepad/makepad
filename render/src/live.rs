@@ -41,12 +41,15 @@ pub trait LiveUpdateHooks {
 
 pub enum LiveFieldType {
     Local,
-    Live
+    Live,
+    EnumBare,
+    EnumTuple,
+    EnumNamed
 }
 
 pub struct LiveField {
     pub id: Id,
-    pub live_type: LiveType,
+    pub live_type: Option<LiveType>,
     pub field_type: LiveFieldType
 }
 
@@ -63,7 +66,7 @@ impl Cx {
         crate::drawtext::live_register(self);
         crate::geometrygen::live_register(self);
         crate::shader_std::live_register(self);
-        crate::fonts::live_register(self);
+        crate::font::live_register(self);
     }
     
     pub fn live_ptr_from_id(&self, path:&str, id:Id)->LivePtr{

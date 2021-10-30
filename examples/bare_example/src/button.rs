@@ -5,7 +5,7 @@ use crate::buttonlogic::*;
 #[derive(Clone, LiveComponent)]
 pub struct NormalButton {
     pub live_node: LiveNode,
-    pub logic: ButtonLogic,
+    pub logic: ButtonLogic,  
     pub bg: DrawQuad,
     pub text: DrawText,
 }
