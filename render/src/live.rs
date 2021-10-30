@@ -39,18 +39,15 @@ pub trait LiveUpdateHooks {
     fn after_live_update(&mut self, _cx: &mut Cx, _live_ptr:LivePtr){}
 }
 
-pub enum LiveFieldType {
+pub enum LiveFieldKind {
     Local,
     Live,
-    EnumBare,
-    EnumTuple,
-    EnumNamed
 }
 
 pub struct LiveField {
     pub id: Id,
     pub live_type: Option<LiveType>,
-    pub field_type: LiveFieldType
+    pub kind: LiveFieldKind
 }
 
 #[derive(Default)]
@@ -101,11 +98,14 @@ impl Cx {
         //println!("{}", live_body.code);
         //let cm = CrateModule::from_module_path_check(&live_body.module_path).unwrap();
         //println!("register_live_body: {}", ModulePath::from_str(&live_body.module_path).unwrap());
+        // ok so here we parse the live file
+        
         let result = self.shader_registry.live_registry.parse_live_file(
             &live_body.file,
             ModulePath::from_str(&live_body.module_path).unwrap(),
             live_body.code,
             live_body.live_types,
+            &self.live_enums,
             live_body.line
         );
         if let Err(msg) = result {
@@ -115,6 +115,10 @@ impl Cx {
     
     pub fn register_factory(&mut self, live_type: LiveType, factory: Box<dyn LiveFactory>) {
         self.live_factories.insert(live_type, factory);
+    }
+    
+    pub fn register_enum(&mut self, live_type:LiveType, info: LiveEnumInfo){
+        self.live_enums.insert(live_type, info);
     }
     
     pub fn get_factory(&mut self, live_type: LiveType) -> &Box<dyn LiveFactory> {

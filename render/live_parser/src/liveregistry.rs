@@ -8,6 +8,7 @@ use crate::livenode::LiveNode;
 use crate::livenode::LiveValue;
 use crate::livenode::LiveType;
 use crate::liveparser::LiveParser;
+use crate::liveparser::LiveEnumInfo;
 use crate::id::FileId;
 use crate::id::LocalPtr;
 use crate::id::LivePtr;
@@ -124,12 +125,12 @@ impl LiveRegistry {
         });
     }*/
     
-    pub fn live_ptr_from_path(&self, module_path:ModulePath, object_path: &[Id]) -> Option<LivePtr>{
-        if let Some(file_id) = self.module_path_to_file_id.get(&module_path){
+    pub fn live_ptr_from_path(&self, module_path: ModulePath, object_path: &[Id]) -> Option<LivePtr> {
+        if let Some(file_id) = self.module_path_to_file_id.get(&module_path) {
             let doc = &self.expanded[file_id.to_index()];
-            if let Some(local_ptr) = doc.scan_for_object_path(object_path){
-                return Some(LivePtr{
-                    file_id:*file_id,
+            if let Some(local_ptr) = doc.scan_for_object_path(object_path) {
+                return Some(LivePtr {
+                    file_id: *file_id,
                     local_ptr
                 })
             }
@@ -142,7 +143,7 @@ impl LiveRegistry {
         (doc, &doc.resolve_ptr(live_ptr.local_ptr))
     }
     
-    pub fn live_object_iterator(&self, live_ptr: LivePtr, node_start:u32, node_count:u16) -> LiveObjectIterator {
+    pub fn live_object_iterator(&self, live_ptr: LivePtr, node_start: u32, node_count: u16) -> LiveObjectIterator {
         LiveObjectIterator {
             file_id: live_ptr.file_id,
             level: live_ptr.local_ptr.level + 1,
@@ -299,7 +300,15 @@ impl LiveRegistry {
         return None
     }
     
-    pub fn parse_live_file(&mut self, file: &str, own_module_path: ModulePath, source: String, live_types: Vec<LiveType>, line_offset:usize) -> Result<FileId, LiveFileError> {
+    pub fn parse_live_file(
+        &mut self,
+        file: &str,
+        own_module_path: ModulePath,
+        source: String,
+        live_types: Vec<LiveType>,
+        live_enums: &HashMap<LiveType,LiveEnumInfo>,
+        line_offset: usize
+    ) -> Result<FileId, LiveFileError> {
         
         let (is_new_file_id, file_id) = if let Some(file_id) = self.file_ids.get(file) {
             (false, *file_id)
@@ -314,7 +323,7 @@ impl LiveRegistry {
             Ok(lex_result) => lex_result
         };
         
-        let mut parser = LiveParser::new(&lex_result.tokens, &live_types, file_id);
+        let mut parser = LiveParser::new(&lex_result.tokens, &live_types, live_enums, file_id);
         
         let mut document = match parser.parse_live_document() {
             Err(msg) => return Err(msg.to_live_file_error(file, &source, line_offset)), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
@@ -326,7 +335,7 @@ impl LiveRegistry {
         // let own_crate_module = CrateModule(crate_id, module_id);
         
         if self.dep_order.iter().position( | v | v.0 == own_module_path).is_none() {
-            self.dep_order.push((own_module_path, TokenId{file_id, token_id:0}));
+            self.dep_order.push((own_module_path, TokenId {file_id, token_id: 0}));
         }
         else {
             // marks dependencies dirty recursively (removes the expanded version)
@@ -851,7 +860,7 @@ impl LiveRegistry {
                 LiveValue::Call {target, node_start, node_count} => {
                     let new_node_start = out_doc.get_level_len(out_level + 1);
                     for i in 0..node_count {
-                        walk_node(expanded,module_path_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, out_level + 1, i as usize + node_start as usize, out_start, 0);
+                        walk_node(expanded, module_path_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, out_level + 1, i as usize + node_start as usize, out_start, 0);
                     }
                     let new_node = LiveNode {
                         token_id: node.token_id,
@@ -1040,16 +1049,16 @@ impl LiveRegistry {
                 },*/
                 LiveValue::Use {module_path_ids} => { // import things on the scope from Use
                     let module_path = in_doc.fetch_module_path(module_path_ids, in_crate);
-                    let file_id = if let Some(file_id) = module_path_to_file_id.get(&module_path){
+                    let file_id = if let Some(file_id) = module_path_to_file_id.get(&module_path) {
                         file_id
                     }
-                    else{
+                    else {
                         errors.push(LiveError {
                             origin: live_error_origin!(),
                             span: in_doc.token_id_to_span(node.token_id),
                             message: format!("Cannot find import {}", IdFmt::col(&in_doc.multi_ids, node.id_pack))
-                        });    
-                        return                    
+                        });
+                        return
                     };
                     let other_doc = &expanded[file_id.to_index()];
                     

@@ -1,5 +1,6 @@
  
 use makepad_id_macros::*;
+use std::collections::{HashMap};
 use crate::token::{Token, TokenWithSpan, TokenId};
 use std::iter::Cloned;
 use std::slice::Iter;
@@ -12,20 +13,29 @@ use crate::id::IdPack;
 use crate::livedocument::LiveDocument;
 use crate::livenode::{LiveNode, LiveValue, LiveType};
 
+pub struct LiveEnumInfo{
+    pub bare: Vec<Id>,
+    pub named: Vec<Id>,
+    pub tuple: Vec<Id>
+}
+
 pub struct LiveParser<'a> {
     pub token_index: usize,
     pub file_id: FileId,
     pub live_types: &'a [LiveType],
+    pub live_enums: &'a HashMap<LiveType, LiveEnumInfo>,
+    
     pub tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
     pub token_with_span: TokenWithSpan,
     pub end: usize,
 }
 
 impl<'a> LiveParser<'a> {
-    pub fn new(tokens: &'a [TokenWithSpan], live_types: &'a [LiveType], file_id: FileId) -> Self {
+    pub fn new(tokens: &'a [TokenWithSpan], live_types: &'a [LiveType], live_enums: &'a HashMap<LiveType, LiveEnumInfo>, file_id: FileId) -> Self {
         let mut tokens_with_span = tokens.iter().cloned();
         let token_with_span = tokens_with_span.next().unwrap();
         LiveParser {
+            live_enums,
             file_id,
             tokens_with_span,
             live_types,
@@ -282,7 +292,7 @@ impl<'a> LiveParser<'a> {
         }
     }
     
-    fn expect_live_value(&mut self, prop_id: IdPack, level: usize, ld: &mut LiveDocument) -> Result<(), LiveError> {
+    fn expect_live_value(&mut self, prop_id: IdPack, level: usize, ld: &mut LiveDocument) -> Result<Option<LiveType>, LiveError> {
         
         // now we can have an array or a class instance
         match self.peek_token() {
@@ -305,12 +315,13 @@ impl<'a> LiveParser<'a> {
                             id_pack: prop_id,
                             value: LiveValue::LiveType(self.live_types[val as usize])
                         });
+                        self.expect_token(Token::CloseBrace)?;
+                        self.expect_token(Token::CloseBrace)?;
+                        return Ok(Some(self.live_types[val as usize]));
                     }
                     else{
                         return Err(self.error(format!("expected live_type index, unexpected token `{}`", token)));
                     }
-                    self.expect_token(Token::CloseBrace)?;
-                    self.expect_token(Token::CloseBrace)?;
                 }
                 else{
                     let (node_start, node_count) = self.expect_object(level + 1, ld) ?;
@@ -320,7 +331,6 @@ impl<'a> LiveParser<'a> {
                         value: LiveValue::Object {node_start, node_count}
                     });
                 }
-                return Ok(())
             },
             Token::OpenBracket => { // array
                 let token_id = self.get_token_id();
@@ -392,7 +402,6 @@ impl<'a> LiveParser<'a> {
                         id_pack: prop_id,
                         value: LiveValue::Class {class: target_id, node_start, node_count}
                     });
-                    return Ok(())
                 }
                 else if self.accept_token(Token::OpenParen) {
                     let (node_start, node_count) = self.expect_arguments(level + 1, ld) ?;
@@ -412,7 +421,7 @@ impl<'a> LiveParser<'a> {
             },
             other => return Err(self.error(format!("Unexpected token {} in property value", other)))
         }
-        Ok(())
+        Ok(None)
     }
     
     fn scan_to_token(&mut self, scan_token: Token) -> Result<usize, LiveError> {
@@ -545,10 +554,6 @@ impl<'a> LiveParser<'a> {
                                 let ty = self.expect_class_id(ld) ?;
                                  self.expect_token(Token::Punct(id!(:)))?;
                                 self.expect_var_def_type() ?;
-                                // now an assignment might follow.
-
-                                // we should parse full expressions here
-                                // consts can only depend on other consts, not on live values
                                 
                                 ld.push_node(level, LiveNode {
                                     token_id,
@@ -573,8 +578,34 @@ impl<'a> LiveParser<'a> {
                     else {
                         self.expect_token(Token::Punct(id!(:))) ?;
                         // ok now we get a value to parse
-                        self.expect_live_value(prop_id, level, ld) ?;
-                        
+                        let token_id = self.get_token_id();
+                        if let Some(live_type) = self.expect_live_value(prop_id, level, ld) ?{
+                            if prop_id == id_pack!(rust_type){ // we should now know the typeID
+                                if let Some(enum_info) = self.live_enums.get(&live_type){
+                                    for bare_id in &enum_info.bare{
+                                        ld.push_node(level, LiveNode {
+                                            token_id,
+                                            id_pack: IdPack::single(*bare_id),
+                                            value: LiveValue::IdPack(IdPack::single(id!(Variant)))
+                                        });
+                                    }
+                                    for named_id in &enum_info.named{
+                                        ld.push_node(level, LiveNode {
+                                            token_id,
+                                            id_pack: IdPack::single(*named_id),
+                                            value: LiveValue::Class{class:IdPack::single(id!(Variant)), node_start:0, node_count:0}
+                                        });
+                                    }
+                                    for tuple_id in &enum_info.tuple{
+                                        ld.push_node(level, LiveNode {
+                                            token_id,
+                                            id_pack: IdPack::single(*tuple_id),
+                                            value: LiveValue::Call{target:IdPack::single(id!(Variant)), node_start:0, node_count:0}
+                                        });
+                                    }
+                                }
+                            }
+                        }
                         self.accept_optional_delim();
                     }
                 },
