@@ -8,32 +8,32 @@ live_body!{
         //debug: true;
         rust_type: {{DrawQuad}}
         geometry: GeometryQuad2D {}
-        varying pos: vec2;
+        varying pos: vec2
         
         fn scroll(self) -> vec2 {
-            return self.draw_scroll.xy;
+            return self.draw_scroll.xy
         }
         
         fn vertex(self) -> vec4 {
-            let scr = self.scroll();
+            let scr = self.scroll()
             
             let clipped: vec2 = clamp(
                 self.geom_pos * self.rect_size + self.rect_pos - scr,
                 self.draw_clip.xy,
                 self.draw_clip.zw
-            );
-            self.pos = (clipped + scr - self.rect_pos) / self.rect_size;
+            )
+            self.pos = (clipped + scr - self.rect_pos) / self.rect_size
             // only pass the clipped position forward
             return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
                 clipped.x,
                 clipped.y,
                 self.draw_depth + self.draw_zbias,
                 1.
-            )));
+            )))
         }
         
         fn pixel(self) -> vec4 {
-            return #f0f;
+            return #f0f
         }
     }
 }

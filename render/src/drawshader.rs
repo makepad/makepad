@@ -110,21 +110,21 @@ impl DrawCallVars {
                             let mut slots = 0;
                             for field in fields {
                                 if field.id == id!(deref_target) {
-                                    recur_expand(after_draw_call_vars, field.live_type, live_factories, draw_shader_def, span);
+                                    recur_expand(after_draw_call_vars, field.live_type.unwrap(), live_factories, draw_shader_def, span);
                                     continue
                                 }
                                 if field.id == id!(draw_call_vars){
                                     // assert the thing to be marked correctly
                                     if let LiveFieldType::Local = field.field_type{}
                                     else{panic!()}
-                                    if field.live_type != DrawCallVars::live_type(){panic!();}
+                                    if field.live_type.unwrap() != DrawCallVars::live_type(){panic!();}
                                     
                                     *after_draw_call_vars = true;
                                     continue;
                                 }
                                 if *after_draw_call_vars{
                                     // lets count sizes
-                                    let ty = live_type_to_shader_ty(field.live_type).expect("Please only put shader instance fields after draw_call_vars");
+                                    let ty = live_type_to_shader_ty(field.live_type.unwrap()).expect("Please only put shader instance fields after draw_call_vars");
                                     slots += ty.slots();
                                     draw_shader_def.add_instance(field.id, ty, span);
                                 }
