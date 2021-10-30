@@ -21,7 +21,7 @@ live_body!{
         rust_type: {{DrawText}}
         geometry: GeometryQuad2D {}
         
-        wrapping: Wrapping::Ellipsis(3.0)
+        wrapping: Wrapping::None
         text_style: TextStyle {}
         
         uniform curve: float
@@ -128,7 +128,7 @@ pub struct TextStyle {
     #[live(1.3)] pub height_factor: f32,
 }
 
-#[derive(Debug, Copy, Live, Clone)]
+#[derive(Debug, Copy, Live, LiveUpdateHooks, Clone)]
 pub enum Wrapping {
     #[default()] Char,
     #[live()] Word,
@@ -137,13 +137,7 @@ pub enum Wrapping {
     #[live(1.0)] Ellipsis(f32),
 }
 
-impl LiveUpdateHooks for Wrapping{
-    fn after_live_update(&mut self, _cx: &mut Cx, _live_ptr:LivePtr) {
-        println!("{:?}", self);
-    }
-}
-
-#[derive(Live)]
+#[derive(Live, LiveUpdateHooks)]
 #[repr(C,)]
 pub struct DrawText {
     #[hidden()] pub buf: Vec<char>,
@@ -168,20 +162,6 @@ pub struct DrawText {
     #[local()] pub font_size: f32,
     #[local()] pub char_offset: f32,
     #[local()] pub marker: f32,
-}
-
-impl LiveUpdateHooks for DrawText {
-    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
-        self.draw_call_vars.update_var(cx, ptr, id);
-    }
-    
-    fn before_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {
-        self.draw_call_vars.init_shader(cx, DrawShaderPtr(live_ptr), &self.geometry);
-    }
-    
-    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
-        self.draw_call_vars.init_slicer(cx);
-    }
 }
 
 impl DrawText {
