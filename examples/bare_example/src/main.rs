@@ -6,14 +6,12 @@ live_body!{
 
     App: Component {
         rust_type: {{BareExampleApp}}
-        
         draw_quad: DrawColor {
-            color: #f00;
+            color: #f00
             fn pixel(self) -> vec4 {
-                return mix(#f00, #0f0, self.geom_pos.y);
+                return mix(#f00, #0f0, self.geom_pos.y)
             }
         }
-
         draw_text: DrawText{
         }
     }

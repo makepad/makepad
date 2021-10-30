@@ -104,9 +104,6 @@ pub enum LiveValue {
         scope_start: u32,
         scope_count: u16
     },
-    /*ResourceRef {
-        target: IdPack,
-    },*/
     VarDef { //instance/uniform def
         token_start: u32,
         token_count: u32,
