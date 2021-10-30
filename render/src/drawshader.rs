@@ -115,7 +115,7 @@ impl DrawCallVars {
                                 }
                                 if field.id == id!(draw_call_vars){
                                     // assert the thing to be marked correctly
-                                    if let LiveFieldType::Local = field.field_type{}
+                                    if let LiveFieldKind::Local = field.kind{}
                                     else{panic!()}
                                     if field.live_type.unwrap() != DrawCallVars::live_type(){panic!();}
                                     

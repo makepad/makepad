@@ -13,6 +13,7 @@ pub use makepad_live_parser::LiveNode;
 pub use makepad_live_parser::LiveType;
 pub use makepad_live_parser::LiveValue;
 pub use makepad_live_parser::ModulePath;
+pub use makepad_live_parser::LiveEnumInfo;
 
 pub use makepad_live_parser::id;
 pub use makepad_shader_compiler::Ty;
@@ -91,6 +92,7 @@ pub struct Cx {
     pub align_list: Vec<Area>,
     
     pub live_factories: HashMap<LiveType, Box<dyn LiveFactory>>,
+    pub live_enums: HashMap<LiveType, LiveEnumInfo>,
     pub draw_shader_ptr_to_id: HashMap<DrawShaderPtr, usize>,
     pub draw_shader_compile_set: BTreeSet<DrawShaderPtr>,
     
@@ -237,6 +239,7 @@ impl Default for Cx {
             align_list: Vec::new(),
             
             live_factories: HashMap::new(),
+            live_enums: HashMap::new(),
             draw_shader_ptr_to_id: HashMap::new(),
             draw_shader_compile_set: BTreeSet::new(),
             

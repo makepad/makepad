@@ -7,12 +7,6 @@ live_body!{
 
     Wrapping: Enum{
         rust_type: {{Wrapping}}
-        Char:Variant,
-        Word:Variant,
-        Line:Variant,
-        None:Variant,
-        Ellipsis:Variant(),
-        Test:Variant{}
     }
 
     TextStyle: Struct {
@@ -27,7 +21,7 @@ live_body!{
         rust_type: {{DrawText}}
         geometry: GeometryQuad2D {}
         
-        wrapping: Wrapping::Test{x:3.0}
+        wrapping: Wrapping::Ellipsis(3.0)
         text_style: TextStyle {}
         
         uniform curve: float
@@ -141,7 +135,6 @@ pub enum Wrapping {
     #[live()] Line,
     #[live()] None,
     #[live(1.0)] Ellipsis(f32),
-    #[live(x:1.0)] Test{x:f32}
 }
 
 impl LiveUpdateHooks for Wrapping{
@@ -149,7 +142,6 @@ impl LiveUpdateHooks for Wrapping{
         println!("{:?}", self);
     }
 }
-
 
 #[derive(Live)]
 #[repr(C,)]
@@ -427,9 +419,6 @@ impl DrawText {
                         else {
                             self.buf.push(c)
                         }
-                    }
-                    Wrapping::Test{..}=>{
-                        
                     }
                 }
             }
