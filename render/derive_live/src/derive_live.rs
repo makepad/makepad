@@ -131,10 +131,10 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
                     tb.add("fields.push(LiveField{id:Id::from_str(").string(&field.name).add(").unwrap(),");
                     tb.add("live_type:Some(").stream(Some(field.ty.clone())).add("::live_type()),");
                     if attr.name == "live"{
-                        tb.add("field_type: LiveFieldType::Live");
+                        tb.add("kind: LiveFieldKind::Live");
                     }
                     else{
-                        tb.add("field_type: LiveFieldType::Local");
+                        tb.add("kind: LiveFieldKind::Local");
                     }
                     tb.add("});");
                 }
@@ -195,14 +195,6 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             
             impl EnumItem {
                 
-                fn live_field_type(&self)->&'static str{
-                    match &self.kind {
-                        EnumKind::Bare => "EnumBare",
-                        EnumKind::Named(_) => "EnumNamed",
-                        EnumKind::Tuple(_) => "EnumTuple",
-                    }
-                }
-                
                 fn gen_new(&self, tb: &mut TokenBuilder) {
                     tb.add("Self::").ident(&self.name);
                     match &self.kind {
@@ -257,20 +249,17 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             tb.add("        LiveType(std::any::TypeId::of::<").ident(&enum_name).add(">())");
             tb.add("    }");
             tb.add("    fn live_register(cx: &mut Cx) {");
-            tb.add("        struct Factory();");
-            tb.add("        impl LiveFactory for Factory {");
-            tb.add("            fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> {");
-            tb.add("                Box::new(").ident(&enum_name).add(" ::live_new(cx))");
-            tb.add("            }");
-            tb.add("            fn live_fields(&self, fields: &mut Vec<LiveField>) {");
+            tb.add("        let mut bare = Vec::new();");
+            tb.add("        let mut named = Vec::new();");
+            tb.add("        let mut tuple = Vec::new();");
             for item in &items{
-                tb.add("            fields.push(LiveField{id:Id::from_str(").string(&item.name).add(").unwrap(),");
-                tb.add("                live_type:None,");
-                tb.add("                field_type:LiveFieldType::").ident(item.live_field_type()).add("});");
+                match item.kind{
+                    EnumKind::Bare => tb.add("bare.push(Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add("));"),
+                    EnumKind::Named(_) => tb.add("named.push(Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add("));"),
+                    EnumKind::Tuple(_) => tb.add("tuple.push(Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add("));")
+                };
             }
-            tb.add("            }");
-            tb.add("        }");
-            tb.add("        cx.register_factory(").ident(&enum_name).add("::live_type(), Box::new(Factory()));");
+            tb.add("        cx.register_enum(").ident(&enum_name).add("::live_type(),LiveEnumInfo{bare, named, tuple});");
             tb.add("    }");
             tb.add("}");
             
