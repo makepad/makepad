@@ -1,11 +1,9 @@
-// ok lets implement these things0
 live_body!{
     
     use crate::shader_std::*;
     use crate::geometrygen::GeometryQuad2D;
     
     DrawQuad: DrawShader2D {
-        //debug: true;
         rust_type: {{DrawQuad}}
         geometry: GeometryQuad2D {}
         varying pos: vec2
