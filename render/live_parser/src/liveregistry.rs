@@ -12,7 +12,6 @@ use crate::id::FileId;
 use crate::id::LocalPtr;
 use crate::id::LivePtr;
 use crate::token::TokenId;
-use crate::token::Token;
 use crate::span::Span;
 use crate::id::ModulePath;
 use std::collections::HashMap;
@@ -39,7 +38,7 @@ pub struct LiveRegistry {
     pub expanded: Vec<LiveDocument >,
 }
 
-pub struct LiveClassIterator {
+pub struct LiveObjectIterator {
     file_id: FileId,
     level: usize,
     node_start: usize,
@@ -47,8 +46,8 @@ pub struct LiveClassIterator {
     index: usize
 }
 
-impl LiveClassIterator {
-    pub fn next(&mut self, live_registry: &LiveRegistry) -> Option<(Id, LivePtr)> {
+impl LiveObjectIterator {
+    pub fn next_id(&mut self, live_registry: &LiveRegistry) -> Option<(Id, LivePtr)> {
         // ok so we get the
         loop {
             if self.index >= self.node_count {
@@ -69,6 +68,24 @@ impl LiveClassIterator {
                     }
                 }));
             }
+        }
+    }
+    pub fn next_prop(&mut self) -> Option<(usize, LivePtr)> {
+        // ok so we get the
+        loop {
+            if self.index >= self.node_count {
+                return None
+            }
+            
+            self.index += 1;
+            
+            return Some((self.index - 1, LivePtr {
+                file_id: self.file_id,
+                local_ptr: LocalPtr {
+                    level: self.level,
+                    index: self.index - 1 + self.node_start
+                }
+            }));
         }
     }
 }
@@ -125,10 +142,20 @@ impl LiveRegistry {
         (doc, &doc.resolve_ptr(live_ptr.local_ptr))
     }
     
-    pub fn live_class_iterator(&self, live_ptr: LivePtr) -> Option<LiveClassIterator> {
+    pub fn live_object_iterator(&self, live_ptr: LivePtr, node_start:u32, node_count:u16) -> LiveObjectIterator {
+        LiveObjectIterator {
+            file_id: live_ptr.file_id,
+            level: live_ptr.local_ptr.level + 1,
+            index: 0,
+            node_start: node_start as usize,
+            node_count: node_count as usize,
+        }
+    }
+    
+    pub fn live_class_iterator(&self, live_ptr: LivePtr) -> Option<LiveObjectIterator> {
         let node = self.resolve_ptr(live_ptr);
         if let LiveValue::Class {node_start, node_count, ..} = node.value {
-            Some(LiveClassIterator {
+            Some(LiveObjectIterator {
                 file_id: live_ptr.file_id,
                 level: live_ptr.local_ptr.level + 1,
                 index: 0,
@@ -154,12 +181,13 @@ impl LiveRegistry {
     pub fn is_baseclass(id: IdPack) -> bool {
         id == id_pack!(Component)
             || id == id_pack!(Enum)
+            || id == id_pack!(Variant)
             || id == id_pack!(Struct)
             || id == id_pack!(DrawShader)
             || id == id_pack!(Geometry)
     }
     
-    pub fn find_enum_origin(&self, start: IdPack, lhs: IdPack) -> IdPack {
+    pub fn find_enum_origin(&self, start: IdPack, lhs: IdPack) -> Id {
         match start.unpack() {
             IdUnpack::LivePtr(live_ptr) => {
                 let doc = &self.expanded[live_ptr.file_id.to_index()];
@@ -179,7 +207,7 @@ impl LiveRegistry {
             }
             _ => ()
         }
-        lhs
+        lhs.as_single()
     }
     /*
     pub fn find_full_node_ptr_from_ids(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<LivePtr> {
@@ -212,7 +240,7 @@ impl LiveRegistry {
         }
         Some(class_iter)
     }
-    
+    /*
     pub fn find_component_origin(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<(ModulePath, Id, LivePtr)> {
         let mp = ModulePath(crate_id, module_id);
         if let Some(file_id) = self.module_path_to_file_id.get(&mp) {
@@ -256,7 +284,7 @@ impl LiveRegistry {
             }
         }
         None
-    }
+    }*/
     
     pub fn token_id_to_span(&self, token_id: TokenId) -> Span {
         self.live_files[token_id.file_id.to_index()].document.token_id_to_span(token_id)

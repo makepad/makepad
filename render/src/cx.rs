@@ -7,15 +7,17 @@ pub use makepad_live_parser::math::*;
 pub use makepad_shader_compiler::ShaderRegistry;
 pub use makepad_shader_compiler::shaderast::DrawShaderPtr;
 pub use makepad_live_parser::Id;
+pub use makepad_live_parser::IdUnpack;
 pub use makepad_live_parser::LivePtr;
 pub use makepad_live_parser::LiveNode;
 pub use makepad_live_parser::LiveType;
 pub use makepad_live_parser::LiveValue;
 pub use makepad_live_parser::ModulePath;
+
 pub use makepad_live_parser::id;
 pub use makepad_shader_compiler::Ty;
 
-pub use crate::fonts::*;
+pub use crate::font::*;
 pub use crate::turtle::*;
 pub use crate::cursor::*;
 pub use crate::window::*;

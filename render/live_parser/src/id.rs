@@ -47,7 +47,7 @@ impl ModulePath{
             i+=1;
         }
         return ModulePath(crate_id, Id::from_bytes(bytes, module_start, i));
-    }
+    } 
     
     pub fn from_str(module_path: &str)->Result<Self, String>{
         // ok lets split off the first 2 things from module_path

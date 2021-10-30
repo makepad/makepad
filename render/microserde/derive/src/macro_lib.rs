@@ -123,34 +123,6 @@ impl TokenBuilder {
         }
         self
     }
-    /* old and stupid
-    pub fn add(&mut self, what: &str) -> &mut Self {
-        for part in what.split(" ") {
-            match part {
-                "{" => self.push_group(Delimiter::Brace),
-                "(" => self.push_group(Delimiter::Parenthesis),
-                "[" => self.push_group(Delimiter::Bracket),
-                "}" => self.pop_group(Delimiter::Brace),
-                ")" => self.pop_group(Delimiter::Parenthesis),
-                "]" => self.pop_group(Delimiter::Bracket),
-                "?" | ";" | "&" | "^" | ":" | "::" | "," | "!" | "." | "<<" | ">>" |
-                "->" | "=>" | "<" | ">" | "<=" | ">=" | "=" | "==" | "!=" |
-                "+" | "+=" | "-" | "-=" | "*" | "*=" | "/" | "/=" | ".." => self.punct(part),
-                _ => {
-                    if part.len() == 0{
-                        continue
-                    }
-                    match part.chars().next().unwrap(){
-                        '0'..='9'=>{
-                            self.unsuf_usize(part.parse().expect(&format!("Can't parse number \"{}\"", what))) 
-                        },
-                        _=>self.ident(part)
-                    }
-                }
-            };
-        }
-        self
-    }*/
     
     pub fn ident(&mut self, id: &str) -> &mut Self {
         self.extend(TokenTree::from(Ident::new(id, Span::call_site())))

@@ -47,7 +47,7 @@ mod cx_desktop;
 mod cx_style;
 
 mod turtle;
-mod fonts;
+mod font;
 mod cursor;
 mod window;
 mod view;
