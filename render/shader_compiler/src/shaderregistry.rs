@@ -459,36 +459,50 @@ impl ShaderRegistry {
         match class_node.value {
             LiveValue::Class {node_start, node_count, ..} => {
                 let mut parser_deps = Vec::new();
-                
-                /*
-                let class_ptr = LivePtr {file_id: shader_ptr.0.file_id, local_ptr: LocalPtr {
-                    level: shader_ptr.0.local_ptr.level + 1,
-                    index: i + node_start as usize
-                }};
-                */
-                if let Some(mut iter) = self.live_registry.live_class_iterator(draw_shader_ptr.0) {
-                    while let Some((id, prop_ptr)) = iter.next(&self.live_registry) {
-                        let prop = doc.resolve_ptr(prop_ptr.local_ptr);
-                        
-                        match prop.value {
-                            // if we have a float or a vec2/3/4
-                            // we should look to set a default value
-                            LiveValue::Bool(val)=>{
-                                if let IdUnpack::Single(id) = prop.id_pack.unpack() {
-                                    if id == id!(debug) {
-                                        draw_shader_def.flags.debug = true;
-                                    }
-                                    if id == id!(draw_call_compare){
-                                        draw_shader_def.flags.draw_call_compare = true;
-                                    }
-                                    if id == id!(draw_call_always){
-                                        draw_shader_def.flags.draw_call_always = true;
-                                    }
+                let mut iter = self.live_registry.live_object_iterator(draw_shader_ptr.0, node_start, node_count);
+                while let Some((id, prop_ptr)) = iter.next_id(&self.live_registry) {
+                    let prop = doc.resolve_ptr(prop_ptr.local_ptr);
+                    
+                    match prop.value {
+                        // if we have a float or a vec2/3/4
+                        // we should look to set a default value
+                        LiveValue::Bool(val)=>{
+                            if let IdUnpack::Single(id) = prop.id_pack.unpack() {
+                                if id == id!(debug) {
+                                    draw_shader_def.flags.debug = true;
+                                }
+                                if id == id!(draw_call_compare){
+                                    draw_shader_def.flags.draw_call_compare = true;
+                                }
+                                if id == id!(draw_call_always){
+                                    draw_shader_def.flags.draw_call_always = true;
                                 }
                             }
-                            LiveValue::LiveType(lt) => {
-                                if let IdUnpack::Single(id) = prop.id_pack.unpack() {
-                                    if id == id!(rust_type) {
+                        }
+                        LiveValue::LiveType(lt) => {
+                            if let IdUnpack::Single(id) = prop.id_pack.unpack() {
+                                if id == id!(rust_type) {
+                                    ext_self(
+                                        self.live_registry.token_id_to_span(prop.token_id),
+                                        id,
+                                        lt,
+                                        &mut draw_shader_def
+                                    );
+                                }
+                            }
+                        }
+                        LiveValue::Class {class, node_start, node_count} => {
+                            // if our id is geometry, process it
+                            if prop.id_pack == id_pack!(geometry) {
+                                // we need to find the rust_type from here
+                                if let Some(local_ptr) = doc.scan_for_object_path_from(
+                                    &[id!(rust_type)],
+                                    node_start as usize,
+                                    node_count as usize,
+                                    prop_ptr.local_ptr.level + 1
+                                ) {
+                                    let node = doc.resolve_ptr(local_ptr);
+                                    if let LiveValue::LiveType(lt) = node.value {
                                         ext_self(
                                             self.live_registry.token_id_to_span(prop.token_id),
                                             id,
@@ -498,94 +512,72 @@ impl ShaderRegistry {
                                     }
                                 }
                             }
-                            LiveValue::Class {class, node_start, node_count} => {
-                                // if our id is geometry, process it
-                                if prop.id_pack == id_pack!(geometry) {
-                                    // we need to find the rust_type from here
-                                    if let Some(local_ptr) = doc.scan_for_object_path_from(
-                                        &[id!(rust_type)],
-                                        node_start as usize,
-                                        node_count as usize,
-                                        prop_ptr.local_ptr.level + 1
-                                    ) {
-                                        let node = doc.resolve_ptr(local_ptr);
-                                        if let LiveValue::LiveType(lt) = node.value {
-                                            ext_self(
-                                                self.live_registry.token_id_to_span(prop.token_id),
-                                                id,
-                                                lt,
-                                                &mut draw_shader_def
-                                            );
-                                        }
-                                    }
-                                }
-                            },
-                            LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
-                                if let IdUnpack::Single(id) = prop.id_pack.unpack() {
-                                    let mut parser = ShaderParser::new(
-                                        self,
-                                        doc.get_tokens(token_start, token_count),
-                                        doc.get_scopes(scope_start, scope_count),
-                                        &mut parser_deps,
-                                        Some(FnSelfKind::DrawShader(draw_shader_ptr)),
-                                        draw_shader_ptr.0.file_id
-                                        //None
-                                    );
-                                    let decl = parser.expect_self_decl(Ident(id), prop_ptr) ?;
-                                    if let Some(decl) = decl {
-                                        // lets see where to inject this.
-                                        // if its an instance var it needs to
-                                        // go above the var_def_node_ptr one
-                                        if let DrawShaderFieldKind::Instance {..} = decl.kind {
-                                            // find from the start the first instancefield
-                                            // without a var_def_node_prt
-                                            if let Some(index) = draw_shader_def.fields.iter().position( | field | {
-                                                if let DrawShaderFieldKind::Instance {var_def_ptr, ..} = field.kind {
-                                                    if var_def_ptr.is_none() {
-                                                        return true
-                                                    }
+                        },
+                        LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
+                            if let IdUnpack::Single(id) = prop.id_pack.unpack() {
+                                let mut parser = ShaderParser::new(
+                                    self,
+                                    doc.get_tokens(token_start, token_count),
+                                    doc.get_scopes(scope_start, scope_count),
+                                    &mut parser_deps,
+                                    Some(FnSelfKind::DrawShader(draw_shader_ptr)),
+                                    draw_shader_ptr.0.file_id
+                                    //None
+                                );
+                                let decl = parser.expect_self_decl(Ident(id), prop_ptr) ?;
+                                if let Some(decl) = decl {
+                                    // lets see where to inject this.
+                                    // if its an instance var it needs to
+                                    // go above the var_def_node_ptr one
+                                    if let DrawShaderFieldKind::Instance {..} = decl.kind {
+                                        // find from the start the first instancefield
+                                        // without a var_def_node_prt
+                                        if let Some(index) = draw_shader_def.fields.iter().position( | field | {
+                                            if let DrawShaderFieldKind::Instance {var_def_ptr, ..} = field.kind {
+                                                if var_def_ptr.is_none() {
+                                                    return true
                                                 }
-                                                false
-                                            }) {
-                                                draw_shader_def.fields.insert(index, decl);
                                             }
-                                            else {
-                                                draw_shader_def.fields.push(decl);
-                                            }
+                                            false
+                                        }) {
+                                            draw_shader_def.fields.insert(index, decl);
                                         }
                                         else {
                                             draw_shader_def.fields.push(decl);
                                         }
                                     }
-                                    //else{ // it was a const
-                                    //}
-                                }
-                            },
-                            LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
-                                if let IdUnpack::Single(id) = prop.id_pack.unpack() {
-                                    // lets parse this thing
-                                    let parser = ShaderParser::new(
-                                        self,
-                                        doc.get_tokens(token_start, token_count),
-                                        doc.get_scopes(scope_start, scope_count),
-                                        &mut parser_deps,
-                                        Some(FnSelfKind::DrawShader(draw_shader_ptr)),
-                                        draw_shader_ptr.0.file_id
-                                        //None
-                                    );
-                                    
-                                    let fn_def = parser.expect_method_def(
-                                        FnPtr(prop_ptr),
-                                        Ident(id),
-                                    ) ?;
-                                    if let Some(fn_def) = fn_def {
-                                        draw_shader_def.methods.push(fn_def.fn_ptr);
-                                        self.all_fns.insert(fn_def.fn_ptr, fn_def);
+                                    else {
+                                        draw_shader_def.fields.push(decl);
                                     }
                                 }
+                                //else{ // it was a const
+                                //}
                             }
-                            _ => ()
+                        },
+                        LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
+                            if let IdUnpack::Single(id) = prop.id_pack.unpack() {
+                                // lets parse this thing
+                                let parser = ShaderParser::new(
+                                    self,
+                                    doc.get_tokens(token_start, token_count),
+                                    doc.get_scopes(scope_start, scope_count),
+                                    &mut parser_deps,
+                                    Some(FnSelfKind::DrawShader(draw_shader_ptr)),
+                                    draw_shader_ptr.0.file_id
+                                    //None
+                                );
+                                
+                                let fn_def = parser.expect_method_def(
+                                    FnPtr(prop_ptr),
+                                    Ident(id),
+                                ) ?;
+                                if let Some(fn_def) = fn_def {
+                                    draw_shader_def.methods.push(fn_def.fn_ptr);
+                                    self.all_fns.insert(fn_def.fn_ptr, fn_def);
+                                }
+                            }
                         }
+                        _ => ()
                     }
                 }
                 // lets check for duplicate fields

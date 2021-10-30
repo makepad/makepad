@@ -630,14 +630,16 @@ impl<'a> ShaderParser<'a> {
     fn expect_break_stmt(&mut self) -> Result<Stmt, LiveError> {
         let span = self.begin_span();
         self.expect_token(Token::Ident(id!(break))) ?;
-        self.expect_token(Token::Punct(id!(;))) ?;
+        self.accept_optional_delim();
+        //self.expect_token(Token::Punct(id!(;))) ?;
         Ok(span.end(self, | span | Stmt::Break {span}))
     }
     
     fn expect_continue_stmt(&mut self) -> Result<Stmt, LiveError> {
         let span = self.begin_span();
         self.expect_token(Token::Ident(id!(continue))) ?;
-        self.expect_token(Token::Punct(id!(;))) ?;
+        self.accept_optional_delim();
+        //self.expect_token(Token::Punct(id!(;))) ?;
         Ok(span.end(self, | span | Stmt::Continue {span}))
     }
     
@@ -705,7 +707,8 @@ impl<'a> ShaderParser<'a> {
         } else {
             None
         };
-        self.expect_token(Token::Punct(id!(;))) ?;
+        self.accept_optional_delim();
+        //self.expect_token(Token::Punct(id!(;))) ?;
         Ok(span.end(self, | span | Stmt::Let {
             span,
             shadow: Cell::new(None),
@@ -719,10 +722,17 @@ impl<'a> ShaderParser<'a> {
     fn expect_return_stmt(&mut self) -> Result<Stmt, LiveError> {
         let span = self.begin_span();
         self.expect_token(Token::Ident(id!(return))) ?;
+        // if we have a void return type, we don't expect expr otherwise we do
+        
         let expr = if !self.accept_token(Token::Punct(id!(;))) {
-            let expr = self.expect_expr() ?;
-            self.expect_token(Token::Punct(id!(;))) ?;
-            Some(expr)
+            if self.peek_token() == Token::CloseBrace{
+                None
+            }
+            else{
+                let expr = self.expect_expr() ?;
+                self.accept_optional_delim();
+                Some(expr)
+            }
         } else {
             None
         };
@@ -732,7 +742,7 @@ impl<'a> ShaderParser<'a> {
     fn expect_expr_stmt(&mut self) -> Result<Stmt, LiveError> {
         let span = self.begin_span();
         let expr = self.expect_expr() ?;
-        self.expect_token(Token::Punct(id!(;))) ?;
+        self.accept_optional_delim();
         Ok(span.end(self, | span | Stmt::Expr {span, expr}))
     }
     
@@ -1362,6 +1372,10 @@ impl<'a> ShaderParser<'a> {
             self.expect_token(Token::CloseParen) ?;
         }
         Ok(arg_exprs)
+    }
+
+    pub fn accept_optional_delim(&mut self){
+        while self.accept_token(Token::Punct(id!(;))){};
     }
 }
 
