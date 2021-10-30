@@ -38,7 +38,7 @@ live_body!{
 
 use crate::cx::*;
 
-#[derive(Live)]
+#[derive(Live, LiveUpdateHooks)]
 #[repr(C)]
 pub struct DrawQuad {
     #[hidden()] pub area: Area,
@@ -91,20 +91,6 @@ impl DrawQuad {
             let new_area = cx.add_aligned_instance(&self.draw_call_vars);
             self.area = cx.update_area_refs(self.area, new_area);
         }
-    }
-}
-
-impl LiveUpdateHooks for DrawQuad {
-    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
-        self.draw_call_vars.update_var(cx, ptr, id);
-    }
-    
-    fn before_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {
-        self.draw_call_vars.init_shader(cx, DrawShaderPtr(live_ptr), &self.geometry);
-    }
-    
-    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
-        self.draw_call_vars.init_slicer(cx);
     }
 }
 
