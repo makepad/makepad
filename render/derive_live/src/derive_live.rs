@@ -8,9 +8,67 @@ pub fn derive_live_update_hooks_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let _main_attribs = parser.eat_attributes();
     parser.eat_ident("pub");
-    if parser.eat_ident("struct") || parser.eat_ident("enum") {
+    if parser.eat_ident("struct") {
         if let Some(struct_name) = parser.eat_any_ident() {
-            tb.add("impl LiveUpdateHooks for").ident(&struct_name).add(" { }");
+            let generic = parser.eat_generic();
+            let types = parser.eat_all_types();
+            let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
+            
+            let fields = if let Some(_types) = types {
+                return parser.unexpected();
+            }
+            else if let Some(fields) = parser.eat_all_struct_fields() {
+                fields
+            }
+            else{
+                return parser.unexpected();
+            };
+            
+            let deref_target = fields.iter().find( | field | field.name == "deref_target");
+            let draw_call_vars = fields.iter().find( | field | field.name == "draw_call_vars");
+            
+            if let Some(_) = draw_call_vars{
+                tb.add("impl").stream(generic.clone());
+                tb.add("LiveUpdateHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+                tb.add("    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
+                tb.add("        self.draw_call_vars.update_var(cx, ptr, id);");
+                tb.add("    }");
+                tb.add("    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr){");
+                tb.add("        self.draw_call_vars.init_shader(cx, DrawShaderPtr(live_ptr), &self.geometry);");
+                tb.add("    }");
+                tb.add("    fn after_live_update(&mut self, cx: &mut Cx, live_ptr:LivePtr) {");
+                tb.add("        self.draw_call_vars.init_slicer(cx);");
+                tb.add("    }");
+                tb.add("}");                
+            }
+            else if let Some(_) = deref_target {
+                tb.add("impl").stream(generic.clone());
+                tb.add("LiveUpdateHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+                tb.add("    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
+                tb.add("        self.deref_target.live_update_value_unknown(cx, id, ptr);");
+                tb.add("    }");
+                tb.add("    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr){");
+                tb.add("        self.deref_target.before_live_update(cx, live_ptr);");
+                tb.add("    }");
+                tb.add("    fn after_live_update(&mut self, cx: &mut Cx, live_ptr:LivePtr) {");
+                tb.add("        self.deref_target.after_live_update(cx, live_ptr);");
+                tb.add("    }");
+                tb.add("}");
+            }
+            else{
+                tb.add("impl").stream(generic.clone());
+                tb.add("LiveUpdateHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
+            }
+            
+            return tb.end();
+        }
+    }
+    else if parser.eat_ident("enum") {
+        if let Some(enum_name) = parser.eat_any_ident() {
+            let generic = parser.eat_generic();
+            let where_clause = parser.eat_where_clause(None);
+            tb.add("impl").stream(generic.clone());
+                tb.add("LiveUpdateHooks for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
             return tb.end();
         }
     }
@@ -48,19 +106,6 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             }
             
             if let Some(deref_target) = deref_target {
-                tb.add("impl").stream(generic.clone());
-                tb.add("LiveUpdateHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-                tb.add("    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
-                tb.add("        self.deref_target.live_update_value_unknown(cx, id, ptr);");
-                tb.add("    }");
-                tb.add("    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr){");
-                tb.add("        self.deref_target.before_live_update(cx, live_ptr);");
-                tb.add("    }");
-                tb.add("    fn after_live_update(&mut self, cx: &mut Cx, live_ptr:LivePtr) {");
-                tb.add("        self.deref_target.after_live_update(cx, live_ptr);");
-                tb.add("    }");
-                tb.add("}");
-                
                 tb.add("impl").stream(generic.clone());
                 tb.add("std::ops::Deref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
                 tb.add("    type Target = ").stream(Some(deref_target.ty.clone())).add(";");
