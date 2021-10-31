@@ -23,6 +23,8 @@ live_body!{
         
         wrapping: Wrapping::None
         text_style: TextStyle {}
+
+        color: #fff
         
         uniform brightness: float
         uniform curve: float
@@ -152,7 +154,7 @@ pub struct DrawText {
     
     #[local()] pub draw_call_vars: DrawCallVars,
     // these values are all generated
-    #[live(Vec4::from_hex_str("ffff").unwrap())] pub color: Vec4,
+    #[live()] pub color: Vec4,
     #[local()] pub font_t1: Vec2,
     #[local()] pub font_t2: Vec2,
     #[local()] pub rect_pos: Vec2,
@@ -221,13 +223,11 @@ impl DrawText {
         
         let in_many = self.many_instances.is_some();
 
-
         self.update_draw_call_vars(cx);
         
         if !in_many {
             self.begin_many_instances(cx);
         }
-
         
         let chunk = chunk.unwrap_or(&self.buf);
         
@@ -421,7 +421,7 @@ impl DrawText {
                 let rect = cx.walk_turtle(Walk {
                     width: Width::Fix(width),
                     height: Height::Fix(height),
-                    margin: Margin::zero()
+                    margin: Margin::default()
                 });
                 
                 self.draw_text_chunk(cx, rect.pos, 0, None, | _, _, _, _ | {0.0});

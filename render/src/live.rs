@@ -64,6 +64,7 @@ impl Cx {
         crate::geometrygen::live_register(self);
         crate::shader_std::live_register(self);
         crate::font::live_register(self);
+        crate::turtle::live_register(self);
     }
     
     pub fn live_ptr_from_id(&self, path:&str, id:Id)->LivePtr{
