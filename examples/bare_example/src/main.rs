@@ -59,6 +59,8 @@ impl BareExampleApp {
         self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(Vec4::color("000")));
         if self.main_view.begin_view(cx, Layout::default()).is_ok() {
             self.draw_quad.draw_quad_abs(cx, Rect {pos: Vec2 {x: 30., y: 30.}, size: Vec2 {x: 100., y: 100.}});
+            self.draw_text.draw_text_abs(cx, Vec2{x:60.,y:60.}, "HELLO WORLD");
+            
             /*
         while let Some(custom) = self.live.draw_live(cx){
             match custom.id_path{
