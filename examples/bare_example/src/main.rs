@@ -1,9 +1,11 @@
 use makepad_render::*;
+use makepad_widget::*;
 
 live_body!{
     use makepad_render::drawcolor::DrawColor;
     use makepad_render::drawtext::DrawText;
-
+    use makepad_widget::normalbutton::NormalButton;
+    
     App: Component {
         rust_type: {{BareExampleApp}}
         draw_quad: DrawColor {
@@ -13,6 +15,8 @@ live_body!{
             }
         }
         draw_text: DrawText{
+        }
+        normal_button: NormalButton{
         }
     }
 }
@@ -26,10 +30,15 @@ pub struct BareExampleApp {
     #[hidden(Texture::new(cx))] color_texture: Texture,
     #[hidden(View::new())] main_view: View,
     #[live()] draw_quad: DrawColor,
-    #[live()] draw_text: DrawText
+    #[live()] draw_text: DrawText,
+    #[live()] normal_button: NormalButton
 }
 
 impl BareExampleApp {
+    pub fn live_register(cx: &mut Cx){
+        makepad_widget::live_register(cx); 
+    }
+  
     pub fn new(cx: &mut Cx) -> Self {
         let mut new = Self::live_new(cx);
         new.live_update(cx, cx.live_ptr_from_id(&module_path!(), id!(App)));
@@ -43,10 +52,8 @@ impl BareExampleApp {
         
         match event {
             Event::Construct => {
-                
             },
             Event::FingerMove(_fm) => {
-                //self.count = fm.abs.x * 0.01;
             },
             _ => ()
         }
@@ -60,29 +67,7 @@ impl BareExampleApp {
         if self.main_view.begin_view(cx, Layout::default()).is_ok() {
             self.draw_quad.draw_quad_abs(cx, Rect {pos: Vec2 {x: 30., y: 30.}, size: Vec2 {x: 100., y: 100.}});
             self.draw_text.draw_text_abs(cx, Vec2{x:60.,y:60.}, "HELLO WORLD");
-            
-            /*
-        while let Some(custom) = self.live.draw_live(cx){
-            match custom.id_path{
-            }
-        }*/
-            /*
-            self.quad.counter = 0.;
-            self.quad.begin_many(cx);
-            
-            self.quad.counter = 0.;
-            self.quad.some = 0.;
-            
-            for i in 0..1000 {  
-                let v = 0.5 * (i as f32);
-                self.quad.counter += 0.01; //= (i as f32).sin();
-                let x = 400. + (v + self.count).sin() * 400.;
-                let y = 400. + (v * 1.12 + self.count * 18.).cos() * 400.;
-                self.quad.draw_quad_abs(cx, Rect {pos: vec2(x, y), size: vec2(10., 10.0)});
-            }
-            self.quad.end_many(cx);
-            self.count += 0.001;
-            self.main_view.redraw_view(cx);*/
+            self.normal_button.draw_normal_button(cx, "HELLO");
             self.main_view.end_view(cx);
         }
         self.pass.end_pass(cx);

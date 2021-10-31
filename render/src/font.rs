@@ -131,7 +131,7 @@ impl Cx {
             let mut buffer = Vec::<u8>::new();
             if file_handle.read_to_end(&mut buffer).is_ok() {
                 match CxFont::load_from_ttf_bytes(&buffer) {
-                    Err(e) => {
+                    Err(_) => {
                         println!("Error loading font {} ", path);
                     }
                     Ok(cxfont) => {
