@@ -24,7 +24,7 @@ impl Cx {
         let mut metal_windows: Vec<MetalWindow> = Vec::new();
         
         //self.mtl_compile_all_shaders(&metal_cx);
-        //self.load_all_fonts();
+       
         
         self.call_event_handler(&mut Event::Construct);
         

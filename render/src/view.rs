@@ -384,7 +384,7 @@ impl Cx {
     }
     
     pub fn add_instance(&mut self, draw_call_vars: &DrawCallVars) -> Area {
-        let data = draw_call_vars.instances_slice();
+        let data = draw_call_vars.as_slice();
         let draw_item = self.append_to_draw_call(draw_call_vars);
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let instance_count = data.len() / draw_call.total_instance_slots;
@@ -404,7 +404,7 @@ impl Cx {
     }
     
     pub fn add_aligned_instance(&mut self, draw_call_vars: &DrawCallVars) -> Area {
-        let data = draw_call_vars.instances_slice();
+        let data = draw_call_vars.as_slice();
         let draw_item = self.append_to_draw_call(draw_call_vars);
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let instance_count = data.len() / draw_call.total_instance_slots;
