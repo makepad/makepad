@@ -55,6 +55,9 @@ impl Cx {
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
                 let draw_call = cxview.draw_items[draw_item_id].draw_call.as_mut().unwrap();
                 let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                if sh.platform.is_none(){ // shader didnt compile somehow
+                    continue;
+                }
                 let shp = sh.platform.as_ref().unwrap();
                 
                 if draw_call.instance_dirty {
@@ -165,7 +168,11 @@ impl Cx {
                 //encoder.set_fragment_bytes(3, (draw_call.uniforms.len() * 4) as u64, draw_call.uniforms.as_ptr() as *const std::ffi::c_void);
                 // lets set our textures
                 for i in 0..sh.mapping.textures.len() {
-                    let texture_id = draw_call.texture_slots[i].unwrap().texture_id;
+                    
+                    let texture_id = if let Some(texture) = draw_call.texture_slots[i]{
+                        texture.texture_id 
+                    }else{0};
+                    
                     let cxtexture = &mut self.textures[texture_id as usize];
                     if cxtexture.update_image {
                         metal_cx.update_platform_texture_image2d(cxtexture);

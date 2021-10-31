@@ -1,7 +1,7 @@
 use crate::cx::*;
 
 
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, Default, PartialEq, Debug)]
 pub struct Texture {
     pub texture_id: u32,
 }

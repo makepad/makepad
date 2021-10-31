@@ -3,7 +3,7 @@ use makepad_geometry::Rectangle;
 
 /// A font.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Font {
+pub struct TTFFont {
     pub units_per_em: f32,
     pub ascender: f32,
     pub descender: f32,

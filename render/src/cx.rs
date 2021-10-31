@@ -74,8 +74,10 @@ pub struct Cx {
     pub views: Vec<CxView>,
     pub views_free: Vec<usize>,
     
-    pub fonts: Vec<CxFont>,
+    pub fonts: Vec<Option<CxFont>>,
     pub fonts_atlas: CxFontsAtlas,
+    pub path_to_font_id: HashMap<String, usize>,
+    
     pub textures: Vec<CxTexture>,
     pub textures_free: Vec<usize>,
     
@@ -124,6 +126,8 @@ pub struct Cx {
 
     pub drag_area: Area,
     pub new_drag_area: Area,
+    
+    pub draw_font_atlas: Option<Box<CxDrawFontAtlas>>,
     
     //pub playing_animator_ids: BTreeMap<AnimatorId, AnimInfo>,
     
@@ -221,7 +225,9 @@ impl Default for Cx {
             views: vec![CxView {..Default::default()}],
             views_free: Vec::new(),
             fonts: Vec::new(),
-            fonts_atlas: CxFontsAtlas::default(),
+            fonts_atlas: CxFontsAtlas::new(),
+            path_to_font_id: HashMap::new(),
+            
             textures: textures,
             textures_free: Vec::new(),
             draw_shaders: Vec::new(),
@@ -247,6 +253,8 @@ impl Default for Cx {
             _redraw_parent_areas: Vec::new(),
             redraw_child_areas: Vec::new(),
             _redraw_child_areas: Vec::new(),
+            
+            draw_font_atlas: None,
             
             redraw_id: 1,
             event_id: 1,
@@ -918,11 +926,8 @@ macro_rules!main_app {
             let mut cx = Cx::default();
             cx.live_register();
             live_register(&mut cx);
-            
             cx.live_expand();
-            //cx.init_live_styles();
             let mut app = None;
-            //let mut cxafterdraw = CxAfterDraw::new(&mut cx);
             cx.event_loop( | cx, mut event | {
                 if let Event::Construct = event{
                     app = Some($ app::new(cx));
@@ -930,6 +935,7 @@ macro_rules!main_app {
                 }
                 if let Event::Draw = event {
                     app.as_mut().unwrap().draw_app(cx);
+                    cx.after_draw();
                     return
                 }
                 app.as_mut().unwrap().handle_app(cx, &mut event);
@@ -943,9 +949,6 @@ macro_rules!main_app {
             cx.live_register();
             live_register(&mut cx);
             cx.live_expand();
-            //cx.init_live_styles();
-            //let app = Box::new( $ app::new(&mut cx));
-            //let cxafterdraw = Box::new(CxAfterDraw::new(&mut cx));
             Box::into_raw(Box::new((0, Box::into_raw(cx)/*, Box::into_raw(cxafterdraw)*/))) as u32
         }
         
@@ -960,7 +963,7 @@ macro_rules!main_app {
                 }
                 if let Event::Draw = event {
                     (*appcx.0).draw_app(cx);
-                    //(*appcx.2).after_draw(cx);
+                     cx.after_draw();
                     return;
                 };
                 (*appcx.0).handle_app(cx, &mut event);
