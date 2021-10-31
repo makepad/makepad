@@ -1,37 +1,50 @@
 use crate::cx::*;
 
-
-#[derive(Copy, Clone, Debug)]
-pub enum LineWrap {
-    None,
-    NewLine,
-    MaxSize(f32)
+live_body!{
+    LineWrap: Enum {rust_type: {{LineWrap}}}
+    Layout: Struct {rust_type: {{Layout}}}
+    Walk: Struct {rust_type: {{Walk}}}
+    Padding: Struct {rust_type: {{Padding}}}
+    Margin: Struct {rust_type: {{Margin}}}
+    Width: Enum {rust_type: {{Width}}}
+    Height: Enum {rust_type: {{Height}}}
+    Align: Struct {rust_type: {{Align}}}
+    Direction: Enum {rust_type: {{Direction}}}
 }
+
+
+#[derive(Copy, Clone, Debug, Live, LiveUpdateHooks)]
+pub enum LineWrap {
+    #[default] None,
+    #[live()] NewLine,
+    #[live(8.0)] MaxSize(f32)
+}
+
 impl Default for LineWrap {
     fn default() -> Self {
         LineWrap::None
     }
 }
 
-#[derive(Copy, Clone, Default, Debug)]
+#[derive(Copy, Clone, Default, Debug, Live, LiveUpdateHooks)]
 pub struct Layout {
-    pub padding: Padding,
-    pub align: Align,
-    pub direction: Direction,
-    pub line_wrap: LineWrap,
-    pub new_line_padding: f32,
-    pub abs_origin: Option<Vec2>,
-    pub abs_size: Option<Vec2>,
-    pub walk: Walk,
+    #[live] pub padding: Padding,
+    #[live] pub align: Align,
+    #[live] pub direction: Direction,
+    #[live] pub line_wrap: LineWrap,
+    #[live] pub new_line_padding: f32,
+    #[hidden()] pub abs_origin: Option<Vec2>,
+    #[hidden()] pub abs_size: Option<Vec2>,
+    #[live] pub walk: Walk,
 }
 
-#[derive(Copy, Clone, Default, Debug)]
+#[derive(Copy, Clone, Default, Debug, Live, LiveUpdateHooks)]
 pub struct Walk {
-    pub margin: Margin,
-    pub width: Width,
-    pub height: Height,
+    #[live] pub margin: Margin,
+    #[live] pub width: Width,
+    #[live] pub height: Height,
 }
-
+/*
 impl Walk {
     pub fn wh(w: Width, h: Height) -> Self {
         Self {
@@ -40,8 +53,8 @@ impl Walk {
             margin: Margin::zero(),
         }
     }
-}
-
+}*/
+/*
 impl Layout {
     pub fn abs_origin_zero() -> Self {
         Layout {
@@ -49,14 +62,14 @@ impl Layout {
             ..Default::default()
         }
     }
-}
+}*/
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, Live, LiveUpdateHooks)]
 pub struct Align {
-    pub fx: f32,
-    pub fy: f32
+    #[live] pub fx: f32,
+    #[live] pub fy: f32
 }
-
+/*
 impl Align {
     pub fn left_top() -> Align {Align {fx: 0., fy: 0.}}
     pub fn center_top() -> Align {Align {fx: 0.5, fy: 0.0}}
@@ -67,16 +80,16 @@ impl Align {
     pub fn left_bottom() -> Align {Align {fx: 0., fy: 1.0}}
     pub fn center_bottom() -> Align {Align {fx: 0.5, fy: 1.0}}
     pub fn right_bottom() -> Align {Align {fx: 1.0, fy: 1.0}}
-}
+}*/
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, Live, LiveUpdateHooks)]
 pub struct Margin {
-    pub l: f32,
-    pub t: f32,
-    pub r: f32,
-    pub b: f32
+    #[live] pub l: f32,
+    #[live] pub t: f32,
+    #[live] pub r: f32,
+    #[live] pub b: f32
 }
-
+/*
 impl Margin {
     pub fn zero() -> Margin {
         Margin {l: 0.0, t: 0.0, r: 0.0, b: 0.0}
@@ -102,16 +115,16 @@ impl Margin {
         Margin {l: 0.0, t: 0.0, r: 0.0, b: v}
     }
     
-}
+}*/
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, Live, LiveUpdateHooks)]
 pub struct Padding {
-    pub l: f32,
-    pub t: f32,
-    pub r: f32,
-    pub b: f32
+    #[live] pub l: f32,
+    #[live] pub t: f32,
+    #[live] pub r: f32,
+    #[live] pub b: f32
 }
-
+/*
 impl Padding {
     pub fn zero() -> Padding {
         Padding {l: 0.0, t: 0.0, r: 0.0, b: 0.0}
@@ -120,26 +133,24 @@ impl Padding {
         Padding {l: v, t: v, r: v, b: v}
     }
 }
+*/
 
-
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Live, LiveUpdateHooks)]
 pub enum Direction {
-    Left,
-    Right,
-    Up,
-    Down
+    #[live] Left,
+    #[default] Right,
+    #[live] Up,
+    #[live] Down
 }
 
 impl Default for Direction {
-    fn default() -> Self {
-        Direction::Right
-    }
+    fn default() -> Self {Self::Right}
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Live, LiveUpdateHooks)]
 pub enum Axis {
-    Horizontal,
-    Vertical
+    #[default] Horizontal,
+    #[live] Vertical
 }
 
 impl Default for Axis {
@@ -149,30 +160,30 @@ impl Default for Axis {
 }
 
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Live, LiveUpdateHooks)]
 pub enum Width {
-    Fill,
-    Fix(f32),
-    Compute,
-    ComputeFill,
-    FillPad(f32),
-    FillScale(f32),
-    FillScalePad(f32, f32),
-    Scale(f32),
-    ScalePad(f32, f32),
+    #[default] Fill,
+    #[live(200.0)] Fix(f32),
+    #[live] Compute,
+    #[live] ComputeFill,
+    #[live(0.0)] FillPad(f32),
+    #[live(0.0)] FillScale(f32),
+    #[live(0.0, 0.0)] FillScalePad(f32, f32),
+    #[live(0.0)] Scale(f32),
+    #[live(0.0, 0.0)] ScalePad(f32, f32),
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Live, LiveUpdateHooks)]
 pub enum Height {
-    Fill,
-    Fix(f32),
-    Compute,
-    ComputeFill,
-    FillPad(f32),
-    FillScale(f32),
-    FillScalePad(f32, f32),
-    Scale(f32),
-    ScalePad(f32, f32),
+    #[default] Fill,
+    #[live(200.0)] Fix(f32),
+    #[live] Compute,
+    #[live] ComputeFill,
+    #[live(0.0)] FillPad(f32),
+    #[live(0.0)] FillScale(f32),
+    #[live(0.0, 0.0)] FillScalePad(f32, f32),
+    #[live(0.0)] Scale(f32),
+    #[live(0.0, 0.0)] ScalePad(f32, f32),
 }
 
 impl Default for Width {
@@ -209,10 +220,10 @@ impl Height {
 }
 
 
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Live, LiveUpdateHooks)]
 pub struct Rect {
-    pub pos: Vec2,
-    pub size: Vec2,
+    #[live] pub pos: Vec2,
+    #[live] pub size: Vec2,
 }
 
 impl Rect {
@@ -249,8 +260,8 @@ impl Rect {
     
     pub fn from_lerp(a: Rect, b: Rect, f: f32) -> Rect {
         Rect {
-            pos: ( b.pos - a.pos ) * f + a.pos,
-            size: ( b.size - a.size ) * f + a.size
+            pos: (b.pos - a.pos) * f + a.pos,
+            size: (b.size - a.size) * f + a.size
         }
     }
 }
