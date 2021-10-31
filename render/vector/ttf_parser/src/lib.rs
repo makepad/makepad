@@ -1,4 +1,4 @@
-use makepad_font::{Font, Glyph, HorizontalMetrics, Outline, OutlinePoint};
+use makepad_font::{TTFFont, Glyph, HorizontalMetrics, Outline, OutlinePoint};
 use makepad_geometry::{
     AffineTransformation, LinearTransformation, Point, Rectangle, Transform, Vector,
 };
@@ -510,7 +510,7 @@ pub type Result<T> = result::Result<T, Error>;
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Error;
 
-pub fn parse_ttf(bytes: &[u8]) -> Result<Font> {
+pub fn parse_ttf(bytes: &[u8]) -> Result<TTFFont> {
     let mut reader = Reader::new(&bytes[0..12]);
     let sfnt_version = reader.read_u32()?;
     if ![0x00010000, u32::from_be_bytes(*b"true")].contains(&sfnt_version) {
@@ -572,7 +572,7 @@ pub fn parse_ttf(bytes: &[u8]) -> Result<Font> {
     reader.skip(6)?;
     let index_to_loc_format = IndexToLocFormat::from_i16(reader.read_i16()?).ok_or(Error)?;
     reader.skip(2)?;
-    Ok(Font {
+    Ok(TTFFont {
         units_per_em,
         ascender,
         descender,

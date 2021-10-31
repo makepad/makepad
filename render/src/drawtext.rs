@@ -24,8 +24,8 @@ live_body!{
         wrapping: Wrapping::None
         text_style: TextStyle {}
         
-        uniform curve: float
         uniform brightness: float
+        uniform curve: float
         texture texture: texture2D
         
         varying tex_coord1: vec2
@@ -147,14 +147,14 @@ pub struct DrawText {
     #[live()] pub geometry: GeometryQuad2D,
     #[live()] pub text_style: TextStyle,
     #[live(Wrapping::None)] pub wrapping: Wrapping,
-    #[live()] pub font_scale: f32,
+    #[live(1.0)] pub font_scale: f32,
     #[live(1.0)] pub draw_depth: f32,
     
     #[local()] pub draw_call_vars: DrawCallVars,
     // these values are all generated
+    #[live(Vec4::from_hex_str("ffff").unwrap())] pub color: Vec4,
     #[local()] pub font_t1: Vec2,
     #[local()] pub font_t2: Vec2,
-    #[local()] pub color: Vec4,
     #[local()] pub rect_pos: Vec2,
     #[local()] pub rect_size: Vec2,
     #[local()] pub char_depth: f32,
@@ -200,6 +200,12 @@ impl DrawText {
         }
     }
     
+    pub fn update_draw_call_vars(&mut self, cx:&mut Cx){
+        self.draw_call_vars.texture_slots[0] = Some(cx.fonts_atlas.texture);
+        self.draw_call_vars.user_uniforms[0] = self.text_style.brightness;
+        self.draw_call_vars.user_uniforms[1] = self.text_style.curve;
+    }
+    
     pub fn draw_text_chunk<F>(&mut self, cx: &mut Cx, pos: Vec2, char_offset: usize, chunk: Option<&[char]>, mut char_callback: F)
     where F: FnMut(char, usize, f32, f32) -> f32
     {
@@ -207,36 +213,39 @@ impl DrawText {
         if pos.x.is_nan() || pos.y.is_nan() || self.text_style.font.font_id.is_none() {
             return
         }
-        
-        // lets use a many
+        let font_id = self.text_style.font.font_id.unwrap();
+
+        if cx.fonts[font_id].is_none(){
+            return
+        }
         
         let in_many = self.many_instances.is_some();
+
+
+        self.update_draw_call_vars(cx);
         
         if !in_many {
             self.begin_many_instances(cx);
         }
-        
-        //let text_style = &self.text_style;
+
         
         let chunk = chunk.unwrap_or(&self.buf);
         
         let mut walk_x = pos.x;
         let mut char_offset = char_offset;
         
-        let font_id = self.text_style.font.font_id.unwrap();
-        let cxfont = &mut cx.fonts[font_id];
+        let cxfont = cx.fonts[font_id].as_mut().unwrap();
         let dpi_factor = cx.current_dpi_factor;
         
-        //let geom_y = (geom_y * dpi_factor).floor() / dpi_factor;
         let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, self.text_style.font_size);
         
-        let font = &mut cxfont.font_loaded.as_ref().unwrap();
+        let font = &mut cxfont.ttf_font;
         
         let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * font.units_per_em);
         let font_size_pixels = font_size_logical * dpi_factor;
         
         let atlas_page = &mut cxfont.atlas_pages[atlas_page_id];
-        
+
         let mi = if let Some(mi) = &mut self.many_instances {mi} else {return};
         
         for wc in chunk {
@@ -251,7 +260,7 @@ impl DrawText {
             let glyph = &font.glyphs[glyph_id];
             
             let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
-            
+
             // snap width/height to pixel granularity
             let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + 1.0;
             let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 1.0;
@@ -295,7 +304,7 @@ impl DrawText {
                 });
                 
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id] = Some(
-                    cx.fonts_atlas.alloc_atlas_glyph(&cxfont.file, w, h)
+                    cx.fonts_atlas.alloc_atlas_glyph(w, h)
                 );
                 
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
@@ -317,7 +326,7 @@ impl DrawText {
             // self.marker = marker;
             self.marker = char_callback(*wc, char_offset, walk_x, advance);
             
-            mi.instances.extend_from_slice(self.draw_call_vars.instances_slice());
+            mi.instances.extend_from_slice(self.draw_call_vars.as_slice());
             // !TODO make sure a derived shader adds 'empty' values here.
             
             walk_x += advance;
@@ -335,8 +344,15 @@ impl DrawText {
             return
         }
         
-        let in_many = self.many_instances.is_some();
+        let font_id = self.text_style.font.font_id.unwrap();
+
+        if cx.fonts[font_id].is_none() {
+            return
+        }
         
+        let in_many = self.many_instances.is_some();
+
+        self.update_draw_call_vars(cx);
         if !in_many {
             self.begin_many_instances(cx);
         }
@@ -347,9 +363,7 @@ impl DrawText {
         self.buf.truncate(0);
         
         let mut iter = text.chars().peekable();
-        
-        let font_id = self.text_style.font.font_id.unwrap();
-        let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * cx.fonts[font_id].font_loaded.as_ref().unwrap().units_per_em);
+        let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * cx.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
         
         while let Some(c) = iter.next() {
             let last = iter.peek().is_none();
@@ -357,7 +371,7 @@ impl DrawText {
             let mut emit = last;
             let mut newline = false;
             let slot = if c < '\u{10000}' {
-                cx.fonts[font_id].font_loaded.as_ref().unwrap().char_code_to_glyph_index_map[c as usize]
+                cx.fonts[font_id].as_ref().unwrap().ttf_font.char_code_to_glyph_index_map[c as usize]
             } else {
                 0
             };
@@ -366,7 +380,7 @@ impl DrawText {
                 newline = true;
             }
             if slot != 0 {
-                let glyph = &cx.fonts[font_id].font_loaded.as_ref().unwrap().glyphs[slot];
+                let glyph = &cx.fonts[font_id].as_ref().unwrap().ttf_font.glyphs[slot];
                 width += glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                 match self.wrapping {
                     Wrapping::Char => {
@@ -478,9 +492,11 @@ impl DrawText {
         if self.text_style.font.font_id.is_none() {
             return Vec2::default();
         }
-        
         let font_id = self.text_style.font.font_id.unwrap();
-        let font = cx.fonts[font_id].font_loaded.as_ref().unwrap();
+        if cx.fonts[font_id].is_none(){
+            return Vec2::default();
+        }
+        let font = &cx.fonts[font_id].as_ref().unwrap().ttf_font;
         let slot = font.char_code_to_glyph_index_map[33];
         let glyph = &font.glyphs[slot];
         
