@@ -14,13 +14,11 @@ live_body!{
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveUpdateHooks)]
 #[repr(C)]
 pub struct DrawColor {
-    #[live()]
-    deref_target: DrawQuad,
-    #[live()]
-    color: Vec4
+    #[live()] pub deref_target: DrawQuad,
+    #[live()] pub color: Vec4
 }
 /*
 impl std::ops::Deref for DrawColor {
