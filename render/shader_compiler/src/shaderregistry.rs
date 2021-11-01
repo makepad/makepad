@@ -447,13 +447,8 @@ impl ShaderRegistry {
     LiveError>
     where F: FnMut(Span, Id, LiveType, &mut DrawShaderDef)
     {
-        
-        // lets find the FullPointer
-        
-        //if let Some(shader_ptr) = self.live_registry.find_full_node_ptr_from_ids(crate_id, module_id, ids) {
-        //let shader_ptr = DrawShaderNodePtr(live_ptr);
         let mut draw_shader_def = DrawShaderDef::default();
-        // we have a pointer to the thing to instance.
+
         let (doc, class_node) = self.live_registry.resolve_doc_ptr(draw_shader_ptr.0);
         
         match class_node.value {
