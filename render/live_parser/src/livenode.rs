@@ -1,4 +1,5 @@
 #![allow(unused_variables)]
+use crate::id::Id;
 use crate::id::IdPack;
 use crate::token::TokenId;
 use crate::math::{Vec2, Vec3};
@@ -9,7 +10,7 @@ pub struct LiveType(pub core::any::TypeId);
 #[derive(Copy, Clone, Debug)]
 pub struct LiveNode { // 3x u64
     pub token_id: TokenId,
-    pub id_pack: IdPack,
+    pub id: Id,
     pub value: LiveValue,
 }
 
@@ -40,7 +41,7 @@ impl LiveValue {
             Self::IdPack(_)=>8,
             Self::Call {..}=>9,
             Self::Array {..}=>10,
-            Self::Object {..}=>11,
+            Self::ClassOverride {..}=>11,
             Self::Fn {..}=>12,
             Self::Const {..}=>13,
             Self::VarDef {..}=>14,
@@ -88,7 +89,7 @@ pub enum LiveValue {
         node_start: u32,
         node_count: u32
     },
-    Object {
+    ClassOverride {
         node_start: u32,
         node_count: u32
     },
@@ -111,7 +112,7 @@ pub enum LiveValue {
         scope_count: u16
     },
     Use{
-        module_path_ids: IdPack,
+        use_ids: IdPack,
     },
     Class {
         class: IdPack, // target class , we can reuse this Id on clone
