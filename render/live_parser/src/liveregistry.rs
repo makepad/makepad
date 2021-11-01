@@ -92,39 +92,7 @@ impl LiveObjectIterator {
 }
 
 impl LiveRegistry {
-    /*
-    pub fn parse_id_path_from_multi_id(crate_id: Id, module_id: Id, span: Span, target: IdPack, multi_ids: &[Id]) -> Result<IdPath, LiveError> {
-        match target.unpack() {
-            IdUnpack::Multi {index, count} => {
-                if count == 2 {
-                    let part1 = multi_ids[index + 0];
-                    let part2 = multi_ids[index + 1];
-                    if part1 != id!(self) {
-                        return Err(LiveError {
-                            origin: live_error_origin!(),
-                            span: span,
-                            message: format!("Unsupported target naming {}", IdFmt::col(multi_ids, target))
-                        });
-                    }
-                    // ok so we have to find crate_id, module_id, part2
-                    return Ok(ShaderResourceId(CrateModule(crate_id, module_id), part2))
-                }
-                if count == 3 {
-                    let part1 = multi_ids[index + 0];
-                    let part2 = multi_ids[index + 1];
-                    let part3 = multi_ids[index + 1];
-                    return Ok(ShaderResourceId(CrateModule(if part1 == id!(crate) {crate_id}else {part1}, part2), part3));
-                }
-            }
-            _ => ()
-        }
-        return Err(LiveError {
-            origin: live_error_origin!(),
-            span: span,
-            message: format!("Unsupported target naming {}", IdFmt::col(multi_ids, target))
-        });
-    }*/
-    
+
     pub fn live_ptr_from_path(&self, module_path: ModulePath, object_path: &[Id]) -> Option<LivePtr> {
         if let Some(file_id) = self.module_path_to_file_id.get(&module_path) {
             let doc = &self.expanded[file_id.to_index()];
@@ -184,6 +152,7 @@ impl LiveRegistry {
             || id == id_pack!(Enum)
             || id == id_pack!(Variant)
             || id == id_pack!(Struct)
+            || id == id_pack!(Namespace)
             || id == id_pack!(DrawShader)
             || id == id_pack!(Geometry)
     }

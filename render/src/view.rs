@@ -339,22 +339,19 @@ impl Cx {
     pub fn begin_many_instances(&mut self, draw_call_vars: &DrawCallVars) -> ManyInstances {
         let draw_item = self.append_to_draw_call(draw_call_vars);
         let draw_call = draw_item.draw_call.as_mut().unwrap();
-        let mut instances = Vec::new();
-        if draw_call.in_many_instances {
-            panic!("please call end_many_instances before calling begin_many_instances again")
-        }
-        draw_call.in_many_instances = true;
+        let mut instances = None;
+
         std::mem::swap(&mut instances, &mut draw_call.instances);
         ManyInstances {
             instance_area: InstanceArea {
                 view_id: draw_item.view_id,
                 draw_item_id: draw_item.draw_item_id,
                 instance_count: 0,
-                instance_offset: instances.len(),
+                instance_offset: instances.as_ref().unwrap().len(),
                 redraw_id: draw_item.redraw_id
             },
             aligned: None,
-            instances
+            instances: instances.unwrap()
         }
     }
     
@@ -365,18 +362,15 @@ impl Cx {
         li
     }
     
-    pub fn end_many_instances(&mut self, mut many_instances: ManyInstances) -> Area {
+    pub fn end_many_instances(&mut self, many_instances: ManyInstances) -> Area {
         let mut ia = many_instances.instance_area;
         let cxview = &mut self.views[ia.view_id];
         let draw_item = &mut cxview.draw_items[ia.draw_item_id];
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         
-        if !draw_call.in_many_instances {
-            panic!("please call begin_many_instances before calling end_many_instances")
-        }
-        draw_call.in_many_instances = false;
-        std::mem::swap(&mut many_instances.instances, &mut draw_call.instances);
-        ia.instance_count = (draw_call.instances.len() - ia.instance_offset) / draw_call.total_instance_slots;
+        let mut instances = Some(many_instances.instances);
+        std::mem::swap(&mut instances, &mut draw_call.instances);
+        ia.instance_count = (draw_call.instances.as_ref().unwrap().len() - ia.instance_offset) / draw_call.total_instance_slots;
         if let Some(aligned) = many_instances.aligned {
             self.align_list[aligned] = ia.clone().into();
         }
@@ -396,10 +390,10 @@ impl Cx {
             view_id: draw_item.view_id,
             draw_item_id: draw_item.draw_item_id,
             instance_count: instance_count,
-            instance_offset: draw_call.instances.len(),
+            instance_offset: draw_call.instances.as_ref().unwrap().len(),
             redraw_id: draw_item.redraw_id
         };
-        draw_call.instances.extend_from_slice(data);
+        draw_call.instances.as_mut().unwrap().extend_from_slice(data);
         ia.into()
     }
     
@@ -416,10 +410,10 @@ impl Cx {
             view_id: draw_item.view_id,
             draw_item_id: draw_item.draw_item_id,
             instance_count: instance_count,
-            instance_offset: draw_call.instances.len(),
+            instance_offset: draw_call.instances.as_ref().unwrap().len(),
             redraw_id: draw_item.redraw_id
         }).into();
-        draw_call.instances.extend_from_slice(data);
+        draw_call.instances.as_mut().unwrap().extend_from_slice(data);
         self.align_list.push(ia.clone());
         ia
     }
@@ -502,10 +496,8 @@ pub struct UserUniforms {
 pub struct DrawCall {
     pub draw_shader: DrawShader, // if shader_id changed, delete gl vao
     
-    pub in_many_instances: bool,
-    pub instances: Vec<f32>,
+    pub instances: Option<Vec<f32>>,
     pub total_instance_slots: usize,
-    //pub current_instance_offset: usize, // offset of current instance
     
     pub draw_uniforms: DrawUniforms, // draw uniforms
     pub geometry: Option<Geometry>,
@@ -527,14 +519,12 @@ impl DrawCall {
             geometry: draw_call_vars.geometry,
             do_h_scroll: true,
             do_v_scroll: true,
-            in_many_instances: false,
             draw_shader: draw_call_vars.draw_shader.unwrap(),
-            instances: Vec::new(),
+            instances: Some(Vec::new()),
             total_instance_slots: mapping.instances.total_slots,
             draw_uniforms: DrawUniforms::default(),
             user_uniforms: draw_call_vars.user_uniforms,
             texture_slots: draw_call_vars.texture_slots,
-            //current_instance_offset: 0,
             instance_dirty: true,
             uniforms_dirty: true,
             platform: CxPlatformDrawCall::default()
@@ -544,7 +534,7 @@ impl DrawCall {
     pub fn update(&mut self, mapping: &CxDrawShaderMapping, draw_call_vars: &DrawCallVars) {
         self.draw_shader = draw_call_vars.draw_shader.unwrap();
         self.geometry = draw_call_vars.geometry;
-        self.instances.truncate(0);
+        self.instances.as_mut().unwrap().truncate(0);
         self.total_instance_slots = mapping.instances.total_slots;
         for i in 0..mapping.user_uniforms.total_slots {
             self.user_uniforms[i] = draw_call_vars.user_uniforms[i];
@@ -590,27 +580,7 @@ impl DrawCall {
         self.draw_uniforms.draw_clip_x2 = clip.1.x;
         self.draw_uniforms.draw_clip_y2 = clip.1.y;
     }
-    /*
-    pub fn into_area(&self) -> Area {
-        Area::Instance(InstanceArea {
-            view_id: self.view_id,
-            draw_call_id: self.draw_call_id,
-            redraw_id: self.redraw_id,
-            instance_offset: 0,
-            instance_count: 0
-        })
-    }*/
-    /*
-    pub fn get_current_instance_area(&self, instance_count: usize) -> InstanceArea {
-        InstanceArea {
-            view_id: self.view_id,
-            draw_call_id: self.draw_call_id,
-            redraw_id: self.redraw_id,
-            instance_offset: self.current_instance_offset,
-            instance_count: instance_count
-        }
-    }*/
-    
+
     pub fn clip_and_scroll_rect(&self, x: f32, y: f32, w: f32, h: f32) -> Rect {
         let mut x1 = x - self.draw_uniforms.draw_scroll_x;
         let mut y1 = y - self.draw_uniforms.draw_scroll_y;
