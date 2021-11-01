@@ -91,6 +91,7 @@ impl Cx {
                 return true
             }
         }
+        println!("TYPE SIGNATURE VERIFY FAILED");
         false
     }
     

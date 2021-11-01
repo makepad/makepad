@@ -15,12 +15,15 @@ impl Span {
             (((end as u64) & 0xffffff) << 0)
         }
     }
+    
     pub fn start(&self)->usize{
         ((self.store>>24)&0xffffff) as usize
     }
+    
     pub fn end(&self)->usize{
         (self.store&0xffffff) as usize
     }
+    
     pub fn len(&self)->usize{
         self.end() - self.start()
     }    
