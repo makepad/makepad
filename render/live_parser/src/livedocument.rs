@@ -125,7 +125,7 @@ impl LiveDocument {
             let mut found = false;
             for j in 0..node_count {
                 let node = &self.nodes[level][j + node_start];
-                if node.id_pack == IdPack::single(id) {
+                if node.id == id {
                     // we found the node.
                     if i == object_path.len() - 1 { // last item
                         return Some(LocalPtr {
@@ -171,7 +171,7 @@ impl LiveDocument {
             let mut found = false;
             for j in 0..node_count {
                 let node = &self.nodes[level][j + node_start];
-                if node.id_pack == IdPack::single(id) {
+                if node.id == id {
                     // we found the node.
                     if i == id_count - 1 { // last item
                         return Ok(LocalPtr {
@@ -213,145 +213,34 @@ impl LiveDocument {
         in_node: &LiveNode
     ) -> Result<Option<usize>, LiveError> {
         // I really need to learn to learn functional programming. This is absurd
-        match in_node.id_pack.unpack() {
-            IdUnpack::Multi {index: id_start, count: id_count} => {
-                let mut node_start = node_start;
-                let mut node_count = node_count;
-                let mut level = level;
-                let mut last_class = None;
-                for i in 0..id_count {
-                    let id = in_doc.multi_ids[i + id_start];
-                    let mut found = false;
-                    for j in 0..node_count {
-                        let node = &mut self.nodes[level][j + node_start];
-                        if node.id_pack == IdPack::single(id) {
-                            // we found the node.
-                            if i == id_count - 1 { // last item
-                                // ok now we need to replace this node
-                                
-                                if node.value.get_type_nr() != in_node.value.get_type_nr() {
-                                    if node.value.is_var_def() { // we can replace a vardef with something else
-                                        continue;
-                                    }
-                                    // we cant replace a VarDef with something else
-                                    return Err(LiveError {
-                                        origin: live_error_origin!(),
-                                        span: in_doc.token_id_to_span(in_node.token_id),
-                                        message: format!("Cannot inherit with different node type {}", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
-                                    })
-                                }
-                                
-                                node.token_id = in_node.token_id;
-                                node.value = in_node.value;
-                                return Ok(None)
-                            }
-                            else { // we need to be either an object or a class
-                                level += 1;
-                                match node.value {
-                                    LiveValue::Class {node_start: ns, node_count: nc, ..} => {
-                                        last_class = Some(j + node_start);
-                                        node_start = ns as usize;
-                                        node_count = nc as usize;
-                                    },
-                                    _ => return Err(LiveError {
-                                        origin: live_error_origin!(),
-                                        span: in_doc.token_id_to_span(in_node.token_id),
-                                        message: format!("Setting property {} is not an object path", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
-                                    })
-                                }
-                                found = true;
-                                break
-                            }
+        if in_node.id == Id(0){
+            let nodes = &mut self.nodes[level];
+            let index = nodes.len();
+            nodes.push(*in_node);
+            return Ok(Some(index))
+        }
+        else{
+            let nodes = &mut self.nodes[level];
+            for i in node_start..nodes.len() {
+                if nodes[i].id == in_node.id { // overwrite and exit
+                    // lets error if the overwrite value type changed.
+                    if nodes[i].value.get_type_nr() != in_node.value.get_type_nr() {
+                        if nodes[i].value.is_var_def() { // we can replace a vardef with something else
+                            continue;
                         }
+                        return Err(LiveError {
+                            origin: live_error_origin!(),
+                            span: in_doc.token_id_to_span(in_node.token_id),
+                            message: format!("Cannot inherit with different node type {}", in_node.id)
+                        })
                     }
-                    if !found { //
-                        if i != id_count - 1 || last_class.is_none() { // not last item, so object doesnt exist
-                            return Err(LiveError {
-                                origin: live_error_origin!(),
-                                span: in_doc.token_id_to_span(in_node.token_id),
-                                message: format!("Setting property {} is not an object path", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
-                            })
-                        }
-                        let last_class = last_class.unwrap();
-                        let nodes_len = self.nodes[level].len();
-                        if nodes_len == node_start + node_count { // can append to level
-                            if let LiveValue::Class {node_count, ..} = &mut self.nodes[level - 1][last_class].value {
-                                *node_count += 1;
-                            }
-                        }
-                        else { // have to move all levelnodes. Someday test this with real data and do it better (maybe shift the rest up)
-                            let ns = if let LiveValue::Class {node_start, node_count, ..} = &mut self.nodes[level - 1][last_class].value {
-                                let ret = *node_start;
-                                *node_start = nodes_len as u32;
-                                *node_count += 1;
-                                ret
-                            }
-                            else {
-                                return Err(LiveError {
-                                    origin: live_error_origin!(),
-                                    span: in_doc.token_id_to_span(in_node.token_id),
-                                    message: format!("Unexpected problem 1 in overwrite_or_add_node with {}", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
-                                })
-                            };
-                            let nodes = &mut self.nodes[level];
-                            for i in 0..node_count {
-                                let node = nodes[i as usize + ns as usize];
-                                nodes.push(node);
-                            }
-                        }
-                        // for object, string and array make sure we copy the values
-                        
-                        // push the final node
-                        self.nodes[level].push(LiveNode {
-                            token_id: in_node.token_id,
-                            id_pack: IdPack::single(in_doc.multi_ids[id_start + id_count - 1]),
-                            value: in_node.value
-                        });
-                        return Ok(None)
-                    }
+                    nodes[i] = *in_node;
+                    return Ok(None)
                 }
-                return Err(LiveError {
-                    origin: live_error_origin!(),
-                    span: in_doc.token_id_to_span(in_node.token_id),
-                    message: format!("Unexpected problem 2 in overwrite_or_add_node with {}", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
-                })
             }
-            IdUnpack::Single(id) => {
-                let nodes = &mut self.nodes[level];
-                for i in node_start..nodes.len() {
-                    if nodes[i].id_pack == in_node.id_pack { // overwrite and exit
-                        // lets error if the overwrite value type changed.
-                        if nodes[i].value.get_type_nr() != in_node.value.get_type_nr() {
-                            if nodes[i].value.is_var_def() { // we can replace a vardef with something else
-                                continue;
-                            }
-                            return Err(LiveError {
-                                origin: live_error_origin!(),
-                                span: in_doc.token_id_to_span(in_node.token_id),
-                                message: format!("Cannot inherit with different node type {}", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
-                            })
-                        }
-                        nodes[i] = *in_node;
-                        return Ok(None)
-                    }
-                }
-                let index = nodes.len();
-                nodes.push(*in_node);
-                return Ok(Some(index))
-            }
-            IdUnpack::Empty => {
-                let nodes = &mut self.nodes[level];
-                let index = nodes.len();
-                nodes.push(*in_node);
-                return Ok(Some(index))
-            },
-            _ => {
-                return Err(LiveError {
-                    origin: live_error_origin!(),
-                    span: in_doc.token_id_to_span(in_node.token_id),
-                    message: format!("Unexpected id type {}", IdFmt::dot(&in_doc.multi_ids, in_node.id_pack))
-                })
-            }
+            let index = nodes.len();
+            nodes.push(*in_node);
+            return Ok(Some(index))
         }
     }
     
@@ -378,9 +267,9 @@ impl LiveDocument {
         }
     }
     
-    pub fn fetch_module_path(&self, id_pack: IdPack, outer_crate_id: Id) -> ModulePath {
-        match id_pack.unpack() {
-            IdUnpack::Multi {index, count} if count == 2 => {
+    pub fn use_ids_to_module_path(&self, use_ids: IdPack, outer_crate_id: Id) -> ModulePath {
+        match use_ids.unpack() {
+            IdUnpack::Multi {index, count} if count >= 2 => {
                 let crate_id = self.multi_ids[index];
                 let crate_id = if crate_id == id!(crate) {
                     outer_crate_id
@@ -390,7 +279,7 @@ impl LiveDocument {
                 ModulePath(crate_id, self.multi_ids[index + 1])
             }
             _ => {
-                panic!("Unexpected id type {:?}", id_pack.unpack())
+                panic!("Unexpected id type {:?}", use_ids.unpack())
             }
         }
     }
@@ -406,56 +295,41 @@ impl fmt::Display for LiveDocument {
             }
         }
         
-        fn prefix(prep_id: IdPack, ld: &LiveDocument, f: &mut fmt::Formatter) {
-            if !prep_id.is_empty() {
-                let _ = write!(f, "{}:", IdFmt::dot(&ld.multi_ids, prep_id));
-            }
-        }
-        
         fn recur(ld: &LiveDocument, level: usize, node_index: usize, f: &mut fmt::Formatter) {
             let node = &ld.nodes[level][node_index];
             //let (row,col) = byte_to_row_col(node.span.start(), &ld.source);
             //let _ = write!(f, "/*{},{} {}*/", row+1, col, node.span.len());
             match node.value {
                 LiveValue::String {string_start, string_count} => {
-                    prefix(node.id_pack, ld, f);
-                    let _ = write!(f, "\"");
+                    let _ = write!(f, "{}:\"", node.id);
                     for i in 0..string_count {
                         let _ = write!(f, "{}", ld.strings[(i + string_start) as usize]);
                     }
                     let _ = write!(f, "\"");
                 },
                 LiveValue::Bool(val) => {
-                    prefix(node.id_pack, ld, f);
-                    let _ = write!(f, "{}", val);
+                    write!(f,"{}:{}",node.id, val);
                 },
                 LiveValue::Int(val) => {
-                    prefix(node.id_pack, ld, f);
-                    let _ = write!(f, "{}", val);
+                    let _ = write!(f, "{}:{}", node.id, val);
                 }
                 LiveValue::Float(val) => {
-                    prefix(node.id_pack, ld, f);
-                    let _ = write!(f, "{}", PrettyPrintedF64(val));
+                    let _ = write!(f, "{}:{}", node.id, PrettyPrintedF64(val));
                 },
                 LiveValue::Color(val) => {
-                    prefix(node.id_pack, ld, f);
-                    let _ = write!(f, "#{:08x}", val);
+                    let _ = write!(f, "{}:#{:08x}", node.id, val);
                 },
                 LiveValue::Vec2(val) => {
-                    prefix(node.id_pack, ld, f);
-                    let _ = write!(f, "{}", val);
+                    let _ = write!(f, "{}:{}", node.id, val);
                 },
                 LiveValue::Vec3(val) => {
-                    prefix(node.id_pack, ld, f);
-                    let _ = write!(f, "{}", val);
+                    let _ = write!(f, "{}:{}", node.id, val);
                 },
                 LiveValue::IdPack(val) => {
-                    prefix(node.id_pack, ld, f);
-                    let _ = write!(f, "{}", IdFmt::col(&ld.multi_ids, val));
+                    let _ = write!(f, "{}:{}", node.id, IdFmt::col(&ld.multi_ids, val));
                 },
                 LiveValue::Call {target, node_start, node_count} => {
-                    prefix(node.id_pack, ld, f);
-                    let _ = write!(f, "{}(", IdFmt::dot(&ld.multi_ids, target));
+                    let _ = write!(f, "{}:{}(", node.id, IdFmt::dot(&ld.multi_ids, target));
                     for i in 0..node_count {
                         if i>0 {
                             let _ = write!(f, ", ");
@@ -465,8 +339,7 @@ impl fmt::Display for LiveDocument {
                     let _ = write!(f, ")");
                 },
                 LiveValue::Array {node_start, node_count} => {
-                    prefix(node.id_pack, ld, f);
-                    let _ = write!(f, "[");
+                    let _ = write!(f, "{}:[", node.id);
                     for i in 0..node_count {
                         if i>0 {
                             let _ = write!(f, ", ");
@@ -475,9 +348,8 @@ impl fmt::Display for LiveDocument {
                     }
                     let _ = write!(f, "]");
                 },
-                LiveValue::Object {node_start, node_count} => {
-                    prefix(node.id_pack, ld, f);
-                    let _ = write!(f, "{{");
+                LiveValue::ClassOverride {node_start, node_count} => {
+                    let _ = write!(f, "{}:{{", node.id);
                     for i in 0..(node_count >> 1) {
                         if i>0 {
                             let _ = write!(f, ", ");
@@ -489,7 +361,7 @@ impl fmt::Display for LiveDocument {
                     let _ = write!(f, "}}");
                 },
                 LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
-                    let _ = write!(f, "fn {}", IdFmt::col(&ld.multi_ids, node.id_pack));
+                    let _ = write!(f, "fn {}", node.id);
                     for i in 0..token_count {
                         let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
                     }
@@ -538,15 +410,14 @@ impl fmt::Display for LiveDocument {
                     }
                     let _ = write!(f, "\"");
                 },
-                LiveValue::Use {module_path_ids} => {
-                    let _ = write!(f, "use {}::{}", IdFmt::col(&ld.multi_ids, node.id_pack), IdFmt::col(&ld.multi_ids, module_path_ids));
+                LiveValue::Use {use_ids} => {
+                    let _ = write!(f, "use {}", IdFmt::col(&ld.multi_ids, use_ids));
                 }
                 LiveValue::LiveType(id) => {
                     let _ = write!(f, "TypeId {:?}", id);
                 }
                 LiveValue::Class {class, node_start, node_count} => {
-                    prefix(node.id_pack, ld, f);
-                    let _ = write!(f, "{} {{", IdFmt::col(&ld.multi_ids, class));
+                    let _ = write!(f, "{}:{} {{", node.id, IdFmt::col(&ld.multi_ids, class));
                     // lets do a pass to check if its all simple values
                     let mut is_simple = true;
                     for i in 0..node_count {
