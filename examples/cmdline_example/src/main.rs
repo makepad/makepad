@@ -1,6 +1,6 @@
 use makepad_live_parser::*;
 //use std::any::Any;
-//use std::collections::HashMap;
+use std::collections::HashMap;
 
 
 fn main() {
@@ -184,6 +184,18 @@ file3: 5 12 - Cannot find item on scope: ERR - origin: render/live_parser/src/li
     */
 
     let source = r#" 
+        Test:Component{
+            a1:Component{
+                b1:1.0
+            }
+            a2:1
+        }
+        Test2: Test{
+            a1:{
+                b1:3.0
+            }
+        }
+    /*
         MyEnum: Enum {  //1
             Value1: Variant; //2
             Value2: Variant(); //3
@@ -194,12 +206,12 @@ file3: 5 12 - Cannot find item on scope: ERR - origin: render/live_parser/src/li
             e2: MyEnum::Value2();//8
             e3: MyEnum::Value3 {value: 1}//9
         }//10
-        MyDerive2: MyComponent {e4:MyComponent::e3{value:2}}//11
+        MyDerive2: MyComponent {e4:MyComponent::e3{value:2}}//11*/
     "#;
     
     let mut lr = LiveRegistry::default();
     
-    match lr.parse_live_file(&format!("test.live"), ModulePath::from_str("test.live").unwrap(), source.to_string(), vec![], 0) {
+    match lr.parse_live_file(&format!("test.live"), ModulePath::from_str("test.live").unwrap(), source.to_string(), vec![], &HashMap::new(), 0) {
         Err(why) => panic!("Couldnt parse file {}", why),
         _ => ()
     }

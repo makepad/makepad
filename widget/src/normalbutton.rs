@@ -38,8 +38,6 @@ live_body!{
                 );
                 return cx.fill(mix(mix(#3, #4, self.hover), #2a, self.down));
             }
-            
-            pixel: 1.0
         }
         
         text: DrawText {}
@@ -80,7 +78,6 @@ pub struct NormalButton {
 impl NormalButton {
     
     pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
-
         ButtonEvent::None
     }
     

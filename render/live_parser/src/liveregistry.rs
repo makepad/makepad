@@ -56,19 +56,17 @@ impl LiveObjectIterator {
             }
             
             let id = live_registry.expanded[self.file_id.to_index()]
-                .nodes[self.level][self.index + self.node_start].id_pack;
+                .nodes[self.level][self.index + self.node_start].id;
             
             self.index += 1;
             
-            if id.is_single() {
-                return Some((id.as_single(), LivePtr {
-                    file_id: self.file_id,
-                    local_ptr: LocalPtr {
-                        level: self.level,
-                        index: self.index - 1 + self.node_start
-                    }
-                }));
-            }
+            return Some((id, LivePtr {
+                file_id: self.file_id,
+                local_ptr: LocalPtr {
+                    level: self.level,
+                    index: self.index - 1 + self.node_start
+                }
+            }));
         }
     }
     pub fn next_prop(&mut self) -> Option<(usize, LivePtr)> {
@@ -92,7 +90,7 @@ impl LiveObjectIterator {
 }
 
 impl LiveRegistry {
-
+    
     pub fn live_ptr_from_path(&self, module_path: ModulePath, object_path: &[Id]) -> Option<LivePtr> {
         if let Some(file_id) = self.module_path_to_file_id.get(&module_path) {
             let doc = &self.expanded[file_id.to_index()];
@@ -157,27 +155,27 @@ impl LiveRegistry {
             || id == id_pack!(Geometry)
     }
     
-    pub fn find_enum_origin(&self, start: IdPack, lhs: IdPack) -> Id {
+    pub fn find_enum_origin(&self, start: IdPack, lhs: Id) -> Id {
         match start.unpack() {
             IdUnpack::LivePtr(live_ptr) => {
                 let doc = &self.expanded[live_ptr.file_id.to_index()];
                 let node = &doc.nodes[live_ptr.local_ptr.level][live_ptr.local_ptr.index];
                 match node.value {
                     LiveValue::IdPack(id) => {
-                        return self.find_enum_origin(id, node.id_pack)
+                        return self.find_enum_origin(id, node.id)
                     }
                     LiveValue::Class {class, ..} => {
-                        return self.find_enum_origin(class, node.id_pack)
+                        return self.find_enum_origin(class, node.id)
                     },
                     LiveValue::Call {target, ..} => {
-                        return self.find_enum_origin(target, node.id_pack)
+                        return self.find_enum_origin(target, node.id)
                     },
                     _ => ()
                 }
             }
             _ => ()
         }
-        lhs.as_single()
+        lhs
     }
     /*
     pub fn find_full_node_ptr_from_ids(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<LivePtr> {
@@ -275,7 +273,7 @@ impl LiveRegistry {
         own_module_path: ModulePath,
         source: String,
         live_types: Vec<LiveType>,
-        live_enums: &HashMap<LiveType,LiveEnumInfo>,
+        live_enums: &HashMap<LiveType, LiveEnumInfo>,
         line_offset: usize
     ) -> Result<FileId, LiveFileError> {
         
@@ -332,8 +330,8 @@ impl LiveRegistry {
         for (_, nodes) in document.nodes.iter().enumerate() {
             for node in nodes {
                 match node.value {
-                    LiveValue::Use {module_path_ids} => {
-                        let module_path = document.fetch_module_path(module_path_ids, own_module_path.0);
+                    LiveValue::Use {use_ids} => {
+                        let module_path = document.use_ids_to_module_path(use_ids, own_module_path.0);
                         dep_graph_set.insert(module_path);
                         let self_index = self.dep_order.iter().position( | v | v.0 == own_module_path).unwrap();
                         if let Some(other_index) = self.dep_order.iter().position( | v | v.0 == module_path) {
@@ -406,7 +404,7 @@ impl LiveRegistry {
             scope_stack: &mut ScopeStack,
             in_doc: Option<(&LiveDocument, FileId)>,
             out_doc: &mut LiveDocument,
-            skip_level_id: IdPack,
+            skip_level_id: Id,
             skip_level: usize,
             in_level: usize,
             out_level: usize,
@@ -422,7 +420,7 @@ impl LiveRegistry {
                 skip_level_id
             }
             else {
-                node.id_pack
+                node.id
             };
             
             fn clone_scope(in_doc: &LiveDocument, out_doc: &mut LiveDocument, scope_start: usize, scope_count: usize, in_file_id: FileId) {
@@ -457,7 +455,7 @@ impl LiveRegistry {
                     
                     out_doc.push_node(out_level, LiveNode {
                         token_id: node.token_id,
-                        id_pack: node_id,
+                        id: node_id,
                         value: LiveValue::Call {
                             target: target,
                             node_start: out_start as u32,
@@ -473,7 +471,7 @@ impl LiveRegistry {
                     }
                     out_doc.push_node(out_level, LiveNode {
                         token_id: node.token_id,
-                        id_pack: node_id,
+                        id: node_id,
                         value: LiveValue::Array {
                             node_start: out_start as u32,
                             node_count: node_count
@@ -481,15 +479,17 @@ impl LiveRegistry {
                     });
                     return CopyRecurResult::Noop
                 },
-                LiveValue::Object {node_start, node_count} => {
+                LiveValue::ClassOverride {node_start, node_count} => {
+                    // COPY RECUR
+                    println!("copy_recur of Override");
                     let out_start = out_doc.get_level_len(out_level + 1);
                     for i in 0..node_count {
                         copy_recur(scope_stack, in_doc, out_doc, skip_level_id, skip_level, in_level + 1, out_level + 1, i as usize + node_start as usize);
                     }
                     out_doc.push_node(out_level, LiveNode {
                         token_id: node.token_id,
-                        id_pack: node_id,
-                        value: LiveValue::Object {
+                        id: node_id,
+                        value: LiveValue::ClassOverride {
                             node_start: out_start as u32,
                             node_count: node_count
                         }
@@ -509,7 +509,7 @@ impl LiveRegistry {
                     if skip_level != in_level {
                         out_doc.push_node(out_level, LiveNode {
                             token_id: node.token_id,
-                            id_pack: node.id_pack,
+                            id: node.id,
                             value: LiveValue::Class {
                                 class: class,
                                 node_start: out_start as u32,
@@ -532,7 +532,7 @@ impl LiveRegistry {
                     };
                     out_doc.push_node(out_level, LiveNode {
                         token_id: node.token_id,
-                        id_pack: node_id,
+                        id: node_id,
                         value: LiveValue::String {
                             string_start: new_string_start as u32,
                             string_count
@@ -555,7 +555,7 @@ impl LiveRegistry {
                     };
                     out_doc.push_node(out_level, LiveNode {
                         token_id: node.token_id,
-                        id_pack: node_id,
+                        id: node_id,
                         value: LiveValue::Fn {
                             token_start: new_token_start,
                             scope_start: new_scope_start,
@@ -580,7 +580,7 @@ impl LiveRegistry {
                     };
                     out_doc.push_node(out_level, LiveNode {
                         token_id: node.token_id,
-                        id_pack: node_id,
+                        id: node_id,
                         value: LiveValue::VarDef {
                             token_start: new_token_start,
                             scope_start: new_scope_start,
@@ -610,7 +610,7 @@ impl LiveRegistry {
                 _ => {
                     out_doc.push_node(out_level, LiveNode {
                         token_id: node.token_id,
-                        id_pack: node_id,
+                        id: node_id,
                         value: node.value
                     });
                     return CopyRecurResult::Noop
@@ -624,15 +624,10 @@ impl LiveRegistry {
                 Err(err) => errors.push(err),
                 Ok(Some(index)) => {
                     if scope_stack.stack.len() - 1 == level {
-                        match in_node.id_pack.unpack() {
-                            IdUnpack::Single(id) => {
-                                scope_stack.stack[level].push(LiveScopeItem {
-                                    id: id,
-                                    target: LiveScopeTarget::LocalPtr(LocalPtr {level: level, index: index})
-                                });
-                            }
-                            _ => ()
-                        }
+                        scope_stack.stack[level].push(LiveScopeItem {
+                            id: in_node.id,
+                            target: LiveScopeTarget::LocalPtr(LocalPtr {level: level, index: index})
+                        });
                     }
                 }
                 _ => ()
@@ -833,7 +828,7 @@ impl LiveRegistry {
                     }
                     let new_node = LiveNode {
                         token_id: node.token_id,
-                        id_pack: node.id_pack,
+                        id: node.id,
                         value: LiveValue::Call {
                             target,
                             node_start: new_node_start as u32,
@@ -862,7 +857,7 @@ impl LiveRegistry {
                                     errors.push(LiveError {
                                         origin: live_error_origin!(),
                                         span: in_doc.token_id_to_span(node.token_id),
-                                        message: format!("Target not a call {}", IdFmt::col(&in_doc.multi_ids, node.id_pack))
+                                        message: format!("Target not a call {}", IdFmt::col(&in_doc.multi_ids, target))
                                     });
                                     return
                                 }
@@ -879,7 +874,7 @@ impl LiveRegistry {
                                     errors.push(LiveError {
                                         origin: live_error_origin!(),
                                         span: in_doc.token_id_to_span(node.token_id),
-                                        message: format!("Target not a call {}", IdFmt::col(&in_doc.multi_ids, node.id_pack))
+                                        message: format!("Target not a call {}", IdFmt::col(&in_doc.multi_ids, target))
                                     });
                                     return
                                 }
@@ -898,20 +893,14 @@ impl LiveRegistry {
                     }
                 },
                 LiveValue::Array {node_start, node_count} => { // normal array
-                    let shifted_out_level = if node.id_pack.is_multi() {
-                        let (_start, len) = node.id_pack.unwrap_multi();
-                        out_level + (len - 1)
-                    }
-                    else {
-                        out_level
-                    };
-                    let new_node_start = out_doc.get_level_len(shifted_out_level + 1);
+                    
+                    let new_node_start = out_doc.get_level_len(out_level + 1);
                     for i in 0..node_count {
-                        walk_node(expanded, module_path_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, shifted_out_level + 1, i as usize + node_start as usize, out_start, 0);
+                        walk_node(expanded, module_path_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, out_level + 1, i as usize + node_start as usize, out_start, 0);
                     }
                     let new_node = LiveNode {
                         token_id: node.token_id,
-                        id_pack: node.id_pack,
+                        id: node.id,
                         value: LiveValue::Array {
                             node_start: new_node_start as u32,
                             node_count: node_count as u32
@@ -919,26 +908,26 @@ impl LiveRegistry {
                     };
                     write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, &new_node);
                 },
-                LiveValue::Object {node_start, node_count} => {
-                    let shifted_out_level = if node.id_pack.is_multi() {
-                        let (_start, len) = node.id_pack.unwrap_multi();
-                        out_level + (len - 1)
-                    }
-                    else {
-                        out_level
-                    };
-                    let new_node_start = out_doc.get_level_len(shifted_out_level + 1);
-                    for i in 0..node_count {
-                        walk_node(expanded, module_path_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, shifted_out_level + 1, i as usize + node_start as usize, out_start, 0);
-                    }
+                LiveValue::ClassOverride {node_start, node_count} => {
+                    // ok we are in the indoc.
+                    // in the out_doc we should already have the property.
+                    // now what we do is walk all our children and the outdoc property
+                    let new_node_start = out_doc.get_level_len(out_level + 1);
+                    
+                    //for i in 0..node_count {
+                    //    walk_node(expanded, module_path_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, out_level + 1, i as usize + node_start as usize, out_start, 0);
+                    //}
+                    
                     let new_node = LiveNode {
                         token_id: node.token_id,
-                        id_pack: node.id_pack,
-                        value: LiveValue::Object {
+                        id: node.id,
+                        value: LiveValue::ClassOverride {
                             node_start: new_node_start as u32,
                             node_count: node_count as u32
                         }
                     };
+                    ///println!("{} {}", out_start, out_doc.get_level_len(out_level))
+                    // we dont know yet yet
                     write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, &new_node);
                 },
                 LiveValue::Fn {token_start, token_count, ..} => {
@@ -952,7 +941,7 @@ impl LiveRegistry {
                     }
                     let new_node = LiveNode {
                         token_id: node.token_id,
-                        id_pack: node.id_pack,
+                        id: node.id,
                         value: LiveValue::Fn {
                             token_start,
                             token_count,
@@ -973,7 +962,7 @@ impl LiveRegistry {
                     }
                     let new_node = LiveNode {
                         token_id: node.token_id,
-                        id_pack: node.id_pack,
+                        id: node.id,
                         value: LiveValue::VarDef {
                             token_start,
                             token_count,
@@ -994,7 +983,7 @@ impl LiveRegistry {
                     }
                     let new_node = LiveNode {
                         token_id: node.token_id,
-                        id_pack: node.id_pack,
+                        id: node.id,
                         value: LiveValue::Const {
                             token_start,
                             token_count,
@@ -1004,20 +993,9 @@ impl LiveRegistry {
                     };
                     write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, &new_node);
                 },
-                /*
-                LiveValue::ResourceRef {target} => {
-                    // we should store the scopestack here so the shader compiler can find symbols.
-                    let new_node = LiveNode {
-                        token_id: node.token_id,
-                        id_pack: node.id_pack,
-                        value: LiveValue::ResourceRef {
-                            target //:out_doc.clone_multi_id(target, &in_doc.multi_ids),
-                        }
-                    };
-                    write_or_add_node(scope_stack, errors, out_doc, out_level, out_start, out_count, in_doc, &new_node);
-                },*/
-                LiveValue::Use {module_path_ids} => { // import things on the scope from Use
-                    let module_path = in_doc.fetch_module_path(module_path_ids, in_crate);
+
+                LiveValue::Use {use_ids} => { // import things on the scope from Use
+                    let module_path = in_doc.use_ids_to_module_path(use_ids, in_crate);
                     let file_id = if let Some(file_id) = module_path_to_file_id.get(&module_path) {
                         file_id
                     }
@@ -1025,98 +1003,43 @@ impl LiveRegistry {
                         errors.push(LiveError {
                             origin: live_error_origin!(),
                             span: in_doc.token_id_to_span(node.token_id),
-                            message: format!("Cannot find import {}", IdFmt::col(&in_doc.multi_ids, node.id_pack))
+                            message: format!("Cannot find import {}", IdFmt::col(&in_doc.multi_ids, use_ids))
                         });
                         return
                     };
                     let other_doc = &expanded[file_id.to_index()];
                     
-                    match node.id_pack.unpack() {
-                        IdUnpack::Empty => { // its a wildcard
-                            let nodes = &other_doc.nodes[0];
-                            for i in 0..nodes.len() {
-                                let id = nodes[i].id_pack;
-                                match id.unpack() {
-                                    IdUnpack::Single(id) => {
-                                        scope_stack.stack[out_level].push(LiveScopeItem {
-                                            id,
-                                            target: LiveScopeTarget::LivePtr(
-                                                LivePtr {
-                                                    file_id: *file_id,
-                                                    local_ptr: LocalPtr {level: 0, index: i}
-                                                }
-                                            )
-                                        });
-                                    }
-                                    _ => ()
-                                }
-                            }
-                        },
-                        IdUnpack::Single(_) => {
-                            let nodes = &other_doc.nodes[0];
-                            let mut found = false;
-                            for i in 0..nodes.len() {
-                                if nodes[i].id_pack == node.id_pack { // found it
-                                    match node.id_pack.unpack() {
-                                        IdUnpack::Single(id) => {
-                                            scope_stack.stack[out_level].push(LiveScopeItem {
-                                                id: id,
-                                                target: LiveScopeTarget::LivePtr(
-                                                    LivePtr {
-                                                        file_id: *file_id,
-                                                        local_ptr: LocalPtr {level: 0, index: i}
-                                                    }
-                                                )
-                                            });
-                                        }
-                                        _ => ()
-                                    }
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if !found {
-                                errors.push(LiveError {
-                                    origin: live_error_origin!(),
-                                    span: in_doc.token_id_to_span(node.token_id),
-                                    message: format!("Cannot find import {}", IdFmt::col(&in_doc.multi_ids, node.id_pack))
-                                });
-                            }
-                        }
+                    match use_ids.unpack() {
                         IdUnpack::Multi {index, count} => {
+                            let shifted_count = count - 2;
                             // lets validate if it exists!
                             let mut node_start = 0 as usize;
                             let mut node_count = other_doc.nodes[0].len();
-                            for level in 0..count {
-                                let id = in_doc.multi_ids[level + index];
-                                if id.is_empty() {
+                            for level in 0..shifted_count {
+                                let id = in_doc.multi_ids[level + 2 + index];
+                                if id.is_empty() { // its a *
                                     if level != count - 1 { // cant appear except at end
                                         panic!()
                                     }
                                     for i in 0..node_count {
-                                        //let other_node = &other_doc.nodes[level][i + node_start];
-                                        match node.id_pack.unpack() {
-                                            IdUnpack::Single(id) => {
-                                                scope_stack.stack[out_level].push(LiveScopeItem {
-                                                    id: id,
-                                                    target: LiveScopeTarget::LivePtr(
-                                                        LivePtr {
-                                                            file_id: *file_id,
-                                                            local_ptr: LocalPtr {level, index: i + node_start}
-                                                        }
-                                                    )
-                                                });
-                                            }
-                                            _ => ()
-                                        }
+                                        let other_node = &other_doc.nodes[level][i + node_start];
+                                        scope_stack.stack[out_level].push(LiveScopeItem {
+                                            id: other_node.id,
+                                            target: LiveScopeTarget::LivePtr(
+                                                LivePtr {
+                                                    file_id: *file_id,
+                                                    local_ptr: LocalPtr {level, index: i + node_start}
+                                                }
+                                            )
+                                        });
                                     }
                                 }
                                 else {
                                     let mut found = false;
                                     for i in 0..node_count {
                                         let other_node = &other_doc.nodes[level][i + node_start];
-                                        if level == count - 1 {
-                                            if IdPack::single(id) == other_node.id_pack {
+                                        if level == count - 1 { // last level
+                                            if id == other_node.id {
                                                 scope_stack.stack[out_level].push(LiveScopeItem {
                                                     id: id,
                                                     target: LiveScopeTarget::LivePtr(
@@ -1130,7 +1053,7 @@ impl LiveRegistry {
                                                 break;
                                             }
                                         }
-                                        if IdPack::single(id) == other_node.id_pack {
+                                        if id == other_node.id {
                                             match other_node.value {
                                                 LiveValue::Class {node_start: ns, node_count: nc, ..} => {
                                                     node_start = ns as usize;
@@ -1148,34 +1071,19 @@ impl LiveRegistry {
                                         errors.push(LiveError {
                                             origin: live_error_origin!(),
                                             span: in_doc.token_id_to_span(node.token_id),
-                                            message: format!("Use path not found {}", IdFmt::col(&in_doc.multi_ids, node.id_pack))
+                                            message: format!("Use path not found {}", IdFmt::col(&in_doc.multi_ids, use_ids))
                                         });
                                     }
                                 }
                             }
                         }
-                        _ => {
-                            errors.push(LiveError {
-                                origin: live_error_origin!(),
-                                span: in_doc.token_id_to_span(node.token_id),
-                                message: format!("Node type invalid {}", IdFmt::col(&in_doc.multi_ids, node.id_pack))
-                            });
-                        }
+                        _ => panic!()
                     }
                 }
                 LiveValue::Class {class, node_start, node_count} => {
                     //let out_index = out_doc.get_level_len(out_level);
                     scope_stack.stack.push(Vec::new());
-                    // if our id is a multi-id, write the clone at the correct level
-                    let shifted_out_level = if node.id_pack.is_multi() {
-                        let (_start, len) = node.id_pack.unwrap_multi();
-                        out_level + (len - 1)
-                    }
-                    else {
-                        out_level
-                    };
-                    
-                    let new_out_start = out_doc.get_level_len(shifted_out_level + 1);
+                    let new_out_start = out_doc.get_level_len(out_level + 1);
                     
                     // result values of the below scan
                     let mut copy_result = CopyRecurResult::IsClass {class};
@@ -1185,7 +1093,7 @@ impl LiveRegistry {
                     if class == id_pack!(Self) {
                         // recursively clone self
                         for i in out_start..out_doc.get_level_len(out_level) {
-                            copy_recur(scope_stack, None, out_doc, node.id_pack, 0, out_level, shifted_out_level + 1, i);
+                            copy_recur(scope_stack, None, out_doc, node.id, 0, out_level, out_level + 1, i);
                         }
                     }
                     else if !LiveRegistry::is_baseclass(class) {
@@ -1201,13 +1109,13 @@ impl LiveRegistry {
                         );
                         match result {
                             Ok((None, found_node)) => {
-                                copy_result = copy_recur(scope_stack, None, out_doc, node.id_pack, found_node.level, found_node.level, shifted_out_level, found_node.index);
+                                copy_result = copy_recur(scope_stack, None, out_doc, node.id, found_node.level, found_node.level, out_level, found_node.index);
                                 value_ptr = Some(found_node);
                             }
                             Ok((Some(found_file_id), found_node)) => {
                                 let other_doc = &expanded[found_file_id.to_index()];
                                 other_file_id = Some(found_file_id);
-                                copy_result = copy_recur(scope_stack, Some((other_doc, found_file_id)), out_doc, node.id_pack, found_node.level, found_node.level, shifted_out_level, found_node.index);
+                                copy_result = copy_recur(scope_stack, Some((other_doc, found_file_id)), out_doc, node.id, found_node.level, found_node.level, out_level, found_node.index);
                                 value_ptr = Some(found_node);
                             }
                             Err(err) => {
@@ -1247,15 +1155,29 @@ impl LiveRegistry {
                                 }
                             };
                             
-                            let new_out_count = out_doc.get_level_len(shifted_out_level + 1) - new_out_start;
+                            let new_out_count = out_doc.get_level_len(out_level + 1) - new_out_start;
                             for i in 0..node_count {
-                                walk_node(expanded, module_path_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, shifted_out_level + 1, i as usize + node_start as usize, new_out_start, new_out_count);
+                                walk_node(
+                                    expanded,
+                                    module_path_to_file_id,
+                                    in_crate,
+                                    in_file_id,
+                                    errors,
+                                    scope_stack,
+                                    in_doc,
+                                    out_doc,
+                                    in_level + 1,
+                                    out_level + 1,
+                                    i as usize + node_start as usize,
+                                    new_out_start,
+                                    new_out_count
+                                );
                             }
-                            let new_out_count = out_doc.get_level_len(shifted_out_level + 1) - new_out_start;
+                            let new_out_count = out_doc.get_level_len(out_level + 1) - new_out_start;
                             
                             let new_node = LiveNode {
                                 token_id: node.token_id,
-                                id_pack: node.id_pack,
+                                id: node.id,
                                 value: LiveValue::Class {
                                     class: new_class_id,
                                     node_start: new_out_start as u32,
