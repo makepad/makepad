@@ -11,6 +11,7 @@ pub mod liveparser;
 pub mod livenode;
 pub mod livedocument;
 pub mod liveregistry;
+pub mod liveexpander;
 pub mod deserialize;
 pub mod id;
 
