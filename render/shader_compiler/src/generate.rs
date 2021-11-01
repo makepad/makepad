@@ -428,7 +428,7 @@ impl<'a> ExprGenerator<'a> {
                 ).unwrap();
             }
             (Some(Some(Val::Float(val))), _) => {
-                write!(self.string, "{}", PrettyPrintedF32(*val)).unwrap();
+                write!(self.string, "{}f", PrettyPrintedF32(*val)).unwrap();
             },
             (Some(Some(val)), _) => {
                 write!(self.string, "{}", val).unwrap();

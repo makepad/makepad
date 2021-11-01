@@ -445,7 +445,7 @@ struct MetalBackendWriter<'a> {
 impl<'a> BackendWriter for MetalBackendWriter<'a> {
     
     fn needs_cstyle_struct_cons(&self) -> bool {
-        true
+        false
     }
     
     fn needs_mul_fn_for_matrix_multiplication(&self) -> bool {
@@ -588,7 +588,7 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
             }
             Ty::Struct(struct_node_ptr) => {
                 prefix(string, sep, is_inout);
-                write!(string, "{} {}", ref_prefix, struct_node_ptr).unwrap();
+                write!(string, "{} {} {}", struct_node_ptr, ref_prefix, ident).unwrap();
             }
             Ty::DrawShader(_) => {
                 return false

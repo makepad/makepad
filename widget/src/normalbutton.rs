@@ -18,21 +18,19 @@ live_body!{
             const border_radius: float = 2.5;
             
             fn pixel(self) -> vec4 {
-                let cx = Sdf2d::viewport(pos * rect_size);
-                cx.box(shadow, shadow, rect_size.x - shadow * (1. + down), rect_size.y - shadow * (1. + down), border_radius);
+                let cx = Sdf2d::viewport(self.pos * self.rect_size);
+                cx.box(shadow, shadow, self.rect_size.x - shadow * (1. + self.down), self.rect_size.y - shadow * (1. + self.down), border_radius);
                 cx.blur = 6.0;
-                cx.fill(mix(#0007, #0, hover));
+                cx.fill(mix(#0007, #0, self.hover));
                 cx.blur = 0.001;
-                cx.box(shadow, shadow, rect_size.x - shadow * 2., rect_size.y - shadow * 2., border_radius);
-                return cx.fill(mix(mix(#3, #4, hover), #2a, down));
+                cx.box(shadow, shadow, self.rect_size.x - shadow * 2., self.rect_size.y - shadow * 2., border_radius);
+                return cx.fill(mix(mix(#3, #4, self.hover), #2a, self.down));
             }
-            fn pixel(self) -> vec4 {
+            /*fn pixel(self) -> vec4 {
                 return self.color;
-            }
+            }*/
         }
-        text: DrawText{
-            
-        }
+        text: DrawText{}
         layout: Layout {
             align: Align{fx:0.5, fy:0.5},
             walk: Walk{

@@ -63,8 +63,8 @@ impl Cx {
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
-                    self.platform.bytes_written += draw_call.instances.len() * 4;
-                    draw_call.platform.inst_vbuf.update_with_f32_data(metal_cx, &draw_call.instances);
+                    self.platform.bytes_written += draw_call.instances.as_ref().unwrap().len() * 4;
+                    draw_call.platform.inst_vbuf.update_with_f32_data(metal_cx, &draw_call.instances.as_ref().unwrap());
                 }
                 
                 // update the zbias uniform if we have it.
@@ -78,7 +78,7 @@ impl Cx {
                 }
                 
                 // lets verify our instance_offset is not disaligned
-                let instances = (draw_call.instances.len() / sh.mapping.instances.total_slots) as u64;
+                let instances = (draw_call.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
                 if instances == 0 {
                     continue;
                 }

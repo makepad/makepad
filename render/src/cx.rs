@@ -888,7 +888,7 @@ impl Cx {
                 let draw_call = cxview.draw_items[draw_item_id].draw_call.as_mut().unwrap();
                 let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 let slots = sh.mapping.instances.total_slots;
-                let instances = draw_call.instances.len() / slots;
+                let instances = draw_call.instances.as_ref().unwrap().len() / slots;
                 writeln!(s, "{}call {}: {}({}) *:{} scroll:{}", indent, draw_item_id, sh.name, draw_call.draw_shader.draw_shader_id, instances, draw_call.get_local_scroll()).unwrap();
                 // lets dump the instance geometry
                 if dump_instances {
@@ -896,11 +896,12 @@ impl Cx {
                         let mut out = String::new();
                         let mut off = 0;
                         for input in &sh.mapping.instances.inputs {
+                            let buf = draw_call.instances.as_ref().unwrap();
                             match input.slots {
-                                1 => out.push_str(&format!("{}:{} ", input.id, draw_call.instances[inst * slots + off])),
-                                2 => out.push_str(&format!("{}:v2({},{}) ", input.id, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off])),
-                                3 => out.push_str(&format!("{}:v3({},{},{}) ", input.id, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off], draw_call.instances[inst * slots + 1 + off])),
-                                4 => out.push_str(&format!("{}:v4({},{},{},{}) ", input.id, draw_call.instances[inst * slots + off], draw_call.instances[inst * slots + 1 + off], draw_call.instances[inst * slots + 2 + off], draw_call.instances[inst * slots + 3 + off])),
+                                1 => out.push_str(&format!("{}:{} ", input.id, buf[inst * slots + off])),
+                                2 => out.push_str(&format!("{}:v2({},{}) ", input.id, buf[inst * slots + off], buf[inst * slots + 1 + off])),
+                                3 => out.push_str(&format!("{}:v3({},{},{}) ", input.id, buf[inst * slots + off], buf[inst * slots + 1 + off], buf[inst * slots + 1 + off])),
+                                4 => out.push_str(&format!("{}:v4({},{},{},{}) ", input.id, buf[inst * slots + off], buf[inst * slots + 1 + off], buf[inst * slots + 2 + off], buf[inst * slots + 3 + off])),
                                 _ => {}
                             }
                             off += input.slots;
