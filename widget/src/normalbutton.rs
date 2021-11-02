@@ -53,16 +53,22 @@ live_body!{
         }
         
         state_default: Self {
-            bg.down: 0.0
-            bg.hover: 1.0
+            bg: {
+                down: 0.0
+                hover: 0.0
+            }
         }
-        state_hover: Self {
-            bg.down: 0.0
-            bg.hover: 1.0
+        state_default: Self {
+            bg: {
+                down: 0.0
+                hover: 1.0
+            }
         }
         state_down: Self {
-            bg.down: 1.0
-            bg.hover: 1.0
+            bg: {
+                down: 1.0
+                hover: 1.0
+            }
         }
     }
 }

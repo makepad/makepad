@@ -145,7 +145,6 @@ impl LiveRegistry {
         live_error.to_live_file_error(&live_file.file, &live_file.source, live_file.line_offset)
     }
     
-    
     pub fn find_enum_origin(&self, start: IdPack, lhs: Id) -> Id {
         match start.unpack() {
             IdUnpack::LivePtr(live_ptr) => {
@@ -168,24 +167,7 @@ impl LiveRegistry {
         }
         lhs
     }
-    /*
-    pub fn find_full_node_ptr_from_ids(&self, crate_id: Id, module_id: Id, ids: &[Id]) -> Option<LivePtr> {
-        let cm = CrateModule(crate_id, module_id);
-        if let Some(file_id) = self.crate_module_to_file_id.get(&cm) {
-            let exp = &self.expanded[file_id.to_index()];
-            if let Some(local_ptr) = exp.scan_for_multi(ids) {
-                let node = &exp.nodes[local_ptr.level][local_ptr.index];
-                match node.value {
-                    LiveValue::Class {..} => {
-                        return Some(LivePtr {file_id: *file_id, local_ptr})
-                    },
-                    _ => ()
-                }
-            }
-        }
-        None
-    }*/
-    
+
     pub fn find_base_class_id(&self, class: IdPack) -> Option<IdPack> {
         let mut class_iter = class;
         while let IdUnpack::LivePtr(live_ptr) = class_iter.unpack() {
@@ -361,14 +343,15 @@ impl LiveRegistry {
             };
             
             for i in 0..len {
+                let out_count = out_doc.nodes[0].len();
                 live_document_expander.walk_node(
-                    in_doc,
+                    in_doc, 
                     0,
                     i,
                     &mut out_doc,
                     0,
                     0,
-                    0
+                    out_count
                 );
             }
             
