@@ -252,19 +252,20 @@ impl<'a> LiveExpander<'a> {
         in_doc: &LiveDocument,
         in_node: &LiveNode
     ) {
+        //println!("Write or add node {} {} {} {} {:?}", out_level, out_start, out_count, in_node.id, in_node.value);
+        
+        // OK this function.
         if in_node.id == Id(0) {
             let nodes = &mut out_doc.nodes[out_level];
-            let index = nodes.len();
             nodes.push(*in_node);
             return
         }
         else {
             let nodes = &mut out_doc.nodes[out_level];
             for i in 0..out_count {
-                if nodes[i].id == in_node.id { // overwrite and exit
-                    // lets error if the overwrite value type changed.
-                    if nodes[i].value.get_type_nr() != in_node.value.get_type_nr() {
-                        if nodes[i].value.is_var_def() { // we can replace a vardef with something else
+                if nodes[i + out_start].id == in_node.id {
+                    if nodes[i + out_start].value.get_type_nr() != in_node.value.get_type_nr() {
+                        if nodes[i + out_start].value.is_var_def() {
                             continue;
                         }
                         self.errors.push(LiveError {
@@ -274,13 +275,21 @@ impl<'a> LiveExpander<'a> {
                         });
                         return;
                     }
-                    nodes[i] = *in_node;
+                    nodes[i + out_start] = *in_node;
                     return
                 }
             }
-            // not found
-            let index = nodes.len();
-            nodes.push(*in_node);
+            let index = if nodes.len() == out_start + out_count {
+                nodes.push(*in_node);
+                nodes.len() - 1
+            }
+            else {
+                for i in 0..out_count {
+                    nodes.push(nodes[i + out_start]);
+                }
+                nodes.push(*in_node);
+                nodes.len() - 1
+            };
             if self.scope_stack.stack.len() - 1 == out_level {
                 self.scope_stack.stack[out_level].push(LiveScopeItem {
                     id: in_node.id,
@@ -426,7 +435,9 @@ impl<'a> LiveExpander<'a> {
         match node.value {
             LiveValue::String {..} => self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, node),
             LiveValue::Bool(_) => self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, node),
-            LiveValue::Int(_) => self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, node),
+            LiveValue::Int(_) => {
+                self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, node);
+            },
             LiveValue::Float(_) => self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, node),
             LiveValue::Color(_) => self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, node),
             LiveValue::Vec2(_) => self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, node),
@@ -569,19 +580,66 @@ impl<'a> LiveExpander<'a> {
                 };
                 self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, &new_node);
             },
-            LiveValue::ClassOverride {node_start, node_count} => {
-                // OK SO what do we do.
+            LiveValue::ClassOverride {node_start: in_node_start, node_count: in_node_count} => {
                 // first off we find the parent node we need to extend.
-                
-                // ok we are in the indoc.
+                for i in 0..out_count {
+                    let out_node = &out_doc.nodes[out_level][i + out_start];
+                    if out_node.id == node.id {
+                        // it HAS to be a class
+                        if let LiveValue::Class {node_start, node_count, ..} = out_node.value {
+                            // ok so our problem is, we need to update this thing
+                            // depending on if we appended to it or moved it.
+                            // how do we learn we did.
+                            
+                            let start_len = out_doc.nodes[out_level + 1].len();
+                            let is_at_end = start_len == node_start as usize + node_count as usize;
+                            
+                            for i in 0..in_node_count {
+                                self.walk_node(
+                                    in_doc,
+                                    in_level + 1,
+                                    in_node_start as usize + i as usize,
+                                    out_doc,
+                                    out_level + 1,
+                                    node_start as usize,
+                                    node_count as usize
+                                );
+                            }
+                            // something got added
+                            let new_len = out_doc.nodes[out_level + 1].len();
+                            if start_len != new_len {
+                                let mut_out_node = &mut out_doc.nodes[out_level][i + out_start];
+                                if let LiveValue::Class {node_start, node_count, ..} = &mut mut_out_node.value {
+                                    if is_at_end { // just got extended
+                                        *node_count += (new_len - start_len) as u16;
+                                    }
+                                    else { // we also have to shift node_start
+                                        *node_start = start_len as u32;
+                                        *node_count = (new_len - start_len) as u16;
+                                    }
+                                }
+                            }
+                            
+                            
+                            
+                            return
+                        }
+                    }
+                }
+                self.errors.push(LiveError {
+                    origin: live_error_origin!(),
+                    span: in_doc.token_id_to_span(node.token_id),
+                    message: format!("Cannot override {}, it is not a class node", node.id)
+                });
+                return
                 // in the out_doc we should already have the property.
                 // now what we do is walk all our children and the outdoc property
-                let new_node_start = out_doc.get_level_len(out_level + 1);
+                // let new_node_start = out_doc.get_level_len(out_level + 1);
                 
                 //for i in 0..node_count {
                 //    walk_node(expanded, module_path_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, out_level + 1, i as usize + node_start as usize, out_start, 0);
                 //}
-                
+                /*
                 let new_node = LiveNode {
                     token_id: node.token_id,
                     id: node.id,
@@ -592,7 +650,7 @@ impl<'a> LiveExpander<'a> {
                 };
                 // println!("{} {}", out_start, out_doc.get_level_len(out_level))
                 // we dont know yet yet
-                self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, &new_node);
+                self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, &new_node);*/
             },
             LiveValue::Fn {token_start, token_count, ..} => {
                 // we should store the scopestack here so the shader compiler can find symbols.
@@ -682,7 +740,7 @@ impl<'a> LiveExpander<'a> {
                         for level in 0..shifted_count {
                             let id = in_doc.multi_ids[level + 2 + index];
                             if id.is_empty() { // its a *
-                                if level != count - 1 { // cant appear except at end
+                                if level != shifted_count - 1 { // cant appear except at end
                                     panic!()
                                 }
                                 for i in 0..node_count {
@@ -702,7 +760,7 @@ impl<'a> LiveExpander<'a> {
                                 let mut found = false;
                                 for i in 0..node_count {
                                     let other_node = &other_doc.nodes[level][i + node_start];
-                                    if level == count - 1 { // last level
+                                    if level == shifted_count - 1 { // last level
                                         if id == other_node.id {
                                             self.scope_stack.stack[out_level].push(LiveScopeItem {
                                                 id: id,
@@ -757,7 +815,7 @@ impl<'a> LiveExpander<'a> {
                 if class == id_pack!(Self) {
                     // recursively clone self
                     for i in out_start..out_doc.get_level_len(out_level) {
-                        self.copy_recur(None, out_level, i, out_doc, out_level + 1, node.id, 0, );
+                        self.copy_recur(None, out_level, i, out_doc, out_level + 1, node.id, 0,);
                     }
                 }
                 else if !Self::is_baseclass(class) {
@@ -771,7 +829,7 @@ impl<'a> LiveExpander<'a> {
                     );
                     match result {
                         Ok((None, found_node)) => {
-                            copy_result = self.copy_recur(None, found_node.level, found_node.index,  out_doc, out_level, node.id, found_node.level);
+                            copy_result = self.copy_recur(None, found_node.level, found_node.index, out_doc, out_level, node.id, found_node.level);
                             value_ptr = Some(found_node);
                         }
                         Ok((Some(found_file_id), found_node)) => {
@@ -817,8 +875,8 @@ impl<'a> LiveExpander<'a> {
                             }
                         };
                         
-                        let new_out_count = out_doc.get_level_len(out_level + 1) - new_out_start;
                         for i in 0..node_count {
+                            let new_out_count = out_doc.get_level_len(out_level + 1) - new_out_start;
                             self.walk_node(
                                 in_doc,
                                 in_level + 1,

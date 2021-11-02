@@ -187,12 +187,16 @@ file3: 5 12 - Cannot find item on scope: ERR - origin: render/live_parser/src/li
         Test:Component{
             a1:Component{
                 b1:1.0
+                x1:1.0
             }
-            a2:1
+            a2: Component{
+                c1:1.0
+            }
         }
         Test2: Test{
             a1:{
-                b1:3.0
+                b1:4.0
+                b2:3.0
             }
         }
     /*

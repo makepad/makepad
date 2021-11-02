@@ -417,7 +417,7 @@ impl fmt::Display for LiveDocument {
                     let _ = write!(f, "\"");
                 },
                 LiveValue::Bool(val) => {
-                    write!(f,"{}:{}",node.id, val);
+                    let _ = write!(f,"{}:{}",node.id, val);
                 },
                 LiveValue::Int(val) => {
                     let _ = write!(f, "{}:{}", node.id, val);
