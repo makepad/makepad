@@ -315,7 +315,7 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             tb.add("        let node = cx.shader_registry.live_registry.resolve_ptr(live_ptr);");
             tb.add("        match &node.value{");
             tb.add("            LiveValue::IdPack(id_pack)=>{");
-            tb.add("                let id = cx.shader_registry.live_registry.find_enum_origin(*id_pack, node.id_pack);");
+            tb.add("                let id = cx.shader_registry.live_registry.find_enum_origin(*id_pack, node.id);");
             tb.add("                match id{");
             for item in &items{
                 if let EnumKind::Bare = item.kind{
@@ -329,7 +329,7 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             tb.add("            },");
             
             tb.add("            LiveValue::Class{class, node_start, node_count}=>{");
-            tb.add("                let id = cx.shader_registry.live_registry.find_enum_origin(*class, node.id_pack);");
+            tb.add("                let id = cx.shader_registry.live_registry.find_enum_origin(*class, node.id);");
             tb.add("                match id{");
             for item in &items{
                 if let EnumKind::Named(fields) = &item.kind{
@@ -367,7 +367,7 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             
             
             tb.add("            LiveValue::Call{target, node_start, node_count}=>{");
-            tb.add("                let id = cx.shader_registry.live_registry.find_enum_origin(*target, node.id_pack);");
+            tb.add("                let id = cx.shader_registry.live_registry.find_enum_origin(*target, node.id);");
             tb.add("                match id{");
             
             for item in &items{
