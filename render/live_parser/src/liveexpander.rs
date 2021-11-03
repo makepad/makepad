@@ -1,4 +1,4 @@
-use crate::id::{Id, IdPack, IdUnpack, IdFmt};
+use crate::id::{Id, MultiPack, MultiUnpack, MultiFmt};
 use crate::liveerror::{LiveError, LiveErrorOrigin};
 use makepad_id_macros::*;
 use crate::livedocument::LiveDocument;
@@ -24,14 +24,15 @@ pub struct LiveExpander<'a> {
 }
 
 impl<'a> LiveExpander<'a> {
-    pub fn is_baseclass(id: IdPack) -> bool {
-        id == id_pack!(Component)
-            || id == id_pack!(Enum)
-            || id == id_pack!(Variant)
-            || id == id_pack!(Struct)
-            || id == id_pack!(Namespace)
-            || id == id_pack!(DrawShader)
-            || id == id_pack!(Geometry)
+    pub fn is_baseclass(pack: MultiPack) -> bool {
+        let id = pack.as_single_id();
+        id == id!(Component)
+            || id == id!(Enum)
+            || id == id!(Variant)
+            || id == id!(Struct)
+            || id == id!(Namespace)
+            || id == id!(DrawShader)
+            || id == id!(Geometry)
     }
     
     fn clone_scope(
@@ -73,7 +74,8 @@ impl<'a> LiveExpander<'a> {
         out_level: usize,
         skip_level_id: Id,
         skip_level: usize,
-    ) -> CopyRecurResult {
+    ) -> Option<MultiPack> {
+        
         let node = if let Some((in_doc, _)) = in_doc {
             in_doc.nodes[in_level][in_index]
         }
@@ -103,7 +105,6 @@ impl<'a> LiveExpander<'a> {
                         node_count: node_count
                     }
                 });
-                return CopyRecurResult::Noop
             },
             LiveValue::Array {node_start, node_count} => {
                 let out_start = out_doc.get_level_len(out_level + 1);
@@ -118,14 +119,14 @@ impl<'a> LiveExpander<'a> {
                         node_count: node_count
                     }
                 });
-                return CopyRecurResult::Noop
             },
-            LiveValue::ClassOverride {node_start, node_count} => {
+            LiveValue::ClassOverride {..} => {
                 // COPY RECUR.. SHOULD NEVER HAPPEN?
-                println!("copy_recur of Override SHOULD NEVER HAPPEN");
+                panic!();
+                /*
                 let out_start = out_doc.get_level_len(out_level + 1);
                 for i in 0..node_count {
-                    self.copy_recur(in_doc, in_level + 1, i as usize + node_start as usize, out_doc, out_level + 1, skip_level_id, skip_level);
+                    self.copy_recur(in_doc, in_level + 1, i as usize + node_start as usize, out_doc, out_level + 1, skip_level_id, skip_level, node_start);
                 }
                 out_doc.push_node(out_level, LiveNode {
                     token_id: node.token_id,
@@ -134,19 +135,19 @@ impl<'a> LiveExpander<'a> {
                         node_start: out_start as u32,
                         node_count: node_count
                     }
-                });
-                return CopyRecurResult::Noop
+                });*/
             },
             LiveValue::Use {..} => { // no need to output there.
             }
             LiveValue::Class {class, node_start, node_count} => {
-                if class == id_pack!(Self) {
-                    return CopyRecurResult::Noop
-                }
                 let out_start = out_doc.get_level_len(out_level + 1);
+               
                 for i in 0..node_count {
                     self.copy_recur(in_doc, in_level + 1, i as usize + node_start as usize, out_doc, out_level + 1, skip_level_id, skip_level);
                 }
+
+                let out_count =  out_doc.get_level_len(out_level + 1) - out_start;
+                
                 if skip_level != in_level {
                     out_doc.push_node(out_level, LiveNode {
                         token_id: node.token_id,
@@ -154,35 +155,35 @@ impl<'a> LiveExpander<'a> {
                         value: LiveValue::Class {
                             class: class,
                             node_start: out_start as u32,
-                            node_count: node_count
+                            node_count: out_count as u16
                         }
                     });
                 }
-                return CopyRecurResult::IsClass {class}
+                return Some(class);
             },
             LiveValue::String {string_start, string_count} => {
-                let new_string_start = if let Some((in_doc, _)) = in_doc { // copy the string if its from another doc
+                /*let new_string_start = if let Some((in_doc, _)) = in_doc { // copy the string if its from another doc
                     let nsi = out_doc.strings.len();
                     for i in 0..string_count {
                         out_doc.strings.push(in_doc.strings[(i + string_start) as usize]);
                     }
                     nsi
-                }
+                } 
                 else {
                     string_start as usize
-                };
+                };*/
+                
                 out_doc.push_node(out_level, LiveNode {
                     token_id: node.token_id,
                     id: node_id,
                     value: LiveValue::String {
-                        string_start: new_string_start as u32,
+                        string_start,
                         string_count
                     }
                 });
-                return CopyRecurResult::Noop
             }
             LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
-                let (new_token_start, new_scope_start) = if let Some((in_doc, in_file_id)) = in_doc { // copy the string if its from another doc
+                /*let (new_token_start, new_scope_start) = if let Some((in_doc, in_file_id)) = in_doc { // copy the string if its from another doc
                     let nts = out_doc.tokens.len();
                     let nss = out_doc.scopes.len();
                     for i in 0..(token_count as usize) {
@@ -193,21 +194,29 @@ impl<'a> LiveExpander<'a> {
                 }
                 else {
                     (token_start, scope_start)
+                };*/
+                
+                let new_scope_start = if let Some((in_doc, in_file_id)) = in_doc { // copy scope
+                    let nss = out_doc.scopes.len();
+                    Self::clone_scope(in_doc, out_doc, scope_start as usize, scope_count as usize, in_file_id);
+                    nss as u32
+                } else{
+                    scope_start
                 };
+                
                 out_doc.push_node(out_level, LiveNode {
                     token_id: node.token_id,
                     id: node_id,
                     value: LiveValue::Fn {
-                        token_start: new_token_start,
+                        token_start,
                         scope_start: new_scope_start,
                         token_count,
                         scope_count
                     }
                 });
-                return CopyRecurResult::Noop
             }
             LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
-                let (new_token_start, new_scope_start) = if let Some((in_doc, in_file_id)) = in_doc { // copy the string if its from another doc
+                /*let (new_token_start, new_scope_start) = if let Some((in_doc, in_file_id)) = in_doc { // copy the string if its from another doc
                     let nts = out_doc.tokens.len();
                     let nss = out_doc.scopes.len();
                     for i in 0..(token_count as usize) {
@@ -218,18 +227,26 @@ impl<'a> LiveExpander<'a> {
                 }
                 else {
                     (token_start, scope_start)
+                };*/
+                let new_scope_start = if let Some((in_doc, in_file_id)) = in_doc { // copy scope
+                    let nss = out_doc.scopes.len();
+                    Self::clone_scope(in_doc, out_doc, scope_start as usize, scope_count as usize, in_file_id);
+                    nss as u32
+                } else{
+                    scope_start
                 };
+                
+                
                 out_doc.push_node(out_level, LiveNode {
                     token_id: node.token_id,
                     id: node_id,
                     value: LiveValue::VarDef {
-                        token_start: new_token_start,
+                        token_start,
                         scope_start: new_scope_start,
                         token_count,
                         scope_count
                     }
                 });
-                return CopyRecurResult::Noop
             }
             _ => {
                 out_doc.push_node(out_level, LiveNode {
@@ -237,10 +254,9 @@ impl<'a> LiveExpander<'a> {
                     id: node_id,
                     value: node.value
                 });
-                return CopyRecurResult::Noop
             }
         }
-        return CopyRecurResult::Noop
+        None
     }
     
     fn write_or_add_node(
@@ -301,7 +317,7 @@ impl<'a> LiveExpander<'a> {
     
     fn resolve_id(
         &self,
-        resolve_id: IdPack,
+        resolve_id: MultiPack,
         token_id: TokenId,
         in_doc: &LiveDocument,
         out_doc: &mut LiveDocument,
@@ -309,7 +325,7 @@ impl<'a> LiveExpander<'a> {
         out_start: usize,
     ) -> Result<(Option<FileId>, LocalPtr), LiveError> {
         match resolve_id.unpack() {
-            IdUnpack::Multi {index: id_start, count: id_count} => {
+            MultiUnpack::MultiId {index: id_start, count: id_count} => {
                 let base = in_doc.multi_ids[id_start];
                 // base id can be Self or a scope target
                 if base == id!(Self) {
@@ -328,7 +344,7 @@ impl<'a> LiveExpander<'a> {
                         }
                     }
                 }
-                else if Self::is_baseclass(IdPack::single(base)) {
+                else if Self::is_baseclass(MultiPack::single_id(base)) {
                     return Err(LiveError {
                         origin: live_error_origin!(),
                         span: in_doc.token_id_to_span(token_id),
@@ -357,7 +373,7 @@ impl<'a> LiveExpander<'a> {
                                     return Err(LiveError {
                                         origin: live_error_origin!(),
                                         span: in_doc.token_id_to_span(token_id),
-                                        message: format!("Property is not a class {} of {}", base, IdFmt::col(&in_doc.multi_ids, resolve_id))
+                                        message: format!("Property is not a class {} of {}", base, MultiFmt::new(&in_doc.multi_ids, resolve_id))
                                     });
                                 }
                             }
@@ -383,7 +399,7 @@ impl<'a> LiveExpander<'a> {
                                     return Err(LiveError {
                                         origin: live_error_origin!(),
                                         span: in_doc.token_id_to_span(token_id),
-                                        message: format!("Property is not a class {} of {}", base, IdFmt::col(&in_doc.multi_ids, resolve_id))
+                                        message: format!("Property is not a class {} of {}", base, MultiFmt::new(&in_doc.multi_ids, resolve_id))
                                     });
                                 }
                             }
@@ -392,13 +408,13 @@ impl<'a> LiveExpander<'a> {
                             return Err(LiveError {
                                 origin: live_error_origin!(),
                                 span: in_doc.token_id_to_span(token_id),
-                                message: format!("Cannot find item on scope: {} of {}", base, IdFmt::col(&in_doc.multi_ids, resolve_id))
+                                message: format!("Cannot find item on scope: {} of {}", base, MultiFmt::new(&in_doc.multi_ids, resolve_id))
                             });
                         }
                     }
                 }
             }
-            IdUnpack::Single(id) if !Self::is_baseclass(IdPack::single(id)) => {
+            MultiUnpack::SingleId(id) if !Self::is_baseclass(MultiPack::single_id(id)) => {
                 match self.scope_stack.find_item(id) {
                     Some(LiveScopeTarget::LocalPtr(local_ptr)) => {
                         return Ok((None, local_ptr));
@@ -443,13 +459,13 @@ impl<'a> LiveExpander<'a> {
             LiveValue::Vec2(_) => self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, node),
             LiveValue::Vec3(_) => self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, node),
             LiveValue::LiveType(_) => self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, node),
-            LiveValue::IdPack(id_value) => {
+            LiveValue::MultiPack(pack) => {
                 // lets resolve ID
                 let out_index = out_doc.get_level_len(out_level);
                 self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, node);
-                if id_value != id_pack!(Self) && !Self::is_baseclass(id_value) {
+                if pack != MultiPack::single_id(id!(Self)) && !Self::is_baseclass(pack) {
                     let result = self.resolve_id(
-                        id_value,
+                        pack,
                         node.token_id,
                         in_doc,
                         out_doc,
@@ -458,17 +474,17 @@ impl<'a> LiveExpander<'a> {
                     );
                     match result {
                         Ok((None, found_node)) => {
-                            let new_id = IdPack::node_ptr(self.in_file_id, found_node);
+                            let new_pack = MultiPack::live_ptr(self.in_file_id, found_node);
                             let written_node = &mut out_doc.nodes[out_level][out_index];
-                            if let LiveValue::IdPack(id) = &mut written_node.value {
-                                *id = new_id;
+                            if let LiveValue::MultiPack(pack) = &mut written_node.value {
+                                *pack = new_pack;
                             }
                         }
                         Ok((Some(found_file_id), found_node)) => {
-                            let new_id = IdPack::node_ptr(found_file_id, found_node);
+                            let new_pack = MultiPack::live_ptr(found_file_id, found_node);
                             let written_node = &mut out_doc.nodes[out_level][out_index];
-                            if let LiveValue::IdPack(id) = &mut written_node.value {
-                                *id = new_id;
+                            if let LiveValue::MultiPack(pack) = &mut written_node.value {
+                                *pack = new_pack;
                             }
                         }
                         Err(err) => {
@@ -503,7 +519,7 @@ impl<'a> LiveExpander<'a> {
                 };
                 let out_index = out_doc.get_level_len(out_level);
                 self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, &new_node);
-                if target != id_pack!(Self) && !Self::is_baseclass(target) {
+                if target.as_single_id() != id!(Self) && !Self::is_baseclass(target) {
                     let result = self.resolve_id(
                         target,
                         node.token_id,
@@ -521,14 +537,14 @@ impl<'a> LiveExpander<'a> {
                                 self.errors.push(LiveError {
                                     origin: live_error_origin!(),
                                     span: in_doc.token_id_to_span(node.token_id),
-                                    message: format!("Target not a call {}", IdFmt::col(&in_doc.multi_ids, target))
+                                    message: format!("Target not a call {}", MultiFmt::new(&in_doc.multi_ids, target))
                                 });
                                 return
                             }
-                            let new_id = IdPack::node_ptr(self.in_file_id, found_node);
+                            let new_pack = MultiPack::live_ptr(self.in_file_id, found_node);
                             let written_node = &mut out_doc.nodes[out_level][out_index];
                             if let LiveValue::Call {target, ..} = &mut written_node.value {
-                                *target = new_id;
+                                *target = new_pack;
                             }
                         }
                         Ok((Some(found_file_id), found_node)) => {
@@ -538,14 +554,14 @@ impl<'a> LiveExpander<'a> {
                                 self.errors.push(LiveError {
                                     origin: live_error_origin!(),
                                     span: in_doc.token_id_to_span(node.token_id),
-                                    message: format!("Target not a call {}", IdFmt::col(&in_doc.multi_ids, target))
+                                    message: format!("Target not a call {}", MultiFmt::new(&in_doc.multi_ids, target))
                                 });
                                 return
                             }
-                            let new_id = IdPack::node_ptr(found_file_id, found_node);
+                            let new_pack = MultiPack::live_ptr(found_file_id, found_node);
                             let written_node = &mut out_doc.nodes[out_level][out_index];
                             if let LiveValue::Call {target, ..} = &mut written_node.value {
-                                *target = new_id;
+                                *target = new_pack;
                             }
                             // store pointer
                         }
@@ -580,31 +596,31 @@ impl<'a> LiveExpander<'a> {
                 };
                 self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, &new_node);
             },
-            LiveValue::ClassOverride {node_start: in_node_start, node_count: in_node_count} => {
+            LiveValue::ClassOverride {node_start, node_count} => {
                 // first off we find the parent node we need to extend.
                 for i in 0..out_count {
                     let out_node = &out_doc.nodes[out_level][i + out_start];
                     if out_node.id == node.id {
                         // it HAS to be a class
-                        if let LiveValue::Class {node_start, node_count, ..} = out_node.value {
-                            // ok so our problem is, we need to update this thing
-                            // depending on if we appended to it or moved it.
-                            // how do we learn we did.
-                            
+                        if let LiveValue::Class {node_start:class_node_start, node_count:class_node_count, ..} = out_node.value {
+
                             let start_len = out_doc.nodes[out_level + 1].len();
-                            let is_at_end = start_len == node_start as usize + node_count as usize;
+                            let is_at_end = start_len == class_node_start as usize + class_node_count as usize;
                             
-                            for i in 0..in_node_count {
+                            self.scope_stack.stack.push(Vec::new());
+                            for i in 0..node_count {
                                 self.walk_node(
                                     in_doc,
                                     in_level + 1,
-                                    in_node_start as usize + i as usize,
+                                    node_start as usize + i as usize,
                                     out_doc,
                                     out_level + 1,
-                                    node_start as usize,
-                                    node_count as usize
+                                    class_node_start as usize,
+                                    class_node_count as usize
                                 );
                             }
+                            self.scope_stack.stack.pop();
+                            
                             // something got added
                             let new_len = out_doc.nodes[out_level + 1].len();
                             if start_len != new_len {
@@ -620,37 +636,50 @@ impl<'a> LiveExpander<'a> {
                                 }
                             }
                             
-                            
-                            
                             return
+                        }
+                        else{
+                            self.errors.push(LiveError {
+                                origin: live_error_origin!(),
+                                span: in_doc.token_id_to_span(node.token_id),
+                                message: format!("Cannot override {}, it is not a class node", node.id)
+                            });
                         }
                     }
                 }
-                self.errors.push(LiveError {
-                    origin: live_error_origin!(),
-                    span: in_doc.token_id_to_span(node.token_id),
-                    message: format!("Cannot override {}, it is not a class node", node.id)
-                });
-                return
-                // in the out_doc we should already have the property.
-                // now what we do is walk all our children and the outdoc property
-                // let new_node_start = out_doc.get_level_len(out_level + 1);
+                // OK so. in case if it doesnt exist, create a 0 class
+                self.scope_stack.stack.push(Vec::new());
+                let new_out_start = out_doc.get_level_len(out_level + 1);
+
+                // walk the subobject
+                for i in 0..node_count {
+                    let new_out_count = out_doc.get_level_len(out_level + 1) - new_out_start;
+                    self.walk_node(
+                        in_doc,
+                        in_level + 1,
+                        i as usize + node_start as usize,
+                        out_doc,
+                        out_level + 1,
+                        new_out_start,
+                        new_out_count
+                    );
+                }
+                let new_out_count = out_doc.get_level_len(out_level + 1) - new_out_start;
                 
-                //for i in 0..node_count {
-                //    walk_node(expanded, module_path_to_file_id, in_crate, in_file_id, errors, scope_stack, in_doc, out_doc, in_level + 1, out_level + 1, i as usize + node_start as usize, out_start, 0);
-                //}
-                /*
                 let new_node = LiveNode {
                     token_id: node.token_id,
                     id: node.id,
-                    value: LiveValue::ClassOverride {
-                        node_start: new_node_start as u32,
-                        node_count: node_count as u32
+                    value: LiveValue::Class {
+                        class: MultiPack::zero_class(),
+                        node_start: new_out_start as u32,
+                        node_count: new_out_count as u16
                     }
                 };
-                // println!("{} {}", out_start, out_doc.get_level_len(out_level))
-                // we dont know yet yet
-                self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, &new_node);*/
+                self.scope_stack.stack.pop();
+                self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, &new_node);
+                
+                
+                return
             },
             LiveValue::Fn {token_start, token_count, ..} => {
                 // we should store the scopestack here so the shader compiler can find symbols.
@@ -725,14 +754,14 @@ impl<'a> LiveExpander<'a> {
                     self.errors.push(LiveError {
                         origin: live_error_origin!(),
                         span: in_doc.token_id_to_span(node.token_id),
-                        message: format!("Cannot find import {}", IdFmt::col(&in_doc.multi_ids, use_ids))
+                        message: format!("Cannot find import {}", MultiFmt::new(&in_doc.multi_ids, use_ids))
                     });
                     return
                 };
                 let other_doc = &self.expanded[file_id.to_index()];
                 
                 match use_ids.unpack() {
-                    IdUnpack::Multi {index, count} => {
+                    MultiUnpack::MultiId {index, count} => {
                         let shifted_count = count - 2;
                         // lets validate if it exists!
                         let mut node_start = 0 as usize;
@@ -793,7 +822,7 @@ impl<'a> LiveExpander<'a> {
                                     self.errors.push(LiveError {
                                         origin: live_error_origin!(),
                                         span: in_doc.token_id_to_span(node.token_id),
-                                        message: format!("Use path not found {}", IdFmt::col(&in_doc.multi_ids, use_ids))
+                                        message: format!("Use path not found {}", MultiFmt::new(&in_doc.multi_ids, use_ids))
                                     });
                                 }
                             }
@@ -807,18 +836,9 @@ impl<'a> LiveExpander<'a> {
                 self.scope_stack.stack.push(Vec::new());
                 let new_out_start = out_doc.get_level_len(out_level + 1);
                 
-                // result values of the below scan
-                let mut copy_result = CopyRecurResult::IsClass {class};
-                let mut value_ptr = None;
-                let mut other_file_id = None;
+                let mut class_pack = class;
                 
-                if class == id_pack!(Self) {
-                    // recursively clone self
-                    for i in out_start..out_doc.get_level_len(out_level) {
-                        self.copy_recur(None, out_level, i, out_doc, out_level + 1, node.id, 0,);
-                    }
-                }
-                else if !Self::is_baseclass(class) {
+                if !Self::is_baseclass(class) { // not baseclass
                     let result = self.resolve_id(
                         class,
                         node.token_id,
@@ -827,84 +847,70 @@ impl<'a> LiveExpander<'a> {
                         out_level,
                         out_start,
                     );
-                    match result {
-                        Ok((None, found_node)) => {
-                            copy_result = self.copy_recur(None, found_node.level, found_node.index, out_doc, out_level, node.id, found_node.level);
-                            value_ptr = Some(found_node);
+                    let is_value = match result {
+                        Ok((None, found_node)) => { // found locally
+                            if let Some(_) = self.copy_recur(None, found_node.level, found_node.index, out_doc, out_level, node.id, found_node.level) {
+                                class_pack = MultiPack::live_ptr(self.in_file_id, found_node);
+                                false
+                            }
+                            else {
+                                true
+                            }
                         }
-                        Ok((Some(found_file_id), found_node)) => {
+                        Ok((Some(found_file_id), found_node)) => { // found in another file
                             let other_doc = &self.expanded[found_file_id.to_index()];
-                            other_file_id = Some(found_file_id);
-                            copy_result = self.copy_recur(Some((other_doc, found_file_id)), found_node.level, found_node.index, out_doc, out_level, node.id, found_node.level);
-                            value_ptr = Some(found_node);
+                            if let Some(_) = self.copy_recur(Some((other_doc, found_file_id)), found_node.level, found_node.index, out_doc, out_level, node.id, found_node.level) {
+                                class_pack = MultiPack::live_ptr(found_file_id, found_node);
+                                false
+                            }
+                            else {
+                                true
+                            }
                         }
                         Err(err) => {
                             self.errors.push(err);
                             return
                         }
+                    };
+                    if is_value {
+                        self.scope_stack.stack.pop();
+                        if node_count >0 {
+                            self.errors.push(LiveError {
+                                origin: live_error_origin!(),
+                                span: in_doc.token_id_to_span(node.token_id),
+                                message: format!("Cannot override items in non-class: {}", MultiFmt::new(&in_doc.multi_ids, class))
+                            });
+                        }
+                        return
                     }
                 }
                 
-                if let CopyRecurResult::IsClass {..} = copy_result {}
-                else if node_count >0 {
-                    self.errors.push(LiveError {
-                        origin: live_error_origin!(),
-                        span: in_doc.token_id_to_span(node.token_id),
-                        message: format!("Cannot override items in non-class: {}", IdFmt::col(&in_doc.multi_ids, class))
-                    });
-                    return
+                // walk the subobject
+                for i in 0..node_count {
+                    let new_out_count = out_doc.get_level_len(out_level + 1) - new_out_start;
+                    self.walk_node(
+                        in_doc,
+                        in_level + 1,
+                        i as usize + node_start as usize,
+                        out_doc,
+                        out_level + 1,
+                        new_out_start,
+                        new_out_count
+                    );
                 }
+                let new_out_count = out_doc.get_level_len(out_level + 1) - new_out_start;
                 
-                match copy_result {
-                    CopyRecurResult::IsClass {class} => {
-                        
-                        let new_class_id = if let Some(other_file_id) = other_file_id {
-                            if let Some(value_ptr) = value_ptr {
-                                IdPack::node_ptr(other_file_id, value_ptr)
-                            }
-                            else {
-                                class
-                            }
-                        }
-                        else {
-                            if let Some(value_ptr) = value_ptr {
-                                IdPack::node_ptr(self.in_file_id, value_ptr)
-                            }
-                            else {
-                                class
-                            }
-                        };
-                        
-                        for i in 0..node_count {
-                            let new_out_count = out_doc.get_level_len(out_level + 1) - new_out_start;
-                            self.walk_node(
-                                in_doc,
-                                in_level + 1,
-                                i as usize + node_start as usize,
-                                out_doc,
-                                out_level + 1,
-                                new_out_start,
-                                new_out_count
-                            );
-                        }
-                        let new_out_count = out_doc.get_level_len(out_level + 1) - new_out_start;
-                        
-                        let new_node = LiveNode {
-                            token_id: node.token_id,
-                            id: node.id,
-                            value: LiveValue::Class {
-                                class: new_class_id,
-                                node_start: new_out_start as u32,
-                                node_count: new_out_count as u16
-                            }
-                        };
-                        self.scope_stack.stack.pop();
-                        self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, &new_node);
+                let new_node = LiveNode {
+                    token_id: node.token_id,
+                    id: node.id,
+                    value: LiveValue::Class {
+                        class: class_pack,
+                        node_start: new_out_start as u32,
+                        node_count: new_out_count as u16
                     }
-                    CopyRecurResult::Noop | CopyRecurResult::Error => {
-                        self.scope_stack.stack.pop();
-                    }
-                }
+                };
+                self.scope_stack.stack.pop();
+                self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, &new_node);
             }
         }
     }
@@ -927,9 +933,3 @@ impl ScopeStack {
     }
 }
 
-#[derive(Debug)]
-pub enum CopyRecurResult {
-    IsClass {class: IdPack},
-    Noop,
-    Error
-}

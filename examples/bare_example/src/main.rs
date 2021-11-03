@@ -1,7 +1,7 @@
 use makepad_render::*;
 use makepad_widget::*;
 
-live_body!{
+live_register!{
     use makepad_render::drawcolor::DrawColor;
     use makepad_render::drawtext::DrawText;
     use makepad_widget::normalbutton::NormalButton;

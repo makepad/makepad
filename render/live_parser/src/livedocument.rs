@@ -1,6 +1,6 @@
 #![allow(unused_variables)]
 use makepad_id_macros::*;
-use crate::id::{Id, IdPack, IdUnpack, IdFmt};
+use crate::id::{Id, MultiPack, MultiUnpack, MultiFmt};
 use std::fmt;
 use crate::span::Span;
 use crate::util::PrettyPrintedF64;
@@ -184,7 +184,7 @@ impl LiveDocument {
                                 node_start = ns as usize;
                                 node_count = nc as usize;
                             },
-                            _ => return Err(format!("Cannont find property {} is not an object path", IdFmt::dot(&multi_ids, IdPack::multi(id_start, id_count))))
+                            _ => return Err(format!("Cannont find property {} is not an object path", MultiFmt::new(&multi_ids, MultiPack::multi_id(id_start, id_count))))
                             //LiveError {
                             //   span:self.token_id_to_span(token_id),
                             //   message: format!("Cannont find property {} is not an object path", IdFmt::dot(&multi_ids, Id::multi(id_start, id_count)))
@@ -196,10 +196,10 @@ impl LiveDocument {
                 }
             }
             if !found {
-                return Err(format!("Cannot find class {}", IdFmt::dot(&multi_ids, IdPack::multi(id_start, id_count))))
+                return Err(format!("Cannot find class {}", MultiFmt::new(&multi_ids, MultiPack::multi_id(id_start, id_count))))
             }
         }
-        return Err(format!("Cannot find class {}", IdFmt::dot(&multi_ids, IdPack::multi(id_start, id_count))))
+        return Err(format!("Cannot find class {}", MultiFmt::new(&multi_ids, MultiPack::multi_id(id_start, id_count))))
     }
     /*
    pub fn write_or_add_node(
@@ -353,22 +353,22 @@ impl LiveDocument {
         }
     }*/
     
-    pub fn create_multi_id(&mut self, ids: &[Id]) -> IdPack {
+    pub fn create_multi_id(&mut self, ids: &[Id]) -> MultiPack {
         let multi_index = self.multi_ids.len();
         for id in ids {
             self.multi_ids.push(*id);
         }
-        IdPack::multi(multi_index, ids.len())
+        MultiPack::multi_id(multi_index, ids.len())
     }
     
-    pub fn clone_multi_id(&mut self, id: IdPack, other_ids: &[Id]) -> IdPack {
+    pub fn clone_multi_id(&mut self, id: MultiPack, other_ids: &[Id]) -> MultiPack {
         match id.unpack() {
-            IdUnpack::Multi {index, count} => {
+            MultiUnpack::MultiId {index, count} => {
                 let multi_index = self.multi_ids.len();
                 for i in 0..count {
                     self.multi_ids.push(other_ids[i + index]);
                 }
-                IdPack::multi(multi_index, self.multi_ids.len() - multi_index)
+                MultiPack::multi_id(multi_index, self.multi_ids.len() - multi_index)
             }
             _ => {
                 id
@@ -376,9 +376,9 @@ impl LiveDocument {
         }
     }
     
-    pub fn use_ids_to_module_path(&self, use_ids: IdPack, outer_crate_id: Id) -> ModulePath {
+    pub fn use_ids_to_module_path(&self, use_ids: MultiPack, outer_crate_id: Id) -> ModulePath {
         match use_ids.unpack() {
-            IdUnpack::Multi {index, count} if count >= 2 => {
+            MultiUnpack::MultiId {index, count} if count >= 2 => {
                 let crate_id = self.multi_ids[index];
                 let crate_id = if crate_id == id!(crate) {
                     outer_crate_id
@@ -434,11 +434,11 @@ impl fmt::Display for LiveDocument {
                 LiveValue::Vec3(val) => {
                     let _ = write!(f, "{}:{}", node.id, val);
                 },
-                LiveValue::IdPack(val) => {
-                    let _ = write!(f, "{}:{}", node.id, IdFmt::col(&ld.multi_ids, val));
+                LiveValue::MultiPack(val) => {
+                    let _ = write!(f, "{}:{}", node.id, MultiFmt::new(&ld.multi_ids, val));
                 },
                 LiveValue::Call {target, node_start, node_count} => {
-                    let _ = write!(f, "{}:{}(", node.id, IdFmt::dot(&ld.multi_ids, target));
+                    let _ = write!(f, "{}:{}(", node.id, MultiFmt::new(&ld.multi_ids, target));
                     for i in 0..node_count {
                         if i>0 {
                             let _ = write!(f, ", ");
@@ -520,13 +520,13 @@ impl fmt::Display for LiveDocument {
                     let _ = write!(f, "\"");
                 },
                 LiveValue::Use {use_ids} => {
-                    let _ = write!(f, "use {}", IdFmt::col(&ld.multi_ids, use_ids));
+                    let _ = write!(f, "use {}", MultiFmt::new(&ld.multi_ids, use_ids));
                 }
                 LiveValue::LiveType(id) => {
                     let _ = write!(f, "TypeId {:?}", id);
                 }
                 LiveValue::Class {class, node_start, node_count} => {
-                    let _ = write!(f, "{}:{} {{", node.id, IdFmt::col(&ld.multi_ids, class));
+                    let _ = write!(f, "{}:{} {{", node.id, MultiFmt::new(&ld.multi_ids, class));
                     // lets do a pass to check if its all simple values
                     let mut is_simple = true;
                     for i in 0..node_count {

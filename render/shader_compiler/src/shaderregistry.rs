@@ -147,8 +147,10 @@ impl ShaderRegistry {
             LiveValue::Const{token_start,..}=>return no_ids(ids, LiveNodeFindResult::Const(ConstPtr(base_ptr))), 
             LiveValue::Class {class, node_start: ns, node_count: nc, ..} => {
                 if ids.len() == 0 { // check if we are struct or component
+                    let base_class =  self.live_registry.find_base_class_id(class);
+                    
                     match self.live_registry.find_base_class_id(class) {
-                        Some(id_pack!(Struct)) => return LiveNodeFindResult::Struct(StructPtr(base_ptr)),
+                        multi_id!(Struct) => return LiveNodeFindResult::Struct(StructPtr(base_ptr)),
                         _ => return LiveNodeFindResult::Component(base_ptr),
                     }
                 }
@@ -170,8 +172,8 @@ impl ShaderRegistry {
                                 match node.value {
                                     LiveValue::Class {class, ..} => {
                                         match self.live_registry.find_base_class_id(class) {
-                                            Some(id_pack!(Struct)) => return LiveNodeFindResult::Struct(StructPtr(full_node_ptr)),
-                                            Some(id_pack!(Component)) => return LiveNodeFindResult::Component(full_node_ptr),
+                                            multi_id!(Struct) => return LiveNodeFindResult::Struct(StructPtr(full_node_ptr)),
+                                            multi_id!(Component) => return LiveNodeFindResult::Component(full_node_ptr),
                                             _ => return LiveNodeFindResult::NotFound
                                         }
                                     },
@@ -181,7 +183,7 @@ impl ShaderRegistry {
                                         if let LiveValue::Class {class, ..} = base_node.value {
                                             // lets check if our base is a component or a struct
                                             match self.live_registry.find_base_class_id(class) {
-                                                Some(id_pack!(Struct)) => return LiveNodeFindResult::PossibleStatic(
+                                                multi_id!(Struct) => return LiveNodeFindResult::PossibleStatic(
                                                     StructPtr(full_base_ptr),
                                                     FnPtr(full_node_ptr)
                                                 ),
@@ -255,9 +257,10 @@ impl ShaderRegistry {
             LiveValue::Const {token_start, token_count, scope_start, scope_count} => {
                 let mut parser_deps = Vec::new();
                 let id = const_node.id;
+                let origin_doc = &self.live_registry.get_origin_doc_from_token_id(const_node.token_id);
                 let mut parser = ShaderParser::new(
                     self,
-                    doc.get_tokens(token_start, token_count + 1),
+                    origin_doc.get_tokens(token_start, token_count + 1),
                     doc.get_scopes(scope_start, scope_count),
                     &mut parser_deps,
                     None,
@@ -298,9 +301,10 @@ impl ShaderRegistry {
                 let id = fn_node.id;
                 let mut parser_deps = Vec::new();
                 // lets parse this thing
+                let origin_doc = &self.live_registry.get_origin_doc_from_token_id(fn_node.token_id);
                 let parser = ShaderParser::new(
                     self,
-                    doc.get_tokens(token_start, token_count + 1),
+                    origin_doc.get_tokens(token_start, token_count + 1),
                     doc.get_scopes(scope_start, scope_count),
                     &mut parser_deps,
                     if let Some(struct_ptr) = struct_ptr {Some(FnSelfKind::Struct(struct_ptr))}else {None},
@@ -369,9 +373,10 @@ impl ShaderRegistry {
                     match prop.value {
                         LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
                             let id = prop.id;
+                            let origin_doc = &self.live_registry.get_origin_doc_from_token_id(prop.token_id);
                             let mut parser = ShaderParser::new(
                                 self,
-                                doc.get_tokens(token_start, token_count + 1),
+                                origin_doc.get_tokens(token_start, token_count + 1),
                                 doc.get_scopes(scope_start, scope_count),
                                 &mut parser_deps,
                                 Some(FnSelfKind::Struct(struct_ptr)),
@@ -387,10 +392,11 @@ impl ShaderRegistry {
                         LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
                             let id = prop.id;
                             // lets parse this thing
+                            let origin_doc = &self.live_registry.get_origin_doc_from_token_id(prop.token_id);
                             let parser = ShaderParser::new(
                                 self,
                                 doc.get_tokens(token_start, token_count + 1),
-                                doc.get_scopes(scope_start, scope_count),
+                                origin_doc.get_scopes(scope_start, scope_count),
                                 &mut parser_deps,
                                 Some(FnSelfKind::Struct(struct_ptr)),
                                 struct_ptr.0.file_id
@@ -505,10 +511,10 @@ impl ShaderRegistry {
                             }
                         },
                         LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
-                       
+                            let origin_doc = &self.live_registry.get_origin_doc_from_token_id(prop.token_id);
                             let mut parser = ShaderParser::new(
                                 self,
-                                doc.get_tokens(token_start, token_count),
+                                origin_doc.get_tokens(token_start, token_count),
                                 doc.get_scopes(scope_start, scope_count),
                                 &mut parser_deps,
                                 Some(FnSelfKind::DrawShader(draw_shader_ptr)),
@@ -543,9 +549,10 @@ impl ShaderRegistry {
                             }
                         },
                         LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
+                            let origin_doc = &self.live_registry.get_origin_doc_from_token_id(prop.token_id);
                             let parser = ShaderParser::new(
                                 self,
-                                doc.get_tokens(token_start, token_count),
+                                origin_doc.get_tokens(token_start, token_count),
                                 doc.get_scopes(scope_start, scope_count),
                                 &mut parser_deps,
                                 Some(FnSelfKind::DrawShader(draw_shader_ptr)),

@@ -14,7 +14,7 @@ impl FileId{
 }
 
 #[derive(Clone, Eq, Hash, Copy, PartialEq)]
-pub struct IdPack(pub u64);
+pub struct MultiPack(pub u64);
 
 //TODO FIX THIS THING TO BE N LEVELS OF MODULES
 #[derive(Clone, Eq, Hash, Debug, Copy, PartialEq)]
@@ -105,12 +105,12 @@ impl fmt::Display for LivePtr {
 
 
 #[derive(Debug)]
-pub enum IdUnpack {
+pub enum MultiUnpack {
     Empty,
-    Multi {index: usize, count: usize},
+    SingleId(Id),
+    MultiId{index: usize, count: usize},
     LivePtr (LivePtr),
-    Single(Id),
-    Number(u64)
+    ZeroClass,
 }
 
 #[derive(Clone, Default, Eq, Hash, Copy, PartialEq)]
@@ -212,60 +212,61 @@ impl PartialOrd for Id {
     }
 }
 
-// IdPack uses the high 3 bits to signal type
+// MultiPack uses the high 3 bits to signal type
 // 0?? = Single Id    0x8 == 0
 // 0 = Empty
 // 101 = NodePtr   0xA
 // 110 = Multi     0xC
 // 111 = Number    0xE
 
-impl IdPack {
+impl MultiPack {
 
-    pub fn unpack(&self) -> IdUnpack {
+    pub fn unpack(&self) -> MultiUnpack {
         if self.0 & 0x8000_0000_0000_0000 != 0 {
             match self.0 & 0xE000_0000_0000_0000 {
-                0xA000_0000_0000_0000 => IdUnpack::LivePtr(LivePtr{
+                0xA000_0000_0000_0000 => MultiUnpack::LivePtr(LivePtr{
                     file_id: FileId(((self.0 >> 32) & 0xffff) as u16),
                     local_ptr: LocalPtr {
                         level: ((self.0 >> 48) & 0x1fff) as usize,
                         index: (self.0 & 0xffff_ffff)as usize
                     }
                 }),
-                0xC000_0000_0000_0000 => IdUnpack::Multi {
+                0xC000_0000_0000_0000 => MultiUnpack::MultiId {
                     index: (self.0 & 0xffff_ffff) as usize,
                     count: ((self.0 & 0x1fff_ffff_ffff_ffff) >> 32) as usize,
                 },
-                0xE000_0000_0000_0000 => IdUnpack::Number(self.0 & 0x1fff_ffff_ffff_ffff),
-                _ => IdUnpack::Empty
+                0xE000_0000_0000_0000 => {
+                    match self.0{
+                        0xE000_0000_0000_0000=>MultiUnpack::ZeroClass,
+                        _=>MultiUnpack::Empty
+                    }
+                }
+                _ => MultiUnpack::Empty
             }
         }
         else {
             if self.0 == 0{
-                IdUnpack::Empty
+                MultiUnpack::Empty
             }
             else{
-                IdUnpack::Single(Id(self.0 & 0x7fff_ffff_ffff_ffff))
+                MultiUnpack::SingleId(Id(self.0 & 0x7fff_ffff_ffff_ffff))
             }
         }
     }
     
-    pub fn multi(index: usize, len: usize) -> Self {
+    pub fn multi_id(index: usize, len: usize) -> Self {
         Self(((((len as u64) << 32) | index as u64) & 0x1fff_ffff_ffff_ffff) | 0xC000_0000_0000_0000)
     }
     
-    pub fn single(id: Id) -> Self {
+    pub fn single_id(id: Id) -> Self {
         Self(id.0)
-    }
-    
-    pub fn number(val: u64) -> Self {
-        Self(0xE000_0000_0000_0000 | (val & 0x1fff_ffff_ffff_ffff))
     }
     
     pub fn empty() -> Self {
         Self(0x0)
     }
     
-    pub fn node_ptr(file_id: FileId, ptr: LocalPtr)->Self{
+    pub fn live_ptr(file_id: FileId, ptr: LocalPtr)->Self{
         Self(
             0xA000_0000_0000_0000 |
             (ptr.index as u64) |
@@ -273,29 +274,33 @@ impl IdPack {
             ((ptr.level as u64) << 48) 
         )
     }
+
+    pub fn zero_class()->Self{
+        Self(0xE000_0000_0000_0000)
+    }
     
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
     
-    pub fn is_node_ptr(&self) -> bool {
+    pub fn is_live_ptr(&self) -> bool {
         self.0 & 0xE000_0000_0000_0000 == 0xA000_0000_0000_0000
     }
         
-    pub fn is_multi(&self) -> bool {
+    pub fn is_multi_id(&self) -> bool {
         self.0 & 0xE000_0000_0000_0000 == 0xC000_0000_0000_0000
     }
     
-    pub fn is_number(&self) -> bool {
-        self.0 & 0xE000_0000_0000_0000 == 0xE000_0000_0000_0000
+    pub fn is_zero_class(&self) -> bool {
+        self.0 == 0xE000_0000_0000_0000
     }
     
-    pub fn is_single(&self) -> bool {
+    pub fn is_single_id(&self) -> bool {
         (self.0 & 0x8000_0000_0000_0000) == 0
     }
     
-    pub fn unwrap_multi(&self) -> (usize, usize) {
-        if !self.is_multi() {
+    pub fn unwrap_multi_id(&self) -> (usize, usize) {
+        if !self.is_multi_id() {
             panic!()
         }
         (
@@ -304,15 +309,15 @@ impl IdPack {
         )
     }
     
-    pub fn unwrap_single(&self) -> Id {
-        if !self.is_single() {
+    pub fn unwrap_single_id(&self) -> Id {
+        if !self.is_single_id() {
             panic!()
         }
         Id(self.0)
     }
     
-    pub fn as_single(&self) -> Id {
-        if !self.is_single() {
+    pub fn as_single_id(&self) -> Id {
+        if !self.is_single_id() {
             Id::empty()
         }
         else{
@@ -342,36 +347,36 @@ impl fmt::Display for Id {
     }
 }
 
-impl fmt::Debug for IdPack {
+impl fmt::Debug for MultiPack {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }
 }
 
-impl fmt::Display for IdPack {
+impl fmt::Display for MultiPack {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self.unpack() {
-            IdUnpack::Multi {index, count} => {
-                write!(f, "MultiId {} {}", index, count)
+            MultiUnpack::MultiId {index, count} => {
+                write!(f, "<MultiId {} {}>", index, count)
             },
-            IdUnpack::Single(single) => {
+            MultiUnpack::SingleId(single) => {
                 single.as_string( | string | {
                     if let Some(id) = string {
                         write!(f, "{}", id)
                     }
                     else {
-                        write!(f, "IdNotFound {:x}", self.0)
+                        write!(f, "<NotFound {:x}>", self.0)
                     }
                 })
             },
-            IdUnpack::Number(value) => {
-                write!(f, "{}", value)
-            },
-            IdUnpack::Empty => {
-                write!(f, "IdEmpty")
+            MultiUnpack::Empty => {
+                write!(f, "<Empty>")
             }
-            IdUnpack::LivePtr(full_ptr)=>{
-                write!(f, "NodePtr{{file:{}, level:{}, index:{}}}", full_ptr.file_id.0, full_ptr.local_ptr.level, full_ptr.local_ptr.index)
+            MultiUnpack::LivePtr(full_ptr)=>{
+                write!(f, "<LivePtr{{file:{}, level:{}, index:{}}}>", full_ptr.file_id.0, full_ptr.local_ptr.level, full_ptr.local_ptr.index)
+            }
+            MultiUnpack::ZeroClass=>{
+                write!(f, "<ZeroClass>")
             }
         }
         
@@ -415,40 +420,31 @@ impl IdMap {
 }
 
 
-pub struct IdFmt<'a> {
+pub struct MultiFmt<'a> {
     multi_ids: &'a [Id],
-    is_dot: bool,
-    id_pack: IdPack
+    multi_pack: MultiPack
 }
 
-impl <'a> IdFmt<'a> {
-    pub fn dot(multi_ids: &'a [Id], id_pack: IdPack) -> Self {
-        Self {multi_ids, is_dot: true, id_pack}
-    }
-    pub fn col(multi_ids: &'a [Id], id_pack: IdPack) -> Self {
-        Self {multi_ids, is_dot: false, id_pack}
+impl <'a> MultiFmt<'a> {
+    pub fn new(multi_ids: &'a [Id], multi_pack: MultiPack) -> Self {
+        Self {multi_ids, multi_pack}
     }
 }
 
-impl <'a> fmt::Display for IdFmt<'a> {
+impl <'a> fmt::Display for MultiFmt<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self.id_pack.unpack() {
-            IdUnpack::Multi {index, count} => {
+        match self.multi_pack.unpack() {
+            MultiUnpack::MultiId {index, count} => {
                 for i in 0..count {
                     let _ = write!(f, "{}", self.multi_ids[(i + index) as usize]);
                     if i < count - 1 {
-                        if self.is_dot {
-                            let _ = write!(f, ".");
-                        }
-                        else {
-                            let _ = write!(f, "::");
-                        }
+                        let _ = write!(f, "::");
                     }
                 }
                 fmt::Result::Ok(())
             },
             _ => {
-                write!(f, "{}", self.id_pack)
+                write!(f, "{}", self.multi_pack)
             },
         }
     }

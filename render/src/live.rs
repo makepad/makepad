@@ -35,7 +35,7 @@ pub trait LiveUpdateValue{
 
 pub trait LiveUpdateHooks {
     fn live_update_value_unknown(&mut self, _cx: &mut Cx, _id: Id, _ptr: LivePtr){}
-    fn before_live_update(&mut self, _cx:&mut Cx, _live_ptr: LivePtr){}
+    fn before_live_update(&mut self, _cx:&mut Cx, live_ptr: LivePtr)->LivePtr{live_ptr}
     fn after_live_update(&mut self, _cx: &mut Cx, _live_ptr:LivePtr){}
 }
 
@@ -72,6 +72,22 @@ impl Cx {
             ModulePath::from_str(path).unwrap(),
             &[id]
         ).unwrap()
+    }
+    
+    pub fn resolve_live_ptr(&self, live_ptr:LivePtr)->&LiveNode{
+        self.shader_registry.live_registry.resolve_ptr(live_ptr)
+    }
+    
+    pub fn scan_live_ptr(&self, class_ptr:LivePtr, seek_id:Id)->Option<LivePtr>{
+        if let Some(mut iter) = self.shader_registry.live_registry.live_class_iterator(class_ptr) {
+            while let Some((id, live_ptr)) = iter.next_id(&self.shader_registry.live_registry) {
+                println!("{}", id);
+                if id == seek_id {
+                    return Some(live_ptr)
+                }
+            }
+        }
+        None
     }
     
     // ok so now what. now we should run the expansion
@@ -131,13 +147,13 @@ impl Cx {
 
 #[macro_export]
 macro_rules!live_primitive {
-    ( $ ty: ident, $ update: item) => {
+    ( $ ty: ident, $default:expr, $ update: item) => {
         impl LiveUpdate for $ ty {
             $update
         }
         impl LiveNew for $ ty {
             fn live_new(_cx: &mut Cx) -> Self {
-                $ ty::default()
+                $default
             }
             fn live_type() -> LiveType {
                 LiveType(std::any::TypeId::of::< $ ty>())
@@ -158,7 +174,41 @@ macro_rules!live_primitive {
     }
 }
 
-live_primitive!(f32, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+live_primitive!(Id, Id::empty(), fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+    let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
+    match node.value{
+        LiveValue::MultiPack(id)=>{
+            match id.unpack(){
+                MultiUnpack::SingleId(id)=>{
+                    *self = id
+                },
+                MultiUnpack::LivePtr(ptr)=>{
+                    let other_node = cx.shader_registry.live_registry.resolve_ptr(ptr);
+                    *self = other_node.id;
+                }
+                _=>()
+            }
+        }
+        _=>()
+    }
+});
+
+live_primitive!(LivePtr, LivePtr{file_id:FileId(0), local_ptr:LocalPtr{level:0,index:0}}, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+    let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
+    match node.value{
+        LiveValue::MultiPack(id)=>{
+            match id.unpack(){
+                MultiUnpack::LivePtr(ptr)=>{
+                    *self = ptr;
+                }
+                _=>()
+            }
+        }
+        _=>()
+    }
+});
+
+live_primitive!(f32, 0.0f32, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
     match node.value{
         LiveValue::Int(val)=>*self = val as f32,
@@ -167,7 +217,7 @@ live_primitive!(f32, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     }
 });
 
-live_primitive!(Vec2, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+live_primitive!(Vec2, Vec2::default(), fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
     match node.value{
         LiveValue::Vec2(v)=>*self =v,
@@ -175,7 +225,7 @@ live_primitive!(Vec2, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     }
 });
 
-live_primitive!(Vec3, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+live_primitive!(Vec3, Vec3::default(), fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
     match node.value{
         LiveValue::Vec3(v)=>*self =v,
@@ -183,7 +233,7 @@ live_primitive!(Vec3, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     }
 });
 
-live_primitive!(Vec4, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+live_primitive!(Vec4, Vec4::default(), fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
     match node.value{
         LiveValue::Color(v)=>*self = Vec4::from_u32(v),
@@ -191,7 +241,7 @@ live_primitive!(Vec4, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     }
 });
 
-live_primitive!(String, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+live_primitive!(String, String::default(), fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let (doc, node) = cx.shader_registry.live_registry.resolve_doc_ptr(ptr);
     match node.value{
         LiveValue::String {string_start,string_count}=>{

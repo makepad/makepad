@@ -1,6 +1,6 @@
 #![allow(unused_variables)]
 use crate::id::Id;
-use crate::id::IdPack;
+use crate::id::MultiPack;
 use crate::token::TokenId;
 use crate::math::{Vec2, Vec3};
 
@@ -24,7 +24,7 @@ impl LiveValue {
             Self::Vec2(_) => true,
             Self::Vec3(_) => true,
             Self::LiveType(_) =>true,
-            Self::IdPack(_) => true,
+            Self::MultiPack(_) => true,
             _ => false
         }
     }
@@ -38,7 +38,7 @@ impl LiveValue {
             Self::Color(_)=>5,
             Self::Vec2(_)=>6,
             Self::Vec3(_)=>7,
-            Self::IdPack(_)=>8,
+            Self::MultiPack(_)=>8,
             Self::Call {..}=>9,
             Self::Array {..}=>10,
             Self::ClassOverride {..}=>11,
@@ -79,9 +79,9 @@ pub enum LiveValue {
     Vec2(Vec2),
     Vec3(Vec3),
     LiveType(LiveType),
-    IdPack(IdPack),
+    MultiPack(MultiPack),
     Call {
-        target: IdPack,
+        target: MultiPack,
         node_start: u32,
         node_count: u16
     },
@@ -112,10 +112,10 @@ pub enum LiveValue {
         scope_count: u16
     },
     Use{
-        use_ids: IdPack,
+        use_ids: MultiPack,
     },
     Class {
-        class: IdPack, // target class , we can reuse this Id on clone
+        class: MultiPack, // target class , we can reuse this Id on clone
         node_start: u32, // how about
         node_count: u16 //65535 class items is plenty keeps this structure at 24 bytes
     },
