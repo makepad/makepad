@@ -9,7 +9,7 @@ use crate::span::Span;
 use crate::liveerror::LiveError;
 use crate::liveerror::LiveErrorOrigin;
 use crate::id::Id;
-use crate::id::IdPack;
+use crate::id::MultiPack;
 use crate::livedocument::LiveDocument;
 use crate::livenode::{LiveNode, LiveValue, LiveType};
 
@@ -129,7 +129,7 @@ impl<'a> LiveParser<'a> {
         }
     }
     
-    fn expect_use_id_wildcard(&mut self, ld: &mut LiveDocument) -> Result<IdPack, LiveError> {
+    fn expect_use_id_wildcard(&mut self, ld: &mut LiveDocument) -> Result<MultiPack, LiveError> {
         
         let multi_index = ld.multi_ids.len();
         loop {
@@ -154,11 +154,11 @@ impl<'a> LiveParser<'a> {
         if ld.multi_ids.len() - multi_index <2{
             return Err(self.error(format!("Need atleast two :: segments")));
         }
-        let id = IdPack::multi(multi_index, ld.multi_ids.len() - multi_index);
+        let id = MultiPack::multi_id(multi_index, ld.multi_ids.len() - multi_index);
         Ok(id)
     }
     
-    fn expect_class_id(&mut self, ld: &mut LiveDocument) -> Result<IdPack, LiveError> {
+    fn expect_class_id(&mut self, ld: &mut LiveDocument) -> Result<MultiPack, LiveError> {
         
         let base = self.expect_ident() ?;
         
@@ -181,10 +181,10 @@ impl<'a> LiveParser<'a> {
                     }
                 }
             };
-            Ok(IdPack::multi(multi_index, ld.multi_ids.len() - multi_index))
+            Ok(MultiPack::multi_id(multi_index, ld.multi_ids.len() - multi_index))
         }
         else {
-            Ok(IdPack::single(base))
+            Ok(MultiPack::single_id(base))
         }
     }
     /*
@@ -396,7 +396,7 @@ impl<'a> LiveParser<'a> {
                     ld.push_node(level, LiveNode {
                         token_id,
                         id: prop_id,
-                        value: LiveValue::IdPack(target_id)
+                        value: LiveValue::MultiPack(target_id)
                     });
                 }
             },
@@ -559,21 +559,21 @@ impl<'a> LiveParser<'a> {
                                         ld.push_node(level, LiveNode {
                                             token_id,
                                             id: *bare_id,
-                                            value: LiveValue::IdPack(IdPack::single(id!(Variant)))
+                                            value: LiveValue::MultiPack(MultiPack::single_id(id!(Variant)))
                                         });
                                     }
                                     for named_id in &enum_info.named{
                                         ld.push_node(level, LiveNode {
                                             token_id,
                                             id: *named_id,
-                                            value: LiveValue::Class{class:IdPack::single(id!(Variant)), node_start:0, node_count:0}
+                                            value: LiveValue::Class{class:MultiPack::single_id(id!(Variant)), node_start:0, node_count:0}
                                         });
                                     }
                                     for tuple_id in &enum_info.tuple{
                                         ld.push_node(level, LiveNode {
                                             token_id,
                                             id: *tuple_id,
-                                            value: LiveValue::Call{target:IdPack::single(id!(Variant)), node_start:0, node_count:0}
+                                            value: LiveValue::Call{target:MultiPack::single_id(id!(Variant)), node_start:0, node_count:0}
                                         });
                                     }
                                 }

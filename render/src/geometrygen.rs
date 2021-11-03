@@ -1,7 +1,7 @@
 use crate::cx::*;
 
 
-live_body!{
+live_register!{
     GeometryQuad2D: Geometry {
         rust_type: {{GeometryQuad2D}}
         x1: 0.0;

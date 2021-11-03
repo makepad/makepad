@@ -41,10 +41,10 @@ pub fn id(item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
-pub fn id_pack(item: TokenStream) -> TokenStream {
+pub fn multi_id(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
     let id = Id::from_str_unchecked(&item.to_string());
-    tb.add("IdPack (").suf_u64(id.0).add(")");
+    tb.add("MultiPack (").suf_u64(id.0).add(")");
     tb.end()
 }
 

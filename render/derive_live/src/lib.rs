@@ -24,7 +24,7 @@ pub fn derive_live_update_hooks(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
-pub fn live_body(input: TokenStream) -> TokenStream {
+pub fn live_register(input: TokenStream) -> TokenStream {
     
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
