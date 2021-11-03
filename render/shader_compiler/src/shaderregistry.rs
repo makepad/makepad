@@ -395,8 +395,8 @@ impl ShaderRegistry {
                             let origin_doc = &self.live_registry.get_origin_doc_from_token_id(prop.token_id);
                             let parser = ShaderParser::new(
                                 self,
-                                doc.get_tokens(token_start, token_count + 1),
-                                origin_doc.get_scopes(scope_start, scope_count),
+                                origin_doc.get_tokens(token_start, token_count + 1),
+                                doc.get_scopes(scope_start, scope_count),
                                 &mut parser_deps,
                                 Some(FnSelfKind::Struct(struct_ptr)),
                                 struct_ptr.0.file_id

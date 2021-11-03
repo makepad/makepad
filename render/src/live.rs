@@ -245,7 +245,8 @@ live_primitive!(String, String::default(), fn live_update(&mut self, cx: &mut Cx
     let (doc, node) = cx.shader_registry.live_registry.resolve_doc_ptr(ptr);
     match node.value{
         LiveValue::String {string_start,string_count}=>{
-            doc.get_string(string_start, string_count, self);
+            let origin_doc = cx.shader_registry.live_registry.get_origin_doc_from_token_id(node.token_id);
+            origin_doc.get_string(string_start, string_count, self);
         }
         _=>()
     }
