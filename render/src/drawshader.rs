@@ -81,8 +81,10 @@ impl DrawCallVars {
     }
     
     pub fn init_shader(&mut self, cx: &mut Cx, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
-        // lets first fetch the shader from live_ptr
-        // if it doesn't exist, we should allocate and
+        if self.draw_shader.is_some(){
+            return
+        }
+
         if let Some(draw_shader_id) = cx.draw_shader_ptr_to_id.get(&draw_shader_ptr) {
             self.draw_shader = Some(DrawShader {
                 draw_shader_ptr,
@@ -210,8 +212,8 @@ impl DrawCallVars {
                 if input.id == id {
                     if values.len() == input.slots {
                         for i in 0..input.slots {
-                            let index = draw_call_vars.var_instances.len() - sh.mapping.var_instances.total_slots + input.offset + i;
-                            draw_call_vars.var_instances[input.offset + index] = values[i];
+                            let index = (draw_call_vars.var_instances.len() - sh.mapping.var_instances.total_slots) + input.offset + i;
+                            draw_call_vars.var_instances[index] = values[i];
                         }
                     }
                 }

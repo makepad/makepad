@@ -33,9 +33,8 @@ pub fn derive_live_update_hooks_impl(input: TokenStream) -> TokenStream {
                 tb.add("    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
                 tb.add("        self.draw_call_vars.update_var(cx, ptr, id);");
                 tb.add("    }");
-                tb.add("    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr)->LivePtr{");
+                tb.add("    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr){");
                 tb.add("        self.draw_call_vars.init_shader(cx, DrawShaderPtr(live_ptr), &self.geometry);");
-                tb.add("        live_ptr");
                 tb.add("    }");
                 tb.add("    fn after_live_update(&mut self, cx: &mut Cx, live_ptr:LivePtr) {");
                 tb.add("        self.draw_call_vars.init_slicer(cx);");
@@ -48,9 +47,8 @@ pub fn derive_live_update_hooks_impl(input: TokenStream) -> TokenStream {
                 tb.add("    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
                 tb.add("        self.deref_target.live_update_value_unknown(cx, id, ptr);");
                 tb.add("    }");
-                tb.add("    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr)->LivePtr{");
+                tb.add("    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr){");
                 tb.add("        self.deref_target.before_live_update(cx, live_ptr);");
-                tb.add("        live_ptr");
                 tb.add("    }");
                 tb.add("    fn after_live_update(&mut self, cx: &mut Cx, live_ptr:LivePtr) {");
                 tb.add("        self.deref_target.after_live_update(cx, live_ptr);");
@@ -144,7 +142,7 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             tb.add("impl").stream(generic.clone());
             tb.add("LiveUpdate for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             tb.add("    fn live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {");
-            tb.add("        let live_ptr = self.before_live_update(cx, live_ptr);");
+            tb.add("        self.before_live_update(cx, live_ptr);");
             tb.add("        if let Some(mut iter) = cx.shader_registry.live_registry.live_class_iterator(live_ptr) {");
             tb.add("            while let Some((id, live_ptr)) = iter.next_id(&cx.shader_registry.live_registry) {");
             tb.add("                if id == id!(rust_type) && !cx.verify_type_signature(live_ptr, Self::live_type()) {");
@@ -313,7 +311,7 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             tb.add("impl").stream(generic.clone());
             tb.add("LiveUpdate for").ident(&enum_name).stream(generic).stream(where_clause).add("{");
             tb.add("    fn live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {");
-            tb.add("        let live_ptr = self.before_live_update(cx, live_ptr);");
+            tb.add("        self.before_live_update(cx, live_ptr);");
             tb.add("        let node = cx.shader_registry.live_registry.resolve_ptr(live_ptr);");
             tb.add("        match &node.value{");
             tb.add("            LiveValue::MultiPack(pack)=>{");
