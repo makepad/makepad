@@ -1,4 +1,4 @@
-use crate::id::{Id, IdPack, IdUnpack};
+use crate::id::{Id, MultiPack, MultiUnpack};
 use crate::liveerror::{LiveError, LiveFileError, LiveErrorOrigin};
 use makepad_id_macros::*;
 use crate::livedocument::LiveDocument;
@@ -108,6 +108,11 @@ impl LiveRegistry {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
         (doc, &doc.resolve_ptr(live_ptr.local_ptr))
     }
+
+    pub fn get_origin_doc_from_token_id(&self, token_id:TokenId) -> &LiveDocument {
+        &self.live_files[token_id.file_id.to_index()].document
+    }
+
     
     pub fn live_object_iterator(&self, live_ptr: LivePtr, node_start: u32, node_count: u16) -> LiveObjectIterator {
         LiveObjectIterator {
@@ -145,13 +150,13 @@ impl LiveRegistry {
         live_error.to_live_file_error(&live_file.file, &live_file.source, live_file.line_offset)
     }
     
-    pub fn find_enum_origin(&self, start: IdPack, lhs: Id) -> Id {
+    pub fn find_enum_origin(&self, start: MultiPack, lhs: Id) -> Id {
         match start.unpack() {
-            IdUnpack::LivePtr(live_ptr) => {
+            MultiUnpack::LivePtr(live_ptr) => {
                 let doc = &self.expanded[live_ptr.file_id.to_index()];
                 let node = &doc.nodes[live_ptr.local_ptr.level][live_ptr.local_ptr.index];
                 match node.value {
-                    LiveValue::IdPack(id) => {
+                    LiveValue::MultiPack(id) => {
                         return self.find_enum_origin(id, node.id)
                     }
                     LiveValue::Class {class, ..} => {
@@ -168,18 +173,18 @@ impl LiveRegistry {
         lhs
     }
 
-    pub fn find_base_class_id(&self, class: IdPack) -> Option<IdPack> {
+    pub fn find_base_class_id(&self, class: MultiPack) -> MultiPack {
         let mut class_iter = class;
-        while let IdUnpack::LivePtr(live_ptr) = class_iter.unpack() {
+        while let MultiUnpack::LivePtr(live_ptr) = class_iter.unpack() {
             let other_node = self.resolve_ptr(live_ptr);
             if let LiveValue::Class {class, ..} = other_node.value {
                 class_iter = class;
             }
             else {
-                return None
+                return MultiPack::empty()
             }
         }
-        Some(class_iter)
+        class_iter
     }
     
     pub fn token_id_to_span(&self, token_id: TokenId) -> Span {

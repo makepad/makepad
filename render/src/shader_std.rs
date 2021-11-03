@@ -1,6 +1,6 @@
 use crate::cx::*;
 
-live_body!{
+live_register!{
     DrawShader2D: DrawShader{
         uniform camera_projection: mat4 in pass;
         uniform camera_view: mat4 in pass;

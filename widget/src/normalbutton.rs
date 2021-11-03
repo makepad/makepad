@@ -1,7 +1,7 @@
 use makepad_render::*;
 use crate::buttonlogic::*;
 
-live_body!{
+live_register!{
     use makepad_render::shader_std::*;
     use makepad_render::turtle::*;
     use makepad_render::drawquad::DrawQuad;
@@ -52,19 +52,21 @@ live_body!{
             padding: Padding {l: 16.0, t: 12.0, r: 16.0, b: 12.0}
         }
         
-        state_default: Self {
+        state_default: {
             bg: {
                 down: 0.0
                 hover: 0.0
             }
         }
-        state_default: Self {
+        
+        state_hover: {
             bg: {
                 down: 0.0
                 hover: 1.0
             }
         }
-        state_down: Self {
+        
+        state_down: {
             bg: {
                 down: 1.0
                 hover: 1.0
@@ -73,18 +75,40 @@ live_body!{
     }
 }
 
-#[derive(Live, LiveUpdateHooks)]
+#[derive(Live)]
 pub struct NormalButton {
-    #[hidden()] pub button: ButtonLogic,
+    #[hidden()] pub button_logic: ButtonLogic,
+    #[hidden(id!(state_default))] pub state_id:Id,
     #[live()] pub bg: DrawQuad,
     #[live()] pub text: DrawText,
     #[live()] pub layout: Layout
 }
 
+impl LiveUpdateHooks for NormalButton {
+    fn before_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) -> LivePtr {
+        // so we can deserialize a 'state' again, over the base.
+        // just like we do with animations.
+        
+    }
+    
+    fn after_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr){
+        //println!("{:?}", node);
+    }
+}
+
 impl NormalButton {
     
     pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
-        ButtonEvent::None
+        // OK SO.. how are we going to do this state tweening.
+        // essentially we need to look up 'state_bla'
+        // and then create a delta against the current state
+        //
+        
+        self.button_logic.handle_button_logic(cx, event, self.bg.area, | _cx, logic_event, _ | match logic_event {
+            ButtonLogicEvent::Down => (),
+            ButtonLogicEvent::Default => (),
+            ButtonLogicEvent::Over => ()
+        })
     }
     
     pub fn draw_normal_button(&mut self, cx: &mut Cx, label: &str) {

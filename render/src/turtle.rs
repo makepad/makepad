@@ -1,6 +1,6 @@
 use crate::cx::*;
 
-live_body!{
+live_register!{
     LineWrap: Enum {rust_type: {{LineWrap}}}
     Layout: Struct {rust_type: {{Layout}}}
     Walk: Struct {rust_type: {{Walk}}}

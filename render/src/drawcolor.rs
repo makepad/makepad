@@ -1,7 +1,7 @@
 use crate::cx::*;
 use crate::drawquad::DrawQuad;
 
-live_body!{
+live_register!{
     use crate::shader_std::*;
     use crate::drawquad::DrawQuad;
     DrawColor: DrawQuad {
