@@ -1,8 +1,8 @@
 use crate::liveregistry::LiveRegistry;
 use crate::livenode::LiveValue;
 use crate::livenode::LiveNode;
-use crate::id::IdPack;
-use crate::id::IdUnpack;
+use crate::id::MultiPack;
+use crate::id::MultiUnpack;
 
 //#[derive(Clone, Debug)]
 pub struct DeLiveErr {
@@ -84,8 +84,8 @@ impl DeLive for f32 {
     DeLiveErr> {
         let node = &lr.expanded[file].nodes[level][index];
         match node.value {
-            LiveValue::IdPack(id)=>{// it should be a pointer
-                if let IdUnpack::LivePtr(live_ptr) = id.unpack(){
+            LiveValue::MultiPack(id)=>{// it should be a pointer
+                if let MultiUnpack::LivePtr(live_ptr) = id.unpack(){
                     return DeLive::de_live(lr, live_ptr.file_id.to_index(), live_ptr.local_ptr.level, live_ptr.local_ptr.index)
                 }
             }

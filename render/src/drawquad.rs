@@ -1,4 +1,4 @@
-live_body!{
+live_register!{
     
     use crate::shader_std::*;
     use crate::geometrygen::GeometryQuad2D;
