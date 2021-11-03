@@ -59,7 +59,7 @@ live_register!{
             }
         }
         
-        state_hover: {
+        state_over: {
             bg: {
                 down: 0.0
                 hover: 1.0
@@ -75,40 +75,71 @@ live_register!{
     }
 }
 
+pub struct LiveStates{
+    state_id: Id,
+    live_ptr: Option<LivePtr>,
+}
+
+impl LiveStates{
+    pub fn new(state_id:Id)->Self{
+        Self{
+            state_id,
+            live_ptr: None,
+        }
+    }
+    pub fn init_live_ptr(&mut self, live_ptr: LivePtr)->bool{
+        if self.live_ptr.is_none(){
+            self.live_ptr = Some(live_ptr);
+            true
+        }
+        else{
+            false
+        }
+    }
+    pub fn state_live_ptr(&self, cx:&Cx)->Option<LivePtr>{
+        cx.scan_live_ptr(self.live_ptr.unwrap(), self.state_id)
+    }
+}
+
 #[derive(Live)]
 pub struct NormalButton {
     #[hidden()] pub button_logic: ButtonLogic,
-    #[hidden(id!(state_default))] pub state_id:Id,
+    #[hidden(LiveStates::new(id!(state_default)))] pub live_states:LiveStates,
     #[live()] pub bg: DrawQuad,
     #[live()] pub text: DrawText,
     #[live()] pub layout: Layout
 }
 
 impl LiveUpdateHooks for NormalButton {
-    fn before_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) -> LivePtr {
-        // so we can deserialize a 'state' again, over the base.
-        // just like we do with animations.
-        live_ptr
+    fn before_live_update(&mut self, _cx: &mut Cx, _live_ptr: LivePtr){
+        
     }
-    
     fn after_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr){
-        //println!("{:?}", node);
+        if self.live_states.init_live_ptr(live_ptr){
+            self.set_live_state(cx, id!(state_default));
+        }
     }
 }
 
 impl NormalButton {
     
-    pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
-        // OK SO.. how are we going to do this state tweening.
-        // essentially we need to look up 'state_bla'
-        // and then create a delta against the current state
-        //
-        
-        self.button_logic.handle_button_logic(cx, event, self.bg.area, | _cx, logic_event, _ | match logic_event {
-            ButtonLogicEvent::Down => (),
-            ButtonLogicEvent::Default => (),
-            ButtonLogicEvent::Over => ()
-        })
+    pub fn set_live_state(&mut self, cx:&mut Cx, state_id:Id){
+        self.live_states.state_id = state_id;
+        if let Some(ptr) = self.live_states.state_live_ptr(cx){
+            self.live_update(cx, ptr);
+            cx.redraw_child_area(self.bg.area);
+        }
+    }
+    
+    pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
+        let res = self.button_logic.handle_button_logic(cx, event, self.bg.area);
+        match res.state{
+            ButtonState::Down => self.set_live_state(cx, id!(state_down)),
+            ButtonState::Default => self.set_live_state(cx, id!(state_default)),
+            ButtonState::Over => self.set_live_state(cx, id!(state_over)),
+            _=>()
+        };
+        res.action
     }
     
     pub fn draw_normal_button(&mut self, cx: &mut Cx, label: &str) {

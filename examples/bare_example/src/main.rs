@@ -48,8 +48,8 @@ impl BareExampleApp {
     pub fn myui_button_clicked(&mut self, _cx: &mut Cx) {
     }
     
-    pub fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
-        
+    pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
+        self.normal_button.handle_normal_button(cx, event);
         match event {
             Event::Construct => {
             },
