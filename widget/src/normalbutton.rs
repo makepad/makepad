@@ -88,7 +88,7 @@ impl LiveUpdateHooks for NormalButton {
     fn before_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) -> LivePtr {
         // so we can deserialize a 'state' again, over the base.
         // just like we do with animations.
-        
+        live_ptr
     }
     
     fn after_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr){
