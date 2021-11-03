@@ -35,7 +35,7 @@ pub trait LiveUpdateValue{
 
 pub trait LiveUpdateHooks {
     fn live_update_value_unknown(&mut self, _cx: &mut Cx, _id: Id, _ptr: LivePtr){}
-    fn before_live_update(&mut self, _cx:&mut Cx, live_ptr: LivePtr)->LivePtr{live_ptr}
+    fn before_live_update(&mut self, _cx:&mut Cx, _live_ptr: LivePtr){}
     fn after_live_update(&mut self, _cx: &mut Cx, _live_ptr:LivePtr){}
 }
 
@@ -81,7 +81,6 @@ impl Cx {
     pub fn scan_live_ptr(&self, class_ptr:LivePtr, seek_id:Id)->Option<LivePtr>{
         if let Some(mut iter) = self.shader_registry.live_registry.live_class_iterator(class_ptr) {
             while let Some((id, live_ptr)) = iter.next_id(&self.shader_registry.live_registry) {
-                println!("{}", id);
                 if id == seek_id {
                     return Some(live_ptr)
                 }
@@ -242,7 +241,7 @@ live_primitive!(Vec4, Vec4::default(), fn live_update(&mut self, cx: &mut Cx, pt
 });
 
 live_primitive!(String, String::default(), fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
-    let (doc, node) = cx.shader_registry.live_registry.resolve_doc_ptr(ptr);
+    let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
     match node.value{
         LiveValue::String {string_start,string_count}=>{
             let origin_doc = cx.shader_registry.live_registry.get_origin_doc_from_token_id(node.token_id);
