@@ -12,9 +12,9 @@ pub struct LiveBody {
 }
 
 pub trait LiveFactory {
-    fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate>;
+    fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveComponent>;
     fn live_fields(&self, fields: &mut Vec<LiveField>);
-//    fn live_type(&self) -> LiveType;
+    //    fn live_type(&self) -> LiveType;
 }
 
 pub trait LiveNew {
@@ -23,20 +23,92 @@ pub trait LiveNew {
     fn live_register(cx: &mut Cx);
 }
 
-pub trait LiveUpdate {
-    fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr);
-//    fn _live_type(&self) -> LiveType;
+pub struct ApplyNode<'a> {
+    pub id: Id,
+    pub value: ApplyValue<'a>
 }
 
-pub trait LiveUpdateValue{
+pub enum ApplyValue<'a> {
+    Str(&'a str),
+    String(String),
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Color(u32),
+    Vec2(Vec2),
+    Vec3(Vec3),
+    Id(Id),
+    Call {target: Id},
+    Class {class: Id}, // subnodes including this one
+    Close // closes call/class
+}
+
+impl<'a> ApplyValue<'a>{
+    pub fn is_close(&self)->bool{
+        if let Self::Close = self{
+            true
+        }
+        else{
+            false
+        }
+    }
+
+    pub fn skip_value<'b,'c>(index:&mut usize, nodes: &'b [ApplyNode<'c>]) {
+        let mut stack_depth = 0;
+        loop{
+            match &nodes[*index].value{
+                ApplyValue::Call{..}=>{
+                    stack_depth += 1;
+                }
+                ApplyValue::Class{..}=>{
+                    stack_depth += 1;
+                }
+                ApplyValue::Close=>{
+                    stack_depth -= 1;
+                    if stack_depth == 0{
+                        *index += 1;
+                        return
+                    }
+                }
+                _=>()
+            }
+            *index += 1;
+        }
+    }
+}// ok so if every sub has a true 'skip' the outer loop can do it
+
+
+pub trait LiveComponentValue {
     fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr);
+    fn live_apply_value(&mut self, cx: &mut Cx,  ndex:&mut usize, nodes: &[ApplyNode]);
 }
 
+pub trait LiveComponent {
+    fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr);
+    fn live_apply(&mut self, cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]);
+    fn apply(&mut self, cx: &mut Cx, nodes: &[ApplyNode]){
+        self.live_apply(cx, &mut 0, nodes);
+    }
+}
 
-pub trait LiveUpdateHooks {
-    fn live_update_value_unknown(&mut self, _cx: &mut Cx, _id: Id, _ptr: LivePtr){}
-    fn before_live_update(&mut self, _cx:&mut Cx, _live_ptr: LivePtr){}
-    fn after_live_update(&mut self, _cx: &mut Cx, _live_ptr:LivePtr){}
+pub trait CanvasComponent : LiveComponent {
+    fn handle(&mut self, cx: &mut Cx, event:&mut Event);
+    fn draw(&mut self, cx: &mut Cx);
+    fn apply_draw(&mut self, cx: &mut Cx, nodes:&[ApplyNode]){
+        self.apply(cx, nodes);
+        self.draw(cx);
+    }
+}
+
+pub trait LiveComponentHooks {
+    fn live_update_value_unknown(&mut self, _cx: &mut Cx, _id: Id, _ptr: LivePtr) {}
+    fn live_apply_value_unknown(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
+        ApplyValue::skip_value(index, nodes);
+    }
+    fn before_live_update(&mut self, _cx: &mut Cx, _live_ptr: LivePtr) {}
+    fn after_live_update(&mut self, _cx: &mut Cx, _live_ptr: LivePtr) {}
+    fn before_live_apply(&mut self, _cx: &mut Cx, _index:usize, _nodes: &[ApplyNode]) {}
+    fn after_live_apply(&mut self, _cx: &mut Cx, _index:usize, _nodes: &[ApplyNode]) {}
 }
 
 pub enum LiveFieldKind {
@@ -67,18 +139,18 @@ impl Cx {
         crate::turtle::live_register(self);
     }
     
-    pub fn live_ptr_from_id(&self, path:&str, id:Id)->LivePtr{
+    pub fn live_ptr_from_id(&self, path: &str, id: Id) -> LivePtr {
         self.shader_registry.live_registry.live_ptr_from_path(
             ModulePath::from_str(path).unwrap(),
             &[id]
         ).unwrap()
     }
     
-    pub fn resolve_live_ptr(&self, live_ptr:LivePtr)->&LiveNode{
+    pub fn resolve_live_ptr(&self, live_ptr: LivePtr) -> &LiveNode {
         self.shader_registry.live_registry.resolve_ptr(live_ptr)
     }
     
-    pub fn scan_live_ptr(&self, class_ptr:LivePtr, seek_id:Id)->Option<LivePtr>{
+    pub fn scan_live_ptr(&self, class_ptr: LivePtr, seek_id: Id) -> Option<LivePtr> {
         if let Some(mut iter) = self.shader_registry.live_registry.live_class_iterator(class_ptr) {
             while let Some((id, live_ptr)) = iter.next_id(&self.shader_registry.live_registry) {
                 if id == seek_id {
@@ -134,7 +206,7 @@ impl Cx {
         self.live_factories.insert(live_type, factory);
     }
     
-    pub fn register_enum(&mut self, live_type:LiveType, info: LiveEnumInfo){
+    pub fn register_enum(&mut self, live_type: LiveType, info: LiveEnumInfo) {
         self.live_enums.insert(live_type, info);
     }
     
@@ -146,13 +218,14 @@ impl Cx {
 
 #[macro_export]
 macro_rules!live_primitive {
-    ( $ ty: ident, $default:expr, $ update: item) => {
-        impl LiveUpdate for $ ty {
-            $update
+    ( $ ty: ident, $ default: expr, $ update: item, $ apply: item) => {
+        impl LiveComponent for $ ty {
+            $ update
+                $ apply
         }
         impl LiveNew for $ ty {
             fn live_new(_cx: &mut Cx) -> Self {
-                $default
+                $ default
             }
             fn live_type() -> LiveType {
                 LiveType(std::any::TypeId::of::< $ ty>())
@@ -160,7 +233,7 @@ macro_rules!live_primitive {
             fn live_register(cx: &mut Cx) {
                 struct Factory();
                 impl LiveFactory for Factory {
-                    fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> where Self: Sized {
+                    fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveComponent> where Self: Sized {
                         Box::new( $ ty ::live_new(cx))
                     }
                     
@@ -175,80 +248,134 @@ macro_rules!live_primitive {
 
 live_primitive!(Id, Id::empty(), fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
-    match node.value{
-        LiveValue::MultiPack(id)=>{
-            match id.unpack(){
-                MultiUnpack::SingleId(id)=>{
+    match node.value {
+        LiveValue::MultiPack(id) => {
+            match id.unpack() {
+                MultiUnpack::SingleId(id) => {
                     *self = id
                 },
-                MultiUnpack::LivePtr(ptr)=>{
+                MultiUnpack::LivePtr(ptr) => {
                     let other_node = cx.shader_registry.live_registry.resolve_ptr(ptr);
                     *self = other_node.id;
                 }
-                _=>()
+                _ => ()
             }
         }
-        _=>()
+        _ => ()
+    }
+}, fn live_apply(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
+    match nodes[0].value{
+        ApplyValue::Id(id)=>{
+            *self = id;
+            *index += 1;
+        }
+        _=>ApplyValue::skip_value(index, nodes)
     }
 });
 
-live_primitive!(LivePtr, LivePtr{file_id:FileId(0), local_ptr:LocalPtr{level:0,index:0}}, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+live_primitive!(LivePtr, LivePtr {file_id: FileId(0), local_ptr: LocalPtr {level: 0, index: 0}}, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
-    match node.value{
-        LiveValue::MultiPack(id)=>{
-            match id.unpack(){
-                MultiUnpack::LivePtr(ptr)=>{
+    match node.value {
+        LiveValue::MultiPack(id) => {
+            match id.unpack() {
+                MultiUnpack::LivePtr(ptr) => {
                     *self = ptr;
                 }
-                _=>()
+                _ => ()
             }
         }
-        _=>()
+        _ => ()
     }
+}, fn live_apply(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
+    ApplyValue::skip_value(index, nodes)
 });
 
 live_primitive!(f32, 0.0f32, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
-    match node.value{
-        LiveValue::Int(val)=>*self = val as f32,
-        LiveValue::Float(val)=>*self = val as f32,
-        _=>()
+    match node.value {
+        LiveValue::Int(val) => *self = val as f32,
+        LiveValue::Float(val) => *self = val as f32,
+        _ => ()
     }
+}, fn live_apply(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
+    match nodes[0].value{
+        ApplyValue::Float(val)=>{
+            *self = val as f32;
+            *index += 1;
+        }
+        _=>ApplyValue::skip_value(index, nodes)
+    }    
 });
 
 live_primitive!(Vec2, Vec2::default(), fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
-    match node.value{
-        LiveValue::Vec2(v)=>*self =v,
-        _=>()
+    match node.value {
+        LiveValue::Vec2(v) => *self = v,
+        _ => ()
     }
+}, fn live_apply(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
+    match nodes[0].value{
+        ApplyValue::Vec2(val)=>{
+            *self = val;
+            *index += 1;
+        }
+        _=>ApplyValue::skip_value(index, nodes)
+    }        
 });
 
 live_primitive!(Vec3, Vec3::default(), fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
-    match node.value{
-        LiveValue::Vec3(v)=>*self =v,
-        _=>()
+    match node.value {
+        LiveValue::Vec3(v) => *self = v,
+        _ => ()
     }
+}, fn live_apply(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
+    match nodes[0].value{
+        ApplyValue::Vec3(val)=>{
+            *self = val;
+            *index += 1;
+        }
+        _=>ApplyValue::skip_value(index, nodes)
+    }       
 });
 
 live_primitive!(Vec4, Vec4::default(), fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
-    match node.value{
-        LiveValue::Color(v)=>*self = Vec4::from_u32(v),
-        _=>()
+    match node.value {
+        LiveValue::Color(v) => *self = Vec4::from_u32(v),
+        _ => ()
     }
+}, fn live_apply(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
+    match nodes[0].value{
+        ApplyValue::Color(v)=>{
+            *self = Vec4::from_u32(v);
+            *index += 1;
+        }
+        _=>ApplyValue::skip_value(index, nodes)
+    }       
 });
 
 live_primitive!(String, String::default(), fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
-    match node.value{
-        LiveValue::String {string_start,string_count}=>{
+    match node.value {
+        LiveValue::String {string_start, string_count} => {
             let origin_doc = cx.shader_registry.live_registry.get_origin_doc_from_token_id(node.token_id);
             origin_doc.get_string(string_start, string_count, self);
         }
-        _=>()
+        _ => ()
     }
+}, fn live_apply(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
+    match &nodes[0].value{
+        ApplyValue::Str(v)=>{
+            *self = v.to_string();
+            *index += 1;
+        }
+        ApplyValue::String(v)=>{
+            *self = v.clone();
+            *index += 1;
+        }
+        _=>ApplyValue::skip_value(index, nodes)
+    }       
 });
 
 /*

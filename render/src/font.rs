@@ -107,13 +107,13 @@ live_register!{
     }
 }
 
-#[derive(Clone, Live)]
+#[derive(Clone, LiveComponent)]
 pub struct Font {
     #[hidden()] pub font_id: Option<usize>,
     #[live()] pub path: String
 }
 
-impl LiveUpdateHooks for Font {
+impl LiveComponentHooks for Font {
     fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
         self.font_id = Some(cx.get_font_by_path(&self.path));
     }
@@ -169,7 +169,7 @@ impl Cx {
 }
 
 
-#[derive(Live, LiveUpdateHooks)]
+#[derive(LiveComponent, LiveComponentHooks)]
 #[repr(C)]
 pub struct DrawTrapezoidText {
     #[hidden()] pub trapezoidator: Trapezoidator,

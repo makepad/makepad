@@ -127,11 +127,6 @@ impl Id{
     
     // from https://nullprogram.com/blog/2018/07/31/
     // i have no idea what im doing with start value and finalisation.
-    pub const fn from_str_unchecked(id_str: &str) -> Self {
-        let bytes = id_str.as_bytes();
-        Self::from_bytes(bytes, 0, bytes.len())
-    }
-    
     pub const fn from_bytes(id_bytes: &[u8], start:usize, end:usize) -> Self {
         //let id_len = id_bytes.len();
         let mut x = 0xd6e8_feb8_6659_fd93u64;
@@ -146,6 +141,24 @@ impl Id{
             i += 1;
         }
         return Self(x & 0x7fff_ffff_ffff_ffff) // leave the first bit
+    }
+
+    // merges 2 ids in a nonsymmetric fashion
+    pub const fn add_id(&self, id: Id) -> Self {
+        //let id_len = id_bytes.len();
+        let mut x = id.0;
+        x = x.overflowing_add(self.0).0;
+        x ^= x >> 32;
+        x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+        x ^= x >> 32;
+        x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+        x ^= x >> 32;
+        return Self(x & 0x7fff_ffff_ffff_ffff) // leave the first bit
+    }
+
+    pub const fn from_str_unchecked(id_str: &str) -> Self {
+        let bytes = id_str.as_bytes();
+        Self::from_bytes(bytes, 0, bytes.len())
     }
     
     pub fn from_str(id_str: &str)->Result<Id, String>{
