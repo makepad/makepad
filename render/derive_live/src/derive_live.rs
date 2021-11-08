@@ -3,7 +3,7 @@ use proc_macro::{TokenStream};
 use crate::macro_lib::*;
 use crate::id::*;
 
-pub fn derive_live_update_hooks_impl(input: TokenStream) -> TokenStream {
+pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
     let _main_attribs = parser.eat_attributes();
@@ -29,9 +29,12 @@ pub fn derive_live_update_hooks_impl(input: TokenStream) -> TokenStream {
             
             if let Some(_) = draw_call_vars{
                 tb.add("impl").stream(generic.clone());
-                tb.add("LiveUpdateHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+                tb.add("LiveComponentHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
                 tb.add("    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
-                tb.add("        self.draw_call_vars.update_var(cx, ptr, id);");
+                tb.add("        self.draw_call_vars.update_value(cx, ptr, id);");
+                tb.add("    }");
+                tb.add("    fn live_apply_value_unknown(&mut self, cx: &mut Cx, index:&mut usize, nodes:&[ApplyNode]) {");
+                tb.add("        self.draw_call_vars.apply_value(cx, index, nodes);");
                 tb.add("    }");
                 tb.add("    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr){");
                 tb.add("        self.draw_call_vars.init_shader(cx, DrawShaderPtr(live_ptr), &self.geometry);");
@@ -43,9 +46,12 @@ pub fn derive_live_update_hooks_impl(input: TokenStream) -> TokenStream {
             }
             else if let Some(_) = deref_target {
                 tb.add("impl").stream(generic.clone());
-                tb.add("LiveUpdateHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+                tb.add("LiveComponentHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
                 tb.add("    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
                 tb.add("        self.deref_target.live_update_value_unknown(cx, id, ptr);");
+                tb.add("    }");
+                tb.add("    fn live_apply_value_unknown(&mut self, cx: &mut Cx, index:&mut usize, nodes:&[ApplyNode]) {");
+                tb.add("        self.deref_target.live_apply_value_unknown(cx, index, nodes);");
                 tb.add("    }");
                 tb.add("    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr){");
                 tb.add("        self.deref_target.before_live_update(cx, live_ptr);");
@@ -57,7 +63,7 @@ pub fn derive_live_update_hooks_impl(input: TokenStream) -> TokenStream {
             }
             else{
                 tb.add("impl").stream(generic.clone());
-                tb.add("LiveUpdateHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
+                tb.add("LiveComponentHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
             }
             
             return tb.end();
@@ -68,14 +74,14 @@ pub fn derive_live_update_hooks_impl(input: TokenStream) -> TokenStream {
             let generic = parser.eat_generic();
             let where_clause = parser.eat_where_clause(None);
             tb.add("impl").stream(generic.clone());
-                tb.add("LiveUpdateHooks for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
+                tb.add("LiveComponentHooks for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
             return tb.end();
         }
     }
     return parser.unexpected()
 }
 
-pub fn derive_live_impl(input: TokenStream) -> TokenStream {
+pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
     let _main_attribs = parser.eat_attributes();
@@ -116,11 +122,10 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
                 tb.add("std::ops::DerefMut for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
                 tb.add("    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.deref_target}");
                 tb.add("}");
-                
             }
 
             tb.add("impl").stream(generic.clone());
-            tb.add("LiveUpdateValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("LiveComponentValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             tb.add("    fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
             tb.add("        match id {");
             for field in &fields{
@@ -134,13 +139,31 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             else{
                 tb.add("        _=> self.live_update_value_unknown(cx, id, ptr)");
             }
-            
             tb.add("        }");
             tb.add("    }");
+            
+            tb.add("    fn live_apply_value(&mut self, cx: &mut Cx, index:&mut usize, nodes:&[ApplyNode]) {");
+            tb.add("        match nodes[*index].id {");
+            for field in &fields{
+                if field.attrs[0].name == "live"{
+                    tb.add("    Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".live_apply(cx, index, nodes),");
+                }
+            }
+            if deref_target.is_some(){
+                tb.add("        _=> self.deref_target.live_apply_value(cx, index, nodes)");
+            }
+            else{
+                tb.add("        _=> self.live_apply_value_unknown(cx, index, nodes)");
+            }
+            tb.add("        }");
+            tb.add("    }");
+            
             tb.add("}");
             
+            
+            
             tb.add("impl").stream(generic.clone());
-            tb.add("LiveUpdate for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("LiveComponent for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             tb.add("    fn live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {");
             tb.add("        self.before_live_update(cx, live_ptr);");
             tb.add("        if let Some(mut iter) = cx.shader_registry.live_registry.live_class_iterator(live_ptr) {");
@@ -152,6 +175,19 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             tb.add("            }");
             tb.add("        }");
             tb.add("        self.after_live_update(cx, live_ptr);");
+            tb.add("    }");
+            tb.add("    fn live_apply(&mut self, cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {");
+            tb.add("        let start_index = *index;");
+            tb.add("        self.before_live_apply(cx, start_index, nodes);");
+            tb.add("        *index += 1;"); // skip the class
+            tb.add("        loop{");
+            tb.add("            if nodes[*index].value.is_close(){");
+            tb.add("                *index += 1;"); 
+            tb.add("                break;");
+            tb.add("            }");
+            tb.add("            self.live_apply_value(cx, index, nodes);");
+            tb.add("        }");
+            tb.add("        self.after_live_apply(cx, start_index, nodes);");
             tb.add("    }");
             tb.add("}");
             
@@ -165,7 +201,7 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             tb.add("        struct Factory();");
             tb.add("        impl LiveFactory for Factory {");
             
-            tb.add("            fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> {");
+            tb.add("            fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveComponent> {");
             tb.add("                Box::new(").ident(&struct_name).add(" ::live_new(cx))");
             tb.add("            }");
             
@@ -309,7 +345,8 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             tb.add("}");
             
             tb.add("impl").stream(generic.clone());
-            tb.add("LiveUpdate for").ident(&enum_name).stream(generic).stream(where_clause).add("{");
+            tb.add("LiveComponent for").ident(&enum_name).stream(generic).stream(where_clause).add("{");
+
             tb.add("    fn live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {");
             tb.add("        self.before_live_update(cx, live_ptr);");
             tb.add("        let node = cx.shader_registry.live_registry.resolve_ptr(live_ptr);");
@@ -342,7 +379,7 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
                     for field in fields{
                         tb.ident(&field.name).add(":").ident(&format!("prefix_{}",field.name)).add(",");
                     }
-                    tb.add("} = self{");
+                    tb.add("                } = self {");
                     tb.add("                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start, *node_count);");
                     tb.add("                    while let Some((prop_id, live_ptr)) = iter.next_id(&cx.shader_registry.live_registry) {");
                     tb.add("                        match prop_id{");
@@ -383,7 +420,7 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
                     for i in 0..args.len(){
                         tb.ident(&format!("var{}",i)).add(",");
                     }
-                    tb.add(") = self{");
+                    tb.add("                    ) = self {");
                     tb.add("                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start, *node_count);");
                     tb.add("                    while let Some((count, live_ptr)) = iter.next_prop() {");
                     tb.add("                        match count{");
@@ -411,6 +448,117 @@ pub fn derive_live_impl(input: TokenStream) -> TokenStream {
             tb.add("        }");
             tb.add("        self.after_live_update(cx, live_ptr);");
             tb.add("    }");
+            
+            tb.add("    fn live_apply(&mut self, cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {");
+            tb.add("        let start_index = *index;");
+            tb.add("        self.before_live_apply(cx, start_index, nodes);");
+            tb.add("        match &nodes[start_index].value{");
+            tb.add("            ApplyValue::Id(id)=>{");
+            tb.add("                match id{");
+            for item in &items{
+                if let EnumKind::Bare = item.kind{
+                    tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>*self = Self::").ident(&item.name).add(",");
+                }
+            }
+            tb.add("                    _=>{");
+            tb.add("                        println!(").string("Enum Wrapping cannot find id {}").add(", id);");
+            tb.add("                        ApplyValue::skip_value(index, nodes);");
+            tb.add("                    }");
+            tb.add("                }");
+            tb.add("            },");
+
+            tb.add("            ApplyValue::Class{class, ..}=>{");
+            tb.add("                match class{");
+            for item in &items{
+                if let EnumKind::Named(fields) = &item.kind{
+                    tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>{");
+                    tb.add("                if let Self::").ident(&item.name).add("{..} = self{}");
+                    tb.add("                else{*self = ");
+                    item.gen_new(&mut tb);
+                    tb.add("                }");
+                    tb.add("                if let Self::").ident(&item.name).add("{");
+                    for field in fields{
+                        tb.ident(&field.name).add(":").ident(&format!("prefix_{}",field.name)).add(",");
+                    }
+                    tb.add("                } = self {");
+                    tb.add("                    *index += 1;"); // skip the class
+                    tb.add("                    loop{");
+                    tb.add("                        if nodes[*index].value.is_close(){");
+                    tb.add("                            *index += 1;"); 
+                    tb.add("                            break;");
+                    tb.add("                        }");
+                    tb.add("                        match nodes[*index].id{");
+                    for field in fields{
+                        tb.add("                        Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>(*");
+                        tb.ident(&format!("prefix_{}",field.name)).add(").live_apply(cx, index, nodes),");
+                    }
+                    tb.add("                            _=>{");
+                    tb.add("                                println!(").string("Enum Wrapping cannot find named struct {} property {}").add(", nodes[start_index].id, nodes[*index].id);");
+                    tb.add("                                ApplyValue::skip_value(index, nodes);");
+                    tb.add("                            }");
+                    tb.add("                        }");
+                    tb.add("                    }");
+                    tb.add("                }");
+                    tb.add("            }");
+                }
+            }
+            tb.add("                    _=>{");
+            tb.add("                        println!(").string("Enum Wrapping cannot find named struct {}").add(", nodes[start_index].id);");
+            tb.add("                        ApplyValue::skip_value(index, nodes);");
+            tb.add("                    }");
+            tb.add("                }");
+            tb.add("            }");
+            tb.add("            ApplyValue::Call{target, ..}=>{");
+            tb.add("                match target{");
+            
+            for item in &items{
+                if let EnumKind::Tuple(args) = &item.kind{
+                    tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>{");
+                    
+                    tb.add("                if let Self::").ident(&item.name).add("{..} = self{}");
+                    tb.add("                else{*self = ");
+                    item.gen_new(&mut tb);
+                    tb.add("                }");
+                    
+                    tb.add("                if let Self::").ident(&item.name).add("(");
+                    for i in 0..args.len(){
+                        tb.ident(&format!("var{}",i)).add(",");
+                    }
+                    tb.add("                ) = self{");
+                    tb.add("                    *index += 1;"); // skip the class
+                    tb.add("                    loop{");
+                    tb.add("                        if nodes[*index].value.is_close(){");
+                    tb.add("                            *index += 1;"); 
+                    tb.add("                            break;");
+                    tb.add("                        }");
+                    tb.add("                        let arg = *index - start_index - 1;");
+                    tb.add("                        match arg{");
+                    for i in 0..args.len(){
+                        tb.add("                        ").unsuf_usize(i).add("=>(*").ident(&format!("var{}",i)).add(").live_apply(cx, index, nodes),");
+                    }
+                    tb.add("                            _=>{");
+                    tb.add("                                println!(").string("Enum Wrapping cannot find tuple struct {} arg {}").add(", nodes[start_index].id, arg);");
+                    tb.add("                                ApplyValue::skip_value(index, nodes);");
+                    tb.add("                            }");
+                    tb.add("                        }");
+                    tb.add("                    }");
+                    tb.add("                }");
+                    tb.add("            }");
+                }
+            }
+            tb.add("                    _=>{");
+            tb.add("                        println!(").string("Enum Wrapping cannot find tuple struct {}").add(", nodes[start_index].id);");
+            tb.add("                        ApplyValue::skip_value(index, nodes);");
+            tb.add("                    }");
+            tb.add("                }");
+            tb.add("            }");
+            tb.add("            _=>{");
+            tb.add("               ApplyValue::skip_value(index, nodes);");
+            tb.add("            }");
+            tb.add("        }");
+            tb.add("        self.after_live_apply(cx, start_index, nodes);");
+            tb.add("    }");
+            
             tb.add("}");
             
             //tb.eprint();

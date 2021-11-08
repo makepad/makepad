@@ -38,7 +38,7 @@ live_register!{
 
 use crate::cx::*;
 
-#[derive(Live, LiveUpdateHooks)]
+#[derive(LiveComponent, LiveComponentHooks)]
 #[repr(C)]
 pub struct DrawQuad {
     #[hidden()] pub area: Area,
