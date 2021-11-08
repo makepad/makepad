@@ -14,7 +14,7 @@ live_register!{
     }
 }
 
-#[derive(Live, LiveUpdateHooks)]
+#[derive(LiveComponent, LiveComponentHooks)]
 #[repr(C)]
 pub struct DrawColor {
     #[live()] pub deref_target: DrawQuad,
