@@ -195,8 +195,11 @@ impl DrawCallVars {
             }
         }
     }
+
+    pub fn apply_value(&mut self, _cx: &mut Cx, index:&mut usize, nodes:&[ApplyNode]) {
+    }
     
-    pub fn update_var(&mut self, cx: &mut Cx, value_ptr: LivePtr, id: Id) {
+    pub fn update_value(&mut self, cx: &mut Cx, value_ptr: LivePtr, id: Id) {
         fn store_values(cx: &Cx, draw_shader: DrawShader, id: Id, values: &[f32], draw_call_vars: &mut DrawCallVars) {
             let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
             for input in &sh.mapping.user_uniforms.inputs {

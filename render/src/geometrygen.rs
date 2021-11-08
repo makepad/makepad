@@ -11,7 +11,7 @@ live_register!{
     }
 }
 
-impl LiveUpdateHooks for GeometryQuad2D {
+impl LiveComponentHooks for GeometryQuad2D {
     fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
         GeometryGen::from_quad_2d(
             self.x1,
@@ -36,7 +36,7 @@ impl GeometryFields for GeometryQuad2D {
     }
 }
 
-#[derive(Live)]
+#[derive(LiveComponent)]
 pub struct GeometryQuad2D {
     #[hidden(cx.new_geometry())] pub geometry: Geometry,
     #[live(0.0)] pub x1: f32,

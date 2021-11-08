@@ -1,12 +1,13 @@
 use makepad_render::*;
 use crate::buttonlogic::*;
 
+
 live_register!{
     use makepad_render::shader_std::*;
     use makepad_render::turtle::*;
     use makepad_render::drawquad::DrawQuad;
     use makepad_render::drawtext::DrawText;
-    
+
     NormalButton: Component {
         rust_type: {{NormalButton}}
         bg: DrawQuad {
@@ -16,7 +17,7 @@ live_register!{
             
             const shadow: float = 3.0
             const border_radius: float = 2.5
-            
+
             fn pixel(self) -> vec4 {
                 let cx = Sdf2d::viewport(self.pos * self.rect_size);
                 cx.box(
@@ -41,7 +42,7 @@ live_register!{
         }
         
         text: DrawText {}
-        
+
         layout: Layout {
             align: Align {fx: 0.5, fy: 0.5},
             walk: Walk {
@@ -54,7 +55,7 @@ live_register!{
         
         state_default: {
             bg: {
-                down: 0.0
+                down: 0.0,
                 hover: 0.0
             }
         }
@@ -74,19 +75,33 @@ live_register!{
         }
     }
 }
+/*
 
-pub struct LiveStates{
-    state_id: Id,
-    live_ptr: Option<LivePtr>,
+pub struct LiveAnim{
+    idxor: Id,
+    value: [f32;4]
 }
 
-impl LiveStates{
+pub struct LiveAnimator{
+    state_id: Id,
+    live_ptr: Option<LivePtr>,
+    buffer_static: [LiveAnim;4],
+    buffer_dynamic: Vec<LiveAnim>,
+}
+
+impl LiveAnimator{
+    pub fn fetch_slot(&mut self, idxor:Id)->&mut [f32;4]{
+        // we find our idxor, either from static buffer or dynamic buffer
+        
+    }
+    
     pub fn new(state_id:Id)->Self{
         Self{
             state_id,
             live_ptr: None,
         }
     }
+    
     pub fn init_live_ptr(&mut self, live_ptr: LivePtr)->bool{
         if self.live_ptr.is_none(){
             self.live_ptr = Some(live_ptr);
@@ -96,39 +111,61 @@ impl LiveStates{
             false
         }
     }
+    
+    // ok so now what.
     pub fn state_live_ptr(&self, cx:&Cx)->Option<LivePtr>{
         cx.scan_live_ptr(self.live_ptr.unwrap(), self.state_id)
     }
+}*/
+/*
+// OK SO. we have this recursive live_animate fn
+// what about doing animation timelines in our DSL
+// we just need a vec with 'first' keys
+pub struct TestStruct{
+    pub live_animator:LiveAnimator,
+    pub value:f32
 }
 
-#[derive(Live)]
-pub struct NormalButton {
-    #[hidden()] pub button_logic: ButtonLogic,
-    #[hidden(LiveStates::new(id!(state_default)))] pub live_states:LiveStates,
-    #[live()] pub bg: DrawQuad,
-    #[live()] pub text: DrawText,
-    #[live()] pub layout: Layout
+impl LiveAnimateValue for TestStruct{
 }
 
-impl LiveUpdateHooks for NormalButton {
-    fn before_live_update(&mut self, _cx: &mut Cx, _live_ptr: LivePtr){
+impl LiveAnimate for TestStruct{
+    fn live_animate(&mut self, cx:&mut Cx, slot_id:&mut usize, animator:Option<&mut LiveAnimator>){
         
     }
-    fn after_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr){
-        if self.live_states.init_live_ptr(live_ptr){
-            self.set_live_state(cx, id!(state_default));
-        }
+}*/
+
+#[derive(LiveComponent, LiveComponentHooks)]
+pub struct NormalButton {
+    #[hidden()] pub button_logic: ButtonLogic,
+    //#[hidden(Animator::new(id!(state_default)))] pub animator:Animator,
+    #[live()] pub bg: DrawQuad,
+    #[live()] pub text: DrawText,
+    #[live()] pub layout: Layout,
+    #[live()] pub label: String
+}
+
+impl CanvasComponent for NormalButton{
+    fn handle(&mut self, cx: &mut Cx, event:&mut Event){
+        self.handle_normal_button(cx, event);
+    }
+    
+    fn draw(&mut self, cx: &mut Cx){
+        self.bg.begin_quad(cx, self.layout);
+        self.text.draw_text_walk(cx, &self.label);
+        self.bg.end_quad(cx);
     }
 }
+
 
 impl NormalButton {
     
-    pub fn set_live_state(&mut self, cx:&mut Cx, state_id:Id){
-        self.live_states.state_id = state_id;
+    pub fn set_live_state(&mut self, _cx:&mut Cx, _state_id:Id){
+       /* self.live_states.state_id = state_id;
         if let Some(ptr) = self.live_states.state_live_ptr(cx){
             self.live_update(cx, ptr);
             cx.redraw_child_area(self.bg.area);
-        }
+        }*/
     }
     
     pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
