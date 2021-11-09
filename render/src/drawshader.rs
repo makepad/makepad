@@ -197,7 +197,8 @@ impl DrawCallVars {
     }
 
     pub fn apply_value(&mut self, _cx: &mut Cx, index:&mut usize, nodes:&[GenNode]) {
-    }
+        GenValue::skip_value(index, nodes);
+    } 
     
     pub fn update_value(&mut self, cx: &mut Cx, value_ptr: LivePtr, id: Id) {
         fn store_values(cx: &Cx, draw_shader: DrawShader, id: Id, values: &[f32], draw_call_vars: &mut DrawCallVars) {
