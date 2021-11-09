@@ -75,8 +75,14 @@ live_register!{
         }
     }
 }
-/*
 
+// ok so what do we do. we need a 'Live' tree walk to gen walk
+// lets start with that.
+// then we can try to compare them maybe error out if it doesnt align
+// then tween them, set up the nextframe / animation system
+// then parse actual timelines and process those
+
+/*
 pub struct LiveAnim{
     idxor: Id,
     value: [f32;4]
@@ -84,7 +90,7 @@ pub struct LiveAnim{
 
 pub struct LiveAnimator{
     state_id: Id,
-    live_ptr: Option<LivePtr>,
+    live_ptr: Vec<GenNode>,
     buffer_static: [LiveAnim;4],
     buffer_dynamic: Vec<LiveAnim>,
 }
@@ -135,14 +141,28 @@ impl LiveAnimate for TestStruct{
     }
 }*/
 
-#[derive(LiveComponent, LiveComponentHooks)]
+#[derive(Default)]
+pub struct Animator{
+    pub state_id: Id,
+    pub live_ptr: Option<LivePtr>,
+    pub current_state: Vec<GenNode>,
+}
+
+#[derive(LiveComponent)]
 pub struct NormalButton {
     #[hidden()] pub button_logic: ButtonLogic,
-    //#[hidden(Animator::new(id!(state_default)))] pub animator:Animator,
+    #[hidden()] pub animator:Animator,
     #[live()] pub bg: DrawQuad,
     #[live()] pub text: DrawText,
     #[live()] pub layout: Layout,
     #[live()] pub label: String
+}
+
+impl LiveComponentHooks for NormalButton{
+    fn after_live_update(&mut self, _cx: &mut Cx, live_ptr: LivePtr) {
+        // store this live ptr we got updated from
+        self.animator.live_ptr = Some(live_ptr);
+    }
 }
 
 impl CanvasComponent for NormalButton{
@@ -157,11 +177,16 @@ impl CanvasComponent for NormalButton{
     }
 }
 
-
 impl NormalButton {
     
-    pub fn set_live_state(&mut self, _cx:&mut Cx, _state_id:Id){
-       /* self.live_states.state_id = state_id;
+    pub fn set_live_state(&mut self, cx:&mut Cx, state_id:Id){
+        let sub_ptr = cx.scan_live_ptr(self.animator.live_ptr.unwrap(), state_id);
+        // ok so lets turn a node into a Gen
+        let state = GenNode::new_from_live_node(cx, sub_ptr.unwrap());
+        self.apply(cx, &state);
+        cx.redraw_child_area(self.bg.area);
+        // OK so 
+        /* self.live_states.state_id = state_id;
         if let Some(ptr) = self.live_states.state_live_ptr(cx){
             self.live_update(cx, ptr);
             cx.redraw_child_area(self.bg.area);
