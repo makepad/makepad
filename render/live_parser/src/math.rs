@@ -2,7 +2,7 @@
 use makepad_microserde::*;
 use std::fmt;
 use std::ops;
-use crate::colors::hex_bytes_to_u32;
+use crate::id::hex_bytes_to_u32;
 use crate::util::PrettyPrintedF32;
 
 #[derive(Clone, Copy, Default, SerBin, DeBin, PartialEq, Debug)]

@@ -9,7 +9,6 @@ pub fn gen_impl(input:TokenStream)->TokenStream{
     fn parse_level(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenStream>{
         // key values
         while !parser.eat_eot(){
-            
             let label = parser.expect_any_ident()?;
             let label_id = Id::from_str(&label).unwrap().0;
             // ok 
@@ -21,7 +20,7 @@ pub fn gen_impl(input:TokenStream)->TokenStream{
                 parser.eat_punct(',');
             }
             else {
-                parser.expect_punct(':')?;
+                parser.expect_punct_any(':')?;
                 // ok now for the value
                 tb.add("GenNode{id:Id(").suf_u64(label_id).add("),value:");
                 if parser.is_paren(){
@@ -73,15 +72,29 @@ pub fn gen_impl(input:TokenStream)->TokenStream{
                     else{
                         return Err(error("Expected {}"));
                     }
-                }
+                } 
                 else if parser.is_brace(){ // add value types here
                     tb.add("GenValue::ClassBare},");
                     parser.open_group();
                     parse_level(parser,tb)?;
                     parser.eat_punct(',');
                 }
-                else if parser.is_punct('#'){ // coLor!
-                    todo!()
+                else if parser.eat_punct('#'){ // coLor!
+                    // ok we now eat an ident
+                    let color = parser.expect_any_ident()?;
+                    let bytes = color.as_bytes();
+                    let val = if bytes[0] == 'x' as u8{
+                        hex_bytes_to_u32(&bytes[1..])
+                    }
+                    else{
+                        hex_bytes_to_u32(bytes)
+                    };
+                    if let Ok(val) = val{
+                        tb.add("GenValue::Color(").suf_u32(val).add(")},");
+                    }
+                    else{
+                        return Err(error(&format!("Can't parse color {}", color)));
+                    }
                 }
                 else if let Some(lit) = parser.eat_literal(){
                     // ok so.. bool float string or int..
@@ -118,6 +131,7 @@ pub fn gen_impl(input:TokenStream)->TokenStream{
     }
 
     tb.add("&[GenNode{id:Id(0),value:GenValue::ClassBare},");
+
     if let Err(e) = parse_level(&mut parser, &mut tb){
         return e
     };
