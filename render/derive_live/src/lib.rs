@@ -27,8 +27,8 @@ pub fn derive_live_component_hooks(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
-pub fn nodes(input: TokenStream) -> TokenStream {
-    nodes_impl(input)
+pub fn gen(input: TokenStream) -> TokenStream {
+    gen_impl(input)
 }
 
 #[proc_macro]

@@ -150,6 +150,9 @@ impl TokenBuilder {
     pub fn suf_u16(&mut self, val: u16) -> &mut Self {self.extend(TokenTree::from(Literal::u16_suffixed(val)))}
     pub fn suf_u64(&mut self, val: u64) -> &mut Self {self.extend(TokenTree::from(Literal::u64_suffixed(val)))}
     pub fn unsuf_f32(&mut self, val: f32) -> &mut Self {self.extend(TokenTree::from(Literal::f32_unsuffixed(val)))}
+    pub fn unsuf_f64(&mut self, val: f64) -> &mut Self {self.extend(TokenTree::from(Literal::f64_unsuffixed(val)))}
+    pub fn unsuf_i64(&mut self, val: i64) -> &mut Self {self.extend(TokenTree::from(Literal::i64_unsuffixed(val)))}
+
     pub fn chr(&mut self, val: char) -> &mut Self {self.extend(TokenTree::from(Literal::character(val)))}
     pub fn _lit(&mut self, lit: Literal) -> &mut Self {self.extend(TokenTree::from(lit))}
     
@@ -352,6 +355,19 @@ impl TokenParser {
         }
         tb.end()
     }
+
+    pub fn eat_level_or_punct(&mut self, what:char) -> TokenStream {
+        let mut tb = TokenBuilder::new();
+        while !self.eat_eot() {
+            if self.is_punct(what){
+                self.advance();
+                return tb.end();
+            }
+            tb.extend(self.current.clone().unwrap());
+            self.advance();
+        }
+        tb.end()
+    }
     
     pub fn eat_ident(&mut self, what: &str) -> bool {
         // check if our current thing is an ident, ifso eat it.
@@ -397,13 +413,24 @@ impl TokenParser {
             if current.as_char() == what && (what == '>' || current.spacing() == Spacing::Alone) {
                 return true
             }
-            else {
-                return false
+        }
+        return false
+    }
+    
+    pub fn eat_double_colon_destruct(&mut self) -> bool {
+        // check if our punct is multichar.
+        if let Some(TokenTree::Punct(current)) = &self.current {
+            if current.as_char() == ':' && current.spacing() == Spacing::Joint{
+                self.advance();
+                if let Some(TokenTree::Punct(current)) = &self.current {
+                    if current.as_char() == ':' && current.spacing() == Spacing::Alone{
+                        self.advance();
+                        return true
+                    }
+                }
             }
         }
-        else {
-            return false
-        }
+        return false
     }
     
     pub fn eat_sep(&mut self) -> bool {
@@ -429,6 +456,16 @@ impl TokenParser {
         }
         false
     }
+
+    pub fn expect_punct(&mut self, what: char) -> Result<(),TokenStream> {
+        if self.is_punct(what) {
+            self.advance();
+            return Ok(())
+        }
+        else{
+            Err(error(&format!("Expected punct {}", what)))
+        }
+    }
     
     pub fn eat_any_punct(&mut self) -> Option<String> {
         let mut out = String::new();
@@ -449,6 +486,15 @@ impl TokenParser {
             return ret
         }
         return None
+    }
+    
+    pub fn expect_any_ident(&mut self) -> Result<String, TokenStream> {
+        if let Some(TokenTree::Ident(ident)) = &self.current {
+            let ret = ident.to_string();
+            self.advance();
+            return Ok(ret)
+        }
+        Err(error(&format!("Expected any ident")))
     }
     
     pub fn eat_ident_path(&mut self) -> Option<TokenStream> {
