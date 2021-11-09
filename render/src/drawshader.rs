@@ -196,7 +196,7 @@ impl DrawCallVars {
         }
     }
 
-    pub fn apply_value(&mut self, _cx: &mut Cx, index:&mut usize, nodes:&[ApplyNode]) {
+    pub fn apply_value(&mut self, _cx: &mut Cx, index:&mut usize, nodes:&[GenNode]) {
     }
     
     pub fn update_value(&mut self, cx: &mut Cx, value_ptr: LivePtr, id: Id) {
