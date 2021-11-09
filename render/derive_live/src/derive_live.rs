@@ -33,7 +33,7 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
                 tb.add("    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
                 tb.add("        self.draw_call_vars.update_value(cx, ptr, id);");
                 tb.add("    }");
-                tb.add("    fn live_apply_value_unknown(&mut self, cx: &mut Cx, index:&mut usize, nodes:&[ApplyNode]) {");
+                tb.add("    fn apply_value_unknown(&mut self, cx: &mut Cx, index:&mut usize, nodes:&[GenNode]) {");
                 tb.add("        self.draw_call_vars.apply_value(cx, index, nodes);");
                 tb.add("    }");
                 tb.add("    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr){");
@@ -50,8 +50,8 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
                 tb.add("    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
                 tb.add("        self.deref_target.live_update_value_unknown(cx, id, ptr);");
                 tb.add("    }");
-                tb.add("    fn live_apply_value_unknown(&mut self, cx: &mut Cx, index:&mut usize, nodes:&[ApplyNode]) {");
-                tb.add("        self.deref_target.live_apply_value_unknown(cx, index, nodes);");
+                tb.add("    fn apply_value_unknown(&mut self, cx: &mut Cx, index:&mut usize, nodes:&[GenNode]) {");
+                tb.add("        self.deref_target.apply_value_unknown(cx, index, nodes);");
                 tb.add("    }");
                 tb.add("    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr){");
                 tb.add("        self.deref_target.before_live_update(cx, live_ptr);");
@@ -142,18 +142,18 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        }");
             tb.add("    }");
             
-            tb.add("    fn live_apply_value(&mut self, cx: &mut Cx, index:&mut usize, nodes:&[ApplyNode]) {");
+            tb.add("    fn apply_value(&mut self, cx: &mut Cx, index:&mut usize, nodes:&[GenNode]) {");
             tb.add("        match nodes[*index].id {");
             for field in &fields{
                 if field.attrs[0].name == "live"{
-                    tb.add("    Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".live_apply(cx, index, nodes),");
+                    tb.add("    Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".apply_index(cx, index, nodes),");
                 }
             }
             if deref_target.is_some(){
-                tb.add("        _=> self.deref_target.live_apply_value(cx, index, nodes)");
+                tb.add("        _=> self.deref_target.apply_value(cx, index, nodes)");
             }
             else{
-                tb.add("        _=> self.live_apply_value_unknown(cx, index, nodes)");
+                tb.add("        _=> self.apply_value_unknown(cx, index, nodes)");
             }
             tb.add("        }");
             tb.add("    }");
@@ -176,18 +176,18 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        }");
             tb.add("        self.after_live_update(cx, live_ptr);");
             tb.add("    }");
-            tb.add("    fn live_apply(&mut self, cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {");
+            tb.add("    fn apply_index(&mut self, cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {");
             tb.add("        let start_index = *index;");
-            tb.add("        self.before_live_apply(cx, start_index, nodes);");
+            tb.add("        self.before_apply_index(cx, start_index, nodes);");
             tb.add("        *index += 1;"); // skip the class
             tb.add("        loop{");
             tb.add("            if nodes[*index].value.is_close(){");
             tb.add("                *index += 1;"); 
             tb.add("                break;");
             tb.add("            }");
-            tb.add("            self.live_apply_value(cx, index, nodes);");
+            tb.add("            self.apply_value(cx, index, nodes);");
             tb.add("        }");
-            tb.add("        self.after_live_apply(cx, start_index, nodes);");
+            tb.add("        self.after_apply_index(cx, start_index, nodes);");
             tb.add("    }");
             tb.add("}");
             
@@ -449,26 +449,26 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        self.after_live_update(cx, live_ptr);");
             tb.add("    }");
             
-            tb.add("    fn live_apply(&mut self, cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {");
+            tb.add("    fn apply_index(&mut self, cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {");
             tb.add("        let start_index = *index;");
-            tb.add("        self.before_live_apply(cx, start_index, nodes);");
+            tb.add("        self.before_apply_index(cx, start_index, nodes);");
             tb.add("        match &nodes[start_index].value{");
-            tb.add("            ApplyValue::Id(id)=>{");
-            tb.add("                match id{");
+            tb.add("            GenValue::EnumBare{base,variant}=>{");
+            tb.add("                match variant{");
             for item in &items{
                 if let EnumKind::Bare = item.kind{
                     tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>*self = Self::").ident(&item.name).add(",");
                 }
             }
             tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum Wrapping cannot find id {}").add(", id);");
-            tb.add("                        ApplyValue::skip_value(index, nodes);");
+            tb.add("                        println!(").string("Enum Wrapping cannot find id {}").add(", variant);");
+            tb.add("                        GenValue::skip_value(index, nodes);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            },");
 
-            tb.add("            ApplyValue::Class{class, ..}=>{");
-            tb.add("                match class{");
+            tb.add("            GenValue::EnumNamed{base, variant}=>{");
+            tb.add("                match variant{");
             for item in &items{
                 if let EnumKind::Named(fields) = &item.kind{
                     tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>{");
@@ -490,11 +490,11 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                     tb.add("                        match nodes[*index].id{");
                     for field in fields{
                         tb.add("                        Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>(*");
-                        tb.ident(&format!("prefix_{}",field.name)).add(").live_apply(cx, index, nodes),");
+                        tb.ident(&format!("prefix_{}",field.name)).add(").apply_index(cx, index, nodes),");
                     }
                     tb.add("                            _=>{");
                     tb.add("                                println!(").string("Enum Wrapping cannot find named struct {} property {}").add(", nodes[start_index].id, nodes[*index].id);");
-                    tb.add("                                ApplyValue::skip_value(index, nodes);");
+                    tb.add("                                GenValue::skip_value(index, nodes);");
                     tb.add("                            }");
                     tb.add("                        }");
                     tb.add("                    }");
@@ -504,12 +504,12 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             }
             tb.add("                    _=>{");
             tb.add("                        println!(").string("Enum Wrapping cannot find named struct {}").add(", nodes[start_index].id);");
-            tb.add("                        ApplyValue::skip_value(index, nodes);");
+            tb.add("                        GenValue::skip_value(index, nodes);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            }");
-            tb.add("            ApplyValue::Call{target, ..}=>{");
-            tb.add("                match target{");
+            tb.add("            GenValue::EnumTuple{base, variant}=>{");
+            tb.add("                match variant{");
             
             for item in &items{
                 if let EnumKind::Tuple(args) = &item.kind{
@@ -534,11 +534,11 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                     tb.add("                        let arg = *index - start_index - 1;");
                     tb.add("                        match arg{");
                     for i in 0..args.len(){
-                        tb.add("                        ").unsuf_usize(i).add("=>(*").ident(&format!("var{}",i)).add(").live_apply(cx, index, nodes),");
+                        tb.add("                        ").unsuf_usize(i).add("=>(*").ident(&format!("var{}",i)).add(").apply_index(cx, index, nodes),");
                     }
                     tb.add("                            _=>{");
                     tb.add("                                println!(").string("Enum Wrapping cannot find tuple struct {} arg {}").add(", nodes[start_index].id, arg);");
-                    tb.add("                                ApplyValue::skip_value(index, nodes);");
+                    tb.add("                                GenValue::skip_value(index, nodes);");
                     tb.add("                            }");
                     tb.add("                        }");
                     tb.add("                    }");
@@ -548,15 +548,15 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             }
             tb.add("                    _=>{");
             tb.add("                        println!(").string("Enum Wrapping cannot find tuple struct {}").add(", nodes[start_index].id);");
-            tb.add("                        ApplyValue::skip_value(index, nodes);");
+            tb.add("                        GenValue::skip_value(index, nodes);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            }");
             tb.add("            _=>{");
-            tb.add("               ApplyValue::skip_value(index, nodes);");
+            tb.add("               GenValue::skip_value(index, nodes);");
             tb.add("            }");
             tb.add("        }");
-            tb.add("        self.after_live_apply(cx, start_index, nodes);");
+            tb.add("        self.after_apply_index(cx, start_index, nodes);");
             tb.add("    }");
             
             tb.add("}");

@@ -307,6 +307,14 @@ impl Vec4 {
         }
     }
     
+    pub fn to_u32(&self) -> u32 {
+        let r = (self.x * 255.0) as u8 as u32;
+        let g = (self.y * 255.0) as u8 as u32;
+        let b = (self.z * 255.0) as u8 as u32;
+        let a = (self.w * 255.0) as u8 as u32;
+        return (r<<24)|(g<<16)|(b<<8)|a;
+    }
+    
     pub fn to_hex_string(&self) -> String {
         fn int_to_hex(d: u8) -> char {
             if d >= 10 {
