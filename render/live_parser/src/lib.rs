@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-pub mod colors;
 pub mod util;
 pub mod math;
 pub mod span;

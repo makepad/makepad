@@ -81,7 +81,12 @@ impl GenValue{
                         return
                     }
                 }
-                _=>()
+                _=>{
+                    if stack_depth == 0{
+                        *index += 1;
+                        return
+                    }
+                }
             }
             *index += 1;
         }
@@ -316,7 +321,7 @@ live_primitive!(f32, 0.0f32, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr
         _ => ()
     }
 }, fn apply_index(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {
-    match nodes[0].value{
+    match nodes[*index].value{
         GenValue::Float(val)=>{
             *self = val as f32;
             *index += 1;
@@ -334,7 +339,7 @@ live_primitive!(Vec2, Vec2::default(), fn live_update(&mut self, cx: &mut Cx, pt
         _ => ()
     }
 }, fn apply_index(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {
-    match nodes[0].value{
+    match nodes[*index].value{
         GenValue::Vec2(val)=>{
             *self = val;
             *index += 1;
@@ -352,7 +357,7 @@ live_primitive!(Vec3, Vec3::default(), fn live_update(&mut self, cx: &mut Cx, pt
         _ => ()
     }
 }, fn apply_index(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {
-    match nodes[0].value{
+    match nodes[*index].value{
         GenValue::Vec3(val)=>{
             *self = val;
             *index += 1;
@@ -371,7 +376,7 @@ live_primitive!(Vec4, Vec4::default(), fn live_update(&mut self, cx: &mut Cx, pt
         _ => ()
     }
 }, fn apply_index(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {
-    match nodes[0].value{
+    match nodes[*index].value{
         GenValue::Color(v)=>{
             *self = Vec4::from_u32(v);
             *index += 1;
@@ -393,7 +398,7 @@ live_primitive!(String, String::default(), fn live_update(&mut self, cx: &mut Cx
         _ => ()
     }
 }, fn apply_index(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {
-    match &nodes[0].value{
+    match &nodes[*index].value{
         GenValue::Str(v)=>{
             *self = v.to_string();
             *index += 1;

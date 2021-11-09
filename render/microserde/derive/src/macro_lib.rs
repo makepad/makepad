@@ -148,6 +148,7 @@ impl TokenBuilder {
     pub fn string(&mut self, val: &str) -> &mut Self {self.extend(TokenTree::from(Literal::string(val)))}
     pub fn unsuf_usize(&mut self, val: usize) -> &mut Self {self.extend(TokenTree::from(Literal::usize_unsuffixed(val)))}
     pub fn suf_u16(&mut self, val: u16) -> &mut Self {self.extend(TokenTree::from(Literal::u16_suffixed(val)))}
+    pub fn suf_u32(&mut self, val: u32) -> &mut Self {self.extend(TokenTree::from(Literal::u32_suffixed(val)))}
     pub fn suf_u64(&mut self, val: u64) -> &mut Self {self.extend(TokenTree::from(Literal::u64_suffixed(val)))}
     pub fn unsuf_f32(&mut self, val: f32) -> &mut Self {self.extend(TokenTree::from(Literal::f32_unsuffixed(val)))}
     pub fn unsuf_f64(&mut self, val: f64) -> &mut Self {self.extend(TokenTree::from(Literal::f64_unsuffixed(val)))}
@@ -416,6 +417,17 @@ impl TokenParser {
         }
         return false
     }
+
+    pub fn is_punct_any(&mut self, what: char) -> bool {
+        // check if our punct is multichar.
+        if let Some(TokenTree::Punct(current)) = &self.current {
+            if current.as_char() == what {
+                return true
+            }
+        }
+        return false
+    }
+
     
     pub fn eat_double_colon_destruct(&mut self) -> bool {
         // check if our punct is multichar.
@@ -459,6 +471,16 @@ impl TokenParser {
 
     pub fn expect_punct(&mut self, what: char) -> Result<(),TokenStream> {
         if self.is_punct(what) {
+            self.advance();
+            return Ok(())
+        }
+        else{
+            Err(error(&format!("Expected punct {}", what)))
+        }
+    }
+
+    pub fn expect_punct_any(&mut self, what: char) -> Result<(),TokenStream> {
+        if self.is_punct_any(what) {
             self.advance();
             return Ok(())
         }
