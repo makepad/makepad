@@ -223,53 +223,33 @@ impl DrawCallVars {
         if let Some(draw_shader) = self.draw_shader {
             let id = nodes[*index].id;
             match nodes[*index].value {
-                GenValue::Int(val) => {
-                    Self::store_values(&cx, draw_shader, id, &[val as f32], self);
-                    *index += 1;
-                }
-                GenValue::Float(val) => {
-                    Self::store_values(&cx, draw_shader, id, &[val as f32], self);
-                    *index += 1;
-                }
+                GenValue::Int(val) => Self::store_values(&cx, draw_shader, id, &[val as f32], self),
+                GenValue::Float(val) =>  Self::store_values(&cx, draw_shader, id, &[val as f32], self),
+                GenValue::Vec2(val) => Self::store_values(&cx, draw_shader, id, &[val.x, val.y], self),
+                GenValue::Vec3(val) => Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z], self),
                 GenValue::Color(val) => {
                     let val = Vec4::from_u32(val);
                     Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z, val.w], self);
-                    *index += 1;
-                }
-                GenValue::Vec2(val) => {
-                    Self::store_values(&cx, draw_shader, id, &[val.x, val.y], self);
-                    *index += 1;
-                }
-                GenValue::Vec3(val) => {
-                    Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z], self);
-                    *index += 1;
                 }
                 _ => {
-                    GenValue::skip_value(index, nodes);       
+                    return GenValue::skip_value(index, nodes);       
                 }
             }
         }
+        *index += 1;
     } 
     
     pub fn update_value(&mut self, cx: &mut Cx, value_ptr: LivePtr, id: Id) {
         if let Some(draw_shader) = self.draw_shader {
             let node = cx.shader_registry.live_registry.resolve_ptr(value_ptr);
             match node.value {
-                LiveValue::Int(val) => {
-                    Self::store_values(&cx, draw_shader, id, &[val as f32], self);
-                }
-                LiveValue::Float(val) => {
-                    Self::store_values(&cx, draw_shader, id, &[val as f32], self);
-                }
+                LiveValue::Int(val) => Self::store_values(&cx, draw_shader, id, &[val as f32], self),
+                LiveValue::Float(val) =>  Self::store_values(&cx, draw_shader, id, &[val as f32], self),
+                LiveValue::Vec2(val) => Self::store_values(&cx, draw_shader, id, &[val.x, val.y], self),
+                LiveValue::Vec3(val) => Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z], self),
                 LiveValue::Color(val) => {
                     let val = Vec4::from_u32(val);
                     Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z, val.w], self);
-                }
-                LiveValue::Vec2(val) => {
-                    Self::store_values(&cx, draw_shader, id, &[val.x, val.y], self);
-                }
-                LiveValue::Vec3(val) => {
-                    Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z], self);
                 }
                 _ => ()
             }

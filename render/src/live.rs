@@ -93,6 +93,13 @@ impl GenValue{
     }
 }// ok so if every sub has a true 'skip' the outer loop can do it
 
+impl GenNode{
+    pub fn new_from_live_node(cx:&mut Cx, live_ptr:LivePtr)->Vec<GenNode>{
+        // OK! awesome.
+        Vec::new()
+    }
+}
+
 
 pub trait LiveComponentValue {
     fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr);
@@ -103,7 +110,9 @@ pub trait LiveComponent {
     fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr);
     fn apply_index(&mut self, cx: &mut Cx, index:&mut usize, nodes: &[GenNode]);
     fn apply(&mut self, cx: &mut Cx, nodes: &[GenNode]){
-        self.apply_index(cx, &mut 0, nodes);
+        if nodes.len()>2{
+            self.apply_index(cx, &mut 0, nodes);
+        }
     }
 }
 
