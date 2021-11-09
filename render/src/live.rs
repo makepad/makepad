@@ -23,13 +23,19 @@ pub trait LiveNew {
     fn live_register(cx: &mut Cx);
 }
 
-pub struct ApplyNode<'a> {
-    pub id: Id,
-    pub value: ApplyValue<'a>
+pub trait ToGenValue {
+    fn to_gen_value(&self)->GenValue;
 }
 
-pub enum ApplyValue<'a> {
-    Str(&'a str),
+#[derive(Debug)]
+pub struct GenNode {
+    pub id: Id,
+    pub value: GenValue
+}
+
+#[derive(Debug)]
+pub enum GenValue {
+    Str(&'static str),
     String(String),
     Bool(bool),
     Int(i64),
@@ -38,12 +44,17 @@ pub enum ApplyValue<'a> {
     Vec2(Vec2),
     Vec3(Vec3),
     Id(Id),
-    Call {target: Id},
-    Class {class: Id}, // subnodes including this one
+    EnumBare{base:Id, variant:Id},
+    // stack items
+    EnumTuple{base:Id, variant:Id},
+    EnumNamed{base:Id, variant:Id},
+    ClassBare, // subnodes including this one
+    ClassNamed {class: Id}, // subnodes including this one
+    
     Close // closes call/class
 }
 
-impl<'a> ApplyValue<'a>{
+impl GenValue{
     pub fn is_close(&self)->bool{
         if let Self::Close = self{
             true
@@ -53,17 +64,17 @@ impl<'a> ApplyValue<'a>{
         }
     }
 
-    pub fn skip_value<'b,'c>(index:&mut usize, nodes: &'b [ApplyNode<'c>]) {
+    pub fn skip_value(index:&mut usize, nodes: &[GenNode]) {
         let mut stack_depth = 0;
         loop{
             match &nodes[*index].value{
-                ApplyValue::Call{..}=>{
+                GenValue::EnumTuple{..} | 
+                GenValue::EnumNamed{..}| 
+                GenValue::ClassNamed{..} |
+                GenValue::ClassBare=>{
                     stack_depth += 1;
                 }
-                ApplyValue::Class{..}=>{
-                    stack_depth += 1;
-                }
-                ApplyValue::Close=>{
+                GenValue::Close=>{
                     stack_depth -= 1;
                     if stack_depth == 0{
                         *index += 1;
@@ -80,21 +91,21 @@ impl<'a> ApplyValue<'a>{
 
 pub trait LiveComponentValue {
     fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr);
-    fn live_apply_value(&mut self, cx: &mut Cx,  ndex:&mut usize, nodes: &[ApplyNode]);
+    fn apply_value(&mut self, cx: &mut Cx,  ndex:&mut usize, nodes: &[GenNode]);
 }
 
 pub trait LiveComponent {
     fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr);
-    fn live_apply(&mut self, cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]);
-    fn apply(&mut self, cx: &mut Cx, nodes: &[ApplyNode]){
-        self.live_apply(cx, &mut 0, nodes);
+    fn apply_index(&mut self, cx: &mut Cx, index:&mut usize, nodes: &[GenNode]);
+    fn apply(&mut self, cx: &mut Cx, nodes: &[GenNode]){
+        self.apply_index(cx, &mut 0, nodes);
     }
 }
 
 pub trait CanvasComponent : LiveComponent {
     fn handle(&mut self, cx: &mut Cx, event:&mut Event);
     fn draw(&mut self, cx: &mut Cx);
-    fn apply_draw(&mut self, cx: &mut Cx, nodes:&[ApplyNode]){
+    fn apply_draw(&mut self, cx: &mut Cx, nodes:&[GenNode]){
         self.apply(cx, nodes);
         self.draw(cx);
     }
@@ -102,13 +113,13 @@ pub trait CanvasComponent : LiveComponent {
 
 pub trait LiveComponentHooks {
     fn live_update_value_unknown(&mut self, _cx: &mut Cx, _id: Id, _ptr: LivePtr) {}
-    fn live_apply_value_unknown(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
-        ApplyValue::skip_value(index, nodes);
+    fn apply_value_unknown(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {
+        GenValue::skip_value(index, nodes);
     }
     fn before_live_update(&mut self, _cx: &mut Cx, _live_ptr: LivePtr) {}
     fn after_live_update(&mut self, _cx: &mut Cx, _live_ptr: LivePtr) {}
-    fn before_live_apply(&mut self, _cx: &mut Cx, _index:usize, _nodes: &[ApplyNode]) {}
-    fn after_live_apply(&mut self, _cx: &mut Cx, _index:usize, _nodes: &[ApplyNode]) {}
+    fn before_apply_index(&mut self, _cx: &mut Cx, _index:usize, _nodes: &[GenNode]) {}
+    fn after_apply_index(&mut self, _cx: &mut Cx, _index:usize, _nodes: &[GenNode]) {}
 }
 
 pub enum LiveFieldKind {
@@ -218,7 +229,10 @@ impl Cx {
 
 #[macro_export]
 macro_rules!live_primitive {
-    ( $ ty: ident, $ default: expr, $ update: item, $ apply: item) => {
+    ( $ ty: ident, $ default: expr, $ update: item, $ apply: item, $to_gen_value: item) => {
+        impl ToGenValue for $ty {
+            $to_gen_value           
+        }
         impl LiveComponent for $ ty {
             $ update
                 $ apply
@@ -263,14 +277,16 @@ live_primitive!(Id, Id::empty(), fn live_update(&mut self, cx: &mut Cx, ptr: Liv
         }
         _ => ()
     }
-}, fn live_apply(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
+}, fn apply_index(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {
     match nodes[0].value{
-        ApplyValue::Id(id)=>{
+        GenValue::Id(id)=>{
             *self = id;
             *index += 1;
         }
-        _=>ApplyValue::skip_value(index, nodes)
+        _=>GenValue::skip_value(index, nodes)
     }
+}, fn to_gen_value(&self)->GenValue{
+    GenValue::Id(*self)
 });
 
 live_primitive!(LivePtr, LivePtr {file_id: FileId(0), local_ptr: LocalPtr {level: 0, index: 0}}, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
@@ -286,8 +302,10 @@ live_primitive!(LivePtr, LivePtr {file_id: FileId(0), local_ptr: LocalPtr {level
         }
         _ => ()
     }
-}, fn live_apply(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
-    ApplyValue::skip_value(index, nodes)
+}, fn apply_index(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {
+    GenValue::skip_value(index, nodes)
+}, fn to_gen_value(&self)->GenValue{
+    panic!()
 });
 
 live_primitive!(f32, 0.0f32, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
@@ -297,14 +315,16 @@ live_primitive!(f32, 0.0f32, fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr
         LiveValue::Float(val) => *self = val as f32,
         _ => ()
     }
-}, fn live_apply(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
+}, fn apply_index(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {
     match nodes[0].value{
-        ApplyValue::Float(val)=>{
+        GenValue::Float(val)=>{
             *self = val as f32;
             *index += 1;
         }
-        _=>ApplyValue::skip_value(index, nodes)
+        _=>GenValue::skip_value(index, nodes)
     }    
+},fn to_gen_value(&self)->GenValue{
+    GenValue::Float(*self as f64)
 });
 
 live_primitive!(Vec2, Vec2::default(), fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
@@ -313,14 +333,16 @@ live_primitive!(Vec2, Vec2::default(), fn live_update(&mut self, cx: &mut Cx, pt
         LiveValue::Vec2(v) => *self = v,
         _ => ()
     }
-}, fn live_apply(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
+}, fn apply_index(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {
     match nodes[0].value{
-        ApplyValue::Vec2(val)=>{
+        GenValue::Vec2(val)=>{
             *self = val;
             *index += 1;
         }
-        _=>ApplyValue::skip_value(index, nodes)
+        _=>GenValue::skip_value(index, nodes)
     }        
+},fn to_gen_value(&self)->GenValue{
+    GenValue::Vec2(*self)
 });
 
 live_primitive!(Vec3, Vec3::default(), fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
@@ -329,15 +351,18 @@ live_primitive!(Vec3, Vec3::default(), fn live_update(&mut self, cx: &mut Cx, pt
         LiveValue::Vec3(v) => *self = v,
         _ => ()
     }
-}, fn live_apply(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
+}, fn apply_index(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {
     match nodes[0].value{
-        ApplyValue::Vec3(val)=>{
+        GenValue::Vec3(val)=>{
             *self = val;
             *index += 1;
         }
-        _=>ApplyValue::skip_value(index, nodes)
+        _=>GenValue::skip_value(index, nodes)
     }       
+},fn to_gen_value(&self)->GenValue{
+    GenValue::Vec3(*self)
 });
+
 
 live_primitive!(Vec4, Vec4::default(), fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
@@ -345,15 +370,18 @@ live_primitive!(Vec4, Vec4::default(), fn live_update(&mut self, cx: &mut Cx, pt
         LiveValue::Color(v) => *self = Vec4::from_u32(v),
         _ => ()
     }
-}, fn live_apply(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
+}, fn apply_index(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {
     match nodes[0].value{
-        ApplyValue::Color(v)=>{
+        GenValue::Color(v)=>{
             *self = Vec4::from_u32(v);
             *index += 1;
         }
-        _=>ApplyValue::skip_value(index, nodes)
+        _=>GenValue::skip_value(index, nodes)
     }       
+},fn to_gen_value(&self)->GenValue{
+    GenValue::Color(self.to_u32())
 });
+
 
 live_primitive!(String, String::default(), fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
     let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
@@ -364,18 +392,20 @@ live_primitive!(String, String::default(), fn live_update(&mut self, cx: &mut Cx
         }
         _ => ()
     }
-}, fn live_apply(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[ApplyNode]) {
+}, fn apply_index(&mut self, _cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {
     match &nodes[0].value{
-        ApplyValue::Str(v)=>{
+        GenValue::Str(v)=>{
             *self = v.to_string();
             *index += 1;
         }
-        ApplyValue::String(v)=>{
+        GenValue::String(v)=>{
             *self = v.clone();
             *index += 1;
         }
-        _=>ApplyValue::skip_value(index, nodes)
+        _=>GenValue::skip_value(index, nodes)
     }       
+},fn to_gen_value(&self)->GenValue{
+    GenValue::String(self.clone())
 });
 
 /*
