@@ -108,7 +108,7 @@ impl BareExampleApp {
             let gen = gen!{
                 text:{color: #x00f}
             };
-            self.normal_button.apply(cx,gen);
+            self.normal_button.apply(cx, gen);
             
             //println!("{:?}", self.normal_button.text.color);
             

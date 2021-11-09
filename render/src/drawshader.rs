@@ -196,51 +196,80 @@ impl DrawCallVars {
         }
     }
 
-    pub fn apply_value(&mut self, _cx: &mut Cx, index:&mut usize, nodes:&[GenNode]) {
-        GenValue::skip_value(index, nodes);
-    } 
-    
-    pub fn update_value(&mut self, cx: &mut Cx, value_ptr: LivePtr, id: Id) {
-        fn store_values(cx: &Cx, draw_shader: DrawShader, id: Id, values: &[f32], draw_call_vars: &mut DrawCallVars) {
-            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
-            for input in &sh.mapping.user_uniforms.inputs {
-                if input.id == id {
-                    if values.len() == input.slots {
-                        for i in 0..input.slots {
-                            draw_call_vars.user_uniforms[input.offset + i] = values[i];
-                        }
-                    }
-                }
-            }
-            for input in &sh.mapping.var_instances.inputs {
-                if input.id == id {
-                    if values.len() == input.slots {
-                        for i in 0..input.slots {
-                            let index = (draw_call_vars.var_instances.len() - sh.mapping.var_instances.total_slots) + input.offset + i;
-                            draw_call_vars.var_instances[index] = values[i];
-                        }
+    fn store_values(cx: &Cx, draw_shader: DrawShader, id: Id, values: &[f32], draw_call_vars: &mut DrawCallVars) {
+        let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+        for input in &sh.mapping.user_uniforms.inputs {
+            if input.id == id {
+                if values.len() == input.slots {
+                    for i in 0..input.slots {
+                        draw_call_vars.user_uniforms[input.offset + i] = values[i];
                     }
                 }
             }
         }
+        for input in &sh.mapping.var_instances.inputs {
+            if input.id == id {
+                if values.len() == input.slots {
+                    for i in 0..input.slots {
+                        let index = (draw_call_vars.var_instances.len() - sh.mapping.var_instances.total_slots) + input.offset + i;
+                        draw_call_vars.var_instances[index] = values[i];
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn apply_value(&mut self, cx: &mut Cx, index:&mut usize, nodes:&[GenNode]) {
+        if let Some(draw_shader) = self.draw_shader {
+            let id = nodes[*index].id;
+            match nodes[*index].value {
+                GenValue::Int(val) => {
+                    Self::store_values(&cx, draw_shader, id, &[val as f32], self);
+                    *index += 1;
+                }
+                GenValue::Float(val) => {
+                    Self::store_values(&cx, draw_shader, id, &[val as f32], self);
+                    *index += 1;
+                }
+                GenValue::Color(val) => {
+                    let val = Vec4::from_u32(val);
+                    Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z, val.w], self);
+                    *index += 1;
+                }
+                GenValue::Vec2(val) => {
+                    Self::store_values(&cx, draw_shader, id, &[val.x, val.y], self);
+                    *index += 1;
+                }
+                GenValue::Vec3(val) => {
+                    Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z], self);
+                    *index += 1;
+                }
+                _ => {
+                    GenValue::skip_value(index, nodes);       
+                }
+            }
+        }
+    } 
+    
+    pub fn update_value(&mut self, cx: &mut Cx, value_ptr: LivePtr, id: Id) {
         if let Some(draw_shader) = self.draw_shader {
             let node = cx.shader_registry.live_registry.resolve_ptr(value_ptr);
             match node.value {
                 LiveValue::Int(val) => {
-                    store_values(&cx, draw_shader, id, &[val as f32], self);
+                    Self::store_values(&cx, draw_shader, id, &[val as f32], self);
                 }
                 LiveValue::Float(val) => {
-                    store_values(&cx, draw_shader, id, &[val as f32], self);
+                    Self::store_values(&cx, draw_shader, id, &[val as f32], self);
                 }
                 LiveValue::Color(val) => {
                     let val = Vec4::from_u32(val);
-                    store_values(&cx, draw_shader, id, &[val.x, val.y, val.z, val.w], self);
+                    Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z, val.w], self);
                 }
                 LiveValue::Vec2(val) => {
-                    store_values(&cx, draw_shader, id, &[val.x, val.y], self);
+                    Self::store_values(&cx, draw_shader, id, &[val.x, val.y], self);
                 }
                 LiveValue::Vec3(val) => {
-                    store_values(&cx, draw_shader, id, &[val.x, val.y, val.z], self);
+                    Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z], self);
                 }
                 _ => ()
             }
