@@ -9,11 +9,14 @@ use crate::span::Span;
 use crate::liveerror::LiveError;
 use crate::liveerror::LiveErrorOrigin;
 use crate::id::Id;
+use crate::id::LivePtr;
 use crate::id::MultiPack;
+use crate::id::LocalPtr;
 use crate::livedocument::LiveDocument;
 use crate::livenode::{LiveNode, LiveValue, LiveType};
 
 pub struct LiveEnumInfo{
+    pub base_name: Id,
     pub bare: Vec<Id>,
     pub named: Vec<Id>,
     pub tuple: Vec<Id>
@@ -554,26 +557,30 @@ impl<'a> LiveParser<'a> {
                         let token_id = self.get_token_id();
                         if let Some(live_type) = self.expect_live_value(prop_id, level, ld) ?{
                             if prop_id == id!(rust_type){ // we should now know the typeID
+                                // inject the enum variants. we could store a live ptr to the parent node
+                                let rust_type_live_ptr = MultiPack::live_ptr(self.file_id,
+                                    LocalPtr{level:level, index:ld.get_level_len(level) - 1}
+                                );
                                 if let Some(enum_info) = self.live_enums.get(&live_type){
                                     for bare_id in &enum_info.bare{
                                         ld.push_node(level, LiveNode {
                                             token_id,
                                             id: *bare_id,
-                                            value: LiveValue::MultiPack(MultiPack::single_id(id!(Variant)))
+                                            value: LiveValue::MultiPack(rust_type_live_ptr)
                                         });
                                     }
                                     for named_id in &enum_info.named{
                                         ld.push_node(level, LiveNode {
                                             token_id,
                                             id: *named_id,
-                                            value: LiveValue::Class{class:MultiPack::single_id(id!(Variant)), node_start:0, node_count:0}
+                                            value: LiveValue::Class{class:rust_type_live_ptr, node_start:0, node_count:0}
                                         });
                                     }
                                     for tuple_id in &enum_info.tuple{
                                         ld.push_node(level, LiveNode {
                                             token_id,
                                             id: *tuple_id,
-                                            value: LiveValue::Call{target:MultiPack::single_id(id!(Variant)), node_start:0, node_count:0}
+                                            value: LiveValue::Call{target:rust_type_live_ptr, node_start:0, node_count:0}
                                         });
                                     }
                                 }

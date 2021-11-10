@@ -25,10 +25,12 @@ pub struct LiveExpander<'a> {
 
 impl<'a> LiveExpander<'a> {
     pub fn is_baseclass(pack: MultiPack) -> bool {
+        if pack.is_live_ptr(){ // its an enum endpoint
+            return true;
+        }
         let id = pack.as_single_id();
         id == id!(Component)
             || id == id!(Enum)
-            || id == id!(Variant)
             || id == id!(Struct)
             || id == id!(Namespace)
             || id == id!(DrawShader)

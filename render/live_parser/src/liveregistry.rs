@@ -103,6 +103,11 @@ impl LiveRegistry {
         }
         None
     }
+        
+    pub fn resolve_ptr(&self, live_ptr: LivePtr) -> &LiveNode {
+        let doc = &self.expanded[live_ptr.file_id.to_index()];
+        &doc.resolve_ptr(live_ptr.local_ptr)
+    }
     
     pub fn resolve_doc_ptr(&self, live_ptr: LivePtr) -> (&LiveDocument, &LiveNode) {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
@@ -112,7 +117,6 @@ impl LiveRegistry {
     pub fn get_origin_doc_from_token_id(&self, token_id:TokenId) -> &LiveDocument {
         &self.live_files[token_id.file_id.to_index()].document
     }
-
     
     pub fn live_object_iterator(&self, live_ptr: LivePtr, node_start: u32, node_count: u16) -> LiveObjectIterator {
         LiveObjectIterator {
@@ -139,39 +143,13 @@ impl LiveRegistry {
             return None
         }
     }
-    
-    pub fn resolve_ptr(&self, live_ptr: LivePtr) -> &LiveNode {
-        let doc = &self.expanded[live_ptr.file_id.to_index()];
-        &doc.resolve_ptr(live_ptr.local_ptr)
-    }
+
     
     pub fn live_error_to_live_file_error(&self, live_error: LiveError) -> LiveFileError {
         let live_file = &self.live_files[live_error.span.file_id().to_index()];
         live_error.to_live_file_error(&live_file.file, &live_file.source, live_file.line_offset)
     }
     
-    pub fn find_enum_origin(&self, start: MultiPack, lhs: Id) -> Id {
-        match start.unpack() {
-            MultiUnpack::LivePtr(live_ptr) => {
-                let doc = &self.expanded[live_ptr.file_id.to_index()];
-                let node = &doc.nodes[live_ptr.local_ptr.level][live_ptr.local_ptr.index];
-                match node.value {
-                    LiveValue::MultiPack(id) => {
-                        return self.find_enum_origin(id, node.id)
-                    }
-                    LiveValue::Class {class, ..} => {
-                        return self.find_enum_origin(class, node.id)
-                    },
-                    LiveValue::Call {target, ..} => {
-                        return self.find_enum_origin(target, node.id)
-                    },
-                    _ => ()
-                }
-            }
-            _ => ()
-        }
-        lhs
-    }
 
     pub fn find_base_class_id(&self, class: MultiPack) -> MultiPack {
         let mut class_iter = class;
