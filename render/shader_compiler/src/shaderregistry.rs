@@ -460,7 +460,7 @@ impl ShaderRegistry {
         match class_node.value {
             LiveValue::Class {node_start, node_count, ..} => {
                 let mut parser_deps = Vec::new();
-                let mut iter = self.live_registry.live_object_iterator(draw_shader_ptr.0, node_start, node_count);
+                let mut iter = self.live_registry.live_object_iterator(draw_shader_ptr.0, node_start as usize, node_count as usize);
                 while let Some((id, prop_ptr)) = iter.next_id(&self.live_registry) {
                     let prop = doc.resolve_ptr(prop_ptr.local_ptr);
                     

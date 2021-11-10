@@ -121,7 +121,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 
                 tb.add("std::ops::DerefMut for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
                 tb.add("    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.deref_target}");
-                tb.add("}");
+                tb.add("}"); 
             }
 
             tb.add("impl").stream(generic.clone());
@@ -252,7 +252,6 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
     }
     
     else if parser.eat_ident("enum") {
-        
         if let Some(enum_name) = parser.eat_any_ident() {
             let generic = parser.eat_generic();
             let where_clause = parser.eat_where_clause(None);
@@ -313,9 +312,10 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                         return parser.unexpected();
                     }
                 }
-                
+                //eprintln!("HERE2");
                 parser.eat_punct(',');
             }
+            
             if default.is_none(){
                 return error(&format!("Enum needs atleast one field marked default"));
             }
@@ -381,7 +381,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                         tb.ident(&field.name).add(":").ident(&format!("prefix_{}",field.name)).add(",");
                     }
                     tb.add("                } = self {");
-                    tb.add("                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start, *node_count);");
+                    tb.add("                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start as usize, *node_count as usize);");
                     tb.add("                    while let Some((prop_id, live_ptr)) = iter.next_id(&cx.shader_registry.live_registry) {");
                     tb.add("                        match prop_id{");
                     for field in fields{
@@ -422,7 +422,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                         tb.ident(&format!("var{}",i)).add(",");
                     }
                     tb.add("                    ) = self {");
-                    tb.add("                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start, *node_count);");
+                    tb.add("                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start as usize, *node_count as usize);");
                     tb.add("                    while let Some((count, live_ptr)) = iter.next_prop() {");
                     tb.add("                        match count{");
                     for i in 0..args.len(){
@@ -561,7 +561,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("    }");
             
             tb.add("}");
-            
+
             //tb.eprint();
             return tb.end();
         }

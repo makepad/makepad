@@ -118,13 +118,13 @@ impl LiveRegistry {
         &self.live_files[token_id.file_id.to_index()].document
     }
     
-    pub fn live_object_iterator(&self, live_ptr: LivePtr, node_start: u32, node_count: u16) -> LiveObjectIterator {
+    pub fn live_object_iterator(&self, live_ptr: LivePtr, node_start: usize, node_count: usize) -> LiveObjectIterator {
         LiveObjectIterator {
             file_id: live_ptr.file_id,
             level: live_ptr.local_ptr.level + 1,
             index: 0,
-            node_start: node_start as usize,
-            node_count: node_count as usize,
+            node_start: node_start,
+            node_count: node_count,
         }
     }
     

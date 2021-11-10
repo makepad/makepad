@@ -616,7 +616,7 @@ impl TokenParser {
                 break;
             }
             while let Some(ident) = self.eat_any_ident() {
-                if !self.open_paren() {
+                if !self.open_paren() && !self.open_brace(){
                     results.push(Attribute {name: ident, args: None});
                     break;
                 }
