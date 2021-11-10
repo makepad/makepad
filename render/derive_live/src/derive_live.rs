@@ -330,6 +330,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        LiveType(std::any::TypeId::of::<").ident(&enum_name).add(">())");
             tb.add("    }");
             tb.add("    fn live_register(cx: &mut Cx) {");
+            tb.add("        let base_name = Id(").suf_u64(Id::from_str(&enum_name).unwrap().0).add(");");
             tb.add("        let mut bare = Vec::new();");
             tb.add("        let mut named = Vec::new();");
             tb.add("        let mut tuple = Vec::new();");
@@ -340,7 +341,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                     EnumKind::Tuple(_) => tb.add("tuple.push(Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add("));")
                 };
             }
-            tb.add("        cx.register_enum(").ident(&enum_name).add("::live_type(),LiveEnumInfo{bare, named, tuple});");
+            tb.add("        cx.register_enum(").ident(&enum_name).add("::live_type(),LiveEnumInfo{base_name, bare, named, tuple});");
             tb.add("    }");
             tb.add("}");
             
@@ -352,22 +353,22 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        let node = cx.shader_registry.live_registry.resolve_ptr(live_ptr);");
             tb.add("        match &node.value{");
             tb.add("            LiveValue::MultiPack(pack)=>{");
-            tb.add("                let id = cx.shader_registry.live_registry.find_enum_origin(*pack, node.id);");
-            tb.add("                match id{");
+            tb.add("                let (_base,variant) = cx.find_enum_origin(*pack, node.id).unwrap_or((Id(0),Id(0)));");
+            tb.add("                match variant{");
             for item in &items{
                 if let EnumKind::Bare = item.kind{
                     tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>*self = Self::").ident(&item.name).add(",");
                 }
             }
             tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum Wrapping cannot find id {}").add(", id);");
+            tb.add("                        println!(").string("Enum Wrapping cannot find id {}").add(", variant);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            },");
             
             tb.add("            LiveValue::Class{class, node_start, node_count}=>{");
-            tb.add("                let id = cx.shader_registry.live_registry.find_enum_origin(*class, node.id);");
-            tb.add("                match id{");
+            tb.add("                let (_base,variant) = cx.find_enum_origin(*class, node.id).unwrap_or((Id(0),Id(0)));");
+            tb.add("                match variant{");
             for item in &items{
                 if let EnumKind::Named(fields) = &item.kind{
                     tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>{");
@@ -388,7 +389,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                         tb.ident(&format!("prefix_{}",field.name)).add(").live_update(cx, live_ptr),");
                     }
                     tb.add("                            _=>{");
-                    tb.add("                                println!(").string("Enum Wrapping cannot find named struct {} property {}").add(", id, prop_id);");
+                    tb.add("                                println!(").string("Enum Wrapping cannot find named struct {} property {}").add(", variant, prop_id);");
                     tb.add("                            }");
                     tb.add("                        }");
                     tb.add("                    }");
@@ -397,15 +398,15 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 }
             }
             tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum Wrapping cannot find named struct {}").add(", id);");
+            tb.add("                        println!(").string("Enum Wrapping cannot find named struct {}").add(", variant);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            }");
             
             
             tb.add("            LiveValue::Call{target, node_start, node_count}=>{");
-            tb.add("                let id = cx.shader_registry.live_registry.find_enum_origin(*target, node.id);");
-            tb.add("                match id{");
+            tb.add("                let (_base,variant) = cx.find_enum_origin(*target, node.id).unwrap_or((Id(0),Id(0)));");
+            tb.add("                match variant{");
             
             for item in &items{
                 if let EnumKind::Tuple(args) = &item.kind{
@@ -428,7 +429,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                         tb.add("                        ").unsuf_usize(i).add("=>(*").ident(&format!("var{}",i)).add(").live_update(cx, live_ptr),");
                     }
                     tb.add("                            _=>{");
-                    tb.add("                                println!(").string("Enum Wrapping cannot find tuple struct {} arg {}").add(", id, count);");
+                    tb.add("                                println!(").string("Enum Wrapping cannot find tuple struct {} arg {}").add(", variant, count);");
                     tb.add("                            }");
                     tb.add("                        }");
                     tb.add("                    }");
@@ -438,7 +439,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             }
             
             tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum Wrapping cannot find tuple struct {}").add(", id);");
+            tb.add("                        println!(").string("Enum Wrapping cannot find tuple struct {}").add(", variant);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            }");
