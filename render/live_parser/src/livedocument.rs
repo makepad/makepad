@@ -395,7 +395,7 @@ impl LiveDocument {
 }
 
 
-impl fmt::Display for LiveDocument {
+impl fmt::Debug for LiveDocument {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // lets iterate the items on level0
         fn indent(depth: usize, f: &mut fmt::Formatter) {
@@ -410,11 +410,12 @@ impl fmt::Display for LiveDocument {
             //let _ = write!(f, "/*{},{} {}*/", row+1, col, node.span.len());
             match node.value {
                 LiveValue::String {string_start, string_count} => {
-                    let _ = write!(f, "{}:\"", node.id);
+                    let _ = write!(f, "{}: string", node.id);
+/*
                     for i in 0..string_count {
                         let _ = write!(f, "{}", ld.strings[(i + string_start) as usize]);
                     }
-                    let _ = write!(f, "\"");
+                    let _ = write!(f, "\"");*/
                 },
                 LiveValue::Bool(val) => {
                     let _ = write!(f,"{}:{}",node.id, val);
@@ -471,10 +472,10 @@ impl fmt::Display for LiveDocument {
                 },
                 LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
                     let _ = write!(f, "fn {}", node.id);
-                    for i in 0..token_count {
+                    /*for i in 0..token_count {
                         let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
-                    }
-                    let _ = write!(f, "\"");
+                    }*/
+                    /*let _ = write!(f, "\"");
                     for i in 0..(scope_count as u32) {
                         let item = &ld.scopes[(i + scope_start) as usize];
                         let _ = write!(f, "{}:{}", item.id, item.target);
@@ -483,7 +484,7 @@ impl fmt::Display for LiveDocument {
                             
                         }
                     }
-                    let _ = write!(f, "\"");
+                    let _ = write!(f, "\"");*/
                 },
                 //LiveValue::ResourceRef {target}=>{
                 //    prefix(node.id_pack, ld, f);
@@ -494,36 +495,37 @@ impl fmt::Display for LiveDocument {
                         let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
                     }
                     let _ = write!(f, "\"");
-                    for i in 0..(scope_count as u32) {
+                    /*for i in 0..(scope_count as u32) {
                         let item = &ld.scopes[(i + scope_start) as usize];
                         let _ = write!(f, "{}:{}", item.id, item.target);
                         if i != (scope_count - 1) as u32 {
                             let _ = write!(f, ", ");
                             
                         }
-                    }
+                    }*/
                     let _ = write!(f, "\"");
                 },
                 LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
-                    for i in 0..token_count {
+                    let _ = write!(f, "vardef {}:\"", node.id);
+                    /*for i in 0..token_count {
                         let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
                     }
-                    let _ = write!(f, "\"");
-                    for i in 0..(scope_count as u32) {
+                    let _ = write!(f, "\"");*/
+                    /*for i in 0..(scope_count as u32) {
                         let item = &ld.scopes[(i + scope_start) as usize];
                         let _ = write!(f, "{}:{}", item.id, item.target);
                         if i != (scope_count - 1) as u32 {
                             let _ = write!(f, ", ");
                             
                         }
-                    }
+                    }*/
                     let _ = write!(f, "\"");
                 },
                 LiveValue::Use {use_ids} => {
                     let _ = write!(f, "use {}", MultiFmt::new(&ld.multi_ids, use_ids));
                 }
                 LiveValue::LiveType(id) => {
-                    let _ = write!(f, "TypeId {:?}", id);
+                    let _ = write!(f, "{}: {:?}",node.id, id);
                 }
                 LiveValue::Class {class, node_start, node_count} => {
                     let _ = write!(f, "{}:{} {{", node.id, MultiFmt::new(&ld.multi_ids, class));

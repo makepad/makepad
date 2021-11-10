@@ -1,7 +1,6 @@
 use makepad_render::*;
 use crate::buttonlogic::*;
 
-
 live_register!{
     use makepad_render::shader_std::*;
     use makepad_render::turtle::*;
@@ -159,9 +158,11 @@ pub struct NormalButton {
 }
 
 impl LiveComponentHooks for NormalButton{
-    fn after_live_update(&mut self, _cx: &mut Cx, live_ptr: LivePtr) {
+    fn after_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {
         // store this live ptr we got updated from
         self.animator.live_ptr = Some(live_ptr);
+        //let (doc, ptr) = cx.resolve_doc_ptr(live_ptr);
+        //println!("{:?}", doc);
     }
 }
 
@@ -182,7 +183,8 @@ impl NormalButton {
     pub fn set_live_state(&mut self, cx:&mut Cx, state_id:Id){
         let sub_ptr = cx.scan_live_ptr(self.animator.live_ptr.unwrap(), state_id);
         // ok so lets turn a node into a Gen
-        let state = GenNode::new_from_live_node(cx, sub_ptr.unwrap());
+        let mut state=Vec::new();
+        GenNode::new_from_live_node(cx, sub_ptr.unwrap(), &mut state);
         self.apply(cx, &state);
         cx.redraw_child_area(self.bg.area);
         // OK so 
