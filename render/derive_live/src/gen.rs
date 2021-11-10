@@ -29,6 +29,12 @@ pub fn gen_impl(input:TokenStream)->TokenStream{
                     tb.add("(").stream(Some(arg)).add(").to_gen_value()},");
                     parser.eat_punct(',');
                 }
+                else if parser.is_bracket(){
+                    tb.add("GenValue::Array},");
+                    parser.open_group();
+                    parse_level(parser,tb)?;
+                    parser.eat_punct(',');
+                }
                 else if let Some(class) = parser.eat_any_ident(){
                     let class_id = Id::from_str(&class).unwrap().0;
                     // could be local class or enum

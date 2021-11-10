@@ -71,7 +71,7 @@ impl ButtonLogic {
                 if fe.input_type.has_hovers() {
                     return ButtonHandleResult {
                         action: ButtonAction::Clicked,
-                        state: ButtonState::Default
+                        state: ButtonState::Over
                     };
                 }
                 return ButtonHandleResult {
