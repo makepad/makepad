@@ -54,7 +54,7 @@ mod view;
 mod pass;
 mod texture;
 //mod layouttypes;
-//mod animator;
+mod animation;
 //mod elements;
 mod area;
 mod geometrygen;

@@ -4,6 +4,7 @@ use crate::buttonlogic::*;
 live_register!{
     use makepad_render::shader_std::*;
     use makepad_render::turtle::*;
+    use makepad_render::animation::*;
     use makepad_render::drawquad::DrawQuad;
     use makepad_render::drawtext::DrawText;
 
@@ -53,8 +54,9 @@ live_register!{
         }
         
         state_default: {
+            play: Play::Cut{duration:1.0}
             bg: {
-                down: 0.0,
+                down: [[1.0,0.0]],
                 hover: 0.0
             }
         }
@@ -75,78 +77,6 @@ live_register!{
     }
 }
 
-// ok so what do we do. we need a 'Live' tree walk to gen walk
-// lets start with that.
-// then we can try to compare them maybe error out if it doesnt align
-// then tween them, set up the nextframe / animation system
-// then parse actual timelines and process those
-
-/*
-pub struct LiveAnim{
-    idxor: Id,
-    value: [f32;4]
-}
-
-pub struct LiveAnimator{
-    state_id: Id,
-    live_ptr: Vec<GenNode>,
-    buffer_static: [LiveAnim;4],
-    buffer_dynamic: Vec<LiveAnim>,
-}
-
-impl LiveAnimator{
-    pub fn fetch_slot(&mut self, idxor:Id)->&mut [f32;4]{
-        // we find our idxor, either from static buffer or dynamic buffer
-        
-    }
-    
-    pub fn new(state_id:Id)->Self{
-        Self{
-            state_id,
-            live_ptr: None,
-        }
-    }
-    
-    pub fn init_live_ptr(&mut self, live_ptr: LivePtr)->bool{
-        if self.live_ptr.is_none(){
-            self.live_ptr = Some(live_ptr);
-            true
-        }
-        else{
-            false
-        }
-    }
-    
-    // ok so now what.
-    pub fn state_live_ptr(&self, cx:&Cx)->Option<LivePtr>{
-        cx.scan_live_ptr(self.live_ptr.unwrap(), self.state_id)
-    }
-}*/
-/*
-// OK SO. we have this recursive live_animate fn
-// what about doing animation timelines in our DSL
-// we just need a vec with 'first' keys
-pub struct TestStruct{
-    pub live_animator:LiveAnimator,
-    pub value:f32
-}
-
-impl LiveAnimateValue for TestStruct{
-}
-
-impl LiveAnimate for TestStruct{
-    fn live_animate(&mut self, cx:&mut Cx, slot_id:&mut usize, animator:Option<&mut LiveAnimator>){
-        
-    }
-}*/
-
-#[derive(Default)]
-pub struct Animator{
-    pub state_id: Id,
-    pub live_ptr: Option<LivePtr>,
-    pub current_state: Vec<GenNode>,
-}
-
 #[derive(LiveComponent)]
 pub struct NormalButton {
     #[hidden()] pub button_logic: ButtonLogic,
@@ -158,11 +88,8 @@ pub struct NormalButton {
 }
 
 impl LiveComponentHooks for NormalButton{
-    fn after_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {
-        // store this live ptr we got updated from
+    fn after_live_update(&mut self, _cx: &mut Cx, live_ptr: LivePtr) {
         self.animator.live_ptr = Some(live_ptr);
-        //let (doc, ptr) = cx.resolve_doc_ptr(live_ptr);
-        //println!("{:?}", doc);
     }
 }
 
@@ -181,18 +108,17 @@ impl CanvasComponent for NormalButton{
 impl NormalButton {
     
     pub fn set_live_state(&mut self, cx:&mut Cx, state_id:Id){
-        let sub_ptr = cx.scan_live_ptr(self.animator.live_ptr.unwrap(), state_id);
-        // ok so lets turn a node into a Gen
+
+        let sub_ptr = cx.find_class_prop_ptr(self.animator.live_ptr.unwrap(), state_id);
+
         let mut state=Vec::new();
-        GenNode::new_from_live_node(cx, sub_ptr.unwrap(), &mut state);
+        GenNode::new_from_live_ptr(cx, sub_ptr.unwrap(), &mut state);
+
+        // we can just implement an animation system on top of an array here
+
         self.apply(cx, &state);
+        
         cx.redraw_child_area(self.bg.area);
-        // OK so 
-        /* self.live_states.state_id = state_id;
-        if let Some(ptr) = self.live_states.state_live_ptr(cx){
-            self.live_update(cx, ptr);
-            cx.redraw_child_area(self.bg.area);
-        }*/
     }
     
     pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {

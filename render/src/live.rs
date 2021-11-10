@@ -49,6 +49,7 @@ pub enum GenValue {
     Id(Id),
     EnumBare {base: Id, variant: Id},
     // stack items
+    Array,
     EnumTuple {base: Id, variant: Id},
     EnumNamed {base: Id, variant: Id},
     ClassBare, // subnodes including this one
@@ -73,8 +74,9 @@ impl GenValue {
             match &nodes[*index].value {
                 GenValue::EnumTuple {..} |
                 GenValue::EnumNamed {..} |
+                GenValue::ClassBare |
                 GenValue::ClassNamed {..} |
-                GenValue::ClassBare => {
+                GenValue::Array => {
                     stack_depth += 1;
                 }
                 GenValue::Close => {
@@ -97,7 +99,7 @@ impl GenValue {
 } // ok so if every sub has a true 'skip' the outer loop can do it
 
 impl GenNode {
-    pub fn new_from_live_node(cx: &Cx, live_ptr: LivePtr, out: &mut Vec<GenNode>) {
+    pub fn new_from_live_ptr(cx: &Cx, live_ptr: LivePtr, out: &mut Vec<GenNode>) {
         // OK! SO now what.
         let node = cx.resolve_ptr(live_ptr);
         match &node.value {
@@ -132,9 +134,9 @@ impl GenNode {
                 if let Some((base,variant)) = cx.find_enum_origin(*target, node.id){
                     // we are an enum
                     out.push(GenNode {id: node.id, value: GenValue::EnumTuple{base, variant}});
-                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start, *node_count);
+                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start as usize, *node_count as usize);
                     while let Some((id, live_ptr)) = iter.next_id(&cx.shader_registry.live_registry) {
-                        Self::new_from_live_node(cx, live_ptr, out);
+                        Self::new_from_live_ptr(cx, live_ptr, out);
                     }
                     out.push(GenNode {id: node.id, value: GenValue::Close});
                 }
@@ -143,7 +145,12 @@ impl GenNode {
                 }
             },
             LiveValue::Array {node_start, node_count} => {
-                todo!();
+                out.push(GenNode {id: node.id, value: GenValue::Array});
+                let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start as usize, *node_count as usize);
+                while let Some((id, live_ptr)) = iter.next_id(&cx.shader_registry.live_registry) {
+                    Self::new_from_live_ptr(cx, live_ptr, out);
+                }
+                out.push(GenNode {id: node.id, value: GenValue::Close});
             },
             LiveValue::ClassOverride {node_start, node_count} => {
                 // should never have this thing
@@ -153,9 +160,9 @@ impl GenNode {
                 if let Some((base,variant)) = cx.find_enum_origin(*class, node.id){
 
                     out.push(GenNode {id: node.id, value: GenValue::EnumNamed{base, variant}});
-                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start, *node_count);
+                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start as usize, *node_count as usize);
                     while let Some((id, live_ptr)) = iter.next_id(&cx.shader_registry.live_registry) {
-                        Self::new_from_live_node(cx, live_ptr, out);
+                        Self::new_from_live_ptr(cx, live_ptr, out);
                     }
                     out.push(GenNode {id: node.id, value: GenValue::Close});
                 }
@@ -166,9 +173,9 @@ impl GenNode {
                     else{ // so whats this class name gonna be.... single step target name?
                         todo!();
                     }
-                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start, *node_count);
+                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start as usize, *node_count as usize);
                     while let Some((id, live_ptr)) = iter.next_id(&cx.shader_registry.live_registry) {
-                        Self::new_from_live_node(cx, live_ptr, out);
+                        Self::new_from_live_ptr(cx, live_ptr, out);
                     }
                     out.push(GenNode {id: node.id, value: GenValue::Close});
                 }
@@ -240,6 +247,7 @@ impl Cx {
         crate::shader_std::live_register(self);
         crate::font::live_register(self);
         crate::turtle::live_register(self);
+        crate::animation::live_register(self);
     }
     
     pub fn find_enum_origin(&self, start: MultiPack, lhs: Id) -> Option<(Id, Id)> {
@@ -294,7 +302,7 @@ impl Cx {
     }
     
     
-    pub fn scan_live_ptr(&self, class_ptr: LivePtr, seek_id: Id) -> Option<LivePtr> {
+    pub fn find_class_prop_ptr(&self, class_ptr: LivePtr, seek_id: Id) -> Option<LivePtr> {
         if let Some(mut iter) = self.shader_registry.live_registry.live_class_iterator(class_ptr) {
             while let Some((id, live_ptr)) = iter.next_id(&self.shader_registry.live_registry) {
                 if id == seek_id {
@@ -470,6 +478,10 @@ live_primitive!(
                 *self = val as f32;
                 *index += 1;
             }
+            GenValue::Int(val) => {
+                *self = val as f32;
+                *index += 1;
+            }
             _ => GenValue::skip_value(index, nodes)
         }
     },
@@ -477,6 +489,36 @@ live_primitive!(
         GenValue::Float(*self as f64)
     }
 );
+
+live_primitive!(
+    f64,
+    0.0f64,
+    fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+        let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
+        match node.value {
+            LiveValue::Int(val) => *self = val as f64,
+            LiveValue::Float(val) => *self = val as f64,
+            _ => ()
+        }
+    },
+    fn apply_index(&mut self, _cx: &mut Cx, index: &mut usize, nodes: &[GenNode]) {
+        match nodes[*index].value {
+            GenValue::Float(val) => {
+                *self = val as f64;
+                *index += 1;
+            }
+            GenValue::Int(val) => {
+                *self = val as f64;
+                *index += 1;
+            }
+            _ => GenValue::skip_value(index, nodes)
+        }
+    },
+    fn to_gen_value(&self) -> GenValue {
+        GenValue::Float(*self as f64)
+    }
+);
+
 
 live_primitive!(
     Vec2,

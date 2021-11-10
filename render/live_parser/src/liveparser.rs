@@ -9,7 +9,6 @@ use crate::span::Span;
 use crate::liveerror::LiveError;
 use crate::liveerror::LiveErrorOrigin;
 use crate::id::Id;
-use crate::id::LivePtr;
 use crate::id::MultiPack;
 use crate::id::LocalPtr;
 use crate::livedocument::LiveDocument;
