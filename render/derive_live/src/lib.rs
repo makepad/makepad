@@ -7,8 +7,8 @@ use crate::derive_live::*;
 mod live_register;
 use crate::live_register::*;
 
-mod gen;
-use crate::gen::*;
+mod gen_macro;
+use crate::gen_macro::*;
 
 #[path = "../../microserde/derive/src/macro_lib.rs"]
 mod macro_lib;

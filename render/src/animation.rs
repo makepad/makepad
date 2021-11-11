@@ -5,70 +5,137 @@ use crate::cx::*;
 live_register!{
     Play: Enum {rust_type: {{Play}}}
     Ease: Enum {rust_type: {{Ease}}}
+    KeyFrame: Struct {rust_type: {{KeyFrame}}}
+}
+
+// deserialisable DSL structure
+#[derive(Debug, LiveComponent, LiveComponentHooks)]
+pub struct KeyFrame {
+    #[live(Ease::Linear)] 
+    pub ease: Ease,
+    
+    #[live(1.0)] 
+    pub time: f64,
+    
+    #[live(KeyFrameValue::None)] 
+    pub value: KeyFrameValue, // do this via the unknown value hook to filter
+}
+
+
+#[derive(Debug)]
+pub enum KeyFrameValue{
+    None,
+    Float(f64),
+    Vec2(Vec2),
+    Vec3(Vec3),
+    Vec4(Vec4),
+    Id(Id)
 }
 
 #[derive(Default)]
-pub struct Animator{
+pub struct Animator {
     pub state_id: Id,
     pub live_ptr: Option<LivePtr>,
-    pub current_state: Vec<GenNode>,
+    pub current_state: Option<Vec<GenNode>>,
+}
+
+// OK so.. now the annoying bit
+impl Animator {
+    
+    pub fn swap_out_state(&mut self)->Vec<GenNode>{
+        self.current_state.take().unwrap()
+    }
+    
+    pub fn swap_in_state(&mut self, state:Vec<GenNode>){
+        self.current_state = Some(state);
+    }
+    
+    pub fn init_from_last_keyframe(&mut self, cx:&mut Cx, nodes: &[GenNode]) {
+        let mut index = 0;
+        // copy in the structure
+        let mut current_state = Vec::new();
+        loop {
+            if index >= nodes.len() {
+                break;
+            }
+            let node = &nodes[index];
+            match node.value {
+                GenValue::Array => { // its a keyframe array. probably :)
+                    if let Some(mut last_child) = nodes.seek_last_child(index) {
+                        if let GenValue::ClassBare = nodes[last_child].value{
+                            let mut kf = KeyFrame::live_new(cx);
+                            kf.apply_index(cx, &mut last_child, nodes);
+                            current_state.push(GenNode{
+                                id:node.id,
+                                value:kf.value.to_gen_value()
+                            });
+                        }
+                        else if !nodes[last_child].value.is_tree(){ // if its a bare value push it in ?
+                            current_state.push(GenNode{
+                                id:node.id,
+                                value:nodes[last_child].value.clone()
+                            });
+                        }
+                    }
+                    nodes.skip_value(&mut index);
+                }
+                _ => { // just copy the value
+                    current_state.push(node.clone());
+                    index += 1;
+                }
+            }
+        }
+        self.current_state = Some(current_state);
+    }
+    
+    
 }
 
 #[derive(Clone, LiveComponent, LiveComponentHooks, Debug, PartialEq)]
 pub enum Play {
-    #[live{scale:1.0}] 
-    Chain {scale: f64},
+    #[default {duration: 1.0}]
+    Forward {duration: f64},
     
-    #[default{scale:1.0}] 
-    Cut {scale: f64},
+    #[live {duration: 1.0, end: 1.0}]
+    Reverse {duration: f64, end: f64},
     
-    #[live{scale:1.0, end:1.0}] 
-    Loop {scale: f64, end:f64},
+    #[live {duration: 1.0, end: 1.0}]
+    Loop {duration: f64, end: f64},
     
-    #[live{scale:1.0, end:1.0}] 
-    Reverse {scale: f64, end:f64},
+    #[live {duration: 1.0, end: 1.0}]
+    ReverseLoop {duration: f64, end: f64},
     
-    #[live{scale:1.0, end:1.0}] 
-    Bounce {scale: f64, end:f64},
+    #[live {duration: 1.0, end: 1.0}]
+    BounceLoop {duration: f64, end: f64},
 }
 
 impl Play {
-    pub fn scale(&self) -> f64 {
+    pub fn duration(&self) -> f64 {
         match self {
-            Play::Chain {scale, ..} => *scale,
-            Play::Cut {scale, ..} => *scale,
-            Play::Loop {scale, ..} => *scale,
-            Play::Reverse {scale, ..} => *scale,
-            Play::Bounce {scale, ..} => *scale,
+            Self::Forward {duration, ..} => *duration,
+            Self::Reverse {duration, ..} => *duration,
+            Self::Loop {duration, ..} => *duration,
+            Self::ReverseLoop {duration, ..} => *duration,
+            Self::BounceLoop {duration, ..} => *duration,
         }
     }
     
-    pub fn cut(&self) -> bool {
+    pub fn get_time(&self, time: f64) -> f64 {
         match self {
-            Play::Cut {..} => true,
-            Play::Chain {..} => false,
-            Play::Loop {..} => true,
-            Play::Reverse {..} => true,
-            Play::Bounce {..} => true,
-        }
-    }
-    
-    pub fn scale_time(&self, time: f64) -> f64 {
-        match self {
-            Play::Cut {scale, ..} => {
-                time * scale
+            Self::Forward {duration} => {
+                time / duration
             },
-            Play::Chain {scale, ..} => {
-                time * scale
+            Self::Reverse {duration, end} => {
+                end - (time / duration)
             },
-            Play::Loop {scale, end, ..} => {
-                (time * scale) % end
+            Self::Loop {duration, end} => {
+                (time / duration) % end
             },
-            Play::Reverse {end, scale, ..} => {
-                end - (time * scale) % end
+            Self::ReverseLoop {end, duration} => {
+                end - (time / duration) % end
             },
-            Play::Bounce {end, scale, ..} => {
-                let mut local_time = (time * scale) % (end * 2.0);
+            Self::BounceLoop {end, duration} => {
+                let mut local_time = (time / duration) % (end * 2.0);
                 if local_time > *end {
                     local_time = 2.0 * end - local_time;
                 };
@@ -81,7 +148,9 @@ impl Play {
 
 #[derive(Clone, LiveComponent, LiveComponentHooks, Debug, PartialEq)]
 pub enum Ease {
-    #[default] Lin,
+    #[default] Linear,
+    #[live] One,
+    #[live(1.0)] Constant(f64),
     #[live] InQuad,
     #[live] OutQuad,
     #[live] InOutQuad,
@@ -112,19 +181,23 @@ pub enum Ease {
     #[live] InBounce,
     #[live] OutBounce,
     #[live] InOutBounce,
-    #[live{begin:0.0,end:1.0}] Pow {begin: f64, end: f64},
-    #[live{cp0:0.0,cp1:0.0, cp2:1.0,cp3:1.0}] Bezier {cp0: f64, cp1: f64, cp2: f64, cp3: f64}
+    #[live {begin: 0.0, end: 1.0}] Pow {begin: f64, end: f64},
+    #[live {cp0: 0.0, cp1: 0.0, cp2: 1.0, cp3: 1.0}] Bezier {cp0: f64, cp1: f64, cp2: f64, cp3: f64}
 }
-
-
 
 impl Ease {
     pub fn map(&self, t: f64) -> f64 {
         match self {
-            Ease::Lin => {
+            Self::Linear => {
                 return t.max(0.0).min(1.0);
             },
-            Ease::Pow {begin, end} => {
+            Self::Constant(t) => {
+                return t.max(0.0).min(1.0);
+            },
+            Self::One => {
+                return 1.0;
+            },
+            Self::Pow {begin, end} => {
                 if t < 0. {
                     return 0.;
                 }
@@ -137,13 +210,13 @@ impl Ease {
                 return (-a * b + b * a * t2) / (a * t2 - b);
             },
             
-            Ease::InQuad => {
+            Self::InQuad => {
                 return t * t;
             },
-            Ease::OutQuad => {
+            Self::OutQuad => {
                 return t * (2.0 - t);
             },
-            Ease::InOutQuad => {
+            Self::InOutQuad => {
                 let t = t * 2.0;
                 if t < 1. {
                     return 0.5 * t * t;
@@ -153,14 +226,14 @@ impl Ease {
                     return -0.5 * (t * (t - 2.) - 1.);
                 }
             },
-            Ease::InCubic => {
+            Self::InCubic => {
                 return t * t * t;
             },
-            Ease::OutCubic => {
+            Self::OutCubic => {
                 let t2 = t - 1.0;
                 return t2 * t2 * t2 + 1.0;
             },
-            Ease::InOutCubic => {
+            Self::InOutCubic => {
                 let t = t * 2.0;
                 if t < 1. {
                     return 0.5 * t * t * t;
@@ -170,14 +243,14 @@ impl Ease {
                     return 1. / 2. * (t * t * t + 2.);
                 }
             },
-            Ease::InQuart => {
+            Self::InQuart => {
                 return t * t * t * t
             },
-            Ease::OutQuart => {
+            Self::OutQuart => {
                 let t = t - 1.;
                 return -(t * t * t * t - 1.);
             },
-            Ease::InOutQuart => {
+            Self::InOutQuart => {
                 let t = t * 2.0;
                 if t < 1. {
                     return 0.5 * t * t * t * t;
@@ -187,14 +260,14 @@ impl Ease {
                     return -0.5 * (t * t * t * t - 2.);
                 }
             },
-            Ease::InQuint => {
+            Self::InQuint => {
                 return t * t * t * t * t;
             },
-            Ease::OutQuint => {
+            Self::OutQuint => {
                 let t = t - 1.;
                 return t * t * t * t * t + 1.;
             },
-            Ease::InOutQuint => {
+            Self::InOutQuint => {
                 let t = t * 2.0;
                 if t < 1. {
                     return 0.5 * t * t * t * t * t;
@@ -204,16 +277,16 @@ impl Ease {
                     return 0.5 * (t * t * t * t * t + 2.);
                 }
             },
-            Ease::InSine => {
+            Self::InSine => {
                 return -(t * PI * 0.5).cos() + 1.;
             },
-            Ease::OutSine => {
+            Self::OutSine => {
                 return (t * PI * 0.5).sin();
             },
-            Ease::InOutSine => {
+            Self::InOutSine => {
                 return -0.5 * ((t * PI).cos() - 1.);
             },
-            Ease::InExp => {
+            Self::InExp => {
                 if t < 0.001 {
                     return 0.;
                 }
@@ -221,7 +294,7 @@ impl Ease {
                     return 2.0f64.powf(10. * (t - 1.));
                 }
             },
-            Ease::OutExp => {
+            Self::OutExp => {
                 if t > 0.999 {
                     return 1.;
                 }
@@ -229,7 +302,7 @@ impl Ease {
                     return -(2.0f64.powf(-10. * t)) + 1.;
                 }
             },
-            Ease::InOutExp => {
+            Self::InOutExp => {
                 if t<0.001 {
                     return 0.;
                 }
@@ -245,14 +318,14 @@ impl Ease {
                     return 0.5 * (-(2.0f64.powf(-10. * t)) + 2.);
                 }
             },
-            Ease::InCirc => {
+            Self::InCirc => {
                 return -((1. - t * t).sqrt() - 1.);
             },
-            Ease::OutCirc => {
+            Self::OutCirc => {
                 let t = t - 1.;
                 return (1. - t * t).sqrt();
             },
-            Ease::InOutCirc => {
+            Self::InOutCirc => {
                 let t = t * 2.;
                 if t < 1. {
                     return -0.5 * ((1. - t * t).sqrt() - 1.);
@@ -262,7 +335,7 @@ impl Ease {
                     return 0.5 * ((1. - t * t).sqrt() + 1.);
                 }
             },
-            Ease::InElastic => {
+            Self::InElastic => {
                 let p = 0.3;
                 let s = p / 4.0; // c = 1.0, b = 0.0, d = 1.0
                 if t < 0.001 {
@@ -274,7 +347,7 @@ impl Ease {
                 let t = t - 1.0;
                 return -(2.0f64.powf(10.0 * t) * ((t - s) * (2.0 * PI) / p).sin());
             },
-            Ease::OutElastic => {
+            Self::OutElastic => {
                 let p = 0.3;
                 let s = p / 4.0; // c = 1.0, b = 0.0, d = 1.0
                 
@@ -286,7 +359,7 @@ impl Ease {
                 }
                 return 2.0f64.powf(-10.0 * t) * ((t - s) * (2.0 * PI) / p).sin() + 1.0;
             },
-            Ease::InOutElastic => {
+            Self::InOutElastic => {
                 let p = 0.3;
                 let s = p / 4.0; // c = 1.0, b = 0.0, d = 1.0
                 if t < 0.001 {
@@ -305,16 +378,16 @@ impl Ease {
                     return 0.5 * 2.0f64.powf(-10.0 * t) * ((t - s) * (2.0 * PI) / p).sin() + 1.0;
                 }
             },
-            Ease::InBack => {
+            Self::InBack => {
                 let s = 1.70158;
                 return t * t * ((s + 1.) * t - s);
             },
-            Ease::OutBack => {
+            Self::OutBack => {
                 let s = 1.70158;
                 let t = t - 1.;
                 return t * t * ((s + 1.) * t + s) + 1.;
             },
-            Ease::InOutBack => {
+            Self::InOutBack => {
                 let s = 1.70158;
                 let t = t * 2.0;
                 if t < 1. {
@@ -326,10 +399,10 @@ impl Ease {
                     return 0.5 * (t * t * ((s + 1.) * t + s) + 2.);
                 }
             },
-            Ease::InBounce => {
-                return 1.0 - Ease::OutBounce.map(1.0 - t);
+            Self::InBounce => {
+                return 1.0 - Self::OutBounce.map(1.0 - t);
             },
-            Ease::OutBounce => {
+            Self::OutBounce => {
                 if t < (1. / 2.75) {
                     return 7.5625 * t * t;
                 }
@@ -344,15 +417,15 @@ impl Ease {
                 let t = t - (2.625 / 2.75);
                 return 7.5625 * t * t + 0.984375;
             },
-            Ease::InOutBounce => {
+            Self::InOutBounce => {
                 if t <0.5 {
-                    return Ease::InBounce.map(t * 2.) * 0.5;
+                    return Self::InBounce.map(t * 2.) * 0.5;
                 }
                 else {
-                    return Ease::OutBounce.map(t * 2. - 1.) * 0.5 + 0.5;
+                    return Self::OutBounce.map(t * 2. - 1.) * 0.5 + 0.5;
                 }
             },
-            Ease::Bezier {cp0, cp1, cp2, cp3} => {
+            Self::Bezier {cp0, cp1, cp2, cp3} => {
                 if t < 0. {
                     return 0.;
                 }
