@@ -102,6 +102,20 @@ impl TokenBuilder {
                     self.unsuf_usize(num.parse().expect(&format!("Can't parse number \"{}\"", what)));
                     o = e;
                 }
+                ('"',_)=>{
+                    let mut e = o + 1;
+                    while e < b.len() {
+                        let c = b[e] as char;
+                        if c == '"' {
+                            break;
+                        }
+                        else{
+                            e += 1;
+                        }
+                    }
+                    self.string(std::str::from_utf8(&b[o+1..e]).unwrap());
+                    o = e + 1;
+                }
                 _ => {
                     let mut e = o;
                     while e < b.len() {
