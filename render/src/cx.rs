@@ -29,6 +29,7 @@ pub use crate::pass::*;
 pub use crate::geometry::*;
 pub use crate::texture::*;
 pub use crate::live::*;
+pub use crate::gen::*;
 pub use crate::events::*;
 pub use crate::animation::*;
 pub use crate::area::*;

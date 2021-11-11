@@ -30,162 +30,6 @@ pub trait ToGenValue {
     fn to_gen_value(&self) -> GenValue;
 }
 
-#[derive(Debug)]
-pub struct GenNode {
-    pub id: Id,
-    pub value: GenValue
-}
-
-#[derive(Debug)]
-pub enum GenValue {
-    Str(&'static str),
-    String(String),
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Color(u32),
-    Vec2(Vec2),
-    Vec3(Vec3),
-    Id(Id),
-    EnumBare {base: Id, variant: Id},
-    // stack items
-    Array,
-    EnumTuple {base: Id, variant: Id},
-    EnumNamed {base: Id, variant: Id},
-    ClassBare, // subnodes including this one
-    ClassNamed {class: Id}, // subnodes including this one
-    
-    Close // closes call/class
-}
-
-impl GenValue {
-    pub fn is_close(&self) -> bool {
-        if let Self::Close = self {
-            true
-        }
-        else {
-            false
-        }
-    }
-    
-    pub fn skip_value(index: &mut usize, nodes: &[GenNode]) {
-        let mut stack_depth = 0;
-        loop {
-            match &nodes[*index].value {
-                GenValue::EnumTuple {..} |
-                GenValue::EnumNamed {..} |
-                GenValue::ClassBare |
-                GenValue::ClassNamed {..} |
-                GenValue::Array => {
-                    stack_depth += 1;
-                }
-                GenValue::Close => {
-                    stack_depth -= 1;
-                    if stack_depth == 0 {
-                        *index += 1;
-                        return
-                    }
-                }
-                _ => {
-                    if stack_depth == 0 {
-                        *index += 1;
-                        return
-                    }
-                }
-            }
-            *index += 1;
-        }
-    }
-} // ok so if every sub has a true 'skip' the outer loop can do it
-
-impl GenNode {
-    pub fn new_from_live_ptr(cx: &Cx, live_ptr: LivePtr, out: &mut Vec<GenNode>) {
-        // OK! SO now what.
-        let node = cx.resolve_ptr(live_ptr);
-        match &node.value {
-            LiveValue::String {string_start, string_count} => {
-                let mut s = String::new();
-                let origin_doc = cx.shader_registry.live_registry.get_origin_doc_from_token_id(node.token_id);
-                origin_doc.get_string(*string_start, *string_count, &mut s);
-                out.push(GenNode {id: node.id, value: GenValue::String(s)});
-            },
-            LiveValue::Bool(val) => {
-                out.push(GenNode {id: node.id, value: GenValue::Bool(*val)});
-            },
-            LiveValue::Int(val) => {
-                out.push(GenNode {id: node.id, value: GenValue::Int(*val)});
-            },
-            LiveValue::Float(val) => {
-                out.push(GenNode {id: node.id, value: GenValue::Float(*val)});
-            },
-            LiveValue::Color(val) => {
-                out.push(GenNode {id: node.id, value: GenValue::Color(*val)});
-            },
-            LiveValue::Vec2(val) => {
-                out.push(GenNode {id: node.id, value: GenValue::Vec2(*val)});
-            },
-            LiveValue::Vec3(val) => {
-                out.push(GenNode {id: node.id, value: GenValue::Vec3(*val)});
-            },
-            LiveValue::MultiPack(val) => {
-                out.push(GenNode {id: node.id, value: GenValue::Id(val.as_single_id())});
-            },
-            LiveValue::Call {target, node_start, node_count} => {
-                if let Some((base,variant)) = cx.find_enum_origin(*target, node.id){
-                    // we are an enum
-                    out.push(GenNode {id: node.id, value: GenValue::EnumTuple{base, variant}});
-                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start as usize, *node_count as usize);
-                    while let Some((id, live_ptr)) = iter.next_id(&cx.shader_registry.live_registry) {
-                        Self::new_from_live_ptr(cx, live_ptr, out);
-                    }
-                    out.push(GenNode {id: node.id, value: GenValue::Close});
-                }
-                else{ // unknown. cant convert
-                    todo!();
-                }
-            },
-            LiveValue::Array {node_start, node_count} => {
-                out.push(GenNode {id: node.id, value: GenValue::Array});
-                let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start as usize, *node_count as usize);
-                while let Some((id, live_ptr)) = iter.next_id(&cx.shader_registry.live_registry) {
-                    Self::new_from_live_ptr(cx, live_ptr, out);
-                }
-                out.push(GenNode {id: node.id, value: GenValue::Close});
-            },
-            LiveValue::ClassOverride {node_start, node_count} => {
-                // should never have this thing
-                panic!();
-            },
-            LiveValue::Class {class, node_start, node_count} => {
-                if let Some((base,variant)) = cx.find_enum_origin(*class, node.id){
-
-                    out.push(GenNode {id: node.id, value: GenValue::EnumNamed{base, variant}});
-                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start as usize, *node_count as usize);
-                    while let Some((id, live_ptr)) = iter.next_id(&cx.shader_registry.live_registry) {
-                        Self::new_from_live_ptr(cx, live_ptr, out);
-                    }
-                    out.push(GenNode {id: node.id, value: GenValue::Close});
-                }
-                else{ // class thing
-                    if class.is_zero_class(){
-                        out.push(GenNode {id: node.id, value: GenValue::ClassBare});
-                    }
-                    else{ // so whats this class name gonna be.... single step target name?
-                        todo!();
-                    }
-                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start as usize, *node_count as usize);
-                    while let Some((id, live_ptr)) = iter.next_id(&cx.shader_registry.live_registry) {
-                        Self::new_from_live_ptr(cx, live_ptr, out);
-                    }
-                    out.push(GenNode {id: node.id, value: GenValue::Close});
-                }
-            },
-            _ => ()
-        }
-    }
-}
-
-
 pub trait LiveComponentValue {
     fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr);
     fn apply_value(&mut self, cx: &mut Cx, ndex: &mut usize, nodes: &[GenNode]);
@@ -213,7 +57,7 @@ pub trait CanvasComponent: LiveComponent {
 pub trait LiveComponentHooks {
     fn live_update_value_unknown(&mut self, _cx: &mut Cx, _id: Id, _ptr: LivePtr) {}
     fn apply_value_unknown(&mut self, _cx: &mut Cx, index: &mut usize, nodes: &[GenNode]) {
-        GenValue::skip_value(index, nodes);
+        nodes.skip_value(index);
     }
     fn before_live_update(&mut self, _cx: &mut Cx, _live_ptr: LivePtr) {}
     fn after_live_update(&mut self, _cx: &mut Cx, _live_ptr: LivePtr) {}
@@ -402,6 +246,64 @@ macro_rules!live_primitive {
 }
 
 live_primitive!(
+    KeyFrameValue,
+    KeyFrameValue::None,
+    fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
+        let node = cx.shader_registry.live_registry.resolve_ptr(ptr);
+        match node.value {
+            LiveValue::MultiPack(id) => {
+                match id.unpack() {
+                    MultiUnpack::SingleId(id) => {
+                        *self = KeyFrameValue::Id(id)
+                    },
+                    MultiUnpack::LivePtr(ptr) => {
+                        let other_node = cx.shader_registry.live_registry.resolve_ptr(ptr);
+                        *self =  KeyFrameValue::Id(other_node.id);
+                    }
+                    _ => ()
+                }
+            }
+            _ => ()
+        }
+    },
+    fn apply_index(&mut self, _cx: &mut Cx, index: &mut usize, nodes: &[GenNode]) {
+        match nodes[*index].value {
+            GenValue::Id(id) => {
+                *self = KeyFrameValue::Id(id);
+                *index += 1;
+            }
+            GenValue::Float(f)=>{
+                *self = KeyFrameValue::Float(f);
+                *index += 1;
+            }
+            GenValue::Vec2(f)=>{
+                *self = KeyFrameValue::Vec2(f);
+                *index += 1;
+            }
+            GenValue::Vec3(f)=>{
+                *self = KeyFrameValue::Vec3(f);
+                *index += 1;
+            }
+            GenValue::Color(f)=>{
+                *self = KeyFrameValue::Vec4(Vec4::from_u32(f));
+                *index += 1;
+            }
+            _ => nodes.skip_value(index)
+        }
+    },
+    fn to_gen_value(&self) -> GenValue {
+        match self{
+            Self::None => GenValue::None,
+            Self::Float(v)=> GenValue::Float(*v),
+            Self::Vec2(v)=> GenValue::Vec2(*v),
+            Self::Vec3(v)=> GenValue::Vec3(*v),
+            Self::Vec4(v)=> GenValue::Color(v.to_u32()),
+            Self::Id(v)=> GenValue::Id(*v),
+        }
+    }
+);
+
+live_primitive!(
     Id,
     Id::empty(),
     fn live_update(&mut self, cx: &mut Cx, ptr: LivePtr) {
@@ -423,12 +325,12 @@ live_primitive!(
         }
     },
     fn apply_index(&mut self, _cx: &mut Cx, index: &mut usize, nodes: &[GenNode]) {
-        match nodes[0].value {
+        match nodes[*index].value {
             GenValue::Id(id) => {
                 *self = id;
                 *index += 1;
             }
-            _ => GenValue::skip_value(index, nodes)
+            _ => nodes.skip_value(index)
         }
     },
     fn to_gen_value(&self) -> GenValue {
@@ -454,7 +356,7 @@ live_primitive!(
         }
     },
     fn apply_index(&mut self, _cx: &mut Cx, index: &mut usize, nodes: &[GenNode]) {
-        GenValue::skip_value(index, nodes)
+        nodes.skip_value(index)
     },
     fn to_gen_value(&self) -> GenValue {
         panic!()
@@ -482,7 +384,7 @@ live_primitive!(
                 *self = val as f32;
                 *index += 1;
             }
-            _ => GenValue::skip_value(index, nodes)
+            _ => nodes.skip_value(index)
         }
     },
     fn to_gen_value(&self) -> GenValue {
@@ -511,7 +413,7 @@ live_primitive!(
                 *self = val as f64;
                 *index += 1;
             }
-            _ => GenValue::skip_value(index, nodes)
+            _ => nodes.skip_value(index)
         }
     },
     fn to_gen_value(&self) -> GenValue {
@@ -536,7 +438,7 @@ live_primitive!(
                 *self = val;
                 *index += 1;
             }
-            _ => GenValue::skip_value(index, nodes)
+            _ => nodes.skip_value(index)
         }
     },
     fn to_gen_value(&self) -> GenValue {
@@ -560,7 +462,7 @@ live_primitive!(
                 *self = val;
                 *index += 1;
             }
-            _ => GenValue::skip_value(index, nodes)
+            _ => nodes.skip_value(index)
         }
     },
     fn to_gen_value(&self) -> GenValue {
@@ -585,7 +487,7 @@ live_primitive!(
                 *self = Vec4::from_u32(v);
                 *index += 1;
             }
-            _ => GenValue::skip_value(index, nodes)
+            _ => nodes.skip_value(index)
         }
     },
     fn to_gen_value(&self) -> GenValue {
@@ -617,7 +519,7 @@ live_primitive!(
                 *self = v.clone();
                 *index += 1;
             }
-            _ => GenValue::skip_value(index, nodes)
+            _ => nodes.skip_value(index)
         }
     },
     fn to_gen_value(&self) -> GenValue {
