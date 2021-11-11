@@ -7,7 +7,7 @@ live_register!{
     use makepad_render::animation::*;
     use makepad_render::drawquad::DrawQuad;
     use makepad_render::drawtext::DrawText;
-
+    
     NormalButton: Component {
         rust_type: {{NormalButton}}
         bg: DrawQuad {
@@ -17,7 +17,7 @@ live_register!{
             
             const shadow: float = 3.0
             const border_radius: float = 2.5
-
+            
             fn pixel(self) -> vec4 {
                 let cx = Sdf2d::viewport(self.pos * self.rect_size);
                 cx.box(
@@ -42,7 +42,7 @@ live_register!{
         }
         
         text: DrawText {}
-
+        
         layout: Layout {
             align: Align {fx: 0.5, fy: 0.5},
             walk: Walk {
@@ -53,10 +53,14 @@ live_register!{
             padding: Padding {l: 16.0, t: 12.0, r: 16.0, b: 12.0}
         }
         
+        // ok so. we have a fromstate->this state selector and then 'per key' easing
+        //
         state_default: {
-            play: Play::Cut{duration:1.0}
-            bg: {
-                down: [[1.0,0.0]],
+            from: {
+                all: Play::Forward {duration: 0.1} // from everything to default
+            }
+            bg: {  
+                down: [{value: 0.0, ease: Ease::One}],
                 hover: 0.0
             }
         }
@@ -70,8 +74,8 @@ live_register!{
         
         state_down: {
             bg: {
-                down: 1.0
-                hover: 1.0
+                down: [{value: 1.0, ease: Ease::Linear}],
+                hover: [{time: 0.1, value: 1.0, ease: Ease::Linear}, {time: 0.5, value: 10.0, ease: Ease::Linear}],
             }
         }
     }
@@ -80,25 +84,26 @@ live_register!{
 #[derive(LiveComponent)]
 pub struct NormalButton {
     #[hidden()] pub button_logic: ButtonLogic,
-    #[hidden()] pub animator:Animator,
+    #[hidden()] pub animator: Animator,
     #[live()] pub bg: DrawQuad,
     #[live()] pub text: DrawText,
     #[live()] pub layout: Layout,
     #[live()] pub label: String
 }
 
-impl LiveComponentHooks for NormalButton{
-    fn after_live_update(&mut self, _cx: &mut Cx, live_ptr: LivePtr) {
+impl LiveComponentHooks for NormalButton {
+    fn after_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {
         self.animator.live_ptr = Some(live_ptr);
+        self.init_state(cx, id!(state_down));
     }
 }
 
-impl CanvasComponent for NormalButton{
-    fn handle(&mut self, cx: &mut Cx, event:&mut Event){
+impl CanvasComponent for NormalButton {
+    fn handle(&mut self, cx: &mut Cx, event: &mut Event) {
         self.handle_normal_button(cx, event);
     }
     
-    fn draw(&mut self, cx: &mut Cx){
+    fn draw(&mut self, cx: &mut Cx) {
         self.bg.begin_quad(cx, self.layout);
         self.text.draw_text_walk(cx, &self.label);
         self.bg.end_quad(cx);
@@ -107,27 +112,43 @@ impl CanvasComponent for NormalButton{
 
 impl NormalButton {
     
-    pub fn set_live_state(&mut self, cx:&mut Cx, state_id:Id){
-
+    pub fn init_state(&mut self, cx: &mut Cx, state_id: Id) {
+        // take the live DSL and turn it into a Gen
         let sub_ptr = cx.find_class_prop_ptr(self.animator.live_ptr.unwrap(), state_id);
+        let mut state = Vec::new();
+        GenNode::convert_live_to_gen(cx, sub_ptr.unwrap(), &mut state);
 
-        let mut state=Vec::new();
-        GenNode::new_from_live_ptr(cx, sub_ptr.unwrap(), &mut state);
-
-        // we can just implement an animation system on top of an array here
-
+        // take the Gen and sample the last keyframe
+        self.animator.init_from_last_keyframe(cx, &state);
+        
+        // apply the last keyframe to self
+        let state = self.animator.swap_out_state();
         self.apply(cx, &state);
+        self.animator.swap_in_state(state);
+    }
+    
+    pub fn set_state(&mut self, cx: &mut Cx, state_id: Id) {
+        
+        let sub_ptr = cx.find_class_prop_ptr(self.animator.live_ptr.unwrap(), state_id);
+        let mut state = Vec::new();
+        GenNode::convert_live_to_gen(cx, sub_ptr.unwrap(), &mut state);
+
+        self.animator.init_from_last_keyframe(cx, &state);
+        let state = self.animator.swap_out_state();
+        self.apply(cx, &state);
+        self.animator.swap_in_state(state);
+
         
         cx.redraw_child_area(self.bg.area);
     }
     
     pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
         let res = self.button_logic.handle_button_logic(cx, event, self.bg.area);
-        match res.state{
-            ButtonState::Down => self.set_live_state(cx, id!(state_down)),
-            ButtonState::Default => self.set_live_state(cx, id!(state_default)),
-            ButtonState::Over => self.set_live_state(cx, id!(state_over)),
-            _=>()
+        match res.state {
+            ButtonState::Down => self.set_state(cx, id!(state_down)),
+            ButtonState::Default => self.set_state(cx, id!(state_default)),
+            ButtonState::Over => self.set_state(cx, id!(state_over)),
+            _ => ()
         };
         res.action
     }

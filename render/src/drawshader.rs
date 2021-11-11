@@ -232,7 +232,7 @@ impl DrawCallVars {
                     Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z, val.w], self);
                 }
                 _ => {
-                    return GenValue::skip_value(index, nodes);       
+                    return nodes.skip_value(index);       
                 }
             }
         }

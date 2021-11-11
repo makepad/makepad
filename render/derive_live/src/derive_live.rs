@@ -42,7 +42,7 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
                 tb.add("    fn after_live_update(&mut self, cx: &mut Cx, live_ptr:LivePtr) {");
                 tb.add("        self.draw_call_vars.init_slicer(cx);");
                 tb.add("    }");
-                tb.add("}");                
+                tb.add("}");
             }
             else if let Some(_) = deref_target {
                 tb.add("impl").stream(generic.clone());
@@ -361,7 +361,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 }
             }
             tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum Wrapping cannot find id {}").add(", variant);");
+            tb.add("                        println!(").string("Enum {} cannot find id {}").add(", ").string(&enum_name).add(", variant);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            },");
@@ -389,7 +389,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                         tb.ident(&format!("prefix_{}",field.name)).add(").live_update(cx, live_ptr),");
                     }
                     tb.add("                            _=>{");
-                    tb.add("                                println!(").string("Enum Wrapping cannot find named struct {} property {}").add(", variant, prop_id);");
+                    tb.add("                                println!(").string("Enum {} cannot find named struct {} property {}").add(", ").string(&enum_name).add(", variant, prop_id);");
                     tb.add("                            }");
                     tb.add("                        }");
                     tb.add("                    }");
@@ -398,7 +398,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 }
             }
             tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum Wrapping cannot find named struct {}").add(", variant);");
+            tb.add("                        println!(").string("Enum {} cannot find named struct {}").add(", ").string(&enum_name).add(",variant);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            }");
@@ -429,7 +429,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                         tb.add("                        ").unsuf_usize(i).add("=>(*").ident(&format!("var{}",i)).add(").live_update(cx, live_ptr),");
                     }
                     tb.add("                            _=>{");
-                    tb.add("                                println!(").string("Enum Wrapping cannot find tuple struct {} arg {}").add(", variant, count);");
+                    tb.add("                                println!(").string("Enum {} cannot find tuple struct {} arg {}").add(", ").string(&enum_name).add(", variant, count);");
                     tb.add("                            }");
                     tb.add("                        }");
                     tb.add("                    }");
@@ -439,7 +439,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             }
             
             tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum Wrapping cannot find tuple struct {}").add(", variant);");
+            tb.add("                        println!(").string("Enum {} cannot find tuple struct {}").add(", ").string(&enum_name).add(", variant);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            }");
@@ -458,12 +458,12 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("                match variant{");
             for item in &items{
                 if let EnumKind::Bare = item.kind{
-                    tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>*self = Self::").ident(&item.name).add(",");
+                    tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>{*index += 1;*self = Self::").ident(&item.name).add("},");
                 }
             }
             tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum Wrapping cannot find id {}").add(", variant);");
-            tb.add("                        GenValue::skip_value(index, nodes);");
+            tb.add("                        println!(").string("Enum {} cannot find id {}").add(", ").string(&enum_name).add(",variant);");
+            tb.add("                        nodes.skip_value(index);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            },");
@@ -494,8 +494,8 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                         tb.ident(&format!("prefix_{}",field.name)).add(").apply_index(cx, index, nodes),");
                     }
                     tb.add("                            _=>{");
-                    tb.add("                                println!(").string("Enum Wrapping cannot find named struct {} property {}").add(", nodes[start_index].id, nodes[*index].id);");
-                    tb.add("                                GenValue::skip_value(index, nodes);");
+                    tb.add("                                println!(").string("Enum {} cannot find named struct {} property {}").add(", ").string(&enum_name).add(",nodes[start_index].id, nodes[*index].id);");
+                    tb.add("                                nodes.skip_value(index);");
                     tb.add("                            }");
                     tb.add("                        }");
                     tb.add("                    }");
@@ -504,8 +504,8 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 }
             }
             tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum Wrapping cannot find named struct {}").add(", nodes[start_index].id);");
-            tb.add("                        GenValue::skip_value(index, nodes);");
+            tb.add("                        println!(").string("Enum {} cannot find named struct {}").add(", ").string(&enum_name).add(", nodes[start_index].id);");
+            tb.add("                        nodes.skip_value(index);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            }");
@@ -538,8 +538,8 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                         tb.add("                        ").unsuf_usize(i).add("=>(*").ident(&format!("var{}",i)).add(").apply_index(cx, index, nodes),");
                     }
                     tb.add("                            _=>{");
-                    tb.add("                                println!(").string("Enum Wrapping cannot find tuple struct {} arg {}").add(", nodes[start_index].id, arg);");
-                    tb.add("                                GenValue::skip_value(index, nodes);");
+                    tb.add("                                println!(").string("Enum {} cannot find tuple struct {} arg {}").add(", ").string(&enum_name).add(", nodes[start_index].id, arg);");
+                    tb.add("                                nodes.skip_value(index);");
                     tb.add("                            }");
                     tb.add("                        }");
                     tb.add("                    }");
@@ -548,13 +548,13 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 }
             }
             tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum Wrapping cannot find tuple struct {}").add(", nodes[start_index].id);");
-            tb.add("                        GenValue::skip_value(index, nodes);");
+            tb.add("                        println!(").string("Enum {} cannot find tuple struct {}").add(", ").string(&enum_name).add(",nodes[start_index].id);");
+            tb.add("                        nodes.skip_value(index);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            }");
             tb.add("            _=>{");
-            tb.add("               GenValue::skip_value(index, nodes);");
+            tb.add("               nodes.skip_value(index);");
             tb.add("            }");
             tb.add("        }");
             tb.add("        self.after_apply_index(cx, start_index, nodes);");
