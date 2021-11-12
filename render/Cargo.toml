@@ -17,7 +17,7 @@ makepad-microserde = {path = "./microserde", version = "0.1"}
 makepad-trapezoidator = { path = "./vector/trapezoidator", version = "0.1" }
 makepad-ttf-parser = { path = "./vector/ttf_parser", version = "0.1" }
 makepad-path = { path = "./vector/path", version = "0.1" }
-makepad-live-parser = { path = "./live_parser", version = "0.1" }
+makepad-live-compiler = { path = "./live_compiler", version = "0.1" }
 makepad-shader-compiler = { path = "./shader_compiler", version = "0.1" }
 makepad-derive-live = { path = "./derive_live", version = "0.1" }
 

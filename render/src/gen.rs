@@ -54,7 +54,7 @@ pub trait GenNodeSlice{
     fn clone_value(&self, index: usize, output: &mut Vec<GenNode>) -> usize;
 }
 
-// accessing the thing like a 
+// accessing the Gen structure like a tree
 impl GenNodeSlice for &[GenNode]{
     fn seek_child_by_index(&self, index: usize, child_index: usize) -> Option<usize> {
         let mut stack_depth = 0;
@@ -253,7 +253,7 @@ impl GenValue {
             false
         }
     }
-} // ok so if every sub has a true 'skip' the outer loop can do it
+}
 
 impl GenNode {
     

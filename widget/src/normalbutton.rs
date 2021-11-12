@@ -53,13 +53,11 @@ live_register!{
             padding: Padding {l: 16.0, t: 12.0, r: 16.0, b: 12.0}
         }
         
-        // ok so. we have a fromstate->this state selector and then 'per key' easing
-        //
         state_default: {
             from: {
                 all: Play::Forward {duration: 0.1} // from everything to default
             }
-            bg: {  
+            bg: {
                 down: [{value: 0.0, ease: Ease::One}],
                 hover: 0.0
             }
@@ -137,8 +135,6 @@ impl NormalButton {
         let state = self.animator.swap_out_state();
         self.apply(cx, &state);
         self.animator.swap_in_state(state);
-
-        
         cx.redraw_child_area(self.bg.area);
     }
     

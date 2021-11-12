@@ -18,7 +18,7 @@ pub struct KeyFrame {
     pub time: f64,
     
     #[live(KeyFrameValue::None)] 
-    pub value: KeyFrameValue, // do this via the unknown value hook to filter
+    pub value: KeyFrameValue, 
 }
 
 
@@ -87,7 +87,9 @@ impl Animator {
         }
         self.current_state = Some(current_state);
     }
-    
+    // alright so . we have the from info
+    // we have values.. we have KeyFrames and KeyFrameValues 
+    // now make an animation engine :)
     
 }
 
