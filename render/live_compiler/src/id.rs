@@ -13,7 +13,6 @@ impl FileId {
     pub fn to_index(&self) -> usize {self.0 as usize}
 }
 
-
 //TODO FIX THIS THING TO BE N LEVELS OF MODULES
 #[derive(Clone, Eq, Hash, Debug, Copy, PartialEq)]
 pub struct ModulePath(pub Id, pub Id);

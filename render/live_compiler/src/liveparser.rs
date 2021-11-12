@@ -1,6 +1,5 @@
 
 use makepad_id_macros::*;
-//use std::collections::{HashMap};
 use crate::token::{Token, TokenWithSpan, TokenId};
 use std::iter::Cloned;
 use std::slice::Iter;
@@ -12,30 +11,22 @@ use crate::id::Id;
 //use crate::id::LocalPtr;
 use crate::livedocument::LiveDocument;
 use crate::livenode::{LiveNode, LiveValue, LiveType};
-/*
-pub struct LiveEnumInfo{
-    pub base_name: Id,
-    pub bare: Vec<Id>,
-    pub named: Vec<Id>,
-    pub tuple: Vec<Id>
-}*/
+
 
 pub struct LiveParser<'a> {
     pub token_index: usize,
     pub file_id: FileId,
     pub live_types: &'a [LiveType],
-    //pub live_enums: &'a HashMap<LiveType, LiveEnumInfo>,
     pub tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
     pub token_with_span: TokenWithSpan,
     pub end: usize,
 }
 
 impl<'a> LiveParser<'a> {
-    pub fn new(tokens: &'a [TokenWithSpan], live_types: &'a [LiveType], /*live_enums: &'a HashMap<LiveType, LiveEnumInfo>,*/ file_id: FileId) -> Self {
+    pub fn new(tokens: &'a [TokenWithSpan], live_types: &'a [LiveType], file_id: FileId) -> Self {
         let mut tokens_with_span = tokens.iter().cloned();
         let token_with_span = tokens_with_span.next().unwrap();
         LiveParser {
-            //live_enums,
             file_id,
             tokens_with_span,
             live_types,
@@ -132,21 +123,15 @@ impl<'a> LiveParser<'a> {
         self.skip_token();
         Ok(())
     }
-    /*
-    fn begin_span(&self) -> SpanTracker {
-        SpanTracker {
-            file_id: self.token_with_span.span.file_id(),
-            start: self.token_with_span.span.start(),
-        }
-    }
-    */
+
     fn expect_use(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
-        self.skip_token();
         let token_id = self.get_token_id();
         let crate_id = self.expect_ident() ?;
         self.expect_token(Token::Punct(id!(::))) ?;
         let module_id = self.expect_ident() ?;
         self.expect_token(Token::Punct(id!(::))) ?;
+
+
         let object_id = if self.peek_token() == Token::Punct(id!(*)) {
             self.skip_token();
             Id(0)
@@ -160,14 +145,12 @@ impl<'a> LiveParser<'a> {
             id: Id::empty(),
             value: LiveValue::Use {crate_id, module_id, object_id}
         });
-        self.accept_optional_delim();
         
         Ok(())
     }
     
     fn expect_fn(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
         let token_start = self.token_index;
-        self.skip_token();
         let token_id = self.get_token_id();
         let prop_id = self.expect_ident() ?;
         //let token_start = self.token_index;
@@ -189,7 +172,6 @@ impl<'a> LiveParser<'a> {
     
     fn expect_const(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
         let token_start = self.token_index;
-        self.skip_token();
         let token_id = self.get_token_id();
         let const_id = self.expect_ident() ?;
         self.expect_token(Token::Punct(id!(:))) ?;
@@ -212,6 +194,7 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_var_def(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
+
         let token_start = self.token_index;
         let token_id = self.get_token_id();
         let real_prop_id = self.expect_ident() ?;
@@ -236,55 +219,6 @@ impl<'a> LiveParser<'a> {
         
         Ok(())
     }
-    
-    /*
-    fn expect_prop_id(&mut self, ld: &mut LiveDocument) -> Result<IdPack, LiveError> {
-        let base = self.expect_ident() ?;
-        if self.peek_token() == Token::Punct(id!(.)) {
-            self.skip_token();
-            // start a multi_id
-            let multi_index = ld.multi_ids.len();
-            ld.multi_ids.push(base);
-            loop {
-                match self.peek_token() {
-                    Token::Ident(id) => {
-                        self.skip_token();
-                        ld.multi_ids.push(id);
-                        if !self.accept_token(Token::Punct(id!(.))) {
-                            break;
-                        }
-                    },
-                    other => {
-                        return Err(self.error(format!("Unexpected token after . {}", other)));
-                    }
-                }
-            };
-            Ok(IdPack::multi(multi_index, ld.multi_ids.len() - multi_index))
-        }
-        else {
-            Ok(IdPack::single(base))
-        }
-    }*/
-    /*
-    fn expect_object(&mut self, level: usize, ld: &mut LiveDocument) -> Result<(u32, u32), LiveError> {
-        let node_start = ld.get_level_len(level);
-        while self.peek_token() != Token::Eof {
-            if self.peek_token() == Token::CloseBrace {
-                self.skip_token();
-                let node_end = ld.get_level_len(level);
-                return Ok((node_start as u32, (node_end - node_start) as u32))
-            }
-            //let span = self.begin_span();
-            self.expect_live_value(Id::empty(), level, ld) ?;
-            self.expect_token(Token::Punct(id!(:))) ?;
-            //let span = self.begin_span();
-            self.expect_live_value(IdPack::empty(), level, ld) ?;
-            if !self.accept_token(Token::Punct(id!(,))) {
-                self.accept_token(Token::Punct(id!(;)));
-            }
-        }
-        return Err(self.error(format!("Eof in object body")))
-    }*/
     
     fn expect_array(&mut self, prop_id: Id, ld: &mut LiveDocument) -> Result<(), LiveError> {
         self.expect_token(Token::OpenBracket) ?;
@@ -319,7 +253,7 @@ impl<'a> LiveParser<'a> {
             if self.accept_token(Token::CloseParen) {
                 ld.nodes.push(LiveNode {
                     token_id: Some(self.get_token_id()),
-                    id: Id::empty(),
+                    id: prop_id,
                     value: LiveValue::Close
                 });
                 return Ok(())
@@ -345,7 +279,7 @@ impl<'a> LiveParser<'a> {
             if self.accept_token(Token::CloseBrace) {
                 ld.nodes.push(LiveNode {
                     token_id: Some(self.get_token_id()),
-                    id: Id::empty(),
+                    id: prop_id,
                     value: LiveValue::Close
                 });
                 return Ok(())
@@ -364,7 +298,6 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_live_value(&mut self, prop_id: Id, ld: &mut LiveDocument) -> Result<(), LiveError> {
-       
         // now we can have an array or a class instance
         match self.peek_token() {
             Token::OpenBrace => { // key/value map
@@ -544,9 +477,10 @@ impl<'a> LiveParser<'a> {
                 }
                 Token::Ident(prop_id) => {
                     self.skip_token();
-                    
+
                     //let span = self.begin_span();
                     // next 
+                    // there is another token coming
                     if let Token::Ident(_) = self.peek_token() {
                         match prop_id {
                             id!(fn) => {
@@ -562,7 +496,6 @@ impl<'a> LiveParser<'a> {
                                 self.accept_optional_delim();
                             }
                             _ => {
-                                // ok so we get an ident.
                                 self.expect_var_def(ld) ?;
                                 self.accept_optional_delim();
                             }
@@ -606,30 +539,4 @@ impl<'a> LiveParser<'a> {
         Ok(ld)
     }
 }
-/*
-pub struct SpanTracker {
-    pub file_id: FileId,
-    pub start: usize,
-}
 
-impl SpanTracker {
-    pub fn end(&self, parser: &mut LiveParser) -> Span {
-        Span::new(
-            self.file_id,
-            self.start,
-            parser.end()
-        )
-    }
-    
-    pub fn error(&self, parser: &mut LiveParser, origin: LiveErrorOrigin, message: String) -> LiveError {
-        LiveError {
-            origin,
-            span: Span::new(
-                self.file_id,
-                self.start,
-                parser.token_end(),
-            ),
-            message,
-        }
-    }
-}*/

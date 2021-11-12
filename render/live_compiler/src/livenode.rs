@@ -20,7 +20,7 @@ impl LiveValue {
             Self::TupleEnum {..} |
             Self::NamedEnum {..} |
             Self::BareClass | // subnodes including this one
-            Self::NamedClass {..} => true, // subnodes including this one          
+            Self::NamedClass {..} => true, // subnodes including this one         
             _ => false
         }
     }
@@ -32,8 +32,63 @@ impl LiveValue {
         }
     }
     
+    pub fn is_enum(&self) -> bool {
+        match self {
+            Self::BareEnum {..} |
+            Self::TupleEnum {..} |
+            Self::NamedEnum {..} => true,
+            _ => false
+        }
+    }
+    
+    pub fn is_array(&self) -> bool {
+        match self {
+            Self::Array => true,
+            _ => false
+        }
+    }
+    
+    pub fn is_named_class(&self) -> bool {
+        match self {
+            Self::NamedClass {..} => true,
+            _ => false
+        }
+    }
+    
+    pub fn is_bare_class(&self) -> bool {
+        match self {
+            Self::BareClass => true,
+            _ => false
+        }
+    }
+    
+    pub fn named_class_id(&self) -> Option<Id> {
+        match self {
+            Self::NamedClass {class} => Some(*class),
+            _ => None
+        }
+    }
+    
+    pub fn enum_base_id(&self) -> Option<Id> {
+        match self {
+            Self::BareEnum {base, ..} => Some(*base),
+            Self::TupleEnum {base, ..} => Some(*base),
+            Self::NamedEnum {base, ..} => Some(*base),
+            _ => None
+        }
+    }
+    
+    pub fn set_scope(&mut self, in_scope_start: usize, in_scope_count: u32) {
+        match self {
+            Self::Fn {scope_start, scope_count, ..} => {*scope_start = in_scope_start; *scope_count = in_scope_count;},
+            Self::Const {scope_start, scope_count, ..} => {*scope_start = in_scope_start; *scope_count = in_scope_count;},
+            Self::VarDef {scope_start, scope_count, ..} => {*scope_start = in_scope_start; *scope_count = in_scope_count;},
+            _ => ()
+        }
+    }
+    
     pub fn variant_id(&self) -> usize {
-        match &self {
+        match self {
             Self::Str(_) => 1,
             Self::String(_) => 2,
             Self::StringRef {..} => 3,
@@ -120,235 +175,240 @@ pub trait LiveNodeSlice {
 }
 
 pub trait LiveNodeVec {
-    fn clone_children_from(&mut self, from_index: usize, insert_start: Option<usize>, other: &[LiveNode]) -> usize;
-    fn clone_children_self(&mut self, from_index: usize, insert_start: Option<usize>) -> usize;
+    fn clone_children_from(&mut self, from_index: usize, insert_start: Option<usize>, other: &[LiveNode]);
+    fn clone_children_self(&mut self, from_index: usize, insert_start: Option<usize>);
 }
 
-//macro_rules!impl_live_node_slice {
-//    ( $ for_type: ty) => {
-// accessing the Gen structure like a tree
-impl LiveNodeSlice for Vec<LiveNode> {
-    fn seek_parent(&self, index: usize) -> Option<usize> {
-        if self.len() == 0 {
-            return None
-        }
-        let mut stack_depth = 0;
-        let mut index = index;
-        // we are going to scan backwards
-        loop {
-            match &self[index].value {
-                LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
-                    if stack_depth == 0 {
-                        return Some(index)
-                    }
-                    stack_depth -= 1;
+macro_rules!impl_live_node_slice {
+    ( $ for_type: ty) => {
+        // accessing the Gen structure like a tree
+        impl LiveNodeSlice for $ for_type {
+            fn seek_parent(&self, index: usize) -> Option<usize> {
+                if self.len() == 0 {
+                    return None
                 }
-                LiveValue::Close => {
-                    stack_depth += 1;
-                }
-                _ => {}
-            }
-            if index == 0 {
-                break
-            }
-            index -= 1;
-        }
-        Some(0)
-    }
-    
-    fn seek_child_by_index(&self, index: usize, child_index: usize) -> Option<usize> {
-        let mut stack_depth = 0;
-        let mut index = index;
-        let mut child_count = 0;
-        while index < self.len() {
-            match &self[index].value {
-                LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
-                    if stack_depth == 1 {
-                        if child_index == child_count {
-                            return Some(index);
+                let mut stack_depth = 0;
+                let mut index = index;
+                // we are going to scan backwards
+                loop {
+                    match &self[index].value {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                            if stack_depth == 0 {
+                                return Some(index)
+                            }
+                            stack_depth -= 1;
                         }
-                        child_count += 1;
-                    }
-                    stack_depth += 1;
-                }
-                LiveValue::Close => {
-                    stack_depth -= 1;
-                    if stack_depth == 0 {
-                        return None
-                    }
-                }
-                _ => {
-                    if stack_depth == 1 {
-                        if child_index == child_count {
-                            return Some(index);
+                        LiveValue::Close => {
+                            stack_depth += 1;
                         }
-                        child_count += 1;
+                        _ => {}
                     }
-                    else if stack_depth == 0 {
-                        return None
+                    if index == 0 {
+                        break
                     }
+                    index -= 1;
                 }
+                Some(0)
             }
-            index += 1;
-        }
-        None
-    }
-    
-    fn seek_last_child(&self, index: usize) -> Option<usize> {
-        let mut stack_depth = 0;
-        let mut index = index;
-        let mut child_count = 0;
-        let mut found_child = None;
-        while index < self.len() {
-            match &self[index].value {
-                LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
-                    if stack_depth == 1 {
-                        found_child = Some(index);
-                        child_count += 1;
+            
+            fn seek_child_by_index(&self, index: usize, child_index: usize) -> Option<usize> {
+                let mut stack_depth = 0;
+                let mut index = index;
+                let mut child_count = 0;
+                while index < self.len() {
+                    match &self[index].value {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                            if stack_depth == 1 {
+                                if child_index == child_count {
+                                    return Some(index);
+                                }
+                                child_count += 1;
+                            }
+                            stack_depth += 1;
+                        }
+                        LiveValue::Close => {
+                            stack_depth -= 1;
+                            if stack_depth == 0 {
+                                return None
+                            }
+                        }
+                        _ => {
+                            if stack_depth == 1 {
+                                if child_index == child_count {
+                                    return Some(index);
+                                }
+                                child_count += 1;
+                            }
+                            else if stack_depth == 0 {
+                                return None
+                            }
+                        }
                     }
-                    stack_depth += 1;
+                    index += 1;
                 }
-                LiveValue::Close => {
-                    stack_depth -= 1;
-                    if stack_depth == 0 {
-                        return found_child
-                    }
-                }
-                _ => {
-                    if stack_depth == 1 {
-                        found_child = Some(index);
-                        child_count += 1;
-                    }
-                    else if stack_depth == 0 {
-                        return found_child
-                    }
-                }
+                None
             }
-            index += 1;
-        }
-        None
-    }
-    
-    fn seek_child_append(&self, index: usize) -> usize {
-        let mut stack_depth = 0;
-        let mut index = index;
-        while index < self.len() {
-            match &self[index].value {
-                LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
-                    stack_depth += 1;
-                }
-                LiveValue::Close => {
-                    stack_depth -= 1;
-                    if stack_depth == 0 {
-                        return index
+            
+            fn seek_last_child(&self, index: usize) -> Option<usize> {
+                let mut stack_depth = 0;
+                let mut index = index;
+                let mut child_count = 0;
+                let mut found_child = None;
+                while index < self.len() {
+                    match &self[index].value {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                            if stack_depth == 1 {
+                                found_child = Some(index);
+                                child_count += 1;
+                            }
+                            stack_depth += 1;
+                        }
+                        LiveValue::Close => {
+                            stack_depth -= 1;
+                            if stack_depth == 0 {
+                                return found_child
+                            }
+                        }
+                        _ => {
+                            if stack_depth == 1 {
+                                found_child = Some(index);
+                                child_count += 1;
+                            }
+                            else if stack_depth == 0 {
+                                return found_child
+                            }
+                        }
                     }
+                    index += 1;
                 }
-                _ => {}
+                None
             }
-            index += 1;
+            
+            fn seek_child_append(&self, index: usize) -> usize {
+                let mut stack_depth = 0;
+                let mut index = index;
+                while index < self.len() {
+                    match &self[index].value {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                            stack_depth += 1;
+                        }
+                        LiveValue::Close => {
+                            stack_depth -= 1;
+                            if stack_depth == 0 {
+                                return index
+                            }
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                index
+            }
+            
+            fn seek_child_by_name(&self, index: usize, child_name: Id) -> Result<usize, usize> {
+                
+                let mut stack_depth = 0;
+                let mut index = index;
+                while index < self.len() {
+                    match &self[index].value {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                            if stack_depth == 1 {
+                                if child_name != Id::empty() && self[index].id == child_name {
+                                    return Ok(index);
+                                }
+                            }
+                            stack_depth += 1;
+                        }
+                        LiveValue::Close => {
+                            stack_depth -= 1;
+                            if stack_depth == 0 {
+                                return Err(index)
+                            }
+                        }
+                        _ => {
+                            if stack_depth == 1 {
+                                if child_name != Id::empty() && self[index].id == child_name {
+                                    return Ok(index);
+                                }
+                            }
+                            else if stack_depth == 0 {
+                                return Err(index)
+                            }
+                        }
+                    }
+                    index += 1;
+                }
+                Err(index)
+            }
+            
+            fn count_children(&self, index: usize) -> usize {
+                
+                let mut stack_depth = 0;
+                let mut index = index;
+                let mut count = 0;
+                while index < self.len() {
+                    match &self[index].value {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                            if stack_depth == 1 {
+                                count += 1;
+                            }
+                            stack_depth += 1;
+                        }
+                        LiveValue::Close => {
+                            stack_depth -= 1;
+                            if stack_depth == 0 {
+                                return count
+                            }
+                        }
+                        _ => {
+                            if stack_depth == 1 {
+                                count += 1;
+                            }
+                            else if stack_depth == 0 {
+                                return count
+                            }
+                        }
+                    }
+                    index += 1;
+                }
+                0
+            }
+            
+            fn skip_value(&self, index: usize) -> usize {
+                let mut index = index;
+                let mut stack_depth = 0;
+                while index < self.len() {
+                    match &self[index].value {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                            stack_depth += 1;
+                        }
+                        LiveValue::Close => {
+                            stack_depth -= 1;
+                            if stack_depth == 0 {
+                                index += 1;
+                                return index;
+                            }
+                        }
+                        _ => {
+                            if stack_depth == 0 {
+                                index += 1;
+                                return index
+                            }
+                        }
+                    }
+                    index += 1;
+                }
+                index
+            }
         }
-        0
-    }
-    
-    fn seek_child_by_name(&self, index: usize, child_name: Id) -> Result<usize, usize> {
         
-        let mut stack_depth = 0;
-        let mut index = index;
-        while index < self.len() {
-            match &self[index].value {
-                LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
-                    if stack_depth == 1 {
-                        if self[index].id == child_name {
-                            return Ok(index);
-                        }
-                    }
-                    stack_depth += 1;
-                }
-                LiveValue::Close => {
-                    stack_depth -= 1;
-                    if stack_depth == 0 {
-                        return Err(index)
-                    }
-                }
-                _ => {
-                    if stack_depth == 1 {
-                        if self[index].id == child_name {
-                            return Ok(index);
-                        }
-                    }
-                    else if stack_depth == 0 {
-                        return Err(index)
-                    }
-                }
-            }
-            index += 1;
-        }
-        Err(index)
-    }
-    
-    fn count_children(&self, index: usize) -> usize {
-        
-        let mut stack_depth = 0;
-        let mut index = index;
-        let mut count = 0;
-        while index < self.len() {
-            match &self[index].value {
-                LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
-                    if stack_depth == 1 {
-                        count += 1;
-                    }
-                    stack_depth += 1;
-                }
-                LiveValue::Close => {
-                    stack_depth -= 1;
-                    if stack_depth == 0 {
-                        return count
-                    }
-                }
-                _ => {
-                    if stack_depth == 1 {
-                        count += 1;
-                    }
-                    else if stack_depth == 0 {
-                        return count
-                    }
-                }
-            }
-            index += 1;
-        }
-        0
-    }
-    
-    fn skip_value(&self, index: usize) -> usize {
-        let mut index = index;
-        let mut stack_depth = 0;
-        while index < self.len() {
-            match &self[index].value {
-                LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
-                    stack_depth += 1;
-                }
-                LiveValue::Close => {
-                    stack_depth -= 1;
-                    if stack_depth == 0 {
-                        index += 1;
-                        return index;
-                    }
-                }
-                _ => {
-                    if stack_depth == 0 {
-                        index += 1;
-                        return index
-                    }
-                }
-            }
-            index += 1;
-        }
-        index
     }
 }
+impl_live_node_slice!(&[LiveNode]);
+impl_live_node_slice!(Vec<LiveNode>);
 
 impl LiveNodeVec for Vec<LiveNode> {
-    fn clone_children_from(&mut self, index: usize, insert_start: Option<usize>, other: &[LiveNode]) -> usize {
+    fn clone_children_from(&mut self, index: usize, insert_start: Option<usize>, other: &[LiveNode]) {
         let mut stack_depth = 0;
         let mut index = index;
         let mut insert_point = if let Some(insert_start) = insert_start {
@@ -358,7 +418,7 @@ impl LiveNodeVec for Vec<LiveNode> {
             other.len()
         };
         while index < other.len() {
-            match &self[index].value {
+            match &other[index].value {
                 LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
                     if stack_depth >= 1 {
                         self.insert(insert_point, other[index].clone());
@@ -373,23 +433,22 @@ impl LiveNodeVec for Vec<LiveNode> {
                         insert_point += 1;
                     }
                     if stack_depth == 0 {
-                        return insert_point
+                        return
                     }
                 }
                 _ => {
                     self.insert(insert_point, other[index].clone());
                     insert_point += 1;
                     if stack_depth == 0 {
-                        return insert_point
+                        return
                     }
                 }
             }
             index += 1;
         }
-        0
     }
     
-    fn clone_children_self(&mut self, index: usize, insert_start: Option<usize>) -> usize {
+    fn clone_children_self(&mut self, index: usize, insert_start: Option<usize>)  {
         let mut stack_depth = 0;
         let mut index = index;
         let mut insert_point = if let Some(insert_start) = insert_start {
@@ -414,28 +473,21 @@ impl LiveNodeVec for Vec<LiveNode> {
                         insert_point += 1;
                     }
                     if stack_depth == 0 {
-                        return insert_point
+                        return 
                     }
                 }
                 _ => {
                     self.insert(insert_point, self[index].clone());
                     insert_point += 1;
                     if stack_depth == 0 {
-                        return insert_point
+                        return 
                     }
                 }
             }
             index += 1;
         }
-        0
     }
 }
-//    }
-//}
-//impl_live_node_slice!(&[LiveNode]);
-//impl_live_node_slice!(Vec<LiveNode>);
-
-
 /*
 #[derive(Clone, Copy, Debug)]
 pub enum ShaderRef {
