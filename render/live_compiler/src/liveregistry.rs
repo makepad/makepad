@@ -1,15 +1,15 @@
-use crate::id::{Id, MultiPack, MultiUnpack};
+//use crate::id::Id;
 use crate::liveerror::{LiveError, LiveFileError, LiveErrorOrigin};
 use makepad_id_macros::*;
 use crate::livedocument::LiveDocument;
-use crate::livenode::LiveNode;
+//use crate::livenode::LiveNode;
 use crate::livenode::LiveValue;
 use crate::livenode::LiveType;
 use crate::liveparser::LiveParser;
-use crate::liveparser::LiveEnumInfo;
+//use crate::liveparser::LiveEnumInfo;
 use crate::id::FileId;
-use crate::id::LocalPtr;
-use crate::id::LivePtr;
+//use crate::id::LocalPtr;
+//use crate::id::LivePtr;
 use crate::token::TokenId;
 use crate::span::Span;
 use crate::id::ModulePath;
@@ -38,7 +38,7 @@ pub struct LiveRegistry {
     pub dep_graph: HashMap<ModulePath, HashSet<ModulePath >>, // this contains all the dependencies a crate has
     pub expanded: Vec<LiveDocument >,
 }
-
+/*
 pub struct LiveObjectIterator {
     file_id: FileId,
     level: usize,
@@ -87,10 +87,10 @@ impl LiveObjectIterator {
             }));
         }
     }
-}
+}*/
 
 impl LiveRegistry {
-    
+    /*
     pub fn live_ptr_from_path(&self, module_path: ModulePath, object_path: &[Id]) -> Option<LivePtr> {
         if let Some(file_id) = self.module_path_to_file_id.get(&module_path) {
             let doc = &self.expanded[file_id.to_index()];
@@ -165,10 +165,6 @@ impl LiveRegistry {
         class_iter
     }
     
-    pub fn token_id_to_span(&self, token_id: TokenId) -> Span {
-        self.live_files[token_id.file_id.to_index()].document.token_id_to_span(token_id)
-    }
-    
     pub fn find_module_path_by_file_id(&self, scan_file_id: FileId) -> Option<ModulePath> {
         for (module_path, file_id) in &self.module_path_to_file_id {
             if *file_id == scan_file_id {
@@ -177,14 +173,18 @@ impl LiveRegistry {
         }
         return None
     }
+    */
     
+    pub fn token_id_to_span(&self, token_id: TokenId) -> Span {
+        self.live_files[token_id.file_id().to_index()].document.token_id_to_span(token_id)
+    }
+
     pub fn parse_live_file(
         &mut self,
         file: &str,
         own_module_path: ModulePath,
         source: String,
         live_types: Vec<LiveType>,
-        live_enums: &HashMap<LiveType, LiveEnumInfo>,
         line_offset: usize
     ) -> Result<FileId, LiveFileError> {
         
@@ -201,7 +201,7 @@ impl LiveRegistry {
             Ok(lex_result) => lex_result
         };
         
-        let mut parser = LiveParser::new(&lex_result.tokens, &live_types, live_enums, file_id);
+        let mut parser = LiveParser::new(&lex_result.tokens, &live_types, file_id);
         
         let mut document = match parser.parse_live_document() {
             Err(msg) => return Err(msg.to_live_file_error(file, &source, line_offset)), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
@@ -213,7 +213,7 @@ impl LiveRegistry {
         // let own_crate_module = CrateModule(crate_id, module_id);
         
         if self.dep_order.iter().position( | v | v.0 == own_module_path).is_none() {
-            self.dep_order.push((own_module_path, TokenId {file_id, token_id: 0}));
+            self.dep_order.push((own_module_path, TokenId::new(file_id, 0)));
         }
         else {
             // marks dependencies dirty recursively (removes the expanded version)
@@ -238,26 +238,24 @@ impl LiveRegistry {
         
         let mut dep_graph_set = HashSet::new();
         
-        for (_, nodes) in document.nodes.iter().enumerate() {
-            for node in nodes {
-                match node.value {
-                    LiveValue::Use {use_ids} => {
-                        let module_path = document.use_ids_to_module_path(use_ids, own_module_path.0);
-                        dep_graph_set.insert(module_path);
-                        let self_index = self.dep_order.iter().position( | v | v.0 == own_module_path).unwrap();
-                        if let Some(other_index) = self.dep_order.iter().position( | v | v.0 == module_path) {
-                            if other_index > self_index {
-                                self.dep_order.remove(other_index);
-                                self.dep_order.insert(self_index, (module_path, node.token_id));
-                            }
+        for node in &document.nodes {
+            match &node.value {
+                LiveValue::Use {crate_id, module_id, object_id} => {
+                    let module_path = ModulePath(*crate_id, *module_id);//document.use_ids_to_module_path(use_ids, own_module_path.0);
+                    dep_graph_set.insert(module_path);
+                    let self_index = self.dep_order.iter().position( | v | v.0 == own_module_path).unwrap();
+                    if let Some(other_index) = self.dep_order.iter().position( | v | v.0 == module_path) {
+                        if other_index > self_index {
+                            self.dep_order.remove(other_index);
+                            self.dep_order.insert(self_index, (module_path, node.token_id.unwrap()));
                         }
-                        else {
-                            self.dep_order.insert(self_index, (module_path, node.token_id));
-                        }
-                        
-                    }, // import
-                    _ => {
                     }
+                    else {
+                        self.dep_order.insert(self_index, (module_path, node.token_id.unwrap()));
+                    }
+                    
+                }, // import
+                _ => {
                 }
             }
         }
@@ -314,7 +312,7 @@ impl LiveRegistry {
             let mut scope_stack = ScopeStack {
                 stack: vec![Vec::new()]
             };
-            let len = in_doc.nodes[0].len();
+            //let len = in_doc.nodes[0].len();
             
             let mut live_document_expander = LiveExpander {
                 module_path_to_file_id: &self.module_path_to_file_id,
@@ -324,7 +322,11 @@ impl LiveRegistry {
                 scope_stack: &mut scope_stack,
                 errors
             };
+            // OK now what. how will we do this.
+            live_document_expander.expand(in_doc, &mut out_doc);
             
+            
+            /*
             for i in 0..len {
                 let out_count = out_doc.nodes[0].len();
                 live_document_expander.walk_node(
@@ -336,7 +338,7 @@ impl LiveRegistry {
                     0,
                     out_count
                 );
-            }
+            }*/
             
             out_doc.recompile = false;
             

@@ -5,7 +5,7 @@ mod macro_lib;
 use crate::macro_lib::*;
 
 use crate::id::*;
-#[path = "../../../live_parser/src/id.rs"]
+#[path = "../../../live_compiler/src/id.rs"]
 mod id; 
 
 /*

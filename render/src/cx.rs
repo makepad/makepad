@@ -920,6 +920,13 @@ impl Cx {
     }
 }
 
+#[macro_export]
+macro_rules!uid {
+    () => {{
+        struct Unique {}
+        std::any::TypeId::of::<Unique>().into()
+    }};
+}
 
 #[macro_export]
 macro_rules!main_app {
