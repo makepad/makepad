@@ -2,14 +2,14 @@
 use crate::liveerror::{LiveError, LiveFileError, LiveErrorOrigin};
 use makepad_id_macros::*;
 use crate::livedocument::LiveDocument;
-//use crate::livenode::LiveNode;
+use crate::livenode::LiveNode;
 use crate::livenode::LiveValue;
 use crate::livenode::LiveType;
 use crate::liveparser::LiveParser;
 //use crate::liveparser::LiveEnumInfo;
 use crate::id::FileId;
 //use crate::id::LocalPtr;
-//use crate::id::LivePtr;
+use crate::id::LivePtr;
 use crate::token::TokenId;
 use crate::span::Span;
 use crate::id::ModulePath;
@@ -90,6 +90,16 @@ impl LiveObjectIterator {
 }*/
 
 impl LiveRegistry {
+    pub fn resolve_ptr(&self, live_ptr: LivePtr) -> &LiveNode {
+        let doc = &self.expanded[live_ptr.file_id.to_index()];
+        &doc.resolve_ptr(live_ptr.local_ptr)
+    }
+    
+    pub fn resolve_doc_ptr(&self, live_ptr: LivePtr) -> (&LiveDocument, &LiveNode) {
+        let doc = &self.expanded[live_ptr.file_id.to_index()];
+        (doc, &doc.resolve_ptr(live_ptr.local_ptr))
+    }
+    
     /*
     pub fn live_ptr_from_path(&self, module_path: ModulePath, object_path: &[Id]) -> Option<LivePtr> {
         if let Some(file_id) = self.module_path_to_file_id.get(&module_path) {
@@ -240,7 +250,7 @@ impl LiveRegistry {
         
         for node in &document.nodes {
             match &node.value {
-                LiveValue::Use {crate_id, module_id, object_id} => {
+                LiveValue::Use {crate_id, module_id, ..} => {
                     let module_path = ModulePath(*crate_id, *module_id);//document.use_ids_to_module_path(use_ids, own_module_path.0);
                     dep_graph_set.insert(module_path);
                     let self_index = self.dep_order.iter().position( | v | v.0 == own_module_path).unwrap();
@@ -324,21 +334,7 @@ impl LiveRegistry {
             };
             // OK now what. how will we do this.
             live_document_expander.expand(in_doc, &mut out_doc);
-            
-            
-            /*
-            for i in 0..len {
-                let out_count = out_doc.nodes[0].len();
-                live_document_expander.walk_node(
-                    in_doc, 
-                    0,
-                    i,
-                    &mut out_doc,
-                    0,
-                    0,
-                    out_count
-                );
-            }*/
+
             
             out_doc.recompile = false;
             
