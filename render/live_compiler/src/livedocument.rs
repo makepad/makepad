@@ -1,20 +1,19 @@
 #![allow(unused_variables)]
-use makepad_id_macros::*;
-use crate::id::{Id, MultiPack, MultiUnpack, MultiFmt};
+//use makepad_id_macros2::*;
+use crate::id::{Id};
 use std::fmt;
 use crate::span::Span;
-use crate::util::PrettyPrintedF64;
+//use crate::util::PrettyPrintedF64;
 use crate::token::{TokenWithSpan, TokenId};
-use crate::livenode::{LiveNode, LiveValue};
-use crate::id::ModulePath;
+use crate::livenode::{LiveNode, LiveValue};//, LiveValue};
+//use crate::id::ModulePath;
 use crate::id::LocalPtr;
 use crate::id::LivePtr;
 use crate::id::FileId;
 
 pub struct LiveDocument {
     pub recompile: bool,
-    pub nodes: Vec<Vec<LiveNode >>,
-    pub multi_ids: Vec<Id>,
+    pub nodes: Vec<LiveNode >,
     pub strings: Vec<char>,
     pub tokens: Vec<TokenWithSpan>,
     pub scopes: Vec<LiveScopeItem>,
@@ -27,7 +26,7 @@ impl fmt::Display for LiveScopeTarget {
                 write!(f, "[local]")
             },
             LiveScopeTarget::LivePtr (ptr) => {
-                write!(f, "[F:{} L:{} I:{}]", ptr.file_id.to_index(), ptr.local_ptr.level, ptr.local_ptr.index)
+                write!(f, "[F:{} I:{}]", ptr.file_id.to_index(), ptr.local_ptr.0)
             }
         }
     }
@@ -63,8 +62,7 @@ impl LiveDocument {
     pub fn new() -> Self {
         Self {
             recompile: true,
-            nodes: vec![Vec::new()],
-            multi_ids: Vec::new(),
+            nodes: Vec::new(),
             strings: Vec::new(),
             tokens: Vec::new(),
             scopes: Vec::new(),
@@ -72,7 +70,7 @@ impl LiveDocument {
     }
     
     pub fn resolve_ptr(&self, local_ptr: LocalPtr) -> &LiveNode {
-        &self.nodes[local_ptr.level][local_ptr.index]
+        &self.nodes[local_ptr.0]
     }
     
     pub fn get_tokens(&self, token_start: u32, token_count: u32) -> &[TokenWithSpan] {
@@ -92,32 +90,19 @@ impl LiveDocument {
     }
     
     pub fn restart_from(&mut self, other: &LiveDocument) {
-        for node in &mut self.nodes {
-            node.truncate(0);
-        }
-        self.multi_ids.clone_from(&other.multi_ids.clone());
+        self.nodes.truncate(0);
+        //self.multi_ids.clone_from(&other.multi_ids.clone());
         self.strings.clone_from(&other.strings);
         self.tokens.clone_from(&other.tokens.clone());
         self.scopes.truncate(0);
     }
     
     pub fn token_id_to_span(&self, token_id: TokenId) -> Span {
-        self.tokens[token_id.token_id as usize].span
+        self.tokens[token_id.token_index() as usize].span
     }
     
-    pub fn get_level_len(&mut self, level: usize) -> usize {
-        let len = self.nodes.len() - 1;
-        for _ in len..level {
-            self.nodes.push(Vec::new())
-        }
-        self.nodes[level].len()
-    }
-    
-    pub fn push_node(&mut self, level: usize, node: LiveNode) {
-        self.nodes[level].push(node);
-    }
-    
-    pub fn scan_for_object_path_from(&self, object_path: &[Id], mut node_start: usize, mut node_count: usize, mut level: usize) -> Option<LocalPtr> {
+    pub fn scan_for_object_path_from(&self, object_path: &[Id], start:LocalPtr) -> Option<LocalPtr> {
+        /*
         for i in 0..object_path.len() {
             let id = object_path[i];
             let mut found = false;
@@ -152,14 +137,15 @@ impl LiveDocument {
             if !found {
                 return None
             }
-        }
+        }*/
         None
     }
     
     pub fn scan_for_object_path(&self, object_path: &[Id]) -> Option<LocalPtr> {
-        self.scan_for_object_path_from(object_path, 0, self.nodes[0].len(), 0)
+        self.scan_for_object_path_from(object_path, LocalPtr(0))
     }
     
+    /*
     pub fn scan_for_multi_for_expand(&self, level: usize, node_start: usize, node_count: usize, id_start: usize, id_count: usize, multi_ids: &Vec<Id>) -> Result<LocalPtr, String> {
         let mut node_start = node_start as usize;
         let mut node_count = node_count as usize;
@@ -200,7 +186,7 @@ impl LiveDocument {
             }
         }
         return Err(format!("Cannot find class {}", MultiFmt::new(&multi_ids, MultiPack::multi_id(id_start, id_count))))
-    }
+    }*/
     /*
    pub fn write_or_add_node(
         &mut self,
@@ -352,7 +338,7 @@ impl LiveDocument {
             }
         }
     }*/
-    
+    /*
     pub fn create_multi_id(&mut self, ids: &[Id]) -> MultiPack {
         let multi_index = self.multi_ids.len();
         for id in ids {
@@ -391,185 +377,111 @@ impl LiveDocument {
                 panic!("Unexpected id type {:?}", use_ids.unpack())
             }
         }
-    }
+    }*/
 }
 
 
 impl fmt::Debug for LiveDocument {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // lets iterate the items on level0
-        fn indent(depth: usize, f: &mut fmt::Formatter) {
-            for _ in 0..depth {
-                let _ = write!(f, "    ");
+        let mut stack_depth = 0;
+        for node in &self.nodes{
+            for _ in 0..stack_depth {
+                write!(f, "= ").unwrap();
+            }
+            match &node.value{
+               LiveValue::Str(s)=>{
+                   writeln!(f, "{}: Str: {}", node.id, s).unwrap();
+                },
+                LiveValue::String(s)=>{
+                    writeln!(f, "{}: <String> {}", node.id, s).unwrap();
+                },
+                LiveValue::StringRef {string_start, string_count}=>{
+                    writeln!(f, "{}: <StringRef> string_start:{}, string_end:{}", node.id, string_start, string_count).unwrap();
+                },
+                LiveValue::Bool(v)=>{
+                    writeln!(f, "{}: <Bool> {}", node.id, v).unwrap();
+                }
+                LiveValue::Int(v)=>{
+                    writeln!(f, "{}: <Int> {}", node.id, v).unwrap();
+                }
+                LiveValue::Float(v)=>{
+                    writeln!(f, "{}: <Float> {}", node.id, v).unwrap();
+                },
+                LiveValue::Color(v)=>{
+                    writeln!(f, "{}: Color:{}", node.id, v).unwrap();
+                },
+                LiveValue::Vec2(v)=>{
+                    writeln!(f, "{}: Vec2:{:?}", node.id, v).unwrap();
+                },
+                LiveValue::Vec3(v)=>{
+                    writeln!(f, "{}: Vec3:{:?}", node.id, v).unwrap();
+                },
+                LiveValue::LiveType(v)=>{
+                    writeln!(f, "{}: <LiveType> {:?}", node.id, v).unwrap();
+                },
+                LiveValue::BareEnum {base, variant}=>{
+                    writeln!(f, "{}: <BareEnum> {}::{}", node.id, base, variant).unwrap();
+                },
+                // stack items
+                LiveValue::Array=>{
+                    writeln!(f, "{}: <Array>", node.id).unwrap();
+                    stack_depth += 1;
+                },
+                LiveValue::TupleEnum {base, variant}=>{
+                    writeln!(f, "{}: <TupleEnum> {}::{}", node.id, base, variant).unwrap();
+                    stack_depth += 1;
+                },
+                LiveValue::NamedEnum {base, variant}=>{
+                    writeln!(f, "{}: <NamedEnum> {}::{}", node.id, base, variant).unwrap();
+                    stack_depth += 1;
+                },
+                LiveValue::BareClass=>{
+                    writeln!(f, "{}: <BareClass>", node.id).unwrap();
+                    stack_depth += 1;
+                }, // subnodes including this one
+                LiveValue::NamedClass {class}=>{
+                    writeln!(f, "{}: <NamedClass> {}", node.id, class).unwrap();
+                    stack_depth += 1;
+                }, // subnodes including this one
+                LiveValue::Close=>{
+                    writeln!(f, "<Close> {}", node.id).unwrap();
+                    stack_depth -= 1;
+                },
+                // the shader code types
+                LiveValue::Fn {
+                    token_start,
+                    token_count,
+                    scope_start,
+                    scope_count
+                }=>{
+                    writeln!(f, "fn {} :token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start,scope_count).unwrap();
+                },
+                LiveValue::Const {
+                    token_start,
+                    token_count,
+                    scope_start,
+                    scope_count
+                }=>{
+                    writeln!(f, "const {} :token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start,scope_count).unwrap();
+                },
+                LiveValue::VarDef { //instance/uniform def
+                    token_start,
+                    token_count,
+                    scope_start,
+                    scope_count
+                }=>{
+                    writeln!(f, "VarDef {} : token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start,scope_count).unwrap();
+                },
+                LiveValue::Use{
+                    crate_id,
+                    module_id,
+                    object_id
+                }=>{
+                    writeln!(f, "use {}::{}::{}", crate_id, module_id, object_id).unwrap();
+                }
+                
             }
         }
-        
-        fn recur(ld: &LiveDocument, level: usize, node_index: usize, f: &mut fmt::Formatter) {
-            let node = &ld.nodes[level][node_index];
-            //let (row,col) = byte_to_row_col(node.span.start(), &ld.source);
-            //let _ = write!(f, "/*{},{} {}*/", row+1, col, node.span.len());
-            match node.value {
-                LiveValue::String {string_start, string_count} => {
-                    let _ = write!(f, "{}: string", node.id);
-/*
-                    for i in 0..string_count {
-                        let _ = write!(f, "{}", ld.strings[(i + string_start) as usize]);
-                    }
-                    let _ = write!(f, "\"");*/
-                },
-                LiveValue::Bool(val) => {
-                    let _ = write!(f,"{}:{}",node.id, val);
-                },
-                LiveValue::Int(val) => {
-                    let _ = write!(f, "{}:{}", node.id, val);
-                }
-                LiveValue::Float(val) => {
-                    let _ = write!(f, "{}:{}", node.id, PrettyPrintedF64(val));
-                },
-                LiveValue::Color(val) => {
-                    let _ = write!(f, "{}:#{:08x}", node.id, val);
-                },
-                LiveValue::Vec2(val) => {
-                    let _ = write!(f, "{}:{}", node.id, val);
-                },
-                LiveValue::Vec3(val) => {
-                    let _ = write!(f, "{}:{}", node.id, val);
-                },
-                LiveValue::MultiPack(val) => {
-                    let _ = write!(f, "{}:{}", node.id, MultiFmt::new(&ld.multi_ids, val));
-                },
-                LiveValue::Call {target, node_start, node_count} => {
-                    let _ = write!(f, "{}:{}(", node.id, MultiFmt::new(&ld.multi_ids, target));
-                    for i in 0..node_count {
-                        if i>0 {
-                            let _ = write!(f, ", ");
-                        }
-                        recur(ld, level + 1, i as usize + node_start as usize, f);
-                    }
-                    let _ = write!(f, ")");
-                },
-                LiveValue::Array {node_start, node_count} => {
-                    let _ = write!(f, "{}:[", node.id);
-                    for i in 0..node_count {
-                        if i>0 {
-                            let _ = write!(f, ", ");
-                        }
-                        recur(ld, level + 1, i as usize + node_start as usize, f);
-                    }
-                    let _ = write!(f, "]");
-                },
-                LiveValue::ClassOverride {node_start, node_count} => {
-                    let _ = write!(f, "{}:{{", node.id);
-                    for i in 0..(node_count >> 1) {
-                        if i>0 {
-                            let _ = write!(f, ", ");
-                        }
-                        recur(ld, level + 1, (i * 2) as usize + node_start as usize, f);
-                        let _ = write!(f, ":");
-                        recur(ld, level + 1, (i * 2 + 1) as usize + node_start as usize, f);
-                    }
-                    let _ = write!(f, "}}");
-                },
-                LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
-                    let _ = write!(f, "fn {}", node.id);
-                    /*for i in 0..token_count {
-                        let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
-                    }*/
-                    /*let _ = write!(f, "\"");
-                    for i in 0..(scope_count as u32) {
-                        let item = &ld.scopes[(i + scope_start) as usize];
-                        let _ = write!(f, "{}:{}", item.id, item.target);
-                        if i != (scope_count - 1) as u32 {
-                            let _ = write!(f, ", ");
-                            
-                        }
-                    }
-                    let _ = write!(f, "\"");*/
-                },
-                //LiveValue::ResourceRef {target}=>{
-                //    prefix(node.id_pack, ld, f);
-                //    let _ = write!(f, "{}", IdFmt::col(&ld.multi_ids, target));
-                // }
-                LiveValue::Const {token_start, token_count, scope_start, scope_count} => {
-                    for i in 0..token_count {
-                        let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
-                    }
-                    let _ = write!(f, "\"");
-                    /*for i in 0..(scope_count as u32) {
-                        let item = &ld.scopes[(i + scope_start) as usize];
-                        let _ = write!(f, "{}:{}", item.id, item.target);
-                        if i != (scope_count - 1) as u32 {
-                            let _ = write!(f, ", ");
-                            
-                        }
-                    }*/
-                    let _ = write!(f, "\"");
-                },
-                LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
-                    let _ = write!(f, "vardef {}:\"", node.id);
-                    /*for i in 0..token_count {
-                        let _ = write!(f, "{}", ld.tokens[(i + token_start) as usize]);
-                    }
-                    let _ = write!(f, "\"");*/
-                    /*for i in 0..(scope_count as u32) {
-                        let item = &ld.scopes[(i + scope_start) as usize];
-                        let _ = write!(f, "{}:{}", item.id, item.target);
-                        if i != (scope_count - 1) as u32 {
-                            let _ = write!(f, ", ");
-                            
-                        }
-                    }*/
-                    let _ = write!(f, "\"");
-                },
-                LiveValue::Use {use_ids} => {
-                    let _ = write!(f, "use {}", MultiFmt::new(&ld.multi_ids, use_ids));
-                }
-                LiveValue::LiveType(id) => {
-                    let _ = write!(f, "{}: {:?}",node.id, id);
-                }
-                LiveValue::Class {class, node_start, node_count} => {
-                    let _ = write!(f, "{}:{} {{", node.id, MultiFmt::new(&ld.multi_ids, class));
-                    // lets do a pass to check if its all simple values
-                    let mut is_simple = true;
-                    for i in 0..node_count {
-                        if !ld.nodes[level + 1][i as usize + node_start as usize].value.is_simple() {
-                            is_simple = false;
-                        }
-                    }
-                    if !is_simple && node_count > 0 {
-                        let _ = write!(f, "\n");
-                    }
-                    for i in 0..node_count {
-                        if !is_simple {
-                            indent(level + 1, f);
-                        }
-                        else {
-                            if i >0 {
-                                let _ = write!(f, ", ");
-                            }
-                        }
-                        recur(ld, level + 1, i as usize + node_start as usize, f);
-                        if !is_simple {
-                            let _ = write!(f, "\n");
-                        }
-                    }
-                    if !is_simple && node_count > 0 {
-                        indent(level, f);
-                    }
-                    let _ = write!(f, "}}");
-                }
-            }
-        }
-        
-        let len = self.nodes[0].len();
-        for i in 0..len {
-            recur(self, 0, i, f);
-            if i != len - 1 {
-                let _ = write!(f, "\n");
-            }
-        }
-        
         fmt::Result::Ok(())
     }
 }
-

@@ -1,17 +1,36 @@
-use crate::id::{Id, MultiPack, MultiUnpack, MultiFmt};
-use crate::liveerror::{LiveError, LiveErrorOrigin};
+use crate::id::Id;
+use crate::liveerror::{LiveError}; //, LiveErrorOrigin};
 use makepad_id_macros::*;
 use crate::livedocument::LiveDocument;
-use crate::livenode::LiveNode;
+//use crate::livenode::LiveNode;
 use crate::livenode::LiveValue;
+use crate::livenode::LiveNodeSlice;
+use crate::livenode::LiveNodeVec;
 use crate::id::FileId;
 use crate::id::LocalPtr;
 use crate::id::LivePtr;
-use crate::token::TokenId;
+//use crate::token::TokenId;
 use crate::id::ModulePath;
 use std::collections::HashMap;
 use crate::livedocument::LiveScopeTarget;
 use crate::livedocument::LiveScopeItem;
+
+pub struct ScopeStack {
+    pub stack: Vec<Vec<LiveScopeItem >>
+}
+
+impl ScopeStack {
+    fn find_item(&self, id: Id) -> Option<LiveScopeTarget> {
+        for items in self.stack.iter().rev() {
+            for item in items.iter().rev() {
+                if item.id == id {
+                    return Some(item.target)
+                }
+            }
+        }
+        return None
+    }
+}
 
 
 pub struct LiveExpander<'a> {
@@ -24,11 +43,7 @@ pub struct LiveExpander<'a> {
 }
 
 impl<'a> LiveExpander<'a> {
-    pub fn is_baseclass(pack: MultiPack) -> bool {
-        if pack.is_live_ptr(){ // its an enum endpoint
-            return true;
-        }
-        let id = pack.as_single_id();
+    pub fn is_baseclass(id: Id) -> bool {
         id == id!(Component)
             || id == id!(Enum)
             || id == id!(Struct)
@@ -66,7 +81,104 @@ impl<'a> LiveExpander<'a> {
         }
     }
     
+    pub fn expand(&mut self, in_doc: &LiveDocument, out_doc: &mut LiveDocument) {
+        out_doc.nodes.push(in_doc.nodes[0].clone());
+        let mut current_parent = vec![0usize];
+        let mut level_overwrite = vec![false];
+        let mut in_index = 1;
+        
+        loop{
+            let in_node = &in_doc.nodes[in_index];
+            if in_index >= in_doc.nodes.len() -1 {
+                break;
+            }
+
+            if !in_node.id.is_empty() {
+                
+                let out_index = match out_doc.nodes.seek_child_by_name(*current_parent.last().unwrap(), in_node.id) {
+                    Ok(overwrite)=>{
+                        // we can only overwrite if the types are the same 
+                        if out_doc.nodes[overwrite].value.variant_id() != in_node.value.variant_id(){
+                            println!("TYPE DIFFERENT")
+                        }
+                        else{ // if we are overwriting, we have to eat the closes
+                            out_doc.nodes[overwrite] = in_node.clone();
+                        }
+                        if in_node.value.is_tree(){
+                            level_overwrite.push(true);
+                        }
+                        overwrite
+                    }
+                    Err(insert_point)=>{
+                        if !in_node.value.is_close() || !level_overwrite.last().unwrap(){
+                            out_doc.nodes.insert(insert_point, in_node.clone());
+                        }
+                        if in_node.value.is_tree(){
+                            level_overwrite.push(false);
+                        }
+                        insert_point
+                    }
+                };
+
+                self.scope_stack.stack.last_mut().unwrap().push(LiveScopeItem {
+                    id: in_node.id,
+                    target: LiveScopeTarget::LocalPtr(LocalPtr(out_index))
+                });
+
+                // ok now match the rest of things
+                match &in_node.value {
+                    LiveValue::NamedClass {class} => { // ok this one matters
+                        if let Some(target) = self.scope_stack.find_item(*class) {
+                            // OK now we need to copy target in.
+                            match target{
+                                LiveScopeTarget::LocalPtr(local_ptr)=>{
+                                    out_doc.nodes.clone_children_self(local_ptr.0, Some(out_index+1));
+                                }
+                                LiveScopeTarget::LivePtr(live_ptr)=>{
+                                    let doc = &self.expanded[live_ptr.file_id.to_index()];
+                                    out_doc.nodes.clone_children_from(live_ptr.local_ptr.0, Some(out_index+1), &doc.nodes);
+                                    // todo fix up the scopestacks for the shaders
+                                }
+                            }
+                        }
+                        // else just ignore it
+                        self.scope_stack.stack.push(Vec::new());
+                        current_parent.push(out_index);
+                    }, // subnodes including this one
+                    LiveValue::Array => {
+                        self.scope_stack.stack.push(Vec::new());
+                        current_parent.push(out_index);
+                    },
+                    LiveValue::TupleEnum {..} => { //base, variant} => {
+                        // ok here we kinda have to remove the old ones
+                        
+                        self.scope_stack.stack.push(Vec::new());
+                        current_parent.push(out_index);
+                    },
+                    LiveValue::NamedEnum {..} => { //{base, variant} => {
+                        self.scope_stack.stack.push(Vec::new());
+                        current_parent.push(out_index);
+                    },
+                    LiveValue::BareClass => {
+                        self.scope_stack.stack.push(Vec::new());
+                        current_parent.push(out_index);
+                    }, // subnodes including this one
+                    LiveValue::Close => {
+                        // we have to scan for our previous insert point / parent
+                        current_parent.pop();
+                        level_overwrite.pop();
+                        self.scope_stack.stack.pop();
+                    },
+                    _ => {}
+                }
+
+            }
+            in_index += 1;
+        }
+        out_doc.nodes.push(in_doc.nodes.last().unwrap().clone());
+    }
     
+    /*
     fn copy_recur(
         &mut self,
         in_doc: Option<(&LiveDocument, FileId)>,
@@ -915,23 +1027,6 @@ impl<'a> LiveExpander<'a> {
                 self.write_or_add_node(out_doc, out_level, out_start, out_count, in_doc, &new_node);
             }
         }
-    }
-}
-
-pub struct ScopeStack {
-    pub stack: Vec<Vec<LiveScopeItem >>
-}
-
-impl ScopeStack {
-    fn find_item(&self, id: Id) -> Option<LiveScopeTarget> {
-        for items in self.stack.iter().rev() {
-            for item in items.iter().rev() {
-                if item.id == id {
-                    return Some(item.target)
-                }
-            }
-        }
-        return None
-    }
+    }*/
 }
 
