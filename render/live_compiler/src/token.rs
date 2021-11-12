@@ -55,22 +55,29 @@ impl fmt::Display for Token {
     }
 }
 
-#[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq)]
-pub struct TokenId {
-    pub file_id:FileId,
-    pub token_id:u32
-}
-
-
-impl fmt::Display for TokenId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "TokenId(token_id:{}, live_file_id:{})", self.token_id, self.file_id.to_index())
+impl TokenId {
+    pub fn new(file_id: FileId, token: usize)->Self{
+        TokenId(
+            (((file_id.to_index() as u32) & 0x0fff) << 20) |
+            ((token as u32) & 0xfffff) 
+        )
+    }
+    
+    pub fn token_index(&self)->usize{
+        ((self.0>>24)&0xfffff) as usize
+    }
+    
+    pub fn file_id(&self)->FileId{
+        FileId(((self.0>>20)&0xfff) as u16)
     }
 }
 
+#[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq)]
+pub struct TokenId(u32);
+
 impl fmt::Debug for TokenId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "TokenId(token_id:{}, live_file_id:{})", self.token_id, self.file_id.to_index())
+        write!(f, "TokenId(token_index:{}, file_id:{})", self.token_index(), self.file_id().to_index())
     }
 }
 
