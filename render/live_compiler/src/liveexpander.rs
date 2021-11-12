@@ -197,7 +197,6 @@ impl<'a> LiveExpander<'a> {
             // process stacks
             match in_value {
                 LiveValue::NamedClass {class} => {
-                    
                     if let Some(target) = self.scope_stack.find_item(*class) {
                         match target {
                             LiveScopeTarget::LocalPtr(local_ptr) => {
@@ -212,30 +211,15 @@ impl<'a> LiveExpander<'a> {
                     self.scope_stack.stack.push(Vec::new());
                     current_parent.push(out_index);
                 }, 
-                LiveValue::Array => {
-                    self.scope_stack.stack.push(Vec::new());
-                    current_parent.push(out_index);
-                },
-                LiveValue::TupleEnum {..} => { 
-                    self.scope_stack.stack.push(Vec::new());
-                    current_parent.push(out_index);
-                },
-                LiveValue::NamedEnum {..} => { 
-                    self.scope_stack.stack.push(Vec::new());
-                    current_parent.push(out_index);
-                },
+                LiveValue::Array |
+                LiveValue::TupleEnum {..} |
+                LiveValue::NamedEnum {..} |
                 LiveValue::BareClass => {
                     self.scope_stack.stack.push(Vec::new());
                     current_parent.push(out_index);
                 },
-                LiveValue::Fn {..} => {
-                    let (start, count) = self.store_scopes(out_doc);
-                    out_doc.nodes[out_index].value.set_scope(start, count as u32);
-                },
-                LiveValue::Const {..} => {
-                    let (start, count) = self.store_scopes(out_doc);
-                    out_doc.nodes[out_index].value.set_scope(start, count as u32);
-                },
+                LiveValue::Fn {..} |
+                LiveValue::Const {..} |
                 LiveValue::VarDef {..} => {
                     let (start, count) = self.store_scopes(out_doc);
                     out_doc.nodes[out_index].value.set_scope(start, count as u32);
