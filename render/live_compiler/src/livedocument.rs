@@ -73,16 +73,16 @@ impl LiveDocument {
         &self.nodes[local_ptr.0]
     }
     
-    pub fn get_tokens(&self, token_start: u32, token_count: u32) -> &[TokenWithSpan] {
-        &self.tokens[token_start as usize..(token_start + token_count)as usize]
+    pub fn get_tokens(&self, token_start: usize, token_count: usize) -> &[TokenWithSpan] {
+        &self.tokens[token_start..(token_start + token_count)]
     }
     
-    pub fn get_scopes(&self, scope_start: u32, scope_count: u16) -> &[LiveScopeItem] {
-        &self.scopes[scope_start as usize..(scope_start + scope_count as u32)as usize]
+    pub fn get_scopes(&self, scope_start: usize, scope_count: u32) -> &[LiveScopeItem] {
+        &self.scopes[scope_start..(scope_start + scope_count as usize)]
     }
     
-    pub fn get_string(&self, string_start: u32, string_count: u32, out:&mut String) {
-        let chunk = &self.strings[string_start as usize..(string_start + string_count as u32)as usize];
+    pub fn get_string(&self, string_start: usize, string_count: usize, out:&mut String) {
+        let chunk = &self.strings[string_start..(string_start + string_count)];
         out.truncate(0);
         for chr in chunk {
             out.push(*chr);

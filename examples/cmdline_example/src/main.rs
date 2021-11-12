@@ -1,93 +1,45 @@
 use makepad_live_compiler::*;
-//use std::any::Any;
-use std::collections::HashMap;
-/*
-
-#[derive(Clone, Debug)]
-pub struct LiveNode2 { // 3x u64
-    pub token_id: TokenId,
-    pub id: Id,
-    pub value: LiveValue2,
-}
-
-#[derive(Clone, Debug)]
-pub enum LiveValue2 {
-    Str(&'static str),
-    String(String),
-    StringRef {
-        string_start: usize,
-        string_count: usize
-    },
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Color(u32),
-    Vec2(Vec2),
-    Vec3(Vec3),
-    LiveType(LiveType),
-    // ok so since these things are 
-    EnumBare {base: Id, variant: Id},
-    // stack items
-    Array,
-    EnumTuple {base: Id, variant: Id},
-    EnumNamed {base: Id, variant: Id},
-    ClassBare, // subnodes including this one
-    ClassNamed {class: Id}, // subnodes including this one
-    Close,
-    // the shader code types
-    Fn {
-        token_start: usize,
-        token_count: usize,
-        scope_start: usize, 
-        scope_count: u32
-    },
-    Const {
-        token_start: usize,
-        token_count: usize,
-        scope_start: usize,
-        scope_count: u32
-    },
-    VarDef { //instance/uniform def
-        token_start: usize,
-        token_count: usize,
-        scope_start: usize,
-        scope_count: u32
-    },
-    Use{
-        crate_id:Id,
-        module_id:Id,
-    }
-}
-*/
 
 fn main() {
-    let source = r#" 
+    let source1 = r#" 
+        
         Test:Component{
-            x:MyEnum::Fn(1.0)
+            x:{x:1}
+            t:My::Other{x:2.0,y:30}
+            v:1.0
         }
+        /*Test2:Test{
+            x:{x:2}
+            t:My::Prop{x:1.0}
+            z:1.0
+        }*/
+    "#;
+    let source2 = r#" 
+        use test::source1::Test;
+        Test3:Test{t:My::Bla,v:5.0};
     "#;
     
     let mut lr = LiveRegistry::default();
     
-    match lr.parse_live_file(&format!("test.live"), ModulePath::from_str("test.live").unwrap(), source.to_string(), vec![], 0) {
+    match lr.parse_live_file(&format!("test1.live"), ModulePath::from_str("test::source1").unwrap(), source1.to_string(), vec![], 0) {
         Err(why) => panic!("Couldnt parse file {}", why),
         _ => ()
     }
-
-    //println!("{:?}", lr.live_files[0].document);
-
+    match lr.parse_live_file(&format!("test2.live"), ModulePath::from_str("test::source2").unwrap(), source2.to_string(), vec![], 0) {
+        Err(why) => panic!("Couldnt parse file {}", why),
+        _ => ()
+    }
     
     let mut errors = Vec::new();
     lr.expand_all_documents(&mut errors);
-
     
     if errors.len() != 0 {
         for msg in errors {
-            println!("{}\n", msg.to_live_file_error("", source, 0));
+            println!("{}\n", msg.to_live_file_error("", source1, 0));
         }
-        assert_eq!(true, false);
+        //assert_eq!(true, false);
     }
-    println!("{:?}",lr.expanded[0]);
+    println!("{:?}",lr.expanded[1]);
     
 }
 
