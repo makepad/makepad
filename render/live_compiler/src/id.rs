@@ -91,6 +91,16 @@ pub struct LivePtr {
     pub local_ptr: LocalPtr,
 }
 
+impl LivePtr{
+    pub fn node_index(&self)->usize{
+        self.local_ptr.0
+    }
+    
+    pub fn with_index(&self, index:usize)->Self{
+        Self{file_id:self.file_id, local_ptr:LocalPtr(index)}
+    }
+}
+
 impl fmt::Display for LivePtr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}_{}", self.file_id.0, self.local_ptr.0)

@@ -19,7 +19,7 @@ macro_rules! builtin {
 use crate::shaderast::Ident;
 use crate::shaderast::Ty;
 use std::collections::HashMap;
-use makepad_live_parser::Id;
+use makepad_live_compiler::Id;
 #[derive(Clone, Debug)]
 pub struct Builtin {
     pub return_tys: HashMap<Vec<Ty>, Ty>,

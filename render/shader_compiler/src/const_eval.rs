@@ -1,11 +1,11 @@
 use crate::shaderast::*;
 use crate::analyse::ShaderAnalyseOptions;
-use makepad_live_parser::LiveError;
-use makepad_live_parser::LiveErrorOrigin;
-use makepad_live_parser::live_error_origin;
+use makepad_live_compiler::LiveError;
+use makepad_live_compiler::LiveErrorOrigin;
+use makepad_live_compiler::live_error_origin;
 use crate::shaderast::Ident;
 use crate::shaderast::{Lit};
-use makepad_live_parser::Span;
+use makepad_live_compiler::Span;
 use crate::shaderast::Val;
 use std::cell::Cell;
 

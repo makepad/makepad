@@ -1,7 +1,7 @@
 use crate::shaderast::*;
 use crate::shaderast::Ident;
 use crate::shaderast::{Lit};
-use makepad_live_parser::Span;
+use makepad_live_compiler::Span;
 use crate::shaderast::Val;
 use std::cell::Cell;
 

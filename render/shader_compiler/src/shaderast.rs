@@ -1,8 +1,8 @@
-use makepad_live_parser::Span;
-use makepad_live_parser::Token;
-use makepad_live_parser::Id;
-use makepad_live_parser::LivePtr;
-use makepad_live_parser::Vec4;
+use makepad_live_compiler::Span;
+use makepad_live_compiler::Token;
+use makepad_live_compiler::Id;
+use makepad_live_compiler::LivePtr;
+use makepad_live_compiler::Vec4;
 use std::fmt::Write;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -10,29 +10,43 @@ use std::collections::BTreeSet;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
-use makepad_live_parser::PrettyPrintedF32;
-use makepad_live_parser::id;
+use std::ops::Deref;
+use std::ops::DerefMut;
+use makepad_live_compiler::PrettyPrintedF32;
+use makepad_live_compiler::id;
 //use crate::shaderregistry::ShaderResourceId;
 
 // all the Live node pointer newtypes
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct FnPtr(pub LivePtr);
+impl Deref for FnPtr{type Target = LivePtr;fn deref(&self) -> &Self::Target {&self.0}}
+impl DerefMut for FnPtr{fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}} 
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct StructPtr(pub LivePtr);
+impl Deref for StructPtr{type Target = LivePtr;fn deref(&self) -> &Self::Target {&self.0}}
+impl DerefMut for StructPtr{fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}} 
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct DrawShaderPtr(pub LivePtr);
+impl Deref for DrawShaderPtr{type Target = LivePtr;fn deref(&self) -> &Self::Target {&self.0}}
+impl DerefMut for DrawShaderPtr{fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}} 
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct ConstPtr(pub LivePtr);
+impl Deref for ConstPtr{type Target = LivePtr;fn deref(&self) -> &Self::Target {&self.0}}
+impl DerefMut for ConstPtr{fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}} 
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct ValuePtr(pub LivePtr);
+impl Deref for ValuePtr{type Target = LivePtr;fn deref(&self) -> &Self::Target {&self.0}}
+impl DerefMut for ValuePtr{fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}} 
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct VarDefPtr(pub LivePtr);
+impl Deref for VarDefPtr{type Target = LivePtr;fn deref(&self) -> &Self::Target {&self.0}}
+impl DerefMut for VarDefPtr{fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}} 
 
 
 #[derive(Clone, Default)]

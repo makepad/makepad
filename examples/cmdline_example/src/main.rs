@@ -4,9 +4,10 @@ fn main() {
     let source1 = r#" 
         
         Test:Component{
-            x:{x:1}
+            x:te{t:1}
             t:My::Other{x:2.0,y:30}
             v:1.0
+            y:2.0
         }
         /*Test2:Test{
             x:{x:2}
@@ -16,7 +17,7 @@ fn main() {
     "#;
     let source2 = r#" 
         use test::source1::Test;
-        Test3:Test{t:My::Bla,v:5.0};
+        Test3:Test{t:My::Bla,v:5.0, x:{t:2}};
     "#;
     
     let mut lr = LiveRegistry::default();

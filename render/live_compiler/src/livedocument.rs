@@ -26,7 +26,7 @@ impl fmt::Display for LiveScopeTarget {
                 write!(f, "[local]")
             },
             LiveScopeTarget::LivePtr (ptr) => {
-                write!(f, "[F:{} I:{}]", ptr.file_id.to_index(), ptr.local_ptr.0)
+                write!(f, "[F:{} I:{}]", ptr.file_id.to_index(), ptr.node_index())
             }
         }
     }
