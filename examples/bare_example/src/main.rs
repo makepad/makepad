@@ -41,9 +41,10 @@ impl BareExampleApp {
         makepad_widget::live_register(cx);
     }
     
-    pub fn new(cx: &mut Cx) -> Self {
-        let mut new = Self::live_new(cx);
-        new.live_update(cx, cx.live_ptr_from_id(&module_path!(), id!(App)));
+    pub fn new_app(cx: &mut Cx) -> Self {
+        let mut new = Self::new(cx);
+        let nodes = cx.clone_from_module_path(&module_path!(), id!(App)).unwrap();
+        new.apply(cx, &nodes);
         new
     }
     

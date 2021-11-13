@@ -45,7 +45,6 @@ mod cx_wasm32;
 mod cx_desktop;
 
 mod cx_style;
-mod gen;
 mod turtle;
 mod font;
 mod cursor;

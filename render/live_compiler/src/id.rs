@@ -99,6 +99,11 @@ impl LivePtr{
     pub fn with_index(&self, index:usize)->Self{
         Self{file_id:self.file_id, local_ptr:LocalPtr(index)}
     }
+
+    pub fn from_index(file_id:FileId, index:usize)->Self{
+        Self{file_id:file_id, local_ptr:LocalPtr(index)}
+    }
+
 }
 
 impl fmt::Display for LivePtr {

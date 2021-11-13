@@ -3,21 +3,21 @@ use std::fmt::Write;
 use std::time::{Instant};
 
 pub use makepad_derive_live::*;
-pub use makepad_live_parser::math::*;
+pub use makepad_live_compiler::math::*;
 pub use makepad_shader_compiler::ShaderRegistry;
 pub use makepad_shader_compiler::shaderast::DrawShaderPtr;
-pub use makepad_live_parser::Id;
-pub use makepad_live_parser::FileId;
-pub use makepad_live_parser::LocalPtr;
-pub use makepad_live_parser::MultiUnpack;
-pub use makepad_live_parser::LivePtr;
-pub use makepad_live_parser::LiveNode;
-pub use makepad_live_parser::LiveType;
-pub use makepad_live_parser::LiveValue;
-pub use makepad_live_parser::ModulePath;
-pub use makepad_live_parser::LiveEnumInfo;
+pub use makepad_live_compiler::Id;
+pub use makepad_live_compiler::FileId;
+pub use makepad_live_compiler::LocalPtr;
+pub use makepad_live_compiler::LivePtr;
+pub use makepad_live_compiler::LiveNode;
+pub use makepad_live_compiler::LiveType;
+pub use makepad_live_compiler::LiveValue;
+pub use makepad_live_compiler::ModulePath;
+pub use makepad_live_compiler::LiveNodeSlice;
+pub use makepad_live_compiler::LiveNodeVec;
 
-pub use makepad_live_parser::id;
+pub use makepad_live_compiler::id;
 pub use makepad_shader_compiler::Ty;
 
 pub use crate::font::*;
@@ -29,7 +29,6 @@ pub use crate::pass::*;
 pub use crate::geometry::*;
 pub use crate::texture::*;
 pub use crate::live::*;
-pub use crate::gen::*;
 pub use crate::events::*;
 pub use crate::animation::*;
 pub use crate::area::*;
@@ -97,7 +96,6 @@ pub struct Cx {
     pub align_list: Vec<Area>,
     
     pub live_factories: HashMap<LiveType, Box<dyn LiveFactory>>,
-    pub live_enums: HashMap<LiveType, LiveEnumInfo>,
     pub draw_shader_ptr_to_id: HashMap<DrawShaderPtr, usize>,
     pub draw_shader_compile_set: BTreeSet<DrawShaderPtr>,
     
@@ -248,7 +246,6 @@ impl Default for Cx {
             align_list: Vec::new(),
             
             live_factories: HashMap::new(),
-            live_enums: HashMap::new(),
             draw_shader_ptr_to_id: HashMap::new(),
             draw_shader_compile_set: BTreeSet::new(),
             
@@ -941,7 +938,7 @@ macro_rules!main_app {
             let mut app = None;
             cx.event_loop( | cx, mut event | {
                 if let Event::Construct = event{
-                    app = Some($ app::new(cx));
+                    app = Some($ app::new_app(cx));
                     return
                 }
                 if let Event::Draw = event {
@@ -969,7 +966,7 @@ macro_rules!main_app {
             let appcx = &*(appcx as *mut (*mut $ app, *mut Cx/*, *mut CxAfterDraw*/));
             (*appcx.1).process_to_wasm(msg_bytes, | cx, mut event | {
                 if let Event::Construct = event{
-                    (*appcx.0) = Box::new($ app::new(&mut cx));
+                    (*appcx.0) = Box::new($ app::new_app(&mut cx));
                     return
                 }
                 if let Event::Draw = event {

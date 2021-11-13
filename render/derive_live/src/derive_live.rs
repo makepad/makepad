@@ -30,16 +30,13 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
             if let Some(_) = draw_call_vars{
                 tb.add("impl").stream(generic.clone());
                 tb.add("LiveComponentHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-                tb.add("    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
-                tb.add("        self.draw_call_vars.update_value(cx, ptr, id);");
+                tb.add("    fn apply_value_unknown(&mut self, cx: &mut Cx, index:usize, nodes:&[LiveNode]) -> usize {");
+                tb.add("        self.draw_call_vars.apply_value(cx, index, nodes)");
                 tb.add("    }");
-                tb.add("    fn apply_value_unknown(&mut self, cx: &mut Cx, index:&mut usize, nodes:&[GenNode]) {");
-                tb.add("        self.draw_call_vars.apply_value(cx, index, nodes);");
+                tb.add("    fn before_apply_index(&mut self, cx:&mut Cx, index: usize, nodes: &[LiveNode]){");
+                tb.add("        self.draw_call_vars.init_shader(cx, index, nodes, &self.geometry);");
                 tb.add("    }");
-                tb.add("    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr){");
-                tb.add("        self.draw_call_vars.init_shader(cx, DrawShaderPtr(live_ptr), &self.geometry);");
-                tb.add("    }");
-                tb.add("    fn after_live_update(&mut self, cx: &mut Cx, live_ptr:LivePtr) {");
+                tb.add("    fn after_apply_index(&mut self, cx: &mut Cx, _index: usize, _nodes: &[LiveNode]) {");
                 tb.add("        self.draw_call_vars.init_slicer(cx);");
                 tb.add("    }");
                 tb.add("}");
@@ -47,17 +44,14 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
             else if let Some(_) = deref_target {
                 tb.add("impl").stream(generic.clone());
                 tb.add("LiveComponentHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-                tb.add("    fn live_update_value_unknown(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
-                tb.add("        self.deref_target.live_update_value_unknown(cx, id, ptr);");
+                tb.add("    fn apply_value_unknown(&mut self, cx: &mut Cx, index:usize, nodes:&[LiveNode]) -> usize{");
+                tb.add("        self.deref_target.apply_value_unknown(cx, index, nodes)");
                 tb.add("    }");
-                tb.add("    fn apply_value_unknown(&mut self, cx: &mut Cx, index:&mut usize, nodes:&[GenNode]) {");
-                tb.add("        self.deref_target.apply_value_unknown(cx, index, nodes);");
+                tb.add("    fn before_apply_index(&mut self, cx:&mut Cx, index: usize, nodes: &[LiveNode]){");
+                tb.add("        self.deref_target.before_apply_index(cx, index, nodes);");
                 tb.add("    }");
-                tb.add("    fn before_live_update(&mut self, cx:&mut Cx, live_ptr: LivePtr){");
-                tb.add("        self.deref_target.before_live_update(cx, live_ptr);");
-                tb.add("    }");
-                tb.add("    fn after_live_update(&mut self, cx: &mut Cx, live_ptr:LivePtr) {");
-                tb.add("        self.deref_target.after_live_update(cx, live_ptr);");
+                tb.add("    fn after_apply_index(&mut self, cx: &mut Cx, index: usize, nodes: &[LiveNode]) {");
+                tb.add("        self.deref_target.after_apply_index(cx, index, nodes);");
                 tb.add("    }");
                 tb.add("}");
             }
@@ -126,24 +120,9 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
 
             tb.add("impl").stream(generic.clone());
             tb.add("LiveComponentValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {");
-            tb.add("        match id {");
-            for field in &fields{
-                if field.attrs[0].name == "live"{
-                    tb.add("    Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".live_update(cx, ptr),");
-                }
-            }
-            if deref_target.is_some(){
-                tb.add("        _=> self.deref_target.live_update_value(cx, id, ptr)");
-            }
-            else{
-                tb.add("        _=> self.live_update_value_unknown(cx, id, ptr)");
-            }
-            tb.add("        }");
-            tb.add("    }");
             
-            tb.add("    fn apply_value(&mut self, cx: &mut Cx, index:&mut usize, nodes:&[GenNode]) {");
-            tb.add("        match nodes[*index].id {");
+            tb.add("    fn apply_value(&mut self, cx: &mut Cx, index:usize, nodes:&[LiveNode]) -> usize{");
+            tb.add("        match nodes[index].id {");
             for field in &fields{
                 if field.attrs[0].name == "live"{
                     tb.add("    Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".apply_index(cx, index, nodes),");
@@ -164,30 +143,18 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             
             tb.add("impl").stream(generic.clone());
             tb.add("LiveComponent for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {");
-            tb.add("        self.before_live_update(cx, live_ptr);");
-            tb.add("        if let Some(mut iter) = cx.shader_registry.live_registry.live_class_iterator(live_ptr) {");
-            tb.add("            while let Some((id, live_ptr)) = iter.next_id(&cx.shader_registry.live_registry) {");
-            tb.add("                if id == id!(rust_type) && !cx.verify_type_signature(live_ptr, Self::live_type()) {");
-            tb.add("                    return;");
-            tb.add("                 }");
-            tb.add("                self.live_update_value(cx, id, live_ptr)");
-            tb.add("            }");
-            tb.add("        }");
-            tb.add("        self.after_live_update(cx, live_ptr);");
-            tb.add("    }");
-            tb.add("    fn apply_index(&mut self, cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {");
-            tb.add("        let start_index = *index;");
+            tb.add("    fn apply_index(&mut self, cx: &mut Cx, start_index: usize, nodes: &[LiveNode])->usize {");
             tb.add("        self.before_apply_index(cx, start_index, nodes);");
-            tb.add("        *index += 1;"); // skip the class
+            tb.add("        let mut index = start_index + 1;"); // skip the class
             tb.add("        loop{");
-            tb.add("            if nodes[*index].value.is_close(){");
-            tb.add("                *index += 1;"); 
+            tb.add("            if nodes[index].value.is_close(){");
+            tb.add("                index += 1;");
             tb.add("                break;");
             tb.add("            }");
-            tb.add("            self.apply_value(cx, index, nodes);");
+            tb.add("            index = self.apply_value(cx, index, nodes);");
             tb.add("        }");
             tb.add("        self.after_apply_index(cx, start_index, nodes);");
+            tb.add("        return index;");
             tb.add("    }");
             tb.add("}");
             
@@ -201,11 +168,11 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        struct Factory();");
             tb.add("        impl LiveFactory for Factory {");
             
-            tb.add("            fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveComponent> {");
-            tb.add("                Box::new(").ident(&struct_name).add(" ::live_new(cx))");
+            tb.add("            fn new_component(&self, cx: &mut Cx) -> Box<dyn LiveComponent> {");
+            tb.add("                Box::new(").ident(&struct_name).add(" ::new(cx))");
             tb.add("            }");
             
-            tb.add("            fn live_fields(&self, fields: &mut Vec<LiveField>) {");
+            tb.add("            fn component_fields(&self, fields: &mut Vec<LiveField>) {");
             for field in &fields{
                 let attr = &field.attrs[0];
                 if attr.name == "live" || attr.name  == "local"{
@@ -225,14 +192,14 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        }");
             tb.add("        cx.register_factory(").ident(&struct_name).add("::live_type(), Box::new(Factory()));");
             tb.add("    }");
-            tb.add("    fn live_new(cx: &mut Cx) -> Self {");
+            tb.add("    fn new(cx: &mut Cx) -> Self {");
             tb.add("        Self {");
             for field in &fields{
                 let attr = &field.attrs[0];
                 tb.ident(&field.name).add(":");
                 if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
                     if attr.name == "live" {
-                        tb.add("LiveNew::live_new(cx)");
+                        tb.add("LiveNew::new(cx)");
                     }
                     else {
                         tb.add("Default::default()");
@@ -323,13 +290,14 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("impl").stream(generic.clone());
             tb.add("LiveNew for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
 
-            tb.add("    fn live_new(_cx:&mut Cx) -> Self {");
+            tb.add("    fn new(_cx:&mut Cx) -> Self {");
             items[default.unwrap()].gen_new(&mut tb);
             tb.add("    }");
             tb.add("    fn live_type() -> LiveType {");
             tb.add("        LiveType(std::any::TypeId::of::<").ident(&enum_name).add(">())");
             tb.add("    }");
             tb.add("    fn live_register(cx: &mut Cx) {");
+            /*
             tb.add("        let base_name = Id(").suf_u64(Id::from_str(&enum_name).unwrap().0).add(");");
             tb.add("        let mut bare = Vec::new();");
             tb.add("        let mut named = Vec::new();");
@@ -342,133 +310,32 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 };
             }
             tb.add("        cx.register_enum(").ident(&enum_name).add("::live_type(),LiveEnumInfo{base_name, bare, named, tuple});");
+            */
             tb.add("    }");
             tb.add("}");
             
             tb.add("impl").stream(generic.clone());
             tb.add("LiveComponent for").ident(&enum_name).stream(generic).stream(where_clause).add("{");
 
-            tb.add("    fn live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {");
-            tb.add("        self.before_live_update(cx, live_ptr);");
-            tb.add("        let node = cx.shader_registry.live_registry.resolve_ptr(live_ptr);");
-            tb.add("        match &node.value{");
-            tb.add("            LiveValue::MultiPack(pack)=>{");
-            tb.add("                let (_base,variant) = cx.find_enum_origin(*pack, node.id).unwrap_or((Id(0),Id(0)));");
-            tb.add("                match variant{");
-            for item in &items{
-                if let EnumKind::Bare = item.kind{
-                    tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>*self = Self::").ident(&item.name).add(",");
-                }
-            }
-            tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum {} cannot find id {}").add(", ").string(&enum_name).add(", variant);");
-            tb.add("                    }");
-            tb.add("                }");
-            tb.add("            },");
-            
-            tb.add("            LiveValue::Class{class, node_start, node_count}=>{");
-            tb.add("                let (_base,variant) = cx.find_enum_origin(*class, node.id).unwrap_or((Id(0),Id(0)));");
-            tb.add("                match variant{");
-            for item in &items{
-                if let EnumKind::Named(fields) = &item.kind{
-                    tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>{");
-                    tb.add("                if let Self::").ident(&item.name).add("{..} = self{}");
-                    tb.add("                else{*self = ");
-                    item.gen_new(&mut tb);
-                    tb.add("                }");
-                    tb.add("                if let Self::").ident(&item.name).add("{");
-                    for field in fields{
-                        tb.ident(&field.name).add(":").ident(&format!("prefix_{}",field.name)).add(",");
-                    }
-                    tb.add("                } = self {");
-                    tb.add("                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start as usize, *node_count as usize);");
-                    tb.add("                    while let Some((prop_id, live_ptr)) = iter.next_id(&cx.shader_registry.live_registry) {");
-                    tb.add("                        match prop_id{");
-                    for field in fields{
-                        tb.add("                        Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>(*");
-                        tb.ident(&format!("prefix_{}",field.name)).add(").live_update(cx, live_ptr),");
-                    }
-                    tb.add("                            _=>{");
-                    tb.add("                                println!(").string("Enum {} cannot find named struct {} property {}").add(", ").string(&enum_name).add(", variant, prop_id);");
-                    tb.add("                            }");
-                    tb.add("                        }");
-                    tb.add("                    }");
-                    tb.add("                }");
-                    tb.add("            }");
-                }
-            }
-            tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum {} cannot find named struct {}").add(", ").string(&enum_name).add(",variant);");
-            tb.add("                    }");
-            tb.add("                }");
-            tb.add("            }");
-            
-            
-            tb.add("            LiveValue::Call{target, node_start, node_count}=>{");
-            tb.add("                let (_base,variant) = cx.find_enum_origin(*target, node.id).unwrap_or((Id(0),Id(0)));");
-            tb.add("                match variant{");
-            
-            for item in &items{
-                if let EnumKind::Tuple(args) = &item.kind{
-                    tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>{");
-                    
-                    tb.add("                if let Self::").ident(&item.name).add("{..} = self{}");
-                    tb.add("                else{*self = ");
-                    item.gen_new(&mut tb);
-                    tb.add("                }");
-                    
-                    tb.add("                if let Self::").ident(&item.name).add("(");
-                    for i in 0..args.len(){
-                        tb.ident(&format!("var{}",i)).add(",");
-                    }
-                    tb.add("                    ) = self {");
-                    tb.add("                    let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start as usize, *node_count as usize);");
-                    tb.add("                    while let Some((count, live_ptr)) = iter.next_prop() {");
-                    tb.add("                        match count{");
-                    for i in 0..args.len(){
-                        tb.add("                        ").unsuf_usize(i).add("=>(*").ident(&format!("var{}",i)).add(").live_update(cx, live_ptr),");
-                    }
-                    tb.add("                            _=>{");
-                    tb.add("                                println!(").string("Enum {} cannot find tuple struct {} arg {}").add(", ").string(&enum_name).add(", variant, count);");
-                    tb.add("                            }");
-                    tb.add("                        }");
-                    tb.add("                    }");
-                    tb.add("                }");
-                    tb.add("            }");
-                }
-            }
-            
-            tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum {} cannot find tuple struct {}").add(", ").string(&enum_name).add(", variant);");
-            tb.add("                    }");
-            tb.add("                }");
-            tb.add("            }");
-            
-            
-            tb.add("            _=>()");
-            tb.add("        }");
-            tb.add("        self.after_live_update(cx, live_ptr);");
-            tb.add("    }");
-            
-            tb.add("    fn apply_index(&mut self, cx: &mut Cx, index:&mut usize, nodes: &[GenNode]) {");
-            tb.add("        let start_index = *index;");
+            tb.add("    fn apply_index(&mut self, cx: &mut Cx, start_index:usize, nodes: &[LiveNode]) -> usize {");
             tb.add("        self.before_apply_index(cx, start_index, nodes);");
+            tb.add("        let mut index = start_index;");
             tb.add("        match &nodes[start_index].value{");
-            tb.add("            GenValue::EnumBare{base,variant}=>{");
+            tb.add("            LiveValue::BareEnum{base,variant}=>{");
             tb.add("                match variant{");
             for item in &items{
                 if let EnumKind::Bare = item.kind{
-                    tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>{*index += 1;*self = Self::").ident(&item.name).add("},");
+                    tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>{index += 1;*self = Self::").ident(&item.name).add("},");
                 }
             }
             tb.add("                    _=>{");
             tb.add("                        println!(").string("Enum {} cannot find id {}").add(", ").string(&enum_name).add(",variant);");
-            tb.add("                        nodes.skip_value(index);");
+            tb.add("                        index = nodes.skip_node(index);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            },");
 
-            tb.add("            GenValue::EnumNamed{base, variant}=>{");
+            tb.add("            LiveValue::NamedEnum{base, variant}=>{");
             tb.add("                match variant{");
             for item in &items{
                 if let EnumKind::Named(fields) = &item.kind{
@@ -482,20 +349,20 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                         tb.ident(&field.name).add(":").ident(&format!("prefix_{}",field.name)).add(",");
                     }
                     tb.add("                } = self {");
-                    tb.add("                    *index += 1;"); // skip the class
+                    tb.add("                    index += 1;"); // skip the class
                     tb.add("                    loop{");
-                    tb.add("                        if nodes[*index].value.is_close(){");
-                    tb.add("                            *index += 1;"); 
+                    tb.add("                        if nodes[index].value.is_close(){");
+                    tb.add("                            index += 1;"); 
                     tb.add("                            break;");
                     tb.add("                        }");
-                    tb.add("                        match nodes[*index].id{");
+                    tb.add("                        match nodes[index].id{");
                     for field in fields{
-                        tb.add("                        Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>(*");
-                        tb.ident(&format!("prefix_{}",field.name)).add(").apply_index(cx, index, nodes),");
+                        tb.add("                        Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>{index = (*");
+                        tb.ident(&format!("prefix_{}",field.name)).add(").apply_index(cx, index, nodes);},");
                     }
                     tb.add("                            _=>{");
-                    tb.add("                                println!(").string("Enum {} cannot find named struct {} property {}").add(", ").string(&enum_name).add(",nodes[start_index].id, nodes[*index].id);");
-                    tb.add("                                nodes.skip_value(index);");
+                    tb.add("                                println!(").string("Enum {} cannot find named struct {} property {}").add(", ").string(&enum_name).add(",nodes[start_index].id, nodes[index].id);");
+                    tb.add("                                index = nodes.skip_node(index);");
                     tb.add("                            }");
                     tb.add("                        }");
                     tb.add("                    }");
@@ -505,11 +372,11 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             }
             tb.add("                    _=>{");
             tb.add("                        println!(").string("Enum {} cannot find named struct {}").add(", ").string(&enum_name).add(", nodes[start_index].id);");
-            tb.add("                        nodes.skip_value(index);");
+            tb.add("                        index = nodes.skip_node(index);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            }");
-            tb.add("            GenValue::EnumTuple{base, variant}=>{");
+            tb.add("            LiveValue::TupleEnum{base, variant}=>{");
             tb.add("                match variant{");
             
             for item in &items{
@@ -526,20 +393,20 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                         tb.ident(&format!("var{}",i)).add(",");
                     }
                     tb.add("                ) = self{");
-                    tb.add("                    *index += 1;"); // skip the class
+                    tb.add("                    index += 1;"); // skip the class
                     tb.add("                    loop{");
-                    tb.add("                        if nodes[*index].value.is_close(){");
-                    tb.add("                            *index += 1;"); 
+                    tb.add("                        if nodes[index].value.is_close(){");
+                    tb.add("                            index += 1;"); 
                     tb.add("                            break;");
                     tb.add("                        }");
-                    tb.add("                        let arg = *index - start_index - 1;");
+                    tb.add("                        let arg = index - start_index - 1;");
                     tb.add("                        match arg{");
                     for i in 0..args.len(){
-                        tb.add("                        ").unsuf_usize(i).add("=>(*").ident(&format!("var{}",i)).add(").apply_index(cx, index, nodes),");
+                        tb.add("                        ").unsuf_usize(i).add("=>{index = (*").ident(&format!("var{}",i)).add(").apply_index(cx, index, nodes); },");
                     }
                     tb.add("                            _=>{");
                     tb.add("                                println!(").string("Enum {} cannot find tuple struct {} arg {}").add(", ").string(&enum_name).add(", nodes[start_index].id, arg);");
-                    tb.add("                                nodes.skip_value(index);");
+                    tb.add("                                index = nodes.skip_node(index);");
                     tb.add("                            }");
                     tb.add("                        }");
                     tb.add("                    }");
@@ -549,15 +416,16 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             }
             tb.add("                    _=>{");
             tb.add("                        println!(").string("Enum {} cannot find tuple struct {}").add(", ").string(&enum_name).add(",nodes[start_index].id);");
-            tb.add("                        nodes.skip_value(index);");
+            tb.add("                        index = nodes.skip_node(index);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            }");
             tb.add("            _=>{");
-            tb.add("               nodes.skip_value(index);");
+            tb.add("               index = nodes.skip_node(index);");
             tb.add("            }");
             tb.add("        }");
             tb.add("        self.after_apply_index(cx, start_index, nodes);");
+            tb.add("        index");
             tb.add("    }");
             
             tb.add("}");

@@ -13,7 +13,7 @@ use crate::gen_macro::*;
 #[path = "../../microserde/derive/src/macro_lib.rs"]
 mod macro_lib;
 
-#[path = "../../live_parser/src/id.rs"]
+#[path = "../../live_compiler/src/id.rs"]
 mod id;
 
 #[proc_macro_derive(LiveComponent, attributes(local, live, hidden, default))]

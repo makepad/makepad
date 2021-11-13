@@ -114,7 +114,7 @@ pub struct Font {
 }
 
 impl LiveComponentHooks for Font {
-    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
+    fn after_apply_index(&mut self, cx: &mut Cx, _index: usize, _nodes:&[LiveNode]) {
         self.font_id = Some(cx.get_font_by_path(&self.path));
     }
 }
@@ -314,8 +314,10 @@ impl CxDrawFontAtlas {
         let atlas_texture = Texture::new(cx);
         cx.fonts_atlas.texture = atlas_texture;
         
-        let mut draw_trapezoid_text = DrawTrapezoidText::live_new(cx);
-        draw_trapezoid_text.live_update(cx, cx.live_ptr_from_id(&module_path!(), id!(DrawTrapezoidText)));
+        let mut draw_trapezoid_text = DrawTrapezoidText::new(cx);
+        
+        let nodes = cx.clone_from_module_path(&module_path!(), id!(DrawTrapezoidText)).unwrap();
+        draw_trapezoid_text.apply(cx, &nodes);
         
         // ok we need to initialize drawtrapezoidtext from a live pointer.
         Self {
