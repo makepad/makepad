@@ -12,7 +12,7 @@ live_register!{
 }
 
 impl LiveComponentHooks for GeometryQuad2D {
-    fn after_live_update(&mut self, cx: &mut Cx, _live_ptr: LivePtr) {
+    fn after_apply_index(&mut self, cx: &mut Cx, _index:usize, _nodes:&[LiveNode]) {
         GeometryGen::from_quad_2d(
             self.x1,
             self.y1,
