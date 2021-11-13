@@ -2,7 +2,7 @@ use std::iter::Cloned;
 use std::slice::Iter;
 use std::cell::Cell;
 use std::cell::RefCell;
-use makepad_live_parser::*;
+use makepad_live_compiler::*;
 use crate::shaderast::*;
 use crate::shaderregistry::ShaderRegistry;
 use crate::shaderregistry::LiveNodeFindResult;

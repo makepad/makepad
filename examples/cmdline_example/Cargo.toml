@@ -7,3 +7,7 @@ edition = "2018"
 path="../../render/live_compiler"
 version="0.1"
 
+[dependencies.makepad-shader-compiler]
+path="../../render/shader_compiler"
+version="0.1" 
+
