@@ -36,21 +36,21 @@ pub enum KeyFrameValue{
 pub struct Animator {
     pub state_id: Id,
     pub live_ptr: Option<LivePtr>,
-    pub current_state: Option<Vec<GenNode>>,
+    pub current_state: Option<Vec<LiveNode>>,
 }
 
 // OK so.. now the annoying bit
 impl Animator {
     
-    pub fn swap_out_state(&mut self)->Vec<GenNode>{
+    pub fn swap_out_state(&mut self)->Vec<LiveNode>{
         self.current_state.take().unwrap()
     }
     
-    pub fn swap_in_state(&mut self, state:Vec<GenNode>){
+    pub fn swap_in_state(&mut self, state:Vec<LiveNode>){
         self.current_state = Some(state);
     }
     
-    pub fn init_from_last_keyframe(&mut self, cx:&mut Cx, nodes: &[GenNode]) {
+    pub fn init_from_last_keyframe(&mut self, cx:&mut Cx, nodes: &[LiveNode]) {
         let mut index = 0;
         // copy in the structure
         let mut current_state = Vec::new();
@@ -60,24 +60,26 @@ impl Animator {
             }
             let node = &nodes[index];
             match node.value {
-                GenValue::Array => { // its a keyframe array. probably :)
-                    if let Some(mut last_child) = nodes.seek_last_child(index) {
-                        if let GenValue::ClassBare = nodes[last_child].value{
-                            let mut kf = KeyFrame::live_new(cx);
-                            kf.apply_index(cx, &mut last_child, nodes);
-                            current_state.push(GenNode{
+                LiveValue::Array => { // its a keyframe array. probably :)
+                    if let Some(last_child) = nodes.last_child(index) {
+                        if let LiveValue::BareClass = nodes[last_child].value{
+                            let mut kf = KeyFrame::new(cx);
+                            kf.apply_index(cx, last_child, nodes);
+                            current_state.push(LiveNode{
+                                token_id: None,
                                 id:node.id,
-                                value:kf.value.to_gen_value()
+                                value:kf.value.to_live_value()
                             });
                         }
                         else if !nodes[last_child].value.is_tree(){ // if its a bare value push it in ?
-                            current_state.push(GenNode{
+                            current_state.push(LiveNode{
+                                token_id: None,
                                 id:node.id,
                                 value:nodes[last_child].value.clone()
                             });
                         }
                     }
-                    nodes.skip_value(&mut index);
+                    index = nodes.skip_node(index);
                 }
                 _ => { // just copy the value
                     current_state.push(node.clone());

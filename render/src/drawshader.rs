@@ -1,6 +1,6 @@
 use crate::cx::*;
-use makepad_live_parser::LiveRegistry;
-use makepad_live_parser::Span;
+use makepad_live_compiler::LiveRegistry;
+use makepad_live_compiler::Span;
 use makepad_shader_compiler::Ty;
 use makepad_shader_compiler::shaderast::DrawShaderDef;
 use makepad_shader_compiler::shaderast::DrawShaderFieldKind;
@@ -80,10 +80,17 @@ impl DrawCallVars {
         }
     }
     
-    pub fn init_shader(&mut self, cx: &mut Cx, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
+    pub fn init_shader(&mut self, cx: &mut Cx, index:usize, nodes:&[LiveNode], geometry_fields: &dyn GeometryFields) {
         if self.draw_shader.is_some(){
             return
         }
+        let node = &nodes[index];
+        if node.token_id.is_none(){
+            return
+        }
+
+        // construct a pointer from our index + nodes
+        let draw_shader_ptr = DrawShaderPtr(LivePtr::from_index(node.token_id.unwrap().file_id(), index));
 
         if let Some(draw_shader_id) = cx.draw_shader_ptr_to_id.get(&draw_shader_ptr) {
             self.draw_shader = Some(DrawShader {
@@ -108,7 +115,7 @@ impl DrawCallVars {
                             
                             let mut fields = Vec::new();
                             
-                            lf.live_fields(&mut fields);
+                            lf.component_fields(&mut fields);
                             let mut slots = 0;
                             for field in fields {
                                 if field.id == id!(deref_target) {
@@ -219,30 +226,10 @@ impl DrawCallVars {
         }
     }
 
-    pub fn apply_value(&mut self, cx: &mut Cx, index:&mut usize, nodes:&[GenNode]) {
+    pub fn apply_value(&mut self, cx: &mut Cx, index:usize, nodes:&[LiveNode])->usize {
         if let Some(draw_shader) = self.draw_shader {
-            let id = nodes[*index].id;
-            match nodes[*index].value {
-                GenValue::Int(val) => Self::store_values(&cx, draw_shader, id, &[val as f32], self),
-                GenValue::Float(val) =>  Self::store_values(&cx, draw_shader, id, &[val as f32], self),
-                GenValue::Vec2(val) => Self::store_values(&cx, draw_shader, id, &[val.x, val.y], self),
-                GenValue::Vec3(val) => Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z], self),
-                GenValue::Color(val) => {
-                    let val = Vec4::from_u32(val);
-                    Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z, val.w], self);
-                }
-                _ => {
-                    return nodes.skip_value(index);       
-                }
-            }
-        }
-        *index += 1;
-    } 
-    
-    pub fn update_value(&mut self, cx: &mut Cx, value_ptr: LivePtr, id: Id) {
-        if let Some(draw_shader) = self.draw_shader {
-            let node = cx.shader_registry.live_registry.resolve_ptr(value_ptr);
-            match node.value {
+            let id = nodes[index].id;
+            match nodes[index].value {
                 LiveValue::Int(val) => Self::store_values(&cx, draw_shader, id, &[val as f32], self),
                 LiveValue::Float(val) =>  Self::store_values(&cx, draw_shader, id, &[val as f32], self),
                 LiveValue::Vec2(val) => Self::store_values(&cx, draw_shader, id, &[val.x, val.y], self),
@@ -251,10 +238,13 @@ impl DrawCallVars {
                     let val = Vec4::from_u32(val);
                     Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z, val.w], self);
                 }
-                _ => ()
+                _ => {
+                    return nodes.skip_node(index);       
+                }
             }
         }
-    }
+        index + 1
+    } 
     
     pub fn init_slicer(
         &mut self,

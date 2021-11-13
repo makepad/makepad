@@ -5,10 +5,10 @@ use crate::livedocument::LiveDocument;
 use crate::livenode::LiveNode;
 use crate::livenode::LiveValue;
 use crate::livenode::LiveType;
+use crate::livenode::LiveNodeSlice;
 use crate::liveparser::LiveParser;
-//use crate::liveparser::LiveEnumInfo;
+use crate::id::Id;
 use crate::id::FileId;
-//use crate::id::LocalPtr;
 use crate::id::LivePtr;
 use crate::token::TokenId;
 use crate::span::Span;
@@ -18,7 +18,6 @@ use std::collections::HashSet;
 use crate::lex::lex;
 use crate::liveexpander::LiveExpander;
 use crate::liveexpander::ScopeStack;
-//use std::fmt;
 
 pub struct LiveFile {
     pub module_path: ModulePath,
@@ -94,20 +93,38 @@ impl LiveRegistry {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
         &doc.resolve_ptr(live_ptr.local_ptr)
     }
-/*
-    pub fn resolve_nodes_ptr(&self, live_ptr: LivePtr) -> (&[LiveNode],&LiveNode) {
-        let nodes = &self.expanded[live_ptr.file_id.to_index()].nodes;
-        return (nodes, &nodes[live_ptr.node_index()]) 
-    }*/
     
     pub fn resolve_doc_ptr(&self, live_ptr: LivePtr) -> (&LiveDocument, &LiveNode) {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
         (doc, &doc.resolve_ptr(live_ptr.local_ptr))
     }
-
-    pub fn doc_from_token_id(&self, token_id:TokenId) -> &LiveDocument {
+    
+    pub fn origin_doc_from_token_id(&self, token_id: TokenId) -> &LiveDocument {
         &self.live_files[token_id.file_id().to_index()].document
-    }    
+    }
+    
+    pub fn clone_from_module_path(&self, module_path: &str, id: Id) -> Option<Vec<LiveNode>> {
+        if let Some(file_id) = self.module_path_to_file_id.get(&ModulePath::from_str(module_path).unwrap()) {
+            let doc = &self.expanded[file_id.to_index()];
+            if let Ok(pos) = doc.nodes.child_by_name(0, id){
+                // ok now what. we should clone 
+                return Some(doc.nodes.clone_child(pos));
+            }
+        }
+        None
+    }
+    /*
+    pub fn nodes_from_module_path(&self, module_path: &str, id: Id) -> Option<(&[LiveNode], usize)> {
+        if let Some(file_id) = self.module_path_to_file_id.get(&ModulePath::from_str(module_path).unwrap()) {
+            let doc = &self.expanded[file_id.to_index()];
+            if let Ok(pos) = doc.nodes.child_by_name(0, id){
+                return Some((&doc.nodes, pos));
+            }
+        }
+        None
+    }*/
+    
+    
     /*
     
     pub fn live_ptr_from_path(&self, module_path: ModulePath, object_path: &[Id]) -> Option<LivePtr> {
@@ -197,7 +214,7 @@ impl LiveRegistry {
     pub fn token_id_to_span(&self, token_id: TokenId) -> Span {
         self.live_files[token_id.file_id().to_index()].document.token_id_to_span(token_id)
     }
-
+    
     pub fn parse_live_file(
         &mut self,
         file: &str,
@@ -260,7 +277,7 @@ impl LiveRegistry {
         for node in &document.nodes {
             match &node.value {
                 LiveValue::Use {crate_id, module_id, ..} => {
-                    let module_path = ModulePath(*crate_id, *module_id);//document.use_ids_to_module_path(use_ids, own_module_path.0);
+                    let module_path = ModulePath(*crate_id, *module_id); //document.use_ids_to_module_path(use_ids, own_module_path.0);
                     dep_graph_set.insert(module_path);
                     let self_index = self.dep_order.iter().position( | v | v.0 == own_module_path).unwrap();
                     if let Some(other_index) = self.dep_order.iter().position( | v | v.0 == module_path) {
@@ -343,7 +360,7 @@ impl LiveRegistry {
             };
             // OK now what. how will we do this.
             live_document_expander.expand(in_doc, &mut out_doc);
-
+            
             
             out_doc.recompile = false;
             

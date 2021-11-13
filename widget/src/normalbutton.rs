@@ -90,8 +90,8 @@ pub struct NormalButton {
 }
 
 impl LiveComponentHooks for NormalButton {
-    fn after_live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {
-        self.animator.live_ptr = Some(live_ptr);
+    fn after_apply_index(&mut self, cx: &mut Cx, _index: usize, _nodes:&[LiveNode]) {
+        //elf.animator.live_ptr = Some(live_ptr);
         self.init_state(cx, id!(state_down));
     }
 }
@@ -110,8 +110,9 @@ impl CanvasComponent for NormalButton {
 
 impl NormalButton {
     
-    pub fn init_state(&mut self, cx: &mut Cx, state_id: Id) {
+    pub fn init_state(&mut self, _cx: &mut Cx, _state_id: Id) {
         // take the live DSL and turn it into a Gen
+        /*
         let sub_ptr = cx.find_class_prop_ptr(self.animator.live_ptr.unwrap(), state_id);
         let mut state = Vec::new();
         GenNode::convert_live_to_gen(cx, sub_ptr.unwrap(), &mut state);
@@ -122,11 +123,11 @@ impl NormalButton {
         // apply the last keyframe to self
         let state = self.animator.swap_out_state();
         self.apply(cx, &state);
-        self.animator.swap_in_state(state);
+        self.animator.swap_in_state(state);*/
     }
     
-    pub fn set_state(&mut self, cx: &mut Cx, state_id: Id) {
-        
+    pub fn set_state(&mut self, _cx: &mut Cx, _state_id: Id) {
+        /*
         let sub_ptr = cx.find_class_prop_ptr(self.animator.live_ptr.unwrap(), state_id);
         let mut state = Vec::new();
         GenNode::convert_live_to_gen(cx, sub_ptr.unwrap(), &mut state);
@@ -135,7 +136,7 @@ impl NormalButton {
         let state = self.animator.swap_out_state();
         self.apply(cx, &state);
         self.animator.swap_in_state(state);
-        cx.redraw_child_area(self.bg.area);
+        cx.redraw_child_area(self.bg.area);*/
     }
     
     pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
