@@ -78,7 +78,7 @@ impl<'a> LiveExpander<'a> {
             match in_value {
                 LiveValue::Close => {
                     if !level_overwrite.last().unwrap() {
-                        let index = out_doc.nodes.seek_child_append(*current_parent.last().unwrap());
+                        let index = out_doc.nodes.append_child_index(*current_parent.last().unwrap());
                         out_doc.nodes.insert(index, in_node.clone());
                     }
                     current_parent.pop();
@@ -92,22 +92,23 @@ impl<'a> LiveExpander<'a> {
                     if let Some(file_id) = self.module_path_to_file_id.get(&ModulePath(*crate_id, *module_id)){
                         // ok now find object_id and get us a pointer
                         let other_doc = &self.expanded[file_id.to_index()];
-                        let mut other_index = 1;
-                        while other_index < other_doc.nodes.len()-1{
-                            let node = &other_doc.nodes[other_index];
+
+                        let mut node_iter = other_doc.nodes.first_child(0);
+                        while let Some(node_index) = node_iter{
+                            let node = &other_doc.nodes[node_index];
                             if node.id.is_empty(){
                                 continue;
                             }
                             if object_id.is_empty() || *object_id == node.id{
                                 self.scope_stack.stack.last_mut().unwrap().push(LiveScopeItem {
                                     id: node.id,
-                                    target: LiveScopeTarget::LivePtr(LivePtr{file_id:*file_id, local_ptr:LocalPtr(other_index)})
+                                    target: LiveScopeTarget::LivePtr(LivePtr{file_id:*file_id, local_ptr:LocalPtr(node_index)})
                                 });
                                 if !object_id.is_empty(){
                                     break
                                 }
                             }
-                            other_index = other_doc.nodes.skip_value(other_index);
+                            node_iter = other_doc.nodes.next_child(node_index);
                         }
                     }
                     in_index += 1;
@@ -117,7 +118,7 @@ impl<'a> LiveExpander<'a> {
             }
             
             // determine node overwrite activity
-            let out_index = match out_doc.nodes.seek_child_by_name(*current_parent.last().unwrap(), in_node.id) {
+            let out_index = match out_doc.nodes.child_by_name(*current_parent.last().unwrap(), in_node.id) {
                 Ok(overwrite) => {
                     let out_value = &out_doc.nodes[overwrite].value;
                     if out_value.variant_id() == in_value.variant_id() { // same type
@@ -126,7 +127,7 @@ impl<'a> LiveExpander<'a> {
                             LiveValue::TupleEnum {..} |
                             LiveValue::NamedEnum {..} |
                             LiveValue::NamedClass {..} => {
-                                let next_index = out_doc.nodes.skip_value(overwrite);
+                                let next_index = out_doc.nodes.next_child(overwrite).unwrap();
                                 out_doc.nodes[overwrite] = in_node.clone();
                                 out_doc.nodes.drain(overwrite + 1..next_index - 1);
                                 level_overwrite.push(true);
@@ -144,7 +145,7 @@ impl<'a> LiveExpander<'a> {
                     in_value.enum_base_id() == out_value.enum_base_id() { // enum switch is allowed
                         if in_value.is_tree() {
                             if out_value.is_tree() {
-                                let next_index = out_doc.nodes.skip_value(overwrite);
+                                let next_index = out_doc.nodes.next_child(overwrite).unwrap();
                                 out_doc.nodes[overwrite] = in_node.clone();
                                 out_doc.nodes.drain(overwrite + 1..next_index - 1);
                                 level_overwrite.push(true);
@@ -154,8 +155,8 @@ impl<'a> LiveExpander<'a> {
                                 level_overwrite.push(false);
                             }
                         }
-                        else if out_value.is_tree() { // out is a tree
-                            let next_index = out_doc.nodes.skip_value(overwrite);
+                        else if out_value.is_tree() { // out is a tree remove incl close
+                            let next_index = out_doc.nodes.next_child(overwrite).unwrap();
                             out_doc.nodes[overwrite] = in_node.clone();
                             out_doc.nodes.drain(overwrite + 1..next_index);
                         }
@@ -165,8 +166,8 @@ impl<'a> LiveExpander<'a> {
                         
                     }
                     else if in_value.is_bare_class() && out_value.is_named_class() {
-                        // this is also allowed to overwrite
-                        out_doc.nodes[overwrite] = in_node.clone();
+                        // this is also allowed to overwrite but don't overwrite the name of the class
+                        //out_doc.nodes[overwrite] = in_node.clone();
                         level_overwrite.push(true);
                     }
                     else { // not allowed
@@ -175,7 +176,7 @@ impl<'a> LiveExpander<'a> {
                             span: in_doc.token_id_to_span(in_node.token_id.unwrap()),
                             message: format!("Cannot switch node type for {} {:?} to {:?}", in_node.id, in_value, out_value)
                         });
-                        in_index = in_doc.nodes.skip_value(in_index);
+                        in_index = in_doc.nodes.next_child(in_index).unwrap();
                         continue;
                     }
                     overwrite
@@ -198,15 +199,24 @@ impl<'a> LiveExpander<'a> {
             match in_value {
                 LiveValue::NamedClass {class} => {
                     if let Some(target) = self.scope_stack.find_item(*class) {
-                        match target {
+                        let cn = match target {
                             LiveScopeTarget::LocalPtr(local_ptr) => {
-                                out_doc.nodes.clone_children_self(local_ptr.0, Some(out_index + 1));
+                                if out_doc.nodes.clone_children_self(local_ptr.0, Some(out_index + 1)){
+                                    self.errors.push(LiveError {
+                                        origin: live_error_origin!(),
+                                        span: in_doc.token_id_to_span(in_node.token_id.unwrap()),
+                                        message: format!("Infinite recursion at {}", in_node.id)
+                                    }); 
+                                }
+                                out_doc.nodes[local_ptr.0].value.get_class_name()
                             }
                             LiveScopeTarget::LivePtr(live_ptr) => {
                                 let doc = &self.expanded[live_ptr.file_id.to_index()];
-                                out_doc.nodes.clone_children_from(live_ptr.local_ptr.0, Some(out_index + 1), &doc.nodes);
+                                out_doc.nodes.clone_children_from(live_ptr.node_index(), Some(out_index + 1), &doc.nodes);
+                                doc.nodes[live_ptr.node_index()].value.get_class_name()
                             }
-                        }
+                        };
+                        out_doc.nodes[out_index].value.set_class_name(cn);
                     }
                     self.scope_stack.stack.push(Vec::new());
                     current_parent.push(out_index);

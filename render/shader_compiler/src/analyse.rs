@@ -9,12 +9,12 @@ use crate::shaderast::{Ty, TyExpr};
 use crate::ty_check::TyChecker;
 use crate::shaderregistry::ShaderRegistry;
 
-use makepad_live_parser::LiveError;
-use makepad_live_parser::LiveErrorOrigin;
-use makepad_live_parser::live_error_origin;
-use makepad_live_parser::id;
-use makepad_live_parser::Id;
-use makepad_live_parser::Span;
+use makepad_live_compiler::LiveError;
+use makepad_live_compiler::LiveErrorOrigin;
+use makepad_live_compiler::live_error_origin;
+use makepad_live_compiler::id;
+use makepad_live_compiler::Id;
+use makepad_live_compiler::Span;
 
 use std::cell::RefCell;
 use std::cell::Cell;

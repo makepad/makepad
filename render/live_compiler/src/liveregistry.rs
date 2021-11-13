@@ -94,13 +94,22 @@ impl LiveRegistry {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
         &doc.resolve_ptr(live_ptr.local_ptr)
     }
+/*
+    pub fn resolve_nodes_ptr(&self, live_ptr: LivePtr) -> (&[LiveNode],&LiveNode) {
+        let nodes = &self.expanded[live_ptr.file_id.to_index()].nodes;
+        return (nodes, &nodes[live_ptr.node_index()]) 
+    }*/
     
     pub fn resolve_doc_ptr(&self, live_ptr: LivePtr) -> (&LiveDocument, &LiveNode) {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
         (doc, &doc.resolve_ptr(live_ptr.local_ptr))
     }
-    
+
+    pub fn doc_from_token_id(&self, token_id:TokenId) -> &LiveDocument {
+        &self.live_files[token_id.file_id().to_index()].document
+    }    
     /*
+    
     pub fn live_ptr_from_path(&self, module_path: ModulePath, object_path: &[Id]) -> Option<LivePtr> {
         if let Some(file_id) = self.module_path_to_file_id.get(&module_path) {
             let doc = &self.expanded[file_id.to_index()];

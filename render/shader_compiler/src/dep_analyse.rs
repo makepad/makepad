@@ -2,7 +2,7 @@
 use crate::shaderast::*;
 use crate::shaderast::Scopes;
 use crate::shaderast::Ident;
-use makepad_live_parser::Span;
+use makepad_live_compiler::Span;
 //use makepad_live_parser::Id;
 //use makepad_live_parser::id;
 use crate::shaderast::{Ty, TyLit};

@@ -1,5 +1,5 @@
 use crate::shaderast::*;
-use makepad_live_parser::*;
+use makepad_live_compiler::*;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::fmt::Write;

@@ -8,18 +8,6 @@ use crate::id::*;
 #[path = "../../../live_compiler/src/id.rs"]
 mod id; 
 
-/*
-#[proc_macro]
-pub fn id_check(item: TokenStream) -> TokenStream {
-    let mut tb = TokenBuilder::new(); 
-    let item_str = item.to_string();
-    
-    let id = Id::from_str(&item_str);
-    tb.add("Id (").suf_u64(id.0).add(") . unwrap (").string(&item_str).add(")");
-    tb.end()
-}
-*/
-
 #[proc_macro]
 pub fn id(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
@@ -39,15 +27,6 @@ pub fn id(item: TokenStream) -> TokenStream {
         parser.unexpected()
     }
 }
-
-#[proc_macro]
-pub fn multi_id(item: TokenStream) -> TokenStream {
-    let mut tb = TokenBuilder::new(); 
-    let id = Id::from_str_unchecked(&item.to_string());
-    tb.add("MultiPack (").suf_u64(id.0).add(")");
-    tb.end()
-}
-
 
 #[proc_macro]
 pub fn live_error_origin(_item: TokenStream) -> TokenStream {
