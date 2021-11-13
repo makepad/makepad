@@ -389,8 +389,11 @@ impl fmt::Debug for LiveDocument {
                 write!(f, "= ").unwrap();
             }
             match &node.value{
-               LiveValue::Str(s)=>{
-                   writeln!(f, "{}: Str: {}", node.id, s).unwrap();
+                LiveValue::None=>{
+                   writeln!(f, "{}: <None>", node.id).unwrap();
+                },
+                LiveValue::Str(s)=>{
+                   writeln!(f, "{}: <Str> {}", node.id, s).unwrap();
                 },
                 LiveValue::String(s)=>{
                     writeln!(f, "{}: <String> {}", node.id, s).unwrap();
@@ -408,16 +411,19 @@ impl fmt::Debug for LiveDocument {
                     writeln!(f, "{}: <Float> {}", node.id, v).unwrap();
                 },
                 LiveValue::Color(v)=>{
-                    writeln!(f, "{}: Color:{}", node.id, v).unwrap();
+                    writeln!(f, "{}: <Color>{}", node.id, v).unwrap();
                 },
                 LiveValue::Vec2(v)=>{
-                    writeln!(f, "{}: Vec2:{:?}", node.id, v).unwrap();
+                    writeln!(f, "{}: <Vec2> {:?}", node.id, v).unwrap();
                 },
                 LiveValue::Vec3(v)=>{
-                    writeln!(f, "{}: Vec3:{:?}", node.id, v).unwrap();
+                    writeln!(f, "{}: <Vec3> {:?}", node.id, v).unwrap();
                 },
                 LiveValue::LiveType(v)=>{
                     writeln!(f, "{}: <LiveType> {:?}", node.id, v).unwrap();
+                },
+                LiveValue::Id(id)=>{
+                   writeln!(f, "{}: <Id> {}", node.id, id).unwrap();
                 },
                 LiveValue::BareEnum {base, variant}=>{
                     writeln!(f, "{}: <BareEnum> {}::{}", node.id, base, variant).unwrap();
@@ -454,7 +460,7 @@ impl fmt::Debug for LiveDocument {
                     scope_start,
                     scope_count
                 }=>{
-                    writeln!(f, "fn {} :token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start,scope_count).unwrap();
+                    writeln!(f, "<Fn> {} :token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start,scope_count).unwrap();
                 },
                 LiveValue::Const {
                     token_start,
@@ -462,7 +468,7 @@ impl fmt::Debug for LiveDocument {
                     scope_start,
                     scope_count
                 }=>{
-                    writeln!(f, "const {} :token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start,scope_count).unwrap();
+                    writeln!(f, "<Const> {} :token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start,scope_count).unwrap();
                 },
                 LiveValue::VarDef { //instance/uniform def
                     token_start,
@@ -470,14 +476,14 @@ impl fmt::Debug for LiveDocument {
                     scope_start,
                     scope_count
                 }=>{
-                    writeln!(f, "VarDef {} : token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start,scope_count).unwrap();
+                    writeln!(f, "<VarDef> {} : token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start,scope_count).unwrap();
                 },
                 LiveValue::Use{
                     crate_id,
                     module_id,
                     object_id
                 }=>{
-                    writeln!(f, "use {}::{}::{}", crate_id, module_id, object_id).unwrap();
+                    writeln!(f, "<Use> {}::{}::{}", crate_id, module_id, object_id).unwrap();
                 }
                 
             }

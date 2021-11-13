@@ -111,6 +111,7 @@ impl LiveValue {
     
     pub fn variant_id(&self) -> usize {
         match self {
+            Self::None => 0,
             Self::Str(_) => 1,
             Self::String(_) => 2,
             Self::StringRef {..} => 3,
@@ -121,17 +122,19 @@ impl LiveValue {
             Self::Vec2(_) => 8,
             Self::Vec3(_) => 9,
             Self::LiveType(_) => 10,
-            Self::BareEnum {..} => 11,
-            Self::Array => 12,
-            Self::TupleEnum {..} => 13,
-            Self::NamedEnum {..} => 14,
-            Self::BareClass => 15,
-            Self::NamedClass {..} => 16,
-            Self::Close => 17,
-            Self::Fn {..} => 18,
-            Self::Const {..} => 19,
-            Self::VarDef {..} => 20,
-            Self::Use {..} => 21
+            Self::Id(_) => 11,
+            
+            Self::BareEnum {..} => 12,
+            Self::Array => 13,
+            Self::TupleEnum {..} => 14,
+            Self::NamedEnum {..} => 15,
+            Self::BareClass => 16,
+            Self::NamedClass {..} => 17,
+            Self::Close => 18,
+            Self::Fn {..} => 19,
+            Self::Const {..} => 20,
+            Self::VarDef {..} => 21,
+            Self::Use {..} => 22
         }
     }
 }
@@ -144,6 +147,7 @@ pub enum LiveValue {
         string_start: usize,
         string_count: usize
     },
+    None,
     Bool(bool),
     Int(i64),
     Float(f64),
@@ -151,7 +155,7 @@ pub enum LiveValue {
     Vec2(Vec2),
     Vec3(Vec3),
     LiveType(LiveType),
-    
+    Id(Id),
     BareEnum {base: Id, variant: Id},
     // stack items
     Array,
@@ -195,6 +199,8 @@ pub trait LiveNodeSlice {
     fn count_children(&self, parent_index: usize) -> usize;
     fn first_child(&self, parent_index: usize) -> Option<usize>;
     fn next_child(&self, child_index: usize) -> Option<usize>;
+    fn skip_node(&self, node_index: usize)->usize;
+    fn clone_child(&self, parent_index: usize)->Vec<LiveNode>;
 }
 
 pub trait LiveNodeVec {
@@ -451,6 +457,60 @@ macro_rules!impl_live_node_slice {
                     index += 1;
                 }
                 panic!()
+            }
+            
+            fn skip_node(&self, node_index: usize)->usize{
+                let mut index = node_index;
+                let mut stack_depth = 0;
+                while index < self.len() {
+                    match &self[index].value {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                            stack_depth += 1;
+                        }
+                        LiveValue::Close => {
+                            stack_depth -= 1;
+                            if stack_depth == 0 {
+                                index += 1;
+                                return index
+                            }
+                        }
+                        _ => {
+                            if stack_depth == 0 {
+                                index += 1;
+                                return index
+                            }
+                        }
+                    }
+                    index += 1;
+                }
+                return index
+            }
+            
+            fn clone_child(&self, parent_index: usize)->Vec<LiveNode>{
+                let mut out = Vec::new();
+                let mut index = parent_index;
+                let mut stack_depth = 0;
+                while index < self.len() {
+                    out.push(self[index].clone());
+                    match &self[index].value {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                            stack_depth += 1;
+                        }
+                        LiveValue::Close => {
+                            stack_depth -= 1;
+                            if stack_depth == 0 {
+                                return out
+                            }
+                        }
+                        _ => {
+                            if stack_depth == 0 {
+                                return out
+                            }
+                        }
+                    }
+                    index += 1;
+                }
+                return out
             }
         }
         

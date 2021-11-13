@@ -216,7 +216,7 @@ impl ShaderRegistry {
             LiveValue::Const {token_start, token_count, scope_start, scope_count} => {
                 let mut parser_deps = Vec::new();
                 let id = const_node.id;
-                let origin_doc = &self.live_registry.doc_from_token_id(const_node.token_id.unwrap());
+                let origin_doc = &self.live_registry.origin_doc_from_token_id(const_node.token_id.unwrap());
                 let mut parser = ShaderParser::new(
                     self,
                     origin_doc.get_tokens(token_start, token_count),
@@ -260,7 +260,7 @@ impl ShaderRegistry {
                 let id = fn_node.id;
                 let mut parser_deps = Vec::new();
                 // lets parse this thing
-                let origin_doc = &self.live_registry.doc_from_token_id(fn_node.token_id.unwrap());
+                let origin_doc = &self.live_registry.origin_doc_from_token_id(fn_node.token_id.unwrap());
                 let parser = ShaderParser::new(
                     self,
                     origin_doc.get_tokens(token_start, token_count),
@@ -332,7 +332,7 @@ impl ShaderRegistry {
                     match prop.value {
                         LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
                             let id = prop.id;
-                            let origin_doc = &self.live_registry.doc_from_token_id(prop.token_id.unwrap());
+                            let origin_doc = &self.live_registry.origin_doc_from_token_id(prop.token_id.unwrap());
                             let mut parser = ShaderParser::new(
                                 self,
                                 origin_doc.get_tokens(token_start, token_count + 1),
@@ -351,7 +351,7 @@ impl ShaderRegistry {
                         LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
                             let id = prop.id;
                             // lets parse this thing
-                            let origin_doc = &self.live_registry.doc_from_token_id(prop.token_id.unwrap());
+                            let origin_doc = &self.live_registry.origin_doc_from_token_id(prop.token_id.unwrap());
                             let parser = ShaderParser::new(
                                 self,
                                 origin_doc.get_tokens(token_start, token_count + 1),
@@ -470,7 +470,7 @@ impl ShaderRegistry {
                             }
                         },
                         LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
-                            let origin_doc = &self.live_registry.doc_from_token_id(prop.token_id.unwrap());
+                            let origin_doc = &self.live_registry.origin_doc_from_token_id(prop.token_id.unwrap());
                             let mut parser = ShaderParser::new(
                                 self,
                                 origin_doc.get_tokens(token_start, token_count),
@@ -508,7 +508,7 @@ impl ShaderRegistry {
                             }
                         },
                         LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
-                            let origin_doc = &self.live_registry.doc_from_token_id(prop.token_id.unwrap());
+                            let origin_doc = &self.live_registry.origin_doc_from_token_id(prop.token_id.unwrap());
                             let parser = ShaderParser::new(
                                 self,
                                 origin_doc.get_tokens(token_start, token_count),
