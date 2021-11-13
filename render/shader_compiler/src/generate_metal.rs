@@ -1,5 +1,5 @@
 use crate::shaderast::*;
-use makepad_live_parser::*;
+use makepad_live_compiler::*;
 use crate::generate::*;
 use std::fmt::Write;
 use std::fmt;

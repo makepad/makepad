@@ -24,6 +24,8 @@ pub use crate::id::ModulePath;
 pub use crate::livenode::LiveValue;
 pub use crate::livenode::LiveNode;
 pub use crate::livenode::LiveType;
+pub use crate::livenode::LiveNodeSlice;
+pub use crate::livenode::LiveNodeVec;
 pub use crate::token::TokenWithSpan;
 pub use crate::token::Token;
 pub use crate::token::TokenId;

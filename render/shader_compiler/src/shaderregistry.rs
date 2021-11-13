@@ -1,6 +1,6 @@
 #![allow(unused_variables)]
 
-use makepad_live_parser::*;
+use makepad_live_compiler::*;
 use crate::shaderast::*;
 use crate::analyse::*;
 
@@ -12,15 +12,6 @@ use std::collections::HashMap;
 use crate::builtin::Builtin;
 use crate::builtin::generate_builtins;
 use crate::shaderast::Scopes;
-/*
-#[derive(Clone, Debug, Copy, Hash, Eq, PartialEq)]
-pub struct ShaderResourceId(CrateModule, Id);
-
-impl fmt::Display for ShaderResourceId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}::{}", self.0, self.1)
-    }
-}*/
 
 pub struct ShaderRegistry {
     pub live_registry: LiveRegistry,
@@ -55,10 +46,9 @@ pub enum LiveNodeFindResult {
     LiveValue(ValuePtr, TyLit)
 }
 
-
 impl ShaderRegistry {
     
-    pub fn compute_const_table(&self, draw_shader_def: &mut DrawShaderDef, filter_file_id: FileId)->DrawShaderConstTable {
+    pub fn compute_const_table(&self, draw_shader_def: &mut DrawShaderDef, filter_file_id: FileId) -> DrawShaderConstTable {
         let mut offsets = BTreeMap::new();
         let mut table = Vec::new();
         let mut offset = 0;
@@ -76,7 +66,7 @@ impl ShaderRegistry {
         for _ in 0..align_gap {
             table.push(0.0);
         }
-        DrawShaderConstTable{
+        DrawShaderConstTable {
             table,
             offsets
         }
@@ -127,108 +117,77 @@ impl ShaderRegistry {
         None
     }
     
-    
     pub fn find_live_node_by_path(&self, base_ptr: LivePtr, ids: &[Id]) -> LiveNodeFindResult {
-        // what are the types of things we can find.
         
-        fn no_ids(ids: &[Id], result: LiveNodeFindResult) -> LiveNodeFindResult {
-            if ids.len() == 0 {result} else {LiveNodeFindResult::NotFound}
-        }
+        let (doc, node) = &self.live_registry.resolve_doc_ptr(base_ptr);
+        return walk_recur(None, base_ptr.file_id, base_ptr.local_ptr.0, &doc.nodes, ids);
         
-        let (doc, node) = self.live_registry.resolve_doc_ptr(base_ptr);
-        match node.value {
-            LiveValue::Bool(_) => return no_ids(ids, LiveNodeFindResult::LiveValue(ValuePtr(base_ptr), TyLit::Bool)),
-            LiveValue::Int(_) => return no_ids(ids, LiveNodeFindResult::LiveValue(ValuePtr(base_ptr), TyLit::Int)),
-            LiveValue::Float(_) => return no_ids(ids, LiveNodeFindResult::LiveValue(ValuePtr(base_ptr), TyLit::Float)),
-            LiveValue::Color(_) => return no_ids(ids, LiveNodeFindResult::LiveValue(ValuePtr(base_ptr), TyLit::Vec4)),
-            LiveValue::Vec2(_) => return no_ids(ids, LiveNodeFindResult::LiveValue(ValuePtr(base_ptr), TyLit::Vec2)),
-            LiveValue::Vec3(_) => return no_ids(ids, LiveNodeFindResult::LiveValue(ValuePtr(base_ptr), TyLit::Vec3)),
-            LiveValue::Fn {..} => return no_ids(ids, LiveNodeFindResult::Function(FnPtr(base_ptr))),
-            LiveValue::Const{token_start,..}=>return no_ids(ids, LiveNodeFindResult::Const(ConstPtr(base_ptr))), 
-            LiveValue::Class {class, node_start: ns, node_count: nc, ..} => {
-                if ids.len() == 0 { // check if we are struct or component
-                    let base_class =  self.live_registry.find_base_class_id(class);
-                    
-                    match self.live_registry.find_base_class_id(class) {
-                        multi_id!(Struct) => return LiveNodeFindResult::Struct(StructPtr(base_ptr)),
-                        _ => return LiveNodeFindResult::Component(base_ptr),
+        // ok so we got a node. great. now what
+        fn walk_recur(struct_ptr:Option<LivePtr>,file_id: FileId, index: usize, nodes: &[LiveNode], ids: &[Id]) -> LiveNodeFindResult {
+            let node = &nodes[index];
+            
+            if ids.len() != 0 && !node.value.is_class() {
+                return LiveNodeFindResult::NotFound;
+            }
+            
+            let now_ptr = LivePtr {file_id, local_ptr: LocalPtr(index)};
+             
+            match node.value {
+                LiveValue::Bool(_) => return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Bool),
+                LiveValue::Int(_) => return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Int),
+                LiveValue::Float(_) => return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Float),
+                LiveValue::Color(_) => return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec4),
+                LiveValue::Vec2(_) => return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec2),
+                LiveValue::Vec3(_) => return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec3),
+                LiveValue::Fn {..} => {
+                    if let Some(struct_ptr) = struct_ptr{
+                        return LiveNodeFindResult::PossibleStatic(StructPtr(struct_ptr),FnPtr(now_ptr));
                     }
+                    return LiveNodeFindResult::Function(FnPtr(now_ptr));
                 }
-                // now we bounce around the DOM tree.
-                let mut parent_ptr = base_ptr.local_ptr;
-                let mut node_start = ns as usize;
-                let mut node_count = nc as usize;
-                let mut level = base_ptr.local_ptr.level + 1;
-                for i in 0..ids.len() {
-                    let id = ids[i];
-                    let mut found = false;
-                    for j in 0..node_count {
-                        let node = &doc.nodes[level][j + node_start];
-                        if node.id == id {
-                            // we found the node.
-                            let node_ptr = LocalPtr {level: level, index: j + node_start};
-                            if i == ids.len() - 1 { // last item
-                                let full_node_ptr = LivePtr {file_id: base_ptr.file_id, local_ptr: node_ptr};
-                                match node.value {
-                                    LiveValue::Class {class, ..} => {
-                                        match self.live_registry.find_base_class_id(class) {
-                                            multi_id!(Struct) => return LiveNodeFindResult::Struct(StructPtr(full_node_ptr)),
-                                            multi_id!(Component) => return LiveNodeFindResult::Component(full_node_ptr),
-                                            _ => return LiveNodeFindResult::NotFound
-                                        }
-                                    },
-                                    LiveValue::Fn {..} => { // check if its a method or a free roaming function
-                                        let full_base_ptr = LivePtr {file_id: base_ptr.file_id, local_ptr: parent_ptr};
-                                        let base_node = doc.resolve_ptr(parent_ptr);
-                                        if let LiveValue::Class {class, ..} = base_node.value {
-                                            // lets check if our base is a component or a struct
-                                            match self.live_registry.find_base_class_id(class) {
-                                                multi_id!(Struct) => return LiveNodeFindResult::PossibleStatic(
-                                                    StructPtr(full_base_ptr),
-                                                    FnPtr(full_node_ptr)
-                                                ),
-                                                _ => return LiveNodeFindResult::Function(FnPtr(full_node_ptr)),
-                                            }
-                                        }
-                                        else {
-                                            panic!()
-                                        }
-                                    },
-                                    LiveValue::Bool(_) => return LiveNodeFindResult::LiveValue(ValuePtr(full_node_ptr), TyLit::Bool),
-                                    LiveValue::Int(_) => return LiveNodeFindResult::LiveValue(ValuePtr(full_node_ptr), TyLit::Int),
-                                    LiveValue::Float(_) => return LiveNodeFindResult::LiveValue(ValuePtr(full_node_ptr), TyLit::Float),
-                                    LiveValue::Color(_) => return LiveNodeFindResult::LiveValue(ValuePtr(full_node_ptr), TyLit::Vec4),
-                                    LiveValue::Vec2(_) => return LiveNodeFindResult::LiveValue(ValuePtr(full_node_ptr), TyLit::Vec2),
-                                    LiveValue::Vec3(_) => return LiveNodeFindResult::LiveValue(ValuePtr(full_node_ptr), TyLit::Vec3),
-                                    LiveValue::Const{token_start,..}=>return LiveNodeFindResult::Const(ConstPtr(full_node_ptr)),
-                                    _ => return LiveNodeFindResult::NotFound
-                                }
+                LiveValue::Const {..} => return LiveNodeFindResult::Const(ConstPtr(now_ptr)),
+                LiveValue::NamedClass {class}=>{
+                    if ids.len() == 0{
+                        if class == id!(Struct){
+                            return LiveNodeFindResult::Struct(StructPtr(now_ptr));
+                        }
+                        return LiveNodeFindResult::Component(now_ptr);
+                    }
+                    match nodes.child_by_name(index, ids[0]){
+                        Ok(child_index)=>{
+                            let struct_ptr = if class == id!(Struct){
+                                Some(now_ptr)
                             }
-                            else { // we need to be either an object or a class
-                                parent_ptr = node_ptr;
-                                level += 1;
-                                match node.value {
-                                    LiveValue::Class {node_start: ns, node_count: nc, ..} => {
-                                        node_start = ns as usize;
-                                        node_count = nc as usize;
-                                    },
-                                    _ => return LiveNodeFindResult::NotFound
-                                }
-                                found = true;
-                                break
-                            }
+                            else{
+                                None
+                            };
+                            return walk_recur(struct_ptr, file_id, child_index, nodes, &ids[1..])
+                        }
+                        Err(_)=>{
+                            return LiveNodeFindResult::NotFound;
                         }
                     }
-                    if !found {
-                        break
+                }
+                LiveValue::BareClass => { 
+                    if ids.len() == 0{
+                        return LiveNodeFindResult::NotFound;
+                    }
+                    match nodes.child_by_name(index, ids[0]){
+                        Ok(child_index)=>{
+                            return walk_recur(None, file_id, child_index, nodes, &ids[1..])
+                        }
+                        Err(_)=>{
+                            return LiveNodeFindResult::NotFound;
+                        }
                     }
                 }
+                _=>{
+                    return LiveNodeFindResult::NotFound;
+                }
             }
-            _ => ()
         }
-        LiveNodeFindResult::NotFound
     }
-   
+    
     pub fn analyse_deps(&mut self, deps: &[ShaderParserDep]) -> Result<(), LiveError> {
         // recur on used types
         for dep in deps {
@@ -257,10 +216,10 @@ impl ShaderRegistry {
             LiveValue::Const {token_start, token_count, scope_start, scope_count} => {
                 let mut parser_deps = Vec::new();
                 let id = const_node.id;
-                let origin_doc = &self.live_registry.get_origin_doc_from_token_id(const_node.token_id);
+                let origin_doc = &self.live_registry.doc_from_token_id(const_node.token_id.unwrap());
                 let mut parser = ShaderParser::new(
                     self,
-                    origin_doc.get_tokens(token_start, token_count + 1),
+                    origin_doc.get_tokens(token_start, token_count),
                     doc.get_scopes(scope_start, scope_count),
                     &mut parser_deps,
                     None,
@@ -301,10 +260,10 @@ impl ShaderRegistry {
                 let id = fn_node.id;
                 let mut parser_deps = Vec::new();
                 // lets parse this thing
-                let origin_doc = &self.live_registry.get_origin_doc_from_token_id(fn_node.token_id);
+                let origin_doc = &self.live_registry.doc_from_token_id(fn_node.token_id.unwrap());
                 let parser = ShaderParser::new(
                     self,
-                    origin_doc.get_tokens(token_start, token_count + 1),
+                    origin_doc.get_tokens(token_start, token_count),
                     doc.get_scopes(scope_start, scope_count),
                     &mut parser_deps,
                     if let Some(struct_ptr) = struct_ptr {Some(FnSelfKind::Struct(struct_ptr))}else {None},
@@ -348,32 +307,32 @@ impl ShaderRegistry {
             return Ok(());
         }
         
-        let (doc, class_node) = self.live_registry.resolve_doc_ptr(struct_ptr.0);
-        //let doc = &self.live_registry.expanded[full_ptr.file_id.to_index()];
-        //let class_node = &doc.nodes[full_ptr.local_ptr.level][full_ptr.local_ptr.index];
+        let (doc, struct_node) = self.live_registry.resolve_doc_ptr(struct_ptr.0);
         
-        match class_node.value {
-            LiveValue::Class {node_start, node_count, class} => {
+        match struct_node.value {
+            LiveValue::NamedClass {class} => {
+                if class != id!(Struct){
+                    panic!()
+                }
                 let mut struct_def = StructDef {
-                    span: self.live_registry.token_id_to_span(class_node.token_id),
-                    // ident: Ident(class_node.id_pack.unwrap_single()),
+                    span: self.live_registry.token_id_to_span(struct_node.token_id.unwrap()),
                     struct_refs: RefCell::new(None),
                     fields: Vec::new(),
                     methods: Vec::new()
-                    //    struct_body: ShaderBody::default()
                 };
                 
                 let mut parser_deps = Vec::new();
-                for i in 0..node_count as usize {
-                    let prop_ptr = LivePtr {file_id: struct_ptr.0.file_id, local_ptr: LocalPtr {
-                        level: struct_ptr.0.local_ptr.level + 1,
-                        index: i + node_start as usize
-                    }};
-                    let prop = doc.resolve_ptr(prop_ptr.local_ptr);
+                
+                // ok how do we iterate children of this node
+                let mut node_iter = doc.nodes.first_child(struct_ptr.node_index());
+                while let Some(node_index) = node_iter{
+                    let prop_ptr = struct_ptr.with_index(node_index);
+                    let prop = &doc.nodes[node_index];
+
                     match prop.value {
                         LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
                             let id = prop.id;
-                            let origin_doc = &self.live_registry.get_origin_doc_from_token_id(prop.token_id);
+                            let origin_doc = &self.live_registry.doc_from_token_id(prop.token_id.unwrap());
                             let mut parser = ShaderParser::new(
                                 self,
                                 origin_doc.get_tokens(token_start, token_count + 1),
@@ -392,7 +351,7 @@ impl ShaderRegistry {
                         LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
                             let id = prop.id;
                             // lets parse this thing
-                            let origin_doc = &self.live_registry.get_origin_doc_from_token_id(prop.token_id);
+                            let origin_doc = &self.live_registry.doc_from_token_id(prop.token_id.unwrap());
                             let parser = ShaderParser::new(
                                 self,
                                 origin_doc.get_tokens(token_start, token_count + 1),
@@ -418,11 +377,12 @@ impl ShaderRegistry {
                         _ => {
                             return Err(LiveError {
                                 origin: live_error_origin!(),
-                                span: self.live_registry.token_id_to_span(prop.token_id),
+                                span: self.live_registry.token_id_to_span(prop.token_id.unwrap()),
                                 message: format!("Cannot use {:?} in struct", prop.value)
                             })
                         }
                     }
+                    node_iter = doc.nodes.next_child(node_index);
                 }
                 // we should store the structs
                 self.structs.insert(struct_ptr, struct_def);
@@ -454,55 +414,54 @@ impl ShaderRegistry {
     where F: FnMut(Span, Id, LiveType, &mut DrawShaderDef)
     {
         let mut draw_shader_def = DrawShaderDef::default();
-
+        
         let (doc, class_node) = self.live_registry.resolve_doc_ptr(draw_shader_ptr.0);
         
         match class_node.value {
-            LiveValue::Class {node_start, node_count, ..} => {
+            LiveValue::NamedClass {class, ..} => {
+                if class != id!(DrawShader){
+                    panic!()
+                }
+
                 let mut parser_deps = Vec::new();
-                let mut iter = self.live_registry.live_object_iterator(draw_shader_ptr.0, node_start as usize, node_count as usize);
-                while let Some((id, prop_ptr)) = iter.next_id(&self.live_registry) {
-                    let prop = doc.resolve_ptr(prop_ptr.local_ptr);
-                    
+                
+                let mut node_iter = doc.nodes.first_child(draw_shader_ptr.node_index());
+                while let Some(node_index) = node_iter{
+                    let prop = &doc.nodes[node_index];
+                    let prop_ptr = draw_shader_ptr.with_index(node_index);
                     match prop.value {
                         // if we have a float or a vec2/3/4
                         // we should look to set a default value
-                        LiveValue::Bool(val)=>{
+                        LiveValue::Bool(val) => {
                             if prop.id == id!(debug) {
                                 draw_shader_def.flags.debug = true;
                             }
-                            if prop.id == id!(draw_call_compare){
+                            if prop.id == id!(draw_call_compare) {
                                 draw_shader_def.flags.draw_call_compare = true;
                             }
-                            if prop.id == id!(draw_call_always){
+                            if prop.id == id!(draw_call_always) {
                                 draw_shader_def.flags.draw_call_always = true;
                             }
                         }
                         LiveValue::LiveType(lt) => {
                             if prop.id == id!(rust_type) {
                                 ext_self(
-                                    self.live_registry.token_id_to_span(prop.token_id),
-                                    id,
+                                    self.live_registry.token_id_to_span(prop.token_id.unwrap()),
+                                    prop.id,
                                     lt,
                                     &mut draw_shader_def
                                 );
                             }
                         }
-                        LiveValue::Class {class, node_start, node_count} => {
+                        LiveValue::NamedClass {class} => {
                             // if our id is geometry, process it
                             if prop.id == id!(geometry) {
-                                // we need to find the rust_type from here
-                                if let Some(local_ptr) = doc.scan_for_object_path_from(
-                                    &[id!(rust_type)],
-                                    node_start as usize,
-                                    node_count as usize,
-                                    prop_ptr.local_ptr.level + 1
-                                ) {
-                                    let node = doc.resolve_ptr(local_ptr);
+                                if let Ok(child_index) = doc.nodes.child_by_name(node_index, id!(rust_type)){
+                                    let node = &doc.nodes[child_index];
                                     if let LiveValue::LiveType(lt) = node.value {
                                         ext_self(
-                                            self.live_registry.token_id_to_span(prop.token_id),
-                                            id,
+                                            self.live_registry.token_id_to_span(prop.token_id.unwrap()),
+                                            prop.id,
                                             lt,
                                             &mut draw_shader_def
                                         );
@@ -511,7 +470,7 @@ impl ShaderRegistry {
                             }
                         },
                         LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
-                            let origin_doc = &self.live_registry.get_origin_doc_from_token_id(prop.token_id);
+                            let origin_doc = &self.live_registry.doc_from_token_id(prop.token_id.unwrap());
                             let mut parser = ShaderParser::new(
                                 self,
                                 origin_doc.get_tokens(token_start, token_count),
@@ -549,7 +508,7 @@ impl ShaderRegistry {
                             }
                         },
                         LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
-                            let origin_doc = &self.live_registry.get_origin_doc_from_token_id(prop.token_id);
+                            let origin_doc = &self.live_registry.doc_from_token_id(prop.token_id.unwrap());
                             let parser = ShaderParser::new(
                                 self,
                                 origin_doc.get_tokens(token_start, token_count),
@@ -571,6 +530,7 @@ impl ShaderRegistry {
                         }
                         _ => ()
                     }
+                    node_iter = doc.nodes.next_child(node_index);
                 }
                 // lets check for duplicate fields
                 for i in 0..draw_shader_def.fields.len() {
@@ -612,27 +572,5 @@ impl ShaderRegistry {
             })
         }
     }
-    /*
-    pub fn generate_glsl_shader(&mut self, shader_ptr: DrawShaderNodePtr) -> (String, String) {
-        // lets find the FullPointer
-        let draw_shader_decl = self.draw_shaders.get(&shader_ptr).unwrap();
-        // TODO this env needs its const table transferred
-        let vertex = generate_glsl::generate_vertex_shader(draw_shader_decl, self);
-        let pixel = generate_glsl::generate_pixel_shader(draw_shader_decl, self);
-        return (vertex, pixel)
-    }
     
-    pub fn generate_metal_shader(&mut self, shader_ptr: DrawShaderNodePtr) -> String{
-        // lets find the FullPointer
-        let draw_shader_decl = self.draw_shaders.get(&shader_ptr).unwrap();
-        let shader = generate_metal::generate_shader(draw_shader_decl, self);
-        return shader
-    }
-    
-    pub fn generate_hlsl_shader(&mut self, shader_ptr: DrawShaderNodePtr) -> String{
-        // lets find the FullPointer
-        let draw_shader_decl = self.draw_shaders.get(&shader_ptr).unwrap();
-        let shader = generate_hlsl::generate_shader(draw_shader_decl, self);
-        return shader
-    }*/
 }
