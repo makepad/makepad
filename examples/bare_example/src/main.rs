@@ -6,20 +6,17 @@ live_register!{
     use makepad_render::drawtext::DrawText;
     use makepad_widget::normalbutton::NormalButton;
     
-    App: Component {
-        rust_type: {{BareExampleApp}}
-        draw_quad: DrawColor {
-            color: #f00
-            fn pixel(self) -> vec4 {
-                return mix(#f00, #0f0, self.geom_pos.y)
-            }
+    draw_quad: DrawColor {
+        color: #f00
+        fn pixel(self) -> vec4 {
+            return mix(#f00, #0f0, self.geom_pos.y)
         }
-        
-        draw_text: DrawText {
-        }
-        
-        normal_button: NormalButton {
-        }
+    }
+    
+    draw_text: DrawText {
+    }
+    
+    normal_button: NormalButton {
     }
 }
 
@@ -43,8 +40,9 @@ impl BareExampleApp {
     
     pub fn new_app(cx: &mut Cx) -> Self {
         let mut new = Self::new(cx);
-        let nodes = cx.clone_from_module_path(&module_path!(), id!(App)).unwrap();
-        new.apply(cx, &nodes);
+        let (file_id, nodes) = cx.clone_from_module_path(&module_path!()).unwrap();
+        //println!("{}", nodes.to_string(0));
+        new.apply_index(cx, ApplyFrom::LiveNew{file_id}, 0, &nodes);
         new
     }
     
@@ -65,7 +63,6 @@ impl BareExampleApp {
     }
     
     pub fn draw_app(&mut self, cx: &mut Cx) {
-        
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
         self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(Vec4::color("000")));

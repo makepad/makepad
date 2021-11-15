@@ -64,7 +64,7 @@ impl TokenId {
     }
     
     pub fn token_index(&self)->usize{
-        ((self.0>>24)&0xfffff) as usize
+        (self.0&0xfffff) as usize
     }
     
     pub fn file_id(&self)->FileId{

@@ -3,8 +3,6 @@ use crate::buttonlogic::*;
 
 live_register!{
     use makepad_render::shader_std::*;
-    use makepad_render::turtle::*;
-    use makepad_render::animation::*;
     use makepad_render::drawquad::DrawQuad;
     use makepad_render::drawtext::DrawText;
     
@@ -90,7 +88,9 @@ pub struct NormalButton {
 }
 
 impl LiveComponentHooks for NormalButton {
-    fn after_apply_index(&mut self, cx: &mut Cx, _index: usize, _nodes:&[LiveNode]) {
+    fn after_new(&mut self, _cx:&mut Cx){
+    }
+    fn after_apply_index(&mut self, cx: &mut Cx, apply_from:ApplyFrom, _index: usize, _nodes:&[LiveNode]) {
         //elf.animator.live_ptr = Some(live_ptr);
         self.init_state(cx, id!(state_down));
     }

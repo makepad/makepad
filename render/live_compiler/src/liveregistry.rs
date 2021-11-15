@@ -37,56 +37,6 @@ pub struct LiveRegistry {
     pub dep_graph: HashMap<ModulePath, HashSet<ModulePath >>, // this contains all the dependencies a crate has
     pub expanded: Vec<LiveDocument >,
 }
-/*
-pub struct LiveObjectIterator {
-    file_id: FileId,
-    level: usize,
-    node_start: usize,
-    node_count: usize,
-    index: usize
-}
-
-impl LiveObjectIterator {
-    pub fn next_id(&mut self, live_registry: &LiveRegistry) -> Option<(Id, LivePtr)> {
-        // ok so we get the
-        loop {
-            if self.index >= self.node_count {
-                return None
-            }
-            
-            let id = live_registry.expanded[self.file_id.to_index()]
-                .nodes[self.level][self.index + self.node_start].id;
-            
-            self.index += 1;
-            
-            return Some((id, LivePtr {
-                file_id: self.file_id,
-                local_ptr: LocalPtr {
-                    level: self.level,
-                    index: self.index - 1 + self.node_start
-                }
-            }));
-        }
-    }
-    pub fn next_prop(&mut self) -> Option<(usize, LivePtr)> {
-        // ok so we get the
-        loop {
-            if self.index >= self.node_count {
-                return None
-            }
-            
-            self.index += 1;
-            
-            return Some((self.index - 1, LivePtr {
-                file_id: self.file_id,
-                local_ptr: LocalPtr {
-                    level: self.level,
-                    index: self.index - 1 + self.node_start
-                }
-            }));
-        }
-    }
-}*/
 
 impl LiveRegistry {
     pub fn resolve_ptr(&self, live_ptr: LivePtr) -> &LiveNode {
@@ -102,114 +52,24 @@ impl LiveRegistry {
     pub fn origin_doc_from_token_id(&self, token_id: TokenId) -> &LiveDocument {
         &self.live_files[token_id.file_id().to_index()].document
     }
+
+    pub fn expanded_doc_from_token_id(&self, token_id: TokenId) -> &LiveDocument {
+        &self.expanded[token_id.file_id().to_index()]
+    }
     
-    pub fn clone_from_module_path(&self, module_path: &str, id: Id) -> Option<Vec<LiveNode>> {
+    pub fn clone_from_module_path(&self, module_path: &str) -> Option<(FileId,Vec<LiveNode>)> {
         if let Some(file_id) = self.module_path_to_file_id.get(&ModulePath::from_str(module_path).unwrap()) {
             let doc = &self.expanded[file_id.to_index()];
-            if let Ok(pos) = doc.nodes.child_by_name(0, id){
-                // ok now what. we should clone 
-                return Some(doc.nodes.clone_child(pos));
-            }
+            return Some((*file_id,doc.nodes.clone_child(0)));
         }
         None
     }
-    /*
-    pub fn nodes_from_module_path(&self, module_path: &str, id: Id) -> Option<(&[LiveNode], usize)> {
-        if let Some(file_id) = self.module_path_to_file_id.get(&ModulePath::from_str(module_path).unwrap()) {
-            let doc = &self.expanded[file_id.to_index()];
-            if let Ok(pos) = doc.nodes.child_by_name(0, id){
-                return Some((&doc.nodes, pos));
-            }
-        }
-        None
-    }*/
-    
-    
-    /*
-    
-    pub fn live_ptr_from_path(&self, module_path: ModulePath, object_path: &[Id]) -> Option<LivePtr> {
-        if let Some(file_id) = self.module_path_to_file_id.get(&module_path) {
-            let doc = &self.expanded[file_id.to_index()];
-            if let Some(local_ptr) = doc.scan_for_object_path(object_path) {
-                return Some(LivePtr {
-                    file_id: *file_id,
-                    local_ptr
-                })
-            }
-        }
-        None
-    }
-        
-    pub fn resolve_ptr(&self, live_ptr: LivePtr) -> &LiveNode {
-        let doc = &self.expanded[live_ptr.file_id.to_index()];
-        &doc.resolve_ptr(live_ptr.local_ptr)
-    }
-    
-    pub fn resolve_doc_ptr(&self, live_ptr: LivePtr) -> (&LiveDocument, &LiveNode) {
-        let doc = &self.expanded[live_ptr.file_id.to_index()];
-        (doc, &doc.resolve_ptr(live_ptr.local_ptr))
-    }
-
-    pub fn get_origin_doc_from_token_id(&self, token_id:TokenId) -> &LiveDocument {
-        &self.live_files[token_id.file_id.to_index()].document
-    }
-    
-    pub fn live_object_iterator(&self, live_ptr: LivePtr, node_start: usize, node_count: usize) -> LiveObjectIterator {
-        LiveObjectIterator {
-            file_id: live_ptr.file_id,
-            level: live_ptr.local_ptr.level + 1,
-            index: 0,
-            node_start: node_start,
-            node_count: node_count,
-        }
-    }
-    
-    pub fn live_class_iterator(&self, live_ptr: LivePtr) -> Option<LiveObjectIterator> {
-        let node = self.resolve_ptr(live_ptr);
-        if let LiveValue::Class {node_start, node_count, ..} = node.value {
-            Some(LiveObjectIterator {
-                file_id: live_ptr.file_id,
-                level: live_ptr.local_ptr.level + 1,
-                index: 0,
-                node_start: node_start as usize,
-                node_count: node_count as usize,
-            })
-        }
-        else {
-            return None
-        }
-    }
-
     
     pub fn live_error_to_live_file_error(&self, live_error: LiveError) -> LiveFileError {
         let live_file = &self.live_files[live_error.span.file_id().to_index()];
         live_error.to_live_file_error(&live_file.file, &live_file.source, live_file.line_offset)
     }
     
-
-    pub fn find_base_class_id(&self, class: MultiPack) -> MultiPack {
-        let mut class_iter = class;
-        while let MultiUnpack::LivePtr(live_ptr) = class_iter.unpack() {
-            let other_node = self.resolve_ptr(live_ptr);
-            if let LiveValue::Class {class, ..} = other_node.value {
-                class_iter = class;
-            }
-            else {
-                return MultiPack::empty()
-            }
-        }
-        class_iter
-    }
-    
-    pub fn find_module_path_by_file_id(&self, scan_file_id: FileId) -> Option<ModulePath> {
-        for (module_path, file_id) in &self.module_path_to_file_id {
-            if *file_id == scan_file_id {
-                return Some(*module_path)
-            }
-        }
-        return None
-    }
-    */
     
     pub fn token_id_to_span(&self, token_id: TokenId) -> Span {
         self.live_files[token_id.file_id().to_index()].document.token_id_to_span(token_id)
@@ -274,9 +134,13 @@ impl LiveRegistry {
         
         let mut dep_graph_set = HashSet::new();
         
-        for node in &document.nodes {
-            match &node.value {
+        for node in &mut document.nodes {
+            match &mut node.value {
                 LiveValue::Use {crate_id, module_id, ..} => {
+                    if *crate_id == id!(crate){ // patch up crate refs
+                        *crate_id = own_module_path.0
+                    };
+
                     let module_path = ModulePath(*crate_id, *module_id); //document.use_ids_to_module_path(use_ids, own_module_path.0);
                     dep_graph_set.insert(module_path);
                     let self_index = self.dep_order.iter().position( | v | v.0 == own_module_path).unwrap();
