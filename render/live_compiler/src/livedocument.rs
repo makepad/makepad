@@ -1,12 +1,9 @@
-#![allow(unused_variables)]
 //use makepad_id_macros2::*;
 use crate::id::{Id};
 use std::fmt;
 use crate::span::Span;
-//use crate::util::PrettyPrintedF64;
 use crate::token::{TokenWithSpan, TokenId};
-use crate::livenode::{LiveNode, LiveValue};//, LiveValue};
-//use crate::id::ModulePath;
+use crate::livenode::LiveNode;//, LiveValue};
 use crate::id::LocalPtr;
 use crate::id::LivePtr;
 use crate::id::FileId;
@@ -100,7 +97,7 @@ impl LiveDocument {
     pub fn token_id_to_span(&self, token_id: TokenId) -> Span {
         self.tokens[token_id.token_index() as usize].span
     }
-    
+    /*
     pub fn scan_for_object_path_from(&self, object_path: &[Id], start:LocalPtr) -> Option<LocalPtr> {
         /*
         for i in 0..object_path.len() {
@@ -139,11 +136,11 @@ impl LiveDocument {
             }
         }*/
         None
-    }
-    
+    }*/
+    /*
     pub fn scan_for_object_path(&self, object_path: &[Id]) -> Option<LocalPtr> {
         self.scan_for_object_path_from(object_path, LocalPtr(0))
-    }
+    }*/
     
     /*
     pub fn scan_for_multi_for_expand(&self, level: usize, node_start: usize, node_count: usize, id_start: usize, id_count: usize, multi_ids: &Vec<Id>) -> Result<LocalPtr, String> {
@@ -381,113 +378,3 @@ impl LiveDocument {
 }
 
 
-impl fmt::Debug for LiveDocument {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut stack_depth = 0;
-        for node in &self.nodes{
-            for _ in 0..stack_depth {
-                write!(f, "= ").unwrap();
-            }
-            match &node.value{
-                LiveValue::None=>{
-                   writeln!(f, "{}: <None>", node.id).unwrap();
-                },
-                LiveValue::Str(s)=>{
-                   writeln!(f, "{}: <Str> {}", node.id, s).unwrap();
-                },
-                LiveValue::String(s)=>{
-                    writeln!(f, "{}: <String> {}", node.id, s).unwrap();
-                },
-                LiveValue::StringRef {string_start, string_count}=>{
-                    writeln!(f, "{}: <StringRef> string_start:{}, string_end:{}", node.id, string_start, string_count).unwrap();
-                },
-                LiveValue::Bool(v)=>{
-                    writeln!(f, "{}: <Bool> {}", node.id, v).unwrap();
-                }
-                LiveValue::Int(v)=>{
-                    writeln!(f, "{}: <Int> {}", node.id, v).unwrap();
-                }
-                LiveValue::Float(v)=>{
-                    writeln!(f, "{}: <Float> {}", node.id, v).unwrap();
-                },
-                LiveValue::Color(v)=>{
-                    writeln!(f, "{}: <Color>{}", node.id, v).unwrap();
-                },
-                LiveValue::Vec2(v)=>{
-                    writeln!(f, "{}: <Vec2> {:?}", node.id, v).unwrap();
-                },
-                LiveValue::Vec3(v)=>{
-                    writeln!(f, "{}: <Vec3> {:?}", node.id, v).unwrap();
-                },
-                LiveValue::LiveType(v)=>{
-                    writeln!(f, "{}: <LiveType> {:?}", node.id, v).unwrap();
-                },
-                LiveValue::Id(id)=>{
-                   writeln!(f, "{}: <Id> {}", node.id, id).unwrap();
-                },
-                LiveValue::BareEnum {base, variant}=>{
-                    writeln!(f, "{}: <BareEnum> {}::{}", node.id, base, variant).unwrap();
-                },
-                // stack items
-                LiveValue::Array=>{
-                    writeln!(f, "{}: <Array>", node.id).unwrap();
-                    stack_depth += 1;
-                },
-                LiveValue::TupleEnum {base, variant}=>{
-                    writeln!(f, "{}: <TupleEnum> {}::{}", node.id, base, variant).unwrap();
-                    stack_depth += 1;
-                },
-                LiveValue::NamedEnum {base, variant}=>{
-                    writeln!(f, "{}: <NamedEnum> {}::{}", node.id, base, variant).unwrap();
-                    stack_depth += 1;
-                },
-                LiveValue::BareClass=>{
-                    writeln!(f, "{}: <BareClass>", node.id).unwrap();
-                    stack_depth += 1;
-                }, // subnodes including this one
-                LiveValue::NamedClass {class}=>{
-                    writeln!(f, "{}: <NamedClass> {}", node.id, class).unwrap();
-                    stack_depth += 1;
-                }, // subnodes including this one
-                LiveValue::Close=>{
-                    writeln!(f, "<Close> {}", node.id).unwrap();
-                    stack_depth -= 1;
-                },
-                // the shader code types
-                LiveValue::Fn {
-                    token_start,
-                    token_count,
-                    scope_start,
-                    scope_count
-                }=>{
-                    writeln!(f, "<Fn> {} :token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start,scope_count).unwrap();
-                },
-                LiveValue::Const {
-                    token_start,
-                    token_count,
-                    scope_start,
-                    scope_count
-                }=>{
-                    writeln!(f, "<Const> {} :token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start,scope_count).unwrap();
-                },
-                LiveValue::VarDef { //instance/uniform def
-                    token_start,
-                    token_count,
-                    scope_start,
-                    scope_count
-                }=>{
-                    writeln!(f, "<VarDef> {} : token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start,scope_count).unwrap();
-                },
-                LiveValue::Use{
-                    crate_id,
-                    module_id,
-                    object_id
-                }=>{
-                    writeln!(f, "<Use> {}::{}::{}", crate_id, module_id, object_id).unwrap();
-                }
-                
-            }
-        }
-        fmt::Result::Ok(())
-    }
-}

@@ -80,18 +80,21 @@ impl DrawCallVars {
         }
     }
     
-    pub fn init_shader(&mut self, cx: &mut Cx, index:usize, nodes:&[LiveNode], geometry_fields: &dyn GeometryFields) {
+    pub fn init_shader(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index:usize, nodes:&[LiveNode], geometry_fields: &dyn GeometryFields) {
         if self.draw_shader.is_some(){
             return
         }
-        let node = &nodes[index];
-        if node.token_id.is_none(){
-            return
-        }
-
-        // construct a pointer from our index + nodes
-        let draw_shader_ptr = DrawShaderPtr(LivePtr::from_index(node.token_id.unwrap().file_id(), index));
-
+        
+        //This does not work. this shaderptr cannot reconstruct
+        let draw_shader_ptr =  match apply_from{
+            ApplyFrom::LiveNew{file_id} | ApplyFrom::LiveUpdate{file_id}=>{
+                DrawShaderPtr(LivePtr::from_index(file_id, index))
+            }
+            _=>{
+                return
+            }
+        };
+        
         if let Some(draw_shader_id) = cx.draw_shader_ptr_to_id.get(&draw_shader_ptr) {
             self.draw_shader = Some(DrawShader {
                 draw_shader_ptr,
@@ -226,7 +229,7 @@ impl DrawCallVars {
         }
     }
 
-    pub fn apply_value(&mut self, cx: &mut Cx, index:usize, nodes:&[LiveNode])->usize {
+    pub fn apply_value(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode])->usize {
         if let Some(draw_shader) = self.draw_shader {
             let id = nodes[index].id;
             match nodes[index].value {

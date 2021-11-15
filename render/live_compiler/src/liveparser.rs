@@ -127,6 +127,7 @@ impl<'a> LiveParser<'a> {
     fn expect_use(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
         let token_id = self.get_token_id();
         let crate_id = self.expect_ident() ?;
+        
         self.expect_token(Token::Punct(id!(::))) ?;
         let module_id = self.expect_ident() ?;
         self.expect_token(Token::Punct(id!(::))) ?;
@@ -150,7 +151,7 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_fn(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
-        let token_start = self.token_index;
+        let token_start = self.token_index-1;
         let token_id = self.get_token_id();
         let prop_id = self.expect_ident() ?;
         //let token_start = self.token_index;
@@ -171,7 +172,7 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_const(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
-        let token_start = self.token_index;
+        let token_start = self.token_index - 1;
         let token_id = self.get_token_id();
         let const_id = self.expect_ident() ?;
         self.expect_token(Token::Punct(id!(:))) ?;
@@ -195,7 +196,7 @@ impl<'a> LiveParser<'a> {
     
     fn expect_var_def(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
 
-        let token_start = self.token_index;
+        let token_start = self.token_index - 1;
         let token_id = self.get_token_id();
         let real_prop_id = self.expect_ident() ?;
         self.expect_token(Token::Punct(id!(:))) ?;
@@ -305,6 +306,7 @@ impl<'a> LiveParser<'a> {
                 let token_id = self.get_token_id();
                 // if we get an OpenBrace immediately after, we are a rust_type
                 if self.peek_token() == Token::OpenBrace {
+                    self.skip_token();
                     let val = self.expect_int() ?;
                     
                     if val< 0 || val >= self.live_types.len() as i64 {

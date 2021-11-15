@@ -29,14 +29,23 @@ pub trait ToLiveValue {
 }
 
 pub trait LiveComponentValue {
-    fn apply_value(&mut self, cx: &mut Cx, index: usize, nodes: &[LiveNode]) -> usize;
+    fn apply_value(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
 }
 
 pub trait LiveComponent {
-    fn apply_index(&mut self, cx: &mut Cx, index: usize, nodes: &[LiveNode]) -> usize;
+    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
     fn apply(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
-        self.apply_index(cx, 0, nodes);
+        self.apply_index(cx, ApplyFrom::Apply, 0, nodes);
     }
+}
+
+#[derive(Debug,Clone,Copy)]
+pub enum ApplyFrom{
+    LiveNew{file_id:FileId}, // newed from DSL
+    LiveUpdate{file_id:FileId}, // live DSL updated
+    DataNew, // newed from bare data
+    Animate,// from animate
+    Apply // called from bare apply() call
 }
 
 pub trait CanvasComponent: LiveComponent {
@@ -49,11 +58,12 @@ pub trait CanvasComponent: LiveComponent {
 }
 
 pub trait LiveComponentHooks {
-    fn apply_value_unknown(&mut self, _cx: &mut Cx, index: usize, nodes: &[LiveNode])->usize {
+    fn apply_value_unknown(&mut self, _cx: &mut Cx, _apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize {
         nodes.skip_node(index)
     }
-    fn before_apply_index(&mut self, _cx: &mut Cx, _index: usize, _nodes: &[LiveNode]) {}
-    fn after_apply_index(&mut self, _cx: &mut Cx, _index: usize, _nodes: &[LiveNode]) {}
+    fn before_apply_index(&mut self, _cx: &mut Cx, _apply_from:ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
+    fn after_apply_index(&mut self, _cx: &mut Cx, _apply_from:ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
+    fn after_new(&mut self, _cx: &mut Cx) {}
 }
 
 pub enum LiveFieldKind {
@@ -81,12 +91,11 @@ impl Cx {
         crate::geometrygen::live_register(self);
         crate::shader_std::live_register(self);
         crate::font::live_register(self);
-        crate::turtle::live_register(self);
-        crate::animation::live_register(self);
+        
     }
     
-    pub fn clone_from_module_path(&self, module_path: &str, id: Id) -> Option<Vec<LiveNode>> {
-        self.shader_registry.live_registry.clone_from_module_path(module_path, id)
+    pub fn clone_from_module_path(&self, module_path: &str) -> Option<(FileId,Vec<LiveNode>)> {
+        self.shader_registry.live_registry.clone_from_module_path(module_path)
     }
     
     // forwards to the live registry
@@ -125,7 +134,7 @@ impl Cx {
         let mut errs = Vec::new();
         self.shader_registry.live_registry.expand_all_documents(&mut errs);
         for err in errs {
-            println!("Error expanding live file {}", err);
+            println!("Error expanding live file {}", self.shader_registry.live_registry.live_error_to_live_file_error(err));
         }
     }
     
@@ -148,8 +157,8 @@ impl Cx {
             live_body.live_types,
             live_body.line
         );
-        if let Err(msg) = result {
-            println!("Error parsing live file {}", msg);
+        if let Err(err) = result {
+            println!("Error parsing live file {}", err);
         }
     }
     
@@ -188,7 +197,7 @@ macro_rules!live_primitive {
 live_primitive!(
     KeyFrameValue,
     KeyFrameValue::None,
-    fn apply_index(&mut self, _cx: &mut Cx, index: usize, nodes: &[LiveNode])->usize {
+    fn apply_index(&mut self, _cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize {
         match &nodes[index].value {
             LiveValue::Id(id) => {
                 *self = KeyFrameValue::Id(*id);
@@ -228,7 +237,7 @@ live_primitive!(
 live_primitive!(
     Id,
     Id::empty(),
-    fn apply_index(&mut self, _cx: &mut Cx, index: usize, nodes: &[LiveNode])->usize {
+    fn apply_index(&mut self, _cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize {
         match &nodes[index].value {
             LiveValue::Id(id) => {
                 *self = *id;
@@ -245,7 +254,7 @@ live_primitive!(
 live_primitive!(
     f32,
     0.0f32,
-    fn apply_index(&mut self, _cx: &mut Cx, index: usize, nodes: &[LiveNode])->usize{
+    fn apply_index(&mut self, _cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize{
         match &nodes[index].value {
             LiveValue::Float(val) => {
                 *self = *val as f32;
@@ -266,7 +275,7 @@ live_primitive!(
 live_primitive!(
     f64,
     0.0f64,
-    fn apply_index(&mut self, _cx: &mut Cx, index: usize, nodes: &[LiveNode])->usize{
+    fn apply_index(&mut self, _cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize{
         match &nodes[index].value {
             LiveValue::Float(val) => {
                 *self = *val as f64;
@@ -287,7 +296,7 @@ live_primitive!(
 live_primitive!(
     Vec2,
     Vec2::default(),
-    fn apply_index(&mut self, _cx: &mut Cx, index: usize, nodes: &[LiveNode])->usize{
+    fn apply_index(&mut self, _cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize{
         match &nodes[index].value {
             LiveValue::Vec2(val) => {
                 *self = *val;
@@ -304,7 +313,7 @@ live_primitive!(
 live_primitive!(
     Vec3,
     Vec3::default(),
-    fn apply_index(&mut self, _cx: &mut Cx, index: usize, nodes: &[LiveNode])->usize{
+    fn apply_index(&mut self, _cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize{
         match &nodes[index].value {
             LiveValue::Vec3(val) => {
                 *self = *val;
@@ -321,7 +330,7 @@ live_primitive!(
 live_primitive!(
     Vec4,
     Vec4::default(),
-    fn apply_index(&mut self, _cx: &mut Cx, index: usize, nodes: &[LiveNode])->usize{
+    fn apply_index(&mut self, _cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize{
         match &nodes[index].value {
             LiveValue::Color(v) => {
                 *self = Vec4::from_u32(*v);
@@ -338,7 +347,7 @@ live_primitive!(
 live_primitive!(
     String,
     String::default(),
-    fn apply_index(&mut self, cx: &mut Cx, index: usize, nodes: &[LiveNode])->usize{
+    fn apply_index(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize{
         match &nodes[index].value {
             LiveValue::Str(v) => {
                 *self = v.to_string();

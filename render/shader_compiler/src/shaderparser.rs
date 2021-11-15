@@ -18,7 +18,7 @@ pub struct ShaderParser<'a> {
     pub token_index: usize,
    pub file_id: FileId,
     pub tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
-    pub live_scope: &'a [LiveScopeItem],
+    pub expanded_docs: &'a [LiveDocument],
     pub shader_registry: &'a ShaderRegistry,
     pub type_deps: &'a mut Vec<ShaderParserDep>,
     pub closure_defs: Vec<ClosureDef>,
@@ -31,7 +31,7 @@ impl<'a> ShaderParser<'a> {
     pub fn new(
         shader_registry: &'a ShaderRegistry,
         tokens: &'a [TokenWithSpan],
-        live_scope: &'a [LiveScopeItem],
+        expanded_docs: &'a [LiveDocument],
         type_deps: &'a mut Vec<ShaderParserDep>,
         self_kind: Option<FnSelfKind>,
         file_id: FileId,
@@ -42,7 +42,7 @@ impl<'a> ShaderParser<'a> {
             closure_defs:Vec::new(),
             shader_registry,
             file_id,
-            live_scope,
+            expanded_docs,
             type_deps,
             tokens_with_span,
             token_with_span,
@@ -186,13 +186,23 @@ impl<'a> ShaderParser<'a> {
         true
     }
     
-    fn expect_ident(&mut self) -> Result<Ident, LiveError> {
+    fn expect_ident(&mut self, live_error_origin:LiveErrorOrigin) -> Result<Ident, LiveError> {
         match self.peek_token() {
             Token::Ident(id) => {
                 self.skip_token();
                 Ok(Ident(id))
             }
-            token => Err(self.error(live_error_origin!(), format!("expected ident, unexpected token `{}`", token))),
+            token => Err(self.error(live_error_origin, format!("expected ident, unexpected token `{}`", token))),
+        }
+    }
+    
+    fn expect_specific_ident(&mut self, specific_id:Id) -> Result<(), LiveError> {
+        match self.peek_token() {
+            Token::Ident(id) if id == id=> {
+                self.skip_token();
+                Ok(())
+            }
+            token => Err(self.error(live_error_origin!(), format!("expected ident {}, unexpected token `{}`", specific_id, token))),
         }
     }
     
@@ -215,8 +225,8 @@ impl<'a> ShaderParser<'a> {
     // lets parse a function.
     pub fn expect_self_decl(&mut self, ident: Ident, decl_node_ptr: LivePtr) -> Result<Option<DrawShaderFieldDef>, LiveError> {
         let span = self.begin_span();
-        let decl_ty = self.expect_ident() ?;
-        let decl_name = self.expect_ident() ?;
+        let decl_ty = self.expect_ident(live_error_origin!()) ?;
+        let decl_name = self.expect_ident(live_error_origin!()) ?;
         if decl_name != ident {
             panic!()
         }
@@ -249,7 +259,7 @@ impl<'a> ShaderParser<'a> {
             }
             Ident(id!(uniform)) => {
                 let block_ident = if self.accept_token(Token::Ident(id!(in))) {
-                    self.expect_ident() ?
+                    self.expect_ident(live_error_origin!()) ?
                 }
                 else {
                     Ident(id!(user))
@@ -298,8 +308,8 @@ impl<'a> ShaderParser<'a> {
     // lets parse a function.
     pub fn expect_const_def(&mut self, ident: Ident) -> Result<ConstDef, LiveError> {
         let span = self.begin_span();
-        let decl_ty = self.expect_ident() ?;
-        let decl_name = self.expect_ident() ?;
+        let decl_ty = self.expect_ident(live_error_origin!()) ?;
+        let decl_name = self.expect_ident(live_error_origin!()) ?;
         if decl_name != ident {
             panic!()
         }
@@ -326,8 +336,8 @@ impl<'a> ShaderParser<'a> {
     // lets parse a function.
     pub fn expect_field(&mut self, ident: Ident, var_def_ptr: VarDefPtr) -> Result<Option<StructFieldDef>, LiveError> {
         let span = self.begin_span();
-        let decl_ty = self.expect_ident() ?;
-        let decl_name = self.expect_ident() ?;
+        let decl_ty = self.expect_ident(live_error_origin!()) ?;
+        let decl_name = self.expect_ident(live_error_origin!()) ?;
         if decl_name != ident {
             panic!()
         }
@@ -353,9 +363,14 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_method_def(mut self, fn_ptr: FnPtr, ident: Ident) -> Result<Option<FnDef>, LiveError> {
-        let span = self.begin_span();
+    pub fn expect_method_def(mut self, fn_ptr: FnPtr, outer_ident: Ident) -> Result<Option<FnDef>, LiveError> {
         
+        let span = self.begin_span();
+        self.expect_specific_ident(id!(fn))?;
+        let ident = self.expect_ident(live_error_origin!())?;
+        if ident != outer_ident{
+            panic!();
+        }
         self.expect_token(Token::OpenParen) ?;
         let mut params = Vec::new();
         if !self.accept_token(Token::CloseParen) {
@@ -408,9 +423,13 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
-    pub fn expect_plain_fn_def(mut self, fn_ptr: FnPtr, ident: Ident) -> Result<FnDef, LiveError> {
+    pub fn expect_plain_fn_def(mut self, fn_ptr: FnPtr, outer_ident: Ident) -> Result<FnDef, LiveError> {
         let span = self.begin_span();
-        
+        self.expect_specific_ident(id!(fn))?;
+        let ident = self.expect_ident(live_error_origin!())?;
+        if ident != outer_ident{
+            panic!();
+        }
         self.expect_token(Token::OpenParen) ?;
         let mut params = Vec::new();
         if !self.accept_token(Token::CloseParen) {
@@ -470,13 +489,15 @@ impl<'a> ShaderParser<'a> {
         Ok(acc)
     }
     
-    fn scan_scope_for_live_ptr(&mut self, id: Id) -> Option<LivePtr> {
-        for item in self.live_scope.iter().rev() {
+    fn scan_scope_for_live_ptr(&mut self, file_id: FileId, id: Id) -> Option<LivePtr> {
+        let scopes = &self.expanded_docs[file_id.to_index()].scopes;
+        for item in scopes.iter().rev() {
             if item.id == id {
+                //println!("FOUND ITEM {}", id);
                 let full_ptr = match item.target {
                     LiveScopeTarget::LivePtr(live_ptr) => live_ptr,
                     LiveScopeTarget::LocalPtr(local_ptr) => LivePtr {
-                        file_id: self.file_id,
+                        file_id,
                         local_ptr
                     }
                 };
@@ -485,10 +506,9 @@ impl<'a> ShaderParser<'a> {
         }
         return None
     }
-    
-    
-    fn scan_scope_for_struct(&mut self, id: Id) -> bool {
-        if let Some(full_node_ptr) = self.scan_scope_for_live_ptr(id) {
+    /*
+    fn scan_scope_for_struct(&mut self, file_id: FileId,  id: Id) -> bool {
+        if let Some(full_node_ptr) = self.scan_scope_for_live_ptr(file_id, id) {
             let ptr = ShaderParserDep::Struct(StructPtr(full_node_ptr));
             
             if !self.type_deps.contains(&ptr) {
@@ -497,7 +517,7 @@ impl<'a> ShaderParser<'a> {
             return true
         }
         return false
-    }
+    }*/
     
     fn expect_prim_ty_expr(&mut self) -> Result<TyExpr, LiveError> {
         let span = self.begin_span();
@@ -557,7 +577,7 @@ impl<'a> ShaderParser<'a> {
                     
                     let ident_path = self.expect_ident_path() ?;
                     
-                    if let Some(ptr) = self.scan_scope_for_live_ptr(ident_path.segs[0]) {
+                    if let Some(ptr) = self.scan_scope_for_live_ptr(span.file_id, ident_path.segs[0]) {
                         match self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]) {
                             LiveNodeFindResult::NotFound => {
                                 return Err(span.error(self, live_error_origin!(), format!("Struct not found `{}`", ident_path).into()))
@@ -593,7 +613,7 @@ impl<'a> ShaderParser<'a> {
     fn expect_param(&mut self) -> Result<Param, LiveError> {
         let span = self.begin_span();
         let is_inout = self.accept_token(Token::Ident(id!(inout)));
-        let ident = self.expect_ident() ?;
+        let ident = self.expect_ident(live_error_origin!()) ?;
         self.expect_token(Token::Punct(id!(:))) ?;
         let ty_expr = self.expect_ty_expr() ?;
         Ok(span.end(self, | span | Param {
@@ -646,7 +666,7 @@ impl<'a> ShaderParser<'a> {
     fn expect_for_stmt(&mut self) -> Result<Stmt, LiveError> {
         let span = self.begin_span();
         self.expect_token(Token::Ident(id!(for))) ?;
-        let ident = self.expect_ident() ?;
+        let ident = self.expect_ident(live_error_origin!()) ?;
         self.expect_token(Token::Ident(id!(from))) ?;
         let from_expr = self.expect_expr() ?;
         self.expect_token(Token::Ident(id!(to))) ?;
@@ -696,7 +716,7 @@ impl<'a> ShaderParser<'a> {
     fn expect_let_stmt(&mut self) -> Result<Stmt, LiveError> {
         let span = self.begin_span();
         self.expect_token(Token::Ident(id!(let))) ?;
-        let ident = self.expect_ident() ?;
+        let ident = self.expect_ident(live_error_origin!()) ?;
         let ty_expr = if self.accept_token(Token::Punct(id!(:))) {
             Some(self.expect_ty_expr() ?)
         } else {
@@ -965,7 +985,7 @@ impl<'a> ShaderParser<'a> {
             match self.peek_token() {
                 Token::Punct(id!(.)) => {
                     self.skip_token();
-                    let ident = self.expect_ident() ?;
+                    let ident = self.expect_ident(live_error_origin!()) ?;
                     acc = if self.accept_token(Token::OpenParen) {
                         let mut arg_exprs = vec![acc];
                         if !self.accept_token(Token::CloseParen) {
@@ -1070,7 +1090,7 @@ impl<'a> ShaderParser<'a> {
                                     return Err(span.error(self, live_error_origin!(), format!("Use of Self not allowed here").into()));
                                 }
                             }
-                            else if let Some(ptr) = self.scan_scope_for_live_ptr(ident_path.segs[0]) {
+                            else if let Some(ptr) = self.scan_scope_for_live_ptr(span.file_id, ident_path.segs[0]) {
                                 match self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]) {
                                     LiveNodeFindResult::Struct(struct_ptr) => {
                                         self.type_deps.push(ShaderParserDep::Struct(struct_ptr));
@@ -1095,7 +1115,7 @@ impl<'a> ShaderParser<'a> {
                             self.skip_token();
                             let mut args = Vec::new();
                             loop {
-                                let name = self.expect_ident() ?;
+                                let name = self.expect_ident(live_error_origin!()) ?;
                                 self.expect_token(Token::Punct(id!(:))) ?;
                                 let expr = self.expect_expr() ?;
                                 self.accept_token(Token::Punct(id!(,)));
@@ -1139,7 +1159,7 @@ impl<'a> ShaderParser<'a> {
                                     },
                                 }))
                             }
-                            else if let Some(ptr) = self.scan_scope_for_live_ptr(ident_path.segs[0]) {
+                            else if let Some(ptr) = self.scan_scope_for_live_ptr(span.file_id, ident_path.segs[0]) {
                                 match self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]) {
                                     LiveNodeFindResult::NotFound => {
                                         Err(span.error(self, live_error_origin!(), format!("Function not found `{}`", ident_path).into()))
@@ -1216,8 +1236,9 @@ impl<'a> ShaderParser<'a> {
                             // ok we wanna resolve, however if its multi-segment and not resolved it fails.
                             
                             let mut var_resolve = VarResolve::NotFound;
-                            if let Some(ptr) = self.scan_scope_for_live_ptr(ident_path.segs[0]) {
-                                match self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]) {
+                            if let Some(ptr) = self.scan_scope_for_live_ptr(span.file_id, ident_path.segs[0]) {
+                                let find_result = self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]); 
+                                match find_result {
                                     LiveNodeFindResult::LiveValue(value_ptr, ty) => {
                                         var_resolve = VarResolve::LiveValue(value_ptr, ty);
                                     }
@@ -1229,7 +1250,7 @@ impl<'a> ShaderParser<'a> {
                                         self.type_deps.push(ShaderParserDep::Function(None, fn_ptr));
                                         var_resolve = VarResolve::Function(fn_ptr);
                                     }
-                                    _ => ()
+                                    _ => {}
                                 }
                             }
                             if let VarResolve::NotFound = var_resolve{
@@ -1302,7 +1323,7 @@ impl<'a> ShaderParser<'a> {
                     loop {
                         let span = self.begin_span();
                         params.push(ClosureParam{
-                            ident: self.expect_ident()?,
+                            ident: self.expect_ident(live_error_origin!())?,
                             span: span.end(self, |span| span),
                             shadow: Cell::new(None)
                         });
