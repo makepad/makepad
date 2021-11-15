@@ -63,8 +63,10 @@ impl Animator {
                 LiveValue::Array => { // its a keyframe array. probably :)
                     if let Some(last_child) = nodes.last_child(index) {
                         if let LiveValue::BareClass = nodes[last_child].value{
+                            
                             let mut kf = KeyFrame::new(cx);
                             kf.apply_index(cx, ApplyFrom::DataNew, last_child, nodes);
+                            
                             current_state.push(LiveNode{
                                 token_id: None,
                                 id:node.id,

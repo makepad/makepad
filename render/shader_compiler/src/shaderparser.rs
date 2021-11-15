@@ -16,9 +16,9 @@ pub enum ShaderParserDep {
 
 pub struct ShaderParser<'a> {
     pub token_index: usize,
-   pub file_id: FileId,
+    pub file_id: FileId,
     pub tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
-    pub expanded_docs: &'a [LiveDocument],
+    pub live_scope: &'a [LiveScopeItem],
     pub shader_registry: &'a ShaderRegistry,
     pub type_deps: &'a mut Vec<ShaderParserDep>,
     pub closure_defs: Vec<ClosureDef>,
@@ -31,7 +31,7 @@ impl<'a> ShaderParser<'a> {
     pub fn new(
         shader_registry: &'a ShaderRegistry,
         tokens: &'a [TokenWithSpan],
-        expanded_docs: &'a [LiveDocument],
+        live_scope: &'a [LiveScopeItem],
         type_deps: &'a mut Vec<ShaderParserDep>,
         self_kind: Option<FnSelfKind>,
         file_id: FileId,
@@ -42,7 +42,7 @@ impl<'a> ShaderParser<'a> {
             closure_defs:Vec::new(),
             shader_registry,
             file_id,
-            expanded_docs,
+            live_scope,
             type_deps,
             tokens_with_span,
             token_with_span,
@@ -490,14 +490,17 @@ impl<'a> ShaderParser<'a> {
     }
     
     fn scan_scope_for_live_ptr(&mut self, file_id: FileId, id: Id) -> Option<LivePtr> {
-        let scopes = &self.expanded_docs[file_id.to_index()].scopes;
-        for item in scopes.iter().rev() {
+        //we have to use a 
+        for item in self.live_scope.iter().rev() {
             if item.id == id {
+                if file_id != self.file_id{
+                    panic!()
+                }
                 //println!("FOUND ITEM {}", id);
                 let full_ptr = match item.target {
                     LiveScopeTarget::LivePtr(live_ptr) => live_ptr,
                     LiveScopeTarget::LocalPtr(local_ptr) => LivePtr {
-                        file_id,
+                        file_id: self.file_id,
                         local_ptr
                     }
                 };

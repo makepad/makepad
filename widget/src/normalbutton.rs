@@ -90,9 +90,12 @@ pub struct NormalButton {
 impl LiveComponentHooks for NormalButton {
     fn after_new(&mut self, _cx:&mut Cx){
     }
-    fn after_apply_index(&mut self, cx: &mut Cx, _apply_from:ApplyFrom, _index: usize, _nodes:&[LiveNode]) {
-        //elf.animator.live_ptr = Some(live_ptr);
-        self.init_state(cx, id!(state_down));
+    
+    fn after_apply_index(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, _nodes:&[LiveNode]) {
+        if let Some(file_id) = apply_from.file_id(){
+            self.animator.live_ptr = Some(LivePtr::from_index(file_id, index));
+            self.init_state(cx, id!(state_down));
+        }
     }
 }
 
@@ -110,7 +113,7 @@ impl CanvasComponent for NormalButton {
 
 impl NormalButton {
     
-    pub fn init_state(&mut self, _cx: &mut Cx, _state_id: Id) {
+    pub fn init_state(&mut self, cx: &mut Cx, _state_id: Id) {
         // take the live DSL and turn it into a Gen
         /*
         let sub_ptr = cx.find_class_prop_ptr(self.animator.live_ptr.unwrap(), state_id);
