@@ -1,6 +1,7 @@
 use crate::cx::*;
 
 live_register!{
+    
     DrawShader2D: DrawShader{
         uniform camera_projection: mat4 in pass;
         uniform camera_view: mat4 in pass;
@@ -98,7 +99,7 @@ live_register!{
         field old_shape: float
         field blur: float
         field aa: float
-        field scale: float
+        field scale_factor: float
         field field: float
         
         fn antialias(p: vec2) -> float {
@@ -117,7 +118,7 @@ live_register!{
                 old_shape:1e+20
                 blur:0.00001
                 aa: antialias(pos)
-                scale:1.0
+                scale_factor:1.0
                 field:0.0
             };
         }
@@ -135,7 +136,7 @@ live_register!{
         }
         
         fn scale(inout self, f: float, x: float, y: float) {
-            self.scale *= f;
+            self.scale_factor *= f;
             self.pos = (self.pos - vec2(x, y)) * f + vec2(x, y);
         }
         
@@ -172,7 +173,7 @@ live_register!{
         }
         
         fn stroke_keep(inout self, color: vec4, width: float) -> vec4 {
-            let f = self.calc_blur(abs(self.shape) - width / self.scale);
+            let f = self.calc_blur(abs(self.shape) - width / self.scale_factor);
             let source = vec4(color.rgb * color.a, color.a);
             let dest = self.result;
             self.result = source * f + dest * (1.0 - source.a * f);
@@ -188,7 +189,7 @@ live_register!{
         }
         
         fn glow_keep(inout self, color: vec4, width: float) -> vec4 {
-            let f = self.calc_blur(abs(self.shape) - width / self.scale);
+            let f = self.calc_blur(abs(self.shape) - width / self.scale_factor);
             let source = vec4(color.rgb * color.a, color.a);
             let dest = self.result;
             self.result = vec4(source.rgb * f, 0.) + dest;
@@ -227,7 +228,7 @@ live_register!{
         fn circle(inout self, x: float, y: float, r: float) {
             let c = self.pos - vec2(x, y);
             let len = sqrt(c.x*c.x+c.y*c.y);
-            self.field = (len - r) / self.scale;
+            self.field = (len - r) / self.scale_factor;
             self.old_shape = self.shape;
             self.shape = min(self.shape, self.field);
         }
@@ -236,7 +237,7 @@ live_register!{
             let p = self.pos - vec2(x, y);
             let size = vec2(0.5 * w, 0.5 * h);
             let bp = max(abs(p - size.xy) - (size.xy - vec2(2. * r, 2. * r).xy), vec2(0., 0.));
-            self.field = (length(bp) - 2. * r) / self.scale;
+            self.field = (length(bp) - 2. * r) / self.scale_factor;
             self.old_shape = self.shape;
             self.shape = min(self.shape, self.field);
         }
@@ -270,7 +271,7 @@ live_register!{
             let ba = p - self.last_pos;
             let h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
             let s = sign(pa.x * ba.y - pa.y * ba.x);
-            self.field = length(pa - ba * h) / self.scale;
+            self.field = length(pa - ba * h) / self.scale_factor;
             self.old_shape = self.shape;
             self.shape = min(self.shape, self.field);
             self.clip = max(self.clip, self.field * s);

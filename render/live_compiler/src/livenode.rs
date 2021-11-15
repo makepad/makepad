@@ -2,6 +2,7 @@
 use crate::id::Id;
 use crate::token::TokenId;
 use crate::math::{Vec2, Vec3};
+use std::fmt::Write;
 
 #[derive(Clone, Debug, Eq, PartialEq, Copy, Hash)]
 pub struct LiveType(pub core::any::TypeId);
@@ -69,6 +70,38 @@ impl LiveValue {
             _ => false
         }
     }
+
+    pub fn is_var_def(&self) -> bool {
+        match self {
+            Self::VarDef{..} => true,
+            _ => false
+        }
+    }
+    
+    pub fn is_value_type(&self)->bool{
+        match self{
+            Self::Str(_) |
+            Self::String(_) |
+            Self::StringRef {..} |
+            Self::Bool(_) |
+            Self::Int(_) |
+            Self::Float(_) |
+            Self::Color(_) |
+            Self::Vec2(_) |
+            Self::Vec3(_) => true,
+            _=>false
+        }
+    }
+
+    pub fn is_float_type(&self)->bool{
+        match self{
+            Self::Float(_) |
+            Self::Color(_) |
+            Self::Vec2(_) |
+            Self::Vec3(_) => true,
+            _=>false
+        }
+    }
     
     pub fn named_class_id(&self) -> Option<Id> {
         match self {
@@ -121,8 +154,9 @@ impl LiveValue {
             Self::Color(_) => 7,
             Self::Vec2(_) => 8,
             Self::Vec3(_) => 9,
-            Self::LiveType(_) => 10,
-            Self::Id(_) => 11,
+            
+            Self::Id(_) => 10,
+            Self::LiveType(_) => 11,
             
             Self::BareEnum {..} => 12,
             Self::Array => 13,
@@ -141,21 +175,24 @@ impl LiveValue {
 
 #[derive(Clone, Debug)]
 pub enum LiveValue {
+    None,
     Str(&'static str),
     String(String),
     StringRef {
         string_start: usize,
         string_count: usize
     },
-    None,
+
     Bool(bool),
     Int(i64),
     Float(f64),
     Color(u32),
     Vec2(Vec2),
     Vec3(Vec3),
-    LiveType(LiveType),
+
     Id(Id),
+    LiveType(LiveType),
+
     BareEnum {base: Id, variant: Id},
     // stack items
     Array,
@@ -201,6 +238,7 @@ pub trait LiveNodeSlice {
     fn next_child(&self, child_index: usize) -> Option<usize>;
     fn skip_node(&self, node_index: usize)->usize;
     fn clone_child(&self, parent_index: usize)->Vec<LiveNode>;
+    fn to_string(&self, parent_index:usize, max_depth:usize)->String;
 }
 
 pub trait LiveNodeVec {
@@ -512,8 +550,133 @@ macro_rules!impl_live_node_slice {
                 }
                 return out
             }
+                
+            fn to_string(&self, parent_index:usize, max_depth:usize)->String{
+                let mut stack_depth = 0;
+                let mut f = String::new();
+                let mut index = parent_index;
+                while index < self.len(){ 
+                    let node = &self[index];
+                    if stack_depth > max_depth{
+                        if node.value.is_tree(){
+                            stack_depth +=1;
+                        }
+                        else if node.value.is_close(){
+                            stack_depth -= 1;
+                        }
+                        index += 1;
+                        continue
+                    }
+                    for _ in 0..stack_depth {
+                        write!(f, "|   ").unwrap();
+                    }
+                    match &node.value{
+                        LiveValue::None=>{
+                           writeln!(f, "{}: <None>", node.id).unwrap();
+                        },
+                        LiveValue::Str(s)=>{
+                           writeln!(f, "{}: <Str> {}", node.id, s).unwrap();
+                        },
+                        LiveValue::String(s)=>{
+                            writeln!(f, "{}: <String> {}", node.id, s).unwrap();
+                        },
+                        LiveValue::StringRef {string_start, string_count}=>{
+                            writeln!(f, "{}: <StringRef> string_start:{}, string_end:{}", node.id, string_start, string_count).unwrap();
+                        },
+                        LiveValue::Bool(v)=>{
+                            writeln!(f, "{}: <Bool> {}", node.id, v).unwrap();
+                        }
+                        LiveValue::Int(v)=>{
+                            writeln!(f, "{}: <Int> {}", node.id, v).unwrap();
+                        }
+                        LiveValue::Float(v)=>{
+                            writeln!(f, "{}: <Float> {}", node.id, v).unwrap();
+                        },
+                        LiveValue::Color(v)=>{
+                            writeln!(f, "{}: <Color>{}", node.id, v).unwrap();
+                        },
+                        LiveValue::Vec2(v)=>{
+                            writeln!(f, "{}: <Vec2> {:?}", node.id, v).unwrap();
+                        },
+                        LiveValue::Vec3(v)=>{
+                            writeln!(f, "{}: <Vec3> {:?}", node.id, v).unwrap();
+                        },
+                        LiveValue::LiveType(v)=>{
+                            writeln!(f, "{}: <LiveType> {:?}", node.id, v).unwrap();
+                        },
+                        LiveValue::Id(id)=>{
+                           writeln!(f, "{}: <Id> {}", node.id, id).unwrap();
+                        },
+                        LiveValue::BareEnum {base, variant}=>{
+                            writeln!(f, "{}: <BareEnum> {}::{}", node.id, base, variant).unwrap();
+                        },
+                        // stack items
+                        LiveValue::Array=>{
+                            writeln!(f, "{}: <Array>", node.id).unwrap();
+                            stack_depth += 1;
+                        },
+                        LiveValue::TupleEnum {base, variant}=>{
+                            writeln!(f, "{}: <TupleEnum> {}::{}", node.id, base, variant).unwrap();
+                            stack_depth += 1;
+                        },
+                        LiveValue::NamedEnum {base, variant}=>{
+                            writeln!(f, "{}: <NamedEnum> {}::{}", node.id, base, variant).unwrap();
+                            stack_depth += 1;
+                        },
+                        LiveValue::BareClass=>{
+                            writeln!(f, "{}: <BareClass>", node.id).unwrap();
+                            stack_depth += 1;
+                        }, // subnodes including this one
+                        LiveValue::NamedClass {class}=>{
+                            writeln!(f, "{}: <NamedClass> {}", node.id, class).unwrap();
+                            stack_depth += 1;
+                        }, // subnodes including this one
+                        LiveValue::Close=>{
+                            writeln!(f, "<Close> {}", node.id).unwrap();
+                            stack_depth -= 1;
+                            if stack_depth == 0{
+                                break;
+                            }
+                        },
+                        // the shader code types
+                        LiveValue::Fn {
+                            token_start,
+                            token_count,
+                            scope_start,
+                            scope_count
+                        }=>{
+                            writeln!(f, "<Fn> {} :token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start,scope_count).unwrap();
+                        },
+                        LiveValue::Const {
+                            token_start,
+                            token_count,
+                            scope_start,
+                            scope_count
+                        }=>{
+                            writeln!(f, "<Const> {} :token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start,scope_count).unwrap();
+                        },
+                        LiveValue::VarDef { //instance/uniform def
+                            token_start,
+                            token_count,
+                            scope_start,
+                            scope_count
+                        }=>{
+                            writeln!(f, "<VarDef> {} : token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start,scope_count).unwrap();
+                        },
+                        LiveValue::Use{
+                            crate_id,
+                            module_id,
+                            object_id
+                        }=>{
+                            writeln!(f, "<Use> {}::{}::{}", crate_id, module_id, object_id).unwrap();
+                        }
+                        
+                    }
+                    index += 1;
+                }
+                f
+            }
         }
-        
     }
 }
 impl_live_node_slice!(&[LiveNode]);

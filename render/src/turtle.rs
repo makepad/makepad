@@ -1,18 +1,5 @@
 use crate::cx::*;
 
-live_register!{
-    LineWrap: Enum {rust_type: {{LineWrap}}}
-    Layout: Struct {rust_type: {{Layout}}}
-    Walk: Struct {rust_type: {{Walk}}}
-    Padding: Struct {rust_type: {{Padding}}}
-    Margin: Struct {rust_type: {{Margin}}}
-    Width: Enum {rust_type: {{Width}}}
-    Height: Enum {rust_type: {{Height}}}
-    Align: Struct {rust_type: {{Align}}}
-    Direction: Enum {rust_type: {{Direction}}}
-}
-
-
 #[derive(Copy, Clone, Debug, LiveComponent, LiveComponentHooks)]
 pub enum LineWrap {
     #[default] None,

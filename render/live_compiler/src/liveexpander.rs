@@ -117,7 +117,7 @@ impl<'a> LiveExpander<'a> {
                 _ => ()
             }
             
-            // determine node overwrite activity
+            // determine node overwrite rules
             let out_index = match out_doc.nodes.child_by_name(*current_parent.last().unwrap(), in_node.id) {
                 Ok(overwrite) => {
                     let out_value = &out_doc.nodes[overwrite].value;
@@ -140,6 +140,7 @@ impl<'a> LiveExpander<'a> {
                                 out_doc.nodes[overwrite] = in_node.clone();
                             }
                         }
+                        overwrite
                     }
                     else if in_value.is_enum() && out_value.is_enum() &&
                     in_value.enum_base_id() == out_value.enum_base_id() { // enum switch is allowed
@@ -163,14 +164,20 @@ impl<'a> LiveExpander<'a> {
                         else {
                             panic!()
                         }
-                        
+                        overwrite
                     }
                     else if in_value.is_bare_class() && out_value.is_named_class() {
                         // this is also allowed to overwrite but don't overwrite the name of the class
                         //out_doc.nodes[overwrite] = in_node.clone();
                         level_overwrite.push(true);
+                        overwrite
                     }
-                    else { // not allowed
+                    else if out_value.is_var_def() && in_value.is_value_type(){ // this is allowed
+                        // we 'insert' it right after the vardef
+                        out_doc.nodes.insert(overwrite+1, in_node.clone());
+                        overwrite + 1
+                    }
+                    else{
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
                             span: in_doc.token_id_to_span(in_node.token_id.unwrap()),
@@ -179,7 +186,6 @@ impl<'a> LiveExpander<'a> {
                         in_index = in_doc.nodes.next_child(in_index).unwrap();
                         continue;
                     }
-                    overwrite
                 }
                 Err(insert_point) => {
                     out_doc.nodes.insert(insert_point, in_node.clone());
