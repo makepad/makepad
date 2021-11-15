@@ -4,17 +4,6 @@ live_register!{
     use crate::shader_std::*;
     use crate::geometrygen::GeometryQuad2D;
     use crate::font::Font;
-
-    Wrapping: Enum{
-        rust_type: {{Wrapping}}
-    }
-
-    TextStyle: Struct {
-        rust_type: {{TextStyle}}
-        font: Font {
-            path: "resources/Ubuntu-R.ttf"
-        }
-    }
     
     DrawText: DrawShader2D {
         //debug: true;
@@ -22,8 +11,12 @@ live_register!{
         geometry: GeometryQuad2D {}
         
         wrapping: Wrapping::None
-        text_style: TextStyle {}
-
+        text_style: TextStyle {
+            font: Font {
+                path: "resources/Ubuntu-R.ttf"
+            }
+        }
+        
         color: #fff
         
         uniform brightness: float
@@ -202,7 +195,7 @@ impl DrawText {
         }
     }
     
-    pub fn update_draw_call_vars(&mut self, cx:&mut Cx){
+    pub fn update_draw_call_vars(&mut self, cx: &mut Cx) {
         self.draw_call_vars.texture_slots[0] = Some(cx.fonts_atlas.texture);
         self.draw_call_vars.user_uniforms[0] = self.text_style.brightness;
         self.draw_call_vars.user_uniforms[1] = self.text_style.curve;
@@ -216,13 +209,13 @@ impl DrawText {
             return
         }
         let font_id = self.text_style.font.font_id.unwrap();
-
-        if cx.fonts[font_id].is_none(){
+        
+        if cx.fonts[font_id].is_none() {
             return
         }
         
         let in_many = self.many_instances.is_some();
-
+        
         self.update_draw_call_vars(cx);
         
         if !in_many {
@@ -245,7 +238,7 @@ impl DrawText {
         let font_size_pixels = font_size_logical * dpi_factor;
         
         let atlas_page = &mut cxfont.atlas_pages[atlas_page_id];
-
+        
         let mi = if let Some(mi) = &mut self.many_instances {mi} else {return};
         
         for wc in chunk {
@@ -260,7 +253,7 @@ impl DrawText {
             let glyph = &font.glyphs[glyph_id];
             
             let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
-
+            
             // snap width/height to pixel granularity
             let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + 1.0;
             let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 1.0;
@@ -345,13 +338,13 @@ impl DrawText {
         }
         
         let font_id = self.text_style.font.font_id.unwrap();
-
+        
         if cx.fonts[font_id].is_none() {
             return
         }
         
         let in_many = self.many_instances.is_some();
-
+        
         self.update_draw_call_vars(cx);
         if !in_many {
             self.begin_many_instances(cx);
@@ -493,7 +486,7 @@ impl DrawText {
             return Vec2::default();
         }
         let font_id = self.text_style.font.font_id.unwrap();
-        if cx.fonts[font_id].is_none(){
+        if cx.fonts[font_id].is_none() {
             return Vec2::default();
         }
         let font = &cx.fonts[font_id].as_ref().unwrap().ttf_font;
