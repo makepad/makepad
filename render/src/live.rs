@@ -48,6 +48,16 @@ pub enum ApplyFrom{
     Apply // called from bare apply() call
 }
 
+impl ApplyFrom{
+    pub fn file_id(&self)->Option<FileId>{
+        match self{
+            Self::LiveNew{file_id}=>Some(*file_id),
+            Self::LiveUpdate{file_id}=>Some(*file_id),
+            _=>None
+        }
+    }
+}
+
 pub trait CanvasComponent: LiveComponent {
     fn handle(&mut self, cx: &mut Cx, event: &mut Event);
     fn draw(&mut self, cx: &mut Cx);
@@ -128,6 +138,10 @@ impl Cx {
         None
     }*/
     
+    pub fn ptr_to_nodes_index(&self, live_ptr: LivePtr) -> (&[LiveNode], usize) {
+        return self.shader_registry.live_registry.ptr_to_nodes_index(live_ptr)
+    }
+    
     // ok so now what. now we should run the expansion
     pub fn live_expand(&mut self) {
         // lets expand the f'er
@@ -139,7 +153,7 @@ impl Cx {
     }
     
     pub fn verify_type_signature(&self, live_ptr: LivePtr, live_type: LiveType) -> bool {
-        let node = self.shader_registry.live_registry.resolve_ptr(live_ptr);
+        let node = self.shader_registry.live_registry.ptr_to_node(live_ptr);
         if let LiveValue::LiveType(ty) = node.value {
             if ty == live_type {
                 return true
@@ -358,7 +372,7 @@ live_primitive!(
                 index + 1
             }
             LiveValue::StringRef{string_start, string_count} => {
-                let origin_doc = cx.shader_registry.live_registry.origin_doc_from_token_id(nodes[index].token_id.unwrap());
+                let origin_doc = cx.shader_registry.live_registry.token_id_to_origin_doc(nodes[index].token_id.unwrap());
                 origin_doc.get_string(*string_start, *string_count, self);
                 index + 1
             }

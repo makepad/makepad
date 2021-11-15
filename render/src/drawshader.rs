@@ -460,7 +460,7 @@ impl CxDrawShaderMapping {
         for input in &self.live_uniforms.inputs{
             match input.slots {
                 1 => { // float
-                    let node = live_registry.resolve_ptr(input.value_ptr.unwrap().0);
+                    let node = live_registry.ptr_to_node(input.value_ptr.unwrap().0);
                     if let LiveValue::Float(float) = node.value {
                         let o = input.offset;
                         self.live_uniforms_buf[o] = float as f32;
@@ -468,7 +468,7 @@ impl CxDrawShaderMapping {
                     }
                 },
                 2 => { // float
-                    let node = live_registry.resolve_ptr(input.value_ptr.unwrap().0);
+                    let node = live_registry.ptr_to_node(input.value_ptr.unwrap().0);
                     if let LiveValue::Vec2(value) = node.value {
                         let o = input.offset;
                         self.live_uniforms_buf[o + 0] = value.x;
@@ -476,7 +476,7 @@ impl CxDrawShaderMapping {
                     }
                 },
                 3 => { // float
-                    let node = live_registry.resolve_ptr(input.value_ptr.unwrap().0);
+                    let node = live_registry.ptr_to_node(input.value_ptr.unwrap().0);
                     if let LiveValue::Vec3(value) = node.value {
                         let o = input.offset;
                         self.live_uniforms_buf[o + 0] = value.x;
@@ -485,7 +485,7 @@ impl CxDrawShaderMapping {
                     }
                 },
                 4 => { // color
-                    let node = live_registry.resolve_ptr(input.value_ptr.unwrap().0);
+                    let node = live_registry.ptr_to_node(input.value_ptr.unwrap().0);
                     if let LiveValue::Color(color_u32) = node.value {
                         let o = input.offset;
                         let color = Vec4::from_u32(color_u32);
