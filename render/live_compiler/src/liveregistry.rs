@@ -39,21 +39,30 @@ pub struct LiveRegistry {
 }
 
 impl LiveRegistry {
-    pub fn resolve_ptr(&self, live_ptr: LivePtr) -> &LiveNode {
+    pub fn ptr_to_node(&self, live_ptr: LivePtr) -> &LiveNode {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
         &doc.resolve_ptr(live_ptr.local_ptr)
     }
     
-    pub fn resolve_doc_ptr(&self, live_ptr: LivePtr) -> (&LiveDocument, &LiveNode) {
+    pub fn ptr_to_doc_node(&self, live_ptr: LivePtr) -> (&LiveDocument, &LiveNode) {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
         (doc, &doc.resolve_ptr(live_ptr.local_ptr))
     }
     
-    pub fn origin_doc_from_token_id(&self, token_id: TokenId) -> &LiveDocument {
+    pub fn ptr_to_doc(&self, live_ptr: LivePtr) -> &LiveDocument{
+         &self.expanded[live_ptr.file_id.to_index()]
+    }
+    
+    pub fn ptr_to_nodes_index(&self, live_ptr: LivePtr) -> (&[LiveNode], usize) {
+        let doc = &self.expanded[live_ptr.file_id.to_index()];
+        (&doc.nodes, live_ptr.local_ptr.0)
+    }
+    
+    pub fn token_id_to_origin_doc(&self, token_id: TokenId) -> &LiveDocument {
         &self.live_files[token_id.file_id().to_index()].document
     }
 
-    pub fn expanded_doc_from_token_id(&self, token_id: TokenId) -> &LiveDocument {
+    pub fn token_id_to_expanded_doc(&self, token_id: TokenId) -> &LiveDocument {
         &self.expanded[token_id.file_id().to_index()]
     }
     
