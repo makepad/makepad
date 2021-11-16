@@ -4,8 +4,8 @@ use proc_macro::{TokenStream};
 mod derive_live;
 use crate::derive_live::*;
 
-mod live_register;
-use crate::live_register::*;
+mod live_register_macro;
+use crate::live_register_macro::*;
 
 mod gen_macro;
 use crate::gen_macro::*;

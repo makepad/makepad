@@ -71,7 +71,7 @@ live_register!{
         state_down: {
             bg: {
                 down: [{value: 1.0, ease: Ease::Linear}],
-                hover: [{time: 0.1, value: 1.0, ease: Ease::Linear}, {time: 0.5, value: 10.0, ease: Ease::Linear}],
+                hover: 1.0,
             }
         }
     }
@@ -88,13 +88,16 @@ pub struct NormalButton {
 }
 
 impl LiveComponentHooks for NormalButton {
-    fn after_new(&mut self, _cx:&mut Cx){
+    fn after_new(&mut self, _cx: &mut Cx) {
     }
     
-    fn after_apply_index(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, _nodes:&[LiveNode]) {
-        if let Some(file_id) = apply_from.file_id(){
+    fn after_apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        if let Some(file_id) = apply_from.file_id() {
             self.animator.live_ptr = Some(LivePtr::from_index(file_id, index));
-            self.init_state(cx, id!(state_down));
+            // lets apply our initial state
+            if let Ok(index) = nodes.child_by_name(index, id!(state_default)){
+                self.apply_index(cx, ApplyFrom::Animate, index, nodes);
+            }
         }
     }
 }
@@ -113,7 +116,7 @@ impl CanvasComponent for NormalButton {
 
 impl NormalButton {
     
-    pub fn init_state(&mut self, cx: &mut Cx, _state_id: Id) {
+    pub fn init_state(&mut self, _cx: &mut Cx, _state_id: Id) {
         // take the live DSL and turn it into a Gen
         /*
         let sub_ptr = cx.find_class_prop_ptr(self.animator.live_ptr.unwrap(), state_id);
@@ -127,23 +130,22 @@ impl NormalButton {
         let state = self.animator.swap_out_state();
         self.apply(cx, &state);
         self.animator.swap_in_state(state);*/
-    }
+    } 
     
-    pub fn set_state(&mut self, _cx: &mut Cx, _state_id: Id) {
-        /*
-        let sub_ptr = cx.find_class_prop_ptr(self.animator.live_ptr.unwrap(), state_id);
-        let mut state = Vec::new();
-        GenNode::convert_live_to_gen(cx, sub_ptr.unwrap(), &mut state);
+    pub fn set_state(&mut self, cx: &mut Cx, state_id: Id) {
 
-        self.animator.init_from_last_keyframe(cx, &state);
-        let state = self.animator.swap_out_state();
-        self.apply(cx, &state);
-        self.animator.swap_in_state(state);
-        cx.redraw_child_area(self.bg.area);*/
+        self.animator.current_state.as_mut().unwrap().truncate(0);
+        if cx.clone_from_ptr_name(self.animator.live_ptr.unwrap(), state_id, self.animator.current_state.as_mut().unwrap()){
+            let state = self.animator.swap_out_state();
+            self.apply(cx, &state);
+            //println!("SETTING FILEID {}", state.to_string(0,100));
+            self.animator.swap_in_state(state);
+            cx.redraw_child_area(self.bg.draw_call_vars.area);
+        }
     }
     
     pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
-        let res = self.button_logic.handle_button_logic(cx, event, self.bg.area);
+        let res = self.button_logic.handle_button_logic(cx, event, self.bg.draw_call_vars.area);
         match res.state {
             ButtonState::Down => self.set_state(cx, id!(state_down)),
             ButtonState::Default => self.set_state(cx, id!(state_default)),

@@ -237,7 +237,7 @@ pub trait LiveNodeSlice {
     fn first_child(&self, parent_index: usize) -> Option<usize>;
     fn next_child(&self, child_index: usize) -> Option<usize>;
     fn skip_node(&self, node_index: usize)->usize;
-    fn clone_child(&self, parent_index: usize)->Vec<LiveNode>;
+    fn clone_child(&self, parent_index: usize, out_vec:&mut Vec<LiveNode>);
     fn to_string(&self, parent_index:usize, max_depth:usize)->String;
 }
 
@@ -524,8 +524,7 @@ macro_rules!impl_live_node_slice {
                 return index
             }
             
-            fn clone_child(&self, parent_index: usize)->Vec<LiveNode>{
-                let mut out = Vec::new();
+            fn clone_child(&self, parent_index: usize, out:&mut Vec<LiveNode>){
                 let mut index = parent_index;
                 let mut stack_depth = 0;
                 while index < self.len() {
@@ -537,18 +536,18 @@ macro_rules!impl_live_node_slice {
                         LiveValue::Close => {
                             stack_depth -= 1;
                             if stack_depth == 0 {
-                                return out
+                                return
                             }
                         }
                         _ => {
                             if stack_depth == 0 {
-                                return out
+                                return
                             }
                         }
                     }
                     index += 1;
                 }
-                return out
+                return
             }
                 
             fn to_string(&self, parent_index:usize, max_depth:usize)->String{
