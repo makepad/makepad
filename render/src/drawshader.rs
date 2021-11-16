@@ -59,6 +59,7 @@ pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPac
 
 #[derive(Default)]
 pub struct DrawCallVars {
+    pub area: Area,
     pub var_instance_start: usize,
     pub var_instance_slots: usize,
     pub draw_shader: Option<DrawShader>,
@@ -87,7 +88,7 @@ impl DrawCallVars {
         
         //This does not work. this shaderptr cannot reconstruct
         let draw_shader_ptr =  match apply_from{
-            ApplyFrom::LiveNew{file_id} | ApplyFrom::LiveUpdate{file_id}=>{
+            ApplyFrom::LiveNew{file_id,..} | ApplyFrom::LiveUpdate{file_id,..}=>{
                 DrawShaderPtr(LivePtr::from_index(file_id, index))
             }
             _=>{
@@ -206,47 +207,90 @@ impl DrawCallVars {
         }
     }
 
-    fn store_values(cx: &Cx, draw_shader: DrawShader, id: Id, values: &[f32], draw_call_vars: &mut DrawCallVars) {
-        let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
-        for input in &sh.mapping.user_uniforms.inputs {
-            if input.id == id {
-                if values.len() == input.slots {
-                    for i in 0..input.slots {
-                        draw_call_vars.user_uniforms[input.offset + i] = values[i];
-                    }
-                }
-            }
-        }
-        for input in &sh.mapping.var_instances.inputs {
-            if input.id == id {
-                if values.len() == input.slots {
-                    for i in 0..input.slots {
-                        let index = (draw_call_vars.var_instances.len() - sh.mapping.var_instances.total_slots) + input.offset + i;
-                        draw_call_vars.var_instances[index] = values[i];
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn apply_value(&mut self, cx: &mut Cx, _apply_from:ApplyFrom, index:usize, nodes:&[LiveNode])->usize {
+    pub fn apply_value(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode])->usize {
         if let Some(draw_shader) = self.draw_shader {
             let id = nodes[index].id;
-            match nodes[index].value {
-                LiveValue::Int(val) => Self::store_values(&cx, draw_shader, id, &[val as f32], self),
-                LiveValue::Float(val) =>  Self::store_values(&cx, draw_shader, id, &[val as f32], self),
-                LiveValue::Vec2(val) => Self::store_values(&cx, draw_shader, id, &[val.x, val.y], self),
-                LiveValue::Vec3(val) => Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z], self),
-                LiveValue::Color(val) => {
-                    let val = Vec4::from_u32(val);
-                    Self::store_values(&cx, draw_shader, id, &[val.x, val.y, val.z, val.w], self);
+            let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+            for input in &sh.mapping.user_uniforms.inputs {
+                let offset = input.offset;
+                if input.id == id {
+                    match input.slots{
+                        1=>{
+                            let mut v:f32 = 0.0;
+                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            self.user_uniforms[offset+0] = v;
+                            return index;
+                        }
+                        2=>{
+                            let mut v:Vec2 = Vec2::default();
+                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            self.user_uniforms[offset+0] = v.x;
+                            self.user_uniforms[offset+1] = v.y;
+                            return index;
+                        }
+                        3=>{
+                            let mut v:Vec3 = Vec3::default();
+                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            self.user_uniforms[offset+0] = v.x;
+                            self.user_uniforms[offset+1] = v.y;
+                            self.user_uniforms[offset+2] = v.z;
+                            return index;
+                        }
+                        4=>{
+                            let mut v:Vec4 = Vec4::default();
+                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            self.user_uniforms[offset+0] = v.x;
+                            self.user_uniforms[offset+1] = v.y;
+                            self.user_uniforms[offset+2] = v.z;
+                            self.user_uniforms[offset+3] = v.w;
+                            return index;
+                        }
+                        _=>{
+                            return nodes.skip_node(index)
+                        }
+                    }
                 }
-                _ => {
-                    return nodes.skip_node(index);       
+            }
+            for input in &sh.mapping.var_instances.inputs {
+                let offset = (self.var_instances.len() - sh.mapping.var_instances.total_slots) + input.offset;
+                if input.id == id {
+                    match input.slots{
+                        1=>{
+                            let mut v:f32 = 0.0;
+                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            self.var_instances[offset+0] = v;
+                            return index;
+                        }
+                        2=>{
+                            let mut v:Vec2 = Vec2::default();
+                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            self.var_instances[offset+0] = v.x;
+                            self.var_instances[offset+1] = v.y;
+                            return index;
+                        }
+                        3=>{
+                            let mut v:Vec3 = Vec3::default();
+                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            self.var_instances[offset+0] = v.x;
+                            self.var_instances[offset+1] = v.y;
+                            self.var_instances[offset+2] = v.z;
+                            return index;
+                        }
+                        4=>{
+                            let mut v:Vec4 = Vec4::default();
+                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            self.var_instances[offset+0] = v.x;
+                            self.var_instances[offset+1] = v.y;
+                            self.var_instances[offset+2] = v.z;
+                            self.var_instances[offset+3] = v.w;
+                            return index;
+                        }
+                        _=>{}
+                    }
                 }
             }
         }
-        index + 1
+        nodes.skip_node(index)
     } 
     
     pub fn init_slicer(
