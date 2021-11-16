@@ -113,7 +113,7 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
                         }
                         tb.add("s . st_post ( d ) ; }");
                     }
-                    else if parser.is_punct(',') || parser.is_eot(){ // bare variant
+                    else if parser.is_punct_alone(',') || parser.is_eot(){ // bare variant
                         tb.add("Self ::").ident(&variant).add("=> {");
                         tb.add("s . label (").string(&variant).add(") ;");
                         tb.add("s . out . push_str (").string(":[]").add(") ; }");
@@ -121,7 +121,7 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
                     else{
                         return parser.unexpected();
                     }
-                    parser.eat_punct(',');
+                    parser.eat_punct_alone(',');
                 }
                 else{
                     return parser.unexpected()
@@ -262,7 +262,7 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
                         }
                         tb.add("}");
                     }
-                    else if parser.is_punct(',') || parser.is_eot(){ // bare variant
+                    else if parser.is_punct_alone(',') || parser.is_eot(){ // bare variant
                         tb.add("s . block_open ( i ) ? ; s . block_close ( i ) ? ; Self ::").ident(&variant);
                     }
                     else{
@@ -270,7 +270,7 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
                     }
                     
                     tb.add("}");
-                    parser.eat_punct(',');
+                    parser.eat_punct_alone(',');
                 }
                 else{
                     return parser.unexpected()

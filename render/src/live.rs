@@ -15,7 +15,6 @@ pub struct LiveBody {
 pub trait LiveFactory {
     fn new_component(&self, cx: &mut Cx) -> Box<dyn LiveComponent>;
     fn component_fields(&self, fields: &mut Vec<LiveField>);
-    //    fn live_type(&self) -> LiveType;
 }
 
 pub trait LiveNew {
@@ -47,14 +46,6 @@ pub enum ApplyFrom {
     Animate, // from animate
     Apply // called from bare apply() call
 }
-/*
-pub enum ApplyFrom<'a>{
-    LiveNew{cx:&'a mut Cx, file_id:FileId}, // newed from DSL
-    LiveUpdate{cx:&'a mut Cx, file_id:FileId}, // live DSL updated
-    Animate{cx:&'a mut Cx},// from animate
-    Apply{cx:&'a mut Cx}, // called from bare apply() call
-    BareData, // newed from bare data
-}*/
 
 impl ApplyFrom {
     pub fn is_from_live(&self) -> bool {
@@ -73,27 +64,6 @@ impl ApplyFrom {
         }
     }
 }
-
-/*
-impl <'a>ApplyFrom<'a>{
-    pub fn cx(self)->&'a mut Cx{
-        match self{
-            Self::LiveNew{cx,..}=>cx,
-            Self::LiveUpdate{cx,..}=>cx,
-            Self::Animate{cx,..}=>cx,// from animate
-            Self::Apply{cx}=>cx, // called from bare apply() call
-            _=>panic!()
-        }
-    }
-
-    pub fn file_id(&self)->Option<FileId>{
-        match self{
-            Self::LiveNew{file_id,..}=>Some(*file_id),
-            Self::LiveUpdate{file_id,..}=>Some(*file_id),
-            _=>None
-        }
-    }
-}*/
 
 pub trait CanvasComponent: LiveComponent {
     fn handle(&mut self, cx: &mut Cx, event: &mut Event);
@@ -138,7 +108,6 @@ impl Cx {
         crate::geometrygen::live_register(self);
         crate::shader_std::live_register(self);
         crate::font::live_register(self);
-        
     }
     
     pub fn clone_from_module_path(&self, module_path: &str) -> Option<(FileId, Vec<LiveNode>)> {
@@ -148,36 +117,6 @@ impl Cx {
     pub fn clone_from_ptr_name(&self, live_ptr: LivePtr, name: Id, out:&mut Vec<LiveNode >) -> bool {
         self.shader_registry.live_registry.clone_from_ptr_name(live_ptr, name, out)
     }
-    
-    // forwards to the live registry
-    /*
-    pub fn live_ptr_from_module_path(&self, module_path: &str, id: Id) -> Option<LivePtr> {
-        self.shader_registry.live_registry.live_ptr_from_module_path(module_path, id)
-    }
-    
-    pub fn resolve_ptr(&self, live_ptr: LivePtr) -> &LiveNode {
-        self.shader_registry.live_registry.resolve_ptr(live_ptr)
-    }
-    
-    pub fn resolve_doc_ptr(&self, live_ptr: LivePtr) -> (&LiveDocument, &LiveNode) {
-        self.shader_registry.live_registry.resolve_doc_ptr(live_ptr)
-    }
-
-    pub fn doc_from_token_id(&self, token_id: TokenId) -> &LiveDocument {
-        self.shader_registry.live_registry.doc_from_token_id(token_id)
-    }*/
-    
-    /*
-    pub fn find_class_prop_ptr(&self, class_ptr: LivePtr, seek_id: Id) -> Option<LivePtr> {
-        if let Some(mut iter) = self.shader_registry.live_registry.live_class_iterator(class_ptr) {
-            while let Some((id, live_ptr)) = iter.next_id(&self.shader_registry.live_registry) {
-                if id == seek_id {
-                    return Some(live_ptr)
-                }
-            }
-        }
-        None
-    }*/
     
     pub fn ptr_to_nodes_index(&self, live_ptr: LivePtr) -> (&[LiveNode], usize) {
         return self.shader_registry.live_registry.ptr_to_nodes_index(live_ptr)
