@@ -41,7 +41,6 @@ use crate::cx::*;
 #[derive(LiveComponent, LiveComponentHooks)]
 #[repr(C)]
 pub struct DrawQuad {
-    #[hidden()] pub area: Area,
     #[live()] pub geometry: GeometryQuad2D,
     #[local()] pub draw_call_vars: DrawCallVars,
     #[live()] pub rect_pos: Vec2,
@@ -54,15 +53,15 @@ impl DrawQuad {
     pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) {
         if self.draw_call_vars.draw_shader.is_some() {
             let new_area = cx.add_aligned_instance(&self.draw_call_vars);
-            self.area = cx.update_area_refs(self.area, new_area);
-            cx.begin_turtle(layout, self.area);
+            self.draw_call_vars.area = cx.update_area_refs(self.draw_call_vars.area, new_area);
+            cx.begin_turtle(layout, self.draw_call_vars.area);
         }
     }
     
     pub fn end_quad(&mut self, cx: &mut Cx) {
         if self.draw_call_vars.draw_shader.is_some() {
-            let rect = cx.end_turtle(self.area);
-            self.area.set_rect(cx, &rect);
+            let rect = cx.end_turtle(self.draw_call_vars.area);
+            self.draw_call_vars.area.set_rect(cx, &rect);
         }
     }
     
@@ -89,7 +88,7 @@ impl DrawQuad {
     pub fn draw_quad(&mut self, cx: &mut Cx) {
         if self.draw_call_vars.draw_shader.is_some() {
             let new_area = cx.add_aligned_instance(&self.draw_call_vars);
-            self.area = cx.update_area_refs(self.area, new_area);
+            self.draw_call_vars.area = cx.update_area_refs(self.draw_call_vars.area, new_area);
         }
     }
 }

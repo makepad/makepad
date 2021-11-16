@@ -11,19 +11,19 @@ live_register!{
 // deserialisable DSL structure
 #[derive(Debug, LiveComponent, LiveComponentHooks)]
 pub struct KeyFrame {
-    #[live(Ease::Linear)] 
+    #[live(Ease::Linear)]
     pub ease: Ease,
     
-    #[live(1.0)] 
+    #[live(1.0)]
     pub time: f64,
     
-    #[live(KeyFrameValue::None)] 
-    pub value: KeyFrameValue, 
+    #[live(KeyFrameValue::None)]
+    pub value: KeyFrameValue,
 }
 
 
 #[derive(Debug)]
-pub enum KeyFrameValue{
+pub enum KeyFrameValue {
     None,
     Float(f64),
     Vec2(Vec2),
@@ -32,52 +32,76 @@ pub enum KeyFrameValue{
     Id(Id)
 }
 
-#[derive(Default)]
 pub struct Animator {
     pub state_id: Id,
     pub live_ptr: Option<LivePtr>,
-    pub current_state: Option<Vec<LiveNode>>,
+    pub current_state: Option<Vec<LiveNode >>,
+}
+
+impl Default for Animator{
+    fn default()->Self{
+        Self{
+            state_id: Id(0),
+            live_ptr:None,
+            current_state:Some(Vec::new())
+        }
+    }
 }
 
 // OK so.. now the annoying bit
 impl Animator {
     
-    pub fn swap_out_state(&mut self)->Vec<LiveNode>{
+    pub fn has_state(&self)->bool{
+        self.current_state.is_some()
+    }
+    
+    pub fn swap_out_state(&mut self) -> Vec<LiveNode> {
         self.current_state.take().unwrap()
     }
     
-    pub fn swap_in_state(&mut self, state:Vec<LiveNode>){
+    pub fn swap_in_state(&mut self, state: Vec<LiveNode>) {
         self.current_state = Some(state);
     }
     
-    pub fn init_from_last_keyframe(&mut self, cx:&mut Cx, nodes: &[LiveNode]) {
-        let mut index = 0;
-        // copy in the structure
-        let mut current_state = Vec::new();
-        loop {
-            if index >= nodes.len() {
-                break;
+    // this find the last keyframe value from an array node
+    pub fn find_last_keyframe_value(index:usize, nodes:&[LiveNode])->Option<usize>{
+        if nodes[index].value.is_array(){
+            if let Some(index) = nodes.last_child(index){
+                if nodes[index].value.is_bare_class(){
+                    if let Ok(value) = nodes.child_by_name(index, id!(value)){
+                        return Some(value)
+                    }
+                }
             }
+        }
+        return None
+    }
+    /*
+    pub fn init_from_last_keyframe(&mut self, cx: &mut Cx,  nodes: &[LiveNode]) {
+        
+        let mut index = 0;
+        let mut current_state = Vec::new();
+        while index < nodes.len() {
             let node = &nodes[index];
             match node.value {
                 LiveValue::Array => { // its a keyframe array. probably :)
                     if let Some(last_child) = nodes.last_child(index) {
-                        if let LiveValue::BareClass = nodes[last_child].value{
+                        if let LiveValue::BareClass = nodes[last_child].value {
                             
                             let mut kf = KeyFrame::new(cx);
                             kf.apply_index(cx, ApplyFrom::DataNew, last_child, nodes);
                             
-                            current_state.push(LiveNode{
+                            current_state.push(LiveNode {
                                 token_id: None,
-                                id:node.id,
-                                value:kf.value.to_live_value()
+                                id: node.id,
+                                value: kf.value.to_live_value()
                             });
                         }
-                        else if !nodes[last_child].value.is_tree(){ // if its a bare value push it in ?
-                            current_state.push(LiveNode{
+                        else if !nodes[last_child].value.is_tree() { // if its a bare value push it in ?
+                            current_state.push(LiveNode {
                                 token_id: None,
-                                id:node.id,
-                                value:nodes[last_child].value.clone()
+                                id: node.id,
+                                value: nodes[last_child].value.clone()
                             });
                         }
                     }
@@ -90,9 +114,9 @@ impl Animator {
             }
         }
         self.current_state = Some(current_state);
-    }
+    }*/
     // alright so . we have the from info
-    // we have values.. we have KeyFrames and KeyFrameValues 
+    // we have values.. we have KeyFrames and KeyFrameValues
     // now make an animation engine :)
     
 }

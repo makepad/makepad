@@ -39,24 +39,61 @@ pub trait LiveComponent {
     }
 }
 
-#[derive(Debug,Clone,Copy)]
-pub enum ApplyFrom{
-    LiveNew{file_id:FileId}, // newed from DSL
-    LiveUpdate{file_id:FileId}, // live DSL updated
+#[derive(Debug, Clone, Copy)]
+pub enum ApplyFrom {
+    LiveNew {file_id: FileId}, // newed from DSL
+    LiveUpdate {file_id: FileId}, // live DSL updated
     DataNew, // newed from bare data
-    Animate,// from animate
+    Animate, // from animate
     Apply // called from bare apply() call
 }
+/*
+pub enum ApplyFrom<'a>{
+    LiveNew{cx:&'a mut Cx, file_id:FileId}, // newed from DSL
+    LiveUpdate{cx:&'a mut Cx, file_id:FileId}, // live DSL updated
+    Animate{cx:&'a mut Cx},// from animate
+    Apply{cx:&'a mut Cx}, // called from bare apply() call
+    BareData, // newed from bare data
+}*/
 
-impl ApplyFrom{
-    pub fn file_id(&self)->Option<FileId>{
-        match self{
-            Self::LiveNew{file_id}=>Some(*file_id),
-            Self::LiveUpdate{file_id}=>Some(*file_id),
-            _=>None
+impl ApplyFrom {
+    pub fn is_from_live(&self) -> bool {
+        match self {
+            Self::LiveNew {..} => true,
+            Self::LiveUpdate {..} => true,
+            _ => false
+        }
+    }
+    
+    pub fn file_id(&self) -> Option<FileId> {
+        match self {
+            Self::LiveNew {file_id} => Some(*file_id),
+            Self::LiveUpdate {file_id} => Some(*file_id),
+            _ => None
         }
     }
 }
+
+/*
+impl <'a>ApplyFrom<'a>{
+    pub fn cx(self)->&'a mut Cx{
+        match self{
+            Self::LiveNew{cx,..}=>cx,
+            Self::LiveUpdate{cx,..}=>cx,
+            Self::Animate{cx,..}=>cx,// from animate
+            Self::Apply{cx}=>cx, // called from bare apply() call
+            _=>panic!()
+        }
+    }
+
+    pub fn file_id(&self)->Option<FileId>{
+        match self{
+            Self::LiveNew{file_id,..}=>Some(*file_id),
+            Self::LiveUpdate{file_id,..}=>Some(*file_id),
+            _=>None
+        }
+    }
+}*/
 
 pub trait CanvasComponent: LiveComponent {
     fn handle(&mut self, cx: &mut Cx, event: &mut Event);
@@ -68,11 +105,11 @@ pub trait CanvasComponent: LiveComponent {
 }
 
 pub trait LiveComponentHooks {
-    fn apply_value_unknown(&mut self, _cx: &mut Cx, _apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize {
+    fn apply_value_unknown(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         nodes.skip_node(index)
     }
-    fn before_apply_index(&mut self, _cx: &mut Cx, _apply_from:ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
-    fn after_apply_index(&mut self, _cx: &mut Cx, _apply_from:ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
+    fn before_apply_index(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
+    fn after_apply_index(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
     fn after_new(&mut self, _cx: &mut Cx) {}
 }
 
@@ -104,8 +141,12 @@ impl Cx {
         
     }
     
-    pub fn clone_from_module_path(&self, module_path: &str) -> Option<(FileId,Vec<LiveNode>)> {
+    pub fn clone_from_module_path(&self, module_path: &str) -> Option<(FileId, Vec<LiveNode>)> {
         self.shader_registry.live_registry.clone_from_module_path(module_path)
+    }
+    
+    pub fn clone_from_ptr_name(&self, live_ptr: LivePtr, name: Id, out:&mut Vec<LiveNode >) -> bool {
+        self.shader_registry.live_registry.clone_from_ptr_name(live_ptr, name, out)
     }
     
     // forwards to the live registry
@@ -140,6 +181,16 @@ impl Cx {
     
     pub fn ptr_to_nodes_index(&self, live_ptr: LivePtr) -> (&[LiveNode], usize) {
         return self.shader_registry.live_registry.ptr_to_nodes_index(live_ptr)
+    }
+    
+    pub fn ptr_name_to_nodes_index(&self, live_ptr: LivePtr, id: Id) -> Option<(&[LiveNode], usize)> {
+        let (nodes, index) = self.shader_registry.live_registry.ptr_to_nodes_index(live_ptr);
+        if let Ok(index) = nodes.child_by_name(index, id) {
+            return Some((nodes, index))
+        }
+        else {
+            None
+        }
     }
     
     // ok so now what. now we should run the expansion
@@ -211,39 +262,45 @@ macro_rules!live_primitive {
 live_primitive!(
     KeyFrameValue,
     KeyFrameValue::None,
-    fn apply_index(&mut self, _cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize {
+    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Id(id) => {
                 *self = KeyFrameValue::Id(*id);
                 index + 1
             }
-            LiveValue::Float(f)=>{
+            LiveValue::Float(f) => {
                 *self = KeyFrameValue::Float(*f);
                 index + 1
             }
-            LiveValue::Vec2(f)=>{
+            LiveValue::Vec2(f) => {
                 *self = KeyFrameValue::Vec2(*f);
                 index + 1
             }
-            LiveValue::Vec3(f)=>{
+            LiveValue::Vec3(f) => {
                 *self = KeyFrameValue::Vec3(*f);
                 index + 1
             }
-            LiveValue::Color(f)=>{
+            LiveValue::Color(f) => {
                 *self = KeyFrameValue::Vec4(Vec4::from_u32(*f));
                 index + 1
+            }
+            LiveValue::Array => {
+                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
+                    self.apply_index(cx, apply_from, index, nodes);
+                }
+                nodes.skip_node(index)
             }
             _ => nodes.skip_node(index)
         }
     },
     fn to_live_value(&self) -> LiveValue {
-        match self{
+        match self {
             Self::None => LiveValue::None,
-            Self::Float(v)=> LiveValue::Float(*v),
-            Self::Vec2(v)=> LiveValue::Vec2(*v),
-            Self::Vec3(v)=> LiveValue::Vec3(*v),
-            Self::Vec4(v)=> LiveValue::Color(v.to_u32()),
-            Self::Id(v)=> LiveValue::Id(*v),
+            Self::Float(v) => LiveValue::Float(*v),
+            Self::Vec2(v) => LiveValue::Vec2(*v),
+            Self::Vec3(v) => LiveValue::Vec3(*v),
+            Self::Vec4(v) => LiveValue::Color(v.to_u32()),
+            Self::Id(v) => LiveValue::Id(*v),
         }
     }
 );
@@ -251,11 +308,17 @@ live_primitive!(
 live_primitive!(
     Id,
     Id::empty(),
-    fn apply_index(&mut self, _cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize {
+    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Id(id) => {
                 *self = *id;
                 index + 1
+            }
+            LiveValue::Array => {
+                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
+                    self.apply_index(cx, apply_from, index, nodes);
+                }
+                nodes.skip_node(index)
             }
             _ => nodes.skip_node(index)
         }
@@ -268,7 +331,7 @@ live_primitive!(
 live_primitive!(
     f32,
     0.0f32,
-    fn apply_index(&mut self, _cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize{
+    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Float(val) => {
                 *self = *val as f32;
@@ -277,6 +340,13 @@ live_primitive!(
             LiveValue::Int(val) => {
                 *self = *val as f32;
                 index + 1
+            }
+            LiveValue::Array => {
+                println!("HERE!");
+                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
+                    self.apply_index(cx, apply_from, index, nodes);
+                }
+                nodes.skip_node(index)
             }
             _ => nodes.skip_node(index)
         }
@@ -289,7 +359,7 @@ live_primitive!(
 live_primitive!(
     f64,
     0.0f64,
-    fn apply_index(&mut self, _cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize{
+    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Float(val) => {
                 *self = *val as f64;
@@ -298,6 +368,12 @@ live_primitive!(
             LiveValue::Int(val) => {
                 *self = *val as f64;
                 index + 1
+            }
+            LiveValue::Array => {
+                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
+                    self.apply_index(cx, apply_from, index, nodes);
+                }
+                nodes.skip_node(index)
             }
             _ => nodes.skip_node(index)
         }
@@ -310,11 +386,17 @@ live_primitive!(
 live_primitive!(
     Vec2,
     Vec2::default(),
-    fn apply_index(&mut self, _cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize{
+    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Vec2(val) => {
                 *self = *val;
                 index + 1
+            }
+            LiveValue::Array => {
+                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
+                    self.apply_index(cx, apply_from, index, nodes);
+                }
+                nodes.skip_node(index)
             }
             _ => nodes.skip_node(index)
         }
@@ -327,11 +409,17 @@ live_primitive!(
 live_primitive!(
     Vec3,
     Vec3::default(),
-    fn apply_index(&mut self, _cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize{
+    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Vec3(val) => {
                 *self = *val;
                 index + 1
+            }
+            LiveValue::Array => {
+                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
+                    self.apply_index(cx, apply_from, index, nodes);
+                }
+                nodes.skip_node(index)
             }
             _ => nodes.skip_node(index)
         }
@@ -344,11 +432,17 @@ live_primitive!(
 live_primitive!(
     Vec4,
     Vec4::default(),
-    fn apply_index(&mut self, _cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize{
+    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Color(v) => {
                 *self = Vec4::from_u32(*v);
                 index + 1
+            }
+            LiveValue::Array => {
+                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
+                    self.apply_index(cx, apply_from, index, nodes);
+                }
+                nodes.skip_node(index)
             }
             _ => nodes.skip_node(index)
         }
@@ -361,7 +455,7 @@ live_primitive!(
 live_primitive!(
     String,
     String::default(),
-    fn apply_index(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode])->usize{
+    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Str(v) => {
                 *self = v.to_string();
@@ -371,10 +465,16 @@ live_primitive!(
                 *self = v.clone();
                 index + 1
             }
-            LiveValue::StringRef{string_start, string_count} => {
+            LiveValue::StringRef {string_start, string_count} => {
                 let origin_doc = cx.shader_registry.live_registry.token_id_to_origin_doc(nodes[index].token_id.unwrap());
                 origin_doc.get_string(*string_start, *string_count, self);
                 index + 1
+            }
+            LiveValue::Array => {
+                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
+                    self.apply_index(cx, apply_from, index, nodes);
+                }
+                nodes.skip_node(index)
             }
             _ => nodes.skip_node(index)
         }

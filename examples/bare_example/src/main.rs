@@ -41,7 +41,6 @@ impl BareExampleApp {
     pub fn new_app(cx: &mut Cx) -> Self {
         let mut new = Self::new(cx);
         let (file_id, nodes) = cx.clone_from_module_path(&module_path!()).unwrap();
-        //println!("{}", nodes.to_string(0));
         new.apply_index(cx, ApplyFrom::LiveNew{file_id}, 0, &nodes);
         new
     }
