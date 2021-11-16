@@ -136,7 +136,6 @@ pub enum Wrapping {
 #[repr(C,)]
 pub struct DrawText {
     #[hidden()] pub buf: Vec<char>,
-    #[hidden()] pub area: Area,
     #[hidden()] pub many_instances: Option<ManyInstances>,
     
     #[live()] pub geometry: GeometryQuad2D,
@@ -191,7 +190,7 @@ impl DrawText {
     pub fn end_many_instances(&mut self, cx: &mut Cx) {
         if let Some(mi) = self.many_instances.take() {
             let new_area = cx.end_many_instances(mi);
-            self.area = cx.update_area_refs(self.area, new_area);
+            self.draw_call_vars.area = cx.update_area_refs(self.draw_call_vars.area, new_area);
         }
     }
     
@@ -433,7 +432,7 @@ impl DrawText {
     
     // looks up text with the behavior of a text selection mouse cursor
     pub fn closest_text_offset(&self, cx: &Cx, pos: Vec2) -> Option<usize> {
-        let area = &self.area;
+        let area = &self.draw_call_vars.area;
         
         if !area.is_valid(cx) {
             return None
