@@ -274,7 +274,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                     else if let Some(fields) = parser.eat_all_struct_fields() { // named variant
                         items.push(EnumItem {name, attributes, kind: EnumKind::Named(fields)})
                     }
-                    else if parser.is_punct(',') || parser.is_eot() { // bare variant
+                    else if parser.is_punct_alone(',') || parser.is_eot() { // bare variant
                         items.push(EnumItem {name, attributes, kind: EnumKind::Bare})
                     }
                     else {
@@ -282,7 +282,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                     }
                 }
                 //eprintln!("HERE2");
-                parser.eat_punct(',');
+                parser.eat_punct_alone(',');
             }
             
             if default.is_none(){
