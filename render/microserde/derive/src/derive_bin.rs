@@ -73,7 +73,7 @@ pub fn derive_ser_bin_impl(input: TokenStream) -> TokenStream {
                         }
                         tb.add("}");
                     }
-                    else if parser.is_punct(',') || parser.is_eot(){ // bare variant
+                    else if parser.is_punct_alone(',') || parser.is_eot(){ // bare variant
                         tb.add("Self ::").ident(&variant).add("=> {");
                         tb.suf_u16(index).add(". ser_bin ( s ) ; }");
                     }
@@ -81,7 +81,7 @@ pub fn derive_ser_bin_impl(input: TokenStream) -> TokenStream {
                         return parser.unexpected();
                     }
                     index += 1;
-                    parser.eat_punct(',');
+                    parser.eat_punct_alone(',');
                 }
                 else{
                     return parser.unexpected()
@@ -167,7 +167,7 @@ pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
                         }
                         tb.add("}");
                     }
-                    else if parser.is_punct(',') || parser.is_eot(){ // bare variant
+                    else if parser.is_punct_alone(',') || parser.is_eot(){ // bare variant
                         tb.ident(&variant);
                     }
                     else{
@@ -176,7 +176,7 @@ pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
                     
                     tb.add(") }");
                     index += 1;
-                    parser.eat_punct(',');
+                    parser.eat_punct_alone(',');
                 }
                 else{
                     return parser.unexpected()

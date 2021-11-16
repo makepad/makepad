@@ -196,10 +196,6 @@ impl<'a> LiveExpander<'a> {
                 }
             };
             
-            self.scope_stack.stack.last_mut().unwrap().push(LiveScopeItem {
-                id: in_node.id,
-                target: LiveScopeTarget::LocalPtr(LocalPtr(out_index))
-            });
             
             // process stacks
             match in_value {
@@ -242,6 +238,12 @@ impl<'a> LiveExpander<'a> {
                 },
                 _ => {}
             }
+
+            self.scope_stack.stack.last_mut().unwrap().push(LiveScopeItem {
+                id: in_node.id,
+                target: LiveScopeTarget::LocalPtr(LocalPtr(out_index))
+            });
+            
             in_index += 1;
         }
         out_doc.nodes.push(in_doc.nodes.last().unwrap().clone());
