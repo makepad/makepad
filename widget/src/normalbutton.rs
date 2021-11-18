@@ -52,32 +52,35 @@ live_register!{
         }
         
         state_default: {
-            from: {
-                all: Play::Forward {duration: 0.1} // from everything to default
-            }
-            bg: {
-                down: 0.0,
-                hover: 0.0
-            }
+            from: {all: Play::Forward {duration: 0.1}}
+            bg: {down: 0.0, hover: 0.0}
+            text: {color: #9}
         }
         
         state_hover: {
-            bg: {
-                down: [{time:1.0, value: 0.0, ease: Ease::Linear}],
-                hover: 1.0
+            from: {
+                all: Play::Forward {duration: 0.1}
+                state_down: Play::Forward {duration: 0.01}
             }
-        }
-        
-        state_down: {
             bg: {
-                down: [{time: 1.0, value: 1.0, ease: Ease::Linear}],
+                down: 0.0,
+                hover: [{time: 0.0, value: 1.0}],
+            } 
+            text: {color: [{time: 0.0, value: #f}]}
+        }
+         
+        state_down: {
+            from: {all: Play::Forward {duration: 0.2}}
+            bg: {
+                down: [{time: 0.0, value: 1.0}],
                 hover: 1.0,
             }
+            text: {color: [{time: 0.0, value: #c}]}
         }
     }
 }
 
-#[derive(LiveComponent)]
+#[derive(LiveComponent, LiveComponentHooks, LiveAnimate)]
 pub struct NormalButton {
     #[hidden()] pub button_logic: ButtonLogic,
     #[hidden()] pub animator: Animator,
@@ -85,27 +88,6 @@ pub struct NormalButton {
     #[live()] pub text: DrawText,
     #[live()] pub layout: Layout,
     #[live()] pub label: String
-}
-
-impl LiveComponentHooks for NormalButton {
-    fn after_new(&mut self, _cx: &mut Cx) {
-    }
-    
-    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(file_id) = apply_from.file_id() {
-            self.animator.live_ptr = Some(LivePtr::from_index(file_id, index));
-            // lets apply our initial state directly from the DSL structure without alloc
-            if let Ok(index) = nodes.child_by_name(index, id!(state_default)){
-                self.apply(cx, ApplyFrom::Animate, index, nodes);
-            }
-            
-            if self.animator.state.is_none(){ // we have no current state, fetch default
-                self.animator.cut_state_to(cx, id!(state_default));
-            }
-            //self.animator.create_timeline_to(cx, id!(state_hover));
-            //self.animator.create_timeline_to(cx, id!(state_default));
-        }
-    }
 }
 
 impl CanvasComponent for NormalButton {
@@ -122,41 +104,13 @@ impl CanvasComponent for NormalButton {
 
 impl NormalButton {
     
-    pub fn init_state(&mut self, _cx: &mut Cx, _state_id: Id) {
-        // take the live DSL and turn it into a Gen
-        /*
-        let sub_ptr = cx.find_class_prop_ptr(self.animator.live_ptr.unwrap(), state_id);
-        let mut state = Vec::new();
-        GenNode::convert_live_to_gen(cx, sub_ptr.unwrap(), &mut state);
-
-        // take the Gen and sample the last keyframe
-        self.animator.init_from_last_keyframe(cx, &state);
-        
-        // apply the last keyframe to self
-        let state = self.animator.swap_out_state();
-        self.apply(cx, &state);
-        self.animator.swap_in_state(state);*/
-    } 
-    
-    pub fn set_state(&mut self, cx: &mut Cx, state_id: Id) {
-        // ok so we set state. we have a default state AND the state we need to go to
-        if self.animator.state.is_none(){ // we have no current state, fetch default
-            self.animator.cut_state_to(cx, id!(state_default));
-        }
-        self.animator.create_timeline_to(cx, state_id);
-        self.animator.cut_state_to(cx, state_id);
-        let state = self.animator.swap_out_state();
-        self.apply(cx, ApplyFrom::Animate, 0, &state);
-        self.animator.swap_in_state(state);
-        cx.redraw_child_area(self.bg.draw_call_vars.area);
-    }
-    
     pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
+        self.handle_animation(cx, event);
         let res = self.button_logic.handle_button_logic(cx, event, self.bg.draw_call_vars.area);
         match res.state {
-            ButtonState::Down => self.set_state(cx, id!(state_down)),
-            ButtonState::Default => self.set_state(cx, id!(state_default)),
-            ButtonState::Over => self.set_state(cx, id!(state_hover)),
+            ButtonState::Down => self.animate_to(cx, id!(state_down)),
+            ButtonState::Default => self.animate_to(cx, id!(state_default)),
+            ButtonState::Over => self.animate_to(cx, id!(state_hover)),
             _ => ()
         };
         res.action

@@ -3,6 +3,67 @@ use proc_macro::{TokenStream};
 use crate::macro_lib::*;
 use crate::id::*;
 
+pub fn derive_live_animate_impl(input: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new();
+    let mut parser = TokenParser::new(input);
+    let _main_attribs = parser.eat_attributes();
+    parser.eat_ident("pub");
+    if parser.eat_ident("struct") {
+        if let Some(struct_name) = parser.eat_any_ident() {
+            let generic = parser.eat_generic();
+            let types = parser.eat_all_types();
+            let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
+            
+            let fields = if let Some(_types) = types {
+                return parser.unexpected();
+            }
+            else if let Some(fields) = parser.eat_all_struct_fields() {
+                fields
+            }
+            else{
+                return parser.unexpected();
+            };
+            
+            let animator = fields.iter().find( | field | field.name == "animator");
+            
+            if !animator.is_some(){
+               // no can do
+               return error("Cannot generate LiveAnimate without animator");
+            }
+            
+            tb.add("impl").stream(generic.clone());
+            tb.add("LiveAnimate for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("    fn animate_to(&mut self, cx: &mut Cx, state_id: Id) {");
+            tb.add("        if self.animator.state.is_none() {");
+            tb.add("            self.animator.cut_to(cx, id!(state_default));");
+            tb.add("         }");
+            tb.add("        self.animator.animate_to(cx, state_id);");
+            tb.add("    }");
+            tb.add("    fn handle_animation(&mut self, cx: &mut Cx, event: &mut Event) {");
+            tb.add("        if self.animator.do_animation(cx, event) {");
+            tb.add("            let state = self.animator.swap_out_state();");
+            tb.add("            self.apply(cx, ApplyFrom::Animate, 0, &state);");
+            tb.add("            self.animator.swap_in_state(state);");
+            tb.add("            cx.redraw_child_area(self.bg.draw_call_vars.area);");
+            tb.add("        }");
+            tb.add("    }");
+            tb.add("}");
+            
+            return tb.end();
+        }
+    }
+    else if parser.eat_ident("enum") {
+        if let Some(enum_name) = parser.eat_any_ident() {
+            let generic = parser.eat_generic();
+            let where_clause = parser.eat_where_clause(None);
+            tb.add("impl").stream(generic.clone());
+                tb.add("LiveComponentHooks for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
+            return tb.end();
+        }
+    }
+    return parser.unexpected()
+}
+
 pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
@@ -26,6 +87,14 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
             
             let deref_target = fields.iter().find( | field | field.name == "deref_target");
             let draw_call_vars = fields.iter().find( | field | field.name == "draw_call_vars");
+            let animator = fields.iter().find( | field | field.name == "animator");
+            
+            if deref_target.is_some() && draw_call_vars.is_some() || 
+               deref_target.is_some() && animator.is_some() ||
+               animator.is_some() && draw_call_vars.is_some(){
+                   // no can do
+                   return error("Cannot generate LiveComponentHooks with more than one of: deref_target/draw_call_vars/animator");
+               }
             
             if let Some(_) = draw_call_vars{
                 tb.add("impl").stream(generic.clone());
@@ -52,6 +121,19 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
                 tb.add("    }");
                 tb.add("    fn after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]) {");
                 tb.add("        self.deref_target.after_apply(cx, apply_from, index, nodes);");
+                tb.add("    }");
+                tb.add("}");
+            }
+            else if let Some(_) = animator {
+                tb.add("impl").stream(generic.clone());
+                tb.add("LiveComponentHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+                tb.add("    fn after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]) {");
+                tb.add("        if let Some(file_id) = apply_from.file_id() {");
+                tb.add("            self.animator.live_ptr = Some(LivePtr::from_index(file_id, index));");
+                tb.add("            if let Ok(index) = nodes.child_by_name(index, id!(state_default)) {");
+                tb.add("                self.apply(cx, ApplyFrom::Animate, index, nodes);");
+                tb.add("            }");
+                tb.add("        }");
                 tb.add("    }");
                 tb.add("}");
             }
