@@ -90,15 +90,10 @@ pub trait LiveComponentHooks {
     fn after_new(&mut self, _cx: &mut Cx) {}
 }
 
-pub enum LiveFieldKind {
-    Local,
-    Live,
-}
-
 pub struct LiveField {
     pub id: Id,
     pub live_type: Option<LiveType>,
-    pub kind: LiveFieldKind
+    pub live_or_local: LiveOrLocal
 }
 
 #[derive(Default)]

@@ -26,6 +26,7 @@ pub struct DrawShaderInput {
     pub id: Id,
     pub ty: Ty,
     pub offset: usize,
+    pub live_or_local: LiveOrLocal,
     pub slots: usize,
     pub value_ptr: Option<ValuePtr>
 }
@@ -81,12 +82,11 @@ impl DrawCallVars {
         }
     }
     
-    pub fn init_shader(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index:usize, _nodes:&[LiveNode], geometry_fields: &dyn GeometryFields) {
+    pub fn before_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index:usize, _nodes:&[LiveNode], geometry_fields: &dyn GeometryFields) {
         if self.draw_shader.is_some(){
             return
         }
         
-        //This does not work. this shaderptr cannot reconstruct
         let draw_shader_ptr =  if let Some(file_id) = apply_from.file_id(){
            DrawShaderPtr(LivePtr::from_index(file_id, index))
         }
@@ -126,7 +126,7 @@ impl DrawCallVars {
                                 }
                                 if field.id == id!(draw_call_vars){
                                     // assert the thing to be marked correctly
-                                    if let LiveFieldKind::Local = field.kind{}
+                                    if let LiveOrLocal::Local = field.live_or_local{}
                                     else{panic!()}
                                     if field.live_type.unwrap() != DrawCallVars::live_type(){panic!();}
                                     
@@ -137,12 +137,12 @@ impl DrawCallVars {
                                     // lets count sizes
                                     let ty = live_type_to_shader_ty(field.live_type.unwrap()).expect("Please only put shader instance fields after draw_call_vars");
                                     slots += ty.slots();
-                                    draw_shader_def.add_instance(field.id, ty, span);
+                                    draw_shader_def.add_instance(field.id, ty, span, field.live_or_local);
                                 }
                             }
                             // insert padding
                             if slots%2 == 1{
-                                draw_shader_def.add_instance(Id(0), Ty::Float, span);
+                                draw_shader_def.add_instance(Id(0), Ty::Float, span, LiveOrLocal::Local);
                             }
                         }
                     }
@@ -206,90 +206,83 @@ impl DrawCallVars {
     }
 
     pub fn apply_value(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode])->usize {
+        fn apply_slots(cx: &mut Cx, slots:usize, output:&mut [f32], offset:usize, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode])->usize{
+             match slots{
+                1=>{
+                    let mut v:f32 = 0.0;
+                    let index = v.apply(cx, apply_from, index, nodes);
+                    output[offset+0] = v;
+                    return index;
+                }
+                2=>{
+                    let mut v:Vec2 = Vec2::default();
+                    let index = v.apply(cx, apply_from, index, nodes);
+                    output[offset+0] = v.x;
+                    output[offset+1] = v.y;
+                    return index;
+                }
+                3=>{
+                    let mut v:Vec3 = Vec3::default();
+                    let index = v.apply(cx, apply_from, index, nodes);
+                    output[offset+0] = v.x;
+                    output[offset+1] = v.y;
+                    output[offset+2] = v.z;
+                    return index;
+                }
+                4=>{
+                    let mut v:Vec4 = Vec4::default();
+                    let index = v.apply(cx, apply_from, index, nodes);
+                    output[offset+0] = v.x;
+                    output[offset+1] = v.y;
+                    output[offset+2] = v.z;
+                    output[offset+3] = v.w;
+                    return index;
+                }
+                _=>{
+                    return nodes.skip_node(index)
+                }
+            }
+        }
+
         if let Some(draw_shader) = self.draw_shader {
             let id = nodes[index].id;
             let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
             for input in &sh.mapping.user_uniforms.inputs {
                 let offset = input.offset;
+                let slots = input.slots;
                 if input.id == id {
-                    match input.slots{
-                        1=>{
-                            let mut v:f32 = 0.0;
-                            let index = v.apply(cx, apply_from, index, nodes);
-                            self.user_uniforms[offset+0] = v;
-                            return index;
-                        }
-                        2=>{
-                            let mut v:Vec2 = Vec2::default();
-                            let index = v.apply(cx, apply_from, index, nodes);
-                            self.user_uniforms[offset+0] = v.x;
-                            self.user_uniforms[offset+1] = v.y;
-                            return index;
-                        }
-                        3=>{
-                            let mut v:Vec3 = Vec3::default();
-                            let index = v.apply(cx, apply_from, index, nodes);
-                            self.user_uniforms[offset+0] = v.x;
-                            self.user_uniforms[offset+1] = v.y;
-                            self.user_uniforms[offset+2] = v.z;
-                            return index;
-                        }
-                        4=>{
-                            let mut v:Vec4 = Vec4::default();
-                            let index = v.apply(cx, apply_from, index, nodes);
-                            self.user_uniforms[offset+0] = v.x;
-                            self.user_uniforms[offset+1] = v.y;
-                            self.user_uniforms[offset+2] = v.z;
-                            self.user_uniforms[offset+3] = v.w;
-                            return index;
-                        }
-                        _=>{
-                            return nodes.skip_node(index)
-                        }
-                    }
+                    return apply_slots(cx, slots, &mut self.user_uniforms, offset, apply_from, index, nodes);
                 }
             }
             for input in &sh.mapping.var_instances.inputs {
                 let offset = (self.var_instances.len() - sh.mapping.var_instances.total_slots) + input.offset;
+                let slots = input.slots;
                 if input.id == id {
-                    match input.slots{
-                        1=>{
-                            let mut v:f32 = 0.0;
-                            let index = v.apply(cx, apply_from, index, nodes);
-                            self.var_instances[offset+0] = v;
-                            return index;
-                        }
-                        2=>{
-                            let mut v:Vec2 = Vec2::default();
-                            let index = v.apply(cx, apply_from, index, nodes);
-                            self.var_instances[offset+0] = v.x;
-                            self.var_instances[offset+1] = v.y;
-                            return index;
-                        }
-                        3=>{
-                            let mut v:Vec3 = Vec3::default();
-                            let index = v.apply(cx, apply_from, index, nodes);
-                            self.var_instances[offset+0] = v.x;
-                            self.var_instances[offset+1] = v.y;
-                            self.var_instances[offset+2] = v.z;
-                            return index;
-                        }
-                        4=>{
-                            let mut v:Vec4 = Vec4::default();
-                            let index = v.apply(cx, apply_from, index, nodes);
-                            self.var_instances[offset+0] = v.x;
-                            self.var_instances[offset+1] = v.y;
-                            self.var_instances[offset+2] = v.z;
-                            self.var_instances[offset+3] = v.w;
-                            return index;
-                        }
-                        _=>{}
-                    }
+                    return apply_slots(cx, slots, &mut self.var_instances, offset, apply_from, index, nodes);
                 }
             }
         }
         nodes.skip_node(index)
     } 
+    
+    pub fn after_apply(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){
+        if apply_from.is_from_doc(){
+            self.init_slicer(cx);
+        }
+        else if let ApplyFrom::Animate = apply_from{
+            // alright lets see if we need to patch our area with new values
+            // ok so. we have our var_instances and our var_uniforms
+            // those we can patch
+            // and then we have our instances
+            if let Some(draw_shader) = self.draw_shader {
+                let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+                // ok now what. 
+                cx.redraw_child_area(self.area);
+                
+                
+            }
+        }
+    }
     
     pub fn init_slicer(
         &mut self,
@@ -312,11 +305,12 @@ impl DrawShaderInputs {
         }
     }
     
-    pub fn push(&mut self, id: Id,  ty:Ty, value_ptr:Option<ValuePtr>) {
+    pub fn push(&mut self, id: Id,  ty:Ty, value_ptr:Option<ValuePtr>, live_or_local:LiveOrLocal) {
         let slots = ty.slots();
         match self.packing_method {
             DrawShaderInputPacking::Attribute => {
                 self.inputs.push(DrawShaderInput {
+                    live_or_local,
                     id,
                     offset: self.total_slots,
                     slots,
@@ -327,6 +321,7 @@ impl DrawShaderInputs {
             }
             DrawShaderInputPacking::UniformsGLSL => {
                 self.inputs.push(DrawShaderInput {
+                    live_or_local,
                     id,
                     offset: self.total_slots,
                     slots,
@@ -340,6 +335,7 @@ impl DrawShaderInputs {
                     self.total_slots += 4 - (self.total_slots & 3); // make jump to new slot
                 }
                 self.inputs.push(DrawShaderInput {
+                    live_or_local,
                     id,
                     offset: self.total_slots,
                     slots,
@@ -354,6 +350,7 @@ impl DrawShaderInputs {
                     self.total_slots += 4 - (self.total_slots & 3); // make jump to new slot
                 }
                 self.inputs.push(DrawShaderInput {
+                    live_or_local,
                     id,
                     offset: self.total_slots,
                     slots,
@@ -424,9 +421,9 @@ impl CxDrawShaderMapping {
             let ty = field.ty_expr.ty.borrow().as_ref().unwrap().clone();
             match &field.kind {
                 DrawShaderFieldKind::Geometry {..} => {
-                    geometries.push(field.ident.0, ty, None);
+                    geometries.push(field.ident.0, ty, None, LiveOrLocal::Live);
                 }
-                DrawShaderFieldKind::Instance {var_def_ptr, ..} => {
+                DrawShaderFieldKind::Instance {var_def_ptr, live_or_local, ..} => {
                     if field.ident.0 == id!(rect_pos){
                         rect_pos = Some(instances.total_slots);
                     }
@@ -434,23 +431,23 @@ impl CxDrawShaderMapping {
                         rect_size = Some(instances.total_slots);
                     }
                     if var_def_ptr.is_some() {
-                        var_instances.push(field.ident.0, ty.clone(), None);
+                        var_instances.push(field.ident.0, ty.clone(), None, *live_or_local);
                     }
-                    instances.push(field.ident.0, ty, None);
+                    instances.push(field.ident.0, ty, None, *live_or_local);
                 }
                 DrawShaderFieldKind::Uniform {block_ident, ..} => {
                     match block_ident.0 {
                         id!(draw) => {
-                            draw_uniforms.push(field.ident.0, ty, None);
+                            draw_uniforms.push(field.ident.0, ty, None, LiveOrLocal::Local);
                         }
                         id!(view) => {
-                            view_uniforms.push(field.ident.0, ty, None);
+                            view_uniforms.push(field.ident.0, ty, None, LiveOrLocal::Local);
                         }
                         id!(pass) => {
-                            pass_uniforms.push(field.ident.0, ty, None);
+                            pass_uniforms.push(field.ident.0, ty, None, LiveOrLocal::Local);
                         }
                         id!(user) => {
-                            user_uniforms.push(field.ident.0, ty, None);
+                            user_uniforms.push(field.ident.0, ty, None, LiveOrLocal::Live);
                         }
                         _ => ()
                     }
@@ -476,7 +473,7 @@ impl CxDrawShaderMapping {
         
         // ok now the live uniforms
         for (value_node_ptr, ty) in draw_shader_def.all_live_refs.borrow().iter() {
-            live_uniforms.push(Id(0), ty.clone(), Some(*value_node_ptr));
+            live_uniforms.push(Id(0), ty.clone(), Some(*value_node_ptr), LiveOrLocal::Live);
         }
         
         CxDrawShaderMapping {
