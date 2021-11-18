@@ -163,7 +163,7 @@ impl Animator {
                     break;
                 }
                 let next_kf = if nodes[node_index].value.is_value_type() { // we hit a bare value node
-                    if let Some(prev_kf) = &prev_kf {
+                    if prev_kf.is_some() {
                         KeyFrame {
                             ease: Ease::Linear,
                             time: 1.0,

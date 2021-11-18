@@ -20,15 +20,15 @@ pub fn derive_live_animate_impl(input: TokenStream) -> TokenStream {
             else if let Some(fields) = parser.eat_all_struct_fields() {
                 fields
             }
-            else{
+            else {
                 return parser.unexpected();
             };
             
             let animator = fields.iter().find( | field | field.name == "animator");
             
-            if !animator.is_some(){
-               // no can do
-               return error("Cannot generate LiveAnimate without animator");
+            if !animator.is_some() {
+                // no can do
+                return error("Cannot generate LiveAnimate without animator");
             }
             
             tb.add("impl").stream(generic.clone());
@@ -44,7 +44,7 @@ pub fn derive_live_animate_impl(input: TokenStream) -> TokenStream {
             tb.add("            let state = self.animator.swap_out_state();");
             tb.add("            self.apply(cx, ApplyFrom::Animate, 0, &state);");
             tb.add("            self.animator.swap_in_state(state);");
-            tb.add("            cx.redraw_child_area(self.bg.draw_call_vars.area);");
+            //            tb.add("            cx.redraw_child_area(self.bg.draw_call_vars.area);");
             tb.add("        }");
             tb.add("    }");
             tb.add("}");
@@ -57,7 +57,7 @@ pub fn derive_live_animate_impl(input: TokenStream) -> TokenStream {
             let generic = parser.eat_generic();
             let where_clause = parser.eat_where_clause(None);
             tb.add("impl").stream(generic.clone());
-                tb.add("LiveComponentHooks for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
+            tb.add("LiveComponentHooks for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
             return tb.end();
         }
     }
@@ -81,7 +81,7 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
             else if let Some(fields) = parser.eat_all_struct_fields() {
                 fields
             }
-            else{
+            else {
                 return parser.unexpected();
             };
             
@@ -89,24 +89,24 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
             let draw_call_vars = fields.iter().find( | field | field.name == "draw_call_vars");
             let animator = fields.iter().find( | field | field.name == "animator");
             
-            if deref_target.is_some() && draw_call_vars.is_some() || 
-               deref_target.is_some() && animator.is_some() ||
-               animator.is_some() && draw_call_vars.is_some(){
-                   // no can do
-                   return error("Cannot generate LiveComponentHooks with more than one of: deref_target/draw_call_vars/animator");
-               }
+            if deref_target.is_some() && draw_call_vars.is_some() ||
+            deref_target.is_some() && animator.is_some() ||
+            animator.is_some() && draw_call_vars.is_some() {
+                // no can do
+                return error("Cannot generate LiveComponentHooks with more than one of: deref_target/draw_call_vars/animator");
+            }
             
-            if let Some(_) = draw_call_vars{
+            if let Some(_) = draw_call_vars {
                 tb.add("impl").stream(generic.clone());
                 tb.add("LiveComponentHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
                 tb.add("    fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> usize {");
                 tb.add("        self.draw_call_vars.apply_value(cx, apply_from, index, nodes)");
                 tb.add("    }");
                 tb.add("    fn before_apply(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
-                tb.add("        self.draw_call_vars.init_shader(cx, apply_from, index, nodes, &self.geometry);");
+                tb.add("        self.draw_call_vars.before_apply(cx, apply_from, index, nodes, &self.geometry);");
                 tb.add("    }");
-                tb.add("    fn after_apply(&mut self, cx: &mut Cx, _apply_from:ApplyFrom, _index: usize, _nodes: &[LiveNode]) {");
-                tb.add("        self.draw_call_vars.init_slicer(cx);");
+                tb.add("    fn after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]) {");
+                tb.add("        self.draw_call_vars.after_apply(cx, apply_from, index, nodes);");
                 tb.add("    }");
                 tb.add("}");
             }
@@ -137,7 +137,7 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
                 tb.add("    }");
                 tb.add("}");
             }
-            else{
+            else {
                 tb.add("impl").stream(generic.clone());
                 tb.add("LiveComponentHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
             }
@@ -150,7 +150,7 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
             let generic = parser.eat_generic();
             let where_clause = parser.eat_where_clause(None);
             tb.add("impl").stream(generic.clone());
-                tb.add("LiveComponentHooks for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
+            tb.add("LiveComponentHooks for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
             return tb.end();
         }
     }
@@ -174,15 +174,15 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             else if let Some(fields) = parser.eat_all_struct_fields() {
                 fields
             }
-            else{
+            else {
                 return parser.unexpected();
             };
             
             let deref_target = fields.iter().find( | field | field.name == "deref_target");
-
+            
             // alright now. we have a field
             for field in &fields {
-                if field.attrs.len() != 1 || field.attrs[0].name != "live" && field.attrs[0].name != "local"  && field.attrs[0].name != "hidden" {
+                if field.attrs.len() != 1 || field.attrs[0].name != "live" && field.attrs[0].name != "local" && field.attrs[0].name != "hidden" {
                     return error(&format!("Field {} does not have a live, local or hidden attribute", field.name));
                 }
             }
@@ -197,23 +197,23 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 
                 tb.add("std::ops::DerefMut for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
                 tb.add("    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.deref_target}");
-                tb.add("}"); 
+                tb.add("}");
             }
-
+            
             tb.add("impl").stream(generic.clone());
             tb.add("LiveComponentValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             
             tb.add("    fn apply_value(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> usize{");
             tb.add("        match nodes[index].id {");
-            for field in &fields{
-                if field.attrs[0].name == "live"{
+            for field in &fields {
+                if field.attrs[0].name == "live" {
                     tb.add("    Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
                 }
             }
-            if deref_target.is_some(){
+            if deref_target.is_some() {
                 tb.add("        _=> self.deref_target.apply_value(cx, apply_from, index, nodes)");
             }
-            else{
+            else {
                 tb.add("        _=> self.apply_value_unknown(cx, apply_from, index, nodes)");
             }
             tb.add("        }");
@@ -256,16 +256,16 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("            }");
             
             tb.add("            fn component_fields(&self, fields: &mut Vec<LiveField>) {");
-            for field in &fields{
+            for field in &fields {
                 let attr = &field.attrs[0];
-                if attr.name == "live" || attr.name  == "local"{
+                if attr.name == "live" || attr.name == "local" {
                     tb.add("fields.push(LiveField{id:Id::from_str(").string(&field.name).add(").unwrap(),");
                     tb.add("live_type:Some(").stream(Some(field.ty.clone())).add("::live_type()),");
-                    if attr.name == "live"{
-                        tb.add("kind: LiveFieldKind::Live");
+                    if attr.name == "live" {
+                        tb.add("live_or_local: LiveOrLocal::Live");
                     }
-                    else{
-                        tb.add("kind: LiveFieldKind::Local");
+                    else {
+                        tb.add("live_or_local: LiveOrLocal::Local");
                     }
                     tb.add("});");
                 }
@@ -275,22 +275,22 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        }");
             tb.add("        cx.register_factory(").ident(&struct_name).add("::live_type(), Box::new(Factory()));");
             tb.add("    }");
-
+            
             tb.add("    fn new_apply(cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> Self {");
             tb.add("        let mut ret = Self::new(cx);");
             tb.add("        ret.apply(cx, apply_from, index, nodes);");
             tb.add("        ret");
             tb.add("    }");
-
+            
             tb.add("    fn new_from_doc(cx: &mut Cx, live_doc_nodes:LiveDocNodes) -> Self {");
             tb.add("        let mut ret = Self::new(cx);");
             tb.add("        ret.apply(cx, ApplyFrom::NewFromDoc{file_id:live_doc_nodes.file_id}, live_doc_nodes.index, live_doc_nodes.nodes);");
             tb.add("        ret");
             tb.add("    }");
-
+            
             tb.add("    fn new(cx: &mut Cx) -> Self {");
             tb.add("        let mut ret = Self {");
-            for field in &fields{
+            for field in &fields {
                 let attr = &field.attrs[0];
                 tb.ident(&field.name).add(":");
                 if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
@@ -301,7 +301,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                         tb.add("Default::default()");
                     }
                 }
-                else{
+                else {
                     tb.stream(attr.args.clone());
                 }
                 tb.add(",");
@@ -354,12 +354,12 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 let attributes = parser.eat_attributes();
                 // check if we have a default attribute
                 if let Some(name) = parser.eat_any_ident() {
-                    if attributes.len() != 1{
+                    if attributes.len() != 1 {
                         return error(&format!("Field {} does not have a live or default attribute", name));
                     }
-                    if attributes[0].name == "default"{
-                        if default.is_some(){
-                            return error(&format!("Enum can only have a single field marked default"));                            
+                    if attributes[0].name == "default" {
+                        if default.is_some() {
+                            return error(&format!("Enum can only have a single field marked default"));
                         }
                         default = Some(items.len())
                     }
@@ -380,13 +380,13 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 parser.eat_punct_alone(',');
             }
             
-            if default.is_none(){
+            if default.is_none() {
                 return error(&format!("Enum needs atleast one field marked default"));
             }
             
             tb.add("impl").stream(generic.clone());
             tb.add("LiveNew for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-
+            
             tb.add("    fn new(cx:&mut Cx) -> Self { let mut ret = ");
             items[default.unwrap()].gen_new(&mut tb);
             tb.add("    ;ret.after_new(cx);ret");
@@ -401,7 +401,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        ret.apply(cx, ApplyFrom::NewFromDoc{file_id:live_doc_nodes.file_id}, live_doc_nodes.index, live_doc_nodes.nodes);");
             tb.add("        ret");
             tb.add("    }");
-
+            
             tb.add("    fn live_type() -> LiveType {");
             tb.add("        LiveType(std::any::TypeId::of::<").ident(&enum_name).add(">())");
             tb.add("    }");
@@ -425,15 +425,15 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             
             tb.add("impl").stream(generic.clone());
             tb.add("LiveComponent for").ident(&enum_name).stream(generic).stream(where_clause).add("{");
-
+            
             tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index:usize, nodes: &[LiveNode]) -> usize {");
             tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
             tb.add("        let mut index = start_index;");
             tb.add("        match &nodes[start_index].value{");
             tb.add("            LiveValue::BareEnum{base,variant}=>{");
             tb.add("                match variant{");
-            for item in &items{
-                if let EnumKind::Bare = item.kind{
+            for item in &items {
+                if let EnumKind::Bare = item.kind {
                     tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>{index += 1;*self = Self::").ident(&item.name).add("},");
                 }
             }
@@ -443,31 +443,31 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("                    }");
             tb.add("                }");
             tb.add("            },");
-
+            
             tb.add("            LiveValue::NamedEnum{base, variant}=>{");
             tb.add("                match variant{");
-            for item in &items{
-                if let EnumKind::Named(fields) = &item.kind{
+            for item in &items {
+                if let EnumKind::Named(fields) = &item.kind {
                     tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>{");
                     tb.add("                if let Self::").ident(&item.name).add("{..} = self{}");
                     tb.add("                else{*self = ");
                     item.gen_new(&mut tb);
                     tb.add("                }");
                     tb.add("                if let Self::").ident(&item.name).add("{");
-                    for field in fields{
-                        tb.ident(&field.name).add(":").ident(&format!("prefix_{}",field.name)).add(",");
+                    for field in fields {
+                        tb.ident(&field.name).add(":").ident(&format!("prefix_{}", field.name)).add(",");
                     }
                     tb.add("                } = self {");
                     tb.add("                    index += 1;"); // skip the class
                     tb.add("                    loop{");
                     tb.add("                        if nodes[index].value.is_close(){");
-                    tb.add("                            index += 1;"); 
+                    tb.add("                            index += 1;");
                     tb.add("                            break;");
                     tb.add("                        }");
                     tb.add("                        match nodes[index].id{");
-                    for field in fields{
+                    for field in fields {
                         tb.add("                        Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>{index = (*");
-                        tb.ident(&format!("prefix_{}",field.name)).add(").apply(cx, apply_from, index, nodes);},");
+                        tb.ident(&format!("prefix_{}", field.name)).add(").apply(cx, apply_from, index, nodes);},");
                     }
                     tb.add("                            _=>{");
                     tb.add("                                println!(").string("Enum {} cannot find named struct {} property {}").add(", ").string(&enum_name).add(",nodes[start_index].id, nodes[index].id);");
@@ -488,8 +488,8 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("            LiveValue::TupleEnum{base, variant}=>{");
             tb.add("                match variant{");
             
-            for item in &items{
-                if let EnumKind::Tuple(args) = &item.kind{
+            for item in &items {
+                if let EnumKind::Tuple(args) = &item.kind {
                     tb.add("            Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add(")=>{");
                     
                     tb.add("                if let Self::").ident(&item.name).add("{..} = self{}");
@@ -498,20 +498,20 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                     tb.add("                }");
                     
                     tb.add("                if let Self::").ident(&item.name).add("(");
-                    for i in 0..args.len(){
-                        tb.ident(&format!("var{}",i)).add(",");
+                    for i in 0..args.len() {
+                        tb.ident(&format!("var{}", i)).add(",");
                     }
                     tb.add("                ) = self{");
                     tb.add("                    index += 1;"); // skip the class
                     tb.add("                    loop{");
                     tb.add("                        if nodes[index].value.is_close(){");
-                    tb.add("                            index += 1;"); 
+                    tb.add("                            index += 1;");
                     tb.add("                            break;");
                     tb.add("                        }");
                     tb.add("                        let arg = index - start_index - 1;");
                     tb.add("                        match arg{");
-                    for i in 0..args.len(){
-                        tb.add("                        ").unsuf_usize(i).add("=>{index = (*").ident(&format!("var{}",i)).add(").apply(cx, apply_from, index, nodes); },");
+                    for i in 0..args.len() {
+                        tb.add("                        ").unsuf_usize(i).add("=>{index = (*").ident(&format!("var{}", i)).add(").apply(cx, apply_from, index, nodes); },");
                     }
                     tb.add("                            _=>{");
                     tb.add("                                println!(").string("Enum {} cannot find tuple struct {} arg {}").add(", ").string(&enum_name).add(", nodes[start_index].id, arg);");
@@ -538,7 +538,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("    }");
             
             tb.add("}");
-
+            
             //tb.eprint();
             return tb.end();
         }
