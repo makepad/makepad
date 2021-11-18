@@ -726,12 +726,16 @@ macro_rules!impl_live_node_slice {
                     }
                     index += 1;
                 }
+                if stack_depth != 0{
+                    writeln!(f, "[[ERROR Stackdepth not 0 at end {}]]", stack_depth).unwrap()
+                }
                 f
             }
         }
     }
 }
 impl_live_node_slice!(&[LiveNode]);
+impl_live_node_slice!(&mut [LiveNode]);
 impl_live_node_slice!(Vec<LiveNode>);
 
 impl LiveNodeVec for Vec<LiveNode> {
