@@ -112,10 +112,8 @@ pub struct Cx {
     pub repaint_id: u64,
     pub event_id: u64,
     pub timer_id: u64,
-    pub animator_id: u64,
     pub next_frame_id: u64,
     pub signal_id: usize,
-    pub live_update_id: u64,
     pub anim_time: f64,
     
     pub prev_key_focus: Area,
@@ -266,8 +264,6 @@ impl Default for Cx {
             repaint_id: 1,
             timer_id: 1,
             signal_id: 1,
-            live_update_id: 1,
-            animator_id: 1,
             next_frame_id: 1,
             anim_time: 0.0,
             
