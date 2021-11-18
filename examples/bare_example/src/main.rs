@@ -39,10 +39,10 @@ impl BareExampleApp {
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {
-        let mut new = Self::new(cx);
-        let (file_id, nodes) = cx.clone_from_module_path(&module_path!()).unwrap();
-        new.apply_index(cx, ApplyFrom::LiveNew{file_id}, 0, &nodes);
-        new
+        Self::new_from_doc(
+            cx,
+            cx.live_registry.clone().borrow().module_path_id_to_doc(&module_path!(), Id(0)).unwrap()
+        )
     }
     
     pub fn myui_button_clicked(&mut self, _cx: &mut Cx) {
@@ -51,7 +51,7 @@ impl BareExampleApp {
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         
         self.normal_button.handle_normal_button(cx, event);
-
+        
         match event {
             Event::Construct => {
             },
@@ -70,12 +70,12 @@ impl BareExampleApp {
             self.draw_quad.draw_quad_abs(cx, Rect {pos: Vec2 {x: 30., y: 30.}, size: Vec2 {x: 100., y: 100.}});
             self.draw_text.draw_text_abs(cx, Vec2 {x: 60., y: 60.}, "HELLO WORLD");
             
-            self.normal_button.apply(cx, live!{
-                text:{color: #f00}
-                Button{}
+            self.normal_button.apply_draw(cx, live!{
+                label: "DSL",
+                text: {color: #f00}
             });
-            self.normal_button.draw_normal_button(cx, "Hello in red");
-
+            //self.normal_button.draw_normal_button(cx, "Hello in red");
+            
             self.main_view.end_view(cx);
         }
         

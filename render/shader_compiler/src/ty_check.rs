@@ -1,6 +1,7 @@
 #![allow(unused_variables)]
 use crate::shaderast::*;
 use crate::shaderast::Scopes;
+use makepad_live_compiler::LiveRegistry;
 use makepad_live_compiler::LiveError;
 use makepad_live_compiler::LiveErrorOrigin;
 use makepad_live_compiler::live_error_origin;
@@ -21,6 +22,7 @@ use crate::shaderast::ScopeSymKind;
 #[derive(Clone)]
 pub struct TyChecker<'a> {
     pub scopes: &'a Scopes,
+    pub live_registry: &'a LiveRegistry, 
     pub shader_registry: &'a ShaderRegistry
 }
 
@@ -600,7 +602,7 @@ impl<'a> TyChecker<'a> {
            Err(err)=> Err(LiveError {
                 origin: live_error_origin!(),
                 span,
-                message: format!("function: `{}`: {}", self.shader_registry.fn_ident_from_ptr(fn_ptr), err.message)
+                message: format!("function: `{}`: {}", self.shader_registry.fn_ident_from_ptr(self.live_registry, fn_ptr), err.message)
             }),
             Ok(closure_args)=>{
                 if closure_args.len()>0{
@@ -609,7 +611,7 @@ impl<'a> TyChecker<'a> {
                         return Err(LiveError {
                             origin: live_error_origin!(),
                             span,
-                            message: format!("Closures not supported here {}", self.shader_registry.fn_ident_from_ptr(fn_ptr))
+                            message: format!("Closures not supported here {}", self.shader_registry.fn_ident_from_ptr(self.live_registry, fn_ptr))
                         });
                     }
                     closure_site_index.unwrap().set(Some(ci.len()));

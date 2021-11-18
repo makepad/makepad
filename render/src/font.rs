@@ -114,7 +114,7 @@ pub struct Font {
 }
 
 impl LiveComponentHooks for Font {
-    fn after_apply_index(&mut self, cx: &mut Cx, _apply_from:ApplyFrom, _index: usize, _nodes:&[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         self.font_id = Some(cx.get_font_by_path(&self.path));
     }
 }
@@ -313,11 +313,11 @@ impl CxDrawFontAtlas {
         
         let atlas_texture = Texture::new(cx);
         cx.fonts_atlas.texture = atlas_texture;
-        
-        let mut draw_trapezoid_text = DrawTrapezoidText::new(cx);
-        
-        let (file_id,nodes) = cx.clone_from_module_path(&module_path!()).unwrap();
-        draw_trapezoid_text.apply_index(cx, ApplyFrom::LiveNew{file_id}, nodes.child_by_name(0, id!(DrawTrapezoidText)).unwrap(), &nodes);
+
+        let draw_trapezoid_text = DrawTrapezoidText::new_from_doc(
+            cx,
+            cx.live_registry.clone().borrow().module_path_id_to_doc(&module_path!(), id!(DrawTrapezoidText)).unwrap()
+        );
         
         // ok we need to initialize drawtrapezoidtext from a live pointer.
         Self {
@@ -335,7 +335,7 @@ impl CxDrawFontAtlas {
         
         // we need to start a pass that just uses the texture
         if cx.fonts_atlas.atlas_todo.len()>0 {
-
+            
             self.atlas_pass.begin_pass(cx);
             self.atlas_pass.set_size(cx, cx.fonts_atlas.texture_size);
             let clear = if cx.fonts_atlas.clear_buffer {

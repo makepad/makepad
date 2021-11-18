@@ -38,6 +38,12 @@ pub struct LiveRegistry {
     pub expanded: Vec<LiveDocument >,
 }
 
+pub struct LiveDocNodes<'a>{
+    pub nodes:&'a [LiveNode],
+    pub file_id:FileId,
+    pub index:usize
+}
+
 impl LiveRegistry {
     pub fn ptr_to_node(&self, live_ptr: LivePtr) -> &LiveNode {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
@@ -66,16 +72,34 @@ impl LiveRegistry {
         &self.expanded[token_id.file_id().to_index()]
     }
     
-    pub fn clone_from_module_path(&self, module_path: &str) -> Option<(FileId,Vec<LiveNode>)> {
+    pub fn module_path_id_to_doc(&self, module_path: &str, id:Id) -> Option<LiveDocNodes> {
         if let Some(file_id) = self.module_path_to_file_id.get(&ModulePath::from_str(module_path).unwrap()) {
             let doc = &self.expanded[file_id.to_index()];
-            let mut out = Vec::new();
-            doc.nodes.clone_child(0, &mut out);
-            return Some((*file_id, out));
+            if id != Id::empty(){
+                if let Ok(index) = doc.nodes.child_by_name(0,id){
+                    return Some(LiveDocNodes{nodes:&doc.nodes, file_id:*file_id, index});
+                }
+                else{
+                    return None
+                }
+            }
+            else{
+                return Some(LiveDocNodes{nodes:&doc.nodes, file_id:*file_id, index:0});
+            }
         }
         None
     }
+
     
+    /*
+    pub fn module_path_to_file_id_nodes(&self, module_path: &str) -> Option<(FileId,&[LiveNode])> {
+        if let Some(file_id) = self.module_path_to_file_id.get(&ModulePath::from_str(module_path).unwrap()) {
+            let doc = &self.expanded[file_id.to_index()];
+            return Some((*file_id, &doc.nodes));
+        }
+        None
+    }*/
+    /*
     pub fn clone_from_ptr_name(&self, live_ptr: LivePtr, name:Id, out_nodes:&mut Vec<LiveNode>) -> bool {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
         if let Ok(index) = doc.nodes.child_by_name(live_ptr.local_ptr.0, name){
@@ -84,7 +108,7 @@ impl LiveRegistry {
         }
         false
     }
-    
+    */
     pub fn live_error_to_live_file_error(&self, live_error: LiveError) -> LiveFileError {
         let live_file = &self.live_files[live_error.span.file_id().to_index()];
         live_error.to_live_file_error(&live_file.file, &live_file.source, live_file.line_offset)
