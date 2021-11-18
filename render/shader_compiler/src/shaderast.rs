@@ -99,6 +99,13 @@ pub enum DrawShaderInputType {
     ShaderResourceId(ShaderResourceId)
 }*/
 
+#[derive(Copy, Clone)]
+pub enum LiveOrLocal {
+    Local,
+    Live,
+}
+
+
 #[derive(Clone)]
 pub enum DrawShaderFieldKind {
     Geometry {
@@ -107,6 +114,7 @@ pub enum DrawShaderFieldKind {
     },
     Instance {
         is_used_in_pixel_shader: Cell<bool >,
+        live_or_local: LiveOrLocal,
         var_def_ptr: Option<VarDefPtr>,
         //input_type: DrawShaderInputType,
     },
@@ -782,10 +790,11 @@ impl DrawShaderDef {
         )
     }
     
-    pub fn add_instance(&mut self, id:Id, ty:Ty, span:Span){
+    pub fn add_instance(&mut self, id:Id, ty:Ty, span:Span, live_or_local:LiveOrLocal){
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Instance {
+                    live_or_local,
                     is_used_in_pixel_shader: Cell::new(false),
                     var_def_ptr: None
                 },
