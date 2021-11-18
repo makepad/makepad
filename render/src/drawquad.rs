@@ -43,8 +43,8 @@ use crate::cx::*;
 pub struct DrawQuad {
     #[live()] pub geometry: GeometryQuad2D,
     #[local()] pub draw_call_vars: DrawCallVars,
-    #[live()] pub rect_pos: Vec2,
-    #[live()] pub rect_size: Vec2,
+    #[local()] pub rect_pos: Vec2,
+    #[local()] pub rect_size: Vec2,
     #[live(1.0)] pub draw_depth: f32,
 }
 
@@ -92,81 +92,3 @@ impl DrawQuad {
         }
     }
 }
-
-/*
-impl LiveUpdateValue for DrawQuad {
-    fn live_update_value(&mut self, cx: &mut Cx, id: Id, ptr: LivePtr) {
-        match id {
-            id!(geometry) => self.geometry.live_update(cx, ptr),
-            id!(rect_pos) => self.rect_pos.live_update(cx, ptr),
-            id!(rect_size) => self.rect_size.live_update(cx, ptr),
-            id!(draw_depth) => self.draw_depth.live_update(cx, ptr),
-            _ => self.live_update_value_unknown(cx, id, ptr)
-        }
-    }
-}*/
-/*
-// how could we compile this away
-impl LiveNew for DrawQuad {
-    fn live_new(cx: &mut Cx) -> Self {
-        Self {
-            area: Area::Empty,
-            
-            geometry: LiveNew::live_new(cx),
-            
-            draw_call_vars: DrawCallVars::default(),
-            rect_pos: Vec2::all(0.0),
-            rect_size: Vec2::all(0.0),
-            draw_depth: 1.0,
-        }
-    }
-    
-    fn live_type() -> LiveType {
-        LiveType(std::any::TypeId::of::<DrawQuad>())
-    }
-    
-    fn live_register(cx: &mut Cx) {
-        cx.register_live_body(live_body());
-        struct Factory();
-        impl LiveFactory for Factory {
-            fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> {
-                Box::new(DrawQuad ::live_new(cx))
-            }
-            
-            fn live_fields(&self, fields: &mut Vec<LiveField>) {
-                fields.push(LiveField {id: Id::from_str("geometry").unwrap(), live_type: GeometryQuad2D::live_type()});
-                fields.push(LiveField {id: Id::from_str("rect_pos").unwrap(), live_type: Vec2::live_type()});
-                fields.push(LiveField {id: Id::from_str("rect_size").unwrap(), live_type: Vec2::live_type()});
-                fields.push(LiveField {id: Id::from_str("draw_depth").unwrap(), live_type: f32::live_type()});
-            }
-            
-            fn live_type(&self) -> LiveType {
-                DrawQuad::live_type()
-            }
-        }
-        cx.register_factory(DrawQuad::live_type(), Box::new(Factory()));
-    }
-}
-
-impl LiveUpdate for DrawQuad {
-    fn live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {
-        self.before_live_update(cx, live_ptr);
-        // how do we verify this?
-        if let Some(mut iter) = cx.shader_registry.live_registry.live_class_iterator(live_ptr) {
-            while let Some((id, live_ptr)) = iter.next(&cx.shader_registry.live_registry) {
-                if id == id!(rust_type) && !cx.verify_type_signature(live_ptr, Self::live_type()) {
-                    // give off an error/warning somehow!
-                    return;
-                }
-                self.live_update_value(cx, id, live_ptr)
-            }
-        }
-        self.after_live_update(cx, live_ptr);
-    }
-    
-    fn _live_type(&self) -> LiveType {
-        Self::live_type()
-    }
-}
-*/
-
