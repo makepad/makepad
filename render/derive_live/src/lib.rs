@@ -32,9 +32,19 @@ pub fn live(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
+pub fn live_array(input: TokenStream) -> TokenStream {
+    live_array_impl(input)
+}
+
+#[proc_macro]
+pub fn live_bare(input: TokenStream) -> TokenStream {
+    live_bare_impl(input)
+}
+
+
+#[proc_macro]
 pub fn live_register(input: TokenStream) -> TokenStream {
     live_register_impl(input)
-
 }
 
 

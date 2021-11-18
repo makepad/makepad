@@ -70,6 +70,14 @@ impl Vec2 {
         Vec2 {x: x, y: x}
     }
     
+    pub fn from_lerp(a: Vec2, b: Vec2, f: f32) -> Vec2 {
+        let nf = 1.0 - f;
+        return Vec2{
+            x: nf * a.x + f * b.x,
+            y: nf * a.y + f * b.y,
+        };
+    }
+    
     pub fn distance(&self, other: &Vec2) -> f32 {
         let dx = self.x - other.x;
         let dy = self.y - other.y;
@@ -241,7 +249,7 @@ impl Vec4 {
         self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w
     }
     
-    pub fn mix(a: Vec4, b: Vec4, f: f32) -> Vec4 {
+    pub fn from_lerp(a: Vec4, b: Vec4, f: f32) -> Vec4 {
         let nf = 1.0 - f;
         return Vec4 {
             x: nf * a.x + f * b.x,

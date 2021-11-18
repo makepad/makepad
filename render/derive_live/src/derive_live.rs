@@ -33,10 +33,10 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
                 tb.add("    fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> usize {");
                 tb.add("        self.draw_call_vars.apply_value(cx, apply_from, index, nodes)");
                 tb.add("    }");
-                tb.add("    fn before_apply_index(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
+                tb.add("    fn before_apply(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
                 tb.add("        self.draw_call_vars.init_shader(cx, apply_from, index, nodes, &self.geometry);");
                 tb.add("    }");
-                tb.add("    fn after_apply_index(&mut self, cx: &mut Cx, _apply_from:ApplyFrom, _index: usize, _nodes: &[LiveNode]) {");
+                tb.add("    fn after_apply(&mut self, cx: &mut Cx, _apply_from:ApplyFrom, _index: usize, _nodes: &[LiveNode]) {");
                 tb.add("        self.draw_call_vars.init_slicer(cx);");
                 tb.add("    }");
                 tb.add("}");
@@ -47,11 +47,11 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
                 tb.add("    fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> usize{");
                 tb.add("        self.deref_target.apply_value_unknown(cx, apply_from, index, nodes)");
                 tb.add("    }");
-                tb.add("    fn before_apply_index(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
-                tb.add("        self.deref_target.before_apply_index(cx, apply_from, index, nodes);");
+                tb.add("    fn before_apply(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
+                tb.add("        self.deref_target.before_apply(cx, apply_from, index, nodes);");
                 tb.add("    }");
-                tb.add("    fn after_apply_index(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]) {");
-                tb.add("        self.deref_target.after_apply_index(cx, apply_from, index, nodes);");
+                tb.add("    fn after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]) {");
+                tb.add("        self.deref_target.after_apply(cx, apply_from, index, nodes);");
                 tb.add("    }");
                 tb.add("}");
             }
@@ -125,7 +125,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        match nodes[index].id {");
             for field in &fields{
                 if field.attrs[0].name == "live"{
-                    tb.add("    Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".apply_index(cx, apply_from, index, nodes),");
+                    tb.add("    Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
                 }
             }
             if deref_target.is_some(){
@@ -143,9 +143,9 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             
             tb.add("impl").stream(generic.clone());
             tb.add("LiveComponent for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn apply_index(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index: usize, nodes: &[LiveNode])->usize {");
+            tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index: usize, nodes: &[LiveNode])->usize {");
             //tb.add("       println!(\"{}\", nodes.to_string(start_index,1));");
-            tb.add("        self.before_apply_index(cx, apply_from, start_index, nodes);");
+            tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
             tb.add("        let mut index = start_index + 1;"); // skip the class
             tb.add("        loop{");
             tb.add("            if nodes[index].value.is_close(){");
@@ -154,7 +154,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("            }");
             tb.add("            index = self.apply_value(cx, apply_from, index, nodes);");
             tb.add("        }");
-            tb.add("        self.after_apply_index(cx, apply_from, start_index, nodes);");
+            tb.add("        self.after_apply(cx, apply_from, start_index, nodes);");
             tb.add("        return index;");
             tb.add("    }");
             tb.add("}");
@@ -193,6 +193,19 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        }");
             tb.add("        cx.register_factory(").ident(&struct_name).add("::live_type(), Box::new(Factory()));");
             tb.add("    }");
+
+            tb.add("    fn new_apply(cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> Self {");
+            tb.add("        let mut ret = Self::new(cx);");
+            tb.add("        ret.apply(cx, apply_from, index, nodes);");
+            tb.add("        ret");
+            tb.add("    }");
+
+            tb.add("    fn new_from_doc(cx: &mut Cx, live_doc_nodes:LiveDocNodes) -> Self {");
+            tb.add("        let mut ret = Self::new(cx);");
+            tb.add("        ret.apply(cx, ApplyFrom::NewFromDoc{file_id:live_doc_nodes.file_id}, live_doc_nodes.index, live_doc_nodes.nodes);");
+            tb.add("        ret");
+            tb.add("    }");
+
             tb.add("    fn new(cx: &mut Cx) -> Self {");
             tb.add("        let mut ret = Self {");
             for field in &fields{
@@ -296,6 +309,17 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             items[default.unwrap()].gen_new(&mut tb);
             tb.add("    ;ret.after_new(cx);ret");
             tb.add("    }");
+            tb.add("    fn new_apply(cx: &mut Cx, apply_from: ApplyFrom, index:usize, nodes:&[LiveNode]) -> Self {");
+            tb.add("        let mut ret = Self::new(cx);");
+            tb.add("        ret.apply(cx, apply_from, index, nodes);");
+            tb.add("        ret");
+            tb.add("    }");
+            tb.add("    fn new_from_doc(cx: &mut Cx, live_doc_nodes:LiveDocNodes) -> Self {");
+            tb.add("        let mut ret = Self::new(cx);");
+            tb.add("        ret.apply(cx, ApplyFrom::NewFromDoc{file_id:live_doc_nodes.file_id}, live_doc_nodes.index, live_doc_nodes.nodes);");
+            tb.add("        ret");
+            tb.add("    }");
+
             tb.add("    fn live_type() -> LiveType {");
             tb.add("        LiveType(std::any::TypeId::of::<").ident(&enum_name).add(">())");
             tb.add("    }");
@@ -320,8 +344,8 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("impl").stream(generic.clone());
             tb.add("LiveComponent for").ident(&enum_name).stream(generic).stream(where_clause).add("{");
 
-            tb.add("    fn apply_index(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index:usize, nodes: &[LiveNode]) -> usize {");
-            tb.add("        self.before_apply_index(cx, apply_from, start_index, nodes);");
+            tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index:usize, nodes: &[LiveNode]) -> usize {");
+            tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
             tb.add("        let mut index = start_index;");
             tb.add("        match &nodes[start_index].value{");
             tb.add("            LiveValue::BareEnum{base,variant}=>{");
@@ -361,7 +385,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                     tb.add("                        match nodes[index].id{");
                     for field in fields{
                         tb.add("                        Id(").suf_u64(Id::from_str(&field.name).unwrap().0).add(")=>{index = (*");
-                        tb.ident(&format!("prefix_{}",field.name)).add(").apply_index(cx, apply_from, index, nodes);},");
+                        tb.ident(&format!("prefix_{}",field.name)).add(").apply(cx, apply_from, index, nodes);},");
                     }
                     tb.add("                            _=>{");
                     tb.add("                                println!(").string("Enum {} cannot find named struct {} property {}").add(", ").string(&enum_name).add(",nodes[start_index].id, nodes[index].id);");
@@ -405,7 +429,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                     tb.add("                        let arg = index - start_index - 1;");
                     tb.add("                        match arg{");
                     for i in 0..args.len(){
-                        tb.add("                        ").unsuf_usize(i).add("=>{index = (*").ident(&format!("var{}",i)).add(").apply_index(cx, apply_from, index, nodes); },");
+                        tb.add("                        ").unsuf_usize(i).add("=>{index = (*").ident(&format!("var{}",i)).add(").apply(cx, apply_from, index, nodes); },");
                     }
                     tb.add("                            _=>{");
                     tb.add("                                println!(").string("Enum {} cannot find tuple struct {} arg {}").add(", ").string(&enum_name).add(", nodes[start_index].id, arg);");
@@ -427,7 +451,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("               index = nodes.skip_node(index);");
             tb.add("            }");
             tb.add("        }");
-            tb.add("        self.after_apply_index(cx, apply_from, start_index, nodes);");
+            tb.add("        self.after_apply(cx, apply_from, start_index, nodes);");
             tb.add("        index");
             tb.add("    }");
             

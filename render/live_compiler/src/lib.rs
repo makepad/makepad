@@ -20,6 +20,7 @@ pub use crate::id::LivePtr;
 pub use crate::id::LocalPtr;
 pub use crate::id::FileId;
 pub use crate::liveregistry::LiveRegistry;
+pub use crate::liveregistry::LiveDocNodes;
 pub use crate::id::ModulePath;
 pub use crate::livenode::LiveValue;
 pub use crate::livenode::LiveNode;

@@ -213,7 +213,7 @@ impl fmt::Debug for Id {
 impl fmt::Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if *self == Id::empty() {
-            write!(f, "<IdEmpty>")
+            write!(f, "0")
         }
         else {
             self.as_string( | string | {

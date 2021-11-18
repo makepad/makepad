@@ -9,6 +9,7 @@ use crate::shaderast::{Ty, TyExpr};
 use crate::ty_check::TyChecker;
 use crate::shaderregistry::ShaderRegistry;
 
+use makepad_live_compiler::LiveRegistry;
 use makepad_live_compiler::LiveError;
 use makepad_live_compiler::LiveErrorOrigin;
 use makepad_live_compiler::live_error_origin;
@@ -30,6 +31,7 @@ pub struct ShaderAnalyseOptions {
 pub struct StructAnalyser<'a> {
     pub struct_def: &'a StructDef,
     pub scopes: &'a mut Scopes,
+    pub live_registry: &'a LiveRegistry,
     pub shader_registry: &'a ShaderRegistry,
     pub options: ShaderAnalyseOptions,
 }
@@ -37,6 +39,7 @@ pub struct StructAnalyser<'a> {
 impl<'a> StructAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
+            live_registry: self.live_registry,
             shader_registry: self.shader_registry,
             scopes: self.scopes,
         }
@@ -58,10 +61,11 @@ impl<'a> StructAnalyser<'a> {
         for fn_node_ptr in &self.struct_def.methods {
             let fn_def = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
             FnDefAnalyser {
+                live_registry: self.live_registry,
+                shader_registry: self.shader_registry,
                 closure_return_ty: None,
                 fn_def,
                 scopes: &mut self.scopes,
-                shader_registry: self.shader_registry,
                 options: self.options,
                 is_inside_loop: false,
             }
@@ -106,6 +110,7 @@ impl<'a> StructAnalyser<'a> {
 pub struct DrawShaderAnalyser<'a> {
     pub draw_shader_def: &'a DrawShaderDef,
     pub scopes: &'a mut Scopes,
+    pub live_registry: &'a LiveRegistry,
     pub shader_registry: &'a ShaderRegistry,
     pub options: ShaderAnalyseOptions,
 }
@@ -113,6 +118,7 @@ pub struct DrawShaderAnalyser<'a> {
 impl<'a> DrawShaderAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
+            live_registry:self.live_registry,
             scopes: self.scopes,
             shader_registry: self.shader_registry,
         }
@@ -164,8 +170,9 @@ impl<'a> DrawShaderAnalyser<'a> {
         for fn_node_ptr in &self.draw_shader_def.methods {
             let fn_def = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
             FnDefAnalyser {
-                closure_return_ty: None,
+                live_registry: self.live_registry,
                 shader_registry: self.shader_registry,
+                closure_return_ty: None,
                 fn_def,
                 scopes: &mut self.scopes,
                 options: self.options,
@@ -521,6 +528,7 @@ impl<'a> DrawShaderAnalyser<'a> {
 pub struct ConstAnalyser<'a> {
     pub const_def: &'a ConstDef,
     pub scopes: &'a mut Scopes,
+    pub live_registry: &'a LiveRegistry,
     pub shader_registry: &'a ShaderRegistry,
     pub options: ShaderAnalyseOptions,
 }
@@ -528,6 +536,7 @@ pub struct ConstAnalyser<'a> {
 impl<'a> ConstAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
+            live_registry: self.live_registry,
             shader_registry: self.shader_registry,
             scopes: self.scopes,
         }
@@ -562,6 +571,7 @@ pub struct FnDefAnalyser<'a> {
     pub fn_def: &'a FnDef,
     pub closure_return_ty: Option<&'a RefCell<Option<Ty>>>,
     pub scopes: &'a mut Scopes,
+    pub live_registry: &'a LiveRegistry,
     pub shader_registry: &'a ShaderRegistry,
     pub options: ShaderAnalyseOptions,
     pub is_inside_loop: bool,
@@ -570,6 +580,7 @@ pub struct FnDefAnalyser<'a> {
 impl<'a> FnDefAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
+            live_registry: self.live_registry,
             shader_registry: self.shader_registry,
             scopes: self.scopes,
         }

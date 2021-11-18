@@ -87,13 +87,11 @@ impl DrawCallVars {
         }
         
         //This does not work. this shaderptr cannot reconstruct
-        let draw_shader_ptr =  match apply_from{
-            ApplyFrom::LiveNew{file_id,..} | ApplyFrom::LiveUpdate{file_id,..}=>{
-                DrawShaderPtr(LivePtr::from_index(file_id, index))
-            }
-            _=>{
-                return
-            }
+        let draw_shader_ptr =  if let Some(file_id) = apply_from.file_id(){
+           DrawShaderPtr(LivePtr::from_index(file_id, index))
+        }
+        else{
+            return
         };
         
         if let Some(draw_shader_id) = cx.draw_shader_ptr_to_id.get(&draw_shader_ptr) {
@@ -112,7 +110,7 @@ impl DrawCallVars {
             }
             // ok ! we have to compile it
             let live_factories = &cx.live_factories;
-            let result = cx.shader_registry.analyse_draw_shader(draw_shader_ptr, | span, id, live_type, draw_shader_def | {
+            let result = cx.shader_registry.analyse_draw_shader(&cx.live_registry.borrow(), draw_shader_ptr, | span, id, live_type, draw_shader_def | {
                 if id == id!(rust_type) {
                     fn recur_expand(after_draw_call_vars:&mut bool, live_type: LiveType, live_factories: &HashMap<LiveType, Box<dyn LiveFactory >>, draw_shader_def: &mut DrawShaderDef, span: Span) {
                         if let Some(lf) = live_factories.get(&live_type) {
@@ -167,7 +165,7 @@ impl DrawCallVars {
             match result {
                 Err(e) => {
                     // ok so. lets get the source for this file id
-                    let file = &cx.shader_registry.live_registry.live_files[e.span.file_id().to_index()];
+                    let file = &cx.live_registry.borrow().live_files[e.span.file_id().to_index()];
                     //println!("{}", file.source);
                     println!("Error {}", e.to_live_file_error(&file.file, &file.source, file.line_offset));
                 }
@@ -183,7 +181,7 @@ impl DrawCallVars {
                         const_table,
                         DRAW_SHADER_INPUT_PACKING
                     );
-                    mapping.update_live_uniforms(&cx.shader_registry.live_registry);
+                    mapping.update_live_uniforms(&cx.live_registry.borrow());
                     
                     cx.draw_shaders.push(CxDrawShader {
                         name: "todo".to_string(),
@@ -217,20 +215,20 @@ impl DrawCallVars {
                     match input.slots{
                         1=>{
                             let mut v:f32 = 0.0;
-                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            let index = v.apply(cx, apply_from, index, nodes);
                             self.user_uniforms[offset+0] = v;
                             return index;
                         }
                         2=>{
                             let mut v:Vec2 = Vec2::default();
-                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            let index = v.apply(cx, apply_from, index, nodes);
                             self.user_uniforms[offset+0] = v.x;
                             self.user_uniforms[offset+1] = v.y;
                             return index;
                         }
                         3=>{
                             let mut v:Vec3 = Vec3::default();
-                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            let index = v.apply(cx, apply_from, index, nodes);
                             self.user_uniforms[offset+0] = v.x;
                             self.user_uniforms[offset+1] = v.y;
                             self.user_uniforms[offset+2] = v.z;
@@ -238,7 +236,7 @@ impl DrawCallVars {
                         }
                         4=>{
                             let mut v:Vec4 = Vec4::default();
-                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            let index = v.apply(cx, apply_from, index, nodes);
                             self.user_uniforms[offset+0] = v.x;
                             self.user_uniforms[offset+1] = v.y;
                             self.user_uniforms[offset+2] = v.z;
@@ -257,20 +255,20 @@ impl DrawCallVars {
                     match input.slots{
                         1=>{
                             let mut v:f32 = 0.0;
-                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            let index = v.apply(cx, apply_from, index, nodes);
                             self.var_instances[offset+0] = v;
                             return index;
                         }
                         2=>{
                             let mut v:Vec2 = Vec2::default();
-                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            let index = v.apply(cx, apply_from, index, nodes);
                             self.var_instances[offset+0] = v.x;
                             self.var_instances[offset+1] = v.y;
                             return index;
                         }
                         3=>{
                             let mut v:Vec3 = Vec3::default();
-                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            let index = v.apply(cx, apply_from, index, nodes);
                             self.var_instances[offset+0] = v.x;
                             self.var_instances[offset+1] = v.y;
                             self.var_instances[offset+2] = v.z;
@@ -278,7 +276,7 @@ impl DrawCallVars {
                         }
                         4=>{
                             let mut v:Vec4 = Vec4::default();
-                            let index = v.apply_index(cx, apply_from, index, nodes);
+                            let index = v.apply(cx, apply_from, index, nodes);
                             self.var_instances[offset+0] = v.x;
                             self.var_instances[offset+1] = v.y;
                             self.var_instances[offset+2] = v.z;
