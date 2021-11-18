@@ -43,6 +43,16 @@ pub struct DrawWriteRef<'a>{
 }
 
 impl Area{
+    
+    pub fn valid_instance(&self, cx:&Cx)->Option<&InstanceArea>{
+        if self.is_valid(cx){
+            if let Self::Instance(inst) = self{
+                return Some(inst)
+            }
+        }
+        None
+    }
+    
     pub fn is_empty(&self)->bool{
         if let Area::Empty = self{
             return true
@@ -58,7 +68,7 @@ impl Area{
             _=>false,
         }
     }
-
+    
     pub fn is_valid(&self, cx:&Cx)->bool{
         return match self{
             Area::Instance(inst)=>{

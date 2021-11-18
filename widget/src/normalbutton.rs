@@ -108,7 +108,7 @@ impl NormalButton {
         match res.state {
             ButtonState::Down => self.animate_to(cx, id!(state_down)),
             ButtonState::Default => self.animate_to(cx, id!(state_default)),
-            ButtonState::Over => self.animate_to(cx, id!(state_hover)),
+            ButtonState::Hover => self.animate_to(cx, id!(state_hover)),
             _ => ()
         };
         res.action

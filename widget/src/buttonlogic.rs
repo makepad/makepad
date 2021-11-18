@@ -10,7 +10,7 @@ impl Default for ButtonAction {
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum ButtonState {
-    Over,
+    Hover,
     Default,
     Down,
     None
@@ -57,7 +57,7 @@ impl ButtonLogic {
                     else {
                         return ButtonHandleResult {
                             action: ButtonAction::None,
-                            state: ButtonState::Over
+                            state: ButtonState::Hover
                         };
                     },
                     HoverState::Out => return ButtonHandleResult {
@@ -71,7 +71,7 @@ impl ButtonLogic {
                 if fe.input_type.has_hovers() {
                     return ButtonHandleResult {
                         action: ButtonAction::Clicked,
-                        state: ButtonState::Over
+                        state: ButtonState::Hover
                     };
                 }
                 return ButtonHandleResult {
