@@ -5,18 +5,19 @@ live_register!{
     use makepad_render::drawcolor::DrawColor;
     use makepad_render::drawtext::DrawText;
     use makepad_widget::normalbutton::NormalButton;
-    
-    draw_quad: DrawColor {
-        color: #f00
-        fn pixel(self) -> vec4 {
-            return mix(#f00, #0f0, self.geom_pos.y)
+    App: {
+        draw_quad: DrawColor {
+            color: #f00
+            fn pixel(self) -> vec4 {
+                return mix(#f00, #0f0, self.geom_pos.y)
+            }
         }
-    }
-    
-    draw_text: DrawText {
-    }
-    
-    normal_button: NormalButton {
+        
+        draw_text: DrawText {
+        }
+        
+        normal_button: NormalButton {
+        }
     }
 }
 
@@ -41,7 +42,7 @@ impl BareExampleApp {
     pub fn new_app(cx: &mut Cx) -> Self {
         Self::new_from_doc(
             cx,
-            cx.live_registry.clone().borrow().module_path_id_to_doc(&module_path!(), Id(0)).unwrap()
+            cx.live_registry.clone().borrow().module_path_id_to_doc(&module_path!(), id!(App)).unwrap()
         )
     }
     
@@ -67,15 +68,13 @@ impl BareExampleApp {
         self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(Vec4::color("000")));
         
         if self.main_view.begin_view(cx, Layout::default()).is_ok() {
-            self.draw_quad.draw_quad_abs(cx, Rect {pos: Vec2 {x: 30., y: 30.}, size: Vec2 {x: 100., y: 100.}});
+            self.draw_quad.draw_quad_abs(cx, Rect {pos: Vec2 {x: 30., y: 30.}, size: Vec2 {x: 200., y: 200.}});
             self.draw_text.draw_text_abs(cx, Vec2 {x: 60., y: 60.}, "HELLO WORLD");
             
-            self.normal_button.apply_draw(cx, live!{
+            self.normal_button.apply_draw(cx, live!{ 
                 label: "DSL",
-                text: {color: #f00}
             });
-            //self.normal_button.draw_normal_button(cx, "Hello in red");
-            
+           
             self.main_view.end_view(cx);
         }
         

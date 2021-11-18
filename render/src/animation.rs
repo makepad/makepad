@@ -9,7 +9,7 @@ live_register!{
 }
 
 // deserialisable DSL structure
-#[derive(Debug, LiveComponent, LiveComponentHooks)]
+#[derive(Debug, Clone, LiveComponent, LiveComponentHooks)]
 pub struct KeyFrame {
     #[live(Ease::Linear)]
     pub ease: Ease,
@@ -24,6 +24,8 @@ pub struct KeyFrame {
 #[derive(Default)]
 pub struct Animator {
     pub state_id: Option<Id>,
+    pub start_time: Option<f64>,
+    pub next_frame: NextFrame,
     pub play: Option<Play>,
     pub live_ptr: Option<LivePtr>,
     pub state: Option<Vec<LiveNode >>,
@@ -42,6 +44,23 @@ impl Animator {
     
     pub fn swap_in_state(&mut self, state: Vec<LiveNode>) {
         self.state = Some(state);
+    }
+    
+    pub fn do_animation(&mut self, cx:&mut Cx, event:&mut Event)->bool{
+        if let Some(nf) = event.is_next_frame(cx, self.next_frame){
+            let play = self.play.as_ref().unwrap();
+            if self.start_time.is_none(){
+                self.start_time = Some(nf.time);
+            }
+            let time =  nf.time - self.start_time.unwrap();
+            let (ended, play_time) = play.get_ended_time(time);
+            self.update_timeline(cx, play_time);
+            if !ended{
+                self.next_frame = cx.new_next_frame();
+            }
+            return true
+        }
+        false
     }
     
     // this find the last keyframe value from an array node
@@ -74,6 +93,38 @@ impl Animator {
         return 1.0
     }
     
+    // this outputs a set of arrays at the end of current_state containing the tracks
+    pub fn update_timeline(&mut self, cx: &mut Cx, time:f64) {
+        let state_nodes = self.state.as_mut().unwrap();
+        let mut state_index = 0;
+        let mut stack_depth = 0;
+        while state_index < state_nodes.len() {
+            let state_node = &mut state_nodes[state_index];
+            if state_node.value.is_array() {
+                // ok so. lets compute our value and store it in the last slot
+                Self::update_timeline_value(cx, state_index, state_nodes, time);
+                state_index = state_nodes.skip_node(state_index);
+            }
+            else { // we have to create a timeline ourselves
+                if state_node.value.is_open() {
+                    stack_depth += 1;
+                    state_index += 1;
+                }
+                else if state_node.value.is_close() {
+                    stack_depth -= 1;
+                    state_index += 1;
+                    if stack_depth == 0 {
+                        break;
+                    }
+                }
+                else { // create a 2 array item tween in timeline + last value
+                    state_index = state_nodes.skip_node(state_index);
+                }
+            }
+        }
+    }
+    
+    
     pub fn tween_live_values(a: &LiveValue, b: &LiveValue, mix: f64) -> LiveValue {
         if a.variant_id() != b.variant_id() {
             println!("Key frame value types are incompatible!");
@@ -100,17 +151,31 @@ impl Animator {
     }
     
     // this find the last keyframe value from an array node
-    pub fn compute_timeline_value(cx: &mut Cx, index: usize, nodes: &[LiveNode], time: f64) -> LiveValue {
+    pub fn update_timeline_value(cx: &mut Cx, index: usize, nodes: &mut [LiveNode], time: f64) {
         // OK so. we have an array with keyframes
         if nodes[index].value.is_array() {
             let mut node_iter = nodes.first_child(index);
             let mut prev_kf: Option<KeyFrame> = None;
+            let mut last_child_index = node_iter.unwrap();
             while let Some(node_index) = node_iter {
+                if nodes[node_index+1].value.is_close(){ // at last slot
+                    last_child_index = node_index;
+                    break;
+                }
                 let next_kf = if nodes[node_index].value.is_value_type() { // we hit a bare value node
-                    KeyFrame {
-                        ease: Ease::Linear,
-                        time: if prev_kf.is_some() {1.0}else {0.0},
-                        value: nodes[node_index].value.clone()
+                    if let Some(prev_kf) = &prev_kf {
+                        KeyFrame {
+                            ease: Ease::Linear,
+                            time: 1.0,
+                            value: nodes[node_index].value.clone()
+                        }
+                    }
+                    else{
+                        KeyFrame {
+                            ease: Ease::Linear,
+                            time: 0.0,
+                            value: nodes[node_index].value.clone()
+                        }
                     }
                 }
                 else { // try to deserialize a keyframe
@@ -118,27 +183,30 @@ impl Animator {
                 };
                 
                 if let Some(prev_kf) = prev_kf {
-                    if prev_kf.time >= time && time <= next_kf.time {
-                        let nt = (time - prev_kf.time) / (next_kf.time - prev_kf.time);
-                        let mix = next_kf.ease.map(nt);
-                        return Self::tween_live_values(&prev_kf.value, &next_kf.value, mix)
+                    if time >= prev_kf.time && time <= next_kf.time {
+                        let normalised_time = (time - prev_kf.time) / (next_kf.time - prev_kf.time);
+                        let mix = next_kf.ease.map(normalised_time);
+                        // find last one
+                        while let Some(node_index) = node_iter{
+                            last_child_index = node_index;
+                            node_iter = nodes.next_child(node_index);                             
+                        }
+                        nodes[last_child_index].value =  Self::tween_live_values(&prev_kf.value, &next_kf.value, mix);
+                        return
                     }
                 }
                 prev_kf = Some(next_kf);
+                last_child_index = node_index;
                 node_iter = nodes.next_child(node_index);
             }
             if let Some(prev_kf) = prev_kf {
-                return prev_kf.value
+                nodes[last_child_index].value = prev_kf.value
             }
         }
-        else {
-            return nodes[index].value.clone();
-        }
-        return LiveValue::None
     }
     
-    // this creates a pure value strip of the state in current_state
-    pub fn cut_state_to(&mut self, cx: &mut Cx, state_id: Id) {
+    // hard cut / initialisate the state to a certain state
+    pub fn cut_to(&mut self, cx: &mut Cx, state_id: Id) {
         let live_registry = cx.live_registry.borrow();
         let (nodes, index) = live_registry.ptr_to_nodes_index(self.live_ptr.unwrap());
         
@@ -193,13 +261,8 @@ impl Animator {
         }
     }
     
-    // this walks our timelines and updates the last array values with the computed time
-    pub fn animate(&mut self, _cx: &mut Cx, _time: f64) {
-        
-    }
-    
     // this outputs a set of arrays at the end of current_state containing the tracks
-    pub fn create_timeline_to(&mut self, cx: &mut Cx, state_id: Id) {
+    pub fn animate_to(&mut self, cx: &mut Cx, state_id: Id) {
 
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
@@ -217,17 +280,16 @@ impl Animator {
             //println!("{}: {:?}", to_node.id, to_node.value);
             // ok so we co-walk the to_nodes
             if stack_depth == 1 && to_node.id == id!(from) {
-                // ok now what. we need to see if we can find our 'from' id
-                // if not we use 'all'
+                // process the transition
                 let from_id = self.state_id.unwrap();
                 if let Ok(from_index) = to_nodes.child_by_name(to_index, from_id){
-                    self.play = Some(Play::new_apply(cx, ApplyFrom::New, from_index, to_nodes))
+                    self.play = Some(Play::new_apply(cx, ApplyFrom::New, from_index, to_nodes));
                 }
                 else if let Ok(from_index) = to_nodes.child_by_name(to_index, id!(all)){
-                    self.play = Some(Play::new_apply(cx, ApplyFrom::New, from_index, to_nodes))
+                    self.play = Some(Play::new_apply(cx, ApplyFrom::New, from_index, to_nodes));
                 }
                 else{
-                    
+                    self.play = Some(Play::new(cx));
                 }
                 to_index = to_nodes.skip_node(to_index);
             }
@@ -323,6 +385,10 @@ impl Animator {
                 }
             }
         }
+        self.state_id = Some(state_id);
+        self.start_time = None;
+        self.next_frame = cx.new_next_frame();
+        
     }
     
 }
@@ -356,26 +422,26 @@ impl Play {
         }
     }
     
-    pub fn get_time(&self, time: f64) -> f64 {
+    pub fn get_ended_time(&self, time: f64) -> (bool,f64) {
         match self {
             Self::Forward {duration} => {
-                time / duration
+                (time > *duration, time / duration)
             },
             Self::Reverse {duration, end} => {
-                end - (time / duration)
+                (time > *duration, end - (time / duration))
             },
             Self::Loop {duration, end} => {
-                (time / duration) % end
+                (false, (time / duration) % end)
             },
             Self::ReverseLoop {end, duration} => {
-                end - (time / duration) % end
+                (false, end - (time / duration) % end)
             },
             Self::BounceLoop {end, duration} => {
                 let mut local_time = (time / duration) % (end * 2.0);
                 if local_time > *end {
                     local_time = 2.0 * end - local_time;
                 };
-                local_time
+                (false, local_time)
             },
         }
     }

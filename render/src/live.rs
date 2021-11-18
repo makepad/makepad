@@ -40,6 +40,11 @@ pub trait LiveComponent {
     }
 }
 
+pub trait LiveAnimate {
+    fn animate_to(&mut self, cx: &mut Cx, state_id: Id);
+    fn handle_animation(&mut self, cx: &mut Cx, event:&mut Event);
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum ApplyFrom {
     NewFromDoc {file_id: FileId}, // newed from DSL
