@@ -96,9 +96,7 @@ impl CanvasComponent for NormalButton {
     }
     
     fn draw(&mut self, cx: &mut Cx) {
-        self.bg.begin_quad(cx, self.layout);
-        self.text.draw_text_walk(cx, &self.label);
-        self.bg.end_quad(cx);
+        self.draw_normal_button(cx, None);
     }
 }
 
@@ -114,11 +112,11 @@ impl NormalButton {
             _ => ()
         };
         res.action
-    }
+    } 
     
-    pub fn draw_normal_button(&mut self, cx: &mut Cx, label: &str) {
+    pub fn draw_normal_button(&mut self, cx: &mut Cx, label: Option<&str>) {
         self.bg.begin_quad(cx, self.layout);
-        self.text.draw_text_walk(cx, label);
+        self.text.draw_text_walk(cx, label.unwrap_or(&self.label));
         self.bg.end_quad(cx);
     }
 }
