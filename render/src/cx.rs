@@ -1,11 +1,15 @@
 use std::collections::{HashMap, HashSet, BTreeSet};
 use std::fmt::Write;
 use std::time::{Instant};
+use std::rc::Rc;
+use std::cell::RefCell;
 
 pub use makepad_derive_live::*;
 pub use makepad_live_compiler::math::*;
 pub use makepad_shader_compiler::ShaderRegistry;
 pub use makepad_shader_compiler::shaderast::DrawShaderPtr;
+pub use makepad_live_compiler::LiveRegistry;
+pub use makepad_live_compiler::LiveDocNodes;
 pub use makepad_live_compiler::Id;
 pub use makepad_live_compiler::FileId;
 pub use makepad_live_compiler::LocalPtr;
@@ -140,6 +144,7 @@ pub struct Cx {
 
     pub profiles: HashMap<u64, Instant>,
     
+    pub live_registry: Rc<RefCell<LiveRegistry>>,
     pub shader_registry: ShaderRegistry,
     
     pub command_settings: HashMap<CommandId, CxCommandSetting>,
@@ -281,6 +286,7 @@ impl Default for Cx {
             new_drag_area: Area::Empty,
             
             shader_registry: ShaderRegistry::new(),
+            live_registry: Rc::new(RefCell::new(LiveRegistry::default())),
             
             command_settings: HashMap::new(),
             

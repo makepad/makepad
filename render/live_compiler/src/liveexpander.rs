@@ -96,10 +96,7 @@ impl<'a> LiveExpander<'a> {
                         let mut node_iter = other_doc.nodes.first_child(0);
                         while let Some(node_index) = node_iter{
                             let node = &other_doc.nodes[node_index];
-                            if node.id.is_empty(){
-                                continue;
-                            }
-                            if object_id.is_empty() || *object_id == node.id{
+                            if !node.id.is_empty() && (object_id.is_empty() || *object_id == node.id){
                                 self.scope_stack.stack.last_mut().unwrap().push(LiveScopeItem {
                                     id: node.id,
                                     target: LiveScopeTarget::LivePtr(LivePtr{file_id:*file_id, local_ptr:LocalPtr(node_index)})
@@ -144,8 +141,8 @@ impl<'a> LiveExpander<'a> {
                     }
                     else if in_value.is_enum() && out_value.is_enum() &&
                     in_value.enum_base_id() == out_value.enum_base_id() { // enum switch is allowed
-                        if in_value.is_tree() {
-                            if out_value.is_tree() {
+                        if in_value.is_open() {
+                            if out_value.is_open() {
                                 let next_index = out_doc.nodes.next_child(overwrite).unwrap();
                                 out_doc.nodes[overwrite] = in_node.clone();
                                 out_doc.nodes.drain(overwrite + 1..next_index - 1);
@@ -156,7 +153,7 @@ impl<'a> LiveExpander<'a> {
                                 level_overwrite.push(false);
                             }
                         }
-                        else if out_value.is_tree() { // out is a tree remove incl close
+                        else if out_value.is_open() { // out is a tree remove incl close
                             let next_index = out_doc.nodes.next_child(overwrite).unwrap();
                             out_doc.nodes[overwrite] = in_node.clone();
                             out_doc.nodes.drain(overwrite + 1..next_index);
@@ -189,7 +186,7 @@ impl<'a> LiveExpander<'a> {
                 }
                 Err(insert_point) => {
                     out_doc.nodes.insert(insert_point, in_node.clone());
-                    if in_node.value.is_tree() {
+                    if in_node.value.is_open() {
                         level_overwrite.push(false);
                     }
                     insert_point

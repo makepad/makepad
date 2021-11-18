@@ -17,107 +17,313 @@ pub struct KeyFrame {
     #[live(1.0)]
     pub time: f64,
     
-    #[live(KeyFrameValue::None)]
-    pub value: KeyFrameValue,
+    #[live(LiveValue::None)]
+    pub value: LiveValue,
 }
 
-
-#[derive(Debug)]
-pub enum KeyFrameValue {
-    None,
-    Float(f64),
-    Vec2(Vec2),
-    Vec3(Vec3),
-    Vec4(Vec4),
-    Id(Id)
-}
-
+#[derive(Default)]
 pub struct Animator {
-    pub state_id: Id,
+    pub state_id: Option<Id>,
+    pub play: Option<Play>,
     pub live_ptr: Option<LivePtr>,
-    pub current_state: Option<Vec<LiveNode >>,
-}
-
-impl Default for Animator{
-    fn default()->Self{
-        Self{
-            state_id: Id(0),
-            live_ptr:None,
-            current_state:Some(Vec::new())
-        }
-    }
+    pub state: Option<Vec<LiveNode >>,
 }
 
 // OK so.. now the annoying bit
 impl Animator {
     
-    pub fn has_state(&self)->bool{
-        self.current_state.is_some()
+    pub fn has_state(&self) -> bool {
+        self.state.is_some()
     }
     
     pub fn swap_out_state(&mut self) -> Vec<LiveNode> {
-        self.current_state.take().unwrap()
+        self.state.take().unwrap()
     }
     
     pub fn swap_in_state(&mut self, state: Vec<LiveNode>) {
-        self.current_state = Some(state);
+        self.state = Some(state);
     }
     
     // this find the last keyframe value from an array node
-    pub fn find_last_keyframe_value(index:usize, nodes:&[LiveNode])->Option<usize>{
-        if nodes[index].value.is_array(){
-            if let Some(index) = nodes.last_child(index){
-                if nodes[index].value.is_bare_class(){
-                    if let Ok(value) = nodes.child_by_name(index, id!(value)){
-                        return Some(value)
-                    }
+    pub fn last_keyframe_value_from_array(index: usize, nodes: &[LiveNode]) -> Option<usize> {
+        if let Some(index) = nodes.last_child(index) {
+            if nodes[index].value.is_bare_class() {
+                if let Ok(index) = nodes.child_by_name(index, id!(value)) {
+                    return Some(index)
                 }
+            }
+            else {
+                return Some(index)
             }
         }
         return None
     }
-    /*
-    pub fn init_from_last_keyframe(&mut self, cx: &mut Cx,  nodes: &[LiveNode]) {
-        
-        let mut index = 0;
-        let mut current_state = Vec::new();
-        while index < nodes.len() {
-            let node = &nodes[index];
-            match node.value {
-                LiveValue::Array => { // its a keyframe array. probably :)
-                    if let Some(last_child) = nodes.last_child(index) {
-                        if let LiveValue::BareClass = nodes[last_child].value {
-                            
-                            let mut kf = KeyFrame::new(cx);
-                            kf.apply_index(cx, ApplyFrom::DataNew, last_child, nodes);
-                            
-                            current_state.push(LiveNode {
-                                token_id: None,
-                                id: node.id,
-                                value: kf.value.to_live_value()
-                            });
-                        }
-                        else if !nodes[last_child].value.is_tree() { // if its a bare value push it in ?
-                            current_state.push(LiveNode {
-                                token_id: None,
-                                id: node.id,
-                                value: nodes[last_child].value.clone()
-                            });
-                        }
+    
+    pub fn first_keyframe_time_from_array(index: usize, nodes: &[LiveNode]) -> f64 {
+        if let Some(index) = nodes.first_child(index) {
+            if nodes[index].value.is_bare_class() {
+                if let Ok(index) = nodes.child_by_name(index, id!(time)) {
+                    return match nodes[index].value {
+                        LiveValue::Float(v) => v,
+                        LiveValue::Int(v) => v as f64,
+                        _ => 1.0
                     }
-                    index = nodes.skip_node(index);
-                }
-                _ => { // just copy the value
-                    current_state.push(node.clone());
-                    index += 1;
                 }
             }
         }
-        self.current_state = Some(current_state);
-    }*/
-    // alright so . we have the from info
-    // we have values.. we have KeyFrames and KeyFrameValues
-    // now make an animation engine :)
+        return 1.0
+    }
+    
+    pub fn tween_live_values(a: &LiveValue, b: &LiveValue, mix: f64) -> LiveValue {
+        if a.variant_id() != b.variant_id() {
+            println!("Key frame value types are incompatible!");
+            return LiveValue::None
+        }
+        match a {
+            LiveValue::Int(va) => if let LiveValue::Int(vb) = b {
+                LiveValue::Int((((vb - va) as f64) * mix + *va as f64) as i64)
+            } else {LiveValue::None}
+            LiveValue::Float(va) => if let LiveValue::Float(vb) = b {
+                LiveValue::Float((vb - va) * mix + va)
+            } else {LiveValue::None}
+            LiveValue::Color(va) => if let LiveValue::Color(vb) = b {
+                LiveValue::Color(Vec4::from_lerp(Vec4::from_u32(*va), Vec4::from_u32(*vb), mix as f32).to_u32())
+            } else {LiveValue::None}
+            LiveValue::Vec2(va) => if let LiveValue::Vec2(vb) = b {
+                LiveValue::Vec2(Vec2::from_lerp(*va, *vb, mix as f32))
+            } else {LiveValue::None}
+            LiveValue::Vec3(va) => if let LiveValue::Vec3(vb) = b {
+                LiveValue::Vec3(Vec3::from_lerp(*va, *vb, mix as f32))
+            } else {LiveValue::None}
+            _ => LiveValue::None
+        }
+    }
+    
+    // this find the last keyframe value from an array node
+    pub fn compute_timeline_value(cx: &mut Cx, index: usize, nodes: &[LiveNode], time: f64) -> LiveValue {
+        // OK so. we have an array with keyframes
+        if nodes[index].value.is_array() {
+            let mut node_iter = nodes.first_child(index);
+            let mut prev_kf: Option<KeyFrame> = None;
+            while let Some(node_index) = node_iter {
+                let next_kf = if nodes[node_index].value.is_value_type() { // we hit a bare value node
+                    KeyFrame {
+                        ease: Ease::Linear,
+                        time: if prev_kf.is_some() {1.0}else {0.0},
+                        value: nodes[node_index].value.clone()
+                    }
+                }
+                else { // try to deserialize a keyframe
+                    KeyFrame::new_apply(cx, ApplyFrom::New, node_index, nodes)
+                };
+                
+                if let Some(prev_kf) = prev_kf {
+                    if prev_kf.time >= time && time <= next_kf.time {
+                        let nt = (time - prev_kf.time) / (next_kf.time - prev_kf.time);
+                        let mix = next_kf.ease.map(nt);
+                        return Self::tween_live_values(&prev_kf.value, &next_kf.value, mix)
+                    }
+                }
+                prev_kf = Some(next_kf);
+                node_iter = nodes.next_child(node_index);
+            }
+            if let Some(prev_kf) = prev_kf {
+                return prev_kf.value
+            }
+        }
+        else {
+            return nodes[index].value.clone();
+        }
+        return LiveValue::None
+    }
+    
+    // this creates a pure value strip of the state in current_state
+    pub fn cut_state_to(&mut self, cx: &mut Cx, state_id: Id) {
+        let live_registry = cx.live_registry.borrow();
+        let (nodes, index) = live_registry.ptr_to_nodes_index(self.live_ptr.unwrap());
+        
+        self.state_id = Some(state_id);
+        
+        let state = if let Some(state) = &mut self.state {
+            state.truncate(0);
+            state
+        }
+        else {
+            self.state = Some(Vec::new());
+            self.state.as_mut().unwrap()
+        };
+        
+        if let Ok(mut index) = nodes.child_by_name(index, state_id) {
+            // lets iterate index
+            let mut stack_depth = 0;
+            while index < nodes.len() {
+                let node = &nodes[index];
+                if stack_depth == 1 && node.id == id!(from) { // skip this one
+                    index = nodes.skip_node(index)
+                }
+                else if node.value.is_array() {
+                    if let Some(last_value) = Self::last_keyframe_value_from_array(index, nodes) {
+                        state.extend_from_slice(live_bare!{
+                            [node.id]: [(nodes[last_value].value.clone())]
+                        });
+                    }
+                    index = nodes.skip_node(index);
+                }
+                else {
+                    if node.value.is_open() {
+                        state.push(node.clone());
+                        stack_depth += 1;
+                    }
+                    else if node.value.is_close() {
+                        state.push(node.clone());
+                        stack_depth -= 1;
+                        if stack_depth == 0 {
+                            break;
+                        }
+                    }
+                    else { // array with single value containing this as state
+                        state.extend_from_slice(live_bare!{
+                            [node.id]: [(node.value.clone())]
+                        });
+                    }
+                    index += 1;
+                }
+                
+            }
+        }
+    }
+    
+    // this walks our timelines and updates the last array values with the computed time
+    pub fn animate(&mut self, _cx: &mut Cx, _time: f64) {
+        
+    }
+    
+    // this outputs a set of arrays at the end of current_state containing the tracks
+    pub fn create_timeline_to(&mut self, cx: &mut Cx, state_id: Id) {
+
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
+        let (to_nodes, to_root_index) = live_registry.ptr_to_nodes_index(self.live_ptr.unwrap());
+        
+        let state_nodes = self.state.as_mut().unwrap();
+        
+        let mut state_index = 0;
+        let mut to_index = to_nodes.child_by_name(to_root_index, state_id).unwrap();
+        let mut stack_depth = 0;
+
+        while state_index < state_nodes.len() {
+            let state_node = &mut state_nodes[state_index];
+            let to_node = &to_nodes[to_index];
+            //println!("{}: {:?}", to_node.id, to_node.value);
+            // ok so we co-walk the to_nodes
+            if stack_depth == 1 && to_node.id == id!(from) {
+                // ok now what. we need to see if we can find our 'from' id
+                // if not we use 'all'
+                let from_id = self.state_id.unwrap();
+                if let Ok(from_index) = to_nodes.child_by_name(to_index, from_id){
+                    self.play = Some(Play::new_apply(cx, ApplyFrom::New, from_index, to_nodes))
+                }
+                else if let Ok(from_index) = to_nodes.child_by_name(to_index, id!(all)){
+                    self.play = Some(Play::new_apply(cx, ApplyFrom::New, from_index, to_nodes))
+                }
+                else{
+                    
+                }
+                to_index = to_nodes.skip_node(to_index);
+            }
+            else {
+                // we are an array. so we have to check if our first value has a time 0
+                if to_node.value.is_array() {
+                    if !state_node.value.is_array() {panic!()};
+                    if state_node.id != to_node.id { // we have a desync we could someday fix that
+                        println!("State node order desync: <state.id> {} <to_node.id> {}", state_node.id, to_node.id);
+                        return
+                    }
+                    
+                    let first_time = Self::first_keyframe_time_from_array(to_index, to_nodes);
+                    
+                    if first_time != 0.0 { // insert first key from the last value
+                        
+                        let (state_first, state_last) = state_nodes.child_range(state_index);
+                        let (to_first, to_last) = to_nodes.child_range(to_index);
+                        
+                        // alright this thing is legit. So now
+                        let current_value = state_nodes[state_last - 1].value.clone();
+                        if !current_value.is_value_type(){
+                            panic!()
+                        }
+                        // splicing nodes
+                        state_nodes.splice(
+                            state_first..state_last - 1,
+                            to_nodes[to_first - 1..to_last].iter().cloned()
+                        );
+                        // lets look at our nodes
+                        // overwrite the first node with our computed value
+                        state_nodes[state_first].id = Id(0);
+                        state_nodes[state_first].value = current_value;
+                    }
+                    else { //splice out all children except the last and replace with our array
+                        let (state_first, state_last) = state_nodes.child_range(state_index);
+                        let (to_first, to_last) = to_nodes.child_range(to_index);
+                        // then we override that one
+                        state_nodes.splice(
+                            state_first..state_last-1,
+                            to_nodes[to_first..to_last].iter().cloned()
+                        );
+                    }
+                    to_index = to_nodes.skip_node(to_index);
+                    state_index = state_nodes.skip_node(state_index);
+                }
+                else { // we have to create a timeline ourselves
+                    if to_node.value.is_open() {
+                        if stack_depth == 0 { // lets copy over the state id
+                            state_node.id = to_node.id;
+                        }
+                        if !state_node.value.is_open() { // we have a desync we could someday fix that
+                            println!("State node order desync: state_node {} is not open, to_node {} is", state_node.id, to_node.id);
+                            return
+                        }
+                        stack_depth += 1;
+                        state_index += 1;
+                        to_index += 1;
+                    }
+                    else if to_node.value.is_close() {
+                        if !state_node.value.is_close() { // we have a desync we could someday fix that
+                            println!("State node order desync: state_node {} is not close, to_node is {}", state_node.id, to_node.id);
+                            return
+                        }
+                        stack_depth -= 1;
+                        state_index += 1;
+                        to_index += 1;
+                        if stack_depth == 0 {
+                            break;
+                        }
+                    }
+                    else { // create a 2 array item tween in timeline + last value
+                        if !state_node.value.is_array() {panic!()};
+                        if state_node.id != to_node.id { // we have a desync we could someday fix that
+                            println!("State node order desync: <state.id> {} <to_node.id> {}", state_node.id, to_node.id);
+                            return
+                        }
+                        let (state_first, state_last) = state_nodes.child_range(state_index);
+                        let current_value = state_nodes[state_last - 1].value.clone();
+                        if !current_value.is_value_type(){
+                            panic!()
+                        }
+                        state_nodes.splice(
+                            state_first..state_last - 1,
+                            live_array!{
+                                (current_value),
+                                (to_node.value.clone())
+                            }.iter().cloned()
+                        );
+                        to_index = to_nodes.skip_node(to_index);
+                        state_index = state_nodes.skip_node(state_index);
+                    }
+                }
+            }
+        }
+    }
     
 }
 
@@ -179,7 +385,7 @@ impl Play {
 #[derive(Clone, LiveComponent, LiveComponentHooks, Debug, PartialEq)]
 pub enum Ease {
     #[default] Linear,
-    #[live] One,
+    #[live] None,
     #[live(1.0)] Constant(f64),
     #[live] InQuad,
     #[live] OutQuad,
@@ -224,7 +430,7 @@ impl Ease {
             Self::Constant(t) => {
                 return t.max(0.0).min(1.0);
             },
-            Self::One => {
+            Self::None => {
                 return 1.0;
             },
             Self::Pow {begin, end} => {

@@ -19,6 +19,7 @@ pub struct ShaderParser<'a> {
     pub file_id: FileId,
     pub tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
     pub live_scope: &'a [LiveScopeItem],
+    pub live_registry: &'a LiveRegistry,
     pub shader_registry: &'a ShaderRegistry,
     pub type_deps: &'a mut Vec<ShaderParserDep>,
     pub closure_defs: Vec<ClosureDef>,
@@ -29,6 +30,7 @@ pub struct ShaderParser<'a> {
 
 impl<'a> ShaderParser<'a> {
     pub fn new(
+        live_registry: &'a LiveRegistry,
         shader_registry: &'a ShaderRegistry,
         tokens: &'a [TokenWithSpan],
         live_scope: &'a [LiveScopeItem],
@@ -40,6 +42,7 @@ impl<'a> ShaderParser<'a> {
         let token_with_span = tokens_with_span.next().unwrap();
         ShaderParser {
             closure_defs:Vec::new(),
+            live_registry,
             shader_registry,
             file_id,
             live_scope,
@@ -581,7 +584,7 @@ impl<'a> ShaderParser<'a> {
                     let ident_path = self.expect_ident_path() ?;
                     
                     if let Some(ptr) = self.scan_scope_for_live_ptr(span.file_id, ident_path.segs[0]) {
-                        match self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]) {
+                        match self.shader_registry.find_live_node_by_path(self.live_registry, ptr, &ident_path.segs[1..ident_path.len()]) {
                             LiveNodeFindResult::NotFound => {
                                 return Err(span.error(self, live_error_origin!(), format!("Struct not found `{}`", ident_path).into()))
                             }
@@ -1094,7 +1097,7 @@ impl<'a> ShaderParser<'a> {
                                 }
                             }
                             else if let Some(ptr) = self.scan_scope_for_live_ptr(span.file_id, ident_path.segs[0]) {
-                                match self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]) {
+                                match self.shader_registry.find_live_node_by_path(self.live_registry, ptr, &ident_path.segs[1..ident_path.len()]) {
                                     LiveNodeFindResult::Struct(struct_ptr) => {
                                         self.type_deps.push(ShaderParserDep::Struct(struct_ptr));
                                         struct_ptr
@@ -1163,7 +1166,7 @@ impl<'a> ShaderParser<'a> {
                                 }))
                             }
                             else if let Some(ptr) = self.scan_scope_for_live_ptr(span.file_id, ident_path.segs[0]) {
-                                match self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]) {
+                                match self.shader_registry.find_live_node_by_path(self.live_registry, ptr, &ident_path.segs[1..ident_path.len()]) {
                                     LiveNodeFindResult::NotFound => {
                                         Err(span.error(self, live_error_origin!(), format!("Function not found `{}`", ident_path).into()))
                                     }
@@ -1240,7 +1243,7 @@ impl<'a> ShaderParser<'a> {
                             
                             let mut var_resolve = VarResolve::NotFound;
                             if let Some(ptr) = self.scan_scope_for_live_ptr(span.file_id, ident_path.segs[0]) {
-                                let find_result = self.shader_registry.find_live_node_by_path(ptr, &ident_path.segs[1..ident_path.len()]); 
+                                let find_result = self.shader_registry.find_live_node_by_path(self.live_registry, ptr, &ident_path.segs[1..ident_path.len()]); 
                                 match find_result {
                                     LiveNodeFindResult::LiveValue(value_ptr, ty) => {
                                         var_resolve = VarResolve::LiveValue(value_ptr, ty);
