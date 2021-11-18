@@ -12,7 +12,6 @@ use crate::builtin::generate_builtins;
 use crate::shaderast::Scopes;
 
 pub struct ShaderRegistry {
-    pub live_registry: LiveRegistry,
     pub consts: HashMap<ConstPtr, ConstDef>,
     pub all_fns: HashMap<FnPtr, FnDef>,
     pub draw_shader_defs: HashMap<DrawShaderPtr, DrawShaderDef>,
@@ -24,7 +23,6 @@ impl ShaderRegistry {
     pub fn new() -> Self {
         Id::from_str("user").unwrap();
         Self {
-            live_registry: LiveRegistry::default(),
             structs: HashMap::new(),
             consts: HashMap::new(),
             draw_shader_defs: HashMap::new(),
@@ -71,8 +69,8 @@ impl ShaderRegistry {
         }
     }
     
-    pub fn fn_ident_from_ptr(&self, fn_node_ptr: FnPtr) -> Ident {
-        let node = self.live_registry.ptr_to_node(fn_node_ptr.0);
+    pub fn fn_ident_from_ptr(&self, live_registry:&LiveRegistry, fn_node_ptr: FnPtr) -> Ident {
+        let node = live_registry.ptr_to_node(fn_node_ptr.0);
         Ident(node.id)
     }
     
@@ -116,9 +114,9 @@ impl ShaderRegistry {
         None
     }
     
-    pub fn find_live_node_by_path(&self, base_ptr: LivePtr, ids: &[Id]) -> LiveNodeFindResult {
+    pub fn find_live_node_by_path(&self, live_registry:&LiveRegistry, base_ptr: LivePtr, ids: &[Id]) -> LiveNodeFindResult {
         
-        let doc = &self.live_registry.ptr_to_doc(base_ptr);
+        let doc = &live_registry.ptr_to_doc(base_ptr);
 
         return walk_recur(None, base_ptr.file_id, base_ptr.local_ptr.0, &doc.nodes, ids);
         // ok so we got a node. great. now what
@@ -186,18 +184,18 @@ impl ShaderRegistry {
         }
     }
     
-    pub fn analyse_deps(&mut self, deps: &[ShaderParserDep]) -> Result<(), LiveError> {
+    pub fn analyse_deps(&mut self, live_registry:&LiveRegistry, deps: &[ShaderParserDep]) -> Result<(), LiveError> {
         // recur on used types
         for dep in deps {
             match dep {
                 ShaderParserDep::Const(dep) => {
-                    self.analyse_const(*dep) ?;
+                    self.analyse_const(live_registry, *dep) ?;
                 },
                 ShaderParserDep::Struct(dep) => {
-                    self.analyse_struct(*dep) ?;
+                    self.analyse_struct(live_registry, *dep) ?;
                 },
                 ShaderParserDep::Function(struct_ptr, fn_ptr) => {
-                    self.analyse_plain_fn(*struct_ptr, *fn_ptr) ?
+                    self.analyse_plain_fn(live_registry, *struct_ptr, *fn_ptr) ?
                 }
             }
         }
@@ -205,17 +203,18 @@ impl ShaderRegistry {
     }
     
     // lets compile the thing
-    pub fn analyse_const(&mut self, const_ptr: ConstPtr) -> Result<(), LiveError> {
+    pub fn analyse_const(&mut self, live_registry:&LiveRegistry, const_ptr: ConstPtr) -> Result<(), LiveError> {
         if self.consts.get(&const_ptr).is_some() {
             return Ok(());
         }
-        let (doc, const_node) = self.live_registry.ptr_to_doc_node(const_ptr.0);
+        let (doc, const_node) = live_registry.ptr_to_doc_node(const_ptr.0);
         match const_node.value {
             LiveValue::Const {token_start, token_count, scope_start, scope_count} => {
                 let mut parser_deps = Vec::new();
                 let id = const_node.id;
-                let origin_doc = &self.live_registry.token_id_to_origin_doc(const_node.token_id.unwrap());
+                let origin_doc = &live_registry.token_id_to_origin_doc(const_node.token_id.unwrap());
                 let mut parser = ShaderParser::new(
+                    live_registry,
                     self,
                     origin_doc.get_tokens(token_start, token_count),
                     &doc.scopes[scope_start..(scope_start+scope_count as usize)],
@@ -228,9 +227,10 @@ impl ShaderRegistry {
                 let const_decl = parser.expect_const_def(Ident(id)) ?;
                 self.consts.insert(const_ptr, const_decl);
                 
-                self.analyse_deps(&parser_deps) ?;
+                self.analyse_deps(live_registry, &parser_deps) ?;
                 
                 let mut ca = ConstAnalyser {
+                    live_registry,
                     const_def: self.consts.get(&const_ptr).unwrap(),
                     scopes: &mut Scopes::new(),
                     shader_registry: self,
@@ -246,21 +246,22 @@ impl ShaderRegistry {
     }
     
     // lets compile the thing
-    pub fn analyse_plain_fn(&mut self, struct_ptr: Option<StructPtr>, fn_ptr: FnPtr) -> Result<(), LiveError> {
+    pub fn analyse_plain_fn(&mut self, live_registry:&LiveRegistry, struct_ptr: Option<StructPtr>, fn_ptr: FnPtr) -> Result<(), LiveError> {
         
         if self.all_fns.get(&fn_ptr).is_some() {
             return Ok(());
         }
         // alright lets parse and analyse a plain fn
-        let (doc, fn_node) = self.live_registry.ptr_to_doc_node(fn_ptr.0);
+        let (doc, fn_node) = live_registry.ptr_to_doc_node(fn_ptr.0);
         match fn_node.value {
             LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
                 let id = fn_node.id;
                 let mut parser_deps = Vec::new();
                 // lets parse this thing
-                let origin_doc = &self.live_registry.token_id_to_origin_doc(fn_node.token_id.unwrap());
+                let origin_doc = &live_registry.token_id_to_origin_doc(fn_node.token_id.unwrap());
 
                 let parser = ShaderParser::new(
+                    live_registry, 
                     self,
                     origin_doc.get_tokens(token_start, token_count),
                     &doc.scopes[scope_start..(scope_start+scope_count as usize)],
@@ -276,10 +277,11 @@ impl ShaderRegistry {
                 ) ?;
                 self.all_fns.insert(fn_ptr, fn_def);
                 
-                self.analyse_deps(&parser_deps) ?;
+                self.analyse_deps(live_registry, &parser_deps) ?;
                 
                 // ok analyse the struct methods now.
                 let mut fa = FnDefAnalyser {
+                    live_registry,
                     closure_return_ty: None,
                     fn_def: self.all_fns.get(&fn_ptr).unwrap(),
                     scopes: &mut Scopes::new(),
@@ -300,13 +302,13 @@ impl ShaderRegistry {
     
     
     // lets compile the thing
-    pub fn analyse_struct(&mut self, struct_ptr: StructPtr) -> Result<(), LiveError> {
+    pub fn analyse_struct(&mut self, live_registry:&LiveRegistry, struct_ptr: StructPtr) -> Result<(), LiveError> {
         
         if self.structs.get(&struct_ptr).is_some() {
             return Ok(());
         }
         
-        let (doc, struct_node) = self.live_registry.ptr_to_doc_node(struct_ptr.0);
+        let (doc, struct_node) = live_registry.ptr_to_doc_node(struct_ptr.0);
         
         match struct_node.value {
             LiveValue::NamedClass {class} => {
@@ -314,7 +316,7 @@ impl ShaderRegistry {
                     panic!()
                 }
                 let mut struct_def = StructDef {
-                    span: self.live_registry.token_id_to_span(struct_node.token_id.unwrap()),
+                    span: live_registry.token_id_to_span(struct_node.token_id.unwrap()),
                     struct_refs: RefCell::new(None),
                     fields: Vec::new(),
                     methods: Vec::new()
@@ -331,9 +333,10 @@ impl ShaderRegistry {
                     match prop.value {
                         LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
                             let id = prop.id;
-                            let origin_doc = &self.live_registry.token_id_to_origin_doc(prop.token_id.unwrap());
-                            let scopes_doc = self.live_registry.token_id_to_expanded_doc(prop.token_id.unwrap());
+                            let origin_doc = &live_registry.token_id_to_origin_doc(prop.token_id.unwrap());
+                            let scopes_doc = live_registry.token_id_to_expanded_doc(prop.token_id.unwrap());
                             let mut parser = ShaderParser::new(
+                                live_registry,
                                 self,
                                 origin_doc.get_tokens(token_start, token_count),
                                 &scopes_doc.scopes[scope_start..scope_start+scope_count as usize],
@@ -351,9 +354,10 @@ impl ShaderRegistry {
                         LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
                             let id = prop.id;
                             // lets parse this thing
-                            let origin_doc = &self.live_registry.token_id_to_origin_doc(prop.token_id.unwrap());
-                            let scopes_doc = self.live_registry.token_id_to_expanded_doc(prop.token_id.unwrap());
+                            let origin_doc = &live_registry.token_id_to_origin_doc(prop.token_id.unwrap());
+                            let scopes_doc = live_registry.token_id_to_expanded_doc(prop.token_id.unwrap());
                             let parser = ShaderParser::new(
+                                live_registry,
                                 self,
                                 origin_doc.get_tokens(token_start, token_count),
                                 &scopes_doc.scopes[scope_start..scope_start+scope_count as usize],
@@ -378,7 +382,7 @@ impl ShaderRegistry {
                         _ => {
                             return Err(LiveError {
                                 origin: live_error_origin!(),
-                                span: self.live_registry.token_id_to_span(prop.token_id.unwrap()),
+                                span: live_registry.token_id_to_span(prop.token_id.unwrap()),
                                 message: format!("Cannot use {:?} in struct", prop.value)
                             })
                         }
@@ -388,10 +392,11 @@ impl ShaderRegistry {
                 // we should store the structs
                 self.structs.insert(struct_ptr, struct_def);
                 
-                self.analyse_deps(&parser_deps) ?;
+                self.analyse_deps(live_registry, &parser_deps) ?;
                 
                 // ok analyse the struct methods now.
                 let mut sa = StructAnalyser {
+                    live_registry,
                     struct_def: self.structs.get(&struct_ptr).unwrap(),
                     scopes: &mut Scopes::new(),
                     shader_registry: self,
@@ -410,13 +415,13 @@ impl ShaderRegistry {
     }
     
     // lets compile the thing
-    pub fn analyse_draw_shader<F>(&mut self, draw_shader_ptr: DrawShaderPtr, mut ext_self: F) -> Result<&DrawShaderDef,
+    pub fn analyse_draw_shader<F>(&mut self, live_registry:&LiveRegistry, draw_shader_ptr: DrawShaderPtr, mut ext_self: F) -> Result<&DrawShaderDef,
     LiveError>
     where F: FnMut(Span, Id, LiveType, &mut DrawShaderDef)
     {
         let mut draw_shader_def = DrawShaderDef::default();
         
-        let (doc, class_node) = self.live_registry.ptr_to_doc_node(draw_shader_ptr.0);
+        let (doc, class_node) = live_registry.ptr_to_doc_node(draw_shader_ptr.0);
         
         match class_node.value {
             LiveValue::NamedClass {class, ..} => {
@@ -447,7 +452,7 @@ impl ShaderRegistry {
                         LiveValue::LiveType(lt) => {
                             if prop.id == id!(rust_type) {
                                 ext_self(
-                                    self.live_registry.token_id_to_span(prop.token_id.unwrap()),
+                                    live_registry.token_id_to_span(prop.token_id.unwrap()),
                                     prop.id,
                                     lt,
                                     &mut draw_shader_def
@@ -461,7 +466,7 @@ impl ShaderRegistry {
                                     let node = &doc.nodes[child_index];
                                     if let LiveValue::LiveType(lt) = node.value {
                                         ext_self(
-                                            self.live_registry.token_id_to_span(prop.token_id.unwrap()),
+                                            live_registry.token_id_to_span(prop.token_id.unwrap()),
                                             prop.id,
                                             lt,
                                             &mut draw_shader_def
@@ -471,10 +476,11 @@ impl ShaderRegistry {
                             }
                         },
                         LiveValue::VarDef {token_start, token_count, scope_start, scope_count} => {
-                            let origin_doc = self.live_registry.token_id_to_origin_doc(prop.token_id.unwrap());
-                            let scopes_doc = self.live_registry.token_id_to_expanded_doc(prop.token_id.unwrap());
+                            let origin_doc = live_registry.token_id_to_origin_doc(prop.token_id.unwrap());
+                            let scopes_doc = live_registry.token_id_to_expanded_doc(prop.token_id.unwrap());
                             
                             let mut parser = ShaderParser::new(
+                                live_registry,
                                 self,
                                 origin_doc.get_tokens(token_start, token_count),
                                 &scopes_doc.scopes[scope_start..(scope_start+scope_count as usize)],
@@ -511,10 +517,11 @@ impl ShaderRegistry {
                             }
                         },
                         LiveValue::Fn {token_start, token_count, scope_start, scope_count} => {
-                            let origin_doc = &self.live_registry.token_id_to_origin_doc(prop.token_id.unwrap());
-                            let scopes_doc = self.live_registry.token_id_to_expanded_doc(prop.token_id.unwrap());
+                            let origin_doc = &live_registry.token_id_to_origin_doc(prop.token_id.unwrap());
+                            let scopes_doc = live_registry.token_id_to_expanded_doc(prop.token_id.unwrap());
                             // whats our fie
                             let parser = ShaderParser::new(
+                                live_registry, 
                                 self,
                                 origin_doc.get_tokens(token_start, token_count),
                                 &scopes_doc.scopes[scope_start..scope_start+scope_count as usize],
@@ -554,13 +561,14 @@ impl ShaderRegistry {
                 
                 self.draw_shader_defs.insert(draw_shader_ptr, draw_shader_def);
                 
-                self.analyse_deps(&parser_deps) ?;
+                self.analyse_deps(live_registry, &parser_deps) ?;
                 
                 let draw_shader_def = self.draw_shader_defs.get(&draw_shader_ptr).unwrap();
                 let mut sa = DrawShaderAnalyser {
+                    live_registry,
+                    shader_registry: self,
                     draw_shader_def: draw_shader_def,
                     scopes: &mut Scopes::new(),
-                    shader_registry: self,
                     options: ShaderAnalyseOptions {
                         no_const_collapse: true
                     }
@@ -572,7 +580,7 @@ impl ShaderRegistry {
             }
             _ => return Err(LiveError {
                 origin: live_error_origin!(),
-                span: self.live_registry.token_id_to_span(class_node.token_id.unwrap()),
+                span: live_registry.token_id_to_span(class_node.token_id.unwrap()),
                 message: format!("analyse_draw_shader could not find shader class")
             })
         }

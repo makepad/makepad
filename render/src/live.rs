@@ -17,8 +17,10 @@ pub trait LiveFactory {
     fn component_fields(&self, fields: &mut Vec<LiveField>);
 }
 
-pub trait LiveNew {
+pub trait LiveNew: LiveComponent {
     fn new(cx: &mut Cx) -> Self;
+    fn new_apply(cx: &mut Cx, apply_from: ApplyFrom, index:usize, nodes:&[LiveNode])->Self;
+    fn new_from_doc(cx: &mut Cx, live_doc_nodes:LiveDocNodes)->Self;
     fn live_type() -> LiveType;
     fn live_register(cx: &mut Cx);
 }
@@ -32,34 +34,34 @@ pub trait LiveComponentValue {
 }
 
 pub trait LiveComponent {
-    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
-    fn apply(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
-        self.apply_index(cx, ApplyFrom::Apply, 0, nodes);
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
+    fn apply_live(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
+        self.apply(cx, ApplyFrom::ApplyLive, 0, nodes);
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum ApplyFrom {
-    LiveNew {file_id: FileId}, // newed from DSL
-    LiveUpdate {file_id: FileId}, // live DSL updated
-    DataNew, // newed from bare data
+    NewFromDoc {file_id: FileId}, // newed from DSL
+    UpdateFromDoc {file_id: FileId}, // live DSL updated
+    New, // Bare new without file info
     Animate, // from animate
-    Apply // called from bare apply() call
+    ApplyLive // called from bare apply_live() call
 }
 
 impl ApplyFrom {
-    pub fn is_from_live(&self) -> bool {
+    pub fn is_from_doc(&self) -> bool {
         match self {
-            Self::LiveNew {..} => true,
-            Self::LiveUpdate {..} => true,
+            Self::NewFromDoc {..} => true,
+            Self::UpdateFromDoc {..} => true,
             _ => false
         }
     }
     
     pub fn file_id(&self) -> Option<FileId> {
         match self {
-            Self::LiveNew {file_id} => Some(*file_id),
-            Self::LiveUpdate {file_id} => Some(*file_id),
+            Self::NewFromDoc {file_id} => Some(*file_id),
+            Self::UpdateFromDoc {file_id} => Some(*file_id),
             _ => None
         }
     }
@@ -69,7 +71,7 @@ pub trait CanvasComponent: LiveComponent {
     fn handle(&mut self, cx: &mut Cx, event: &mut Event);
     fn draw(&mut self, cx: &mut Cx);
     fn apply_draw(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
-        self.apply(cx, nodes);
+        self.apply_live(cx, nodes);
         self.draw(cx);
     }
 }
@@ -78,8 +80,8 @@ pub trait LiveComponentHooks {
     fn apply_value_unknown(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         nodes.skip_node(index)
     }
-    fn before_apply_index(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
-    fn after_apply_index(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
+    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
+    fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
     fn after_new(&mut self, _cx: &mut Cx) {}
 }
 
@@ -109,7 +111,7 @@ impl Cx {
         crate::shader_std::live_register(self);
         crate::font::live_register(self);
     }
-    
+    /*
     pub fn clone_from_module_path(&self, module_path: &str) -> Option<(FileId, Vec<LiveNode>)> {
         self.shader_registry.live_registry.clone_from_module_path(module_path)
     }
@@ -131,19 +133,21 @@ impl Cx {
             None
         }
     }
-    
+    */
     // ok so now what. now we should run the expansion
     pub fn live_expand(&mut self) {
         // lets expand the f'er
         let mut errs = Vec::new();
-        self.shader_registry.live_registry.expand_all_documents(&mut errs);
+        let mut live_registry = self.live_registry.borrow_mut();
+        live_registry.expand_all_documents(&mut errs);
         for err in errs {
-            println!("Error expanding live file {}", self.shader_registry.live_registry.live_error_to_live_file_error(err));
+            println!("Error expanding live file {}", live_registry.live_error_to_live_file_error(err));
         }
     }
     
     pub fn verify_type_signature(&self, live_ptr: LivePtr, live_type: LiveType) -> bool {
-        let node = self.shader_registry.live_registry.ptr_to_node(live_ptr);
+        let live_registry = self.live_registry.borrow();
+        let node = live_registry.ptr_to_node(live_ptr);
         if let LiveValue::LiveType(ty) = node.value {
             if ty == live_type {
                 return true
@@ -154,7 +158,7 @@ impl Cx {
     }
     
     pub fn register_live_body(&mut self, live_body: LiveBody) {
-        let result = self.shader_registry.live_registry.parse_live_file(
+        let result = self.live_registry.borrow_mut().parse_live_file(
             &live_body.file,
             ModulePath::from_str(&live_body.module_path).unwrap(),
             live_body.code,
@@ -189,6 +193,16 @@ macro_rules!live_primitive {
             fn new(_cx: &mut Cx) -> Self {
                 $ default
             }
+            fn new_apply(cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> Self {
+                let mut ret = $ default;
+                ret.apply(cx, apply_from, index, nodes);
+                ret
+            }
+            fn new_from_doc(cx: &mut Cx, live_doc_nodes:LiveDocNodes) -> Self {
+                let mut ret = $ default;
+                ret.apply(cx, ApplyFrom::NewFromDoc{file_id:live_doc_nodes.file_id}, live_doc_nodes.index, live_doc_nodes.nodes);
+                ret
+            }
             fn live_type() -> LiveType {
                 LiveType(std::any::TypeId::of::< $ ty>())
             }
@@ -199,63 +213,40 @@ macro_rules!live_primitive {
 }
 
 live_primitive!(
-    KeyFrameValue,
-    KeyFrameValue::None,
-    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        match &nodes[index].value {
-            LiveValue::Id(id) => {
-                *self = KeyFrameValue::Id(*id);
-                index + 1
+    LiveValue,
+    LiveValue::None,
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        if nodes[index].value.is_array(){
+            if let Some(value) = Animator::last_keyframe_value_from_array(index, nodes) {
+                self.apply(cx, apply_from, index, nodes);
             }
-            LiveValue::Float(f) => {
-                *self = KeyFrameValue::Float(*f);
-                index + 1
-            }
-            LiveValue::Vec2(f) => {
-                *self = KeyFrameValue::Vec2(*f);
-                index + 1
-            }
-            LiveValue::Vec3(f) => {
-                *self = KeyFrameValue::Vec3(*f);
-                index + 1
-            }
-            LiveValue::Color(f) => {
-                *self = KeyFrameValue::Vec4(Vec4::from_u32(*f));
-                index + 1
-            }
-            LiveValue::Array => {
-                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
-                    self.apply_index(cx, apply_from, index, nodes);
-                }
-                nodes.skip_node(index)
-            }
-            _ => nodes.skip_node(index)
+            nodes.skip_node(index)
+        }
+        else if nodes[index].value.is_open(){ // cant use this
+            nodes.skip_node(index)
+        }
+        else{
+            *self = nodes[index].value.clone();
+            index + 1
         }
     },
     fn to_live_value(&self) -> LiveValue {
-        match self {
-            Self::None => LiveValue::None,
-            Self::Float(v) => LiveValue::Float(*v),
-            Self::Vec2(v) => LiveValue::Vec2(*v),
-            Self::Vec3(v) => LiveValue::Vec3(*v),
-            Self::Vec4(v) => LiveValue::Color(v.to_u32()),
-            Self::Id(v) => LiveValue::Id(*v),
-        }
+        self.clone()
     }
 );
 
 live_primitive!(
     Id,
     Id::empty(),
-    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Id(id) => {
                 *self = *id;
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
-                    self.apply_index(cx, apply_from, index, nodes);
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, apply_from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -270,7 +261,7 @@ live_primitive!(
 live_primitive!(
     f32,
     0.0f32,
-    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Float(val) => {
                 *self = *val as f32;
@@ -281,9 +272,8 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Array => {
-                println!("HERE!");
-                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
-                    self.apply_index(cx, apply_from, index, nodes);
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, apply_from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -298,7 +288,7 @@ live_primitive!(
 live_primitive!(
     f64,
     0.0f64,
-    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Float(val) => {
                 *self = *val as f64;
@@ -309,8 +299,8 @@ live_primitive!(
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
-                    self.apply_index(cx, apply_from, index, nodes);
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, apply_from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -325,15 +315,15 @@ live_primitive!(
 live_primitive!(
     Vec2,
     Vec2::default(),
-    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Vec2(val) => {
                 *self = *val;
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
-                    self.apply_index(cx, apply_from, index, nodes);
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, apply_from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -348,15 +338,15 @@ live_primitive!(
 live_primitive!(
     Vec3,
     Vec3::default(),
-    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Vec3(val) => {
                 *self = *val;
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
-                    self.apply_index(cx, apply_from, index, nodes);
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, apply_from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -371,15 +361,15 @@ live_primitive!(
 live_primitive!(
     Vec4,
     Vec4::default(),
-    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Color(v) => {
                 *self = Vec4::from_u32(*v);
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
-                    self.apply_index(cx, apply_from, index, nodes);
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, apply_from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -394,24 +384,27 @@ live_primitive!(
 live_primitive!(
     String,
     String::default(),
-    fn apply_index(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Str(v) => {
-                *self = v.to_string();
+                self.truncate(0);
+                self.push_str(v);
                 index + 1
             }
             LiveValue::String(v) => {
-                *self = v.clone();
+                self.truncate(0);
+                self.push_str(v);
                 index + 1
             }
             LiveValue::StringRef {string_start, string_count} => {
-                let origin_doc = cx.shader_registry.live_registry.token_id_to_origin_doc(nodes[index].token_id.unwrap());
+                let live_registry = cx.live_registry.borrow();
+                let origin_doc = live_registry.token_id_to_origin_doc(nodes[index].token_id.unwrap());
                 origin_doc.get_string(*string_start, *string_count, self);
                 index + 1
             }
             LiveValue::Array => {
-                if let Some(index) = Animator::find_last_keyframe_value(index, nodes) {
-                    self.apply_index(cx, apply_from, index, nodes);
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, apply_from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
