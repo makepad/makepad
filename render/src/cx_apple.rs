@@ -574,21 +574,37 @@ pub enum MTLCPUCacheMode {
     WriteCombined = 1,
 }
 
+#[repr(u64)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum MTLHazardTrackingMode {
+    Default = 0,
+    Untracked = 1,
+    Tracked = 2,
+}
+
 pub const MTLResourceCPUCacheModeShift: u64 = 0;
 pub const MTLResourceCPUCacheModeMask: u64 = 0xf << MTLResourceCPUCacheModeShift;
+
 pub const MTLResourceStorageModeShift: u64 = 4;
 pub const MTLResourceStorageModeMask: u64 = 0xf << MTLResourceStorageModeShift;
 
-#[allow(non_upper_case_globals)]
-#[repr(u64)]
-pub enum MTLResourceOptions {
-    //CPUCacheModeDefaultCache  = (MTLCPUCacheMode::DefaultCache as u64) << MTLResourceCPUCacheModeShift,
-    CPUCacheModeWriteCombined = (MTLCPUCacheMode::WriteCombined as u64) << MTLResourceCPUCacheModeShift,
+pub const MTLResourceHazardTrackingModeShift: u64 = 8;
+pub const MTLResourceHazardTrackingModeMask: u64 = 0x3 << MTLResourceHazardTrackingModeShift;
 
-    StorageModeShared  = (MTLStorageMode::Shared as u64)  << MTLResourceStorageModeShift,
-    StorageModeManaged = (MTLStorageMode::Managed as u64) << MTLResourceStorageModeShift,
-    StorageModePrivate = (MTLStorageMode::Private as u64) << MTLResourceStorageModeShift,
-    StorageModeMemoryless = (MTLStorageMode::Memoryless as u64) << MTLResourceStorageModeShift,
+#[allow(non_upper_case_globals)]
+pub struct MTLResourceOptions;
+impl MTLResourceOptions{
+    pub const CPUCacheModeDefaultCache:u64  = (MTLCPUCacheMode::DefaultCache as u64) << MTLResourceCPUCacheModeShift;
+    pub const CPUCacheModeWriteCombined:u64 = (MTLCPUCacheMode::WriteCombined as u64) << MTLResourceCPUCacheModeShift;
+
+    pub const HazardTrackingModeUntracked:u64 = (MTLHazardTrackingMode::Untracked as u64) << MTLResourceHazardTrackingModeShift;
+    pub const HazardTrackingModeTracked:u64 = (MTLHazardTrackingMode::Tracked as u64) << MTLResourceHazardTrackingModeShift;
+
+    pub const StorageModeShared:u64  = (MTLStorageMode::Shared as u64)  << MTLResourceStorageModeShift;
+    pub const StorageModeManaged:u64 = (MTLStorageMode::Managed as u64) << MTLResourceStorageModeShift;
+    pub const StorageModePrivate:u64 = (MTLStorageMode::Private as u64) << MTLResourceStorageModeShift;
+    pub const StorageModeMemoryless:u64 = (MTLStorageMode::Memoryless as u64) << MTLResourceStorageModeShift;
 }
 
 #[repr(u64)]
