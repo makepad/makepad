@@ -42,7 +42,7 @@ use crate::cx::*;
 #[repr(C)]
 pub struct DrawQuad {
     #[live()] pub geometry: GeometryQuad2D,
-    #[local()] pub draw_call_vars: DrawCallVars,
+    #[local()] pub draw_vars: DrawVars,
     #[local()] pub rect_pos: Vec2,
     #[local()] pub rect_size: Vec2,
     #[live(1.0)] pub draw_depth: f32,
@@ -51,17 +51,17 @@ pub struct DrawQuad {
 impl DrawQuad {
     
     pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) {
-        if self.draw_call_vars.draw_shader.is_some() {
-            let new_area = cx.add_aligned_instance(&self.draw_call_vars);
-            self.draw_call_vars.area = cx.update_area_refs(self.draw_call_vars.area, new_area);
-            cx.begin_turtle(layout, self.draw_call_vars.area);
+        if self.draw_vars.draw_shader.is_some() {
+            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+            cx.begin_turtle(layout, self.draw_vars.area);
         }
     }
     
     pub fn end_quad(&mut self, cx: &mut Cx) {
-        if self.draw_call_vars.draw_shader.is_some() {
-            let rect = cx.end_turtle(self.draw_call_vars.area);
-            self.draw_call_vars.area.set_rect(cx, &rect);
+        if self.draw_vars.draw_shader.is_some() {
+            let rect = cx.end_turtle(self.draw_vars.area);
+            self.draw_vars.area.set_rect(cx, &rect);
         }
     }
     
@@ -86,9 +86,9 @@ impl DrawQuad {
     }
     
     pub fn draw_quad(&mut self, cx: &mut Cx) {
-        if self.draw_call_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_call_vars);
-            self.draw_call_vars.area = cx.update_area_refs(self.draw_call_vars.area, new_area);
+        if self.draw_vars.can_instance() {
+            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
 }

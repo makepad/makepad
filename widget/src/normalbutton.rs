@@ -104,7 +104,7 @@ impl NormalButton {
     
     pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
         self.handle_animation(cx, event);
-        let res = self.button_logic.handle_button_logic(cx, event, self.bg.draw_call_vars.area);
+        let res = self.button_logic.handle_button_logic(cx, event, self.bg.draw_vars.area);
         match res.state {
             ButtonState::Down => self.animate_to(cx, id!(state_down)),
             ButtonState::Default => self.animate_to(cx, id!(state_default)),
@@ -118,5 +118,6 @@ impl NormalButton {
         self.bg.begin_quad(cx, self.layout);
         self.text.draw_text_walk(cx, label.unwrap_or(&self.label));
         self.bg.end_quad(cx);
+        //self.bg.draw_vars.redraw(cx);
     }
 }
