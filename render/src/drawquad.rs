@@ -86,7 +86,7 @@ impl DrawQuad {
     }
     
     pub fn draw_quad(&mut self, cx: &mut Cx) {
-        if self.draw_call_vars.draw_shader.is_some() {
+        if self.draw_call_vars.can_instance() {
             let new_area = cx.add_aligned_instance(&self.draw_call_vars);
             self.draw_call_vars.area = cx.update_area_refs(self.draw_call_vars.area, new_area);
         }
