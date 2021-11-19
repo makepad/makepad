@@ -238,7 +238,7 @@ impl Animator {
             }
             else if node.value.is_array() {
                 if let Some(last_value) = Self::last_keyframe_value_from_array(index, nodes) {
-                    state.extend_from_slice(live_bare!{
+                    state.extend_from_slice(live_object!{
                         [node.id]: [(nodes[last_value].value.clone())]
                     });
                 }
@@ -257,7 +257,7 @@ impl Animator {
                     }
                 }
                 else { // array with single value containing this as state
-                    state.extend_from_slice(live_bare!{
+                    state.extend_from_slice(live_object!{
                         [node.id]: [(node.value.clone())]
                     });
                 }

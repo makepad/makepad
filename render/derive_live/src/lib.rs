@@ -42,8 +42,8 @@ pub fn live_array(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
-pub fn live_bare(input: TokenStream) -> TokenStream {
-    live_bare_impl(input)
+pub fn live_object(input: TokenStream) -> TokenStream {
+    live_object_impl(input)
 }
 
 
