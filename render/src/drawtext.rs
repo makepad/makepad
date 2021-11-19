@@ -144,7 +144,7 @@ pub struct DrawText {
     #[live(1.0)] pub font_scale: f32,
     #[live(1.0)] pub draw_depth: f32,
     
-    #[local()] pub draw_call_vars: DrawCallVars,
+    #[local()] pub draw_vars: DrawVars,
     // these values are all generated
     #[live()] pub color: Vec4,
     #[local()] pub font_t1: Vec2,
@@ -183,28 +183,28 @@ impl DrawText {
     }
     
     pub fn begin_many_instances(&mut self, cx: &mut Cx) {
-        let mi = cx.begin_many_aligned_instances(&self.draw_call_vars);
+        let mi = cx.begin_many_aligned_instances(&self.draw_vars);
         self.many_instances = Some(mi);
     }
     
     pub fn end_many_instances(&mut self, cx: &mut Cx) {
         if let Some(mi) = self.many_instances.take() {
             let new_area = cx.end_many_instances(mi);
-            self.draw_call_vars.area = cx.update_area_refs(self.draw_call_vars.area, new_area);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
     
     pub fn update_draw_call_vars(&mut self, cx: &mut Cx) {
-        self.draw_call_vars.texture_slots[0] = Some(cx.fonts_atlas.texture);
-        self.draw_call_vars.user_uniforms[0] = self.text_style.brightness;
-        self.draw_call_vars.user_uniforms[1] = self.text_style.curve;
+        self.draw_vars.texture_slots[0] = Some(cx.fonts_atlas.texture);
+        self.draw_vars.user_uniforms[0] = self.text_style.brightness;
+        self.draw_vars.user_uniforms[1] = self.text_style.curve;
     }
     
     pub fn draw_text_chunk<F>(&mut self, cx: &mut Cx, pos: Vec2, char_offset: usize, chunk: Option<&[char]>, mut char_callback: F)
     where F: FnMut(char, usize, f32, f32) -> f32
     {
         
-        if !self.draw_call_vars.can_instance()
+        if !self.draw_vars.can_instance()
             || pos.x.is_nan()
             || pos.y.is_nan()
             || self.text_style.font.font_id.is_none() {
@@ -321,7 +321,7 @@ impl DrawText {
             // self.marker = marker;
             self.marker = char_callback(*wc, char_offset, walk_x, advance);
             
-            mi.instances.extend_from_slice(self.draw_call_vars.as_slice());
+            mi.instances.extend_from_slice(self.draw_vars.as_slice());
             // !TODO make sure a derived shader adds 'empty' values here.
             
             walk_x += advance;
@@ -335,7 +335,7 @@ impl DrawText {
     
     pub fn draw_text_walk(&mut self, cx: &mut Cx, text: &str) {
         
-        if !self.draw_call_vars.can_instance()
+        if !self.draw_vars.can_instance()
             || self.text_style.font.font_id.is_none() {
             return
         }
@@ -436,7 +436,7 @@ impl DrawText {
     
     // looks up text with the behavior of a text selection mouse cursor
     pub fn closest_text_offset(&self, cx: &Cx, pos: Vec2) -> Option<usize> {
-        let area = &self.draw_call_vars.area;
+        let area = &self.draw_vars.area;
         
         if !area.is_valid(cx) {
             return None

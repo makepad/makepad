@@ -174,7 +174,7 @@ impl Cx {
 pub struct DrawTrapezoidText {
     #[hidden()] pub trapezoidator: Trapezoidator,
     #[live()] pub geometry: GeometryQuad2D,
-    #[local()] pub draw_call_vars: DrawCallVars,
+    #[local()] pub draw_vars: DrawVars,
     #[local()] pub a_xs: Vec2,
     #[local()] pub a_ys: Vec4,
     #[local()] pub chan: f32,
@@ -185,7 +185,7 @@ impl DrawTrapezoidText {
     // test api for directly drawing a glyph
     pub fn draw_char(&mut self, cx: &mut Cx, c: char, font_id: usize, font_size: f32) {
         // now lets make a draw_character function
-        let mut many = cx.begin_many_instances(&self.draw_call_vars);
+        let mut many = cx.begin_many_instances(&self.draw_vars);
         
         let trapezoids = {
             let cxfont = cx.fonts[font_id].as_ref().unwrap();
@@ -232,7 +232,7 @@ impl DrawTrapezoidText {
             self.a_xs = Vec2 {x: trapezoid.xs[0], y: trapezoid.xs[1]};
             self.a_ys = Vec4 {x: trapezoid.ys[0], y: trapezoid.ys[1], z: trapezoid.ys[2], w: trapezoid.ys[3]};
             self.chan = 3.0;
-            many.instances.extend_from_slice(self.draw_call_vars.as_slice());
+            many.instances.extend_from_slice(self.draw_vars.as_slice());
         }
         
         cx.end_many_instances(many);
@@ -294,7 +294,7 @@ impl DrawTrapezoidText {
                 self.a_xs = Vec2 {x: trapezoid.xs[0], y: trapezoid.xs[1]};
                 self.a_ys = Vec4 {x: trapezoid.ys[0], y: trapezoid.ys[1], z: trapezoid.ys[2], w: trapezoid.ys[3]};
                 self.chan = i as f32;
-                many.instances.extend_from_slice(self.draw_call_vars.as_slice());
+                many.instances.extend_from_slice(self.draw_vars.as_slice());
             }
         }
     }
@@ -350,7 +350,7 @@ impl CxDrawFontAtlas {
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut cx.fonts_atlas.atlas_todo, &mut atlas_todo);
             
-            let mut many = cx.begin_many_instances(&self.draw_trapezoid_text.draw_call_vars);
+            let mut many = cx.begin_many_instances(&self.draw_trapezoid_text.draw_vars);
             
             for todo in atlas_todo {
                 self.draw_trapezoid_text.draw_todo(cx, todo, &mut many);
