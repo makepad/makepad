@@ -5,33 +5,33 @@ live_register!{
     use makepad_render::shader_std::*;
     use makepad_render::drawquad::DrawQuad;
     
-    DrawDesktopButton:DrawQuad{
-        rust_type:{{DrawDesktopButton}}
-            
+    DrawDesktopButton: DrawQuad {
+        rust_type: {{DrawDesktopButton}}
+        debug:false,
         fn pixel(self) -> vec4 {
             let cx = Sdf2d::viewport(self.pos * self.rect_size);
             cx.aa *= 3.0;
             let sz = 4.5;
             let c = self.rect_size * vec2(0.5, 0.5);
-
+            
             // WindowsMin
-            match self.button_type{
-                DesktopButtonType::WindowsMin=>{
+            match self.button_type {
+                DesktopButtonType::WindowsMin => {
                     cx.clear(mix(#3, mix(#6, #9, self.pressed), self.hover));
                     cx.move_to(c.x - sz, c.y);
                     cx.line_to(c.x + sz, c.y);
                     cx.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
                     return cx.result;
                 }
-                DesktopButtonType::WindowsMax=>{
-                    cx.clear(mix(#3, mix(#6, #9, pressed), hover));
+                DesktopButtonType::WindowsMax => {
+                    cx.clear(mix(#3, mix(#6, #9, self.pressed), self.hover));
                     cx.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
                     cx.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
                     return cx.result;
                 }
-                DesktopButtonType::WindowsMaxToggled=>{
+                DesktopButtonType::WindowsMaxToggled => {
                     let clear = mix(#3, mix(#6, #9, self.pressed), self.hover);
-                    df.clear(clear);
+                    cx.clear(clear);
                     let sz = 3.5;
                     cx.rect(c.x - sz + 1., c.y - sz - 1., 2. * sz, 2. * sz);
                     cx.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
@@ -40,16 +40,16 @@ live_register!{
                     cx.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
                     return cx.result;
                 }
-                DesktopButtonType::WindowsClose=>{
+                DesktopButtonType::WindowsClose => {
                     cx.clear(mix(#3, mix(#e00, #c00, self.pressed), self.hover));
                     cx.move_to(c.x - sz, c.y - sz);
                     cx.line_to(c.x + sz, c.y + sz);
                     cx.move_to(c.x - sz, c.y + sz);
                     cx.line_to(c.x + sz, c.y - sz);
                     cx.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
-                    return df.result;
+                    return cx.result;
                 }
-                DesktopButtonType::VRMode=>{
+                DesktopButtonType::XRMode => {
                     cx.clear(mix(#3, mix(#0aa, #077, self.pressed), self.hover));
                     let w = 12.;
                     let h = 8.;
@@ -65,7 +65,7 @@ live_register!{
                     
                     return cx.result;
                 }
-                DesktopButtonType::Fullscreen=>{
+                DesktopButtonType::Fullscreen => {
                     sz = 8.;
                     cx.clear(mix(#3, mix(#6, #9, self.pressed), self.hover));
                     cx.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
@@ -99,12 +99,12 @@ live_register!{
                 all: Play::Forward {duration: 0.1}
                 state_down: Play::Forward {duration: 0.01}
             }
-            bg: { 
+            bg: {
                 down: 0.0,
                 hover: [{time: 0.0, value: 1.0}],
-            } 
+            }
         }
-         
+        
         state_pressed: {
             from: {all: Play::Forward {duration: 0.2}}
             bg: {
@@ -114,7 +114,6 @@ live_register!{
         }
     }
 }
-
 
 #[derive(LiveComponent, LiveApply, LiveAnimate)]
 pub struct DesktopButton {
@@ -157,7 +156,7 @@ impl DesktopButton {
         res.action
     }
     
-    pub fn draw_desktop_button(&mut self, cx: &mut Cx, ty:DesktopButtonType) {
+    pub fn draw_desktop_button(&mut self, cx: &mut Cx, ty: DesktopButtonType) {
         let (w, h) = match ty {
             DesktopButtonType::WindowsMin
                 | DesktopButtonType::WindowsMax
@@ -166,9 +165,9 @@ impl DesktopButton {
             DesktopButtonType::XRMode => (50., 36.),
             DesktopButtonType::Fullscreen => (50., 36.),
         };
-
+        
         self.bg.button_type = ty;
-        self.bg.draw_quad_walk(cx, Walk::fixed(w,h));
+        self.bg.draw_quad_walk(cx, Walk::fixed(w, h));
     }
 }
 

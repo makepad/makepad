@@ -164,12 +164,13 @@ pub fn generate_cons_fn(backend_writer:&dyn BackendWriter, string: &mut String, 
 
 impl<'a> BlockGenerator<'a> {
     pub fn generate_block(&mut self, block: &Block) {
-        write!(self.string, "{{").unwrap();
+        write!(self.string, "{{\n").unwrap();
+        self.write_indent();
         if !block.stmts.is_empty() {
-            writeln!(self.string).unwrap();
             self.indent_level += 1;
             for stmt in &block.stmts {
                 self.generate_stmt(stmt);
+                writeln!(self.string).unwrap();
             }
             self.indent_level -= 1;
             self.write_indent();
@@ -196,6 +197,11 @@ impl<'a> BlockGenerator<'a> {
                 ref block_if_true,
                 ref block_if_false,
             } => self.generate_if_stmt(span, expr, block_if_true, block_if_false),
+            Stmt::Match {
+                span,
+                ref expr,
+                ref matches,
+            } => self.generate_match_stmt(span, expr, matches),
             Stmt::Let {
                 span,
                 ref ty,
@@ -291,6 +297,25 @@ impl<'a> BlockGenerator<'a> {
             self.generate_block(block_if_false);
         }
         writeln!(self.string).unwrap();
+    }
+    
+    fn generate_match_stmt(
+        &mut self,
+        _span: Span,
+        expr: &Expr,
+        matches: &Vec<Match>,
+    ) {
+        for (index,match_item) in matches.iter().enumerate(){
+            if index != 0{
+                write!(self.string, "else  ").unwrap();
+            }
+
+            write!(self.string, "if(").unwrap();
+            self.generate_expr(expr);
+            write!(self.string, " == {})", match_item.enum_value.get().unwrap()).unwrap();
+            
+            self.generate_block(&match_item.block);
+        }
     }
     
     fn generate_let_stmt(
