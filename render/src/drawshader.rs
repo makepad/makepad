@@ -82,6 +82,9 @@ impl DrawVars {
     pub fn live_type()->LiveType{
         LiveType(std::any::TypeId::of::<DrawVars>())    
     }
+
+    pub fn live_register(_cx:&mut Cx){
+    }
     
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
         unsafe {
@@ -123,7 +126,7 @@ impl DrawVars {
                                 }
                                 if field.id == id!(draw_vars){
                                     // assert the thing to be marked correctly
-                                    if let LiveOrLocal::Local = field.live_or_local{}
+                                    if let LiveOrCalc::Calc = field.live_or_calc{}
                                     else{panic!()}
                                     if field.live_type.unwrap() != DrawVars::live_type(){panic!();}
                                     
@@ -132,14 +135,16 @@ impl DrawVars {
                                 }
                                 if *after_draw_call_vars{
                                     // lets count sizes
+                                    // 
+                                    
                                     let ty = live_type_to_shader_ty(field.live_type.unwrap()).expect("Please only put shader instance fields after draw_call_vars");
                                     slots += ty.slots();
-                                    draw_shader_def.add_instance(field.id, ty, span, field.live_or_local);
+                                    draw_shader_def.add_instance(field.id, ty, span, field.live_or_calc);
                                 }
                             }
                             // insert padding
                             if slots%2 == 1{
-                                draw_shader_def.add_instance(Id(0), Ty::Float, span, LiveOrLocal::Local);
+                                draw_shader_def.add_instance(Id(0), Ty::Float, span, LiveOrCalc::Calc);
                             }
                         }
                     }
@@ -459,7 +464,7 @@ impl CxDrawShaderMapping {
                 DrawShaderFieldKind::Geometry {..} => {
                     geometries.push(field.ident.0, ty, None);
                 }
-                DrawShaderFieldKind::Instance {var_def_ptr, live_or_local, ..} => {
+                DrawShaderFieldKind::Instance {var_def_ptr, live_or_calc, ..} => {
                     if field.ident.0 == id!(rect_pos){
                         rect_pos = Some(instances.total_slots);
                     }
@@ -470,7 +475,7 @@ impl CxDrawShaderMapping {
                         var_instances.push(field.ident.0, ty.clone(), None,);
                     }
                     instances.push(field.ident.0, ty, None);
-                    if let LiveOrLocal::Live = live_or_local{
+                    if let LiveOrCalc::Live = live_or_calc{
                         live_instances.inputs.push(instances.inputs.last().unwrap().clone());
                     }
                 }

@@ -11,8 +11,8 @@ live_register!{
         bg: DrawQuad {
             instance color: vec4 = #333
             instance hover: float
-            instance down: float
-            
+            instance pressed: float
+
             const shadow: float = 3.0
             const border_radius: float = 2.5
             
@@ -21,8 +21,8 @@ live_register!{
                 cx.box(
                     shadow,
                     shadow,
-                    self.rect_size.x - shadow * (1. + self.down),
-                    self.rect_size.y - shadow * (1. + self.down),
+                    self.rect_size.x - shadow * (1. + self.pressed),
+                    self.rect_size.y - shadow * (1. + self.pressed),
                     border_radius
                 );
                 cx.blur = 6.0;
@@ -35,7 +35,7 @@ live_register!{
                     self.rect_size.y - shadow * 2.,
                     border_radius
                 );
-                return cx.fill(mix(mix(#3, #4, self.hover), #2a, self.down));
+                return cx.fill(mix(mix(#3, #4, self.hover), #2a, self.pressed));
             }
         }
         
@@ -53,7 +53,7 @@ live_register!{
         
         state_default: {
             from: {all: Play::Forward {duration: 0.1}}
-            bg: {down: 0.0, hover: 0.0}
+            bg: {pressed: 0.0, hover: 0.0}
             text: {color: #9}
         }
         
@@ -63,16 +63,16 @@ live_register!{
                 state_down: Play::Forward {duration: 0.01}
             }
             bg: { 
-                down: 0.0,
+                pressed: 0.0,
                 hover: [{time: 0.0, value: 1.0}],
             } 
             text: {color: [{time: 0.0, value: #f}]}
         }
          
-        state_down: {
+        state_pressed: {
             from: {all: Play::Forward {duration: 0.2}}
             bg: {
-                down: [{time: 0.0, value: 1.0}],
+                pressed: [{time: 0.0, value: 1.0}],
                 hover: 1.0,
             }
             text: {color: [{time: 0.0, value: #c}]}
@@ -82,12 +82,12 @@ live_register!{
 
 #[derive(LiveComponent, LiveComponentHooks, LiveAnimate)]
 pub struct NormalButton {
-    #[hidden()] pub button_logic: ButtonLogic,
-    #[hidden()] pub animator: Animator,
-    #[live()] pub bg: DrawQuad,
-    #[live()] pub text: DrawText,
-    #[live()] pub layout: Layout,
-    #[live()] pub label: String
+    #[hide] pub button_logic: ButtonLogic,
+    #[hide] pub animator: Animator,
+    #[live] pub bg: DrawQuad,
+    #[live] pub text: DrawText,
+    #[live] pub layout: Layout,
+    #[live] pub label: String
 }
 
 impl CanvasComponent for NormalButton {
@@ -106,7 +106,7 @@ impl NormalButton {
         self.handle_animation(cx, event);
         let res = self.button_logic.handle_button_logic(cx, event, self.bg.draw_vars.area);
         match res.state {
-            ButtonState::Down => self.animate_to(cx, id!(state_down)),
+            ButtonState::Pressed => self.animate_to(cx, id!(state_pressed)),
             ButtonState::Default => self.animate_to(cx, id!(state_default)),
             ButtonState::Hover => self.animate_to(cx, id!(state_hover)),
             _ => ()
@@ -118,6 +118,5 @@ impl NormalButton {
         self.bg.begin_quad(cx, self.layout);
         self.text.draw_text_walk(cx, label.unwrap_or(&self.label));
         self.bg.end_quad(cx);
-        //self.bg.draw_vars.redraw(cx);
     }
 }

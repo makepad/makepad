@@ -109,8 +109,8 @@ live_register!{
 
 #[derive(Clone, LiveComponent)]
 pub struct Font {
-    #[hidden()] pub font_id: Option<usize>,
-    #[live()] pub path: String
+    #[hide] pub font_id: Option<usize>,
+    #[live] pub path: String
 }
 
 impl LiveComponentHooks for Font {
@@ -172,12 +172,12 @@ impl Cx {
 #[derive(LiveComponent, LiveComponentHooks)]
 #[repr(C)]
 pub struct DrawTrapezoidText {
-    #[hidden()] pub trapezoidator: Trapezoidator,
-    #[live()] pub geometry: GeometryQuad2D,
-    #[local()] pub draw_vars: DrawVars,
-    #[local()] pub a_xs: Vec2,
-    #[local()] pub a_ys: Vec4,
-    #[local()] pub chan: f32,
+    #[hide] pub trapezoidator: Trapezoidator,
+    #[live] pub geometry: GeometryQuad2D,
+    #[calc] pub draw_vars: DrawVars,
+    #[calc] pub a_xs: Vec2,
+    #[calc] pub a_ys: Vec4,
+    #[calc] pub chan: f32,
 }
 
 impl DrawTrapezoidText {

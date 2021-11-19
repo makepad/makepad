@@ -218,7 +218,7 @@ pub struct Iter<It> where It: Iterator {
     buffer: Option<It::Item>,
 }
 
-
+#[derive(Debug)]
 pub struct Attribute {
     pub name: String,
     pub args: Option<TokenStream>
