@@ -12,7 +12,7 @@ impl Default for ButtonAction {
 pub enum ButtonState {
     Hover,
     Default,
-    Down,
+    Pressed,
     None
 }
 
@@ -42,7 +42,7 @@ impl ButtonLogic {
             Event::FingerDown(_fe) => {
                 return ButtonHandleResult {
                     action: ButtonAction::Down,
-                    state: ButtonState::Down
+                    state: ButtonState::Pressed
                 };
             },
             Event::FingerHover(fe) => {
@@ -51,7 +51,7 @@ impl ButtonLogic {
                     HoverState::In => if fe.any_down {
                         return ButtonHandleResult {
                             action: ButtonAction::None,
-                            state: ButtonState::Down
+                            state: ButtonState::Pressed
                         };
                     }
                     else {

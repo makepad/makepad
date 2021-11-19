@@ -125,37 +125,37 @@ pub struct TextStyle {
 
 #[derive(Debug, Copy, LiveComponent, LiveComponentHooks, Clone)]
 pub enum Wrapping {
-    #[default()] Char,
-    #[live()] Word,
-    #[live()] Line,
-    #[live()] None,
+    #[pick] Char,
+    #[live] Word,
+    #[live] Line,
+    #[live] None,
     #[live(1.0)] Ellipsis(f32),
 }
 
 #[derive(LiveComponent, LiveComponentHooks)]
-#[repr(C,)]
+#[repr(C)]
 pub struct DrawText {
-    #[hidden()] pub buf: Vec<char>,
-    #[hidden()] pub many_instances: Option<ManyInstances>,
+    #[hide] pub buf: Vec<char>,
+    #[hide] pub many_instances: Option<ManyInstances>,
     
-    #[live()] pub geometry: GeometryQuad2D,
-    #[live()] pub text_style: TextStyle,
+    #[live] pub geometry: GeometryQuad2D,
+    #[live] pub text_style: TextStyle,
     #[live(Wrapping::None)] pub wrapping: Wrapping,
     #[live(1.0)] pub font_scale: f32,
     #[live(1.0)] pub draw_depth: f32,
     
-    #[local()] pub draw_vars: DrawVars,
+    #[calc] pub draw_vars: DrawVars,
     // these values are all generated
-    #[live()] pub color: Vec4,
-    #[local()] pub font_t1: Vec2,
-    #[local()] pub font_t2: Vec2,
-    #[local()] pub rect_pos: Vec2,
-    #[local()] pub rect_size: Vec2,
-    #[local()] pub char_depth: f32,
-    #[local()] pub base: Vec2,
-    #[local()] pub font_size: f32,
-    #[local()] pub char_offset: f32,
-    #[local()] pub marker: f32,
+    #[live] pub color: Vec4,
+    #[calc] pub font_t1: Vec2,
+    #[calc] pub font_t2: Vec2,
+    #[calc] pub rect_pos: Vec2,
+    #[calc] pub rect_size: Vec2,
+    #[calc] pub char_depth: f32,
+    #[calc] pub base: Vec2,
+    #[calc] pub font_size: f32,
+    #[calc] pub char_offset: f32,
+    #[calc] pub marker: f32,
 }
 
 impl DrawText {

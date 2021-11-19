@@ -8,7 +8,7 @@ pub use makepad_derive_live::*;
 pub use makepad_live_compiler::math::*;
 pub use makepad_shader_compiler::ShaderRegistry;
 pub use makepad_shader_compiler::shaderast::DrawShaderPtr;
-pub use makepad_shader_compiler::shaderast::LiveOrLocal;
+pub use makepad_shader_compiler::shaderast::LiveOrCalc;
 pub use makepad_live_compiler::LiveRegistry;
 pub use makepad_live_compiler::LiveDocNodes;
 pub use makepad_live_compiler::Id;

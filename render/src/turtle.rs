@@ -2,7 +2,7 @@ use crate::cx::*;
 
 #[derive(Copy, Clone, Debug, LiveComponent, LiveComponentHooks)]
 pub enum LineWrap {
-    #[default] None,
+    #[pick] None,
     #[live()] NewLine,
     #[live(8.0)] MaxSize(f32)
 }
@@ -20,8 +20,8 @@ pub struct Layout {
     #[live] pub direction: Direction,
     #[live] pub line_wrap: LineWrap,
     #[live] pub new_line_padding: f32,
-    #[hidden()] pub abs_origin: Option<Vec2>,
-    #[hidden()] pub abs_size: Option<Vec2>,
+    #[hide] pub abs_origin: Option<Vec2>,
+    #[hide] pub abs_size: Option<Vec2>,
     #[live] pub walk: Walk,
 }
 
@@ -30,6 +30,16 @@ pub struct Walk {
     #[live] pub margin: Margin,
     #[live] pub width: Width,
     #[live] pub height: Height,
+}
+
+impl Walk{
+    pub fn fixed(w:f32, h:f32)->Self{
+        Self{
+            margin:Margin::default(),
+            width:Width::Fix(w),
+            height:Height::Fix(h)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, Debug, LiveComponent, LiveComponentHooks)]
@@ -106,7 +116,7 @@ impl Padding {
 #[derive(Copy, Clone, Debug, LiveComponent, LiveComponentHooks)]
 pub enum Direction {
     #[live] Left,
-    #[default] Right,
+    #[pick] Right,
     #[live] Up,
     #[live] Down
 }
@@ -117,7 +127,7 @@ impl Default for Direction {
 
 #[derive(Copy, Clone, Debug, LiveComponent, LiveComponentHooks)]
 pub enum Axis {
-    #[default] Horizontal,
+    #[pick] Horizontal,
     #[live] Vertical
 }
 
@@ -130,7 +140,7 @@ impl Default for Axis {
 
 #[derive(Copy, Clone, Debug, LiveComponent, LiveComponentHooks)]
 pub enum Width {
-    #[default] Fill,
+    #[pick] Fill,
     #[live(200.0)] Fix(f32),
     #[live] Compute,
     #[live] ComputeFill,
@@ -143,7 +153,7 @@ pub enum Width {
 
 #[derive(Copy, Clone, Debug, LiveComponent, LiveComponentHooks)]
 pub enum Height {
-    #[default] Fill,
+    #[pick] Fill,
     #[live(200.0)] Fix(f32),
     #[live] Compute,
     #[live] ComputeFill,
