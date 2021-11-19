@@ -204,7 +204,10 @@ impl DrawText {
     where F: FnMut(char, usize, f32, f32) -> f32
     {
         
-        if pos.x.is_nan() || pos.y.is_nan() || self.text_style.font.font_id.is_none() {
+        if !self.draw_call_vars.can_instance()
+            || pos.x.is_nan()
+            || pos.y.is_nan()
+            || self.text_style.font.font_id.is_none() {
             return
         }
         let font_id = self.text_style.font.font_id.unwrap();
@@ -332,7 +335,8 @@ impl DrawText {
     
     pub fn draw_text_walk(&mut self, cx: &mut Cx, text: &str) {
         
-        if self.text_style.font.font_id.is_none() {
+        if !self.draw_call_vars.can_instance()
+            || self.text_style.font.font_id.is_none() {
             return
         }
         

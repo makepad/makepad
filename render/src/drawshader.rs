@@ -71,6 +71,10 @@ pub struct DrawCallVars {
 
 impl DrawCallVars {
     
+    pub fn can_instance(&self)->bool{
+        self.draw_shader.is_some()
+    }
+    
     pub fn live_type()->LiveType{
         LiveType(std::any::TypeId::of::<DrawCallVars>())    
     }
