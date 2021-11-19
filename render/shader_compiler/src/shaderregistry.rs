@@ -17,10 +17,12 @@ pub struct ShaderRegistry {
     pub draw_shader_defs: HashMap<DrawShaderPtr, DrawShaderDef>,
     pub structs: HashMap<StructPtr, StructDef>,
     pub builtins: HashMap<Ident, Builtin>,
-    pub enums: HashMap<LiveType, DrawShaderEnum>,
+    pub enums: HashMap<LiveType, ShaderEnum>,
 }
 
-pub struct DrawShaderEnum{
+pub struct ShaderEnum{
+    pub enum_name: Id,
+    pub variants:Vec<Id>
 }
 
 impl ShaderRegistry {
@@ -49,6 +51,10 @@ pub enum LiveNodeFindResult {
 }
 
 impl ShaderRegistry {
+    
+    pub fn register_enum(&mut self, live_type:LiveType, shader_enum: ShaderEnum){
+        self.enums.insert(live_type, shader_enum);
+    }
     
     pub fn compute_const_table(&self, draw_shader_def: &mut DrawShaderDef, filter_file_id: FileId) -> DrawShaderConstTable {
         let mut offsets = BTreeMap::new();
@@ -422,7 +428,7 @@ impl ShaderRegistry {
     // lets compile the thing
     pub fn analyse_draw_shader<F>(&mut self, live_registry:&LiveRegistry, draw_shader_ptr: DrawShaderPtr, mut ext_self: F) -> Result<&DrawShaderDef,
     LiveError>
-    where F: FnMut(Span, Id, LiveType, &mut DrawShaderDef)
+    where F: FnMut(&ShaderRegistry, Span, Id, LiveType, &mut DrawShaderDef)
     {
         let mut draw_shader_def = DrawShaderDef::default();
         
@@ -458,6 +464,7 @@ impl ShaderRegistry {
                         LiveValue::LiveType(lt) => {
                             if prop.id == id!(rust_type) {
                                 ext_self(
+                                    self,
                                     live_registry.token_id_to_span(prop.token_id.unwrap()),
                                     prop.id,
                                     lt,
@@ -472,6 +479,7 @@ impl ShaderRegistry {
                                     let node = &doc.nodes[child_index];
                                     if let LiveValue::LiveType(lt) = node.value {
                                         ext_self(
+                                            self,
                                             live_registry.token_id_to_span(prop.token_id.unwrap()),
                                             prop.id,
                                             lt,
@@ -555,11 +563,11 @@ impl ShaderRegistry {
                     for j in (i + 1)..draw_shader_def.fields.len() {
                         let field_a = &draw_shader_def.fields[i];
                         let field_b = &draw_shader_def.fields[j];
-                        if field_a.ident == field_b.ident {
+                        if field_a.ident == field_b.ident && !field_a.ident.0.is_empty(){
                             return Err(LiveError {
                                 origin: live_error_origin!(),
                                 span: field_a.span,
-                                message: format!("Field double declaration {}", field_b.ident)
+                                message: format!("Field double declaration  {}", field_b.ident)
                             })
                         }
                     }

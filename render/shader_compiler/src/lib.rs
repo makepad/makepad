@@ -22,6 +22,4 @@ pub mod generate_metal;
 #[cfg(any(target_os = "windows", test))]
 pub mod generate_hlsl;
 
-pub use crate::shaderregistry::ShaderRegistry;
-pub use crate::shaderast::Ty;
 //pub use crate::shaderregistry::DrawShaderInput;

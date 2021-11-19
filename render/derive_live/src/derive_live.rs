@@ -181,8 +181,8 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             let deref_target = fields.iter().find( | field | field.name == "deref_target");
             
             let draw_vars = fields.iter().find( | field | field.name == "draw_vars");
-            if draw_vars.is_some(){ // we have draw vars, make sure we are repr(C)6
-                if main_attribs.iter().find(|attr| attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "c").is_none(){
+            if draw_vars.is_some() { // we have draw vars, make sure we are repr(C)6
+                if main_attribs.iter().find( | attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "c").is_none() {
                     return error("Any struct with draw_vars needs to be repr(c)")
                 }
             }
@@ -421,19 +421,23 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        LiveType(std::any::TypeId::of::<").ident(&enum_name).add(">())");
             tb.add("    }");
             tb.add("    fn live_register(cx: &mut Cx) {");
-/*
-            let is_u32_enum = main_attribs.iter().find(|attr| attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "u32").is_some();
-            if is_u32_enum{
-                for item in &items{
-                    match item.kind{
-                        EnumKind::Bare => tb.add("bare.push(Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add("));"),
-                        EnumKind::Named(_)  | 
+            
+            let is_u32_enum = main_attribs.iter().find( | attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "u32").is_some();
+            if is_u32_enum {
+                tb.add("        let mut variants = Vec::new();");
+                for item in &items {
+                    match item.kind {
+                        EnumKind::Bare => {
+                            tb.add("variants.push(Id::from_str(").string(&item.name).add(").unwrap());");
+                        },
+                        EnumKind::Named(_) |
                         EnumKind::Tuple(_) => {
                             return error("For repr(u32) shader-accessible enums only bare values are supported");
                         }
                     }
                 }
-            }*/
+                tb.add("        cx.shader_registry.register_enum(").ident(&enum_name).add("::live_type(),ShaderEnum{enum_name:Id::from_str(").string(&enum_name).add(").unwrap(),variants});");
+            }
             
             /*
             tb.add("        let base_name = Id(").suf_u64(Id::from_str(&enum_name).unwrap().0).add(");");

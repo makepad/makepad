@@ -11,7 +11,7 @@ mod id;
 #[proc_macro]
 pub fn id(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
-    // item HAS to be an identifier.
+
     let mut parser = TokenParser::new(item);
     if let Some(name) = parser.eat_any_ident() {
         let id = Id::from_str_unchecked(&name.to_string());

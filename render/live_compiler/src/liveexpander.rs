@@ -44,7 +44,6 @@ impl ScopeStack {
     }
 }
 
-
 pub struct LiveExpander<'a> {
     pub module_path_to_file_id: &'a HashMap<ModulePath, FileId>,
     pub expanded: &'a Vec<LiveDocument >,

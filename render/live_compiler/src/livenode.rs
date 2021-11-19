@@ -4,7 +4,7 @@ use crate::token::TokenId;
 use crate::math::{Vec2, Vec3};
 use std::fmt::Write;
 
-#[derive(Clone, Debug, Eq, PartialEq, Copy, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Copy, Hash)]
 pub struct LiveType(pub core::any::TypeId);
 
 #[derive(Clone, Debug)]
