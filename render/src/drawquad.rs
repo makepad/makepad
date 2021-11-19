@@ -41,10 +41,10 @@ use crate::cx::*;
 #[derive(LiveComponent, LiveComponentHooks)]
 #[repr(C)]
 pub struct DrawQuad {
-    #[live()] pub geometry: GeometryQuad2D,
-    #[local()] pub draw_vars: DrawVars,
-    #[local()] pub rect_pos: Vec2,
-    #[local()] pub rect_size: Vec2,
+    #[live] pub geometry: GeometryQuad2D,
+    #[calc] pub draw_vars: DrawVars,
+    #[calc] pub rect_pos: Vec2,
+    #[calc] pub rect_size: Vec2,
     #[live(1.0)] pub draw_depth: f32,
 }
 

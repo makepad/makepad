@@ -252,7 +252,7 @@ impl<'a> ShaderParser<'a> {
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Instance {
                         is_used_in_pixel_shader: Cell::new(false),
-                        live_or_local:LiveOrLocal::Live,
+                        live_or_calc:LiveOrCalc::Live,
                         var_def_ptr: Some(VarDefPtr(decl_node_ptr)),
                         //input_type: DrawShaderInputType::VarDef(decl_node_ptr),
                     },

@@ -17,6 +17,10 @@ pub struct ShaderRegistry {
     pub draw_shader_defs: HashMap<DrawShaderPtr, DrawShaderDef>,
     pub structs: HashMap<StructPtr, StructDef>,
     pub builtins: HashMap<Ident, Builtin>,
+    pub enums: HashMap<LiveType, DrawShaderEnum>,
+}
+
+pub struct DrawShaderEnum{
 }
 
 impl ShaderRegistry {
@@ -25,6 +29,7 @@ impl ShaderRegistry {
         Self {
             structs: HashMap::new(),
             consts: HashMap::new(),
+            enums: HashMap::new(),
             draw_shader_defs: HashMap::new(),
             all_fns: HashMap::new(),
             builtins: generate_builtins()
@@ -425,6 +430,7 @@ impl ShaderRegistry {
         
         match class_node.value {
             LiveValue::Class {class, ..} => {
+
                 if class != id!(DrawShader){
                     panic!()
                 }
