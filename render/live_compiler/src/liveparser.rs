@@ -325,7 +325,7 @@ impl<'a> LiveParser<'a> {
                     ld.nodes.push(LiveNode {
                         token_id:Some(token_id),
                         id: prop_id,
-                        value: LiveValue::BareClass
+                        value: LiveValue::Object
                     });
                     self.expect_live_class(false, prop_id, ld) ?;
                 }
@@ -399,7 +399,7 @@ impl<'a> LiveParser<'a> {
                     ld.nodes.push(LiveNode {
                         token_id: Some(self.get_token_id()),
                         id: prop_id,
-                        value: LiveValue::NamedClass {class: base}
+                        value: LiveValue::Class {class: base}
                     });
                     self.expect_token(Token::OpenBrace)?;
                     self.expect_live_class(false, prop_id, ld) ?;
@@ -529,7 +529,7 @@ impl<'a> LiveParser<'a> {
         ld.nodes.push(LiveNode {
             token_id: Some(self.get_token_id()),
             id: Id::empty(),
-            value: LiveValue::BareClass
+            value: LiveValue::Object
         });
         self.expect_live_class(true, Id::empty(), &mut ld) ?;
         ld.nodes.push(LiveNode {

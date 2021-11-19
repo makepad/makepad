@@ -112,7 +112,7 @@ impl NormalButton {
             _ => ()
         };
         res.action
-    } 
+    }
     
     pub fn draw_normal_button(&mut self, cx: &mut Cx, label: Option<&str>) {
         self.bg.begin_quad(cx, self.layout);

@@ -123,13 +123,13 @@ impl<'a> LiveExpander<'a> {
                             LiveValue::Array |
                             LiveValue::TupleEnum {..} |
                             LiveValue::NamedEnum {..} |
-                            LiveValue::NamedClass {..} => {
+                            LiveValue::Class {..} => {
                                 let next_index = out_doc.nodes.next_child(overwrite).unwrap();
                                 out_doc.nodes[overwrite] = in_node.clone();
                                 out_doc.nodes.drain(overwrite + 1..next_index - 1);
                                 level_overwrite.push(true);
                             },
-                            LiveValue::BareClass => {
+                            LiveValue::Object => {
                                 out_doc.nodes[overwrite] = in_node.clone();
                                 level_overwrite.push(true);
                             }
@@ -163,7 +163,7 @@ impl<'a> LiveExpander<'a> {
                         }
                         overwrite
                     }
-                    else if in_value.is_bare_class() && out_value.is_named_class() {
+                    else if in_value.is_object() && out_value.is_class() {
                         // this is also allowed to overwrite but don't overwrite the name of the class
                         //out_doc.nodes[overwrite] = in_node.clone();
                         level_overwrite.push(true);
@@ -196,7 +196,7 @@ impl<'a> LiveExpander<'a> {
             
             // process stacks
             match in_value {
-                LiveValue::NamedClass {class} => {
+                LiveValue::Class {class} => {
                     if let Some(target) = self.scope_stack.find_item(*class) {
                         let cn = match target {
                             LiveScopeTarget::LocalPtr(local_ptr) => {
@@ -223,7 +223,7 @@ impl<'a> LiveExpander<'a> {
                 LiveValue::Array |
                 LiveValue::TupleEnum {..} |
                 LiveValue::NamedEnum {..} |
-                LiveValue::BareClass => {
+                LiveValue::Object => {
                     self.scope_stack.stack.push(Vec::new());
                     current_parent.push(out_index);
                 },

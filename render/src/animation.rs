@@ -66,7 +66,7 @@ impl Animator {
     // this find the last keyframe value from an array node
     pub fn last_keyframe_value_from_array(index: usize, nodes: &[LiveNode]) -> Option<usize> {
         if let Some(index) = nodes.last_child(index) {
-            if nodes[index].value.is_bare_class() {
+            if nodes[index].value.is_object() {
                 if let Ok(index) = nodes.child_by_name(index, id!(value)) {
                     return Some(index)
                 }
@@ -80,7 +80,7 @@ impl Animator {
     
     pub fn first_keyframe_time_from_array(index: usize, nodes: &[LiveNode]) -> f64 {
         if let Some(index) = nodes.first_child(index) {
-            if nodes[index].value.is_bare_class() {
+            if nodes[index].value.is_object() {
                 if let Ok(index) = nodes.child_by_name(index, id!(time)) {
                     return match nodes[index].value {
                         LiveValue::Float(v) => v,

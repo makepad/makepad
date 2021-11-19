@@ -22,7 +22,7 @@ pub fn live_core_impl(parser:&mut TokenParser, tb:&mut TokenBuilder, is_array:bo
             }
             else if parser.is_brace(){  // its an inline class
                 parser.open_group();
-                tb.add("LiveNode{token_id:None, id:Id(0),value:LiveValue::NamedClass{");
+                tb.add("LiveNode{token_id:None, id:Id(0),value:LiveValue::Class{");
                 tb.add("class:").stream(Some(prop_id_ts)).add("}},");
                 parse_class(parser,tb)?;
                 tb.add("LiveNode{token_id:None, id:Id(0),value:LiveValue::Close},");
@@ -54,7 +54,7 @@ pub fn live_core_impl(parser:&mut TokenParser, tb:&mut TokenBuilder, is_array:bo
             tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::Close},");
         }
         else if parser.is_brace(){ // its a bare class
-            tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::BareClass},");
+            tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Object},");
             parser.open_group();
             parse_class(parser, tb)?;
             tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::Close},");
@@ -103,7 +103,7 @@ pub fn live_core_impl(parser:&mut TokenParser, tb:&mut TokenBuilder, is_array:bo
                 }
             }
             else if parser.is_brace(){ 
-                tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::NamedClass{");
+                tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Class{");
                 tb.add("class:Id(").suf_u64(class_id).add(")}},");
                 parser.open_group();
                 parse_class(parser,tb)?;
@@ -176,7 +176,7 @@ pub fn live_impl(input:TokenStream)->TokenStream{
     let mut tb = TokenBuilder::new();
 
     tb.add("&[");
-    tb.add("LiveNode{token_id:None, id:Id(0),value:LiveValue::BareClass},");
+    tb.add("LiveNode{token_id:None, id:Id(0),value:LiveValue::Object},");
     if let Err(e) = live_core_impl(&mut parser, &mut tb, false){
         return e
     };

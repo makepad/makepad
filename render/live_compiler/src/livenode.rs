@@ -20,8 +20,8 @@ impl LiveValue {
             Self::Array |
             Self::TupleEnum {..} |
             Self::NamedEnum {..} |
-            Self::BareClass | // subnodes including this one
-            Self::NamedClass {..} => true, // subnodes including this one        
+            Self::Object | // subnodes including this one
+            Self::Class {..} => true, // subnodes including this one        
             _ => false
         }
     }
@@ -48,25 +48,25 @@ impl LiveValue {
             _ => false
         }
     }
-    
+    /*
     pub fn is_class(&self) -> bool {
         match self {
             Self::BareClass |
             Self::NamedClass {..} => true,
             _ => false
         }
-    }
+    }*/
     
-    pub fn is_named_class(&self) -> bool {
+    pub fn is_class(&self) -> bool {
         match self {
-            Self::NamedClass {..} => true,
+            Self::Class {..} => true,
             _ => false
         }
     }
     
-    pub fn is_bare_class(&self) -> bool {
+    pub fn is_object(&self) -> bool {
         match self {
-            Self::BareClass => true,
+            Self::Object => true,
             _ => false
         }
     }
@@ -106,7 +106,7 @@ impl LiveValue {
     
     pub fn named_class_id(&self) -> Option<Id> {
         match self {
-            Self::NamedClass {class} => Some(*class),
+            Self::Class {class} => Some(*class),
             _ => None
         }
     }
@@ -131,14 +131,14 @@ impl LiveValue {
     
     pub fn set_class_name(&mut self, name: Id) {
         match self {
-            Self::NamedClass {class} => *class = name,
+            Self::Class {class} => *class = name,
             _ => ()
         }
     }
     
     pub fn get_class_name(&self)->Id{
         match self {
-            Self::NamedClass {class} => *class,
+            Self::Class {class} => *class,
             _ => Id(0)
         }
     }
@@ -163,8 +163,8 @@ impl LiveValue {
             Self::Array => 13,
             Self::TupleEnum {..} => 14,
             Self::NamedEnum {..} => 15,
-            Self::BareClass => 16,
-            Self::NamedClass {..} => 17,
+            Self::Object => 16,
+            Self::Class {..} => 17,
             Self::Close => 18,
             Self::Fn {..} => 19,
             Self::Const {..} => 20,
@@ -199,8 +199,8 @@ pub enum LiveValue {
     Array,
     TupleEnum {base: Id, variant: Id},
     NamedEnum {base: Id, variant: Id},
-    BareClass, // subnodes including this one
-    NamedClass {class: Id}, // subnodes including this one
+    Object, // subnodes including this one
+    Class {class: Id}, // subnodes including this one
     Close,
     // the shader code types
     Fn {
@@ -267,7 +267,7 @@ macro_rules!impl_live_node_slice {
                 // we are going to scan backwards
                 loop {
                     match &self[index].value {
-                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::Object | LiveValue::Class {..} | LiveValue::Array => {
                             if stack_depth == 0 {
                                 return Some(index)
                             }
@@ -295,7 +295,7 @@ macro_rules!impl_live_node_slice {
                 }
                 while index < self.len() {
                     match &self[index].value {
-                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::Object | LiveValue::Class {..} | LiveValue::Array => {
                             if stack_depth == 1 {
                                 if child_number == child_count {
                                     return Some(index);
@@ -329,7 +329,7 @@ macro_rules!impl_live_node_slice {
             
             fn first_child(&self, parent_index: usize) -> Option<usize> {
                 match &self[parent_index].value {
-                    LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                    LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::Object | LiveValue::Class {..} | LiveValue::Array => {
                         if self[parent_index + 1].value.is_close(){
                             return None
                         }
@@ -346,7 +346,7 @@ macro_rules!impl_live_node_slice {
                 let mut stack_depth = 0;
                 while index < self.len() {
                     match &self[index].value {
-                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::Object | LiveValue::Class {..} | LiveValue::Array => {
                             if stack_depth == 0 && index != child_index{ 
                                 return Some(index)
                             }
@@ -379,7 +379,7 @@ macro_rules!impl_live_node_slice {
                 }
                 while index < self.len() {
                     match &self[index].value {
-                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::Object | LiveValue::Class {..} | LiveValue::Array => {
                             if stack_depth == 1 {
                                 found_child = Some(index);
                                 child_count += 1;
@@ -418,7 +418,7 @@ macro_rules!impl_live_node_slice {
                 }
                 while index < self.len() {
                     match &self[index].value {
-                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::Object | LiveValue::Class {..} | LiveValue::Array => {
                             if stack_depth == 1 {
                                 if first_child.is_none(){
                                     first_child = Some(index)
@@ -461,7 +461,7 @@ macro_rules!impl_live_node_slice {
                 }
                 while index < self.len() {
                     match &self[index].value {
-                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::Object | LiveValue::Class {..} | LiveValue::Array => {
                             stack_depth += 1;
                         }
                         LiveValue::Close => {
@@ -485,7 +485,7 @@ macro_rules!impl_live_node_slice {
                 }
                 while index < self.len() {
                     match &self[index].value {
-                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::Object | LiveValue::Class {..} | LiveValue::Array => {
                             if stack_depth == 1 {
                                 if child_name != Id::empty() && self[index].id == child_name {
                                     return Ok(index);
@@ -524,7 +524,7 @@ macro_rules!impl_live_node_slice {
                 }
                 while index < self.len() {
                     match &self[index].value {
-                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::Object | LiveValue::Class {..} | LiveValue::Array => {
                             if stack_depth == 1 {
                                 count += 1;
                             }
@@ -555,7 +555,7 @@ macro_rules!impl_live_node_slice {
                 let mut stack_depth = 0;
                 while index < self.len() {
                     match &self[index].value {
-                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::Object | LiveValue::Class {..} | LiveValue::Array => {
                             stack_depth += 1;
                         }
                         LiveValue::Close => {
@@ -583,7 +583,7 @@ macro_rules!impl_live_node_slice {
                 while index < self.len() {
                     out.push(self[index].clone());
                     match &self[index].value {
-                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                        LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::Object | LiveValue::Class {..} | LiveValue::Array => {
                             stack_depth += 1;
                         }
                         LiveValue::Close => {
@@ -675,12 +675,12 @@ macro_rules!impl_live_node_slice {
                             writeln!(f, "{}: <NamedEnum> {}::{}", node.id, base, variant).unwrap();
                             stack_depth += 1;
                         },
-                        LiveValue::BareClass=>{
-                            writeln!(f, "{}: <BareClass>", node.id).unwrap();
+                        LiveValue::Object=>{
+                            writeln!(f, "{}: <Object>", node.id).unwrap();
                             stack_depth += 1;
                         }, // subnodes including this one
-                        LiveValue::NamedClass {class}=>{
-                            writeln!(f, "{}: <NamedClass> {}", node.id, class).unwrap();
+                        LiveValue::Class {class}=>{
+                            writeln!(f, "{}: <Class> {}", node.id, class).unwrap();
                             stack_depth += 1;
                         }, // subnodes including this one
                         LiveValue::Close=>{
@@ -750,7 +750,7 @@ impl LiveNodeVec for Vec<LiveNode> {
         };
         while index < other.len() {
             match &other[index].value {
-                LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::Object | LiveValue::Class {..} | LiveValue::Array => {
                     if stack_depth >= 1 {
                         self.insert(insert_point, other[index].clone());
                         insert_point += 1;
@@ -790,7 +790,7 @@ impl LiveNodeVec for Vec<LiveNode> {
         };
         while index < self.len() {
             match &self[index].value {
-                LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::BareClass | LiveValue::NamedClass {..} | LiveValue::Array => {
+                LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::Object | LiveValue::Class {..} | LiveValue::Array => {
                     if stack_depth >= 1 {
                         self.insert(insert_point, self[index].clone());
                         insert_point += 1;
