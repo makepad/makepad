@@ -112,7 +112,7 @@ live_register!{
     }
 }
 
-#[derive(Clone, LiveComponent, LiveComponentHooks)]
+#[derive(Clone, LiveComponent, LiveApply)]
 pub struct TextStyle {
     #[live()] pub font: Font,
     #[live(8.0)] pub font_size: f32,
@@ -123,7 +123,7 @@ pub struct TextStyle {
     #[live(1.3)] pub height_factor: f32,
 }
 
-#[derive(Debug, Copy, LiveComponent, LiveComponentHooks, Clone)]
+#[derive(Debug, Copy, LiveComponent, LiveApply, Clone)]
 pub enum Wrapping {
     #[pick] Char,
     #[live] Word,
@@ -132,7 +132,7 @@ pub enum Wrapping {
     #[live(1.0)] Ellipsis(f32),
 }
 
-#[derive(LiveComponent, LiveComponentHooks)]
+#[derive(LiveComponent, LiveApply)]
 #[repr(C)]
 pub struct DrawText {
     #[hide] pub buf: Vec<char>,
@@ -503,107 +503,3 @@ impl DrawText {
         }
     }
 }
-
-/*
-impl LiveUpdateValue for Wrapping {
-    fn live_update_value(&mut self, _cx: &mut Cx, id: Id, _ptr: LivePtr) {
-        match id {
-            _ => ()
-        }
-    }
-}
-
-// how could we compile this away
-impl LiveNew for Wrapping {
-    fn live_new(_cx: &mut Cx) -> Self {
-        // the default
-        Self::Char
-    }
-    
-    fn live_type() -> LiveType {
-        LiveType(std::any::TypeId::of::<Wrapping>())
-    }
-    
-    fn live_register(cx: &mut Cx) {
-        struct Factory();
-        impl LiveFactory for Factory {
-            fn live_new(&self, cx: &mut Cx) -> Box<dyn LiveUpdate> {
-                Box::new(Wrapping ::live_new(cx))
-            }
-            
-            fn live_fields(&self, _fields: &mut Vec<LiveField>) {
-            }
-        }
-        cx.register_factory(Wrapping::live_type(), Box::new(Factory()));
-    }
-}
-
-impl LiveUpdate for Wrapping {
-    fn live_update(&mut self, cx: &mut Cx, live_ptr: LivePtr) {
-        self.before_live_update(cx, live_ptr);
-        let node = cx.shader_registry.live_registry.resolve_ptr(live_ptr);
-        match &node.value{
-            LiveValue::IdPack(id_pack)=>{
-                let id = cx.shader_registry.live_registry.find_enum_origin(*id_pack, node.id_pack);
-                match id{
-                    id!(Char)=>*self = Wrapping::Char,
-                    id!(Word)=>*self = Wrapping::Word,
-                    id!(Line)=>*self = Wrapping::Line,
-                    id!(None)=>*self = Wrapping::None,
-                    _=>{
-                        println!("Enum Wrapping cannot find id {}", id);
-                    }
-                }
-            },
-            LiveValue::Class{class, node_start, node_count}=>{
-                let id = cx.shader_registry.live_registry.find_enum_origin(*class, node.id_pack);
-                match id{
-                    id!(Test)=>{
-                        if let Self::Test{..} = self{}
-                        else{*self = Self::Test{x:1.0}}
-                        if let Self::Test{x} = self{
-                            let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start, *node_count);
-                            while let Some((prop_id, live_ptr)) = iter.next_id(&cx.shader_registry.live_registry) {
-                                match prop_id{
-                                    id!(x)=>(*x).live_update(cx, live_ptr),
-                                    _=>{
-                                         println!("Enum Wrapping cannot find named struct {} property {}", id, prop_id);
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    _=>{ // some warning? id is not found
-                        println!("Enum Wrapping cannot find named struct {}", id);
-                    }
-                }
-            },
-            LiveValue::Call{target, node_start, node_count}=>{
-                // find origin
-                let id = cx.shader_registry.live_registry.find_enum_origin(*target, node.id_pack);
-                match id{
-                    id!(Ellipsis)=>{
-                        if let Self::Ellipsis{..} = self{}
-                        else{*self = Self::Ellipsis(1.0)}
-                        if let Self::Ellipsis(var0) = self{
-                            let mut iter = cx.shader_registry.live_registry.live_object_iterator(live_ptr, *node_start, *node_count);
-                            while let Some((count, live_ptr)) = iter.next_prop() {
-                                match count{
-                                    0=>(*var0).live_update(cx, live_ptr),
-                                    _=>{
-                                         println!("Enum Wrapping cannot find tuple struct {} arg {}", id, count);
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    _=>{ // some warning? id is not found
-                        println!("Enum Wrapping cannot find tuple struct {}", id);
-                    }
-                }
-            }
-            _=>() // error
-        }
-        self.after_live_update(cx, live_ptr);
-    }
-}*/
