@@ -205,11 +205,18 @@ impl Animator {
         }
     }
     
-    // hard cut / initialisate the state to a certain state
-    pub fn cut_to(&mut self, cx: &mut Cx, state_id: Id) {
-        let live_registry = cx.live_registry.borrow();
+    pub fn cut_to_live(&mut self, cx: &mut Cx, state_id: Id) {
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
         let (nodes, index) = live_registry.ptr_to_nodes_index(self.live_ptr.unwrap());
         
+        if let Ok(index) = nodes.child_by_name(index, state_id) {
+            self.cut_to(cx, state_id, index, nodes);
+        }
+    }
+    
+    // hard cut / initialisate the state to a certain state
+    pub fn cut_to(&mut self, _cx: &mut Cx, state_id:Id, index:usize, nodes:&[LiveNode]) {
         self.state_id = Some(state_id);
         
         let state = if let Some(state) = &mut self.state {
@@ -221,52 +228,54 @@ impl Animator {
             self.state.as_mut().unwrap()
         };
         
-        if let Ok(mut index) = nodes.child_by_name(index, state_id) {
-            // lets iterate index
-            let mut stack_depth = 0;
-            while index < nodes.len() {
-                let node = &nodes[index];
-                if stack_depth == 1 && node.id == id!(from) { // skip this one
-                    index = nodes.skip_node(index)
-                }
-                else if node.value.is_array() {
-                    if let Some(last_value) = Self::last_keyframe_value_from_array(index, nodes) {
-                        state.extend_from_slice(live_bare!{
-                            [node.id]: [(nodes[last_value].value.clone())]
-                        });
-                    }
-                    index = nodes.skip_node(index);
-                }
-                else {
-                    if node.value.is_open() {
-                        state.push(node.clone());
-                        stack_depth += 1;
-                    }
-                    else if node.value.is_close() {
-                        state.push(node.clone());
-                        stack_depth -= 1;
-                        if stack_depth == 0 {
-                            break;
-                        }
-                    }
-                    else { // array with single value containing this as state
-                        state.extend_from_slice(live_bare!{
-                            [node.id]: [(node.value.clone())]
-                        });
-                    }
-                    index += 1;
-                }
-                
+        let mut index = index;
+        // lets iterate index
+        let mut stack_depth = 0;
+        while index < nodes.len() {
+            let node = &nodes[index];
+            if stack_depth == 1 && node.id == id!(from) { // skip this one
+                index = nodes.skip_node(index)
             }
+            else if node.value.is_array() {
+                if let Some(last_value) = Self::last_keyframe_value_from_array(index, nodes) {
+                    state.extend_from_slice(live_bare!{
+                        [node.id]: [(nodes[last_value].value.clone())]
+                    });
+                }
+                index = nodes.skip_node(index);
+            }
+            else {
+                if node.value.is_open() {
+                    state.push(node.clone());
+                    stack_depth += 1;
+                }
+                else if node.value.is_close() {
+                    state.push(node.clone());
+                    stack_depth -= 1;
+                    if stack_depth == 0 {
+                        break;
+                    }
+                }
+                else { // array with single value containing this as state
+                    state.extend_from_slice(live_bare!{
+                        [node.id]: [(node.value.clone())]
+                    });
+                }
+                index += 1;
+            }
+            
         }
     }
     
     // this outputs a set of arrays at the end of current_state containing the tracks
-    pub fn animate_to(&mut self, cx: &mut Cx, state_id: Id) {
-
+    pub fn animate_to_live(&mut self, cx: &mut Cx, state_id: Id) {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
         let (to_nodes, to_root_index) = live_registry.ptr_to_nodes_index(self.live_ptr.unwrap());
+        self.animate_to(cx, state_id, to_root_index, to_nodes)
+    }
+
+    pub fn animate_to(&mut self, cx: &mut Cx, state_id: Id, to_root_index:usize, to_nodes:&[LiveNode]) {
         
         let state_nodes = self.state.as_mut().unwrap();
         
