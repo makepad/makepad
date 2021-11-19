@@ -93,7 +93,7 @@ pub trait LiveComponentHooks {
 pub struct LiveField {
     pub id: Id,
     pub live_type: Option<LiveType>,
-    pub live_or_local: LiveOrLocal
+    pub live_or_calc: LiveOrCalc
 }
 
 #[derive(Default)]

@@ -12,12 +12,26 @@ use crate::id::ModulePath;
 use std::collections::HashMap;
 use crate::livedocument::LiveScopeTarget;
 use crate::livedocument::LiveScopeItem;
+use std::fmt;
 
 pub struct ScopeStack {
     pub stack: Vec<Vec<LiveScopeItem >>
 }
 
+impl fmt::Debug for ScopeStack {
+    // This trait requires `fmt` with this exact signature.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for (level, items) in self.stack.iter().enumerate() {
+            for item in items.iter() {
+                writeln!(f, "{} {}", level, item.id).unwrap();
+            }
+        }
+        fmt::Result::Ok(())
+    }
+}
+
 impl ScopeStack {
+
     fn find_item(&self, id: Id) -> Option<LiveScopeTarget> {
         for items in self.stack.iter().rev() {
             for item in items.iter().rev() {
@@ -193,6 +207,10 @@ impl<'a> LiveExpander<'a> {
                 }
             };
             
+            self.scope_stack.stack.last_mut().unwrap().push(LiveScopeItem {
+                id: in_node.id,
+                target: LiveScopeTarget::LocalPtr(LocalPtr(out_index))
+            });
             
             // process stacks
             match in_value {
@@ -207,16 +225,23 @@ impl<'a> LiveExpander<'a> {
                                         message: format!("Infinite recursion at {}", in_node.id)
                                     }); 
                                 }
+                                //println!("LOCAL EXPANSION {}",out_doc.nodes[local_ptr.0].value.get_class_name());
                                 out_doc.nodes[local_ptr.0].value.get_class_name()
                             }
                             LiveScopeTarget::LivePtr(live_ptr) => {
                                 let doc = &self.expanded[live_ptr.file_id.to_index()];
                                 out_doc.nodes.clone_children_from(live_ptr.node_index(), Some(out_index + 1), &doc.nodes);
+                                //println!("REMOTE EXPANSION {}",doc.nodes[live_ptr.node_index()].value.get_class_name());
                                 doc.nodes[live_ptr.node_index()].value.get_class_name()
                             }
                         };
                         out_doc.nodes[out_index].value.set_class_name(cn);
-                    }
+                    }/*
+                    else{
+                        if *class == id!(DrawDesktopButton){
+                            println!("{:?} {} {:?}", self.in_file_id, class, self.scope_stack);
+                        }
+                    }*/
                     self.scope_stack.stack.push(Vec::new());
                     current_parent.push(out_index);
                 }, 
@@ -235,11 +260,6 @@ impl<'a> LiveExpander<'a> {
                 },
                 _ => {}
             }
-
-            self.scope_stack.stack.last_mut().unwrap().push(LiveScopeItem {
-                id: in_node.id,
-                target: LiveScopeTarget::LocalPtr(LocalPtr(out_index))
-            });
             
             in_index += 1;
         }

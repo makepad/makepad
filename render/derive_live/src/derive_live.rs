@@ -160,7 +160,7 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
 pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
-    let _main_attribs = parser.eat_attributes();
+    let main_attribs = parser.eat_attributes();
     parser.eat_ident("pub");
     if parser.eat_ident("struct") {
         if let Some(struct_name) = parser.eat_any_ident() {
@@ -180,10 +180,17 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             
             let deref_target = fields.iter().find( | field | field.name == "deref_target");
             
+            let draw_vars = fields.iter().find( | field | field.name == "draw_vars");
+            if draw_vars.is_some(){ // we have draw vars, make sure we are repr(C)6
+                if main_attribs.iter().find(|attr| attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "c").is_none(){
+                    return error("Any struct with draw_vars needs to be repr(c)")
+                }
+            }
+            
             // alright now. we have a field
             for field in &fields {
-                if field.attrs.len() != 1 || field.attrs[0].name != "live" && field.attrs[0].name != "local" && field.attrs[0].name != "hidden" {
-                    return error(&format!("Field {} does not have a live, local or hidden attribute", field.name));
+                if field.attrs.len() != 1 || field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "hide" {
+                    return error(&format!("Field {} does not have a live, calc or hide attribute", field.name));
                 }
             }
             
@@ -258,14 +265,14 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("            fn component_fields(&self, fields: &mut Vec<LiveField>) {");
             for field in &fields {
                 let attr = &field.attrs[0];
-                if attr.name == "live" || attr.name == "local" {
+                if attr.name == "live" || attr.name == "calc" {
                     tb.add("fields.push(LiveField{id:Id::from_str(").string(&field.name).add(").unwrap(),");
                     tb.add("live_type:Some(").stream(Some(field.ty.clone())).add("::live_type()),");
                     if attr.name == "live" {
-                        tb.add("live_or_local: LiveOrLocal::Live");
+                        tb.add("live_or_calc: LiveOrCalc::Live");
                     }
                     else {
-                        tb.add("live_or_local: LiveOrLocal::Local");
+                        tb.add("live_or_calc: LiveOrCalc::Calc");
                     }
                     tb.add("});");
                 }
@@ -274,6 +281,13 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             
             tb.add("        }");
             tb.add("        cx.register_factory(").ident(&struct_name).add("::live_type(), Box::new(Factory()));");
+            // lets register all our components
+            for field in &fields {
+                let attr = &field.attrs[0];
+                if attr.name == "live" || attr.name == "local" {
+                    tb.stream(Some(field.ty.clone())).add("::live_register(cx);");
+                }
+            }
             tb.add("    }");
             
             tb.add("    fn new_apply(cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> Self {");
@@ -349,19 +363,19 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 }
             }
             
-            let mut default = None;
+            let mut pick = None;
             while !parser.eat_eot() {
                 let attributes = parser.eat_attributes();
                 // check if we have a default attribute
                 if let Some(name) = parser.eat_any_ident() {
                     if attributes.len() != 1 {
-                        return error(&format!("Field {} does not have a live or default attribute", name));
+                        return error(&format!("Field {} does not have a live or pick attribute", name));
                     }
-                    if attributes[0].name == "default" {
-                        if default.is_some() {
-                            return error(&format!("Enum can only have a single field marked default"));
+                    if attributes[0].name == "pick" {
+                        if pick.is_some() {
+                            return error(&format!("Enum can only have a single field marked pick"));
                         }
-                        default = Some(items.len())
+                        pick = Some(items.len())
                     }
                     if let Some(types) = parser.eat_all_types() {
                         items.push(EnumItem {name, attributes, kind: EnumKind::Tuple(types)})
@@ -380,15 +394,16 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 parser.eat_punct_alone(',');
             }
             
-            if default.is_none() {
-                return error(&format!("Enum needs atleast one field marked default"));
+            if pick.is_none() {
+                return error(&format!("Enum needs atleast one field marked pick"));
             }
+            
             
             tb.add("impl").stream(generic.clone());
             tb.add("LiveNew for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             
             tb.add("    fn new(cx:&mut Cx) -> Self { let mut ret = ");
-            items[default.unwrap()].gen_new(&mut tb);
+            items[pick.unwrap()].gen_new(&mut tb);
             tb.add("    ;ret.after_new(cx);ret");
             tb.add("    }");
             tb.add("    fn new_apply(cx: &mut Cx, apply_from: ApplyFrom, index:usize, nodes:&[LiveNode]) -> Self {");
@@ -406,6 +421,20 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        LiveType(std::any::TypeId::of::<").ident(&enum_name).add(">())");
             tb.add("    }");
             tb.add("    fn live_register(cx: &mut Cx) {");
+/*
+            let is_u32_enum = main_attribs.iter().find(|attr| attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "u32").is_some();
+            if is_u32_enum{
+                for item in &items{
+                    match item.kind{
+                        EnumKind::Bare => tb.add("bare.push(Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add("));"),
+                        EnumKind::Named(_)  | 
+                        EnumKind::Tuple(_) => {
+                            return error("For repr(u32) shader-accessible enums only bare values are supported");
+                        }
+                    }
+                }
+            }*/
+            
             /*
             tb.add("        let base_name = Id(").suf_u64(Id::from_str(&enum_name).unwrap().0).add(");");
             tb.add("        let mut bare = Vec::new();");

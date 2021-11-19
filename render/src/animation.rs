@@ -404,7 +404,7 @@ impl Animator {
 
 #[derive(Clone, LiveComponent, LiveComponentHooks, Debug, PartialEq)]
 pub enum Play {
-    #[default {duration: 1.0}]
+    #[pick {duration: 1.0}]
     Forward {duration: f64},
     
     #[live {duration: 1.0, end: 1.0}]
@@ -459,7 +459,7 @@ impl Play {
 
 #[derive(Clone, LiveComponent, LiveComponentHooks, Debug, PartialEq)]
 pub enum Ease {
-    #[default] Linear,
+    #[pick] Linear,
     #[live] None,
     #[live(1.0)] Constant(f64),
     #[live] InQuad,

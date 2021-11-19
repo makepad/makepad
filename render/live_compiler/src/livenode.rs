@@ -788,6 +788,7 @@ impl LiveNodeVec for Vec<LiveNode> {
         else {
             self.len()
         };
+        //let mut insert_start = insert_point;
         while index < self.len() {
             match &self[index].value {
                 LiveValue::TupleEnum {..} | LiveValue::NamedEnum {..} | LiveValue::Object | LiveValue::Class {..} | LiveValue::Array => {
@@ -815,7 +816,7 @@ impl LiveNodeVec for Vec<LiveNode> {
                     }
                 }
             }
-            if insert_point >= index{
+            if stack_depth > MAX_CLONE_STACK_DEPTH_SAFETY{
                 return true
             }
             index += 1;
@@ -823,3 +824,4 @@ impl LiveNodeVec for Vec<LiveNode> {
         false
     }
 }
+const MAX_CLONE_STACK_DEPTH_SAFETY:usize = 100;
