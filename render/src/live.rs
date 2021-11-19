@@ -81,7 +81,7 @@ pub trait CanvasComponent: LiveComponent {
     }
 }
 
-pub trait LiveComponentHooks {
+pub trait LiveApply {
     fn apply_value_unknown(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         nodes.skip_node(index)
     }

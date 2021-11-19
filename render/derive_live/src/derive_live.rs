@@ -64,7 +64,7 @@ pub fn derive_live_animate_impl(input: TokenStream) -> TokenStream {
     return parser.unexpected()
 }
 
-pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
+pub fn derive_live_apply_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
     let _main_attribs = parser.eat_attributes();
@@ -93,12 +93,12 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
             deref_target.is_some() && animator.is_some() ||
             animator.is_some() && draw_vars.is_some() {
                 // no can do
-                return error("Cannot generate LiveComponentHooks with more than one of: deref_target/draw_call_vars/animator");
+                return error("Cannot generate LiveApply with more than one of: deref_target/draw_call_vars/animator");
             }
             
             if let Some(_) = draw_vars {
                 tb.add("impl").stream(generic.clone());
-                tb.add("LiveComponentHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+                tb.add("LiveApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
                 tb.add("    fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> usize {");
                 tb.add("        self.draw_vars.apply_value(cx, apply_from, index, nodes)");
                 tb.add("    }");
@@ -112,7 +112,7 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
             }
             else if let Some(_) = deref_target {
                 tb.add("impl").stream(generic.clone());
-                tb.add("LiveComponentHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+                tb.add("LiveApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
                 tb.add("    fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> usize{");
                 tb.add("        self.deref_target.apply_value_unknown(cx, apply_from, index, nodes)");
                 tb.add("    }");
@@ -126,7 +126,7 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
             }
             else if let Some(_) = animator {
                 tb.add("impl").stream(generic.clone());
-                tb.add("LiveComponentHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+                tb.add("LiveApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
                 tb.add("    fn after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]) {");
                 tb.add("        if let Some(file_id) = apply_from.file_id() {");
                 tb.add("            self.animator.live_ptr = Some(LivePtr::from_index(file_id, index));");
@@ -139,7 +139,7 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
             }
             else {
                 tb.add("impl").stream(generic.clone());
-                tb.add("LiveComponentHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
+                tb.add("LiveApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
             }
             
             return tb.end();
@@ -150,7 +150,7 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
             let generic = parser.eat_generic();
             let where_clause = parser.eat_where_clause(None);
             tb.add("impl").stream(generic.clone());
-            tb.add("LiveComponentHooks for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
+            tb.add("LiveApply for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
             return tb.end();
         }
     }

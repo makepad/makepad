@@ -113,7 +113,7 @@ pub struct Font {
     #[live] pub path: String
 }
 
-impl LiveComponentHooks for Font {
+impl LiveApply for Font {
     fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         self.font_id = Some(cx.get_font_by_path(&self.path));
     }
@@ -169,7 +169,7 @@ impl Cx {
 }
 
 
-#[derive(LiveComponent, LiveComponentHooks)]
+#[derive(LiveComponent, LiveApply)]
 #[repr(C)]
 pub struct DrawTrapezoidText {
     #[hide] pub trapezoidator: Trapezoidator,
