@@ -35,9 +35,9 @@ pub fn derive_live_animate_impl(input: TokenStream) -> TokenStream {
             tb.add("LiveAnimate for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             tb.add("    fn animate_to(&mut self, cx: &mut Cx, state_id: Id) {");
             tb.add("        if self.animator.state.is_none() {");
-            tb.add("            self.animator.cut_to(cx, id!(state_default));");
+            tb.add("            self.animator.cut_to_live(cx, id!(state_default));");
             tb.add("         }");
-            tb.add("        self.animator.animate_to(cx, state_id);");
+            tb.add("        self.animator.animate_to_live(cx, state_id);");
             tb.add("    }");
             tb.add("    fn handle_animation(&mut self, cx: &mut Cx, event: &mut Event) {");
             tb.add("        if self.animator.do_animation(cx, event) {");
