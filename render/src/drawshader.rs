@@ -58,7 +58,7 @@ pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPac
 
 
 #[derive(Default)]
-pub struct DrawCallVars {
+pub struct DrawVars {
     pub area: Area,
     pub var_instance_start: usize,
     pub var_instance_slots: usize,
@@ -69,14 +69,18 @@ pub struct DrawCallVars {
     pub var_instances: [f32; DRAW_CALL_VAR_INSTANCES]
 }
 
-impl DrawCallVars {
+impl DrawVars {
     
     pub fn can_instance(&self)->bool{
         self.draw_shader.is_some()
     }
     
+    pub fn redraw(&self, cx:&mut Cx){
+        cx.redraw_child_area(self.area);
+    }
+    
     pub fn live_type()->LiveType{
-        LiveType(std::any::TypeId::of::<DrawCallVars>())    
+        LiveType(std::any::TypeId::of::<DrawVars>())    
     }
     
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
@@ -117,11 +121,11 @@ impl DrawCallVars {
                                     recur_expand(after_draw_call_vars, field.live_type.unwrap(), live_factories, draw_shader_def, span);
                                     continue
                                 }
-                                if field.id == id!(draw_call_vars){
+                                if field.id == id!(draw_vars){
                                     // assert the thing to be marked correctly
                                     if let LiveOrLocal::Local = field.live_or_local{}
                                     else{panic!()}
-                                    if field.live_type.unwrap() != DrawCallVars::live_type(){panic!();}
+                                    if field.live_type.unwrap() != DrawVars::live_type(){panic!();}
                                     
                                     *after_draw_call_vars = true;
                                     continue;

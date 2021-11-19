@@ -86,27 +86,27 @@ pub fn derive_live_component_hooks_impl(input: TokenStream) -> TokenStream {
             };
             
             let deref_target = fields.iter().find( | field | field.name == "deref_target");
-            let draw_call_vars = fields.iter().find( | field | field.name == "draw_call_vars");
+            let draw_vars = fields.iter().find( | field | field.name == "draw_vars");
             let animator = fields.iter().find( | field | field.name == "animator");
             
-            if deref_target.is_some() && draw_call_vars.is_some() ||
+            if deref_target.is_some() && draw_vars.is_some() ||
             deref_target.is_some() && animator.is_some() ||
-            animator.is_some() && draw_call_vars.is_some() {
+            animator.is_some() && draw_vars.is_some() {
                 // no can do
                 return error("Cannot generate LiveComponentHooks with more than one of: deref_target/draw_call_vars/animator");
             }
             
-            if let Some(_) = draw_call_vars {
+            if let Some(_) = draw_vars {
                 tb.add("impl").stream(generic.clone());
                 tb.add("LiveComponentHooks for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
                 tb.add("    fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> usize {");
-                tb.add("        self.draw_call_vars.apply_value(cx, apply_from, index, nodes)");
+                tb.add("        self.draw_vars.apply_value(cx, apply_from, index, nodes)");
                 tb.add("    }");
                 tb.add("    fn before_apply(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
-                tb.add("        self.draw_call_vars.before_apply(cx, apply_from, index, nodes, &self.geometry);");
+                tb.add("        self.draw_vars.before_apply(cx, apply_from, index, nodes, &self.geometry);");
                 tb.add("    }");
                 tb.add("    fn after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]) {");
-                tb.add("        self.draw_call_vars.after_apply(cx, apply_from, index, nodes);");
+                tb.add("        self.draw_vars.after_apply(cx, apply_from, index, nodes);");
                 tb.add("    }");
                 tb.add("}");
             }
