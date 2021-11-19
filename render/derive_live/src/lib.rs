@@ -21,9 +21,9 @@ pub fn derive_live(input: TokenStream) -> TokenStream {
     derive_live_component_impl(input)
 }
 
-#[proc_macro_derive(LiveComponentHooks)]
-pub fn derive_live_component_hooks(input: TokenStream) -> TokenStream {
-    derive_live_component_hooks_impl(input)
+#[proc_macro_derive(LiveApply)]
+pub fn derive_live_apply(input: TokenStream) -> TokenStream {
+    derive_live_apply_impl(input)
 }
 
 #[proc_macro_derive(LiveAnimate)]

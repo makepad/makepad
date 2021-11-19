@@ -116,14 +116,14 @@ live_register!{
 }
 
 
-#[derive(LiveComponent, LiveComponentHooks, LiveAnimate)]
+#[derive(LiveComponent, LiveApply, LiveAnimate)]
 pub struct DesktopButton {
     #[hide] pub button_logic: ButtonLogic,
     #[hide] pub animator: Animator,
     #[live] pub bg: DrawDesktopButton,
 }
 
-#[derive(LiveComponent, LiveComponentHooks)]
+#[derive(LiveComponent, LiveApply)]
 #[repr(u32)]
 pub enum DesktopButtonType {
     #[live] WindowsMin,
@@ -134,7 +134,7 @@ pub enum DesktopButtonType {
     #[pick] Fullscreen
 }
 
-#[derive(LiveComponent, LiveComponentHooks)]
+#[derive(LiveComponent, LiveApply)]
 #[repr(C)]
 pub struct DrawDesktopButton {
     #[live] deref_target: DrawQuad,

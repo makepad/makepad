@@ -178,13 +178,10 @@ impl<'a> LiveExpander<'a> {
                         overwrite
                     }
                     else if in_value.is_object() && out_value.is_class() {
-                        // this is also allowed to overwrite but don't overwrite the name of the class
-                        //out_doc.nodes[overwrite] = in_node.clone();
                         level_overwrite.push(true);
                         overwrite
                     }
                     else if out_value.is_var_def() && in_value.is_value_type(){ // this is allowed
-                        // we 'insert' it right after the vardef
                         out_doc.nodes.insert(overwrite+1, in_node.clone());
                         overwrite + 1
                     }
@@ -225,23 +222,16 @@ impl<'a> LiveExpander<'a> {
                                         message: format!("Infinite recursion at {}", in_node.id)
                                     }); 
                                 }
-                                //println!("LOCAL EXPANSION {}",out_doc.nodes[local_ptr.0].value.get_class_name());
                                 out_doc.nodes[local_ptr.0].value.get_class_name()
                             }
                             LiveScopeTarget::LivePtr(live_ptr) => {
                                 let doc = &self.expanded[live_ptr.file_id.to_index()];
                                 out_doc.nodes.clone_children_from(live_ptr.node_index(), Some(out_index + 1), &doc.nodes);
-                                //println!("REMOTE EXPANSION {}",doc.nodes[live_ptr.node_index()].value.get_class_name());
                                 doc.nodes[live_ptr.node_index()].value.get_class_name()
                             }
                         };
                         out_doc.nodes[out_index].value.set_class_name(cn);
-                    }/*
-                    else{
-                        if *class == id!(DrawDesktopButton){
-                            println!("{:?} {} {:?}", self.in_file_id, class, self.scope_stack);
-                        }
-                    }*/
+                    }
                     self.scope_stack.stack.push(Vec::new());
                     current_parent.push(out_index);
                 }, 

@@ -28,7 +28,7 @@ live_register!{
 
 main_app!(BareExampleApp);
 
-#[derive(LiveComponent, LiveComponentHooks)]
+#[derive(LiveComponent, LiveApply)]
 pub struct BareExampleApp {
     #[hide(Window::new(cx))] window: Window,
     #[hide] pass: Pass,

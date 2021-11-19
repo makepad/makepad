@@ -80,7 +80,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveComponentHooks, LiveAnimate)]
+#[derive(LiveComponent, LiveApply, LiveAnimate)]
 pub struct NormalButton {
     #[hide] pub button_logic: ButtonLogic,
     #[hide] pub animator: Animator,
