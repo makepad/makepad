@@ -46,7 +46,7 @@ impl BareExampleApp {
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {
-        println!("{}",  cx.live_registry.clone().borrow().module_path_id_to_doc(&module_path!(), id!(App)).unwrap().nodes.len()*48);
+        //println!("{}",  cx.live_registry.clone().borrow().module_path_id_to_doc(&module_path!(), id!(App)).unwrap().nodes.len()*48);
         Self::new_from_doc(
             cx,
             cx.live_registry.clone().borrow().module_path_id_to_doc(&module_path!(), id!(App)).unwrap()

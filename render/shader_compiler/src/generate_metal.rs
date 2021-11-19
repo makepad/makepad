@@ -223,6 +223,11 @@ impl<'a> DrawShaderGenerator<'a> {
                             self.write_var_decl_packed(&DisplayDsIdent(field.ident), &Ty::Vec4);
                             writeln!(self.string, ";").unwrap();
                         },
+                        Ty::Enum(v) =>{
+                            write!(self.string, "    ").unwrap();
+                            self.write_var_decl_packed(&DisplayDsIdent(field.ident), &Ty::Enum(*v));
+                            writeln!(self.string, ";").unwrap();
+                        }
                         _ => panic!("unsupported type in generate_instance_struct")
                     }
                 }
@@ -277,6 +282,11 @@ impl<'a> DrawShaderGenerator<'a> {
                             self.write_ty_lit(TyLit::Vec4);
                             writeln!(self.string, " {};", &DisplayDsIdent(field.ident)).unwrap();
                         },
+                        Ty::Enum(v) =>{
+                            write!(self.string, "    ").unwrap();
+                            self.write_var_decl_packed(&DisplayDsIdent(field.ident), &Ty::Enum(*v));
+                            writeln!(self.string, ";").unwrap();
+                        }
                         _ => panic!("unsupported type in generate_varying_struct")
                     }
                 }
@@ -589,6 +599,10 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
             Ty::Struct(struct_node_ptr) => {
                 prefix(string, sep, is_inout);
                 write!(string, "{} {} {}", struct_node_ptr, ref_prefix, ident).unwrap();
+            }
+            Ty::Enum(_) => {
+                prefix(string, sep, is_inout);
+                write!(string, "uint32_t {} {}", ref_prefix, ident).unwrap();
             }
             Ty::DrawShader(_) => {
                 return false

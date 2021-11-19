@@ -2,8 +2,8 @@ use makepad_live_compiler::Span;
 use makepad_live_compiler::Token;
 use makepad_live_compiler::Id;
 use makepad_live_compiler::LivePtr;
+use makepad_live_compiler::LiveType;
 use makepad_live_compiler::Vec4;
-use std::fmt::Write;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::collections::BTreeSet;
@@ -69,7 +69,7 @@ pub struct DrawShaderDef {
     //pub default_geometry: Option<ShaderResourceId>,
     pub fields: Vec<DrawShaderFieldDef>,
     pub methods: Vec<FnPtr>,
-    
+    pub enums: Vec<LiveType>,
     // analysis results:
     pub all_const_refs: RefCell<BTreeSet<ConstPtr>>,
     pub all_live_refs: RefCell<BTreeMap<ValuePtr, Ty >>,
@@ -312,6 +312,12 @@ pub enum Stmt {
         block_if_true: Box<Block>,
         block_if_false: Option<Box<Block >>,
     },
+    Match {
+        span: Span,
+        expr: Expr,
+        matches: Vec<Match>,
+    },
+
     Let {
         span: Span,
         ty: RefCell<Option<Ty >>,
@@ -332,6 +338,15 @@ pub enum Stmt {
         span: Span,
         expr: Expr,
     },
+}
+
+#[derive(Clone)]
+pub struct Match {
+    pub span: Span,
+    pub enum_name: Ident,
+    pub enum_variant: Ident,
+    pub enum_value: Cell<Option<usize>>,
+    pub block: Block
 }
 
 #[derive(Clone)]
@@ -452,6 +467,7 @@ pub enum TyExprKind {
         len: u32,
     },
     Struct(StructPtr),
+    Enum(LiveType),
     DrawShader(DrawShaderPtr),
     Lit {
         ty_lit: TyLit,
@@ -518,6 +534,7 @@ pub enum Ty {
     Texture2D,
     Array {elem_ty: Rc<Ty>, len: usize},
     Struct(StructPtr),
+    Enum(LiveType),
     DrawShader(DrawShaderPtr),
     ClosureDef(ClosureDefIndex),
     ClosureDecl
@@ -971,6 +988,7 @@ impl Ty {
             Ty::Texture2D => Some(TyLit::Bool),
             Ty::Array {..} => None,
             Ty::Struct(_) => None,
+            Ty::Enum(_) => None,
             Ty::DrawShader(_) => None,
             Ty::ClosureDecl => None,
             Ty::ClosureDef {..} => None
@@ -1017,6 +1035,7 @@ impl Ty {
             Ty::Mat4 => 16,
             Ty::Texture2D {..} => panic!(),
             Ty::Array {elem_ty, len} => elem_ty.slots() * len,
+            Ty::Enum(_) => 1,
             Ty::Struct(_) => panic!(),
             Ty::DrawShader(_) => panic!(),
             Ty::ClosureDecl => panic!(),
@@ -1058,6 +1077,9 @@ impl Ty {
                 Ty::DrawShader(draw_shader_node_ptr)=>{
                     TyExprKind::DrawShader(*draw_shader_node_ptr)
                 },
+                Ty::Enum(live_type) => {
+                    TyExprKind::Enum(*live_type)
+                },
                 Ty::ClosureDef(_)=>panic!(),
                 Ty::ClosureDecl=>panic!()
             }
@@ -1088,6 +1110,7 @@ impl fmt::Display for Ty {
             Ty::Array {elem_ty, len} => write!(f, "{}[{}]", elem_ty, len),
             Ty::Struct(struct_ptr) => write!(f, "Struct:{:?}", struct_ptr),
             Ty::DrawShader(shader_ptr) => write!(f, "DrawShader:{:?}", shader_ptr),
+            Ty::Enum(_) => write!(f, "Enum"),
             Ty::ClosureDecl => write!(f, "ClosureDecl"),
             Ty::ClosureDef {..} => write!(f, "ClosureDef"),
         }
@@ -1222,9 +1245,7 @@ impl fmt::Display for Lit {
 
 impl Ident {
     pub fn to_id(self) -> Id {self.0}
-    pub fn to_ident_path(self) -> IdentPath {
-        IdentPath::from_ident(self)
-    }
+
 }
 
 impl fmt::Debug for Ident {
@@ -1245,70 +1266,8 @@ pub struct IdentPath {
     pub len: usize
 }
 
-#[derive(Clone, Copy, Default, Eq, PartialEq, Debug)]
-pub struct IdentPathWithSpan {
-    pub span: Span,
-    pub ident_path: IdentPath,
-}
-
-
 impl IdentPath {
-    
-    pub fn from_ident(ident: Ident) -> Self {
-        let mut p = IdentPath::default();
-        p.segs[0] = ident.0;
-        p.len = 1;
-        p
-    }
-    
-    pub fn from_two(ident1: Ident, ident2: Ident) -> Self {
-        let mut p = IdentPath::default();
-        p.segs[0] = ident1.0;
-        p.segs[1] = ident2.0;
-        p.len = 2;
-        p
-    }
-    
-    pub fn from_three(ident1: Ident, ident2: Ident, ident3: Ident) -> Self {
-        let mut p = IdentPath::default();
-        p.segs[0] = ident1.0;
-        p.segs[1] = ident2.0;
-        p.segs[1] = ident3.0;
-        p.len = 3;
-        p
-    }
-    
-    pub fn from_array(idents: &[Ident]) -> Self {
-        let mut p = IdentPath::default();
-        for i in 0..idents.len() {
-            p.segs[i] = idents[i].0;
-        }
-        p.len = idents.len();
-        p
-    }
-    
-    pub fn to_struct_fn_ident(&self) -> Ident {
-        let mut s = String::new();
-        for i in 0..self.len {
-            if i != 0 {
-                let _ = write!(s, "_").unwrap();
-            }
-            let _ = write!(s, "{}", self.segs[i]);
-        }
-        Ident(Id::from_str(&s).unwrap())
-    }
-    
-    pub fn from_str(value: &str) -> Self {
-        let mut p = IdentPath::default();
-        p.segs[0] = Id::from_str_unchecked(value);
-        p.len = 1;
-        p
-    }
-    
-    pub fn is_self_scope(&self) -> bool {
-        self.len > 1 && self.segs[0] == id!(self)
-    }
-    
+
     pub fn len(&self) -> usize {
         self.len
     }
@@ -1320,14 +1279,6 @@ impl IdentPath {
         self.segs[self.len] = ident.0;
         self.len += 1;
         return true
-    }
-    
-    
-    pub fn get_single(&self) -> Option<Ident> {
-        if self.len != 1 {
-            return None
-        }
-        return Some(Ident(self.segs[0]))
     }
 }
 

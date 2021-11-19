@@ -17,7 +17,7 @@ pub trait LiveFactory {
     fn component_fields(&self, fields: &mut Vec<LiveField>);
 }
 
-pub trait LiveNew: LiveComponent {
+pub trait LiveNew {
     fn new(cx: &mut Cx) -> Self;
     fn new_apply(cx: &mut Cx, apply_from: ApplyFrom, index:usize, nodes:&[LiveNode])->Self;
     fn new_from_doc(cx: &mut Cx, live_doc_nodes:LiveDocNodes)->Self;
@@ -95,13 +95,13 @@ pub struct LiveField {
     pub live_type: Option<LiveType>,
     pub live_or_calc: LiveOrCalc
 }
-
+/*
 #[derive(Default)]
 pub struct LiveBinding {
     pub live_ptr: Option<LivePtr>
 }
 
-
+*/
 impl Cx {
     pub fn live_register(&mut self) {
         crate::drawquad::live_register(self);
