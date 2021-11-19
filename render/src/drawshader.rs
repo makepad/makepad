@@ -211,7 +211,7 @@ impl DrawCallVars {
 
                 // lets iterate the /*
                 for input in &sh.mapping.live_instances.inputs{
-                    for j in 0..repeat{ 
+                    for j in 0..repeat{
                         for i in 0..input.slots{
                             instances[input.offset + i + j * stride] = inst_slice[input.offset + i]
                         } 

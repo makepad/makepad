@@ -142,7 +142,7 @@ impl ShaderRegistry {
                     return LiveNodeFindResult::Function(FnPtr(now_ptr));
                 }
                 LiveValue::Const {..} => return LiveNodeFindResult::Const(ConstPtr(now_ptr)),
-                LiveValue::NamedClass {class}=>{
+                LiveValue::Class {class}=>{
                     if ids.len() == 0{
                         if class == id!(Struct){
                             return LiveNodeFindResult::Struct(StructPtr(now_ptr));
@@ -164,7 +164,7 @@ impl ShaderRegistry {
                         }
                     }
                 }
-                LiveValue::BareClass => { 
+                LiveValue::Object => { 
                     if ids.len() == 0{
                         return LiveNodeFindResult::NotFound;
                     }
@@ -311,7 +311,7 @@ impl ShaderRegistry {
         let (doc, struct_node) = live_registry.ptr_to_doc_node(struct_ptr.0);
         
         match struct_node.value {
-            LiveValue::NamedClass {class} => {
+            LiveValue::Class {class} => {
                 if class != id!(Struct){
                     panic!()
                 }
@@ -424,7 +424,7 @@ impl ShaderRegistry {
         let (doc, class_node) = live_registry.ptr_to_doc_node(draw_shader_ptr.0);
         
         match class_node.value {
-            LiveValue::NamedClass {class, ..} => {
+            LiveValue::Class {class, ..} => {
                 if class != id!(DrawShader){
                     panic!()
                 }
@@ -459,7 +459,7 @@ impl ShaderRegistry {
                                 );
                             }
                         }
-                        LiveValue::NamedClass {..} => {
+                        LiveValue::Class {..} => {
                             // if our id is geometry, process it
                             if prop.id == id!(geometry) {
                                 if let Ok(child_index) = doc.nodes.child_by_name(node_index, id!(rust_type)){
