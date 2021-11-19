@@ -31,25 +31,7 @@ pub struct Walk {
     #[live] pub width: Width,
     #[live] pub height: Height,
 }
-/*
-impl Walk {
-    pub fn wh(w: Width, h: Height) -> Self {
-        Self {
-            width: w,
-            height: h,
-            margin: Margin::zero(),
-        }
-    }
-}*/
-/*
-impl Layout {
-    pub fn abs_origin_zero() -> Self {
-        Layout {
-            abs_origin: Some(Vec2::default()),
-            ..Default::default()
-        }
-    }
-}*/
+
 #[derive(Clone, Copy, Default, Debug, LiveComponent, LiveComponentHooks)]
 pub struct Align {
     #[live] pub fx: f32,

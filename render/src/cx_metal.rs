@@ -364,8 +364,7 @@ impl Cx {
             let () = unsafe {msg_send![encoder, endEncoding]};
             let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
             let () = unsafe {msg_send![command_buffer, commit]};
-            //let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
-            //command_buffer.wait_until_scheduled();
+            let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
         }
         let () = unsafe {msg_send![pool, release]};
     }
@@ -405,7 +404,7 @@ impl Cx {
         let () = unsafe {msg_send![encoder, textureBarrier]};
         let () = unsafe {msg_send![encoder, endEncoding]};
         let () = unsafe {msg_send![command_buffer, commit]};
-        //command_buffer.wait_until_scheduled();
+        let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
         let () = unsafe {msg_send![pool, release]};
     }
 }
@@ -820,9 +819,7 @@ impl MetalCx {
         gen: MetalGeneratedShader,
         draw_shader_def: &DrawShaderDef,
     ) -> ShaderCompileResult {
-        //println!("{}", gen.mtlsl);
-        //let debug = ;
-        //mapping.update_live_uniforms(live_styles);
+
         if draw_shader_def.flags.debug {
             let split = gen.mtlsl.split("\n");
             for (i,item) in split.enumerate(){
@@ -840,7 +837,7 @@ impl MetalCx {
         let mtl_compile_options: ObjcId = unsafe {msg_send![class!(MTLCompileOptions), new]};
         
         let _: ObjcId = unsafe {msg_send![
-            mtl_compile_options,
+            mtl_compile_options, 
             setFastMathEnabled: true
         ]};
         
@@ -856,14 +853,8 @@ impl MetalCx {
             let err_str: ObjcId = unsafe {msg_send![err, localizedDescription]};
             println!("{}", nsstring_to_string(err_str));
             panic!("{}", nsstring_to_string(err_str));
-            //return Err(SlErr {msg: nsstring_to_string(err_str)})
         }
-        //let err_str: id = unsafe {msg_send![err, localizedDescription]};
-        //println!("{}", nsstring_to_string(err_str));
-        //sh.name = name;
-        //sh.default_geometry = default_geometry;
-        //sh.mapping = mapping;
-        
+
         let mut draw_uniform_buffer_id = None;
         let mut pass_uniform_buffer_id = None;
         let mut view_uniform_buffer_id = None;

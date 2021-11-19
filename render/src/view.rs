@@ -288,23 +288,23 @@ impl View {
 
 impl Cx {
     
-    pub fn new_draw_call(&mut self, draw_call_vars: &DrawCallVars) -> &mut DrawItem {
-        return self.get_draw_call(false, draw_call_vars);
+    pub fn new_draw_call(&mut self, draw_vars: &DrawVars) -> &mut DrawItem {
+        return self.get_draw_call(false, draw_vars);
     }
     
-    pub fn append_to_draw_call(&mut self, draw_call_vars: &DrawCallVars) -> &mut DrawItem {
-        return self.get_draw_call(true, draw_call_vars);
+    pub fn append_to_draw_call(&mut self, draw_vars: &DrawVars) -> &mut DrawItem {
+        return self.get_draw_call(true, draw_vars);
     }
     
-    pub fn get_draw_call(&mut self, append: bool, draw_call_vars: &DrawCallVars) -> &mut DrawItem {
-        let sh = &self.draw_shaders[draw_call_vars.draw_shader.unwrap().draw_shader_id];
+    pub fn get_draw_call(&mut self, append: bool, draw_vars: &DrawVars) -> &mut DrawItem {
+        let sh = &self.draw_shaders[draw_vars.draw_shader.unwrap().draw_shader_id];
         
         let current_view_id = *self.view_stack.last().unwrap();
         let cxview = &mut self.views[current_view_id];
         let draw_item_id = cxview.draw_items_len;
         
         if append && !sh.mapping.flags.draw_call_always {
-            if let Some(index) = cxview.find_appendable_drawcall(sh, draw_call_vars) {
+            if let Some(index) = cxview.find_appendable_drawcall(sh, draw_vars) {
                 return &mut cxview.draw_items[index];
             }
         }
@@ -319,7 +319,7 @@ impl Cx {
                 view_id: current_view_id,
                 redraw_id: self.redraw_id,
                 sub_view_id: None,
-                draw_call: Some(DrawCall::new(&sh.mapping, draw_call_vars))
+                draw_call: Some(DrawCall::new(&sh.mapping, draw_vars))
             });
             return &mut cxview.draw_items[draw_item_id];
         }
@@ -328,16 +328,16 @@ impl Cx {
         draw_item.sub_view_id = None;
         draw_item.redraw_id = self.redraw_id;
         if let Some(dc) = &mut draw_item.draw_call {
-            dc.update(&sh.mapping, draw_call_vars);
+            dc.update(&sh.mapping, draw_vars);
         }
         else {
-            draw_item.draw_call = Some(DrawCall::new(&sh.mapping, draw_call_vars))
+            draw_item.draw_call = Some(DrawCall::new(&sh.mapping, draw_vars))
         }
         return draw_item;
     }
     
-    pub fn begin_many_instances(&mut self, draw_call_vars: &DrawCallVars) -> ManyInstances {
-        let draw_item = self.append_to_draw_call(draw_call_vars);
+    pub fn begin_many_instances(&mut self, draw_vars: &DrawVars) -> ManyInstances {
+        let draw_item = self.append_to_draw_call(draw_vars);
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let mut instances = None;
 
@@ -355,8 +355,8 @@ impl Cx {
         }
     }
     
-    pub fn begin_many_aligned_instances(&mut self, draw_call_vars: &DrawCallVars) -> ManyInstances {
-        let mut li = self.begin_many_instances(draw_call_vars);
+    pub fn begin_many_aligned_instances(&mut self, draw_vars: &DrawVars) -> ManyInstances {
+        let mut li = self.begin_many_instances(draw_vars);
         li.aligned = Some(self.align_list.len());
         self.align_list.push(Area::Empty);
         li
@@ -377,9 +377,9 @@ impl Cx {
         ia.into()
     }
     
-    pub fn add_instance(&mut self, draw_call_vars: &DrawCallVars) -> Area {
-        let data = draw_call_vars.as_slice();
-        let draw_item = self.append_to_draw_call(draw_call_vars);
+    pub fn add_instance(&mut self, draw_vars: &DrawVars) -> Area {
+        let data = draw_vars.as_slice();
+        let draw_item = self.append_to_draw_call(draw_vars);
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let instance_count = data.len() / draw_call.total_instance_slots;
         let check = data.len() % draw_call.total_instance_slots;
@@ -397,9 +397,9 @@ impl Cx {
         ia.into()
     }
     
-    pub fn add_aligned_instance(&mut self, draw_call_vars: &DrawCallVars) -> Area {
-        let data = draw_call_vars.as_slice();
-        let draw_item = self.append_to_draw_call(draw_call_vars);
+    pub fn add_aligned_instance(&mut self, draw_vars: &DrawVars) -> Area {
+        let data = draw_vars.as_slice();
+        let draw_item = self.append_to_draw_call(draw_vars);
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let instance_count = data.len() / draw_call.total_instance_slots;
         let check = data.len() % draw_call.total_instance_slots;
@@ -514,33 +514,33 @@ pub struct DrawCall {
 
 impl DrawCall {
     
-    pub fn new(mapping: &CxDrawShaderMapping, draw_call_vars: &DrawCallVars) -> Self {
+    pub fn new(mapping: &CxDrawShaderMapping, draw_vars: &DrawVars) -> Self {
         DrawCall {
-            geometry: draw_call_vars.geometry,
+            geometry: draw_vars.geometry,
             do_h_scroll: true,
             do_v_scroll: true,
-            draw_shader: draw_call_vars.draw_shader.unwrap(),
+            draw_shader: draw_vars.draw_shader.unwrap(),
             instances: Some(Vec::new()),
             total_instance_slots: mapping.instances.total_slots,
             draw_uniforms: DrawUniforms::default(),
-            user_uniforms: draw_call_vars.user_uniforms,
-            texture_slots: draw_call_vars.texture_slots,
+            user_uniforms: draw_vars.user_uniforms,
+            texture_slots: draw_vars.texture_slots,
             instance_dirty: true,
             uniforms_dirty: true,
             platform: CxPlatformDrawCall::default()
         }
     }
     
-    pub fn update(&mut self, mapping: &CxDrawShaderMapping, draw_call_vars: &DrawCallVars) {
-        self.draw_shader = draw_call_vars.draw_shader.unwrap();
-        self.geometry = draw_call_vars.geometry;
+    pub fn update(&mut self, mapping: &CxDrawShaderMapping, draw_vars: &DrawVars) {
+        self.draw_shader = draw_vars.draw_shader.unwrap();
+        self.geometry = draw_vars.geometry;
         self.instances.as_mut().unwrap().truncate(0);
         self.total_instance_slots = mapping.instances.total_slots;
         for i in 0..mapping.user_uniforms.total_slots {
-            self.user_uniforms[i] = draw_call_vars.user_uniforms[i];
+            self.user_uniforms[i] = draw_vars.user_uniforms[i];
         }
         for i in 0..mapping.textures.len() {
-            self.texture_slots[i] = draw_call_vars.texture_slots[i];
+            self.texture_slots[i] = draw_vars.texture_slots[i];
         }
         self.instance_dirty = true;
         self.uniforms_dirty = true;
@@ -674,25 +674,25 @@ impl CxView {
         }
     }
     
-    pub fn find_appendable_drawcall(&mut self, sh: &CxDrawShader, draw_call_vars: &DrawCallVars) -> Option<usize> {
+    pub fn find_appendable_drawcall(&mut self, sh: &CxDrawShader, draw_vars: &DrawVars) -> Option<usize> {
         // find our drawcall to append to the current layer
         if self.draw_items_len > 0 {
             for i in (0..self.draw_items_len).rev() {
                 let draw_item = &mut self.draw_items[i];
                 if let Some(draw_call) = &draw_item.draw_call {
-                    if draw_item.sub_view_id.is_none() && draw_call.draw_shader == draw_call_vars.draw_shader.unwrap() {
+                    if draw_item.sub_view_id.is_none() && draw_call.draw_shader == draw_vars.draw_shader.unwrap() {
                         // lets compare uniforms and textures..
                         if sh.mapping.flags.draw_call_compare {
-                            if draw_call.geometry != draw_call_vars.geometry {
+                            if draw_call.geometry != draw_vars.geometry {
                                 return None
                             }
                             for i in 0..sh.mapping.user_uniforms.total_slots {
-                                if draw_call.user_uniforms[i] != draw_call_vars.user_uniforms[i] {
+                                if draw_call.user_uniforms[i] != draw_vars.user_uniforms[i] {
                                     return None
                                 }
                             }
                             for i in 0..sh.mapping.textures.len() {
-                                if draw_call.texture_slots[i] != draw_call_vars.texture_slots[i] {
+                                if draw_call.texture_slots[i] != draw_vars.texture_slots[i] {
                                     return None
                                 }
                             }
