@@ -118,7 +118,7 @@ pub struct DrawShaderAnalyser<'a> {
 impl<'a> DrawShaderAnalyser<'a> {
     fn ty_checker(&self) -> TyChecker {
         TyChecker {
-            live_registry:self.live_registry,
+            live_registry: self.live_registry,
             scopes: self.scopes,
             shader_registry: self.shader_registry,
         }
@@ -126,40 +126,12 @@ impl<'a> DrawShaderAnalyser<'a> {
     
     pub fn analyse_shader(&mut self) -> Result<(), LiveError> {
         self.scopes.push_scope();
-         
+        
         //let mut var_inputs = DrawShaderVarInputs::default();
         for field in &self.draw_shader_def.fields {
             self.analyse_field_decl(field) ?;
-            /*
-            if let DrawShaderFieldKind::Instance{var_def_ptr,..} = field.kind{
-                if var_def_ptr.is_some(){
-                    var_inputs.inputs.push(DrawShaderVarInput{
-                        ident: field.ident,
-                        offset:var_inputs.var_instance_slots,
-                        size: field.ty_expr.ty.borrow().as_ref().unwrap().size(),
-                        kind:DrawShaderVarInputKind::Instance
-                    });
-                    var_inputs.var_instance_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
-                }
-                var_inputs.total_instance_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
-            }
-            if let DrawShaderFieldKind::Uniform{var_def_ptr,block_ident,..} = field.kind{
-                if block_ident != Ident(id!(user)){ 
-                    continue
-                }
-                if var_def_ptr.is_some(){
-                    var_inputs.inputs.push(DrawShaderVarInput{
-                        ident:field.ident,
-                        offset:var_inputs.var_uniform_slots,
-                        size: field.ty_expr.ty.borrow().as_ref().unwrap().size(),
-                        kind:DrawShaderVarInputKind::Uniform
-                    });
-                    var_inputs.var_uniform_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
-                }
-                var_inputs.total_uniform_slots += field.ty_expr.ty.borrow().as_ref().unwrap().size();
-            }*/
         }
-
+        
         // first analyse decls
         for fn_node_ptr in &self.draw_shader_def.methods {
             let fn_def = self.shader_registry.all_fns.get(fn_node_ptr).unwrap();
@@ -249,18 +221,17 @@ impl<'a> DrawShaderAnalyser<'a> {
                 self.analyse_struct_tree(&mut Vec::new(), *struct_ptr, struct_def, &mut vertex_structs, &mut all_structs) ?;
             }
         }
-
-        for any_fn in all_fns.iter().rev(){
+        
+        for any_fn in all_fns.iter().rev() {
             let fn_def = self.shader_registry.all_fns.get(any_fn).unwrap();
             all_live_refs.extend(fn_def.live_refs.borrow().as_ref().cloned().unwrap());
             all_const_refs.extend(fn_def.const_refs.borrow().as_ref().unwrap());
             // fill in fns where hidden args is none
-            if fn_def.hidden_args.borrow().is_none(){
+            if fn_def.hidden_args.borrow().is_none() {
                 self.analyse_hidden_args(fn_def);
             }
         }
-       // *self.draw_shader_def.var_inputs.borrow_mut() = var_inputs;
-
+        
         *self.draw_shader_def.all_live_refs.borrow_mut() = all_live_refs;
         *self.draw_shader_def.all_const_refs.borrow_mut() = all_const_refs;
         
@@ -274,44 +245,44 @@ impl<'a> DrawShaderAnalyser<'a> {
         Ok(())
     }
     
-    fn analyse_hidden_args(&mut self, fn_def: &FnDef){
+    fn analyse_hidden_args(&mut self, fn_def: &FnDef) {
         // ok so.. lets build it up
         let mut hidden_args = BTreeSet::new();
-        for ident in fn_def.draw_shader_refs.borrow().as_ref().unwrap(){
-            let field_def = self.draw_shader_def.fields.iter().find(|field| field.ident == *ident).unwrap();
-            match &field_def.kind{
-                DrawShaderFieldKind::Geometry{is_used_in_pixel_shader, ..}=>{
-                    if is_used_in_pixel_shader.get(){
+        for ident in fn_def.draw_shader_refs.borrow().as_ref().unwrap() {
+            let field_def = self.draw_shader_def.fields.iter().find( | field | field.ident == *ident).unwrap();
+            match &field_def.kind {
+                DrawShaderFieldKind::Geometry {is_used_in_pixel_shader, ..} => {
+                    if is_used_in_pixel_shader.get() {
                         hidden_args.insert(HiddenArgKind::Varyings);
                     }
-                    else{
+                    else {
                         hidden_args.insert(HiddenArgKind::Geometries);
                     }
                 }
-                DrawShaderFieldKind::Instance{is_used_in_pixel_shader, ..}=>{
-                    if is_used_in_pixel_shader.get(){
+                DrawShaderFieldKind::Instance {is_used_in_pixel_shader, ..} => {
+                    if is_used_in_pixel_shader.get() {
                         hidden_args.insert(HiddenArgKind::Varyings);
                     }
-                    else{
+                    else {
                         hidden_args.insert(HiddenArgKind::Instances);
                     }
                 }
-                DrawShaderFieldKind::Texture{..}=>{
+                DrawShaderFieldKind::Texture {..} => {
                     hidden_args.insert(HiddenArgKind::Textures);
                 }
-                DrawShaderFieldKind::Uniform{block_ident, ..}=>{
+                DrawShaderFieldKind::Uniform {block_ident, ..} => {
                     hidden_args.insert(HiddenArgKind::Uniform(*block_ident));
                 }
-                DrawShaderFieldKind::Varying{..}=>{
+                DrawShaderFieldKind::Varying {..} => {
                     hidden_args.insert(HiddenArgKind::Varyings);
                 }
             }
         }
-        if fn_def.live_refs.borrow().as_ref().unwrap().len() > 0{
+        if fn_def.live_refs.borrow().as_ref().unwrap().len() > 0 {
             hidden_args.insert(HiddenArgKind::LiveUniforms);
         }
         // merge in the others
-        for callee in fn_def.callees.borrow().as_ref().unwrap().iter(){
+        for callee in fn_def.callees.borrow().as_ref().unwrap().iter() {
             let other_fn_def = self.shader_registry.all_fns.get(callee).unwrap();
             
             hidden_args.extend(other_fn_def.hidden_args.borrow().as_ref().unwrap().iter().cloned());
@@ -341,7 +312,7 @@ impl<'a> DrawShaderAnalyser<'a> {
             DrawShaderFieldKind::Instance {..} => {
                 let ty = self.ty_checker().ty_check_ty_expr(&decl.ty_expr) ?;
                 match ty {
-                    Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 | Ty::Mat2 | Ty::Mat3 | Ty::Mat4 => {}
+                    Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 | Ty::Mat2 | Ty::Mat3 | Ty::Mat4 | Ty::Enum(_) => {}
                     _ => {
                         return Err(LiveError {
                             origin: live_error_origin!(),
@@ -569,7 +540,7 @@ impl<'a> ConstAnalyser<'a> {
 
 pub struct FnDefAnalyser<'a> {
     pub fn_def: &'a FnDef,
-    pub closure_return_ty: Option<&'a RefCell<Option<Ty>>>,
+    pub closure_return_ty: Option<&'a RefCell<Option<Ty >> >,
     pub scopes: &'a mut Scopes,
     pub live_registry: &'a LiveRegistry,
     pub shader_registry: &'a ShaderRegistry,
@@ -667,11 +638,11 @@ impl<'a> FnDefAnalyser<'a> {
         // lets build up our fn_args_hidden and combine it
         // with our callees
         
-        if let Some(ty_expr) = &self.fn_def.return_ty_expr{
-            if let Ty::Void = ty_expr.ty.borrow().as_ref().unwrap(){
+        if let Some(ty_expr) = &self.fn_def.return_ty_expr {
+            if let Ty::Void = ty_expr.ty.borrow().as_ref().unwrap() {
             }
-            else{
-                if !self.fn_def.has_return.get(){
+            else {
+                if !self.fn_def.has_return.get() {
                     return Err(LiveError {
                         origin: live_error_origin!(),
                         span: self.fn_def.span,
@@ -717,7 +688,8 @@ impl<'a> FnDefAnalyser<'a> {
                             span: closure_def.span,
                             message: format!(
                                 "Closure does not have the same number of arguments as function decl: {} expected: {}",
-                                closure_def.params.len(), params.len()
+                                closure_def.params.len(),
+                                params.len()
                             ),
                         });
                     }
@@ -736,26 +708,27 @@ impl<'a> FnDefAnalyser<'a> {
                         def_param.shadow.set(Some(shadow));
                     }
                     // ok and now we go analyse the body.
-                    match &closure_def.kind{
-                        ClosureDefKind::Expr(expr)=>{
-                            self.analyse_expr_stmt(closure_def.span, expr)?;
+                    match &closure_def.kind {
+                        ClosureDefKind::Expr(expr) => {
+                            self.analyse_expr_stmt(closure_def.span, expr) ?;
                             // check the expr ty vs return ty
-                            if expr.ty.borrow().as_ref() != return_ty.borrow().as_ref(){
+                            if expr.ty.borrow().as_ref() != return_ty.borrow().as_ref() {
                                 return Err(LiveError {
                                     origin: live_error_origin!(),
                                     span: closure_def.span,
                                     message: format!(
                                         "Closure return type not correct: {} expected: {}",
-                                        expr.ty.borrow().as_ref().unwrap(), return_ty.borrow().as_ref().unwrap()
+                                        expr.ty.borrow().as_ref().unwrap(),
+                                        return_ty.borrow().as_ref().unwrap()
                                     ),
                                 });
                             }
                         }
-                        ClosureDefKind::Block(block)=>{
+                        ClosureDefKind::Block(block) => {
                             self.closure_return_ty = Some(return_ty);
                             // ohdear. the return should be checked against the closure
                             // not the fndef.
-                            self.analyse_block(block)?;
+                            self.analyse_block(block) ?;
                             self.closure_return_ty = None;
                         }
                     }
@@ -765,7 +738,7 @@ impl<'a> FnDefAnalyser<'a> {
                     // ok we also have something else.
                     // ok we have to store the variables we have accessed on frpm scope
                     let all_syms = self.scopes.all_referenced_syms();
-                    for sym in &all_syms{
+                    for sym in &all_syms {
                         closure_site.all_closed_over.insert(sym.clone());
                     }
                     *closure_def.closed_over_syms.borrow_mut() = Some(all_syms);
@@ -780,14 +753,14 @@ impl<'a> FnDefAnalyser<'a> {
         }
         // move or extend
         let mut closure_sites_out = self.fn_def.closure_sites.borrow_mut();
-        if closure_sites_out.is_some(){
+        if closure_sites_out.is_some() {
             closure_sites_out.as_mut().unwrap().extend(closure_sites);
         }
-        else{
+        else {
             *closure_sites_out = Some(closure_sites);
         }
         // recur
-        if self.scopes.closure_sites.borrow().len()>0{
+        if self.scopes.closure_sites.borrow().len()>0 {
             return Err(LiveError {
                 origin: live_error_origin!(),
                 span: self.fn_def.span,
@@ -823,6 +796,11 @@ impl<'a> FnDefAnalyser<'a> {
                 ref block_if_true,
                 ref block_if_false,
             } => self.analyse_if_stmt(span, expr, block_if_true, block_if_false),
+            Stmt::Match {
+                span,
+                ref expr,
+                ref matches,
+            } => self.analyse_match_stmt(span, expr, matches),
             Stmt::Let {
                 span,
                 ref ty,
@@ -953,6 +931,58 @@ impl<'a> FnDefAnalyser<'a> {
         Ok(())
     }
     
+    fn analyse_match_stmt(
+        &mut self,
+        span: Span,
+        expr: &Expr,
+        matches: &Vec<Match>,
+    ) -> Result<(), LiveError> {
+        let ty = self.ty_checker()
+            .ty_check_expr(expr) ?;
+        // ok so the ty MUST be an Enum
+        if let Ty::Enum(live_type) = ty {
+            self.const_evaluator().try_const_eval_expr(expr);
+            self.const_gatherer().const_gather_expr(expr);
+            self.dep_analyser().dep_analyse_expr(expr);
+            
+            for match_item in matches {
+                // lets fetch our Enum + Variant and see if its the same live_type
+                let shader_enum = self.shader_registry.enums.get(&live_type).unwrap();
+                // ok so.. our match_item
+                if match_item.enum_name.0 != shader_enum.enum_name{
+                    return Err(LiveError {
+                        origin: live_error_origin!(),
+                        span,
+                        message: format!("Enum name mismatched, expected {} got {}", shader_enum.enum_name, match_item.enum_name.0),
+                    } .into())
+                } 
+                
+                if let Some(pos) = shader_enum.variants.iter().position( | id | *id == match_item.enum_variant.0) {
+                    match_item.enum_value.set(Some(pos));
+                }
+                else{
+                    return Err(LiveError {
+                        origin: live_error_origin!(),
+                        span,
+                        message: format!("Variant not found on enum {}::{}", match_item.enum_name.0, match_item.enum_variant.0),
+                    } .into())
+                }
+                // lets see if we have the right name
+                self.scopes.push_scope();
+                self.analyse_block(&match_item.block) ?;
+                self.scopes.pop_scope();
+            }
+            Ok(())
+        }
+        else {
+            Err(LiveError {
+                origin: live_error_origin!(),
+                span,
+                message: String::from("Can only match on enum types"),
+            } .into())
+        }
+    }
+    
     fn analyse_let_stmt(
         &mut self,
         span: Span,
@@ -960,7 +990,7 @@ impl<'a> FnDefAnalyser<'a> {
         ident: Ident,
         ty_expr: &Option<TyExpr>,
         expr: &Option<Expr>,
-        shadow: &Cell<Option<ScopeSymShadow>>,
+        shadow: &Cell<Option<ScopeSymShadow >>,
     ) -> Result<(), LiveError> {
         *ty.borrow_mut() = Some(if let Some(ty_expr) = ty_expr {
             if expr.is_none() {
@@ -1015,14 +1045,14 @@ impl<'a> FnDefAnalyser<'a> {
         
         self.fn_def.has_return.set(true);
         if let Some(expr) = expr {
-            if let Some(ty) = self.closure_return_ty{
+            if let Some(ty) = self.closure_return_ty {
                 self.ty_checker().ty_check_expr_with_expected_ty(
                     span,
                     expr,
                     ty.borrow().as_ref().unwrap()
                 ) ?;
             }
-            else{
+            else {
                 self.ty_checker().ty_check_expr_with_expected_ty(
                     span,
                     expr,

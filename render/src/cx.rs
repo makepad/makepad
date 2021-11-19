@@ -6,9 +6,11 @@ use std::cell::RefCell;
 
 pub use makepad_derive_live::*;
 pub use makepad_live_compiler::math::*;
-pub use makepad_shader_compiler::ShaderRegistry;
+pub use makepad_shader_compiler::shaderregistry::ShaderRegistry;
+pub use makepad_shader_compiler::shaderregistry::ShaderEnum;
 pub use makepad_shader_compiler::shaderast::DrawShaderPtr;
 pub use makepad_shader_compiler::shaderast::LiveOrCalc;
+pub use makepad_shader_compiler::shaderast::Ty;
 pub use makepad_live_compiler::LiveRegistry;
 pub use makepad_live_compiler::LiveDocNodes;
 pub use makepad_live_compiler::Id;
@@ -23,7 +25,6 @@ pub use makepad_live_compiler::LiveNodeSlice;
 pub use makepad_live_compiler::LiveNodeVec;
 
 pub use makepad_live_compiler::id;
-pub use makepad_shader_compiler::Ty;
 
 pub use crate::font::*;
 pub use crate::turtle::*;

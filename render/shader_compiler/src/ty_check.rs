@@ -39,6 +39,7 @@ impl<'a> TyChecker<'a> {
             } => self.ty_check_array_ty_expr(ty_expr.span, elem_ty_expr, *len),
             TyExprKind::Lit {ty_lit} => self.ty_check_lit_ty_expr(ty_expr.span, *ty_lit),
             TyExprKind::Struct(struct_ptr) => Ok(Ty::Struct(*struct_ptr)),
+            TyExprKind::Enum(live_type) => Ok(Ty::Enum(*live_type)),
             TyExprKind::DrawShader(shader_ptr) => Ok(Ty::DrawShader(*shader_ptr)),
             TyExprKind::ClosureDecl {return_ty_expr, params, return_ty} => {
                 // check the closure

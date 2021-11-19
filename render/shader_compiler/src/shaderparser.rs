@@ -648,6 +648,7 @@ impl<'a> ShaderParser<'a> {
             Token::Ident(id!(continue)) => self.expect_continue_stmt(),
             Token::Ident(id!(for)) => self.expect_for_stmt(),
             Token::Ident(id!(if)) => self.expect_if_stmt(),
+            Token::Ident(id!(match)) => self.expect_match_stmt(),
             Token::Ident(id!(let)) => self.expect_let_stmt(),
             Token::Ident(id!(return)) => self.expect_return_stmt(),
             _ => self.expect_expr_stmt(),
@@ -719,6 +720,42 @@ impl<'a> ShaderParser<'a> {
         }))
     }
     
+    fn expect_match_item(&mut self) -> Result<Match, LiveError> {
+        let span = self.begin_span();
+        let enum_name = self.expect_ident(live_error_origin!())?;
+        self.expect_token(Token::Punct(id!(::)))?;
+        let enum_variant = self.expect_ident(live_error_origin!())?;
+        self.expect_token(Token::Punct(id!(=>)))?;
+        let block = self.expect_block() ?;
+        Ok(span.end(self, | span | Match {
+            span,
+            enum_name,
+            enum_variant,
+            enum_value:Cell::new(None),
+            block
+        }))
+    }
+
+    fn expect_match_stmt(&mut self) -> Result<Stmt, LiveError> {
+        let span = self.begin_span();
+        self.expect_token(Token::Ident(id!(match))) ?;
+
+        let expr = self.expect_expr() ?;
+        
+        // now we parse our match block
+        self.expect_token(Token::OpenBrace) ?;
+
+        let mut matches = Vec::new();
+        while !self.accept_token(Token::CloseBrace) {
+            matches.push(self.expect_match_item() ?);
+        }
+        
+        Ok(span.end(self, | span | Stmt::Match {
+            span,
+            expr,
+            matches,
+        }))
+    }
     
     fn expect_let_stmt(&mut self) -> Result<Stmt, LiveError> {
         let span = self.begin_span();

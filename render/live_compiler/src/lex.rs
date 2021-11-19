@@ -54,6 +54,7 @@ pub fn fill_collisions() {
             "==",
             "=",
             ">=",
+            "=>",
             ">",
             "?"
         ];
@@ -142,7 +143,7 @@ C: Iterator<Item = char>,
             ('#', _) => {
                 self.skip_char();
                 self.temp_hex.truncate(0);
-                if self.ch_0 == 'x'{
+                if self.ch_0 == 'x' {
                     self.skip_char();
                 }
                 while let Some(ch) = self.read_char_if( | ch | ch.is_ascii_hexdigit()) {
@@ -279,6 +280,10 @@ C: Iterator<Item = char>,
                 self.skip_two_chars();
                 Token::Punct(id!( ==))
             }
+            ('=', '>') => {
+                self.skip_two_chars();
+                Token::Punct(id!( =>))
+            }
             ('=', _) => {
                 self.skip_char();
                 Token::Punct(id!( =))
@@ -328,16 +333,16 @@ C: Iterator<Item = char>,
                 
                 // this underscore filtering is because otherwise transpiling to glsl would
                 // be unable to use the real identifiers in the generated code.
-                // this makes it much harder to read and debug. 
+                // this makes it much harder to read and debug.
                 let mut last_ch = '\0';
                 let mut double_underscore = false;
                 self.read_chars_while( | ch | {
                     if ch == '_' && last_ch == '_' {double_underscore = true};
-                    if ch.is_ascii_alphanumeric() || ch == '_'{
+                    if ch.is_ascii_alphanumeric() || ch == '_' {
                         last_ch = ch;
                         true
                     }
-                    else{
+                    else {
                         false
                     }
                 });
@@ -345,7 +350,7 @@ C: Iterator<Item = char>,
                 if first_ch == '_' || last_ch == '_' {
                     return Err(span.error(self, format!("Id's cannot start or end with an underscore {}", self.temp_string).into()));
                 }
-                if double_underscore{
+                if double_underscore {
                     return Err(span.error(self, format!("Id's cannot contain double underscores {}", self.temp_string).into()));
                 }
                 
@@ -353,9 +358,9 @@ C: Iterator<Item = char>,
                     "true" => Token::Bool(true),
                     "false" => Token::Bool(false),
                     _ => {
-                        match Id::from_str(&self.temp_string){
-                            Err(collide)=>return Err(span.error(self, format!("Id has collision {} with {}, please rename one of them", self.temp_string, collide).into())),
-                            Ok(id)=>Token::Ident(id)
+                        match Id::from_str(&self.temp_string) {
+                            Err(collide) => return Err(span.error(self, format!("Id has collision {} with {}, please rename one of them", self.temp_string, collide).into())),
+                            Ok(id) => Token::Ident(id)
                         }
                     }
                 }
