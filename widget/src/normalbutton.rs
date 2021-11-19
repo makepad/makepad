@@ -62,7 +62,7 @@ live_register!{
                 all: Play::Forward {duration: 0.1}
                 state_down: Play::Forward {duration: 0.01}
             }
-            bg: {
+            bg: { 
                 down: 0.0,
                 hover: [{time: 0.0, value: 1.0}],
             } 

@@ -40,6 +40,7 @@ impl BareExampleApp {
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {
+        
         Self::new_from_doc(
             cx,
             cx.live_registry.clone().borrow().module_path_id_to_doc(&module_path!(), id!(App)).unwrap()
@@ -50,7 +51,6 @@ impl BareExampleApp {
     }
     
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
-        
         self.normal_button.handle_normal_button(cx, event);
         
         match event {
@@ -71,10 +71,10 @@ impl BareExampleApp {
             self.draw_quad.draw_quad_abs(cx, Rect {pos: Vec2 {x: 30., y: 30.}, size: Vec2 {x: 200., y: 200.}});
             self.draw_text.draw_text_abs(cx, Vec2 {x: 60., y: 60.}, "HELLO WORLD");
             
-            self.normal_button.apply_draw(cx, live!{ 
+            self.normal_button.apply_draw(cx, live!{
                 label: "DSL",
             });
-           
+            
             self.main_view.end_view(cx);
         }
         

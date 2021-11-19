@@ -100,7 +100,7 @@ impl Cx {
                     geometry.dirty = false;
                 }
                 
-                if let Some(buf) = geometry.platform.geom_vbuf.multi_buffer_read().buffer {
+                if let Some(buf) = geometry.platform.geom_vbuf.buffer {
                     unsafe {msg_send![
                         encoder,
                         setVertexBuffer: buf
@@ -110,7 +110,7 @@ impl Cx {
                 }
                 else {println!("Drawing error: geom_vbuf None")}
                 
-                if let Some(buf) = draw_call.platform.inst_vbuf.multi_buffer_read().buffer {
+                if let Some(buf) = draw_call.platform.inst_vbuf.buffer {
                     unsafe {msg_send![
                         encoder,
                         setVertexBuffer: buf
@@ -185,7 +185,7 @@ impl Cx {
                     }
                 }
                 self.platform.draw_calls_done += 1;
-                if let Some(buf) = geometry.platform.geom_ibuf.multi_buffer_read().buffer {
+                if let Some(buf) = geometry.platform.geom_ibuf.buffer {
                     
                     let () = unsafe {msg_send![
                         encoder,
@@ -517,12 +517,12 @@ pub struct CxPlatformPass {
 }
 
 #[derive(Default, Clone)]
-pub struct MultiMetalBuffer {
+pub struct MetalBuffer {
     pub buffer: Option<ObjcId>,
     pub size: usize,
     pub used: usize
 }
-
+/*
 #[derive(Default, Clone)]
 pub struct MetalBuffer {
     pub last_written: usize,
@@ -532,8 +532,9 @@ pub struct MetalBuffer {
     pub multi4: MultiMetalBuffer,
     pub multi5: MultiMetalBuffer,
 }
-
+*/
 impl MetalBuffer {
+    /*
     pub fn multi_buffer_read(&self) -> &MultiMetalBuffer {
         match self.last_written {
             0 => &self.multi1,
@@ -553,24 +554,26 @@ impl MetalBuffer {
             3 => &mut self.multi4,
             _ => &mut self.multi5,
         }
-    }
+    }*/
     
     pub fn update_with_f32_data(&mut self, metal_cx: &MetalCx, data: &Vec<f32>) {
-        let elem = self.multi_buffer_write();
-        if elem.size < data.len() {
-            elem.buffer = None;
+        //let elem = self.multi_buffer_write();
+        if self.size < data.len() {
+            self.buffer = None;
         }
-        if let None = elem.buffer {
+        if let None = self.buffer {
             let buffer: ObjcId = unsafe {msg_send![
                 metal_cx.device,
                 newBufferWithLength: (data.len() * std::mem::size_of::<f32>()) as u64
-                options: MTLResourceOptions::StorageModeShared
+                options: MTLResourceOptions::HazardTrackingModeTracked |
+                MTLResourceOptions::StorageModeManaged |
+                MTLResourceOptions::CPUCacheModeWriteCombined
             ]};
-            if buffer == nil {elem.buffer = None} else {elem.buffer = Some(buffer)}
-            elem.size = data.len()
+            if buffer == nil {self.buffer = None} else {self.buffer = Some(buffer)}
+            self.size = data.len()
         }
         
-        if let Some(buffer) = elem.buffer {
+        if let Some(buffer) = self.buffer {
             unsafe {
                 let p: *mut std::ffi::c_void = msg_send![buffer, contents];
                 std::ptr::copy(data.as_ptr(), p as *mut f32, data.len());
@@ -583,24 +586,27 @@ impl MetalBuffer {
                 ];
             }
         }
-        elem.used = data.len()
+        self.used = data.len()
     }
     
     pub fn update_with_u32_data(&mut self, metal_cx: &MetalCx, data: &Vec<u32>) {
-        let elem = self.multi_buffer_write();
-        if elem.size < data.len() {
-            elem.buffer = None;
+        //let elem = self.multi_buffer_write();
+        if self.size < data.len() {
+            self.buffer = None;
         }
-        if let None = elem.buffer {
+        if let None = self.buffer {
             let buffer: ObjcId = unsafe {msg_send![
                 metal_cx.device,
                 newBufferWithLength: (data.len() * std::mem::size_of::<u32>()) as u64
-                options: MTLResourceOptions::StorageModeShared
+                options: 
+                MTLResourceOptions::HazardTrackingModeTracked |
+                MTLResourceOptions::StorageModeManaged |
+                MTLResourceOptions::CPUCacheModeWriteCombined
             ]};
-            if buffer == nil {elem.buffer = None} else {elem.buffer = Some(buffer)}
-            elem.size = data.len()
+            if buffer == nil {self.buffer = None} else {self.buffer = Some(buffer)}
+            self.size = data.len()
         }
-        if let Some(buffer) = elem.buffer {
+        if let Some(buffer) = self.buffer {
             unsafe {
                 let p: *mut std::ffi::c_void = msg_send![buffer, contents];
                 std::ptr::copy(data.as_ptr(), p as *mut u32, data.len());
@@ -613,7 +619,7 @@ impl MetalBuffer {
                 ];
             }
         }
-        elem.used = data.len()
+        self.used = data.len()
     }
 }
 
