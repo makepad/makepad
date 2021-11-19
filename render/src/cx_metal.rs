@@ -1,8 +1,3 @@
-//use cocoa::base::{id};
-//use cocoa::appkit::{NSView};
-//use cocoa::foundation::{NSAutoreleasePool, NSUInteger, NSRange};
-//use core_graphics::geometry::CGSize;
-//use core_graphics::color::CGColor;
 use makepad_objc_sys::{msg_send};
 use makepad_objc_sys::runtime::YES;
 
@@ -10,7 +5,6 @@ use makepad_shader_compiler::generate_metal;
 use makepad_shader_compiler::generate_metal::MetalGeneratedShader;
 use makepad_shader_compiler::shaderast::DrawShaderDef;
 
-//use metal::*;
 use crate::cx_apple::*;
 use crate::cx_cocoa_app::*;
 use crate::cx_cocoa_window::*;
