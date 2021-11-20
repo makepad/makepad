@@ -10,7 +10,7 @@ live_register!{
     
     DesktopWindow: {
         rust_type: {{DesktopWindow}}
-        clear_color: #f00
+        clear_color: #1e1e1e
         inner_layout: Layout {}
         caption_text: DrawText {}
         min_btn: DesktopButton {}
@@ -18,8 +18,8 @@ live_register!{
         close_btn: DesktopButton {}
         xr_btn: DesktopButton {}
         fullscreen_btn: DesktopButton {}
-        caption_bg: DrawColor {color: #0f0}
-        caption: "Hello World"
+        caption_bg: DrawColor {color: #3d3d3d}
+        caption: "Desktop Window"
     }
 }
 
@@ -237,7 +237,7 @@ impl DesktopWindow {
                         }
                         self.caption_bg.begin_quad(cx, Layout {
                             align: Align {fx: 0.5, fy: 0.5},
-                            walk: Walk::wh(Width::Fill, Height::Fix(22.)),
+                            walk: Walk::wh(Width::Fill, Height::Fix(26.)),
                             ..Default::default()
                         });
                         self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
