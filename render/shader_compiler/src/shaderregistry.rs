@@ -39,7 +39,7 @@ impl ShaderRegistry {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug)] 
 pub enum LiveNodeFindResult {
     NotFound,
     Component(LivePtr),
