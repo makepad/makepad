@@ -29,7 +29,7 @@ impl View {
         }
     }
     
-    pub fn new() -> Self {
+    pub fn new(_cx:&mut Cx) -> Self {
         Self {
             redraw_id: 0,
             is_clipped: true,

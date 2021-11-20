@@ -117,8 +117,8 @@ live_register!{
 
 #[derive(LiveComponent, LiveApply, LiveAnimate)]
 pub struct DesktopButton {
-    #[hide] pub button_logic: ButtonLogic,
-    #[hide] pub animator: Animator,
+    #[rust] pub button_logic: ButtonLogic,
+    #[rust] pub animator: Animator,
     #[live] pub bg: DrawDesktopButton,
 }
 

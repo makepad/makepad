@@ -73,10 +73,10 @@ impl BareExampleApp {
         
         self.draw_quad.draw_quad_abs(cx, Rect {pos: Vec2 {x: 30., y: 30.}, size: Vec2 {x: 200., y: 200.}});
         self.draw_text.draw_text_abs(cx, Vec2 {x: 60., y: 60.}, "HELLO WORLD");
-        /*
-        self.normal_button.apply_draw(cx, live!{
+        
+        self.normal_button.apply_draw(cx, live!{ 
             label: "DSL",
-        });*/
+        });
         
         self.desktop_button.draw_desktop_button(cx, DesktopButtonType::WindowsMax );
         
