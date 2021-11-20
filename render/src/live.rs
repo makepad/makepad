@@ -111,6 +111,8 @@ impl Cx {
         crate::shader_std::live_register(self);
         crate::font::live_register(self);
     }
+    
+    //pub fn live_error
     /*
     pub fn clone_from_module_path(&self, module_path: &str) -> Option<(FileId, Vec<LiveNode>)> {
         self.shader_registry.live_registry.clone_from_module_path(module_path)
