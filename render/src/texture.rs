@@ -5,7 +5,7 @@ use crate::cx::*;
 pub struct Texture {
     pub texture_id: u32,
 }
-
+/*
 #[derive(Copy, Clone, Default, PartialEq, Debug)]
 pub struct Texture2D(pub Option<u32>);
 
@@ -13,7 +13,7 @@ impl Into<Texture2D> for Texture {
     fn into(self) -> Texture2D {
         Texture2D(Some(self.texture_id as u32))
     }
-}
+}*/
 
 #[derive(Clone, PartialEq)]
 pub enum TextureFormat {
