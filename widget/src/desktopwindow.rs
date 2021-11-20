@@ -7,37 +7,38 @@ live_register!{
     use makepad_render::drawcolor::DrawColor;
     use makepad_render::drawtext::DrawText;
     use makepad_widget::desktopbutton::DesktopButton;
-
+    
     DesktopWindow: {
-        rust_type:{{DesktopWindow}}
+        rust_type: {{DesktopWindow}}
         clear_color: #f00
-        inner_layout: Layout{}
-        caption_text:DrawText{}
-        min_btn: DesktopButton{}
-        max_btn: DesktopButton{}
-        close_btn: DesktopButton{}
-        xr_btn: DesktopButton{}
-        fullscreen_btn: DesktopButton{}
-        caption_bg: DrawColor{color:#0f0}
-        caption:"Hello World"
+        inner_layout: Layout {}
+        caption_text: DrawText {}
+        min_btn: DesktopButton {}
+        max_btn: DesktopButton {}
+        close_btn: DesktopButton {}
+        xr_btn: DesktopButton {}
+        fullscreen_btn: DesktopButton {}
+        caption_bg: DrawColor {color: #0f0}
+        caption: "Hello World"
     }
 }
 
 #[derive(LiveComponent, LiveApply)]
 pub struct DesktopWindow {
-    #[hide(Window::new(cx))] pub window: Window,
-    #[hide] pub pass: Pass,
 
-    #[live] pub clear_color: Vec4,
-
-    #[hide(Texture::new(cx))] pub color_texture: Texture,
-    #[hide(Texture::new(cx))] pub depth_texture: Texture,
-    #[hide(View::new())] pub caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
+    #[rust] pub pass: Pass,
+    #[rust(Texture::new(cx))] pub color_texture: Texture,
+    #[rust(Texture::new(cx))] pub depth_texture: Texture,
+    #[rust] pub caption_size: Vec2,
     
-    #[hide(View::new())] pub main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
-    #[hide(View::new())] pub inner_view: View,
+    #[rust(Window::new(cx))] pub window: Window,
+    #[rust(View::new(cx))] pub caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
+    #[rust(View::new(cx))] pub main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
+    #[rust(View::new(cx))] pub inner_view: View,
     #[live] pub inner_layout: Layout,
     
+    #[live] pub clear_color: Vec4,
+
     //pub caption_bg_color: ColorId,
     #[live] pub min_btn: DesktopButton,
     #[live] pub max_btn: DesktopButton,
@@ -49,20 +50,18 @@ pub struct DesktopWindow {
     #[live] pub caption_bg: DrawColor,
     #[live] pub caption: String,
     
-    #[hide] pub caption_size: Vec2,
-    
-    #[hide(WindowMenu::new(cx))] pub window_menu: WindowMenu,
-    #[hide(Menu::main(vec![
+    #[rust(WindowMenu::new(cx))] pub window_menu: WindowMenu,
+    #[rust(Menu::main(vec![
         Menu::sub("App", vec![
             Menu::item("Quit App", Cx::command_quit()),
         ]),
     ]))]
     pub default_menu: Menu,
     
-    #[hide] pub last_menu: Option<Menu>,
+    #[rust] pub last_menu: Option<Menu>,
     
     // testing
-    #[hide] pub inner_over_chrome: bool,
+    #[rust] pub inner_over_chrome: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -78,6 +77,7 @@ impl DesktopWindow {
     pub fn handle_desktop_window(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
         //self.main_view.handle_scroll_bars(cx, event);
         //self.inner_view.handle_scroll_bars(cx, event);
+        
         if let ButtonAction::Clicked = self.xr_btn.handle_desktop_button(cx, event) {
             if self.window.xr_is_presenting(cx) {
                 self.window.xr_stop_presenting(cx);
@@ -173,6 +173,7 @@ impl DesktopWindow {
         }
         
         self.window.begin_window(cx);
+        
         self.pass.begin_pass(cx);
         self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(self.clear_color));
         self.pass.set_depth_texture(cx, self.depth_texture, ClearDepth::ClearWith(1.0));
@@ -183,7 +184,7 @@ impl DesktopWindow {
             walk: Walk::wh(Width::Fill, Height::Compute),
             ..Layout::default()
         }).is_ok() {
-
+            
             // alright here we draw our platform buttons.
             let process_chrome = match cx.platform_type {
                 PlatformType::Linux {custom_window_chrome} => custom_window_chrome,
@@ -194,7 +195,7 @@ impl DesktopWindow {
                     PlatformType::Windows | PlatformType::Unknown | PlatformType::Linux {..} => {
                         
                         self.caption_bg.begin_quad(cx, Layout {
-                            align: Align{fx: 1.0, fy: 0.0},
+                            align: Align {fx: 1.0, fy: 0.0},
                             walk: Walk::wh(Width::Fill, Height::Compute),
                             ..Default::default()
                         });
@@ -235,7 +236,7 @@ impl DesktopWindow {
                             cx.update_menu(&self.default_menu);
                         }
                         self.caption_bg.begin_quad(cx, Layout {
-                            align: Align{fx:0.5,fy:0.5},
+                            align: Align {fx: 0.5, fy: 0.5},
                             walk: Walk::wh(Width::Fill, Height::Fix(22.)),
                             ..Default::default()
                         });
@@ -247,7 +248,7 @@ impl DesktopWindow {
                     PlatformType::Web {..} => {
                         if self.window.is_fullscreen(cx) { // put a bar at the top
                             self.caption_bg.begin_quad(cx, Layout {
-                                align: Align{fx:0.5,fy:0.5},
+                                align: Align {fx: 0.5, fy: 0.5},
                                 walk: Walk::wh(Width::Fill, Height::Fix(22.)),
                                 ..Default::default()
                             });

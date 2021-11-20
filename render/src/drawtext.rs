@@ -135,8 +135,8 @@ pub enum Wrapping {
 #[derive(LiveComponent, LiveApply)]
 #[repr(C)]
 pub struct DrawText {
-    #[hide] pub buf: Vec<char>,
-    #[hide] pub many_instances: Option<ManyInstances>,
+    #[rust] pub buf: Vec<char>,
+    #[rust] pub many_instances: Option<ManyInstances>,
     
     #[live] pub geometry: GeometryQuad2D,
     #[live] pub text_style: TextStyle,
