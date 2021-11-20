@@ -107,6 +107,7 @@ impl<'a> LiveExpander<'a> {
                         let other_doc = &self.expanded[file_id.to_index()];
 
                         let mut node_iter = other_doc.nodes.first_child(0);
+                        let mut items_added = 0;
                         while let Some(node_index) = node_iter{
                             let node = &other_doc.nodes[node_index];
                             if !node.id.is_empty() && (object_id.is_empty() || *object_id == node.id){
@@ -114,11 +115,19 @@ impl<'a> LiveExpander<'a> {
                                     id: node.id,
                                     target: LiveScopeTarget::LivePtr(LivePtr{file_id:*file_id, local_ptr:LocalPtr(node_index)})
                                 });
+                                items_added += 1;
                                 if !object_id.is_empty(){
                                     break
                                 }
                             }
                             node_iter = other_doc.nodes.next_child(node_index);
+                        }
+                        if items_added == 0{
+                            self.errors.push(LiveError {
+                                origin: live_error_origin!(),
+                                span: in_doc.token_id_to_span(in_node.token_id.unwrap()),
+                                message: format!("Cannot find use {}::{}::{}", crate_id, module_id, object_id)
+                            });
                         }
                     }
                     in_index += 1;

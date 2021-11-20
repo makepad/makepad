@@ -330,7 +330,7 @@ impl<'a> BlockGenerator<'a> {
         self.backend_writer.write_var_decl(
             &mut self.string,
             "",
-            false,
+            false, 
             false,
             &DisplayVarName(ident, shadow.get().unwrap()),
             ty.borrow().as_ref().unwrap()

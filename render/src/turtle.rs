@@ -33,6 +33,14 @@ pub struct Walk {
 }
 
 impl Walk{
+    pub fn wh(w:Width, h:Height)->Self{
+        Self{
+            margin:Margin::default(),
+            width:w,
+            height:h
+        }
+    }
+    
     pub fn fixed(w:f32, h:f32)->Self{
         Self{
             margin:Margin::default(),
