@@ -1,11 +1,11 @@
 use crate::cx::*;
-
+/*
 #[derive(Clone)]
 pub struct ViewTexture {
     sample_count: usize,
     has_depth_stencil: bool,
     fixed_size: Option<Vec2>
-}
+}*/
 
 pub type ViewRedraw = Result<(), ()>;
 
