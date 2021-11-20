@@ -109,7 +109,7 @@ live_register!{
 
 #[derive(Clone, LiveComponent)]
 pub struct Font {
-    #[hide] pub font_id: Option<usize>,
+    #[rust] pub font_id: Option<usize>,
     #[live] pub path: String
 }
 
@@ -172,7 +172,7 @@ impl Cx {
 #[derive(LiveComponent, LiveApply)]
 #[repr(C)]
 pub struct DrawTrapezoidText {
-    #[hide] pub trapezoidator: Trapezoidator,
+    #[rust] pub trapezoidator: Trapezoidator,
     #[live] pub geometry: GeometryQuad2D,
     #[calc] pub draw_vars: DrawVars,
     #[calc] pub a_xs: Vec2,
@@ -324,7 +324,7 @@ impl CxDrawFontAtlas {
             counter: 0,
             draw_trapezoid_text,
             atlas_pass: Pass::default(),
-            atlas_view: View::new()
+            atlas_view: View::new(cx)
                 .with_always_redraw(true),
             atlas_texture: atlas_texture
         }
@@ -412,7 +412,7 @@ pub struct CxFontsAtlas {
 impl CxFontsAtlas {
     pub fn new() -> Self {
         Self {
-            texture: Texture::default(),
+            texture: Texture{texture_id:0},
             texture_size: Vec2 {x: 2048.0, y: 2048.0},
             clear_buffer: false,
             alloc_xpos: 0.0,

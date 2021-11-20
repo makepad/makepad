@@ -20,8 +20,8 @@ pub struct Layout {
     #[live] pub direction: Direction,
     #[live] pub line_wrap: LineWrap,
     #[live] pub new_line_padding: f32,
-    #[hide] pub abs_origin: Option<Vec2>,
-    #[hide] pub abs_size: Option<Vec2>,
+    #[rust] pub abs_origin: Option<Vec2>,
+    #[rust] pub abs_size: Option<Vec2>,
     #[live] pub walk: Walk,
 }
 

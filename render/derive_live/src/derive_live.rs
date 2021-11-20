@@ -189,7 +189,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             
             // alright now. we have a field
             for field in &fields {
-                if field.attrs.len() != 1 || field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "hide" {
+                if field.attrs.len() != 1 || field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust" {
                     return error(&format!("Field {} does not have a live, calc or hide attribute", field.name));
                 }
             }
@@ -284,7 +284,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             // lets register all our components
             for field in &fields {
                 let attr = &field.attrs[0];
-                if attr.name == "live" || attr.name == "local" {
+                if attr.name == "live" || attr.name == "calc" {
                     tb.stream(Some(field.ty.clone())).add("::live_register(cx);");
                 }
             }
