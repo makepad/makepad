@@ -152,7 +152,7 @@ impl DrawVars {
                                         draw_shader_def.add_instance(field.id, Ty::Enum(live_type), span, field.live_or_calc);
                                     }
                                     else {
-                                        let ty = live_type_to_shader_ty(live_type).expect("Please only put shader instance fields after draw_call_vars");
+                                        let ty = live_type_to_shader_ty(live_type).expect("Please only put shader-understandable instance fields after draw_vars");
                                         slots += ty.slots();
                                         draw_shader_def.add_instance(field.id, ty, span, field.live_or_calc);
                                     }
