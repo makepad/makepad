@@ -22,6 +22,7 @@ impl View {
     pub fn new(cx:&mut Cx) -> Self {
         let views_free = cx.views_free.clone();
         let view_id =  if let Some(view_id) = views_free.borrow_mut().pop(  ){
+            cx.views[view_id].alloc_generation += 1;
             view_id 
         }
         else{
@@ -34,7 +35,7 @@ impl View {
             views_free: views_free,
             redraw_id: 0,
             view_id,
-        }
+        } 
     }
     
     pub fn set_is_clipped(&self, cx:&mut Cx, is_clipped: bool) {cx.views[self.view_id].is_clipped = is_clipped;}
@@ -76,7 +77,7 @@ impl View {
 
         cx.views[self.view_id].pass_id = pass_id;
         
-        let nesting_view_id = if cx.view_stack.len() > 0 {
+        let codeflow_parent_id = if cx.view_stack.len() > 0 {
             *cx.view_stack.last().unwrap()
         }
         else { // return the root draw list
@@ -157,7 +158,7 @@ impl View {
         }
         
         // set nesting draw list id for incremental repaint scanning
-        cx.views[self.view_id].nesting_view_id = nesting_view_id;
+        cx.views[self.view_id].codeflow_parent_id = Some(codeflow_parent_id);
         
         if !cx.views[self.view_id].always_redraw && cx.views[self.view_id].draw_items_len != 0 && !cx.view_will_redraw(self.view_id) {
             
@@ -229,41 +230,20 @@ impl View {
     
     
     pub fn set_view_debug(&self, cx: &mut Cx, view_debug: CxViewDebug) {
-        //if let Some(view_id) = self.view_id {
         let cxview = &mut cx.views[self.view_id];
         cxview.debug = Some(view_debug);
-        //}
     }
     
     pub fn redraw_view(&self, cx: &mut Cx) {
-        //if let Some(view_id) = self.view_id {
-        let cxview = &cx.views[self.view_id];
-        let area = Area::View(ViewArea {view_id: self.view_id, redraw_id: cxview.redraw_id});
-        cx.redraw_child_area(area);
-        //}
-        //else {
-        //    cx.redraw_child_area(Area::All)
-        // }
+        cx.redraw_area(self.area());
     }
     
-    pub fn redraw_view_parent(&self, cx: &mut Cx) {
-        //if let Some(view_id) = self.view_id {
-        let cxview = &cx.views[self.view_id];
-        let area = Area::View(ViewArea {view_id: self.view_id, redraw_id: cxview.redraw_id});
-        cx.redraw_parent_area(area);
-        //}
-        //else {
-        //    cx.redraw_parent_area(Area::All)
-        //}
+    pub fn redraw_view_and_children(&self, cx: &mut Cx) {
+        cx.redraw_area_and_children(self.area());
     }
     
     pub fn area(&self) -> Area {
-        //if let Some(view_id) = self.view_id {
         Area::View(ViewArea {view_id: self.view_id, redraw_id: self.redraw_id})
-        //}
-        //else {
-        //    Area::Empty
-       // }
     }
 }
 
@@ -596,7 +576,8 @@ pub enum CxViewDebug {
 
 #[derive(Default, Clone)]
 pub struct CxView {
-    pub nesting_view_id: usize, // the id of the parent we nest in, codeflow wise
+    pub alloc_generation: u64,
+    pub codeflow_parent_id: Option<usize>, // the id of the parent we nest in, codeflow wise
     pub redraw_id: u64,
     pub pass_id: usize,
     pub locked_view_transform: bool,

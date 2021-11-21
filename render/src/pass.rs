@@ -123,10 +123,10 @@ impl Pass {
             cx.current_dpi_factor = cx.get_delegated_dpi_factor(*cx.pass_stack.last().unwrap());
         }
     }
-    
+    /*
     pub fn redraw_pass_area(&mut self, cx: &mut Cx) {
-        cx.redraw_pass_and_sub_passes(self.pass_id);
-    }
+        cx.redraw_pass_and_child_passes(self.pass_id);
+    }*/
     
 }
 
