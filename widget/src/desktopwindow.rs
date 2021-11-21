@@ -151,16 +151,6 @@ impl DesktopWindow {
         }
     }
     
-    pub fn draw_desktop_window<F>(&mut self, cx: &mut Cx, menu: Option<&Menu>, f: F)
-    where
-    F: FnOnce(&mut Cx)
-    {
-        if self.begin_desktop_window(cx, menu).is_ok() {
-            f(cx);
-            self.end_desktop_window(cx);
-        }
-    }
-    
     pub fn begin_desktop_window(&mut self, cx: &mut Cx, menu: Option<&Menu>) -> ViewRedraw {
         
         if !self.main_view.view_will_redraw(cx) {
@@ -173,7 +163,7 @@ impl DesktopWindow {
         self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(self.clear_color));
         self.pass.set_depth_texture(cx, self.depth_texture, ClearDepth::ClearWith(1.0));
         
-        let _ = self.main_view.begin_view(cx, Layout::default());
+        self.main_view.begin_view(cx, Layout::default()).unwrap();
         
         if self.caption_view.begin_view(cx, Layout {
             walk: Walk::wh(Width::Fill, Height::Compute),
@@ -186,7 +176,7 @@ impl DesktopWindow {
                 _ => true
             };
             if process_chrome {
-                match cx.platform_type {
+                match PlatformType::Windows{//cx.platform_type {
                     PlatformType::Windows | PlatformType::Unknown | PlatformType::Linux {..} => {
                         
                         self.caption_bg.begin_quad(cx, Layout {

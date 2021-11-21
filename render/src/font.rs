@@ -164,7 +164,7 @@ impl Cx {
         self.fonts_atlas.alloc_ypos = 0.;
         self.fonts_atlas.alloc_hmax = 0.;
         self.fonts_atlas.clear_buffer = true;
-        self.redraw_child_area(Area::All);
+        self.redraw_all();
     }
 }
 

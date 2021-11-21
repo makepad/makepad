@@ -19,7 +19,6 @@ pub struct ViewArea{
 #[derive(Clone, Debug, Hash, PartialEq, Ord, PartialOrd, Eq, Copy)]
 pub enum Area{
     Empty,
-    All,
     Instance(InstanceArea),
     View(ViewArea)
 }
@@ -58,6 +57,18 @@ impl Area{
             return true
         }
         false
+    }
+    
+    pub fn view_id(&self)->Option<usize>{
+        return match self{
+            Area::Instance(inst)=>{
+                Some(inst.view_id)
+            },
+            Area::View(view)=>{
+                Some(view.view_id)
+            }
+            _=>None
+        }
     }
     
     pub fn is_first_instance(&self)->bool{
@@ -359,24 +370,6 @@ impl Area{
         }
         None
     }
-/*
-    pub fn write_texture_2d_id(&self, cx:&mut Cx, id:Id, name:&str, texture_id: usize){
-         match self{
-            Area::Instance(inst)=>{
-                let cxview = &mut cx.views[inst.view_id];
-                let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
-                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
-                for (index, prop) in sh.mapping.textures.iter().enumerate(){
-                    if prop.id == id{
-                        draw_call.textures_2d[index] = texture_id as u32;
-                        return
-                    }
-                }
-            }
-            _=>(),
-        }
-        panic!("Cannot find texture2D prop {}", name)
-    }*/
 }
 
 impl Into<Area> for InstanceArea{
