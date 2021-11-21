@@ -6,26 +6,26 @@ pub type ViewRedraw = Result<(), ()>;
 
 #[derive(Debug)]
 pub struct View { // draw info per UI element
-    pub view_id: usize,//Option<usize>,
+    pub view_id: usize, //Option<usize>,
     pub redraw_id: u64,
-    pub views_free: Rc<RefCell<Vec<usize>>>,
+    pub views_free: Rc<RefCell<Vec<usize >> >,
 }
 
-impl Drop for View{
-    fn drop(&mut self){
+impl Drop for View {
+    fn drop(&mut self) {
         self.views_free.borrow_mut().push(self.view_id)
     }
 }
 
 impl View {
     
-    pub fn new(cx:&mut Cx) -> Self {
+    pub fn new(cx: &mut Cx) -> Self {
         let views_free = cx.views_free.clone();
-        let view_id =  if let Some(view_id) = views_free.borrow_mut().pop(  ){
+        let view_id = if let Some(view_id) = views_free.borrow_mut().pop() {
             cx.views[view_id].alloc_generation += 1;
-            view_id 
+            view_id
         }
-        else{
+        else {
             let view_id = cx.views.len();
             cx.views.push(CxView::new());
             view_id
@@ -35,12 +35,17 @@ impl View {
             views_free: views_free,
             redraw_id: 0,
             view_id,
-        } 
+        }
     }
     
-    pub fn set_is_clipped(&self, cx:&mut Cx, is_clipped: bool) {cx.views[self.view_id].is_clipped = is_clipped;}
-    pub fn set_is_overlay(&self, cx:&mut Cx,is_overlay: bool) {cx.views[self.view_id].is_overlay = is_overlay;}
-    pub fn set_always_redraw(&self, cx:&mut Cx,always_redraw: bool) {cx.views[self.view_id].always_redraw = always_redraw;}
+    pub fn set_is_clipped(&self, cx: &mut Cx, is_clipped: bool) {cx.views[self.view_id].is_clipped = is_clipped;}
+    pub fn set_is_overlay(&self, cx: &mut Cx, is_overlay: bool) {cx.views[self.view_id].is_overlay = is_overlay;}
+    pub fn set_always_redraw(&self, cx: &mut Cx, always_redraw: bool) {cx.views[self.view_id].always_redraw = always_redraw;}
+    
+    pub fn set_layout(&self, cx: &mut Cx, layout: Layout) {
+        cx.views[self.view_id].layout = layout;
+    }
+    
     
     pub fn lock_view_transform(&self, cx: &mut Cx, mat: &Mat4) {
         let cxview = &mut cx.views[self.view_id];
@@ -66,7 +71,7 @@ impl View {
         set_view_transform_recur(self.view_id, cx, mat);
     }
     
-    pub fn begin_view(&mut self, cx: &mut Cx, layout: Layout) -> ViewRedraw {
+    pub fn begin_view(&mut self, cx: &mut Cx) -> ViewRedraw {
         
         if !cx.in_redraw_cycle {
             panic!("calling begin_view outside of redraw cycle is not possible!");
@@ -74,55 +79,36 @@ impl View {
         
         // check if we have a pass id parent
         let pass_id = *cx.pass_stack.last().expect("No pass found when begin_view");
-
         cx.views[self.view_id].pass_id = pass_id;
         
-        let codeflow_parent_id = if cx.view_stack.len() > 0 {
-            *cx.view_stack.last().unwrap()
-        }
-        else { // return the root draw list
-            0
-        };
+        let codeflow_parent_id = cx.view_stack.last();
         
-        let (override_layout, is_root_for_pass) = if cx.passes[pass_id].main_view_id.is_none() {
-            // we are the first view on a window
-            let cxpass = &mut cx.passes[pass_id];
-            cxpass.main_view_id = Some(self.view_id);
-            // we should take the window geometry and abs position as our turtle layout
-            (Layout {
-                abs_origin: Some(Vec2 {x: 0., y: 0.}),
-                abs_size: Some(cxpass.pass_size),
-                ..layout
-            }, true)
-        }
-        else {
-            (layout, false)
-        };
+        let view_will_redraw = cx.view_will_redraw(self.view_id);
         
         let cxpass = &mut cx.passes[pass_id];
-
+        
+        if cxpass.main_view_id.is_none() {
+            cxpass.main_view_id = Some(self.view_id);
+            cx.views[self.view_id].layout.abs_origin = Some(Vec2 {x: 0., y: 0.});
+            cx.views[self.view_id].layout.abs_size = Some(cxpass.pass_size);
+        }
+        
+        let cxpass = &mut cx.passes[pass_id];
+        
         // find the parent draw list id
         let parent_view_id = if cx.views[self.view_id].is_overlay {
             if cxpass.main_view_id.is_none() {
                 panic!("Cannot make overlay inside window without root view")
             };
             let main_view_id = cxpass.main_view_id.unwrap();
-            main_view_id
+            Some(main_view_id)
         }
         else {
-            if is_root_for_pass {
-                self.view_id
-            }
-            else if let Some(last_view_id) = cx.view_stack.last() {
-                *last_view_id
-            }
-            else { // we have no parent
-                self.view_id
-            }
+            cx.view_stack.last().cloned()
         };
         
         // push ourselves up the parent draw_stack
-        if self.view_id != parent_view_id {
+        if let Some(parent_view_id) = parent_view_id {
             // copy the view transform
             
             if !cx.views[self.view_id].locked_view_transform {
@@ -132,78 +118,74 @@ impl View {
                 }
             }
             
-            // we need a new draw
-            let parent_cxview = &mut cx.views[parent_view_id];
-            
-            let id = parent_cxview.draw_items_len;
-            parent_cxview.draw_items_len = parent_cxview.draw_items_len + 1;
+            let parent = &mut cx.views[parent_view_id];
             
             // see if we need to add a new one
-            if parent_cxview.draw_items_len > parent_cxview.draw_items.len() {
-                parent_cxview.draw_items.push({
+            if parent.draw_items_len >= parent.draw_items.len() {
+                parent.draw_items.push({
                     DrawItem {
                         view_id: parent_view_id,
-                        draw_item_id: parent_cxview.draw_items.len(),
+                        draw_item_id: parent.draw_items.len(),
                         redraw_id: cx.redraw_id,
                         sub_view_id: Some(self.view_id),
                         draw_call: None
                     }
-                })
+                });
+                parent.draw_items_len += 1;
             }
             else { // or reuse a sub list node
-                let draw_item = &mut parent_cxview.draw_items[id];
+                let draw_item = &mut parent.draw_items[parent.draw_items_len];
                 draw_item.sub_view_id = Some(self.view_id);
                 draw_item.redraw_id = cx.redraw_id;
+                parent.draw_items_len += 1;
             }
         }
         
         // set nesting draw list id for incremental repaint scanning
-        cx.views[self.view_id].codeflow_parent_id = Some(codeflow_parent_id);
+        cx.views[self.view_id].codeflow_parent_id = codeflow_parent_id.cloned();
         
-        if !cx.views[self.view_id].always_redraw && cx.views[self.view_id].draw_items_len != 0 && !cx.view_will_redraw(self.view_id) {
+        // check redraw status
+        if !cx.views[self.view_id].always_redraw
+            && cx.views[self.view_id].draw_items_len != 0
+            && !view_will_redraw {
             
             // walk the turtle because we aren't drawing
             let w = Width::Fix(cx.views[self.view_id].rect.size.x);
             let h = Height::Fix(cx.views[self.view_id].rect.size.y);
-            cx.walk_turtle(Walk {width: w, height: h, margin: override_layout.walk.margin});
+            cx.walk_turtle(Walk {width: w, height: h, margin: cx.views[self.view_id].layout.walk.margin});
             return Err(());
         }
         
-        // prepare drawlist for drawing
+        if cxpass.main_view_id.unwrap() == self.view_id {
+            cx.passes[pass_id].paint_dirty = true;
+        }
+        
         let cxview = &mut cx.views[self.view_id];
         
-        // update drawlist ids
+        // update redarw id
         let last_redraw_id = cxview.redraw_id;
         self.redraw_id = cx.redraw_id;
         cxview.redraw_id = cx.redraw_id;
+        
         cxview.draw_items_len = 0;
         
         cx.view_stack.push(self.view_id);
         
         let old_area = Area::View(ViewArea {view_id: self.view_id, redraw_id: last_redraw_id});
         let new_area = Area::View(ViewArea {view_id: self.view_id, redraw_id: cx.redraw_id});
+        
         cx.update_area_refs(old_area, new_area);
-        
-        cx.begin_turtle(override_layout, new_area);
-        
-        if is_root_for_pass {
-            cx.passes[pass_id].paint_dirty = true;
-        }
+        cx.begin_turtle(cx.views[self.view_id].layout, new_area);
         
         Ok(())
     }
     
     pub fn view_will_redraw(&self, cx: &mut Cx) -> bool {
-        //if let Some(view_id) = self.view_id {
         cx.view_will_redraw(self.view_id)
-        //}
-        //else {
-        //    true
-        //}
     }
     
     pub fn end_view(&mut self, cx: &mut Cx) -> Area {
-       // let view_id = self.view_id.unwrap();
+        // let view_id = self.view_id.unwrap();
         let view_area = Area::View(ViewArea {view_id: self.view_id, redraw_id: cx.redraw_id});
         let rect = cx.end_turtle(view_area);
         let cxview = &mut cx.views[self.view_id];
@@ -213,21 +195,14 @@ impl View {
     }
     
     pub fn get_rect(&self, cx: &Cx) -> Rect {
-        //if let Some(view_id) = self.view_id {
         let cxview = &cx.views[self.view_id];
         return cxview.rect
-        //}
-        //Rect::default()
     }
     
     pub fn get_view_transform(&self, cx: &Cx) -> Mat4 {
-        //if let Some(view_id) = self.view_id {
         let cxview = &cx.views[self.view_id];
         return cxview.get_view_transform()
-        //}
-        //Mat4::default()
     }
-    
     
     pub fn set_view_debug(&self, cx: &mut Cx, view_debug: CxViewDebug) {
         let cxview = &mut cx.views[self.view_id];
@@ -235,11 +210,11 @@ impl View {
     }
     
     pub fn redraw_view(&self, cx: &mut Cx) {
-        cx.redraw_area(self.area());
+        cx.redraw_view(self.area());
     }
     
     pub fn redraw_view_and_children(&self, cx: &mut Cx) {
-        cx.redraw_area_and_children(self.area());
+        cx.redraw_view_and_children(self.area());
     }
     
     pub fn area(&self) -> Area {
@@ -290,7 +265,7 @@ impl Cx {
         draw_item.sub_view_id = None;
         draw_item.redraw_id = self.redraw_id;
         if let Some(dc) = &mut draw_item.draw_call {
-            dc.update(&sh.mapping, draw_vars);
+            dc.reuse_in_place(&sh.mapping, draw_vars);
         }
         else {
             draw_item.draw_call = Some(DrawCall::new(&sh.mapping, draw_vars))
@@ -302,7 +277,7 @@ impl Cx {
         let draw_item = self.append_to_draw_call(draw_vars);
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let mut instances = None;
-
+        
         std::mem::swap(&mut instances, &mut draw_call.instances);
         ManyInstances {
             instance_area: InstanceArea {
@@ -458,7 +433,7 @@ pub struct UserUniforms {
 pub struct DrawCall {
     pub draw_shader: DrawShader, // if shader_id changed, delete gl vao
     
-    pub instances: Option<Vec<f32>>,
+    pub instances: Option<Vec<f32 >>,
     pub total_instance_slots: usize,
     
     pub draw_uniforms: DrawUniforms, // draw uniforms
@@ -493,7 +468,7 @@ impl DrawCall {
         }
     }
     
-    pub fn update(&mut self, mapping: &CxDrawShaderMapping, draw_vars: &DrawVars) {
+    pub fn reuse_in_place(&mut self, mapping: &CxDrawShaderMapping, draw_vars: &DrawVars) {
         self.draw_shader = draw_vars.draw_shader.unwrap();
         self.geometry = draw_vars.geometry;
         self.instances.as_mut().unwrap().truncate(0);
@@ -542,7 +517,7 @@ impl DrawCall {
         self.draw_uniforms.draw_clip_x2 = clip.1.x;
         self.draw_uniforms.draw_clip_y2 = clip.1.y;
     }
-
+    
     pub fn clip_and_scroll_rect(&self, x: f32, y: f32, w: f32, h: f32) -> Rect {
         let mut x1 = x - self.draw_uniforms.draw_scroll_x;
         let mut y1 = y - self.draw_uniforms.draw_scroll_y;
@@ -577,30 +552,40 @@ pub enum CxViewDebug {
 #[derive(Default, Clone)]
 pub struct CxView {
     pub alloc_generation: u64,
+    
     pub codeflow_parent_id: Option<usize>, // the id of the parent we nest in, codeflow wise
+    
     pub redraw_id: u64,
+    
     pub pass_id: usize,
+    
     pub locked_view_transform: bool,
     pub do_v_scroll: bool, // this means we
     pub do_h_scroll: bool,
-    pub draw_items: Vec<DrawItem>,
-    pub draw_items_len: usize,
     pub parent_scroll: Vec2,
-    pub view_uniforms: ViewUniforms,
     pub unsnapped_scroll: Vec2,
     pub snapped_scroll: Vec2,
+    
+    pub draw_items: Vec<DrawItem>,
+    pub draw_items_len: usize,
+    
+    pub view_uniforms: ViewUniforms,
     pub platform: CxPlatformView,
+    
     pub rect: Rect,
     pub is_clipped: bool,
     pub is_overlay: bool,
     pub always_redraw: bool,
+    
+    pub layout: Layout,
+    
     pub debug: Option<CxViewDebug>
 }
 
 impl CxView {
-    pub fn new()->Self{
-        let mut ret = Self{
-            do_v_scroll:true,
+    pub fn new() -> Self {
+        let mut ret = Self {
+            do_v_scroll: true,
             do_h_scroll: true,
             ..Self::default()
         };

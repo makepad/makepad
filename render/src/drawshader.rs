@@ -75,8 +75,8 @@ impl DrawVars {
         self.draw_shader.is_some()
     }
     
-    pub fn redraw(&self, cx: &mut Cx) {
-        cx.redraw_area(self.area);
+    pub fn redraw_view(&self, cx: &mut Cx) {
+        cx.redraw_view(self.area);
     }
     
     pub fn live_type() -> LiveType {

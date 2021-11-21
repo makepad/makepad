@@ -453,7 +453,7 @@ impl Cx {
         let mut walk_pass_id = pass_id;
         loop {
             if let Some(main_view_id) = self.passes[walk_pass_id].main_view_id {
-                self.redraw_area_and_children(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
+                self.redraw_view_and_children(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
             }
             match self.passes[walk_pass_id].dep_of.clone() {
                 CxPassDepOf::Pass(next_pass_id) => {
@@ -469,7 +469,7 @@ impl Cx {
     pub fn redraw_pass_and_child_passes(&mut self, pass_id: usize) {
         let cxpass = &self.passes[pass_id];
         if let Some(main_view_id) = cxpass.main_view_id {
-            self.redraw_area_and_children(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
+            self.redraw_view_and_children(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
         }
         // lets redraw all subpasses as well
         for sub_pass_id in 0..self.passes.len() {
@@ -491,7 +491,7 @@ impl Cx {
         || self.redraw_views_and_children.len() != 0
     }
     
-    pub fn redraw_area(&mut self, area: Area) {
+    pub fn redraw_view(&mut self, area: Area) {
         if self.panic_redraw {
             #[cfg(debug_assertions)]
             panic!("Panic Redraw triggered")
@@ -504,7 +504,7 @@ impl Cx {
         }
     }
     
-    pub fn redraw_area_and_children(&mut self, area: Area) {
+    pub fn redraw_view_and_children(&mut self, area: Area) {
         if self.panic_redraw {
             #[cfg(debug_assertions)]
             panic!("Panic Redraw triggered")
