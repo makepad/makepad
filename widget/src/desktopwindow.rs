@@ -35,7 +35,6 @@ pub struct DesktopWindow {
     #[rust(View::new(cx))] pub caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     #[rust(View::new(cx))] pub main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     #[rust(View::new(cx))] pub inner_view: View,
-    #[live] pub inner_layout: Layout,
     
     #[live] pub clear_color: Vec4,
 
@@ -163,13 +162,14 @@ impl DesktopWindow {
         self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(self.clear_color));
         self.pass.set_depth_texture(cx, self.depth_texture, ClearDepth::ClearWith(1.0));
         
-        self.main_view.begin_view(cx, Layout::default()).unwrap();
+        self.main_view.begin_view(cx).unwrap();
         
-        if self.caption_view.begin_view(cx, Layout {
+        self.caption_view.set_layout(cx, Layout {
             walk: Walk::wh(Width::Fill, Height::Compute),
             ..Layout::default()
-        }).is_ok() {
-            
+        });
+        
+        if self.caption_view.begin_view(cx).is_ok() {
             // alright here we draw our platform buttons.
             let process_chrome = match cx.platform_type {
                 PlatformType::Linux {custom_window_chrome} => custom_window_chrome,
@@ -246,13 +246,14 @@ impl DesktopWindow {
             self.caption_view.end_view(cx);
         }
         cx.turtle_new_line();
-        
+        /*
         if self.inner_over_chrome {
             let _ = self.inner_view.begin_view(cx, Layout {abs_origin: Some(Vec2::default()), ..self.inner_layout});
         }
         else {
             let _ = self.inner_view.begin_view(cx, self.inner_layout);
-        }
+        }*/
+        self.inner_view.begin_view(cx);
         Ok(())
     }
     

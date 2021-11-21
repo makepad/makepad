@@ -346,7 +346,7 @@ impl CxDrawFontAtlas {
             };
             self.atlas_pass.add_color_texture(cx, self.atlas_texture, clear);
             self.atlas_view.set_always_redraw(cx, true);
-            self.atlas_view.begin_view(cx, Layout::default()).unwrap();
+            self.atlas_view.begin_view(cx).unwrap();
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut cx.fonts_atlas.atlas_todo, &mut atlas_todo);
             
