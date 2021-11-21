@@ -62,7 +62,7 @@ impl Cx {
                     Event::WindowClosed(wc) => {
                         // lets remove the window from the set
                         self.windows[wc.window_id].window_state = CxWindowState::Closed;
-                        self.windows_free.push(wc.window_id);
+                        //self.windows_free.push(wc.window_id);
                         // remove the d3d11/win32 window
                         
                         for index in 0..metal_windows.len() {
