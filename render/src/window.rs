@@ -61,12 +61,12 @@ impl Window {
     pub fn handle_window(&mut self, _cx: &mut Cx, _event: &mut Event) -> bool {
         false
     }
-    
+    /*
     pub fn redraw_window_area(&mut self, cx: &mut Cx) {
         if let Some(pass_id) = cx.windows[self.window_id].main_pass_id {
             cx.redraw_pass_and_sub_passes(pass_id);
         }
-    }
+    }*/
     
     pub fn end_window(&mut self, cx: &mut Cx) -> Area {
         cx.window_stack.pop();

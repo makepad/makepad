@@ -114,7 +114,7 @@ impl Cx {
             },
             Event::FingerScroll(_) => {
                 // check for anything being paint or dra dirty
-                if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
+                if self.any_views_need_redrawing() {
                     self.platform.desktop.repaint_via_scroll_event = true;
                 }
             }
@@ -144,10 +144,11 @@ impl Cx {
         self.call_signals_and_triggers();
         
         // call redraw event
-        if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
+        if self.any_views_need_redrawing(){
             self.call_draw_event();
         }
-        if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
+
+        if self.any_views_need_redrawing(){
             vsync = true;
         }
         
