@@ -90,25 +90,6 @@ impl LiveRegistry {
         None
     }
 
-    
-    /*
-    pub fn module_path_to_file_id_nodes(&self, module_path: &str) -> Option<(FileId,&[LiveNode])> {
-        if let Some(file_id) = self.module_path_to_file_id.get(&ModulePath::from_str(module_path).unwrap()) {
-            let doc = &self.expanded[file_id.to_index()];
-            return Some((*file_id, &doc.nodes));
-        }
-        None
-    }*/
-    /*
-    pub fn clone_from_ptr_name(&self, live_ptr: LivePtr, name:Id, out_nodes:&mut Vec<LiveNode>) -> bool {
-        let doc = &self.expanded[live_ptr.file_id.to_index()];
-        if let Ok(index) = doc.nodes.child_by_name(live_ptr.local_ptr.0, name){
-            doc.nodes.clone_child(index, out_nodes);
-            return true;
-        }
-        false
-    }
-    */
     pub fn live_error_to_live_file_error(&self, live_error: LiveError) -> LiveFileError {
         let live_file = &self.live_files[live_error.span.file_id().to_index()];
         live_error.to_live_file_error(&live_file.file, &live_file.source, live_file.line_offset)

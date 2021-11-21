@@ -341,6 +341,13 @@ impl DrawVars {
                 }
             }
         }
+        let unknown_shader_props = match nodes[index].id{
+            id!(debug) => false,
+            _=>true
+        };
+        if unknown_shader_props && nodes[index].value.is_value_type(){
+            cx.apply_error_no_matching_value(apply_from, index, nodes);
+        }
         nodes.skip_node(index)
     }
     

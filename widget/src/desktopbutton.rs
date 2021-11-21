@@ -91,7 +91,7 @@ live_register!{
         
         state_default: {
             from: {all: Play::Forward {duration: 0.1}}
-            bg: {down: 0.0, hover: 0.0}
+            bg: {pressed: 0.0, hover: 0.0}
         }
         
         state_hover: {
@@ -100,7 +100,7 @@ live_register!{
                 state_down: Play::Forward {duration: 0.01}
             }
             bg: {
-                down: 0.0,
+                pressed: 0.0,
                 hover: [{time: 0.0, value: 1.0}],
             }
         }
@@ -108,7 +108,7 @@ live_register!{
         state_pressed: {
             from: {all: Play::Forward {duration: 0.2}}
             bg: {
-                down: [{time: 0.0, value: 1.0}],
+                pressed: [{time: 0.0, value: 1.0}],
                 hover: 1.0,
             }
         }
