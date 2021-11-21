@@ -17,7 +17,7 @@ pub enum WindowMenuEvent {
 }
 
 impl WindowMenu {
-    pub fn new(cx: &mut Cx) -> Self {
+    pub fn new(_cx: &mut Cx) -> Self {
         Self {
         }
     }

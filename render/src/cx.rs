@@ -75,12 +75,15 @@ pub struct Cx {
     pub counter: usize,
     pub platform_type: PlatformType,
     pub gpu_info: GpuInfo,
+    
     pub windows: Vec<CxWindow>,
-    pub windows_free: Vec<usize>,
+    pub windows_free: Rc<RefCell<Vec<usize>>>,
+    
     pub passes: Vec<CxPass>,
-    pub passes_free: Vec<usize>,
+    pub passes_free: Rc<RefCell<Vec<usize>>>,
+    
     pub views: Vec<CxView>,
-    pub views_free: Vec<usize>,
+    pub views_free: Rc<RefCell<Vec<usize>>>,
     
     pub fonts: Vec<Option<CxFont>>,
     pub fonts_atlas: CxFontsAtlas,
@@ -225,11 +228,14 @@ impl Default for Cx {
             running: true,
             
             windows: Vec::new(),
-            windows_free: Vec::new(),
+            windows_free: Rc::new(RefCell::new(Vec::new())),
+            
             passes: Vec::new(),
-            passes_free: Vec::new(),
-            views: vec![CxView {..Default::default()}],
-            views_free: Vec::new(),
+            passes_free: Rc::new(RefCell::new(Vec::new())),
+            
+            views: Vec::new(),//vec![CxView {..Default::default()}],
+            views_free: Rc::new(RefCell::new(Vec::new())),
+            
             fonts: Vec::new(),
             fonts_atlas: CxFontsAtlas::new(),
             path_to_font_id: HashMap::new(),

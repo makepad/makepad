@@ -323,9 +323,8 @@ impl CxDrawFontAtlas {
         Self {
             counter: 0,
             draw_trapezoid_text,
-            atlas_pass: Pass::default(),
-            atlas_view: View::new(cx)
-                .with_always_redraw(true),
+            atlas_pass: Pass::new(cx),
+            atlas_view: View::new(cx),
             atlas_texture: atlas_texture
         }
     }
@@ -346,7 +345,8 @@ impl CxDrawFontAtlas {
                 ClearColor::InitWith(Vec4::default())
             };
             self.atlas_pass.add_color_texture(cx, self.atlas_texture, clear);
-            let _ = self.atlas_view.begin_view(cx, Layout::default());
+            self.atlas_view.set_always_redraw(cx, true);
+            self.atlas_view.begin_view(cx, Layout::default()).unwrap();
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut cx.fonts_atlas.atlas_todo, &mut atlas_todo);
             
