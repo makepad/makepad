@@ -1,93 +1,98 @@
 use crate::cx::*;
+use std::rc::Rc;
+use std::cell::RefCell;
 
-#[derive(Default, Clone)]
 pub struct Pass {
-    pub pass_id: Option<usize>
+    pub pass_id: usize,
+    pub passes_free: Rc<RefCell<Vec<usize>>>,
 }
 
+impl Drop for Pass{
+    fn drop(&mut self){
+        self.passes_free.borrow_mut().push(self.pass_id)
+    }
+}
 
 impl Pass {
+    pub fn new(cx:&mut Cx)->Self{
+        let passes_free = cx.passes_free.clone();
+        let pass_id =  if let Some(pass_id) = passes_free.borrow_mut().pop(  ){
+            pass_id 
+        }
+        else{
+            let pass_id = cx.passes.len();
+            cx.passes.push(CxPass::default());
+            pass_id
+        };        
+        Self{
+            pass_id,
+            passes_free
+        }
+    }
+    
     pub fn begin_pass(&mut self, cx: &mut Cx) {
         
-        if self.pass_id.is_none() { // we need to allocate a CxPass
-            self.pass_id = Some(if cx.passes_free.len() != 0 {
-                cx.passes_free.pop().unwrap()
-            } else {
-                cx.passes.push(CxPass::default());
-                cx.passes.len() - 1
-            });
-        }
-        let pass_id = self.pass_id.unwrap();
         
         if let Some(window_id) = cx.window_stack.last() {
             if cx.windows[*window_id].main_pass_id.is_none() { // we are the main pass of a window
-                let cxpass = &mut cx.passes[pass_id];
-                cx.windows[*window_id].main_pass_id = Some(pass_id);
+                let cxpass = &mut cx.passes[self.pass_id];
+                cx.windows[*window_id].main_pass_id = Some(self.pass_id);
                 cxpass.dep_of = CxPassDepOf::Window(*window_id);
                 cxpass.pass_size = cx.windows[*window_id].get_inner_size();
-                cx.current_dpi_factor = cx.get_delegated_dpi_factor(pass_id);
+                cx.current_dpi_factor = cx.get_delegated_dpi_factor(self.pass_id);
             }
             else if let Some(dep_of_pass_id) = cx.pass_stack.last() { 
                 let dep_of_pass_id = *dep_of_pass_id;
-                cx.passes[pass_id].dep_of = CxPassDepOf::Pass(dep_of_pass_id);
-                cx.passes[pass_id].pass_size = cx.passes[dep_of_pass_id].pass_size;
+                cx.passes[self.pass_id].dep_of = CxPassDepOf::Pass(dep_of_pass_id);
+                cx.passes[self.pass_id].pass_size = cx.passes[dep_of_pass_id].pass_size;
                 cx.current_dpi_factor = cx.get_delegated_dpi_factor(dep_of_pass_id);
             }
             else {
-                cx.passes[pass_id].dep_of = CxPassDepOf::None;
-                cx.passes[pass_id].override_dpi_factor = Some(1.0);
+                cx.passes[self.pass_id].dep_of = CxPassDepOf::None;
+                cx.passes[self.pass_id].override_dpi_factor = Some(1.0);
                 cx.current_dpi_factor = 1.0;
             }
         }
         else {
-            cx.passes[pass_id].dep_of = CxPassDepOf::None;
-            cx.passes[pass_id].override_dpi_factor = Some(1.0);
+            cx.passes[self.pass_id].dep_of = CxPassDepOf::None;
+            cx.passes[self.pass_id].override_dpi_factor = Some(1.0);
             cx.current_dpi_factor = 1.0;
         }
         
-        let cxpass = &mut cx.passes[pass_id];
+        let cxpass = &mut cx.passes[self.pass_id];
         cxpass.main_view_id = None;
         cxpass.color_textures.truncate(0);
-        cx.pass_stack.push(pass_id);
+        cx.pass_stack.push(self.pass_id);
         
         //let pass_size = cxpass.pass_size;
         //self.set_ortho_matrix(cx, Vec2::zero(), pass_size);
     }
     
     pub fn override_dpi_factor(&mut self, cx: &mut Cx, dpi_factor:f32){
-        if let Some(pass_id) = self.pass_id {
-            cx.passes[pass_id].override_dpi_factor = Some(dpi_factor);
-            cx.current_dpi_factor = dpi_factor;
-        }
+        cx.passes[self.pass_id].override_dpi_factor = Some(dpi_factor);
+        cx.current_dpi_factor = dpi_factor;
     }
     
     pub fn make_dep_of_pass(&mut self, cx: &mut Cx, pass: &Pass) {
-        let cxpass = &mut cx.passes[self.pass_id.unwrap()];
-        if let Some(pass_id) = pass.pass_id {
-            cxpass.dep_of = CxPassDepOf::Pass(pass_id)
-        }
-        else {
-            cxpass.dep_of = CxPassDepOf::None
-        }
+        let cxpass = &mut cx.passes[self.pass_id];
+        cxpass.dep_of = CxPassDepOf::Pass(self.pass_id)
     }
     
     pub fn set_size(&mut self, cx: &mut Cx, pass_size: Vec2) {
         let mut pass_size = pass_size;
         if pass_size.x < 1.0{pass_size.x = 1.0};
         if pass_size.y < 1.0{pass_size.y = 1.0};
-        let cxpass = &mut cx.passes[self.pass_id.unwrap()];
+        let cxpass = &mut cx.passes[self.pass_id];
         cxpass.pass_size = pass_size;
     }
     
     pub fn set_window_clear_color(&mut self, cx: &mut Cx, clear_color: Vec4) {
-        let pass_id = self.pass_id.expect("Please call set_window_clear_color after begin_pass");
-        let cxpass = &mut cx.passes[pass_id];
+        let cxpass = &mut cx.passes[self.pass_id];
         cxpass.clear_color = clear_color;
     }
     
     pub fn add_color_texture(&mut self, cx: &mut Cx, texture: Texture, clear_color: ClearColor) {
-        let pass_id = self.pass_id.expect("Please call add_color_texture after begin_pass");
-        let cxpass = &mut cx.passes[pass_id];
+        let cxpass = &mut cx.passes[self.pass_id];
         cxpass.color_textures.push(CxPassColorTexture {
             texture_id: texture.texture_id,
             clear_color: clear_color
@@ -95,25 +100,20 @@ impl Pass {
     }
     
     pub fn set_depth_texture(&mut self, cx: &mut Cx, texture: Texture, clear_depth: ClearDepth) {
-        let pass_id = self.pass_id.expect("Please call set_depth_texture after begin_pass");
-        let cxpass = &mut cx.passes[pass_id];
+        let cxpass = &mut cx.passes[self.pass_id];
         cxpass.depth_texture = Some(texture.texture_id);
         cxpass.clear_depth = clear_depth;
     }
     
     pub fn set_matrix_mode(&mut self, cx: &mut Cx, pmm: PassMatrixMode){
-        if let Some(pass_id) = self.pass_id{
-            let cxpass = &mut cx.passes[pass_id];
-            cxpass.paint_dirty = true;
-            cxpass.matrix_mode = pmm;
-        }
+        let cxpass = &mut cx.passes[self.pass_id];
+        cxpass.paint_dirty = true;
+        cxpass.matrix_mode = pmm;
     }
 
     pub fn set_debug(&mut self, cx: &mut Cx, debug:bool){
-        if let Some(pass_id) = self.pass_id{
-            let cxpass = &mut cx.passes[pass_id];
-            cxpass.debug = debug;
-        }
+        let cxpass = &mut cx.passes[self.pass_id];
+        cxpass.debug = debug;
     }
 
     
@@ -125,9 +125,7 @@ impl Pass {
     }
     
     pub fn redraw_pass_area(&mut self, cx: &mut Cx) {
-        if let Some(pass_id) = self.pass_id {
-            cx.redraw_pass_and_sub_passes(pass_id);
-        }
+        cx.redraw_pass_and_sub_passes(self.pass_id);
     }
     
 }

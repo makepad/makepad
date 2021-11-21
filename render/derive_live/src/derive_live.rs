@@ -233,8 +233,26 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("impl").stream(generic.clone());
             tb.add("LiveComponent for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index: usize, nodes: &[LiveNode])->usize {");
-            //tb.add("       println!(\"{}\", nodes.to_string(start_index,1));");
             tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
+
+            //tb.add("       println!(\"{}\", nodes.to_string(start_index,1));");
+            tb.add("        let struct_id = Id(").suf_u64(Id::from_str(&struct_name).unwrap().0).add(");");
+            tb.add("        match &nodes[start_index].value{");
+            /*tb.add("            LiveValue::Class{class} =>{");
+            tb.add("                if *class != struct_id{");
+            tb.add("                    cx.apply_error_wrong_struct_name(apply_from, start_index, nodes, struct_id, *class);");
+            tb.add("                    self.after_apply(cx, apply_from, start_index, nodes);");
+            tb.add("                    return nodes.skip_node(start_index);");
+            tb.add("                }");
+            tb.add("            }");*/
+            tb.add("            LiveValue::Class{..} | LiveValue::Object=>(),");
+            tb.add("            _=>{");
+            tb.add("                cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, struct_id);");
+            tb.add("                self.after_apply(cx, apply_from, start_index, nodes);");
+            tb.add("                return nodes.skip_node(start_index);");
+            tb.add("            }");
+            tb.add("        }");
+            
             tb.add("        let mut index = start_index + 1;"); // skip the class
             tb.add("        loop{");
             tb.add("            if nodes[index].value.is_close(){");
@@ -462,8 +480,15 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index:usize, nodes: &[LiveNode]) -> usize {");
             tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
             tb.add("        let mut index = start_index;");
+            tb.add("        let enum_id = Id(").suf_u64(Id::from_str(&enum_name).unwrap().0).add(");");
             tb.add("        match &nodes[start_index].value{");
             tb.add("            LiveValue::BareEnum{base,variant}=>{");
+            tb.add("                if *base != enum_id{");
+            tb.add("                    cx.apply_error_wrong_enum_base(apply_from, index, nodes, enum_id, *base);");
+            tb.add("                    index = nodes.skip_node(index);");
+            tb.add("                    self.after_apply(cx, apply_from, start_index, nodes);");
+            tb.add("                    return index;");
+            tb.add("                }");
             tb.add("                match variant{");
             for item in &items {
                 if let EnumKind::Bare = item.kind {
@@ -471,13 +496,19 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 }
             }
             tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum {} cannot find id {}").add(", ").string(&enum_name).add(",variant);");
+            tb.add("                        cx.apply_error_wrong_enum_variant(apply_from, index, nodes, enum_id, *variant);");
             tb.add("                        index = nodes.skip_node(index);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            },");
             
             tb.add("            LiveValue::NamedEnum{base, variant}=>{");
+            tb.add("                if *base != enum_id{");
+            tb.add("                    cx.apply_error_wrong_enum_base(apply_from, index, nodes, enum_id, *base);");
+            tb.add("                    index = nodes.skip_node(index);");
+            tb.add("                    self.after_apply(cx, apply_from, start_index, nodes);");
+            tb.add("                    return index;");
+            tb.add("                }");
             tb.add("                match variant{");
             for item in &items {
                 if let EnumKind::Named(fields) = &item.kind {
@@ -503,7 +534,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                         tb.ident(&format!("prefix_{}", field.name)).add(").apply(cx, apply_from, index, nodes);},");
                     }
                     tb.add("                            _=>{");
-                    tb.add("                                println!(").string("Enum {} cannot find named struct {} property {}").add(", ").string(&enum_name).add(",nodes[start_index].id, nodes[index].id);");
+                    tb.add("                                cx.apply_error_named_enum_invalid_prop(apply_from, index, nodes, enum_id, *variant, nodes[index].id);");
                     tb.add("                                index = nodes.skip_node(index);");
                     tb.add("                            }");
                     tb.add("                        }");
@@ -513,12 +544,18 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 }
             }
             tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum {} cannot find named struct {}").add(", ").string(&enum_name).add(", nodes[start_index].id);");
+            tb.add("                        cx.apply_error_wrong_enum_variant(apply_from, index, nodes, enum_id, *variant);");
             tb.add("                        index = nodes.skip_node(index);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            }");
             tb.add("            LiveValue::TupleEnum{base, variant}=>{");
+            tb.add("                if *base != enum_id{");
+            tb.add("                    cx.apply_error_wrong_enum_base(apply_from, index, nodes, enum_id, *base);");
+            tb.add("                    index = nodes.skip_node(index);");
+            tb.add("                    self.after_apply(cx, apply_from, start_index, nodes);");
+            tb.add("                    return index;");
+            tb.add("                }");
             tb.add("                match variant{");
             
             for item in &items {
@@ -547,7 +584,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                         tb.add("                        ").unsuf_usize(i).add("=>{index = (*").ident(&format!("var{}", i)).add(").apply(cx, apply_from, index, nodes); },");
                     }
                     tb.add("                            _=>{");
-                    tb.add("                                println!(").string("Enum {} cannot find tuple struct {} arg {}").add(", ").string(&enum_name).add(", nodes[start_index].id, arg);");
+                    tb.add("                                cx.apply_error_tuple_enum_arg_not_found(apply_from, index, nodes, enum_id, *variant, arg);");
                     tb.add("                                index = nodes.skip_node(index);");
                     tb.add("                            }");
                     tb.add("                        }");
@@ -557,12 +594,13 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 }
             }
             tb.add("                    _=>{");
-            tb.add("                        println!(").string("Enum {} cannot find tuple struct {}").add(", ").string(&enum_name).add(",nodes[start_index].id);");
+            tb.add("                        cx.apply_error_wrong_enum_variant(apply_from, index, nodes, enum_id, *variant);");
             tb.add("                        index = nodes.skip_node(index);");
             tb.add("                    }");
             tb.add("                }");
             tb.add("            }");
             tb.add("            _=>{");
+            tb.add("               cx.apply_error_expected_enum(apply_from, index, nodes);");
             tb.add("               index = nodes.skip_node(index);");
             tb.add("            }");
             tb.add("        }");

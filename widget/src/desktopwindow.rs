@@ -26,7 +26,7 @@ live_register!{
 #[derive(LiveComponent, LiveApply)]
 pub struct DesktopWindow {
 
-    #[rust] pub pass: Pass,
+    #[rust(Pass::new(cx))] pub pass: Pass,
     #[rust(Texture::new(cx))] pub color_texture: Texture,
     #[rust(Texture::new(cx))] pub depth_texture: Texture,
     #[rust] pub caption_size: Vec2,
@@ -109,47 +109,42 @@ impl DesktopWindow {
         if let ButtonAction::Clicked = self.close_btn.handle_desktop_button(cx, event) {
             self.window.close_window(cx);
         }
-        if let Some(window_id) = self.window.window_id {
-            let is_for_other_window = match event {
-                Event::WindowCloseRequested(ev) => ev.window_id != window_id,
-                Event::WindowClosed(ev) => {
-                    if ev.window_id == window_id {
-                        return DesktopWindowEvent::WindowClosed
-                    }
-                    true
+        let is_for_other_window = match event {
+            Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id,
+            Event::WindowClosed(ev) => {
+                if ev.window_id == self.window.window_id {
+                    return DesktopWindowEvent::WindowClosed
                 }
-                Event::WindowGeomChange(ev) => {
-                    if ev.window_id == window_id {
-                        return DesktopWindowEvent::WindowGeomChange(ev.clone())
-                    }
-                    true
-                },
-                Event::WindowDragQuery(dq) => {
-                    if dq.window_id == window_id {
-                        if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
-                            if dq.abs.x < 50. {
-                                dq.response = WindowDragQueryResponse::SysMenu;
-                            }
-                            else {
-                                dq.response = WindowDragQueryResponse::Caption;
-                            }
+                true
+            }
+            Event::WindowGeomChange(ev) => {
+                if ev.window_id == self.window.window_id {
+                    return DesktopWindowEvent::WindowGeomChange(ev.clone())
+                }
+                true
+            },
+            Event::WindowDragQuery(dq) => {
+                if dq.window_id == self.window.window_id {
+                    if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
+                        if dq.abs.x < 50. {
+                            dq.response = WindowDragQueryResponse::SysMenu;
+                        }
+                        else {
+                            dq.response = WindowDragQueryResponse::Caption;
                         }
                     }
-                    true
                 }
-                Event::FingerDown(ev) => ev.window_id != window_id,
-                Event::FingerMove(ev) => ev.window_id != window_id,
-                Event::FingerHover(ev) => ev.window_id != window_id,
-                Event::FingerUp(ev) => ev.window_id != window_id,
-                Event::FingerScroll(ev) => ev.window_id != window_id,
-                _ => false
-            };
-            if is_for_other_window {
-                DesktopWindowEvent::EventForOtherWindow
+                true
             }
-            else {
-                DesktopWindowEvent::None
-            }
+            Event::FingerDown(ev) => ev.window_id != self.window.window_id,
+            Event::FingerMove(ev) => ev.window_id != self.window.window_id,
+            Event::FingerHover(ev) => ev.window_id != self.window.window_id,
+            Event::FingerUp(ev) => ev.window_id != self.window.window_id,
+            Event::FingerScroll(ev) => ev.window_id != self.window.window_id,
+            _ => false
+        };
+        if is_for_other_window {
+            DesktopWindowEvent::EventForOtherWindow
         }
         else {
             DesktopWindowEvent::None
