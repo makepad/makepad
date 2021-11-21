@@ -108,10 +108,12 @@ pub struct Cx {
     pub draw_shader_ptr_to_id: HashMap<DrawShaderPtr, usize>,
     pub draw_shader_compile_set: BTreeSet<DrawShaderPtr>,
     
-    pub redraw_child_areas: Vec<Area>,
-    pub redraw_parent_areas: Vec<Area>,
-    pub _redraw_child_areas: Vec<Area>,
-    pub _redraw_parent_areas: Vec<Area>,
+    pub redraw_views: Vec<usize>,
+    pub redraw_views_and_children: Vec<usize>,
+    pub _redraw_views: Vec<usize>,
+    pub _redraw_views_and_children: Vec<usize>,
+    pub redraw_all_views: bool,
+    pub _redraw_all_views: bool,
     
     pub redraw_id: u64,
     pub repaint_id: u64,
@@ -260,11 +262,13 @@ impl Default for Cx {
             draw_shader_ptr_to_id: HashMap::new(),
             draw_shader_compile_set: BTreeSet::new(),
             
-            redraw_parent_areas: Vec::new(),
-            _redraw_parent_areas: Vec::new(),
-            redraw_child_areas: Vec::new(),
-            _redraw_child_areas: Vec::new(),
-            
+            redraw_views: Vec::new(),
+            _redraw_views: Vec::new(),
+            redraw_views_and_children: Vec::new(),
+            _redraw_views_and_children: Vec::new(),
+            redraw_all_views: true,
+            _redraw_all_views: true,
+    
             draw_font_atlas: None,
             
             redraw_id: 1,
@@ -377,6 +381,7 @@ impl Cx {
     pub fn compute_passes_to_repaint(&mut self, passes_todo: &mut Vec<usize>, windows_need_repaint: &mut usize) {
         passes_todo.truncate(0);
         
+        // we need this because we don't mark the entire deptree of passes dirty every small paint
         loop {
             let mut altered = false; // yes this is horrible but im tired and i dont know why recursion fails
             for pass_id in 0..self.passes.len() {
@@ -434,36 +439,21 @@ impl Cx {
     pub fn redraw_pass_of(&mut self, area: Area) {
         // we walk up the stack of area
         match area {
-            Area::All => {
-                for window_id in 0..self.windows.len() {
-                    let redraw = match self.windows[window_id].window_state {
-                        CxWindowState::Create {..} | CxWindowState::Created => {
-                            true
-                        },
-                        _ => false
-                    };
-                    if redraw {
-                        if let Some(pass_id) = self.windows[window_id].main_pass_id {
-                            self.redraw_pass_and_dep_of_passes(pass_id);
-                        }
-                    }
-                }
-            },
             Area::Empty => (),
             Area::Instance(instance) => {
-                self.redraw_pass_and_dep_of_passes(self.views[instance.view_id].pass_id);
+                self.redraw_pass_and_parent_passes(self.views[instance.view_id].pass_id);
             },
             Area::View(viewarea) => {
-                self.redraw_pass_and_dep_of_passes(self.views[viewarea.view_id].pass_id);
+                self.redraw_pass_and_parent_passes(self.views[viewarea.view_id].pass_id);
             }
         }
     }
     
-    pub fn redraw_pass_and_dep_of_passes(&mut self, pass_id: usize) {
+    pub fn redraw_pass_and_parent_passes(&mut self, pass_id: usize) {
         let mut walk_pass_id = pass_id;
         loop {
             if let Some(main_view_id) = self.passes[walk_pass_id].main_view_id {
-                self.redraw_parent_area(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
+                self.redraw_area_and_children(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
             }
             match self.passes[walk_pass_id].dep_of.clone() {
                 CxPassDepOf::Pass(next_pass_id) => {
@@ -476,61 +466,55 @@ impl Cx {
         }
     }
     
-    pub fn redraw_pass_and_sub_passes(&mut self, pass_id: usize) {
+    pub fn redraw_pass_and_child_passes(&mut self, pass_id: usize) {
         let cxpass = &self.passes[pass_id];
         if let Some(main_view_id) = cxpass.main_view_id {
-            self.redraw_parent_area(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
+            self.redraw_area_and_children(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
         }
         // lets redraw all subpasses as well
         for sub_pass_id in 0..self.passes.len() {
             if let CxPassDepOf::Pass(dep_pass_id) = self.passes[sub_pass_id].dep_of.clone() {
                 if dep_pass_id == pass_id {
-                    self.redraw_pass_and_sub_passes(sub_pass_id);
+                    self.redraw_pass_and_child_passes(sub_pass_id);
                 }
             }
         }
     }
     
-    pub fn redraw_child_area(&mut self, area: Area) {
-        if self.panic_redraw {
-            #[cfg(debug_assertions)]
-            panic!("Panic Redraw triggered")
-        }
-        
-        // if we are redrawing all, clear the rest
-        if area == Area::All {
-            self.redraw_child_areas.truncate(0);
-        }
-        // check if we are already redrawing all
-        else if self.redraw_child_areas.len() == 1 && self.redraw_child_areas[0] == Area::All {
-            return;
-        };
-        // only add it if we dont have it already
-        if let Some(_) = self.redraw_child_areas.iter().position( | a | *a == area) {
-            return;
-        }
-        self.redraw_child_areas.push(area);
+    pub fn redraw_all(&mut self) {
+        self.redraw_all_views = true;
     }
     
-    pub fn redraw_parent_area(&mut self, area: Area) {
+    pub fn any_views_need_redrawing(&self)->bool{
+        self.redraw_all_views 
+        || self.redraw_views.len() != 0
+        || self.redraw_views_and_children.len() != 0
+    }
+    
+    pub fn redraw_area(&mut self, area: Area) {
         if self.panic_redraw {
             #[cfg(debug_assertions)]
             panic!("Panic Redraw triggered")
         }
-        
-        // if we are redrawing all, clear the rest
-        if area == Area::All {
-            self.redraw_parent_areas.truncate(0);
+        if let Some(view_id) = area.view_id(){
+            if self.redraw_views.iter().position( | v | *v == view_id).is_some() {
+                return;
+            }
+            self.redraw_views.push(view_id);
         }
-        // check if we are already redrawing all
-        else if self.redraw_parent_areas.len() == 1 && self.redraw_parent_areas[0] == Area::All {
-            return;
-        };
-        // only add it if we dont have it already
-        if let Some(_) = self.redraw_parent_areas.iter().position( | a | *a == area) {
-            return;
+    }
+    
+    pub fn redraw_area_and_children(&mut self, area: Area) {
+        if self.panic_redraw {
+            #[cfg(debug_assertions)]
+            panic!("Panic Redraw triggered")
         }
-        self.redraw_parent_areas.push(area);
+        if let Some(view_id) = area.view_id(){
+            if self.redraw_views_and_children.iter().position( | v | *v == view_id).is_some() {
+                return;
+            }
+            self.redraw_views_and_children.push(view_id);
+        }
     }
     
     pub fn is_xr_presenting(&mut self) -> bool {
@@ -542,7 +526,7 @@ impl Cx {
         }
         self.windows[*self.window_stack.last().unwrap()].window_geom.xr_is_presenting
     }
-    
+    /*
     pub fn redraw_previous_areas(&mut self) {
         for area in self._redraw_child_areas.clone() {
             self.redraw_child_area(area);
@@ -550,96 +534,43 @@ impl Cx {
         for area in self._redraw_parent_areas.clone() {
             self.redraw_parent_area(area);
         }
-    }
-    
-    pub fn view_will_redraw(&self, view_id: usize) -> bool {
-        
-        // figure out if areas are in some way a child of draw_list_id, then we need to redraw
-        for area in &self._redraw_child_areas {
-            match area {
-                Area::All => {
-                    return true;
-                },
-                Area::Empty => (),
-                Area::Instance(instance) => {
-                    let mut vw = instance.view_id;
-                    if vw == view_id {
-                        return true
-                    }
-                    while vw != 0 {
-                        vw = self.views[vw].nesting_view_id;
-                        if vw == view_id {
-                            return true
-                        }
-                    }
-                },
-                Area::View(viewarea) => {
-                    let mut vw = viewarea.view_id;
-                    if vw == view_id {
-                        return true
-                    }
-                    while vw != 0 {
-                        vw = self.views[vw].nesting_view_id;
-                        if vw == view_id {
-                            return true
-                        }
-                    }
-                }
-            }
-        }
-        // figure out if areas are in some way a parent of draw_list_id, then redraw
-        for area in &self._redraw_parent_areas {
-            match area {
-                Area::All => {
-                    return true;
-                },
-                Area::Empty => (),
-                Area::Instance(instance) => {
-                    let mut vw = view_id;
-                    if vw == instance.view_id {
-                        return true
-                    }
-                    while vw != 0 {
-                        vw = self.views[vw].nesting_view_id;
-                        if vw == instance.view_id {
-                            return true
-                        }
-                    }
-                },
-                Area::View(viewarea) => {
-                    let mut vw = view_id;
-                    if vw == viewarea.view_id {
-                        return true
-                    }
-                    while vw != 0 {
-                        vw = self.views[vw].nesting_view_id;
-                        if vw == viewarea.view_id {
-                            return true
-                        }
-                    }
-                    
-                }
-            }
-        }
-        
-        false
-    }
-    /*
-    pub fn check_ended_animator_ids(&mut self, time: f64) {
-        let mut ended_animator_ids = BTreeSet::new();
-        //self.ended_animator_ids.clear();
-        for (anim_id, anim_info) in &self.playing_animator_ids{
-            if anim_info.start_time.is_nan() || time - anim_info.start_time >= anim_info.total_time {
-                ended_animator_ids.insert(*anim_id);
-            }
-        }
-        for anim_id in &ended_animator_ids{
-            self.playing_animator_ids.remove(anim_id);
-        }
     }*/
     
+    pub fn view_will_redraw(&self, view_id: usize) -> bool {
+        if self._redraw_all_views{
+            return true;
+        }
+        // figure out if areas are in some way a child of view_id, then we need to redraw
+        for check_view_id in &self._redraw_views {
+            if *check_view_id == view_id {
+                return true
+            }
+            let mut vw = *check_view_id;
+            while let Some(next_vw) = self.views[vw].codeflow_parent_id {
+                vw = next_vw;
+                if vw == view_id {
+                    return true
+                }
+            }
+        }
+        // figure out if areas are in some way a parent of view_id, then redraw
+        for check_view_id in &self._redraw_views_and_children {
+            if *check_view_id == view_id {
+                return true
+            }
+            let mut vw = view_id;
+            while let Some(next_vw) = self.views[vw].codeflow_parent_id {
+                vw = next_vw;
+                if vw == view_id {
+                    return true
+                }
+            }
+        }
+        false
+    }
+    
     pub fn update_area_refs(&mut self, old_area: Area, new_area: Area) -> Area {
-        if old_area == Area::Empty || old_area == Area::All {
+        if old_area == Area::Empty {
             return new_area
         }
         
@@ -735,12 +666,19 @@ impl Cx {
         self.in_redraw_cycle = true;
         self.redraw_id += 1;
         self.counter = 0;
-        std::mem::swap(&mut self._redraw_child_areas, &mut self.redraw_child_areas);
-        std::mem::swap(&mut self._redraw_parent_areas, &mut self.redraw_parent_areas);
+
+        std::mem::swap(&mut self._redraw_views, &mut self.redraw_views);
+        std::mem::swap(&mut self._redraw_views_and_children, &mut self.redraw_views_and_children);
+
+        self._redraw_all_views = self._redraw_all_views;
+        self.redraw_all_views = false;
+        self.redraw_views.truncate(0);
+        self.redraw_views_and_children.truncate(0);
+
         self.align_list.truncate(0);
-        self.redraw_child_areas.truncate(0);
-        self.redraw_parent_areas.truncate(0);
+
         self.call_event_handler(&mut Event::Draw);
+
         self.in_redraw_cycle = false;
         /*
         if self.live_styles.style_stack.len()>0 {

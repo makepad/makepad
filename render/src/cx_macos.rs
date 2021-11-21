@@ -28,7 +28,7 @@ impl Cx {
         
         self.call_event_handler(&mut Event::Construct);
         
-        self.redraw_child_area(Area::All);
+        self.redraw_all();
         
         let mut passes_todo = Vec::new();
         
@@ -50,7 +50,7 @@ impl Cx {
                                 // redraw just this windows root draw list
                                 if re.old_geom.inner_size != re.new_geom.inner_size {
                                     if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
-                                        self.redraw_pass_and_sub_passes(main_pass_id);
+                                        self.redraw_pass_and_child_passes(main_pass_id);
                                     }
                                 }
                                 break;
@@ -211,7 +211,7 @@ impl Cx {
                                             if metal_window.first_draw {
                                                 metal_window.first_draw = false;
                                                 if dpi_factor != self.default_dpi_factor {
-                                                    self.redraw_pass_and_sub_passes(*pass_id);
+                                                    self.redraw_pass_and_child_passes(*pass_id);
                                                 }
                                             }
                                         }}
@@ -265,8 +265,7 @@ impl Cx {
             
             self.process_live_style_errors();
             */
-            if  self.redraw_parent_areas.len() != 0
-                || self.redraw_child_areas.len() != 0
+            if  self.any_views_need_redrawing()
                 || self.next_frames.len() != 0 {
                 false   
             } else {

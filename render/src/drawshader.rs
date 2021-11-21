@@ -76,7 +76,7 @@ impl DrawVars {
     }
     
     pub fn redraw(&self, cx: &mut Cx) {
-        cx.redraw_child_area(self.area);
+        cx.redraw_area(self.area);
     }
     
     pub fn live_type() -> LiveType {
