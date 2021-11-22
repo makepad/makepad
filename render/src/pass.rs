@@ -74,7 +74,7 @@ impl Pass {
     }
     
     pub fn make_dep_of_pass(&mut self, cx: &mut Cx, pass: &Pass) {
-        let cxpass = &mut cx.passes[self.pass_id];
+        let cxpass = &mut cx.passes[pass.pass_id];
         cxpass.dep_of = CxPassDepOf::Pass(self.pass_id)
     }
     

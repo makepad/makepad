@@ -6,9 +6,9 @@ use makepad_shader_compiler::shaderast::DrawShaderDef;
 use makepad_shader_compiler::shaderast::DrawShaderFieldKind;
 use makepad_shader_compiler::shaderast::DrawShaderFlags;
 use makepad_shader_compiler::shaderast::DrawShaderConstTable;
+use makepad_shader_compiler::shaderregistry::DrawShaderQuery;
 use makepad_shader_compiler::shaderast::ValuePtr;
 use makepad_shader_compiler::shaderast::DrawShaderPtr;
-use std::collections::HashMap;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct DrawShader {
@@ -83,6 +83,15 @@ impl DrawVars {
         LiveType(std::any::TypeId::of::<DrawVars>())
     }
     
+    pub fn live_type_info() -> LiveTypeInfo {
+        LiveTypeInfo {
+            module_path: ModulePath::from_str(&module_path!()).unwrap(),
+            live_type: Self::live_type(),
+            fields: Vec::new(),
+            type_name: Id::from_str("DrawVars").unwrap()
+        }
+    }
+
     pub fn live_register(_cx: &mut Cx) {
     }
     
@@ -109,73 +118,72 @@ impl DrawVars {
                 else {None}
             }
             // ok ! we have to compile it
-            let live_factories = &cx.live_factories;
-            let result = cx.shader_registry.analyse_draw_shader(&cx.live_registry.borrow(), draw_shader_ptr, | shader_registry, span, id, live_type, draw_shader_def | {
-                if id == id!(rust_type) {
-                    fn recur_expand(
-                        shader_registry: &ShaderRegistry,
-                        level: usize,
-                        after_draw_vars: &mut bool,
-                        live_type: LiveType,
-                        live_factories: &HashMap<LiveType, Box<dyn LiveFactory >>,
-                        draw_shader_def: &mut DrawShaderDef,
-                        span: Span
-                    ) {
-                        if let Some(lf) = live_factories.get(&live_type) {
-                            
-                            let mut fields = Vec::new();
-                            
-                            lf.component_fields(&mut fields);
-                            let mut slots = 0;
-                            for field in fields {
-                                if field.id == id!(deref_target) {
-                                    recur_expand(shader_registry, level + 1, after_draw_vars, field.live_type.unwrap(), live_factories, draw_shader_def, span);
-                                    continue
-                                }
-                                if field.id == id!(draw_vars) {
-                                    // assert the thing to be marked correctly
-                                    if let LiveOrCalc::Calc = field.live_or_calc {}
-                                    else {panic!()}
-                                    if field.live_type.unwrap() != DrawVars::live_type() {panic!();}
-                                    
-                                    *after_draw_vars = true;
-                                    continue;
-                                }
-                                if *after_draw_vars {
-                                    // lets count sizes
-                                    //
-                                    let live_type = field.live_type.unwrap();
-                                    if shader_registry.enums.get(&live_type).is_some() {
-                                        slots += 1;
-                                        //draw_shader_def.enums
+            //let live_factories = &cx.live_factories;
+            let result = cx.shader_registry.analyse_draw_shader(&cx.live_registry.borrow(), draw_shader_ptr, | live_registry, shader_registry, span, draw_shader_query, live_type, draw_shader_def | {
+                match draw_shader_query{
+                    DrawShaderQuery::DrawShader=>{
+                        fn recur_expand(
+                            live_registry: &LiveRegistry,
+                            shader_registry: &ShaderRegistry,
+                            level: usize,
+                            after_draw_vars: &mut bool,
+                            live_type: LiveType,
+                            draw_shader_def: &mut DrawShaderDef,
+                            span: Span
+                        ) {
+                            if let Some(lf) = live_registry.live_type_infos.get(&live_type) {
+                                
+                                let mut slots = 0;
+                                for field in &lf.fields {
+                                    if field.id == id!(deref_target) {
+                                        recur_expand(live_registry, shader_registry, level + 1, after_draw_vars, field.live_type_info.live_type, draw_shader_def, span);
+                                        continue
+                                    }
+                                    if field.id == id!(draw_vars) {
+                                        // assert the thing to be marked correctly
+                                        if let LiveOrCalc::Calc = field.live_or_calc {}
+                                        else {panic!()}
+                                        if field.live_type_info.live_type != DrawVars::live_type() {panic!();}
                                         
-                                        draw_shader_def.add_instance(field.id, Ty::Enum(live_type), span, field.live_or_calc);
+                                        *after_draw_vars = true;
+                                        continue; 
                                     }
-                                    else {
-                                        let ty = live_type_to_shader_ty(live_type).expect("Please only put shader-understandable instance fields after draw_vars");
-                                        slots += ty.slots();
-                                        draw_shader_def.add_instance(field.id, ty, span, field.live_or_calc);
+                                    if *after_draw_vars {
+                                        // lets count sizes
+                                        //
+                                        let live_type = field.live_type_info.live_type;
+                                        if shader_registry.enums.get(&live_type).is_some() {
+                                            slots += 1;
+                                            //draw_shader_def.enums
+                                            
+                                            draw_shader_def.add_instance(field.id, Ty::Enum(live_type), span, field.live_or_calc);
+                                        }
+                                        else {
+                                            let ty = live_type_to_shader_ty(live_type).expect("Please only put shader-understandable instance fields after draw_vars");
+                                            slots += ty.slots();
+                                            draw_shader_def.add_instance(field.id, ty, span, field.live_or_calc);
+                                        }
                                     }
                                 }
-                            }
-                            // insert padding
-                            if level >0 &&  slots % 2 == 1 {
-                                draw_shader_def.add_instance(Id(0), Ty::Float, span, LiveOrCalc::Calc);
+                                // insert padding
+                                if level >0 &&  slots % 2 == 1 {
+                                    draw_shader_def.add_instance(Id(0), Ty::Float, span, LiveOrCalc::Calc);
+                                }
                             }
                         }
+                        recur_expand(live_registry, shader_registry, 0, &mut false, live_type, draw_shader_def, span);
                     }
-                    recur_expand(shader_registry, 0, &mut false, live_type, live_factories, draw_shader_def, span);
-                }
-                if id == id!(geometry) {
-                    if live_type == geometry_fields.live_type_check() {
-                        let mut fields = Vec::new();
-                        geometry_fields.geometry_fields(&mut fields);
-                        for field in fields {
-                            draw_shader_def.add_geometry(field.id, field.ty, span);
+                    DrawShaderQuery::Geometry=>{
+                        if live_type == geometry_fields.live_type_check() {
+                            let mut fields = Vec::new();
+                            geometry_fields.geometry_fields(&mut fields);
+                            for field in fields {
+                                draw_shader_def.add_geometry(field.id, field.ty, span);
+                            }
                         }
-                    }
-                    else {
-                        eprintln!("lf.get_type() != geometry_fields.live_type_check()");
+                        else {
+                            eprintln!("lf.get_type() != geometry_fields.live_type_check()");
+                        }
                     }
                 }
             });
@@ -185,7 +193,7 @@ impl DrawVars {
                     // ok so. lets get the source for this file id
                     let file = &cx.live_registry.borrow().live_files[e.span.file_id().to_index()];
                     //println!("{}", file.source);
-                    println!("Error {}", e.to_live_file_error(&file.file, &file.source, file.line_offset));
+                    println!("Error {}", e.to_live_file_error(&file.file_name, &file.source, file.line_offset));
                 }
                 Ok(draw_shader_def) => {
                     // OK! SO the shader parsed

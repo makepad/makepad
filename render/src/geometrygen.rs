@@ -2,8 +2,7 @@ use crate::cx::*;
 
 
 live_register!{
-    GeometryQuad2D: Geometry {
-        rust_type: {{GeometryQuad2D}}
+    GeometryQuad2D: {{GeometryQuad2D}} {
         x1: 0.0;
         y1: 0.0;
         x2: 1.0;

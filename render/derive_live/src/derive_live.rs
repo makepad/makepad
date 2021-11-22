@@ -44,7 +44,6 @@ pub fn derive_live_animate_impl(input: TokenStream) -> TokenStream {
             tb.add("            let state = self.animator.swap_out_state();");
             tb.add("            self.apply(cx, ApplyFrom::Animate, 0, &state);");
             tb.add("            self.animator.swap_in_state(state);");
-            //            tb.add("            cx.redraw_child_area(self.bg.draw_call_vars.area);");
             tb.add("        }");
             tb.add("    }");
             tb.add("}");
@@ -235,22 +234,14 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index: usize, nodes: &[LiveNode])->usize {");
             tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
 
-            //tb.add("       println!(\"{}\", nodes.to_string(start_index,1));");
             tb.add("        let struct_id = Id(").suf_u64(Id::from_str(&struct_name).unwrap().0).add(");");
             tb.add("        match &nodes[start_index].value{");
-            /*tb.add("            LiveValue::Class{class} =>{");
-            tb.add("                if *class != struct_id{");
-            tb.add("                    cx.apply_error_wrong_struct_name(apply_from, start_index, nodes, struct_id, *class);");
-            tb.add("                    self.after_apply(cx, apply_from, start_index, nodes);");
-            tb.add("                    return nodes.skip_node(start_index);");
-            tb.add("                }");
-            tb.add("            }");*/
-            tb.add("            LiveValue::Class{..} | LiveValue::Object=>(),");
+            tb.add("            LiveValue::Clone{..} | LiveValue::Class{..} | LiveValue::Object=>(),");
             tb.add("            _=>{");
             tb.add("                cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, struct_id);");
             tb.add("                self.after_apply(cx, apply_from, start_index, nodes);");
             tb.add("                return nodes.skip_node(start_index);");
-            tb.add("            }");
+            tb.add("            }"); 
             tb.add("        }");
             
             tb.add("        let mut index = start_index + 1;"); // skip the class
@@ -271,21 +262,14 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn live_type() -> LiveType {");
             tb.add("        LiveType(std::any::TypeId::of::<").ident(&struct_name).add(">())");
             tb.add("    }");
+            tb.add("    fn live_type_info() -> LiveTypeInfo {");
+            tb.add("        let mut fields = Vec::new();");
             
-            tb.add("    fn live_register(cx: &mut Cx) {");
-            tb.add("        struct Factory();");
-            tb.add("        impl LiveFactory for Factory {");
-            
-            tb.add("            fn new_component(&self, cx: &mut Cx) -> Box<dyn LiveComponent> {");
-            tb.add("                Box::new(").ident(&struct_name).add(" ::new(cx))");
-            tb.add("            }");
-            
-            tb.add("            fn component_fields(&self, fields: &mut Vec<LiveField>) {");
             for field in &fields {
                 let attr = &field.attrs[0];
                 if attr.name == "live" || attr.name == "calc" {
-                    tb.add("fields.push(LiveField{id:Id::from_str(").string(&field.name).add(").unwrap(),");
-                    tb.add("live_type:Some(").stream(Some(field.ty.clone())).add("::live_type()),");
+                    tb.add("fields.push(LiveTypeField{id:Id::from_str(").string(&field.name).add(").unwrap(),");
+                    tb.add("live_type_info:").stream(Some(field.ty.clone())).add("::live_type_info(),");
                     if attr.name == "live" {
                         tb.add("live_or_calc: LiveOrCalc::Live");
                     }
@@ -295,7 +279,19 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                     tb.add("});");
                 }
             }
+            tb.add("        LiveTypeInfo{module_path:ModulePath::from_str2(&module_path!()).unwrap(), live_type:Self::live_type(), fields,");
+            tb.add("            type_name:Id::from_str(").string(&struct_name).add(").unwrap()}");
+            tb.add("    }");
+            
+            
+            tb.add("    fn live_register(cx: &mut Cx) {");
+            tb.add("        struct Factory();");
+            tb.add("        impl LiveFactory for Factory {");
+            
+            tb.add("            fn new_component(&self, cx: &mut Cx) -> Box<dyn LiveComponent> {");
+            tb.add("                Box::new(").ident(&struct_name).add(" ::new(cx))");
             tb.add("            }");
+            
             
             tb.add("        }");
             tb.add("        cx.register_factory(").ident(&struct_name).add("::live_type(), Box::new(Factory()));");
@@ -342,7 +338,6 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        ret.after_new(cx);ret");
             tb.add("    }");
             tb.add("}");
-            
             return tb.end();
         }
     }
@@ -437,6 +432,10 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             
             tb.add("    fn live_type() -> LiveType {");
             tb.add("        LiveType(std::any::TypeId::of::<").ident(&enum_name).add(">())");
+            tb.add("    }");
+            tb.add("    fn live_type_info() -> LiveTypeInfo {");
+            tb.add("        LiveTypeInfo{module_path:ModulePath::from_str(&module_path!()).unwrap(), live_type:Self::live_type(), fields:Vec::new(),");
+            tb.add("            type_name:Id::from_str(").string(&enum_name).add(").unwrap()}");
             tb.add("    }");
             tb.add("    fn live_register(cx: &mut Cx) {");
             

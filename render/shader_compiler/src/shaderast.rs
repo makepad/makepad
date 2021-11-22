@@ -3,6 +3,7 @@ use makepad_live_compiler::Token;
 use makepad_live_compiler::Id;
 use makepad_live_compiler::LivePtr;
 use makepad_live_compiler::LiveType;
+use makepad_live_compiler::LiveOrCalc;
 use makepad_live_compiler::Vec4;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -99,11 +100,6 @@ pub enum DrawShaderInputType {
     ShaderResourceId(ShaderResourceId)
 }*/
 
-#[derive(Copy, Clone)]
-pub enum LiveOrCalc {
-    Calc,
-    Live,
-}
 
 
 #[derive(Clone)]
@@ -793,11 +789,11 @@ impl DrawShaderDef {
         uniform_blocks
     }
     
-    pub fn add_uniform(&mut self, id:Id, ty:Ty, span:Span){
+    pub fn add_uniform(&mut self, id:Id, block:Id, ty:Ty, span:Span){
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Uniform {
-                    block_ident: Ident(id!(user)),
+                    block_ident: Ident(block),
                     var_def_ptr: None
                 },
                 span,

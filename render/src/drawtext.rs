@@ -2,17 +2,13 @@ use crate::cx::*;
 
 live_register!{
     use crate::shader_std::*;
-    use crate::geometrygen::GeometryQuad2D;
-    use crate::font::Font;
     
-    DrawText: DrawShader2D {
+    DrawText: {{DrawText}} {
         //debug: true;
-        rust_type: {{DrawText}}
-        geometry: GeometryQuad2D {}
         
         wrapping: Wrapping::None
-        text_style: TextStyle {
-            font: Font {
+        text_style: {
+            font: {
                 path: "resources/Ubuntu-R.ttf"
             }
         }
@@ -415,8 +411,8 @@ impl DrawText {
             if emit {
                 let height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
                 let rect = cx.walk_turtle(Walk {
-                    width: Width::Fix(width),
-                    height: Height::Fix(height),
+                    width: Width::Fixed(width),
+                    height: Height::Fixed(height),
                     margin: Margin::default()
                 });
                 
