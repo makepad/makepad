@@ -2,10 +2,6 @@ use makepad_render::*;
 use makepad_widget::*;
 
 live_register!{
-    use makepad_render::drawcolor::DrawColor;
-    use makepad_render::drawtext::DrawText;
-    use makepad_widget::normalbutton::NormalButton;
-    use makepad_widget::desktopwindow::DesktopWindow;
     App: {{BareExampleApp}} {
         draw_quad: {
             color: #f00
@@ -33,7 +29,7 @@ impl BareExampleApp {
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {
-        //println!("{}",  cx.live_registry.clone().borrow().module_path_str_id_to_doc(&module_path!(), id!(App)).unwrap().nodes.to_string(0,100));
+        println!("{}",  cx.live_registry.clone().borrow().module_path_str_id_to_doc(&module_path!(), id!(App)).unwrap().nodes.len()*48);
         Self::new_from_doc(
             cx,
             cx.live_registry.clone().borrow().module_path_str_id_to_doc(&module_path!(), id!(App)).unwrap()
