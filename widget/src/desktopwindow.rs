@@ -6,21 +6,22 @@ use crate::buttonlogic::*;
 live_register!{
     DesktopWindow: {{DesktopWindow}} {
         clear_color: #1e1e1e
-        //inner_layout: Layout {}
-        //caption_text: DrawText {}
-        //min_btn: DesktopButton {}
-        //max_btn: DesktopButton {}
-        //close_btn: DesktopButton {}
-        // xr_btn: DesktopButton {}
-        //fullscreen_btn: DesktopButton {}
         caption_bg: {color: #3d3d3d}
-        caption: "Desktop Window"
+        caption: "Desktop Window",
+        caption_view: {
+            layout: {
+                walk: {
+                    width: Width::Filled,
+                    height: Height::Computed
+                },
+            }
+        }
     }
 }
 
 #[derive(LiveComponent, LiveApply)]
 pub struct DesktopWindow {
-
+    
     #[rust(Pass::new(cx))] pub pass: Pass,
     #[rust(Texture::new(cx))] pub color_texture: Texture,
     #[rust(Texture::new(cx))] pub depth_texture: Texture,
@@ -32,7 +33,7 @@ pub struct DesktopWindow {
     #[rust(View::new(cx))] pub inner_view: View,
     
     #[live] pub clear_color: Vec4,
-
+    
     //pub caption_bg_color: ColorId,
     #[live] pub min_btn: DesktopButton,
     #[live] pub max_btn: DesktopButton,
@@ -45,7 +46,7 @@ pub struct DesktopWindow {
     #[live] pub caption: String,
     
     #[rust(WindowMenu::new(cx))] pub window_menu: WindowMenu,
-    #[rust(Menu::main(vec![
+    #[rust(Menu::main(vec![ 
         Menu::sub("App", vec![
             Menu::item("Quit App", Cx::command_quit()),
         ]),
@@ -159,10 +160,10 @@ impl DesktopWindow {
         
         self.main_view.begin_view(cx).unwrap();
         
-        self.caption_view.set_layout(cx, Layout {
+        /*self.caption_view.set_layout(cx, Layout {
             walk: Walk::wh(Width::Filled, Height::Computed),
             ..Layout::default()
-        });
+        });*/
         
         if self.caption_view.begin_view(cx).is_ok() {
             // alright here we draw our platform buttons.
@@ -171,7 +172,7 @@ impl DesktopWindow {
                 _ => true
             };
             if process_chrome {
-                match PlatformType::Windows{//cx.platform_type {
+                match PlatformType::Windows { //cx.platform_type {
                     PlatformType::Windows | PlatformType::Unknown | PlatformType::Linux {..} => {
                         
                         self.caption_bg.begin_quad(cx, Layout {
@@ -241,7 +242,7 @@ impl DesktopWindow {
             self.caption_view.end_view(cx);
         }
         cx.turtle_new_line();
-
+        
         self.inner_view.begin_view(cx).unwrap();
         Ok(())
     }
