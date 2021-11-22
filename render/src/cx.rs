@@ -9,7 +9,6 @@ pub use makepad_live_compiler::math::*;
 pub use makepad_shader_compiler::shaderregistry::ShaderRegistry;
 pub use makepad_shader_compiler::shaderregistry::ShaderEnum;
 pub use makepad_shader_compiler::shaderast::DrawShaderPtr;
-pub use makepad_shader_compiler::shaderast::LiveOrCalc;
 pub use makepad_shader_compiler::shaderast::Ty;
 pub use makepad_live_compiler::LiveRegistry;
 pub use makepad_live_compiler::LiveDocNodes;
@@ -19,6 +18,9 @@ pub use makepad_live_compiler::LocalPtr;
 pub use makepad_live_compiler::LivePtr;
 pub use makepad_live_compiler::LiveNode;
 pub use makepad_live_compiler::LiveType;
+pub use makepad_live_compiler::LiveTypeInfo;
+pub use makepad_live_compiler::LiveTypeField;
+pub use makepad_live_compiler::LiveOrCalc;
 pub use makepad_live_compiler::LiveValue;
 pub use makepad_live_compiler::ModulePath;
 pub use makepad_live_compiler::LiveNodeSlice;
@@ -121,7 +123,6 @@ pub struct Cx {
     pub timer_id: u64,
     pub next_frame_id: u64,
     pub signal_id: usize,
-    pub anim_time: f64,
     
     pub prev_key_focus: Area,
     pub next_key_focus: Area,
@@ -277,7 +278,6 @@ impl Default for Cx {
             timer_id: 1,
             signal_id: 1,
             next_frame_id: 1,
-            anim_time: 0.0,
             
             next_key_focus: Area::Empty,
             prev_key_focus: Area::Empty,
@@ -382,8 +382,8 @@ impl Cx {
         passes_todo.truncate(0);
         
         // we need this because we don't mark the entire deptree of passes dirty every small paint
-        loop {
-            let mut altered = false; // yes this is horrible but im tired and i dont know why recursion fails
+        loop { // loop untill we don't propagate anymore
+            let mut altered = false; 
             for pass_id in 0..self.passes.len() {
                 if self.passes[pass_id].paint_dirty {
                     let other = match self.passes[pass_id].dep_of {
@@ -414,7 +414,7 @@ impl Cx {
                     },
                     CxPassDepOf::Pass(dep_of_pass_id) => {
                         if pass_id == dep_of_pass_id {
-                            eprintln!("WHAAAT");
+                            panic!()
                         }
                         for insert_before in 0..passes_todo.len() {
                             if passes_todo[insert_before] == dep_of_pass_id {
@@ -492,10 +492,6 @@ impl Cx {
     }
     
     pub fn redraw_view(&mut self, area: Area) {
-        if self.panic_redraw {
-            #[cfg(debug_assertions)]
-            panic!("Panic Redraw triggered")
-        }
         if let Some(view_id) = area.view_id(){
             if self.redraw_views.iter().position( | v | *v == view_id).is_some() {
                 return;
@@ -505,10 +501,6 @@ impl Cx {
     }
     
     pub fn redraw_view_and_children(&mut self, area: Area) {
-        if self.panic_redraw {
-            #[cfg(debug_assertions)]
-            panic!("Panic Redraw triggered")
-        }
         if let Some(view_id) = area.view_id(){
             if self.redraw_views_and_children.iter().position( | v | *v == view_id).is_some() {
                 return;

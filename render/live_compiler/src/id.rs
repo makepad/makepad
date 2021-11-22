@@ -74,6 +74,34 @@ impl ModulePath {
         }
         return Ok(ModulePath(crate_id, Id::from_str(std::str::from_utf8(&bytes[module_start..i]).unwrap()) ?));
     }
+    
+        pub fn from_str2(module_path: &str) -> Result<Self,
+    String> {
+        let bytes = module_path.as_bytes();
+        let len = bytes.len();
+        // we have to find the first :
+        let mut crate_id = Id(0);
+        let mut i = 0;
+        while i < len {
+            if bytes[i] == ':' as u8 {
+                crate_id = Id::from_str(std::str::from_utf8(&bytes[0..i]).unwrap()) ?;
+                i += 2;
+                break
+            }
+            i += 1;
+        }
+        if i == len { // module_path is only one thing
+            return Ok(ModulePath(Id(0), Id::from_str(std::str::from_utf8(&bytes[0..len]).unwrap()) ?));
+        }
+        let module_start = i;
+        while i < len {
+            if bytes[i] == ':' as u8 {
+                break
+            }
+            i += 1;
+        }
+        return Ok(ModulePath(crate_id, Id::from_str(std::str::from_utf8(&bytes[module_start..i]).unwrap()) ?));
+    }
 }
 
 impl fmt::Display for ModulePath {

@@ -3,10 +3,8 @@ use crate::buttonlogic::*;
 
 live_register!{
     use makepad_render::shader_std::*;
-    use makepad_render::drawquad::DrawQuad;
     
-    DrawDesktopButton: DrawQuad {
-        rust_type: {{DrawDesktopButton}}
+    DrawDesktopButton: {{DrawDesktopButton}} {
         debug:false,
         fn pixel(self) -> vec4 {
             let cx = Sdf2d::viewport(self.pos * self.rect_size);
@@ -84,10 +82,9 @@ live_register!{
         }
     }
     
-    DesktopButton: Component {
-        rust_type: {{DesktopButton}}
+    DesktopButton: {{DesktopButton}} {
         
-        bg: DrawDesktopButton {}
+        //bg: DrawDesktopButton {}
         
         state_default: {
             from: {all: Play::Forward {duration: 0.1}}

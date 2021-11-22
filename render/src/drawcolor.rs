@@ -4,9 +4,7 @@ use crate::drawquad::DrawQuad;
 live_register!{
     use crate::shader_std::*;
     use crate::drawquad::DrawQuad;
-    DrawColor: DrawQuad {
-        
-        rust_type: {{DrawColor}}
+    DrawColor: {{DrawColor}} {// it will figure out the baseclass from the Rust type!
         
         fn pixel(self) -> vec4 {
             return self.color;

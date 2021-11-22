@@ -14,11 +14,11 @@ pub fn live_register_impl(input:TokenStream)->TokenStream{
         tb.add("        file:").ident_with_span("file", span).add("!().to_string().replace(").string("\\").add(",").string("/").add("),");
         tb.add("        line:").unsuf_usize(span.start().line - 1).add(",");
         tb.add("        column:").unsuf_usize(span.start().column).add(",");
-        tb.add("        live_types:{");
+        tb.add("        live_type_infos:{");
         tb.add("            let mut v = Vec::new();");
         for live_type in &live_types {
             tb.stream(Some(live_type.clone())).add("::live_register(cx);");
-            tb.add("        v.push(").stream(Some(live_type.clone())).add("::live_type());");
+            tb.add("        v.push(").stream(Some(live_type.clone())).add("::live_type_info());");
         }
         tb.add("            v");
         tb.add("        },");

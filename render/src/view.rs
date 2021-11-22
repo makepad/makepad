@@ -150,8 +150,8 @@ impl View {
             && !view_will_redraw {
             
             // walk the turtle because we aren't drawing
-            let w = Width::Fix(cx.views[self.view_id].rect.size.x);
-            let h = Height::Fix(cx.views[self.view_id].rect.size.y);
+            let w = Width::Fixed(cx.views[self.view_id].rect.size.x);
+            let h = Height::Fixed(cx.views[self.view_id].rect.size.y);
             cx.walk_turtle(Walk {width: w, height: h, margin: cx.views[self.view_id].layout.walk.margin});
             return Err(());
         }
@@ -664,15 +664,6 @@ impl CxView {
         }
         None
     }
-    /*
-    pub fn set_clipping_uniforms(&mut self) {
-        if self.clipped {
-           self.uniform_view_clip(self.rect.x, self.rect.y, self.rect.x + self.rect.w, self.rect.y + self.rect.h);
-        }
-        else {
-            self.uniform_view_clip(-50000.0, -50000.0, 50000.0, 50000.0);
-        }
-    }*/
     
     pub fn get_local_scroll(&self) -> Vec2 {
         let xs = if self.do_v_scroll {self.snapped_scroll.x}else {0.};
@@ -695,7 +686,6 @@ impl CxView {
         }
         m
     }
-    
 }
 
 

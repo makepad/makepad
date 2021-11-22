@@ -3,12 +3,9 @@ use crate::buttonlogic::*;
 
 live_register!{
     use makepad_render::shader_std::*;
-    use makepad_render::drawquad::DrawQuad;
-    use makepad_render::drawtext::DrawText;
     
-    NormalButton: Component {
-        rust_type: {{NormalButton}}
-        bg: DrawQuad {
+    NormalButton: {{NormalButton}} {
+        bg: {
             instance color: vec4 = #333
             instance hover: float
             instance pressed: float
@@ -39,13 +36,13 @@ live_register!{
             }
         }
         
-        text: DrawText {}
+        text: {}
         
         layout: Layout {
             align: Align {fx: 0.5, fy: 0.5},
             walk: Walk {
-                width: Width::Compute,
-                height: Height::Compute,
+                width: Width::Computed,
+                height: Height::Computed,
                 margin: Margin {l: 100.0, r: 1.0, t: 100.0, b: 1.0},
             }
             padding: Padding {l: 16.0, t: 12.0, r: 16.0, b: 12.0}
