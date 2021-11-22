@@ -203,7 +203,7 @@ impl<'a> LiveExpander<'a> {
                             span: in_doc.token_id_to_span(in_node.token_id.unwrap()),
                             message: format!("Cannot switch node type for {} {:?} to {:?}", in_node.id, out_value, in_value)
                         });
-                        in_index = in_doc.nodes.next_child(in_index).unwrap();
+                        in_index = in_doc.nodes.skip_node(in_index);
                         continue;
                     }
                 }
