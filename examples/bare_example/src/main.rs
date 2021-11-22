@@ -24,12 +24,12 @@ pub struct BareExampleApp {
 }
 
 impl BareExampleApp {
-    pub fn live_register(cx: &mut Cx) {
+    pub fn live_register(cx: &mut Cx) { 
         makepad_widget::live_register(cx);
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {
-        println!("{}",  cx.live_registry.clone().borrow().module_path_str_id_to_doc(&module_path!(), id!(App)).unwrap().nodes.len()*48);
+        //println!("{}",  cx.live_registry.clone().borrow().module_path_str_id_to_doc(&module_path!(), id!(App)).unwrap().nodes.len()*48);
         Self::new_from_doc(
             cx,
             cx.live_registry.clone().borrow().module_path_str_id_to_doc(&module_path!(), id!(App)).unwrap()

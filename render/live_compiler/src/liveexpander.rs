@@ -140,12 +140,12 @@ impl<'a> LiveExpander<'a> {
                 Ok(overwrite) => {
                     let out_value = &out_doc.nodes[overwrite].value;
                     
-                    if out_value.variant_id() == in_value.variant_id() { // same type
+                    if !in_value.is_class() && out_value.variant_id() == in_value.variant_id() { // same type
                         match in_value {
                             LiveValue::Array |
                             LiveValue::TupleEnum {..} |
                             LiveValue::NamedEnum {..} |
-                            LiveValue::Class {..} => {
+                            LiveValue::Clone {..} => {
                                 let next_index = out_doc.nodes.next_child(overwrite).unwrap();
                                 out_doc.nodes[overwrite] = in_node.clone();
                                 out_doc.nodes.drain(overwrite + 1..next_index - 1);
@@ -208,9 +208,6 @@ impl<'a> LiveExpander<'a> {
                     }
                 }
                 Err(insert_point) => {
-                    // OK so. what if we got a rust_type insertion.
-                    // if our parent is an 'Object' we need to populate with the reflection data here
-                    // 
                     out_doc.nodes.insert(insert_point, in_node.clone());
                     if in_node.value.is_open() {
                         level_overwrite.push(false);
