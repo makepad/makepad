@@ -20,13 +20,26 @@ pub trait LiveFactory {
     fn new_component(&self, cx: &mut Cx) -> Box<dyn LiveComponent>;
 }
 
-pub trait LiveNew {
+pub trait LiveNew: LiveComponent {
     fn new(cx: &mut Cx) -> Self;
-    fn new_apply(cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Self;
-    fn new_from_doc(cx: &mut Cx, live_doc_nodes: LiveDocNodes) -> Self;
-    fn live_type() -> LiveType;
     fn live_type_info() -> LiveTypeInfo;
     fn live_register(cx: &mut Cx);
+
+    fn new_apply(cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> Self where Self:Sized{
+      let mut ret = Self::new(cx);
+      ret.apply(cx, apply_from, index, nodes);
+      ret
+    }
+    
+    fn new_from_doc(cx: &mut Cx, live_doc_nodes: LiveDocNodes)->Self where Self:Sized{
+        let mut ret = Self::new(cx);
+        ret.apply(cx, ApplyFrom::NewFromDoc {file_id: live_doc_nodes.file_id}, live_doc_nodes.index, live_doc_nodes.nodes);
+        ret
+    }
+
+    fn live_type() -> LiveType where Self:'static{
+         LiveType(std::any::TypeId::of::<Self>())
+    }
 }
 
 pub trait ToLiveValue {
@@ -238,9 +251,7 @@ impl<T> LiveNew for Option<T> where T: LiveComponent + LiveNew {
         ret.apply(cx, ApplyFrom::NewFromDoc {file_id: live_doc_nodes.file_id}, live_doc_nodes.index, live_doc_nodes.nodes);
         ret
     }
-    fn live_type() -> LiveType {
-        T::live_type()
-    }
+
     fn live_type_info() -> LiveTypeInfo {
         T::live_type_info()
     }
@@ -280,7 +291,7 @@ macro_rules!live_primitive {
                     module_path: ModulePath::from_str(&module_path!()).unwrap(),
                     live_type: Self::live_type(),
                     fields: Vec::new(),
-                    type_name: Id::from_str(stringify!($ty)).unwrap()
+                    type_name: Id::from_str(stringify!( $ ty)).unwrap()
                 }
             }
             fn live_register(cx: &mut Cx) {

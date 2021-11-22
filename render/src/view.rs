@@ -189,7 +189,7 @@ impl View {
         let view_area = Area::View(ViewArea {view_id: self.view_id, redraw_id: cx.redraw_id});
         let rect = cx.end_turtle(view_area);
         let cxview = &mut cx.views[self.view_id];
-        cxview.rect = rect;
+        cxview.rect = rect; 
         cx.view_stack.pop();
         view_area
     }

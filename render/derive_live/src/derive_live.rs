@@ -259,9 +259,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             
             tb.add("impl").stream(generic.clone());
             tb.add("LiveNew for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
-            tb.add("    fn live_type() -> LiveType {");
-            tb.add("        LiveType(std::any::TypeId::of::<").ident(&struct_name).add(">())");
-            tb.add("    }");
+
             tb.add("    fn live_type_info() -> LiveTypeInfo {");
             tb.add("        let mut fields = Vec::new();");
             
@@ -302,18 +300,6 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                     tb.stream(Some(field.ty.clone())).add("::live_register(cx);");
                 }
             }
-            tb.add("    }");
-            
-            tb.add("    fn new_apply(cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> Self {");
-            tb.add("        let mut ret = Self::new(cx);");
-            tb.add("        ret.apply(cx, apply_from, index, nodes);");
-            tb.add("        ret");
-            tb.add("    }");
-            
-            tb.add("    fn new_from_doc(cx: &mut Cx, live_doc_nodes:LiveDocNodes) -> Self {");
-            tb.add("        let mut ret = Self::new(cx);");
-            tb.add("        ret.apply(cx, ApplyFrom::NewFromDoc{file_id:live_doc_nodes.file_id}, live_doc_nodes.index, live_doc_nodes.nodes);");
-            tb.add("        ret");
             tb.add("    }");
             
             tb.add("    fn new(cx: &mut Cx) -> Self {");
@@ -419,24 +405,12 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             items[pick.unwrap()].gen_new(&mut tb);
             tb.add("    ;ret.after_new(cx);ret");
             tb.add("    }");
-            tb.add("    fn new_apply(cx: &mut Cx, apply_from: ApplyFrom, index:usize, nodes:&[LiveNode]) -> Self {");
-            tb.add("        let mut ret = Self::new(cx);");
-            tb.add("        ret.apply(cx, apply_from, index, nodes);");
-            tb.add("        ret");
-            tb.add("    }");
-            tb.add("    fn new_from_doc(cx: &mut Cx, live_doc_nodes:LiveDocNodes) -> Self {");
-            tb.add("        let mut ret = Self::new(cx);");
-            tb.add("        ret.apply(cx, ApplyFrom::NewFromDoc{file_id:live_doc_nodes.file_id}, live_doc_nodes.index, live_doc_nodes.nodes);");
-            tb.add("        ret");
-            tb.add("    }");
-            
-            tb.add("    fn live_type() -> LiveType {");
-            tb.add("        LiveType(std::any::TypeId::of::<").ident(&enum_name).add(">())");
-            tb.add("    }");
+
             tb.add("    fn live_type_info() -> LiveTypeInfo {");
             tb.add("        LiveTypeInfo{module_path:ModulePath::from_str(&module_path!()).unwrap(), live_type:Self::live_type(), fields:Vec::new(),");
             tb.add("            type_name:Id::from_str(").string(&enum_name).add(").unwrap()}");
             tb.add("    }");
+            
             tb.add("    fn live_register(cx: &mut Cx) {");
             
             let is_u32_enum = main_attribs.iter().find( | attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "u32").is_some();
