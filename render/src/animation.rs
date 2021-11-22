@@ -272,6 +272,7 @@ impl Animator {
         let mut state_index = 0;
         let mut to_index = to_nodes.child_by_name(to_root_index, state_id).unwrap();
         let mut stack_depth = 0;
+        
 
         while state_index < state_nodes.len() {
             let state_node = &mut state_nodes[state_index];
@@ -291,6 +292,7 @@ impl Animator {
                 to_index = to_nodes.skip_node(to_index);
             }
             else {
+                
                 if to_node.value.is_array() {
                     if !state_node.value.is_array() {panic!()};
                     if state_node.id != to_node.id { 
@@ -331,6 +333,8 @@ impl Animator {
                     state_index = state_nodes.skip_node(state_index);
                 }
                 else { 
+                    
+
                     if to_node.value.is_open() {
                         if stack_depth == 0 {
                             state_node.id = to_node.id;
@@ -356,7 +360,10 @@ impl Animator {
                         }
                     }
                     else {
-                        if !state_node.value.is_array() {panic!()};
+                        if !state_node.value.is_array() {
+                            println!("State node is not an array <state.id> {} <to_node.id> {}", state_node.id, to_node.id);
+                            panic!()
+                        };
                         if state_node.id != to_node.id {
                             println!("State node order desync: <state.id> {} <to_node.id> {}", state_node.id, to_node.id);
                             return

@@ -8,15 +8,8 @@ use std::fs::File;
 
 live_register!{
     use crate::shader_std::*;
-    use crate::geometrygen::GeometryQuad2D;
     
-    Font: Struct {
-        rust_type: {{Font}}
-    }
-    
-    DrawTrapezoidText: DrawShader2D {
-        rust_type: {{DrawTrapezoidText}}
-        geometry: GeometryQuad2D {}
+    DrawTrapezoidText: {{DrawTrapezoidText}} {
         
         varying v_p0: vec2;
         varying v_p1: vec2;
@@ -316,7 +309,7 @@ impl CxDrawFontAtlas {
 
         let draw_trapezoid_text = DrawTrapezoidText::new_from_doc(
             cx,
-            cx.live_registry.clone().borrow().module_path_id_to_doc(&module_path!(), id!(DrawTrapezoidText)).unwrap()
+            cx.live_registry.clone().borrow().module_path_str_id_to_doc(&module_path!(), id!(DrawTrapezoidText)).unwrap()
         );
         
         // ok we need to initialize drawtrapezoidtext from a live pointer.

@@ -1,11 +1,7 @@
 live_register!{
-    
     use crate::shader_std::*;
-    use crate::geometrygen::GeometryQuad2D;
     
-    DrawQuad: DrawShader2D {
-        rust_type: {{DrawQuad}}
-        geometry: GeometryQuad2D {}
+    DrawQuad: {{DrawQuad}} {
         varying pos: vec2
         
         fn scroll(self) -> vec2 {
