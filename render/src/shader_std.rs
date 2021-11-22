@@ -2,20 +2,6 @@ use crate::cx::*;
 
 live_register!{
     
-    DrawShader2D: DrawShader{
-        uniform camera_projection: mat4 in pass;
-        uniform camera_view: mat4 in pass;
-        uniform camera_inv: mat4 in pass;
-        uniform dpi_factor: float in pass;
-        uniform dpi_dilate: float in pass;
-        
-        uniform view_transform: mat4 in view;
-        
-        uniform draw_clip: vec4 in draw;
-        uniform draw_scroll: vec4 in draw;
-        uniform draw_zbias: float in draw;
-    }
-    
     const PI: float = 3.141592653589793;
     const E: float = 2.718281828459045;
     const LN2: float = 0.6931471805599453;

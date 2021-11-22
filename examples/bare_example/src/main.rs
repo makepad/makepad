@@ -6,22 +6,12 @@ live_register!{
     use makepad_render::drawtext::DrawText;
     use makepad_widget::normalbutton::NormalButton;
     use makepad_widget::desktopwindow::DesktopWindow;
-    App: {
-        draw_quad: DrawColor {
+    App: {{BareExampleApp}} {
+        draw_quad: {
             color: #f00
             fn pixel(self) -> vec4 {
                 return mix(#f00, #0f0, self.geom_pos.y)
             }
-        }
-        desktop_window: DesktopWindow{}
-        draw_text: DrawText {
-        }
-        
-        normal_button: NormalButton {
-        }
-         
-        desktop_button: DesktopButton{
-            
         }
     }
 }
@@ -43,10 +33,10 @@ impl BareExampleApp {
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {
-        println!("{}",  cx.live_registry.clone().borrow().module_path_id_to_doc(&module_path!(), id!(App)).unwrap().nodes.len()*48);
+        //println!("{}",  cx.live_registry.clone().borrow().module_path_str_id_to_doc(&module_path!(), id!(App)).unwrap().nodes.to_string(0,100));
         Self::new_from_doc(
             cx,
-            cx.live_registry.clone().borrow().module_path_id_to_doc(&module_path!(), id!(App)).unwrap()
+            cx.live_registry.clone().borrow().module_path_str_id_to_doc(&module_path!(), id!(App)).unwrap()
         )
     }
     

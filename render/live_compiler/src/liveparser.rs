@@ -10,26 +10,26 @@ use crate::liveerror::LiveErrorOrigin;
 use crate::id::Id;
 //use crate::id::LocalPtr;
 use crate::livedocument::LiveDocument;
-use crate::livenode::{LiveNode, LiveValue, LiveType};
+use crate::livenode::{LiveNode, LiveValue, LiveTypeInfo};
 
 
 pub struct LiveParser<'a> {
     pub token_index: usize,
     pub file_id: FileId,
-    pub live_types: &'a [LiveType],
+    pub live_type_infos: &'a [LiveTypeInfo],
     pub tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
     pub token_with_span: TokenWithSpan,
     pub end: usize,
 }
 
 impl<'a> LiveParser<'a> {
-    pub fn new(tokens: &'a [TokenWithSpan], live_types: &'a [LiveType], file_id: FileId) -> Self {
+    pub fn new(tokens: &'a [TokenWithSpan], live_type_infos: &'a [LiveTypeInfo], file_id: FileId) -> Self {
         let mut tokens_with_span = tokens.iter().cloned();
         let token_with_span = tokens_with_span.next().unwrap();
         LiveParser {
             file_id,
             tokens_with_span,
-            live_types,
+            live_type_infos,
             token_with_span,
             token_index: 0,
             end: 0,
@@ -160,7 +160,7 @@ impl<'a> LiveParser<'a> {
         ld.nodes.push(LiveNode {
             token_id:Some(token_id),
             id: prop_id,
-            value: LiveValue::Fn {
+            value: LiveValue::DSL {
                 token_start: token_start,
                 token_count: (token_index - token_start),
                 scope_start: 0,
@@ -183,7 +183,7 @@ impl<'a> LiveParser<'a> {
         ld.nodes.push(LiveNode {
             token_id:Some(token_id),
             id: const_id,
-            value: LiveValue::Const {
+            value: LiveValue::DSL {
                 token_start: token_start,
                 token_count: self.token_index - token_start,
                 scope_start: 0,
@@ -205,7 +205,7 @@ impl<'a> LiveParser<'a> {
         ld.nodes.push(LiveNode {
             token_id:Some(token_id),
             id: real_prop_id,
-            value: LiveValue::VarDef {
+            value: LiveValue::DSL {
                 token_start,
                 token_count: (self.token_index - token_start),
                 scope_start: 0,
@@ -309,16 +309,20 @@ impl<'a> LiveParser<'a> {
                     self.skip_token();
                     let val = self.expect_int() ?;
                     
-                    if val< 0 || val >= self.live_types.len() as i64 {
+                    if val< 0 || val >= self.live_type_infos.len() as i64 {
                         return Err(self.error(format!("live_type index out of range {}", val)));
                     }
                     ld.nodes.push(LiveNode {
                         token_id:Some(token_id),
                         id: prop_id,
-                        value: LiveValue::LiveType(self.live_types[val as usize])
+                        value: LiveValue::Class(self.live_type_infos[val as usize].live_type)
                     });
                     self.expect_token(Token::CloseBrace) ?;
                     self.expect_token(Token::CloseBrace) ?;
+
+                    self.expect_token(Token::OpenBrace)?;
+                    self.expect_live_class(false, prop_id, ld) ?;
+
                     return Ok(());
                 }
                 else {
@@ -399,7 +403,7 @@ impl<'a> LiveParser<'a> {
                     ld.nodes.push(LiveNode {
                         token_id: Some(self.get_token_id()),
                         id: prop_id,
-                        value: LiveValue::Class {class: base}
+                        value: LiveValue::Clone(base)
                     });
                     self.expect_token(Token::OpenBrace)?;
                     self.expect_live_class(false, prop_id, ld) ?;

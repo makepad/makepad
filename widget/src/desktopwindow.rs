@@ -4,21 +4,16 @@ use crate::windowmenu::*;
 use crate::buttonlogic::*;
 
 live_register!{
-    use makepad_render::drawcolor::DrawColor;
-    use makepad_render::drawtext::DrawText;
-    use makepad_widget::desktopbutton::DesktopButton;
-    
-    DesktopWindow: {
-        rust_type: {{DesktopWindow}}
+    DesktopWindow: {{DesktopWindow}} {
         clear_color: #1e1e1e
-        inner_layout: Layout {}
-        caption_text: DrawText {}
-        min_btn: DesktopButton {}
-        max_btn: DesktopButton {}
-        close_btn: DesktopButton {}
-        xr_btn: DesktopButton {}
-        fullscreen_btn: DesktopButton {}
-        caption_bg: DrawColor {color: #3d3d3d}
+        //inner_layout: Layout {}
+        //caption_text: DrawText {}
+        //min_btn: DesktopButton {}
+        //max_btn: DesktopButton {}
+        //close_btn: DesktopButton {}
+        // xr_btn: DesktopButton {}
+        //fullscreen_btn: DesktopButton {}
+        caption_bg: {color: #3d3d3d}
         caption: "Desktop Window"
     }
 }
@@ -165,7 +160,7 @@ impl DesktopWindow {
         self.main_view.begin_view(cx).unwrap();
         
         self.caption_view.set_layout(cx, Layout {
-            walk: Walk::wh(Width::Fill, Height::Compute),
+            walk: Walk::wh(Width::Filled, Height::Computed),
             ..Layout::default()
         });
         
@@ -181,7 +176,7 @@ impl DesktopWindow {
                         
                         self.caption_bg.begin_quad(cx, Layout {
                             align: Align {fx: 1.0, fy: 0.0},
-                            walk: Walk::wh(Width::Fill, Height::Compute),
+                            walk: Walk::wh(Width::Filled, Height::Computed),
                             ..Default::default()
                         });
                         
@@ -222,7 +217,7 @@ impl DesktopWindow {
                         }
                         self.caption_bg.begin_quad(cx, Layout {
                             align: Align {fx: 0.5, fy: 0.5},
-                            walk: Walk::wh(Width::Fill, Height::Fix(26.)),
+                            walk: Walk::wh(Width::Filled, Height::Fixed(26.)),
                             ..Default::default()
                         });
                         self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
@@ -234,7 +229,7 @@ impl DesktopWindow {
                         if self.window.is_fullscreen(cx) { // put a bar at the top
                             self.caption_bg.begin_quad(cx, Layout {
                                 align: Align {fx: 0.5, fy: 0.5},
-                                walk: Walk::wh(Width::Fill, Height::Fix(22.)),
+                                walk: Walk::wh(Width::Filled, Height::Fixed(22.)),
                                 ..Default::default()
                             });
                             self.caption_bg.end_quad(cx);
@@ -246,14 +241,8 @@ impl DesktopWindow {
             self.caption_view.end_view(cx);
         }
         cx.turtle_new_line();
-        /*
-        if self.inner_over_chrome {
-            let _ = self.inner_view.begin_view(cx, Layout {abs_origin: Some(Vec2::default()), ..self.inner_layout});
-        }
-        else {
-            let _ = self.inner_view.begin_view(cx, self.inner_layout);
-        }*/
-        self.inner_view.begin_view(cx);
+
+        self.inner_view.begin_view(cx).unwrap();
         Ok(())
     }
     

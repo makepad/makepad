@@ -44,8 +44,8 @@ impl Walk{
     pub fn fixed(w:f32, h:f32)->Self{
         Self{
             margin:Margin::default(),
-            width:Width::Fix(w),
-            height:Height::Fix(h)
+            width:Width::Fixed(w),
+            height:Height::Fixed(h)
         }
     }
 }
@@ -55,18 +55,6 @@ pub struct Align {
     #[live] pub fx: f32,
     #[live] pub fy: f32
 }
-/*
-impl Align {
-    pub fn left_top() -> Align {Align {fx: 0., fy: 0.}}
-    pub fn center_top() -> Align {Align {fx: 0.5, fy: 0.0}}
-    pub fn right_top() -> Align {Align {fx: 1.0, fy: 0.0}}
-    pub fn left_center() -> Align {Align {fx: 0.0, fy: 0.5}}
-    pub fn center() -> Align {Align {fx: 0.5, fy: 0.5}}
-    pub fn right_center() -> Align {Align {fx: 1.0, fy: 0.5}}
-    pub fn left_bottom() -> Align {Align {fx: 0., fy: 1.0}}
-    pub fn center_bottom() -> Align {Align {fx: 0.5, fy: 1.0}}
-    pub fn right_bottom() -> Align {Align {fx: 1.0, fy: 1.0}}
-}*/
 
 #[derive(Clone, Copy, Default, Debug, LiveComponent, LiveApply)]
 pub struct Margin {
@@ -75,33 +63,6 @@ pub struct Margin {
     #[live] pub r: f32,
     #[live] pub b: f32
 }
-/*
-impl Margin {
-    pub fn zero() -> Margin {
-        Margin {l: 0.0, t: 0.0, r: 0.0, b: 0.0}
-    }
-    
-    pub fn all(v: f32) -> Margin {
-        Margin {l: v, t: v, r: v, b: v}
-    }
-    
-    pub fn left(v: f32) -> Margin {
-        Margin {l: v, t: 0.0, r: 0.0, b: 0.0}
-    }
-    
-    pub fn top(v: f32) -> Margin {
-        Margin {l: 0.0, t: v, r: 0.0, b: 0.0}
-    }
-    
-    pub fn right(v: f32) -> Margin {
-        Margin {l: 0.0, t: 0.0, r: v, b: 0.0}
-    }
-    
-    pub fn bottom(v: f32) -> Margin {
-        Margin {l: 0.0, t: 0.0, r: 0.0, b: v}
-    }
-    
-}*/
 
 #[derive(Clone, Copy, Default, Debug, LiveComponent, LiveApply)]
 pub struct Padding {
@@ -110,16 +71,6 @@ pub struct Padding {
     #[live] pub r: f32,
     #[live] pub b: f32
 }
-/*
-impl Padding {
-    pub fn zero() -> Padding {
-        Padding {l: 0.0, t: 0.0, r: 0.0, b: 0.0}
-    }
-    pub fn all(v: f32) -> Padding {
-        Padding {l: v, t: v, r: v, b: v}
-    }
-}
-*/
 
 #[derive(Copy, Clone, Debug, LiveComponent, LiveApply)]
 pub enum Direction {
@@ -148,40 +99,44 @@ impl Default for Axis {
 
 #[derive(Copy, Clone, Debug, LiveComponent, LiveApply)]
 pub enum Width {
-    #[pick] Fill,
-    #[live(200.0)] Fix(f32),
-    #[live] Compute,
+    #[pick] Filled,
+    #[live(200.0)] Fixed(f32),
+    #[live] Computed,
+    /*
     #[live] ComputeFill,
     #[live(0.0)] FillPad(f32),
     #[live(0.0)] FillScale(f32),
     #[live(0.0, 0.0)] FillScalePad(f32, f32),
     #[live(0.0)] Scale(f32),
     #[live(0.0, 0.0)] ScalePad(f32, f32),
+    */
 }
 
 #[derive(Copy, Clone, Debug, LiveComponent, LiveApply)]
 pub enum Height {
-    #[pick] Fill,
-    #[live(200.0)] Fix(f32),
-    #[live] Compute,
+    #[pick] Filled,
+    #[live(200.0)] Fixed(f32),
+    #[live] Computed,
+    /*
     #[live] ComputeFill,
     #[live(0.0)] FillPad(f32),
     #[live(0.0)] FillScale(f32),
     #[live(0.0, 0.0)] FillScalePad(f32, f32),
     #[live(0.0)] Scale(f32),
     #[live(0.0, 0.0)] ScalePad(f32, f32),
+    */
 }
 
 impl Default for Width {
     fn default() -> Self {
-        Width::Fill
+        Width::Filled
     }
 }
 
 
 impl Default for Height {
     fn default() -> Self {
-        Height::Fill
+        Height::Filled
     }
 }
 
@@ -189,7 +144,7 @@ impl Default for Height {
 impl Width {
     pub fn fixed(&self) -> f32 {
         match self {
-            Width::Fix(v) => *v,
+            Width::Fixed(v) => *v,
             _ => 0.
         }
     }
@@ -199,7 +154,7 @@ impl Width {
 impl Height {
     pub fn fixed(&self) -> f32 {
         match self {
-            Height::Fix(v) => *v,
+            Height::Fixed(v) => *v,
             _ => 0.
         }
     }
@@ -330,26 +285,26 @@ impl Cx {
         
         let w = if old.width.is_nan() {
             if old.bound_right_bottom.x == std::f32::NEG_INFINITY { // nothing happened, use padding
-                Width::Fix(old.layout.padding.l + old.layout.padding.r)
+                Width::Fixed(old.layout.padding.l + old.layout.padding.r)
             }
             else { // use the bounding box
-                Width::Fix(max_zero_keep_nan(old.bound_right_bottom.x - old.origin.x + old.layout.padding.r).max(old.min_width))
+                Width::Fixed(max_zero_keep_nan(old.bound_right_bottom.x - old.origin.x + old.layout.padding.r).max(old.min_width))
             }
         }
         else {
-            Width::Fix(old.width)
+            Width::Fixed(old.width)
         };
         
         let h = if old.height.is_nan() {
             if old.bound_right_bottom.y == std::f32::NEG_INFINITY { // nothing happened use the padding
-                Height::Fix(old.layout.padding.t + old.layout.padding.b)
+                Height::Fixed(old.layout.padding.t + old.layout.padding.b)
             }
             else { // use the bounding box
-                Height::Fix(max_zero_keep_nan(old.bound_right_bottom.y - old.origin.y + old.layout.padding.b).max(old.min_height))
+                Height::Fixed(max_zero_keep_nan(old.bound_right_bottom.y - old.origin.y + old.layout.padding.b).max(old.min_height))
             }
         }
         else {
-            Height::Fix(old.height)
+            Height::Fixed(old.height)
         };
         
         let margin = old.layout.walk.margin.clone();
@@ -366,8 +321,8 @@ impl Cx {
         // when a turtle is x-abs / y-abs you dont walk the parent
         if !old.layout.abs_origin.is_none() {
             let abs_origin = if let Some(abs_origin) = old.layout.abs_origin {abs_origin} else {Vec2::default()};
-            let w = if let Width::Fix(vw) = w {vw} else {0.};
-            let h = if let Height::Fix(vh) = h {vh} else {0.};
+            let w = if let Width::Fixed(vw) = w {vw} else {0.};
+            let h = if let Height::Fixed(vh) = h {vh} else {0.};
             return Rect {pos: abs_origin, size: vec2(w, h)};
         }
         
@@ -974,7 +929,7 @@ impl Cx {
     
     pub fn is_height_computed(&self) -> bool {
         if let Some(turtle) = self.turtles.last() {
-            if let Height::Compute = turtle.layout.walk.height {
+            if let Height::Computed = turtle.layout.walk.height {
                 return true
             }
         }
@@ -983,7 +938,7 @@ impl Cx {
     
     pub fn is_width_computed(&self) -> bool {
         if let Some(turtle) = self.turtles.last() {
-            if let Width::Compute = turtle.layout.walk.width {
+            if let Width::Computed = turtle.layout.walk.width {
                 return true
             }
         }
@@ -993,29 +948,29 @@ impl Cx {
     
     pub fn eval_width(&self, width: &Width, margin: Margin, abs: bool, abs_pos: f32) -> (f32, f32) {
         match width {
-            Width::Compute => (std::f32::NAN, 0.),
-            Width::ComputeFill => (std::f32::NAN, self._get_width_left(abs, abs_pos) - (margin.l + margin.r)),
-            Width::Fix(v) => (max_zero_keep_nan(*v), 0.),
-            Width::Fill => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - (margin.l + margin.r)), 0.),
-            Width::FillPad(p) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - p - (margin.l + margin.r)), 0.),
-            Width::FillScale(s) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) * s - (margin.l + margin.r)), 0.),
-            Width::FillScalePad(s, p) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) * s - p - (margin.l + margin.r)), 0.),
-            Width::Scale(s) => (max_zero_keep_nan(self._get_width_total(abs, abs_pos) * s - (margin.l + margin.r)), 0.),
-            Width::ScalePad(s, p) => (max_zero_keep_nan(self._get_width_total(abs, abs_pos) * s - p - (margin.l + margin.r)), 0.),
+            Width::Computed => (std::f32::NAN, 0.),
+            //Width::ComputeFill => (std::f32::NAN, self._get_width_left(abs, abs_pos) - (margin.l + margin.r)),
+            Width::Fixed(v) => (max_zero_keep_nan(*v), 0.),
+            Width::Filled => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - (margin.l + margin.r)), 0.),
+            //Width::FillPad(p) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - p - (margin.l + margin.r)), 0.),
+            //Width::FillScale(s) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) * s - (margin.l + margin.r)), 0.),
+            //Width::FillScalePad(s, p) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) * s - p - (margin.l + margin.r)), 0.),
+            //Width::Scale(s) => (max_zero_keep_nan(self._get_width_total(abs, abs_pos) * s - (margin.l + margin.r)), 0.),
+            //Width::ScalePad(s, p) => (max_zero_keep_nan(self._get_width_total(abs, abs_pos) * s - p - (margin.l + margin.r)), 0.),
         }
     }
     
     pub fn eval_height(&self, height: &Height, margin: Margin, abs: bool, abs_pos: f32) -> (f32, f32) {
         match height {
-            Height::Compute => (std::f32::NAN, 0.),
-            Height::ComputeFill => (std::f32::NAN, self._get_height_left(abs, abs_pos) - (margin.t + margin.b)),
-            Height::Fix(v) => (max_zero_keep_nan(*v), 0.),
-            Height::Fill => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - (margin.t + margin.b)), 0.),
-            Height::FillPad(p) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - p - (margin.t + margin.b)), 0.),
-            Height::FillScale(s) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) * s - (margin.t + margin.b)), 0.),
-            Height::FillScalePad(s, p) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) * s - p - (margin.t + margin.b)), 0.),
-            Height::Scale(s) => (max_zero_keep_nan(self._get_height_total(abs, abs_pos) * s - (margin.t + margin.b)), 0.),
-            Height::ScalePad(s, p) => (max_zero_keep_nan(self._get_height_total(abs, abs_pos) * s - p - (margin.t + margin.b)), 0.),
+            Height::Computed => (std::f32::NAN, 0.),
+            //Height::ComputeFill => (std::f32::NAN, self._get_height_left(abs, abs_pos) - (margin.t + margin.b)),
+            Height::Fixed(v) => (max_zero_keep_nan(*v), 0.),
+            Height::Filled=> (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - (margin.t + margin.b)), 0.),
+            //Height::FillPad(p) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - p - (margin.t + margin.b)), 0.),
+            //Height::FillScale(s) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) * s - (margin.t + margin.b)), 0.),
+            //Height::FillScalePad(s, p) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) * s - p - (margin.t + margin.b)), 0.),
+            //Height::Scale(s) => (max_zero_keep_nan(self._get_height_total(abs, abs_pos) * s - (margin.t + margin.b)), 0.),
+            //Height::ScalePad(s, p) => (max_zero_keep_nan(self._get_height_total(abs, abs_pos) * s - p - (margin.t + margin.b)), 0.),
         }
     }
 }
