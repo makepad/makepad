@@ -28,6 +28,15 @@ pub enum ButtonAction {
     Up
 }
 
+impl IntoFrameAction for ButtonAction{
+    fn into_frame_action(self)->Option<Box<dyn FrameAction>>{
+        if let ButtonAction::None = self{
+            return None
+        }
+        return Some(Box::new(self));
+    }
+}
+
 #[derive(Copy, Clone, Default)]
 pub struct ButtonHandleResult {
     pub action: ButtonAction,
