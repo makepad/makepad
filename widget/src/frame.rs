@@ -19,8 +19,8 @@ impl LiveCast for Frame{
 }
 
 impl FrameComponent for Frame {
-    fn handle(&mut self, cx: &mut Cx, event: &mut Event)->Option<Box<dyn FrameAction>>{
-        self.handle_frame(cx, event).into_frame_action()
+    fn handle(&mut self, cx: &mut Cx, event: &mut Event)->Option<Box<dyn AnyAction>>{
+        self.handle_frame(cx, event).into_any_action()
     }
     
     fn draw(&mut self, cx: &mut Cx) {
@@ -114,7 +114,7 @@ impl LiveComponent for Frame {
 
 pub struct FrameActionItem {
     pub id: Id,
-    pub action: Box<dyn FrameAction>
+    pub action: Box<dyn AnyAction>
 }
 
 pub struct FrameActions(Vec<FrameActionItem>);
@@ -129,8 +129,8 @@ impl FrameActions {
     }
 }
 
-impl IntoFrameAction for FrameActions{
-    fn into_frame_action(self)->Option<Box<dyn FrameAction>>{
+impl IntoAnyAction for FrameActions{
+    fn into_any_action(self)->Option<Box<dyn AnyAction>>{
         if self.0.len() == 0{
             return None
         }
@@ -147,6 +147,7 @@ impl Frame{
                 if let Some(action) = fc.handle(cx, event){
                     // flatten frame events
                     if let Some(results) = action.cast::<FrameActions>(){
+                        // we need to do some shit here but it no work.
                         //for result in &results.0{
                         //    actions.push(result);
                         //}
