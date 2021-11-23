@@ -21,7 +21,6 @@ live_register!{
 
 #[derive(LiveComponent, LiveApply)]
 pub struct DesktopWindow {
-    
     #[live] pub pass: Pass,
     #[live] pub color_texture: Texture,
     #[live] pub depth_texture: Texture,
