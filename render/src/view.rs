@@ -17,6 +17,7 @@ impl Drop for View {
     }
 }
 
+impl LiveCast for View{}
 impl LiveNew for View {
     fn new(cx: &mut Cx)->Self{
         let views_free = cx.views_free.clone();

@@ -473,7 +473,7 @@ impl<'a> LiveParser<'a> {
                         ld.nodes.push(LiveNode {
                             token_id: Some(token_id),
                             id: prop_id,
-                            value: LiveValue::Id(prop_id)
+                            value: LiveValue::Id(base)
                         });
                     }
                 }

@@ -30,7 +30,7 @@ pub enum LiveOrCalc {
 }
 
 #[derive(Clone, Debug)]
-pub struct LiveNode { // 3x u64
+pub struct LiveNode { // 40 bytes. Don't really see ways to compress
     pub token_id: Option<TokenId>,
     pub id: Id,
     pub value: LiveValue,
@@ -40,14 +40,15 @@ pub struct LiveNode { // 3x u64
 #[derive(Clone, Debug)]
 pub enum LiveValue {
     None,
+    // string types
     Str(&'static str),
-    //String(String),
     DocumentString {
         string_start: usize,
         string_count: usize
     },
     FittedString(FittedString),
     InlineString(InlineString),
+    // bare values
     Bool(bool),
     Int(i64),
     Float(f64),
@@ -55,19 +56,20 @@ pub enum LiveValue {
     Vec2(Vec2),
     Vec3(Vec3),
     Vec4(Vec4),
-
     Id(Id),
-
+    
+    // enum thing
     BareEnum {base: Id, variant: Id},
-    // stack items
+    // tree items
     Array,
     TupleEnum {base: Id, variant: Id},
     NamedEnum {base: Id, variant: Id},
-    Object, // subnodes including this one
-    Clone(Id), // subnodes including this one
-    Class(LiveType), // subnodes including this one
+    Object, 
+    Clone(Id), 
+    Class(LiveType),
     Close,
-    // the shader code types
+
+    // shader code and other DSLs
     DSL {
         token_start: u32,
         token_count: u32,
@@ -223,14 +225,14 @@ impl LiveValue {
             Self::FittedString(_) |
             Self::InlineString{..} |
             Self::DocumentString {..} |
-            Self::Id {..} |
             Self::Bool(_) |
             Self::Int(_) |
             Self::Float(_) |
             Self::Color(_) |
             Self::Vec2(_) |
             Self::Vec3(_) |
-            Self::Vec4(_)  => true,
+            Self::Vec4(_) |
+            Self::Id {..} => true,
             _=>false
         }
     }
@@ -308,7 +310,6 @@ impl LiveValue {
             Self::Vec2(_) => 9,
             Self::Vec3(_) => 10,
             Self::Vec4(_) => 11,
-            
             Self::Id(_) => 12,
             
             Self::BareEnum {..} => 13,
@@ -336,6 +337,7 @@ pub trait LiveNodeSlice {
     fn next_child(&self, child_index: usize) -> Option<usize>;
     fn child_by_number(&self, parent_index: usize, child_number: usize) -> Option<usize>;
     fn child_by_name(&self, parent_index: usize, name: Id) -> Result<usize, usize>;
+    fn prev_by_name(&self, parent_index: usize, name: Id) -> Option<usize>;
     fn count_children(&self, parent_index: usize) -> usize;
     fn skip_node(&self, node_index: usize)->usize;
     fn clone_child(&self, parent_index: usize, out_vec:&mut Vec<LiveNode>);
@@ -378,6 +380,35 @@ impl<T> LiveNodeSlice for T where T:AsRef<[LiveNode]> {
             index -= 1;
         }
         Some(0)
+    }
+    
+    fn prev_by_name(&self, index: usize, name: Id) -> Option<usize>{
+        let self_ref = self.as_ref();
+        if self_ref.len() == 0 {
+            return None
+        }
+        let mut stack_depth:isize = 0;
+        let mut index = index;
+        // scan backwards to find a node with this name
+        loop {
+            if self_ref[index].value.is_open(){
+                if stack_depth>0{
+                    stack_depth -= 1;
+                }
+            }
+            else if self_ref[index].value.is_close(){
+                stack_depth += 1;
+            }
+            if stack_depth == 0 && self_ref[index].id == name && !self_ref[index].value.is_close(){ // valuenode
+                return Some(index)
+            }
+            
+            if index == 0 {
+                break
+            }
+            index -= 1;
+        }
+        None
     }
     
     fn child_by_number(&self, parent_index: usize, child_number: usize) -> Option<usize> {
@@ -730,7 +761,7 @@ impl<T> LiveNodeSlice for T where T:AsRef<[LiveNode]> {
                     writeln!(f, "{}: <Float> {}", node.id, v).unwrap();
                 },
                 LiveValue::Color(v)=>{
-                    writeln!(f, "{}: <Color>{}", node.id, v).unwrap();
+                    writeln!(f, "{}: <Color>{:08x}", node.id, v).unwrap();
                 },
                 LiveValue::Vec2(v)=>{
                     writeln!(f, "{}: <Vec2> {:?}", node.id, v).unwrap();
@@ -926,6 +957,7 @@ impl LiveNodeVec for Vec<LiveNode> {
                     return insert_point
                 }
             }
+            
             index += 1;
         }
         panic!();

@@ -10,20 +10,20 @@ live_register!{
             }
         }*/
         use makepad_widget::frame::Frame;
-        use makepad_widget::normalbutton::NormalButton;
+        use makepad_widget::button::Button;
         frame:{
-            b1:NormalButton{label:"hi"}
-            b2:NormalButton{label:"ho"}
-            b3:NormalButton{label:"ho"}
+            b1:Button{label:"hi"}
+            b2:Button{label:"ho"}
+            b3:Button{label:"ho"}
             frame1:Frame{children:[b3]}
-            children:[b1, b2]
+            children:[b1, b2, b3, frame1]
         }
     }
 }
 
 main_app!(BareExampleApp);
 
-#[derive(LiveComponent, LiveApply)]
+#[derive(LiveComponent, LiveApply, LiveCast)]
 pub struct BareExampleApp {
     #[live] desktop_window: DesktopWindow,
     #[live] frame: Frame
@@ -52,8 +52,7 @@ impl BareExampleApp {
     
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         self.desktop_window.handle_desktop_window(cx, event);
-        //self.normal_button.handle_normal_button(cx, event);
-        
+        self.frame.handle_frame(cx, event);
         match event {
             Event::Construct => {
             },

@@ -34,7 +34,7 @@ live_register!{
 
 use crate::cx::*;
 
-#[derive(LiveComponent, LiveApply)]
+#[derive(LiveComponent, LiveApply, LiveCast)]
 #[repr(C)]
 pub struct DrawQuad {
     #[live] pub geometry: GeometryQuad2D,

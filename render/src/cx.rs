@@ -108,7 +108,7 @@ pub struct Cx {
     pub turtles: Vec<Turtle>,
     pub align_list: Vec<Area>,
     
-    pub live_factories: HashMap<LiveType, Box<dyn LiveFactory>>,
+    pub live_factories: Rc<RefCell<HashMap<LiveType, Box<dyn LiveFactory>>>>,
     pub draw_shader_ptr_to_id: HashMap<DrawShaderPtr, usize>,
     pub draw_shader_compile_set: BTreeSet<DrawShaderPtr>,
     
@@ -262,7 +262,7 @@ impl Default for Cx {
             turtles: Vec::new(),
             align_list: Vec::new(),
             
-            live_factories: HashMap::new(),
+            live_factories: Rc::new(RefCell::new(HashMap::new())),
             draw_shader_ptr_to_id: HashMap::new(),
             draw_shader_compile_set: BTreeSet::new(),
             

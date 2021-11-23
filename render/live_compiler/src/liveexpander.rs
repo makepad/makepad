@@ -226,7 +226,7 @@ impl<'a> LiveExpander<'a> {
             match in_value {
                 LiveValue::Clone(clone) => {
                     if let Some(target) = self.scope_stack.find_item(*clone) {
-                        let cn = match target {
+                        let val = match target {
                             LiveScopeTarget::LocalPtr(local_ptr) => {
                                 if out_doc.nodes.clone_children_self(local_ptr.0, Some(out_index + 1)){
                                     self.errors.push(LiveError {
@@ -235,15 +235,15 @@ impl<'a> LiveExpander<'a> {
                                         message: format!("Infinite recursion at {}", in_node.id)
                                     }); 
                                 }
-                                out_doc.nodes[local_ptr.0].value.get_clone_name()
+                                out_doc.nodes[local_ptr.0].value.clone()
                             }
                             LiveScopeTarget::LivePtr(live_ptr) => {
                                 let doc = &self.live_registry.expanded[live_ptr.file_id.to_index()];
                                 out_doc.nodes.clone_children_from(live_ptr.node_index(), Some(out_index + 1), &doc.nodes);
-                                doc.nodes[live_ptr.node_index()].value.get_clone_name()
+                                doc.nodes[live_ptr.node_index()].value.clone()
                             }
                         };
-                        out_doc.nodes[out_index].value.set_clone_name(cn);
+                        out_doc.nodes[out_index].value = val;
                     }
                     self.scope_stack.stack.push(Vec::new());
                     current_parent.push(out_index);
