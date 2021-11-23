@@ -65,7 +65,7 @@ pub struct DrawVars {
     pub draw_shader: Option<DrawShader>,
     pub geometry: Option<Geometry>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS],
-    pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
+    pub texture_slots: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
     pub var_instances: [f32; DRAW_CALL_VAR_INSTANCES]
 }
 

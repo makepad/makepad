@@ -13,8 +13,8 @@ impl Drop for Pass{
     }
 }
 
-impl Pass {
-    pub fn new(cx:&mut Cx)->Self{
+impl LiveNew for Pass {
+    fn new(cx: &mut Cx)->Self{
         let passes_free = cx.passes_free.clone();
         let pass_id =  if let Some(pass_id) = passes_free.borrow_mut().pop(  ){
             pass_id 
@@ -29,7 +29,36 @@ impl Pass {
             passes_free
         }
     }
-    
+}
+
+impl LiveComponent for Pass {
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
+        
+        if !nodes[start_index].value.is_struct_type() {
+            cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, id!(View));
+            return nodes.skip_node(start_index);
+        }
+        
+        let mut index = start_index + 1;
+        loop {
+            if nodes[index].value.is_close() {
+                index += 1;
+                break;
+            }
+            match nodes[index].id {
+                id!(clear_color) => cx.passes[self.pass_id].clear_color = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
+                _=> {
+                    cx.apply_error_no_matching_value(apply_from, index, nodes);
+                    index = nodes.skip_node(index);
+                }
+            }
+        }
+        return index;
+    }
+}
+
+impl Pass {
+
     pub fn begin_pass(&mut self, cx: &mut Cx) {
         
         
@@ -91,7 +120,7 @@ impl Pass {
         cxpass.clear_color = clear_color;
     }
     
-    pub fn add_color_texture(&mut self, cx: &mut Cx, texture: Texture, clear_color: ClearColor) {
+    pub fn add_color_texture(&mut self, cx: &mut Cx, texture: &Texture, clear_color: ClearColor) {
         let cxpass = &mut cx.passes[self.pass_id];
         cxpass.color_textures.push(CxPassColorTexture {
             texture_id: texture.texture_id,
@@ -99,7 +128,7 @@ impl Pass {
         })
     }
     
-    pub fn set_depth_texture(&mut self, cx: &mut Cx, texture: Texture, clear_depth: ClearDepth) {
+    pub fn set_depth_texture(&mut self, cx: &mut Cx, texture: &Texture, clear_depth: ClearDepth) {
         let cxpass = &mut cx.passes[self.pass_id];
         cxpass.depth_texture = Some(texture.texture_id);
         cxpass.clear_depth = clear_depth;
@@ -151,7 +180,7 @@ pub enum ClearDepth {
 #[derive(Default, Clone)]
 pub struct CxPassColorTexture {
     pub clear_color: ClearColor,
-    pub texture_id: u32
+    pub texture_id: usize
 }
 
 #[derive(Default, Clone)]
@@ -183,7 +212,7 @@ pub struct CxPass {
     pub debug: bool,
     pub matrix_mode: PassMatrixMode,
     pub color_textures: Vec<CxPassColorTexture>,
-    pub depth_texture: Option<u32>,
+    pub depth_texture: Option<usize>,
     pub clear_depth: ClearDepth,
     pub depth_init: f64,
     pub clear_color: Vec4,
