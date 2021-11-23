@@ -8,6 +8,7 @@ use crate::span::Span;
 use crate::liveerror::LiveError;
 use crate::liveerror::LiveErrorOrigin;
 use crate::id::Id;
+use crate::math::{Vec2,Vec3,Vec4};
 //use crate::id::LocalPtr;
 use crate::livedocument::LiveDocument;
 use crate::livenode::{LiveNode, LiveValue, LiveTypeInfo};
@@ -114,6 +115,19 @@ impl<'a> LiveParser<'a> {
         }
     }
     
+    fn expect_float(&mut self) -> Result<f64, LiveError> {
+        match self.peek_token() {
+            Token::Float(v) => {
+                self.skip_token();
+                Ok(v)
+            }
+            Token::Int(v) => {
+                self.skip_token();
+                Ok(v as f64)
+            }
+            token => Err(self.error(format!("expected float, unexpected token `{}`", token))),
+        }
+    }
     
     fn expect_token(&mut self, expected: Token) -> Result<(), LiveError> {
         let actual = self.peek_token();
@@ -377,8 +391,51 @@ impl<'a> LiveParser<'a> {
                     value: LiveValue::StringRef {string_start: index as usize, string_count: len as usize}
                 });
             },
-            Token::Ident(id!(vec2)) => {todo!()},
-            Token::Ident(id!(vec3)) => {todo!()},
+            Token::Ident(id!(vec2)) => {
+                self.skip_token();
+                self.expect_token(Token::OpenParen)?;
+                let x =self.expect_float()?;
+                self.expect_token(Token::Punct(id!(,)))?;
+                let y = self.expect_float()?;
+                self.expect_token(Token::CloseParen)?;
+                ld.nodes.push(LiveNode {
+                    token_id: Some(self.get_token_id()),
+                    id: prop_id,
+                    value: LiveValue::Vec2(Vec2{x:x as f32, y:y as f32})
+                });
+            },
+            Token::Ident(id!(vec3)) => {
+                self.skip_token();
+                self.expect_token(Token::OpenParen)?;
+                let x =self.expect_float()?;
+                self.expect_token(Token::Punct(id!(,)))?;
+                let y = self.expect_float()?;
+                self.expect_token(Token::Punct(id!(,)))?;
+                let z = self.expect_float()?;
+                self.expect_token(Token::CloseParen)?;
+                ld.nodes.push(LiveNode {
+                    token_id: Some(self.get_token_id()),
+                    id: prop_id,
+                    value: LiveValue::Vec3(Vec3{x:x as f32, y:y as f32, z:z as f32})
+                });
+            },
+            Token::Ident(id!(vec4)) => {
+                self.skip_token();
+                self.expect_token(Token::OpenParen)?;
+                let x =self.expect_float()?;
+                self.expect_token(Token::Punct(id!(,)))?;
+                let y = self.expect_float()?;
+                self.expect_token(Token::Punct(id!(,)))?;
+                let z = self.expect_float()?;
+                self.expect_token(Token::Punct(id!(,)))?;
+                let w = self.expect_float()?;
+                self.expect_token(Token::CloseParen)?;
+                ld.nodes.push(LiveNode {
+                    token_id: Some(self.get_token_id()),
+                    id: prop_id,
+                    value: LiveValue::Vec4(Vec4{x:x as f32, y:y as f32, z:z as f32, w:w as f32})
+                });
+            },
             Token::Ident(base) => { // we're gonna parse a class or an enum
                 self.skip_token();
                 if self.accept_token(Token::Punct(id!(::))) { // enum
