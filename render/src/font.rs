@@ -100,7 +100,7 @@ live_register!{
     }
 }
 
-#[derive(Clone, LiveComponent)]
+#[derive(Clone, LiveComponent, LiveCast)]
 pub struct Font {
     #[rust] pub font_id: Option<usize>,
     #[live] pub path: String
@@ -162,7 +162,7 @@ impl Cx {
 }
 
 
-#[derive(LiveComponent, LiveApply)]
+#[derive(LiveComponent, LiveApply, LiveCast)]
 #[repr(C)]
 pub struct DrawTrapezoidText {
     #[rust] pub trapezoidator: Trapezoidator,
