@@ -22,12 +22,23 @@ pub trait LiveFactory {
 
 pub trait LiveNew: LiveComponent {
     fn new(cx: &mut Cx) -> Self;
-    fn live_type_info() -> LiveTypeInfo;
-    fn live_register(cx: &mut Cx);
+    
+    fn live_register(cx: &mut Cx){}
+    
+    fn live_type_info() -> LiveTypeInfo where Self:Sized + 'static{
+        LiveTypeInfo{module_path:ModulePath::from_str(&module_path!()).unwrap(), live_type:Self::live_type(), fields:Vec::new(),
+               type_name:Id::from_str("LiveNew").unwrap()}
+    }
 
     fn new_apply(cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> Self where Self:Sized{
       let mut ret = Self::new(cx);
       ret.apply(cx, apply_from, index, nodes);
+      ret
+    }
+    
+    fn new_apply_mut(cx: &mut Cx, apply_from:ApplyFrom, index:&mut usize, nodes:&[LiveNode]) -> Self where Self:Sized{
+      let mut ret = Self::new(cx);
+      *index = ret.apply(cx, apply_from, *index, nodes);
       ret
     }
     
@@ -237,7 +248,7 @@ impl<T> LiveComponent for Option<T> where T: LiveComponent + LiveNew {
     }
 }
 
-impl<T> LiveNew for Option<T> where T: LiveComponent + LiveNew {
+impl<T> LiveNew for Option<T> where T: LiveComponent + LiveNew + 'static {
     fn new(_cx: &mut Cx) -> Self {
         Self::None
     }
@@ -273,19 +284,7 @@ macro_rules!live_primitive {
             fn new(_cx: &mut Cx) -> Self {
                 $ default
             }
-            fn new_apply(cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Self {
-                let mut ret = $ default;
-                ret.apply(cx, apply_from, index, nodes);
-                ret
-            }
-            fn new_from_doc(cx: &mut Cx, live_doc_nodes: LiveDocNodes) -> Self {
-                let mut ret = $ default;
-                ret.apply(cx, ApplyFrom::NewFromDoc {file_id: live_doc_nodes.file_id}, live_doc_nodes.index, live_doc_nodes.nodes);
-                ret
-            }
-            fn live_type() -> LiveType {
-                LiveType(std::any::TypeId::of::< $ ty>())
-            }
+
             fn live_type_info() -> LiveTypeInfo {
                 LiveTypeInfo {
                     module_path: ModulePath::from_str(&module_path!()).unwrap(),
@@ -293,8 +292,6 @@ macro_rules!live_primitive {
                     fields: Vec::new(),
                     type_name: Id::from_str(stringify!( $ ty)).unwrap()
                 }
-            }
-            fn live_register(cx: &mut Cx) {
             }
         }
     }
@@ -343,6 +340,29 @@ live_primitive!(
     },
     fn to_live_value(&self) -> LiveValue {
         LiveValue::Id(*self)
+    }
+);
+
+live_primitive!(
+    bool,
+    false,
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        match &nodes[index].value {
+            LiveValue::Bool(val) => {
+                *self = *val;
+                index + 1
+            }
+            LiveValue::Array => {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, apply_from, index, nodes);
+                }
+                nodes.skip_node(index)
+            }
+            _ => nodes.skip_node(index)
+        }
+    },
+    fn to_live_value(&self) -> LiveValue {
+        LiveValue::Bool(*self)
     }
 );
 

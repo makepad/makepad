@@ -1,19 +1,12 @@
 use crate::cx::*;
+use std::rc::Rc;
+use std::cell::RefCell;
 
-
-#[derive(Copy, Clone,  PartialEq, Debug)]
+#[derive(PartialEq)]
 pub struct Texture {
-    pub texture_id: u32,
+    pub texture_id: usize,
+    pub textures_free: Rc<RefCell<Vec<usize>>>,
 }
-/*
-#[derive(Copy, Clone, Default, PartialEq, Debug)]
-pub struct Texture2D(pub Option<u32>);
-
-impl Into<Texture2D> for Texture {
-    fn into(self) -> Texture2D {
-        Texture2D(Some(self.texture_id as u32))
-    }
-}*/
 
 #[derive(Clone, PartialEq)]
 pub enum TextureFormat {
@@ -54,24 +47,57 @@ impl Default for TextureDesc {
 
 
 pub trait TextureCx {
-    fn new(cx:&mut Cx)->Texture;
     fn set_desc(&mut self, cx:&mut Cx, desc:TextureDesc);
     fn get_desc(&self, cx:&mut Cx) -> TextureDesc;
 }
 
 
-impl TextureCx for Texture{
-    fn new(cx:&mut Cx)->Texture{
-        Texture{
-            texture_id:if cx.textures_free.len() > 0 {
-                cx.textures_free.pop().unwrap() as u32
-            } else {
-                cx.textures.push(CxTexture::default());
-                (cx.textures.len() - 1) as u32
-            }
+
+impl LiveNew for Texture {
+    fn new(cx: &mut Cx)->Self{
+        let textures_free = cx.textures_free.clone();
+        let texture_id =  if let Some(texture_id) = textures_free.borrow_mut().pop(  ){
+            texture_id 
+        }
+        else{
+            let texture_id = cx.textures.len();
+            cx.textures.push(CxTexture::default());
+            texture_id
+        };        
+        Self{
+            texture_id,
+            textures_free
         }
     }
+}
 
+impl LiveComponent for Texture {
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
+        
+        if !nodes[start_index].value.is_struct_type() {
+            cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, id!(View));
+            return nodes.skip_node(start_index);
+        }
+        
+        let mut index = start_index + 1;
+        loop {
+            if nodes[index].value.is_close() {
+                index += 1;
+                break;
+            }
+            match nodes[index].id {
+                _=> {
+                    cx.apply_error_no_matching_value(apply_from, index, nodes);
+                    index = nodes.skip_node(index);
+                }
+            }
+        }
+        return index;
+    }
+}
+
+
+impl TextureCx for Texture{
     fn set_desc(&mut self, cx:&mut Cx, desc:TextureDesc){
         let cxtexture = &mut cx.textures[self.texture_id as usize];
         cxtexture.desc = desc;

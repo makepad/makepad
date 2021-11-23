@@ -22,15 +22,15 @@ live_register!{
 #[derive(LiveComponent, LiveApply)]
 pub struct DesktopWindow {
     
-    #[rust(Pass::new(cx))] pub pass: Pass,
-    #[rust(Texture::new(cx))] pub color_texture: Texture,
-    #[rust(Texture::new(cx))] pub depth_texture: Texture,
+    #[live] pub pass: Pass,
+    #[live] pub color_texture: Texture,
+    #[live] pub depth_texture: Texture,
     #[rust] pub caption_size: Vec2,
     
-    #[rust(Window::new(cx))] pub window: Window,
-    #[rust(View::new(cx))] pub caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
-    #[rust(View::new(cx))] pub main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
-    #[rust(View::new(cx))] pub inner_view: View,
+    #[live] pub window: Window,
+    #[live] pub caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
+    #[live] pub main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
+    #[live] pub inner_view: View,
     
     #[live] pub clear_color: Vec4,
     
@@ -155,8 +155,8 @@ impl DesktopWindow {
         self.window.begin_window(cx);
         
         self.pass.begin_pass(cx);
-        self.pass.add_color_texture(cx, self.color_texture, ClearColor::ClearWith(self.clear_color));
-        self.pass.set_depth_texture(cx, self.depth_texture, ClearDepth::ClearWith(1.0));
+        self.pass.add_color_texture(cx, &self.color_texture, ClearColor::ClearWith(self.clear_color));
+        self.pass.set_depth_texture(cx, &self.depth_texture, ClearDepth::ClearWith(1.0));
         
         self.main_view.begin_view(cx).unwrap();
         

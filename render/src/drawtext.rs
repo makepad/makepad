@@ -191,7 +191,7 @@ impl DrawText {
     }
     
     pub fn update_draw_call_vars(&mut self, cx: &mut Cx) {
-        self.draw_vars.texture_slots[0] = Some(cx.fonts_atlas.texture);
+        self.draw_vars.texture_slots[0] = Some(cx.fonts_atlas.texture_id);
         self.draw_vars.user_uniforms[0] = self.text_style.brightness;
         self.draw_vars.user_uniforms[1] = self.text_style.curve;
     }

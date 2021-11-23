@@ -163,8 +163,8 @@ impl Cx {
                 // lets set our textures
                 for i in 0..sh.mapping.textures.len() {
                     
-                    let texture_id = if let Some(texture) = draw_call.texture_slots[i]{
-                        texture.texture_id 
+                    let texture_id = if let Some(texture_id) = draw_call.texture_slots[i]{
+                        texture_id
                     }else{0};
                     
                     let cxtexture = &mut self.textures[texture_id as usize];

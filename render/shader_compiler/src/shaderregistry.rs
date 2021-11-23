@@ -454,7 +454,7 @@ impl ShaderRegistry {
     {
         let mut draw_shader_def = DrawShaderDef::default();
         
-        // lets inser the 2D drawshader uniforms
+        // lets insert the 2D drawshader uniforms
         draw_shader_def.add_uniform(id_from_str!(camera_projection).unwrap(), id_from_str!(pass).unwrap(), Ty::Mat4, Span::default());
         draw_shader_def.add_uniform(id_from_str!(camera_view).unwrap(), id_from_str!(pass).unwrap(), Ty::Mat4, Span::default());
         draw_shader_def.add_uniform(id_from_str!(camera_inv).unwrap(), id_from_str!(pass).unwrap(), Ty::Mat4, Span::default());
@@ -466,12 +466,7 @@ impl ShaderRegistry {
         draw_shader_def.add_uniform(id_from_str!(draw_zbias).unwrap(), id_from_str!(draw).unwrap(), Ty::Float, Span::default());
 
         let (doc, class_node) = live_registry.ptr_to_doc_node(draw_shader_ptr.0);
-        //println!("VALUE {} {} {:?}", live_registry.file_id_to_file_name(draw_shader_ptr.file_id), class_node.id, class_node.value);
-        //for (module_path,file_id) in &live_registry.module_path_to_file_id{
-        //    if *file_id == draw_shader_ptr.file_id{
-        //        println!("{}", module_path );
-        //    }
-       // }
+
         match class_node.value {
             LiveValue::Class(draw_shader_type) => {
                 
@@ -517,24 +512,6 @@ impl ShaderRegistry {
                                 );
                             }
                         }
-                        /*
-                        LiveValue::Clone (clone_id) => {
-                            // if our id is geometry, process it
-                            if prop.id == id!(geometry) {
-                                if let Ok(child_index) = doc.nodes.child_by_name(node_index, id!(rust_type)){
-                                    let node = &doc.nodes[child_index];
-                                    if let LiveValue::LiveType(lt) = node.value {
-                                        ext_self(
-                                            self,
-                                            live_registry.token_id_to_span(prop.token_id.unwrap()),
-                                            prop.id,
-                                            lt,
-                                            &mut draw_shader_def
-                                        );
-                                    }
-                                }
-                            }
-                        },*/
                         LiveValue::DSL {token_start, token_count, scope_start, scope_count} => {
                             let origin_doc = live_registry.token_id_to_origin_doc(prop.token_id.unwrap());
                             let scopes_doc = live_registry.token_id_to_expanded_doc(prop.token_id.unwrap());
