@@ -28,8 +28,8 @@ pub enum ButtonAction {
     Up
 }
 
-impl IntoFrameAction for ButtonAction{
-    fn into_frame_action(self)->Option<Box<dyn FrameAction>>{
+impl IntoAnyAction for ButtonAction{
+    fn into_any_action(self)->Option<Box<dyn AnyAction>>{
         if let ButtonAction::None = self{
             return None
         }
