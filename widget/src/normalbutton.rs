@@ -36,8 +36,6 @@ live_register!{
             }
         }
         
-        text: {}
-        
         layout: Layout {
             align: Align {fx: 0.5, fy: 0.5},
             walk: Walk {
