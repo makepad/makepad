@@ -36,6 +36,115 @@ pub struct LiveNode { // 3x u64
     pub value: LiveValue,
 }
 
+
+#[derive(Clone, Debug)]
+pub enum LiveValue {
+    None,
+    Str(&'static str),
+    //String(String),
+    DocumentString {
+        string_start: usize,
+        string_count: usize
+    },
+    FittedString(FittedString),
+    InlineString(InlineString),
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Color(u32),
+    Vec2(Vec2),
+    Vec3(Vec3),
+    Vec4(Vec4),
+
+    Id(Id),
+
+    BareEnum {base: Id, variant: Id},
+    // stack items
+    Array,
+    TupleEnum {base: Id, variant: Id},
+    NamedEnum {base: Id, variant: Id},
+    Object, // subnodes including this one
+    Clone(Id), // subnodes including this one
+    Class(LiveType), // subnodes including this one
+    Close,
+    // the shader code types
+    DSL {
+        token_start: u32,
+        token_count: u32,
+        scope_start: u32,
+        scope_count: u32
+    },
+    Use {
+        crate_id: Id,
+        module_id: Id,
+    }
+}
+
+#[derive(Debug)]
+pub struct FittedString{
+    buffer: *mut u8,
+    length: usize,
+}
+
+impl FittedString{
+    pub fn from_string(mut inp:String)->Self{
+        inp.shrink_to_fit();
+        let mut s =  std::mem::ManuallyDrop::new(inp);
+        let buffer = s.as_mut_ptr();
+        let length = s.len();
+        let capacity = s.capacity();
+        if length != capacity{
+            panic!()
+        }
+        FittedString{buffer, length}
+    }
+    
+    pub fn to_string(self)->String{
+        unsafe{String::from_raw_parts(self.buffer, self.length, self.length)}
+    }
+    
+    pub fn as_str<'a>(&'a self)->&'a str{
+        unsafe{std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.buffer, self.length))}
+    }
+}
+
+impl Drop for FittedString{
+    fn drop(&mut self){
+        unsafe{String::from_raw_parts(self.buffer, self.length, self.length)};
+    }
+}
+
+impl Clone for FittedString{
+    fn clone(&self)->Self{
+        Self::from_string(self.as_str().to_string())
+    }
+}
+
+const INLINE_STRING_BUFFER_SIZE:usize = 22;
+#[derive(Clone, Debug)]
+pub struct InlineString{
+    length:u8,
+    buffer:[u8;INLINE_STRING_BUFFER_SIZE]
+}
+
+impl InlineString{
+    pub fn from_str(inp:&str)->Option<Self>{
+        let bytes = inp.as_bytes();
+        if bytes.len()<INLINE_STRING_BUFFER_SIZE{
+            let mut buffer= [0u8;INLINE_STRING_BUFFER_SIZE];
+            for i in 0..bytes.len(){
+                buffer[i] = bytes[i];
+            }
+            return Some(Self{length:bytes.len() as u8, buffer})
+        }
+        None
+    }
+    
+    pub fn as_str<'a>(&'a self)->&'a str{
+        unsafe{std::str::from_utf8_unchecked(std::slice::from_raw_parts(self.buffer.as_ptr(), self.length as usize))}
+    }
+}
+
 impl LiveValue {
     pub fn is_open(&self) -> bool {
         match self {
@@ -111,8 +220,9 @@ impl LiveValue {
     pub fn is_value_type(&self)->bool{
         match self{
             Self::Str(_) |
-            Self::String(_) |
-            Self::StringRef {..} |
+            Self::FittedString(_) |
+            Self::InlineString{..} |
+            Self::DocumentString {..} |
             Self::Id {..} |
             Self::Bool(_) |
             Self::Int(_) |
@@ -125,7 +235,7 @@ impl LiveValue {
         }
     }
     
-    pub fn is_struct_type(&self)->bool{
+    pub fn is_structy_type(&self)->bool{
         match self{
             Self::Object | // subnodes including this one
             Self::Clone {..} | // subnodes including this one
@@ -163,7 +273,7 @@ impl LiveValue {
     
     pub fn set_scope(&mut self, in_scope_start: usize, in_scope_count: u32) {
         match self {
-            Self::DSL {scope_start, scope_count, ..} => {*scope_start = in_scope_start; *scope_count = in_scope_count;},
+            Self::DSL {scope_start, scope_count, ..} => {*scope_start = in_scope_start as u32; *scope_count = in_scope_count;},
             //lf::Const {scope_start, scope_count, ..} => {*scope_start = in_scope_start; *scope_count = in_scope_count;},
             //Self::VarDef {scope_start, scope_count, ..} => {*scope_start = in_scope_start; *scope_count = in_scope_count;},
             _ => ()
@@ -188,88 +298,34 @@ impl LiveValue {
         match self {
             Self::None => 0,
             Self::Str(_) => 1,
-            Self::String(_) => 2,
-            Self::StringRef {..} => 3,
-            Self::Bool(_) => 4,
-            Self::Int(_) => 5,
-            Self::Float(_) => 6,
-            Self::Color(_) => 7,
-            Self::Vec2(_) => 8,
-            Self::Vec3(_) => 9,
-            Self::Vec4(_) => 10,
+            Self::FittedString(_) => 2,
+            Self::InlineString{..} => 3,
+            Self::DocumentString {..} => 4,
+            Self::Bool(_) => 5,
+            Self::Int(_) => 6,
+            Self::Float(_) => 7,
+            Self::Color(_) => 8,
+            Self::Vec2(_) => 9,
+            Self::Vec3(_) => 10,
+            Self::Vec4(_) => 11,
             
-            Self::Id(_) => 11,
+            Self::Id(_) => 12,
             
-            Self::BareEnum {..} => 12,
-            Self::Array => 13,
-            Self::TupleEnum {..} => 14,
-            Self::NamedEnum {..} => 15,
-            Self::Object => 16,
-            Self::Clone {..} => 17,
-            Self::Class {..} => 18,
-            Self::Close => 19,
+            Self::BareEnum {..} => 13,
+            Self::Array => 14,
+            Self::TupleEnum {..} => 15,
+            Self::NamedEnum {..} => 16,
+            Self::Object => 17,
+            Self::Clone {..} => 18,
+            Self::Class {..} => 19,
+            Self::Close => 20,
             
-            Self::DSL {..} => 20,
-            Self::Use {..} => 21
+            Self::DSL {..} => 21,
+            Self::Use {..} => 22
         }
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum LiveValue {
-    None,
-    Str(&'static str),
-    String(String),
-    StringRef {
-        string_start: usize,
-        string_count: usize
-    },
-
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Color(u32),
-    Vec2(Vec2),
-    Vec3(Vec3),
-    Vec4(Vec4),
-
-    Id(Id),
-
-    BareEnum {base: Id, variant: Id},
-    // stack items
-    Array,
-    TupleEnum {base: Id, variant: Id},
-    NamedEnum {base: Id, variant: Id},
-    Object, // subnodes including this one
-    Clone(Id), // subnodes including this one
-    Class(LiveType), // subnodes including this one
-    Close,
-    // the shader code types
-    DSL {
-        token_start: usize,
-        token_count: usize,
-        scope_start: usize,
-        scope_count: u32
-    },
-    /*
-    Const {
-        token_start: usize,
-        token_count: usize,
-        scope_start: usize,
-        scope_count: u32
-    },
-    VarDef { //instance/uniform def
-        token_start: usize,
-        token_count: usize,
-        scope_start: usize,
-        scope_count: u32
-    },*/
-    Use {
-        crate_id: Id,
-        module_id: Id,
-        object_id: Id,
-    }
-}
 
 pub trait LiveNodeSlice {
     fn parent(&self, child_index: usize) -> Option<usize>;
@@ -655,11 +711,14 @@ impl<T> LiveNodeSlice for T where T:AsRef<[LiveNode]> {
                 LiveValue::Str(s)=>{
                    writeln!(f, "{}: <Str> {}", node.id, s).unwrap();
                 },
-                LiveValue::String(s)=>{
-                    writeln!(f, "{}: <String> {}", node.id, s).unwrap();
+                LiveValue::InlineString(s)=>{
+                    writeln!(f, "{}: <InlineString> {}", node.id, s.as_str()).unwrap();
                 },
-                LiveValue::StringRef {string_start, string_count}=>{
-                    writeln!(f, "{}: <StringRef> string_start:{}, string_end:{}", node.id, string_start, string_count).unwrap();
+                LiveValue::FittedString(s)=>{
+                    writeln!(f, "{}: <FittedString> {}", node.id, s.as_str()).unwrap();
+                },
+                LiveValue::DocumentString {string_start, string_count}=>{
+                    writeln!(f, "{}: <DocumentString> string_start:{}, string_end:{}", node.id, string_start, string_count).unwrap();
                 },
                 LiveValue::Bool(v)=>{
                     writeln!(f, "{}: <Bool> {}", node.id, v).unwrap();
@@ -732,9 +791,8 @@ impl<T> LiveNodeSlice for T where T:AsRef<[LiveNode]> {
                 LiveValue::Use{
                     crate_id,
                     module_id,
-                    object_id
                 }=>{
-                    writeln!(f, "<Use> {}::{}::{}", crate_id, module_id, object_id).unwrap();
+                    writeln!(f, "<Use> {}::{}::{}", crate_id, module_id, node.id).unwrap();
                 }
                 
             }

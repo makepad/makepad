@@ -22,6 +22,8 @@ pub use makepad_live_compiler::LiveTypeInfo;
 pub use makepad_live_compiler::LiveTypeField;
 pub use makepad_live_compiler::LiveOrCalc;
 pub use makepad_live_compiler::LiveValue;
+pub use makepad_live_compiler::FittedString;
+pub use makepad_live_compiler::InlineString;
 pub use makepad_live_compiler::ModulePath;
 pub use makepad_live_compiler::LiveNodeSlice;
 pub use makepad_live_compiler::LiveNodeVec;

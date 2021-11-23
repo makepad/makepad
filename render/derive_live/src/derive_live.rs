@@ -235,7 +235,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
 
             tb.add("        let struct_id = Id(").suf_u64(Id::from_str(&struct_name).unwrap().0).add(");");
-            tb.add("        if !nodes[start_index].value.is_struct_type(){");
+            tb.add("        if !nodes[start_index].value.is_structy_type(){");
             tb.add("            cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, struct_id);");
             tb.add("            self.after_apply(cx, apply_from, start_index, nodes);");
             tb.add("            return nodes.skip_node(start_index);");
