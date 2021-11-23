@@ -92,8 +92,8 @@ impl LiveCast for Button{
 }
 
 impl FrameComponent for Button {
-    fn handle(&mut self, cx: &mut Cx, event: &mut Event) {
-        self.handle_button(cx, event);
+    fn handle(&mut self, cx: &mut Cx, event: &mut Event)->Option<Box<dyn FrameAction>>{
+        self.handle_button(cx, event).into_frame_action()
     }
     
     fn draw(&mut self, cx: &mut Cx) {
