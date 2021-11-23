@@ -124,6 +124,15 @@ impl LiveValue {
             _=>false
         }
     }
+    
+    pub fn is_struct_type(&self)->bool{
+        match self{
+            Self::Object | // subnodes including this one
+            Self::Clone {..} | // subnodes including this one
+            Self::Class {..} => true, // subnodes including this one        
+            _ => false
+        }
+    }
 
     pub fn is_float_type(&self)->bool{
         match self{

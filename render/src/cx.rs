@@ -92,7 +92,7 @@ pub struct Cx {
     pub path_to_font_id: HashMap<String, usize>,
     
     pub textures: Vec<CxTexture>,
-    pub textures_free: Vec<usize>,
+    pub textures_free: Rc<RefCell<Vec<usize>>>,
     
     pub geometries: Vec<CxGeometry>,
     pub draw_shaders: Vec<CxDrawShader>,
@@ -238,13 +238,14 @@ impl Default for Cx {
             
             views: Vec::new(),//vec![CxView {..Default::default()}],
             views_free: Rc::new(RefCell::new(Vec::new())),
+
+            textures: textures,
+            textures_free: Rc::new(RefCell::new(Vec::new())),
             
             fonts: Vec::new(),
             fonts_atlas: CxFontsAtlas::new(),
             path_to_font_id: HashMap::new(),
             
-            textures: textures,
-            textures_free: Vec::new(),
             draw_shaders: Vec::new(),
             //shader_recompiles: Vec::new(),
             

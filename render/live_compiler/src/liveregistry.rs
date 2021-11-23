@@ -55,7 +55,6 @@ impl LiveRegistry {
         &self.live_files[file_id.to_index()].file_name
     }    
     
-    
     pub fn ptr_to_doc_node(&self, live_ptr: LivePtr) -> (&LiveDocument, &LiveNode) {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
         (doc, &doc.resolve_ptr(live_ptr.local_ptr))

@@ -12,9 +12,8 @@ impl Drop for Window{
         self.windows_free.borrow_mut().push(self.window_id)
     }
 }
-
-impl Window {
-    pub fn new(cx: &mut Cx) -> Self {
+impl LiveNew for Window {
+    fn new(cx: &mut Cx)->Self{
         let windows_free = cx.windows_free.clone();
         let window_id =  if let Some(view_id) = windows_free.borrow_mut().pop(  ){
             view_id 
@@ -37,7 +36,54 @@ impl Window {
             window_id,
         }
     }
-    
+}
+impl LiveComponent for Window {
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
+        
+        if !nodes[start_index].value.is_struct_type() {
+            cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, id!(View));
+            return nodes.skip_node(start_index);
+        }
+        
+        let mut index = start_index + 1;
+        loop {
+            if nodes[index].value.is_close() {
+                index += 1;
+                break;
+            }
+            match nodes[index].id {
+                id!(position) => cx.windows[self.window_id].window_set_position = Some(LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes)),
+                id!(inner_size) => {
+                    let v = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes);
+                    if let CxWindowState::Create{inner_size,..} = &mut cx.windows[self.window_id].window_state{
+                        *inner_size = v;
+                    }
+                },
+                id!(title) => {
+                    let v = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes);
+                    if let CxWindowState::Create{title,..} = &mut cx.windows[self.window_id].window_state{
+                        *title = v;
+                    }
+                }
+                id!(position) => {
+                    let v = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes);
+                    if let CxWindowState::Create{position,..} = &mut cx.windows[self.window_id].window_state{
+                        *position = v;
+                    }
+                }
+                _=> {
+                    cx.apply_error_no_matching_value(apply_from, index, nodes);
+                    index = nodes.skip_node(index);
+                }
+            }
+        }
+        return index;
+    }
+}
+
+
+impl Window {
+
     pub fn begin_window(&mut self, cx: &mut Cx) {
         // if we are not at ground level for viewports,
         cx.windows[self.window_id].main_pass_id = None;
