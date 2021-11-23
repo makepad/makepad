@@ -305,7 +305,7 @@ impl CxDrawFontAtlas {
     pub fn new(cx: &mut Cx) -> Self {
         
         let atlas_texture = Texture::new(cx);
-        cx.fonts_atlas.texture = atlas_texture;
+        cx.fonts_atlas.texture_id = atlas_texture.texture_id;
 
         let draw_trapezoid_text = DrawTrapezoidText::new_from_doc(
             cx,
@@ -337,7 +337,7 @@ impl CxDrawFontAtlas {
             else {
                 ClearColor::InitWith(Vec4::default())
             };
-            self.atlas_pass.add_color_texture(cx, self.atlas_texture, clear);
+            self.atlas_pass.add_color_texture(cx, &self.atlas_texture, clear);
             self.atlas_view.set_always_redraw(cx, true);
             self.atlas_view.begin_view(cx).unwrap();
             let mut atlas_todo = Vec::new();
@@ -393,7 +393,7 @@ pub struct CxFontsAtlasTodo {
 }
 
 pub struct CxFontsAtlas {
-    pub texture: Texture,
+    pub texture_id: usize,
     pub texture_size: Vec2,
     pub clear_buffer: bool,
     pub alloc_xpos: f32,
@@ -405,7 +405,7 @@ pub struct CxFontsAtlas {
 impl CxFontsAtlas {
     pub fn new() -> Self {
         Self {
-            texture: Texture{texture_id:0},
+            texture_id: 0,
             texture_size: Vec2 {x: 2048.0, y: 2048.0},
             clear_buffer: false,
             alloc_xpos: 0.0,

@@ -235,13 +235,10 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
 
             tb.add("        let struct_id = Id(").suf_u64(Id::from_str(&struct_name).unwrap().0).add(");");
-            tb.add("        match &nodes[start_index].value{");
-            tb.add("            LiveValue::Clone{..} | LiveValue::Class{..} | LiveValue::Object=>(),");
-            tb.add("            _=>{");
-            tb.add("                cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, struct_id);");
-            tb.add("                self.after_apply(cx, apply_from, start_index, nodes);");
-            tb.add("                return nodes.skip_node(start_index);");
-            tb.add("            }"); 
+            tb.add("        if !nodes[start_index].value.is_struct_type(){");
+            tb.add("            cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, struct_id);");
+            tb.add("            self.after_apply(cx, apply_from, start_index, nodes);");
+            tb.add("            return nodes.skip_node(start_index);");
             tb.add("        }");
             
             tb.add("        let mut index = start_index + 1;"); // skip the class
@@ -429,21 +426,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 }
                 tb.add("        cx.shader_registry.register_enum(").ident(&enum_name).add("::live_type(),ShaderEnum{enum_name:Id::from_str(").string(&enum_name).add(").unwrap(),variants});");
             }
-            
-            /*
-            tb.add("        let base_name = Id(").suf_u64(Id::from_str(&enum_name).unwrap().0).add(");");
-            tb.add("        let mut bare = Vec::new();");
-            tb.add("        let mut named = Vec::new();");
-            tb.add("        let mut tuple = Vec::new();");
-            for item in &items{
-                match item.kind{
-                    EnumKind::Bare => tb.add("bare.push(Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add("));"),
-                    EnumKind::Named(_) => tb.add("named.push(Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add("));"),
-                    EnumKind::Tuple(_) => tb.add("tuple.push(Id(").suf_u64(Id::from_str(&item.name).unwrap().0).add("));")
-                };
-            }
-            tb.add("        cx.register_enum(").ident(&enum_name).add("::live_type(),LiveEnumInfo{base_name, bare, named, tuple});");
-            */
+
             tb.add("    }");
             tb.add("}");
             

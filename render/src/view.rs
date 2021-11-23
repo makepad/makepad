@@ -17,9 +17,8 @@ impl Drop for View {
     }
 }
 
-impl View {
-    
-    pub fn new(cx: &mut Cx) -> Self {
+impl LiveNew for View {
+    fn new(cx: &mut Cx)->Self{
         let views_free = cx.views_free.clone();
         let view_id = if let Some(view_id) = views_free.borrow_mut().pop() {
             cx.views[view_id].alloc_generation += 1;
@@ -37,6 +36,38 @@ impl View {
             view_id,
         }
     }
+}
+
+impl LiveComponent for View {
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
+        
+        if !nodes[start_index].value.is_struct_type() {
+            cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, id!(View));
+            return nodes.skip_node(start_index);
+        }
+        
+        let mut index = start_index + 1;
+        loop {
+            if nodes[index].value.is_close() {
+                index += 1;
+                break;
+            }
+            match nodes[index].id {
+                id!(is_clipped) => cx.views[self.view_id].is_clipped = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
+                id!(is_overlay) => cx.views[self.view_id].is_overlay = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
+                id!(always_redraw) => cx.views[self.view_id].always_redraw = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
+                id!(layout) => cx.views[self.view_id].layout = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
+                _=> {
+                    cx.apply_error_no_matching_value(apply_from, index, nodes);
+                    index = nodes.skip_node(index);
+                }
+            }
+        }
+        return index;
+    }
+}
+
+impl View {
     
     pub fn set_is_clipped(&self, cx: &mut Cx, is_clipped: bool) {cx.views[self.view_id].is_clipped = is_clipped;}
     pub fn set_is_overlay(&self, cx: &mut Cx, is_overlay: bool) {cx.views[self.view_id].is_overlay = is_overlay;}
@@ -189,7 +220,7 @@ impl View {
         let view_area = Area::View(ViewArea {view_id: self.view_id, redraw_id: cx.redraw_id});
         let rect = cx.end_turtle(view_area);
         let cxview = &mut cx.views[self.view_id];
-        cxview.rect = rect; 
+        cxview.rect = rect;
         cx.view_stack.pop();
         view_area
     }
@@ -443,7 +474,7 @@ pub struct DrawCall {
     pub do_v_scroll: bool,
     pub do_h_scroll: bool,
     
-    pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
+    pub texture_slots: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
     pub platform: CxPlatformDrawCall
