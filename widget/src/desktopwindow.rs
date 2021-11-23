@@ -19,7 +19,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply)]
+#[derive(LiveComponent, LiveApply, LiveCast)]
 pub struct DesktopWindow {
     #[live] pub pass: Pass,
     #[live] pub color_texture: Texture,

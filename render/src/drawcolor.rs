@@ -9,7 +9,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply)]
+#[derive(LiveComponent, LiveApply, LiveCast)]
 #[repr(C)]
 pub struct DrawColor {
     #[live()] pub deref_target: DrawQuad,

@@ -3,7 +3,7 @@ use std::f64::consts::PI;
 use crate::cx::*;
 
 // deserialisable DSL structure
-#[derive(Debug, Clone, LiveComponent, LiveApply)]
+#[derive(Debug, Clone, LiveComponent, LiveApply, LiveCast)]
 pub struct KeyFrame {
     #[live(Ease::Linear)]
     pub ease: Ease,
@@ -392,7 +392,7 @@ impl Animator {
     }
 }
 
-#[derive(Clone, LiveComponent, LiveApply, Debug, PartialEq)]
+#[derive(Clone, LiveComponent, LiveApply, Debug, PartialEq, LiveCast)]
 pub enum Play {
     #[pick {duration: 1.0}]
     Forward {duration: f64},
@@ -447,7 +447,7 @@ impl Play {
 }
 
 
-#[derive(Clone, LiveComponent, LiveApply, Debug, PartialEq)]
+#[derive(Clone, LiveComponent, LiveApply, Debug, PartialEq, LiveCast)]
 pub enum Ease {
     #[pick] Linear,
     #[live] None,
