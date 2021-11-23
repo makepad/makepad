@@ -35,7 +35,7 @@ impl GeometryFields for GeometryQuad2D {
     }
 }
 
-#[derive(LiveComponent)]
+#[derive(LiveComponent, LiveCast)]
 pub struct GeometryQuad2D {
     #[rust(cx.new_geometry())] pub geometry: Geometry,
     #[live(0.0)] pub x1: f32,

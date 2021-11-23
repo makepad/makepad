@@ -12,6 +12,8 @@ impl Drop for Window{
         self.windows_free.borrow_mut().push(self.window_id)
     }
 }
+
+impl LiveCast for Window{}
 impl LiveNew for Window {
     fn new(cx: &mut Cx)->Self{
         let windows_free = cx.windows_free.clone();

@@ -1,6 +1,6 @@
 use crate::cx::*;
 
-#[derive(Copy, Clone, Debug, LiveComponent, LiveApply)]
+#[derive(Copy, Clone, Debug, LiveComponent, LiveApply, LiveCast)]
 pub enum LineWrap {
     #[pick] None,
     #[live()] NewLine,
@@ -13,7 +13,7 @@ impl Default for LineWrap {
     }
 }
 
-#[derive(Copy, Clone, Default, Debug, LiveComponent, LiveApply)]
+#[derive(Copy, Clone, Default, Debug, LiveComponent, LiveApply, LiveCast)]
 pub struct Layout {
     #[live] pub padding: Padding,
     #[live] pub align: Align,
@@ -25,7 +25,7 @@ pub struct Layout {
     #[live] pub walk: Walk,
 }
 
-#[derive(Copy, Clone, Default, Debug, LiveComponent, LiveApply)]
+#[derive(Copy, Clone, Default, Debug, LiveComponent, LiveApply, LiveCast)]
 pub struct Walk {
     #[live] pub margin: Margin,
     #[live] pub width: Width,
@@ -50,13 +50,13 @@ impl Walk{
     }
 }
 
-#[derive(Clone, Copy, Default, Debug, LiveComponent, LiveApply)]
+#[derive(Clone, Copy, Default, Debug, LiveComponent, LiveApply, LiveCast)]
 pub struct Align {
     #[live] pub fx: f32,
     #[live] pub fy: f32
 }
 
-#[derive(Clone, Copy, Default, Debug, LiveComponent, LiveApply)]
+#[derive(Clone, Copy, Default, Debug, LiveComponent, LiveApply, LiveCast)]
 pub struct Margin {
     #[live] pub l: f32,
     #[live] pub t: f32,
@@ -64,7 +64,7 @@ pub struct Margin {
     #[live] pub b: f32
 }
 
-#[derive(Clone, Copy, Default, Debug, LiveComponent, LiveApply)]
+#[derive(Clone, Copy, Default, Debug, LiveComponent, LiveApply, LiveCast)]
 pub struct Padding {
     #[live] pub l: f32,
     #[live] pub t: f32,
@@ -72,7 +72,7 @@ pub struct Padding {
     #[live] pub b: f32
 }
 
-#[derive(Copy, Clone, Debug, LiveComponent, LiveApply)]
+#[derive(Copy, Clone, Debug, LiveComponent, LiveApply, LiveCast)]
 pub enum Direction {
     #[live] Left,
     #[pick] Right,
@@ -84,7 +84,7 @@ impl Default for Direction {
     fn default() -> Self {Self::Right}
 }
 
-#[derive(Copy, Clone, Debug, LiveComponent, LiveApply)]
+#[derive(Copy, Clone, Debug, LiveComponent, LiveApply, LiveCast)]
 pub enum Axis {
     #[pick] Horizontal,
     #[live] Vertical
@@ -97,7 +97,7 @@ impl Default for Axis {
 }
 
 
-#[derive(Copy, Clone, Debug, LiveComponent, LiveApply)]
+#[derive(Copy, Clone, Debug, LiveComponent, LiveApply, LiveCast)]
 pub enum Width {
     #[pick] Filled,
     #[live(200.0)] Fixed(f32),
@@ -112,7 +112,7 @@ pub enum Width {
     */
 }
 
-#[derive(Copy, Clone, Debug, LiveComponent, LiveApply)]
+#[derive(Copy, Clone, Debug, LiveComponent, LiveApply, LiveCast)]
 pub enum Height {
     #[pick] Filled,
     #[live(200.0)] Fixed(f32),
@@ -161,7 +161,7 @@ impl Height {
 }
 
 
-#[derive(Clone, Copy, Default, Debug, PartialEq, LiveComponent, LiveApply)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, LiveComponent, LiveApply, LiveCast)]
 pub struct Rect {
     #[live] pub pos: Vec2,
     #[live] pub size: Vec2,
