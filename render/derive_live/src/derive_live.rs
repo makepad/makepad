@@ -72,7 +72,7 @@ pub fn derive_live_cast_impl(input: TokenStream) -> TokenStream {
     if parser.eat_ident("struct") {
         if let Some(struct_name) = parser.eat_any_ident() {
             let generic = parser.eat_generic();
-            let _types = parser.eat_all_types();
+            let types = parser.eat_all_types();
             let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
             tb.add("impl").stream(generic.clone());
             tb.add("LiveCast for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
